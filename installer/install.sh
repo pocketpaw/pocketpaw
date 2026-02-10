@@ -1,6 +1,6 @@
 #!/bin/sh
 # PocketPaw Installer Bootstrap
-# Usage: curl -fsSL https://pocketpaw.com/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/pocketpaw/pocketpaw/dev/installer/install.sh | sh
 # POSIX sh — no bashisms
 
 set -e
@@ -24,38 +24,127 @@ case "$OS" in
         ;;
 esac
 
-# ── Find Python 3.11+ ──────────────────────────────────────────────────
-PYTHON=""
-for cmd in python3 python3.13 python3.12 python3.11 python; do
-    if command -v "$cmd" >/dev/null 2>&1; then
-        ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
-        major=$(echo "$ver" | cut -d. -f1)
-        minor=$(echo "$ver" | cut -d. -f2)
-        if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
-            PYTHON="$cmd"
-            break
-        fi
-    fi
-done
-
-if [ -z "$PYTHON" ]; then
-    printf '\033[31mError:\033[0m Python 3.11+ is required but not found.\n'
-    printf '       Install from https://www.python.org/downloads/\n'
-    case "$OS" in
-        Darwin) printf '       Or: brew install python@3.12\n' ;;
-        Linux)  printf '       Or: sudo apt install python3.12 (Debian/Ubuntu)\n'
-                printf '           sudo dnf install python3.12 (Fedora)\n' ;;
-    esac
+# ── Download helper ─────────────────────────────────────────────────────
+if command -v curl >/dev/null 2>&1; then
+    DOWNLOAD="curl -fsSL"
+elif command -v wget >/dev/null 2>&1; then
+    DOWNLOAD="wget -qO-"
+else
+    printf '\033[31mError:\033[0m Neither curl nor wget found.\n'
     exit 1
 fi
 
+# ── ensure_uv() — install uv if not present ────────────────────────────
+UV_AVAILABLE=0
+
+ensure_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        UV_AVAILABLE=1
+        return 0
+    fi
+
+    printf '  Installing uv (fast Python package manager)...\n'
+    if $DOWNLOAD https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; then
+        # Refresh PATH to pick up the new binary
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        if command -v uv >/dev/null 2>&1; then
+            UV_AVAILABLE=1
+            printf '  \033[32m✓\033[0m uv installed\n'
+            return 0
+        fi
+    fi
+
+    printf '  \033[33mWarn:\033[0m Could not install uv automatically.\n'
+    return 1
+}
+
+# ── Find Python 3.11+ ──────────────────────────────────────────────────
+find_python() {
+    for cmd in python3 python3.13 python3.12 python3.11 python; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
+            major=$(echo "$ver" | cut -d. -f1)
+            minor=$(echo "$ver" | cut -d. -f2)
+            if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+                PYTHON="$cmd"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+PYTHON=""
+if ! find_python; then
+    # Cascade 1: install via uv
+    printf '  Python 3.11+ not found. Attempting to install...\n'
+    if ensure_uv; then
+        printf '  Installing Python 3.12 via uv...\n'
+        if uv python install 3.12 >/dev/null 2>&1; then
+            uv_python_path=$(uv python find 3.12 2>/dev/null || echo "")
+            if [ -n "$uv_python_path" ]; then
+                PYTHON="$uv_python_path"
+                printf '  \033[32m✓\033[0m Python 3.12 installed via uv\n'
+            fi
+        fi
+    fi
+
+    # Cascade 2: system package manager
+    if [ -z "$PYTHON" ]; then
+        case "$OS" in
+            Darwin)
+                if command -v brew >/dev/null 2>&1; then
+                    printf '  Installing Python 3.12 via Homebrew...\n'
+                    if brew install python@3.12 >/dev/null 2>&1; then
+                        find_python
+                    fi
+                fi
+                ;;
+            Linux)
+                if command -v apt-get >/dev/null 2>&1; then
+                    printf '  Installing Python 3.12 via apt...\n'
+                    if sudo apt-get update -qq >/dev/null 2>&1 && \
+                       sudo apt-get install -y -qq python3.12 python3.12-venv >/dev/null 2>&1; then
+                        find_python
+                    fi
+                elif command -v dnf >/dev/null 2>&1; then
+                    printf '  Installing Python 3.12 via dnf...\n'
+                    if sudo dnf install -y -q python3.12 >/dev/null 2>&1; then
+                        find_python
+                    fi
+                elif command -v pacman >/dev/null 2>&1; then
+                    printf '  Installing Python via pacman...\n'
+                    if sudo pacman -S --noconfirm python >/dev/null 2>&1; then
+                        find_python
+                    fi
+                fi
+                ;;
+        esac
+    fi
+
+    # Cascade 3: hard exit
+    if [ -z "$PYTHON" ]; then
+        printf '\033[31mError:\033[0m Python 3.11+ is required but could not be installed.\n'
+        printf '       Install manually:\n'
+        printf '         curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.12\n'
+        case "$OS" in
+            Darwin) printf '         Or: brew install python@3.12\n' ;;
+            Linux)  printf '         Or: sudo apt install python3.12 (Debian/Ubuntu)\n'
+                    printf '             sudo dnf install python3.12 (Fedora)\n'
+                    printf '             sudo pacman -S python (Arch)\n' ;;
+        esac
+        exit 1
+    fi
+fi
+
 PYTHON_VER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
-printf '  Python:  %s (%s)\n' "$PYTHON_VER" "$(command -v "$PYTHON")"
+printf '  Python:  %s (%s)\n' "$PYTHON_VER" "$(command -v "$PYTHON" 2>/dev/null || echo "$PYTHON")"
 
 # ── Find package installer (prefer uv > pip3 > pip) ────────────────────
 PIP_CMD=""
 if command -v uv >/dev/null 2>&1; then
     PIP_CMD="uv pip"
+    UV_AVAILABLE=1
     printf '  Installer: uv pip\n'
 elif "$PYTHON" -m pip --version >/dev/null 2>&1; then
     PIP_CMD="$PYTHON -m pip"
@@ -66,10 +155,47 @@ elif command -v pip3 >/dev/null 2>&1; then
 elif command -v pip >/dev/null 2>&1; then
     PIP_CMD="pip"
     printf '  Installer: pip\n'
-else
-    printf '\033[31mError:\033[0m No pip or uv found. Install pip:\n'
-    printf '       %s -m ensurepip --upgrade\n' "$PYTHON"
-    exit 1
+fi
+
+# Auto-install pip/uv if nothing found
+if [ -z "$PIP_CMD" ]; then
+    printf '  No pip or uv found. Attempting to install...\n'
+
+    # Cascade 1: install uv
+    if ensure_uv; then
+        PIP_CMD="uv pip"
+        printf '  Installer: uv pip\n'
+    fi
+
+    # Cascade 2: ensurepip
+    if [ -z "$PIP_CMD" ]; then
+        printf '  Trying ensurepip...\n'
+        if "$PYTHON" -m ensurepip --upgrade >/dev/null 2>&1; then
+            PIP_CMD="$PYTHON -m pip"
+            printf '  \033[32m✓\033[0m pip bootstrapped via ensurepip\n'
+            printf '  Installer: pip\n'
+        fi
+    fi
+
+    # Cascade 3: get-pip.py
+    if [ -z "$PIP_CMD" ]; then
+        printf '  Trying get-pip.py...\n'
+        if $DOWNLOAD https://bootstrap.pypa.io/get-pip.py | "$PYTHON" - --user >/dev/null 2>&1; then
+            export PATH="$HOME/.local/bin:$PATH"
+            PIP_CMD="$PYTHON -m pip"
+            printf '  \033[32m✓\033[0m pip installed via get-pip.py\n'
+            printf '  Installer: pip\n'
+        fi
+    fi
+
+    # Cascade 4: hard exit
+    if [ -z "$PIP_CMD" ]; then
+        printf '\033[31mError:\033[0m No pip or uv could be installed.\n'
+        printf '       Install uv manually:\n'
+        printf '         curl -LsSf https://astral.sh/uv/install.sh | sh\n'
+        printf '       Then re-run this installer.\n'
+        exit 1
+    fi
 fi
 
 printf '\n'
@@ -84,19 +210,10 @@ trap cleanup EXIT INT TERM
 
 INSTALLER_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py"
 
-if command -v curl >/dev/null 2>&1; then
-    DOWNLOAD="curl -fsSL"
-elif command -v wget >/dev/null 2>&1; then
-    DOWNLOAD="wget -qO-"
-else
-    printf '\033[31mError:\033[0m Neither curl nor wget found.\n'
-    exit 1
-fi
-
 printf '  Downloading installer...\n'
 if ! $DOWNLOAD "$INSTALLER_URL" > "$INSTALLER" 2>/dev/null; then
     printf '\033[33mWarn:\033[0m Primary download failed, trying fallback...\n'
-    FALLBACK_URL="https://pocketpaw.com/installer.py"
+    FALLBACK_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py"
     if ! $DOWNLOAD "$FALLBACK_URL" > "$INSTALLER" 2>/dev/null; then
         printf '\033[31mError:\033[0m Could not download installer.\n'
         printf '       Try manually: %s\n' "$INSTALLER_URL"
@@ -114,4 +231,9 @@ fi
 printf '  Launching interactive installer...\n\n'
 
 # ── Run installer ──────────────────────────────────────────────────────
-"$PYTHON" "$INSTALLER" --pip-cmd "$PIP_CMD" "$@"
+UV_FLAG=""
+if [ "$UV_AVAILABLE" = "1" ]; then
+    UV_FLAG="--uv-available"
+fi
+
+"$PYTHON" "$INSTALLER" --pip-cmd "$PIP_CMD" $UV_FLAG "$@"

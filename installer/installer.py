@@ -34,7 +34,7 @@ _HAS_INQUIRER = False
 
 
 def _bootstrap_deps() -> None:
-    """Install InquirerPy and rich if missing, using pip --user."""
+    """Install InquirerPy and rich if missing, with uv-first cascade."""
     global _HAS_RICH, _HAS_INQUIRER
     missing: list[str] = []
     if importlib.util.find_spec("rich") is None:
@@ -50,6 +50,22 @@ def _bootstrap_deps() -> None:
         return
 
     print(f"  Installing UI dependencies: {', '.join(missing)}...")
+
+    # Cascade 1: uv pip install --system
+    if shutil.which("uv"):
+        try:
+            cmd = ["uv", "pip", "install", "-q"] + missing
+            if not _in_virtualenv():
+                cmd.insert(3, "--system")
+            subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            importlib.invalidate_caches()
+            _HAS_RICH = True
+            _HAS_INQUIRER = True
+            return
+        except Exception:
+            pass
+
+    # Cascade 2: python -m pip install --user
     try:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--user", "-q"] + missing,
@@ -59,9 +75,56 @@ def _bootstrap_deps() -> None:
         importlib.invalidate_caches()
         _HAS_RICH = True
         _HAS_INQUIRER = True
-    except Exception as exc:
-        print(f"  Warning: Could not install {', '.join(missing)}: {exc}")
-        print("  Falling back to plain text prompts.\n")
+        return
+    except subprocess.CalledProcessError as exc:
+        # Cascade 3: PEP 668 — retry with --break-system-packages
+        stderr_text = exc.stderr.decode(errors="replace") if exc.stderr else ""
+        if "externally-managed-environment" in stderr_text:
+            try:
+                subprocess.check_call(
+                    [
+                        sys.executable, "-m", "pip", "install",
+                        "--user", "-q", "--break-system-packages",
+                    ] + missing,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                importlib.invalidate_caches()
+                _HAS_RICH = True
+                _HAS_INQUIRER = True
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Cascade 4: pip3 / pip on PATH
+    for pip_bin in ("pip3", "pip"):
+        if shutil.which(pip_bin):
+            try:
+                subprocess.check_call(
+                    [pip_bin, "install", "--user", "-q"] + missing,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                importlib.invalidate_caches()
+                _HAS_RICH = True
+                _HAS_INQUIRER = True
+                return
+            except Exception:
+                pass
+
+    print(f"  Warning: Could not install {', '.join(missing)}.")
+    print("  Falling back to plain text prompts.\n")
+
+
+def _in_virtualenv() -> bool:
+    """Check if running inside a virtual environment."""
+    return (
+        hasattr(sys, "real_prefix")  # virtualenv
+        or (sys.prefix != sys.base_prefix)  # venv
+        or bool(os.environ.get("VIRTUAL_ENV"))
+    )
 
 
 _bootstrap_deps()
@@ -252,6 +315,12 @@ class SystemCheck:
 
         # Pip command
         info.pip_cmd = self.pip_cmd or self._detect_pip()
+        if not info.pip_cmd:
+            info.errors.append(
+                "No package installer found. Install uv: "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh"
+            )
+            info.ok = False
 
         # Disk space
         try:
@@ -291,10 +360,35 @@ class SystemCheck:
         for cmd in ("pip3", "pip"):
             if shutil.which(cmd):
                 return cmd
-        return "pip"
+        # Last resort: try ensurepip bootstrap
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "ensurepip", "--upgrade"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return f"{sys.executable} -m pip"
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        return ""
 
     def _detect_existing(self) -> str | None:
         """Check if pocketpaw is already installed."""
+        # Try uv pip show first (works when only uv is installed)
+        if shutil.which("uv"):
+            try:
+                result = subprocess.run(
+                    ["uv", "pip", "show", PACKAGE],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        if line.startswith("Version:"):
+                            return line.split(":", 1)[1].strip()
+            except Exception:
+                pass
+        # Try pip show
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "show", PACKAGE],
@@ -305,6 +399,13 @@ class SystemCheck:
                 for line in result.stdout.splitlines():
                     if line.startswith("Version:"):
                         return line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+        # Try importlib.metadata
+        try:
+            import importlib.metadata
+
+            return importlib.metadata.version(PACKAGE)
         except Exception:
             pass
         return None
@@ -623,16 +724,28 @@ class PackageInstaller:
             pkg = PACKAGE
 
         cmd_parts = self.pip_cmd.split() + ["install"]
+        # uv pip outside a virtualenv needs --system
+        if "uv" in self.pip_cmd and not _in_virtualenv():
+            cmd_parts.append("--system")
         if upgrade:
             cmd_parts.append("--upgrade")
         cmd_parts.append(pkg)
 
         if _HAS_RICH and console:
             with console.status(f"[bold cyan]Installing {pkg}...[/bold cyan]"):
-                return self._run_cmd(cmd_parts)
+                ok, stderr_text = self._run_cmd_capture(cmd_parts)
         else:
             print(f"  Installing {pkg}...")
-            return self._run_cmd(cmd_parts)
+            ok, stderr_text = self._run_cmd_capture(cmd_parts)
+
+        if ok:
+            return True
+
+        # PEP 668 retry: add --break-system-packages for pip
+        if "uv" not in self.pip_cmd and "externally-managed-environment" in stderr_text:
+            return self._retry_with_pep668_workaround(cmd_parts, pkg)
+
+        return False
 
     def install_playwright(self) -> bool:
         """Install Playwright browsers."""
@@ -645,6 +758,11 @@ class PackageInstaller:
 
     def _run_cmd(self, cmd: list[str]) -> bool:
         """Run a command, return True on success."""
+        ok, _ = self._run_cmd_capture(cmd)
+        return ok
+
+    def _run_cmd_capture(self, cmd: list[str]) -> tuple[bool, str]:
+        """Run a command, return (success, stderr_text)."""
         try:
             result = subprocess.run(
                 cmd,
@@ -653,22 +771,43 @@ class PackageInstaller:
                 timeout=600,
             )
             if result.returncode != 0:
+                stderr_text = result.stderr or ""
+                # Silently return for PEP 668 — caller will handle retry
+                if "externally-managed-environment" in stderr_text:
+                    return False, stderr_text
                 print(f"\n  Command failed: {' '.join(cmd)}")
-                if result.stderr:
-                    # Show last 20 lines of stderr
-                    lines = result.stderr.strip().splitlines()[-20:]
+                if stderr_text:
+                    lines = stderr_text.strip().splitlines()[-20:]
                     for line in lines:
                         print(f"    {line}")
                 print()
-                return False
-            return True
+                return False, stderr_text
+            return True, ""
         except subprocess.TimeoutExpired:
             print("\n  Installation timed out (10 minutes). Try again with a better connection.\n")
-            return False
+            return False, ""
         except FileNotFoundError:
             print(f"\n  Command not found: {cmd[0]}")
             print(f"  Make sure {self.pip_cmd} is installed and on your PATH.\n")
-            return False
+            return False, ""
+
+    def _retry_with_pep668_workaround(self, cmd_parts: list[str], pkg: str) -> bool:
+        """Retry pip install with --break-system-packages for PEP 668 environments."""
+        print("  Detected PEP 668 (externally-managed-environment), retrying...")
+        retry_cmd = cmd_parts.copy()
+        # Insert --break-system-packages after "install"
+        try:
+            idx = retry_cmd.index("install") + 1
+        except ValueError:
+            idx = len(retry_cmd)
+        retry_cmd.insert(idx, "--break-system-packages")
+
+        if _HAS_RICH and console:
+            with console.status(f"[bold cyan]Retrying {pkg}...[/bold cyan]"):
+                ok, _ = self._run_cmd_capture(retry_cmd)
+        else:
+            ok, _ = self._run_cmd_capture(retry_cmd)
+        return ok
 
 
 # ── Config Writer ──────────────────────────────────────────────────────
@@ -992,6 +1131,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-launch",
         action="store_true",
         help="Don't launch PocketPaw after install (non-interactive)",
+    )
+    parser.add_argument(
+        "--uv-available",
+        action="store_true",
+        help="Hint that uv is on PATH (passed by install.sh)",
     )
     return parser
 
