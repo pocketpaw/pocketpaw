@@ -93,7 +93,7 @@ class SlackAdapter(BaseChannelAdapter):
         user_id = event.get("user", "")
         text = event.get("text", "")
 
-        if not text or not user_id:
+        if not user_id:
             return
 
         # Channel filter
@@ -104,7 +104,36 @@ class SlackAdapter(BaseChannelAdapter):
         import re
 
         text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
-        if not text:
+
+        # Download attached files
+        media_paths: list[str] = []
+        files = event.get("files", [])
+        if files:
+            try:
+                from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                downloader = get_media_downloader()
+                names = []
+                for f in files:
+                    url = f.get("url_private_download") or f.get("url_private")
+                    if not url:
+                        continue
+                    name = f.get("name", "file")
+                    mime = f.get("mimetype")
+                    try:
+                        path = await downloader.download_url_with_auth(
+                            url, f"Bearer {self.bot_token}", name=name, mime=mime
+                        )
+                        media_paths.append(path)
+                        names.append(name)
+                    except Exception as e:
+                        logger.warning("Failed to download Slack file: %s", e)
+                if names:
+                    text += build_media_hint(names)
+            except Exception as e:
+                logger.warning("Slack media download error: %s", e)
+
+        if not text and not media_paths:
             return
 
         metadata: dict[str, Any] = {
@@ -120,6 +149,7 @@ class SlackAdapter(BaseChannelAdapter):
             sender_id=user_id,
             chat_id=channel_id,
             content=text,
+            media=media_paths,
             metadata=metadata,
         )
         await self._publish_inbound(msg)

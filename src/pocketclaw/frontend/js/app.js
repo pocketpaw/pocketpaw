@@ -23,6 +23,7 @@ function app() {
         // View state
         view: 'chat',
         showSettings: false,
+        showWelcome: false,
         showScreenshot: false,
         screenshotSrc: '',
 
@@ -341,6 +342,11 @@ function app() {
                 if (s.agentStatus.features?.length > 0) {
                     this.log(`Features: ${s.agentStatus.features.join(', ')}`, 'info');
                 }
+            }
+
+            // First-run welcome: show if no API key and not previously dismissed
+            if (!this.hasAnthropicKey && !localStorage.getItem('pocketpaw_setup_dismissed')) {
+                this.showWelcome = true;
             }
         },
 

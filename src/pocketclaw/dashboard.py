@@ -61,6 +61,9 @@ active_connections: list[WebSocket] = []
 # Channel adapters (auto-started when configured, keyed by channel name)
 _channel_adapters: dict[str, object] = {}
 
+# Protects settings read-modify-write from concurrent WebSocket clients
+_settings_lock = asyncio.Lock()
+
 # Set by run_dashboard() so the startup event can open the browser once the server is ready
 _open_browser_url: str | None = None
 
@@ -85,6 +88,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
 
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
@@ -762,11 +766,14 @@ async def list_webhooks(request: Request):
     slots = []
     for cfg in settings.webhook_configs:
         name = cfg.get("name", "")
+        secret = cfg.get("secret", "")
+        # Redact secret — only show last 4 chars so user can identify it
+        redacted = f"***{secret[-4:]}" if len(secret) > 4 else "***"
         slots.append(
             {
                 "name": name,
                 "description": cfg.get("description", ""),
-                "secret": cfg.get("secret", ""),
+                "secret": redacted,
                 "sync_timeout": cfg.get("sync_timeout", settings.webhook_sync_timeout),
                 "url": f"{protocol}://{host}/webhook/inbound/{name}",
             }
@@ -1271,16 +1278,17 @@ async def auth_middleware(request: Request, call_next):
 
     is_valid = False
 
-    # 1. Check Query Param (master token)
-    if token and token == current_token:
-        is_valid = True
+    # 1. Check Query Param (master token or session token)
+    if token:
+        if token == current_token:
+            is_valid = True
+        elif ":" in token and verify_session_token(token, current_token):
+            is_valid = True
 
     # 2. Check Header
     elif auth_header:
         bearer_value = (
-            auth_header.removeprefix("Bearer ").strip()
-            if auth_header.startswith("Bearer ")
-            else ""
+            auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
         )
         if bearer_value == current_token:
             is_valid = True
@@ -1291,12 +1299,10 @@ async def auth_middleware(request: Request, call_next):
     elif _is_genuine_localhost(request):
         is_valid = True
 
-    # Allow frontend assets (/, .js, .css) through for SPA bootstrap
-    if (
-        request.url.path == "/"
-        or request.url.path.endswith(".js")
-        or request.url.path.endswith(".css")
-    ):
+    # Allow frontend assets (/, /static/*) through for SPA bootstrap.
+    # Only match explicit static asset paths — never suffix-match, as that
+    # would let crafted URLs like /api/secrets/steal.js bypass auth.
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
         return await call_next(request)
 
     # API Protection
@@ -1320,9 +1326,7 @@ async def exchange_session_token(request: Request):
     """
     auth_header = request.headers.get("Authorization", "")
     bearer = (
-        auth_header.removeprefix("Bearer ").strip()
-        if auth_header.startswith("Bearer ")
-        else ""
+        auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
     )
     master = get_access_token()
     if bearer != master:
@@ -1349,12 +1353,16 @@ async def get_qr_code(request: Request):
     tunnel = get_tunnel_manager()
     status = tunnel.get_status()
 
+    # Use a short-lived session token instead of the master token
+    # to limit exposure in browser history, screenshots, and logs.
+    qr_token = create_session_token(get_access_token(), ttl_hours=1)
+
     if status.get("active") and status.get("url"):
-        login_url = f"{status['url']}/?token={get_access_token()}"
+        login_url = f"{status['url']}/?token={qr_token}"
     else:
         # Fallback to current request host (localhost or network IP)
         protocol = "https" if "trycloudflare" in str(host) else "http"
-        login_url = f"{protocol}://{host}/?token={get_access_token()}"
+        login_url = f"{protocol}://{host}/?token={qr_token}"
 
     img = qrcode.make(login_url)
     buf = io.BytesIO()
@@ -1593,9 +1601,7 @@ async def websocket_endpoint(
         await websocket.accept()
         try:
             first_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-            if first_msg.get("action") == "authenticate" and _token_valid(
-                first_msg.get("token")
-            ):
+            if first_msg.get("action") == "authenticate" and _token_valid(first_msg.get("token")):
                 pass  # Authenticated
             else:
                 await websocket.close(code=4003, reason="Unauthorized")
@@ -1738,66 +1744,69 @@ async def websocket_endpoint(
 
             # Handle settings update
             elif action == "settings":
-                settings.agent_backend = data.get("agent_backend", settings.agent_backend)
-                settings.llm_provider = data.get("llm_provider", settings.llm_provider)
-                if data.get("anthropic_model"):
-                    settings.anthropic_model = data.get("anthropic_model")
-                if "bypass_permissions" in data:
-                    settings.bypass_permissions = bool(data.get("bypass_permissions"))
-                if data.get("web_search_provider"):
-                    settings.web_search_provider = data["web_search_provider"]
-                if data.get("url_extract_provider"):
-                    settings.url_extract_provider = data["url_extract_provider"]
-                if "injection_scan_enabled" in data:
-                    settings.injection_scan_enabled = bool(data["injection_scan_enabled"])
-                if "injection_scan_llm" in data:
-                    settings.injection_scan_llm = bool(data["injection_scan_llm"])
-                if data.get("tool_profile"):
-                    settings.tool_profile = data["tool_profile"]
-                if "plan_mode" in data:
-                    settings.plan_mode = bool(data["plan_mode"])
-                if "plan_mode_tools" in data:
-                    raw = data["plan_mode_tools"]
-                    if isinstance(raw, str):
-                        settings.plan_mode_tools = [t.strip() for t in raw.split(",") if t.strip()]
-                    elif isinstance(raw, list):
-                        settings.plan_mode_tools = raw
-                if "smart_routing_enabled" in data:
-                    settings.smart_routing_enabled = bool(data["smart_routing_enabled"])
-                if data.get("model_tier_simple"):
-                    settings.model_tier_simple = data["model_tier_simple"]
-                if data.get("model_tier_moderate"):
-                    settings.model_tier_moderate = data["model_tier_moderate"]
-                if data.get("model_tier_complex"):
-                    settings.model_tier_complex = data["model_tier_complex"]
-                if data.get("tts_provider"):
-                    settings.tts_provider = data["tts_provider"]
-                if "tts_voice" in data:
-                    settings.tts_voice = data["tts_voice"]
-                if data.get("stt_model"):
-                    settings.stt_model = data["stt_model"]
-                if "self_audit_enabled" in data:
-                    settings.self_audit_enabled = bool(data["self_audit_enabled"])
-                if data.get("self_audit_schedule"):
-                    settings.self_audit_schedule = data["self_audit_schedule"]
-                # Memory settings
-                if data.get("memory_backend"):
-                    settings.memory_backend = data["memory_backend"]
-                if "mem0_auto_learn" in data:
-                    settings.mem0_auto_learn = bool(data["mem0_auto_learn"])
-                if data.get("mem0_llm_provider"):
-                    settings.mem0_llm_provider = data["mem0_llm_provider"]
-                if data.get("mem0_llm_model"):
-                    settings.mem0_llm_model = data["mem0_llm_model"]
-                if data.get("mem0_embedder_provider"):
-                    settings.mem0_embedder_provider = data["mem0_embedder_provider"]
-                if data.get("mem0_embedder_model"):
-                    settings.mem0_embedder_model = data["mem0_embedder_model"]
-                if data.get("mem0_vector_store"):
-                    settings.mem0_vector_store = data["mem0_vector_store"]
-                if data.get("mem0_ollama_base_url"):
-                    settings.mem0_ollama_base_url = data["mem0_ollama_base_url"]
-                settings.save()
+                async with _settings_lock:
+                    settings.agent_backend = data.get("agent_backend", settings.agent_backend)
+                    settings.llm_provider = data.get("llm_provider", settings.llm_provider)
+                    if data.get("anthropic_model"):
+                        settings.anthropic_model = data.get("anthropic_model")
+                    if "bypass_permissions" in data:
+                        settings.bypass_permissions = bool(data.get("bypass_permissions"))
+                    if data.get("web_search_provider"):
+                        settings.web_search_provider = data["web_search_provider"]
+                    if data.get("url_extract_provider"):
+                        settings.url_extract_provider = data["url_extract_provider"]
+                    if "injection_scan_enabled" in data:
+                        settings.injection_scan_enabled = bool(data["injection_scan_enabled"])
+                    if "injection_scan_llm" in data:
+                        settings.injection_scan_llm = bool(data["injection_scan_llm"])
+                    if data.get("tool_profile"):
+                        settings.tool_profile = data["tool_profile"]
+                    if "plan_mode" in data:
+                        settings.plan_mode = bool(data["plan_mode"])
+                    if "plan_mode_tools" in data:
+                        raw = data["plan_mode_tools"]
+                        if isinstance(raw, str):
+                            settings.plan_mode_tools = [
+                                t.strip() for t in raw.split(",") if t.strip()
+                            ]
+                        elif isinstance(raw, list):
+                            settings.plan_mode_tools = raw
+                    if "smart_routing_enabled" in data:
+                        settings.smart_routing_enabled = bool(data["smart_routing_enabled"])
+                    if data.get("model_tier_simple"):
+                        settings.model_tier_simple = data["model_tier_simple"]
+                    if data.get("model_tier_moderate"):
+                        settings.model_tier_moderate = data["model_tier_moderate"]
+                    if data.get("model_tier_complex"):
+                        settings.model_tier_complex = data["model_tier_complex"]
+                    if data.get("tts_provider"):
+                        settings.tts_provider = data["tts_provider"]
+                    if "tts_voice" in data:
+                        settings.tts_voice = data["tts_voice"]
+                    if data.get("stt_model"):
+                        settings.stt_model = data["stt_model"]
+                    if "self_audit_enabled" in data:
+                        settings.self_audit_enabled = bool(data["self_audit_enabled"])
+                    if data.get("self_audit_schedule"):
+                        settings.self_audit_schedule = data["self_audit_schedule"]
+                    # Memory settings
+                    if data.get("memory_backend"):
+                        settings.memory_backend = data["memory_backend"]
+                    if "mem0_auto_learn" in data:
+                        settings.mem0_auto_learn = bool(data["mem0_auto_learn"])
+                    if data.get("mem0_llm_provider"):
+                        settings.mem0_llm_provider = data["mem0_llm_provider"]
+                    if data.get("mem0_llm_model"):
+                        settings.mem0_llm_model = data["mem0_llm_model"]
+                    if data.get("mem0_embedder_provider"):
+                        settings.mem0_embedder_provider = data["mem0_embedder_provider"]
+                    if data.get("mem0_embedder_model"):
+                        settings.mem0_embedder_model = data["mem0_embedder_model"]
+                    if data.get("mem0_vector_store"):
+                        settings.mem0_vector_store = data["mem0_vector_store"]
+                    if data.get("mem0_ollama_base_url"):
+                        settings.mem0_ollama_base_url = data["mem0_ollama_base_url"]
+                    settings.save()
 
                 # Reset the agent loop's router to pick up new settings
                 agent_loop.reset_router()
@@ -1820,78 +1829,81 @@ async def websocket_endpoint(
                 provider = data.get("provider")
                 key = data.get("key", "")
 
-                if provider == "anthropic" and key:
-                    settings.anthropic_api_key = key
-                    settings.llm_provider = "anthropic"
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ Anthropic API key saved!"}
-                    )
-                elif provider == "openai" and key:
-                    settings.openai_api_key = key
-                    settings.llm_provider = "openai"
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ OpenAI API key saved!"}
-                    )
-                elif provider == "tavily" and key:
-                    settings.tavily_api_key = key
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ Tavily API key saved!"}
-                    )
-                elif provider == "brave" and key:
-                    settings.brave_search_api_key = key
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ Brave Search API key saved!"}
-                    )
-                elif provider == "parallel" and key:
-                    settings.parallel_api_key = key
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ Parallel AI API key saved!"}
-                    )
-                elif provider == "elevenlabs" and key:
-                    settings.elevenlabs_api_key = key
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ ElevenLabs API key saved!"}
-                    )
-                elif provider == "google_oauth_id" and key:
-                    settings.google_oauth_client_id = key
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ Google OAuth Client ID saved!"}
-                    )
-                elif provider == "google_oauth_secret" and key:
-                    settings.google_oauth_client_secret = key
-                    settings.save()
-                    await websocket.send_json(
-                        {
-                            "type": "message",
-                            "content": "✅ Google OAuth Client Secret saved!",
-                        }
-                    )
-                elif provider == "spotify_client_id" and key:
-                    settings.spotify_client_id = key
-                    settings.save()
-                    await websocket.send_json(
-                        {"type": "message", "content": "✅ Spotify Client ID saved!"}
-                    )
-                elif provider == "spotify_client_secret" and key:
-                    settings.spotify_client_secret = key
-                    settings.save()
-                    await websocket.send_json(
-                        {
-                            "type": "message",
-                            "content": "✅ Spotify Client Secret saved!",
-                        }
-                    )
-                else:
-                    await websocket.send_json(
-                        {"type": "error", "content": "Invalid API key or provider"}
-                    )
+                async with _settings_lock:
+                    if provider == "anthropic" and key:
+                        settings.anthropic_api_key = key
+                        settings.llm_provider = "anthropic"
+                        settings.save()
+                        agent_loop.reset_router()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Anthropic API key saved!"}
+                        )
+                    elif provider == "openai" and key:
+                        settings.openai_api_key = key
+                        settings.llm_provider = "openai"
+                        settings.save()
+                        agent_loop.reset_router()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ OpenAI API key saved!"}
+                        )
+                    elif provider == "tavily" and key:
+                        settings.tavily_api_key = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Tavily API key saved!"}
+                        )
+                    elif provider == "brave" and key:
+                        settings.brave_search_api_key = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Brave Search API key saved!"}
+                        )
+                    elif provider == "parallel" and key:
+                        settings.parallel_api_key = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Parallel AI API key saved!"}
+                        )
+                    elif provider == "elevenlabs" and key:
+                        settings.elevenlabs_api_key = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ ElevenLabs API key saved!"}
+                        )
+                    elif provider == "google_oauth_id" and key:
+                        settings.google_oauth_client_id = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Google OAuth Client ID saved!"}
+                        )
+                    elif provider == "google_oauth_secret" and key:
+                        settings.google_oauth_client_secret = key
+                        settings.save()
+                        await websocket.send_json(
+                            {
+                                "type": "message",
+                                "content": "✅ Google OAuth Client Secret saved!",
+                            }
+                        )
+                    elif provider == "spotify_client_id" and key:
+                        settings.spotify_client_id = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Spotify Client ID saved!"}
+                        )
+                    elif provider == "spotify_client_secret" and key:
+                        settings.spotify_client_secret = key
+                        settings.save()
+                        await websocket.send_json(
+                            {
+                                "type": "message",
+                                "content": "✅ Spotify Client Secret saved!",
+                            }
+                        )
+                    else:
+                        await websocket.send_json(
+                            {"type": "error", "content": "Invalid API key or provider"}
+                        )
 
             # Handle get_settings - return current settings to frontend
             elif action == "get_settings":
@@ -2111,8 +2123,17 @@ async def websocket_endpoint(
                 skill = loader.get(skill_name)
 
                 if not skill:
+                    available = [s.name for s in loader.get_invocable()]
+                    hint = (
+                        f"Available commands: /{', /'.join(available)}"
+                        if available
+                        else "No skills installed yet."
+                    )
                     await websocket.send_json(
-                        {"type": "error", "content": f"Skill not found: {skill_name}"}
+                        {
+                            "type": "error",
+                            "content": f"Unknown command: /{skill_name}\n\n{hint}",
+                        }
                     )
                 else:
                     await websocket.send_json(
@@ -2193,7 +2214,7 @@ async def delete_session(session_id: str):
     store = manager._store
 
     if hasattr(store, "delete_session"):
-        deleted = store.delete_session(session_id)
+        deleted = await store.delete_session(session_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Session not found")
         return {"status": "ok"}
@@ -2213,7 +2234,7 @@ async def update_session_title(session_id: str, request: Request):
     store = manager._store
 
     if hasattr(store, "update_session_title"):
-        updated = store.update_session_title(session_id, title)
+        updated = await store.update_session_title(session_id, title)
         if not updated:
             raise HTTPException(status_code=404, detail="Session not found")
         return {"status": "ok"}
@@ -2442,9 +2463,15 @@ async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data:
     """Handle tool execution."""
 
     if tool == "status":
+        # Run blocking status check in thread pool to avoid freezing websocket
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
         from pocketclaw.tools.status import get_system_status
 
-        status = get_system_status()  # sync function
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            status = await loop.run_in_executor(pool, get_system_status)
         await websocket.send_json({"type": "status", "content": status})
 
     elif tool == "screenshot":

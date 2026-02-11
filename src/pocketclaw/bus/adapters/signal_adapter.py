@@ -83,7 +83,7 @@ class SignalAdapter(BaseChannelAdapter):
         data_msg = envelope.get("dataMessage", {})
         content = data_msg.get("message", "")
 
-        if not source or not content:
+        if not source:
             return
 
         # Filter by allowed phone numbers
@@ -91,11 +91,42 @@ class SignalAdapter(BaseChannelAdapter):
             logger.debug("Signal message from unauthorized number: %s", source)
             return
 
+        # Download attachments
+        media_paths: list[str] = []
+        attachments = data_msg.get("attachments", [])
+        if attachments and self._http:
+            try:
+                from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                downloader = get_media_downloader()
+                names = []
+                for att in attachments:
+                    att_id = att.get("id")
+                    if not att_id:
+                        continue
+                    name = att.get("filename") or "attachment"
+                    mime = att.get("contentType")
+                    try:
+                        url = f"{self.api_url}/v1/attachments/{att_id}"
+                        path = await downloader.download_url(url, name=name, mime=mime)
+                        media_paths.append(path)
+                        names.append(name)
+                    except Exception as e:
+                        logger.warning("Failed to download Signal attachment: %s", e)
+                if names:
+                    content += build_media_hint(names)
+            except Exception as e:
+                logger.warning("Signal media download error: %s", e)
+
+        if not content and not media_paths:
+            return
+
         msg = InboundMessage(
             channel=Channel.SIGNAL,
             sender_id=source,
             chat_id=source,
             content=content,
+            media=media_paths,
             metadata={
                 "timestamp": envelope.get("timestamp", ""),
             },

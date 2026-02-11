@@ -112,12 +112,23 @@ window.PocketPaw.Chat = {
                 this.isStreaming = true;
                 this.isThinking = true;
                 this.streamingContent = '';
+                // Safety timeout — prevent infinite spinner if backend hangs
+                this._streamTimeout = setTimeout(() => {
+                    if (this.isStreaming) {
+                        this.addMessage('assistant', 'Response timed out. The agent may not be configured — check Settings.');
+                        this.endStreaming();
+                    }
+                }, 90000);
             },
 
             /**
              * End streaming mode
              */
             endStreaming() {
+                if (this._streamTimeout) {
+                    clearTimeout(this._streamTimeout);
+                    this._streamTimeout = null;
+                }
                 if (this.isStreaming && this.streamingContent) {
                     this.addMessage('assistant', this.streamingContent);
                 }

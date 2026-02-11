@@ -354,6 +354,14 @@ class Settings(BaseSettings):
         description="Targets for autonomous messages, e.g. ['telegram:12345', 'discord:98765']",
     )
 
+    # Media Downloads
+    media_download_dir: str = Field(
+        default="", description="Custom media download dir (default: ~/.pocketclaw/media/)"
+    )
+    media_max_file_size_mb: int = Field(
+        default=50, description="Max media file size in MB (0 = unlimited)"
+    )
+
     # Concurrency
     max_concurrent_conversations: int = Field(
         default=5, description="Max parallel conversations processed simultaneously"
@@ -505,18 +513,23 @@ class Settings(BaseSettings):
             # Identity / Multi-user
             "owner_id": self.owner_id,
             "notification_channels": self.notification_channels,
+            # Media Downloads
+            "media_download_dir": self.media_download_dir,
+            "media_max_file_size_mb": self.media_max_file_size_mb,
             # Concurrency
             "max_concurrent_conversations": self.max_concurrent_conversations,
         }
 
-        # Save all fields to config.json (file is chmod 600)
-        # Additionally store secrets in the encrypted credential store
+        # Store secrets in the encrypted credential store, then strip
+        # them from the dict before writing config.json to prevent
+        # plaintext secret leakage.
         store = get_credential_store()
         for key, value in all_fields.items():
             if key in SECRET_FIELDS and value:
                 store.set(key, value)
 
-        config_path.write_text(json.dumps(all_fields, indent=2))
+        safe_fields = {k: v for k, v in all_fields.items() if k not in SECRET_FIELDS}
+        config_path.write_text(json.dumps(safe_fields, indent=2))
         _chmod_safe(config_path, 0o600)
 
     @classmethod

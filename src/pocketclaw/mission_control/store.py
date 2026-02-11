@@ -98,7 +98,7 @@ class FileMissionControlStore:
         try:
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            temp_path.rename(path)
+            temp_path.replace(path)
         except OSError as e:
             logger.error(f"Error saving {path}: {e}")
             if temp_path.exists():

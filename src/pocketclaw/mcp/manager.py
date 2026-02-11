@@ -49,9 +49,60 @@ class _ServerState:
 class MCPManager:
     """Manages MCP server connections and tool invocations."""
 
+    # Env vars safe to inherit from host → MCP subprocesses.
+    # Excludes secrets (API keys, tokens) that subprocess shouldn't access.
+    _SAFE_ENV_KEYS = {
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "SHELL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        # Node.js / npm
+        "NODE_PATH",
+        "NODE_ENV",
+        "NPM_CONFIG_PREFIX",
+        "NVM_DIR",
+        # Python
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        # Windows essentials
+        "SYSTEMROOT",
+        "COMSPEC",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+    }
+
     def __init__(self) -> None:
         self._servers: dict[str, _ServerState] = {}
         self._lock = asyncio.Lock()
+
+    @classmethod
+    def _build_safe_env(cls, config_env: dict[str, str]) -> dict[str, str]:
+        """Build a filtered env dict for MCP subprocesses.
+
+        Only passes safe host env vars + explicit config overrides.
+        This prevents leaking API keys, tokens, and credentials.
+        """
+        env = {}
+        for key in cls._SAFE_ENV_KEYS:
+            if key in os.environ:
+                env[key] = os.environ[key]
+        # Config-specified env vars always override (user explicitly wants these)
+        env.update(config_env)
+        return env
 
     async def start_server(self, config: MCPServerConfig) -> bool:
         """Start an MCP server and initialize its session.
@@ -67,17 +118,18 @@ class MCPManager:
             self._servers[config.name] = state
 
             try:
+                timeout = config.timeout or 30
                 if config.transport == "stdio":
-                    await self._connect_stdio(state)
+                    await asyncio.wait_for(self._connect_stdio(state), timeout=timeout)
                 elif config.transport == "http":
-                    await self._connect_http(state)
+                    await asyncio.wait_for(self._connect_http(state), timeout=timeout)
                 else:
                     state.error = f"Unknown transport: {config.transport}"
                     logger.error(state.error)
                     return False
 
-                # Discover tools
-                await self._discover_tools(state)
+                # Discover tools (also bounded by timeout)
+                await asyncio.wait_for(self._discover_tools(state), timeout=timeout)
                 state.connected = True
                 logger.info(
                     "MCP server '%s' started — %d tools",
@@ -86,6 +138,11 @@ class MCPManager:
                 )
                 return True
 
+            except TimeoutError:
+                state.error = f"Connection timed out after {timeout}s"
+                state.connected = False
+                logger.error("MCP server '%s' timed out after %ds", config.name, timeout)
+                return False
             except Exception as e:
                 state.error = str(e)
                 state.connected = False
@@ -97,7 +154,7 @@ class MCPManager:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
-        env = {**os.environ, **state.config.env}
+        env = self._build_safe_env(state.config.env)
         params = StdioServerParameters(
             command=state.config.command,
             args=state.config.args,
@@ -105,17 +162,23 @@ class MCPManager:
         )
 
         # stdio_client is an async context manager — we enter it manually
-        # and keep it alive until stop_server
+        # and keep it alive until stop_server.
+        # If session init fails, we must clean up the transport context.
         ctx = stdio_client(params)
         streams = await ctx.__aenter__()
         state.client = ctx
         state.read_stream = streams[0]
         state.write_stream = streams[1]
 
-        session = ClientSession(state.read_stream, state.write_stream)
-        await session.__aenter__()
-        await session.initialize()
-        state.session = session
+        try:
+            session = ClientSession(state.read_stream, state.write_stream)
+            await session.__aenter__()
+            await session.initialize()
+            state.session = session
+        except Exception:
+            await ctx.__aexit__(None, None, None)
+            state.client = None
+            raise
 
     async def _connect_http(self, state: _ServerState) -> None:
         """Connect to an MCP server via HTTP/SSE."""
@@ -128,10 +191,15 @@ class MCPManager:
         state.read_stream = streams[0]
         state.write_stream = streams[1]
 
-        session = ClientSession(state.read_stream, state.write_stream)
-        await session.__aenter__()
-        await session.initialize()
-        state.session = session
+        try:
+            session = ClientSession(state.read_stream, state.write_stream)
+            await session.__aenter__()
+            await session.initialize()
+            state.session = session
+        except Exception:
+            await ctx.__aexit__(None, None, None)
+            state.client = None
+            raise
 
     async def _discover_tools(self, state: _ServerState) -> None:
         """Discover tools from a connected MCP session."""
@@ -271,4 +339,12 @@ def get_mcp_manager() -> MCPManager:
     global _manager
     if _manager is None:
         _manager = MCPManager()
+
+        from pocketclaw.lifecycle import register
+
+        def _reset():
+            global _manager
+            _manager = None
+
+        register("mcp_manager", shutdown=_manager.stop_all, reset=_reset)
     return _manager

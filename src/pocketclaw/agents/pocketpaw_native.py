@@ -18,6 +18,7 @@ Changes:
   - 2026-02-05: Added 'remember' and 'recall' tools for long-term memory.
 """
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -344,7 +345,17 @@ class PocketPawOrchestrator:
             logger.error("❌ Anthropic API key required for PocketPaw Native")
             return
 
-        self._client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+        # Initialize client with timeout to prevent hanging
+        try:
+            self._client = AsyncAnthropic(
+                api_key=self.settings.anthropic_api_key,
+                timeout=60.0,  # 60 second timeout for API requests
+                max_retries=2,  # Limit retries to prevent long hangs
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize Anthropic client: {e}")
+            self._client = None
+            return
 
         # Initialize executor (Open Interpreter)
         try:
@@ -749,14 +760,31 @@ class PocketPawOrchestrator:
                 identity = system_prompt or _DEFAULT_IDENTITY
                 final_system = identity + "\n" + _TOOL_GUIDE
 
-                # Call Claude
-                response = await self._client.messages.create(
-                    model=model,
-                    max_tokens=4096,
-                    system=final_system,
-                    tools=self._get_filtered_tools(),
-                    messages=messages,
-                )
+                # Call Claude with timeout wrapper for safety
+                try:
+                    response = await asyncio.wait_for(
+                        self._client.messages.create(
+                            model=model,
+                            max_tokens=4096,
+                            system=final_system,
+                            tools=self._get_filtered_tools(),
+                            messages=messages,
+                        ),
+                        timeout=90.0,  # Additional asyncio timeout as safety net
+                    )
+                except asyncio.TimeoutError:
+                    yield AgentEvent(
+                        type="error",
+                        content="⏱️ Request timed out. Please check your network connection and API key.",
+                    )
+                    return
+                except Exception as api_error:
+                    logger.error(f"Anthropic API error: {api_error}")
+                    yield AgentEvent(
+                        type="error",
+                        content=f"❌ API Error: {str(api_error)}. Please verify your Anthropic API key in Settings.",
+                    )
+                    return
 
                 # Process response content blocks
                 assistant_content = []

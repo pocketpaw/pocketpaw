@@ -68,11 +68,43 @@ class WebSocketAdapter(BaseChannelAdapter):
         action = data.get("action", "chat")
 
         if action == "chat":
+            content = data.get("message", "")
+            media_paths: list[str] = []
+
+            # Handle base64-encoded media items
+            media_items = data.get("media", [])
+            if media_items:
+                try:
+                    import base64
+
+                    from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                    downloader = get_media_downloader()
+                    names = []
+                    for item in media_items:
+                        b64_data = item.get("data", "")
+                        name = item.get("name", "upload")
+                        mime = item.get("mime_type")
+                        if not b64_data:
+                            continue
+                        try:
+                            raw = base64.b64decode(b64_data)
+                            path = await downloader.save_from_bytes(raw, name, mime)
+                            media_paths.append(path)
+                            names.append(name)
+                        except Exception as e:
+                            logger.warning("Failed to save WebSocket media: %s", e)
+                    if names:
+                        content += build_media_hint(names)
+                except Exception as e:
+                    logger.warning("WebSocket media error: %s", e)
+
             message = InboundMessage(
                 channel=Channel.WEBSOCKET,
                 sender_id=chat_id,
                 chat_id=chat_id,
-                content=data.get("message", ""),
+                content=content,
+                media=media_paths,
                 metadata=data,
             )
 

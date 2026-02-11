@@ -56,8 +56,17 @@ class TelegramAdapter(BaseChannelAdapter):
 
         # Add Handlers
         self.app.add_handler(CommandHandler("start", self._handle_start))
-        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
-        # We can add a generic handler for other content types later (photos, etc.)
+        media_filter = (
+            filters.PHOTO
+            | filters.Document.ALL
+            | filters.AUDIO
+            | filters.VIDEO
+            | filters.VOICE
+            | filters.VIDEO_NOTE
+        )
+        self.app.add_handler(
+            MessageHandler((filters.TEXT | media_filter) & ~filters.COMMAND, self._handle_message)
+        )
 
         # Initialize
         await self.app.initialize()
@@ -247,7 +256,7 @@ class TelegramAdapter(BaseChannelAdapter):
         )
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Forward message to Bus."""
+        """Forward message to Bus, downloading any attached media."""
         if not update.effective_user or not update.message:
             return
 
@@ -255,13 +264,57 @@ class TelegramAdapter(BaseChannelAdapter):
         if self.allowed_user_id and user_id != self.allowed_user_id:
             return
 
-        content = update.message.text
-        if not content:
+        tg_msg = update.message
+        content = tg_msg.text or tg_msg.caption or ""
+        media_paths: list[str] = []
+
+        # Download attached media
+        file_obj = None
+        file_name = "media"
+        mime = None
+        if tg_msg.photo:
+            file_obj = await tg_msg.photo[-1].get_file()
+            file_name = "photo.jpg"
+            mime = "image/jpeg"
+        elif tg_msg.document:
+            file_obj = await tg_msg.document.get_file()
+            file_name = tg_msg.document.file_name or "document"
+            mime = tg_msg.document.mime_type
+        elif tg_msg.audio:
+            file_obj = await tg_msg.audio.get_file()
+            file_name = tg_msg.audio.file_name or "audio"
+            mime = tg_msg.audio.mime_type
+        elif tg_msg.video:
+            file_obj = await tg_msg.video.get_file()
+            file_name = tg_msg.video.file_name or "video"
+            mime = tg_msg.video.mime_type
+        elif tg_msg.voice:
+            file_obj = await tg_msg.voice.get_file()
+            file_name = "voice.ogg"
+            mime = tg_msg.voice.mime_type or "audio/ogg"
+        elif tg_msg.video_note:
+            file_obj = await tg_msg.video_note.get_file()
+            file_name = "video_note.mp4"
+            mime = "video/mp4"
+
+        if file_obj:
+            try:
+                from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                data = await file_obj.download_as_bytearray()
+                downloader = get_media_downloader()
+                path = await downloader.save_from_bytes(bytes(data), file_name, mime)
+                media_paths.append(path)
+                content += build_media_hint([file_name])
+            except Exception as e:
+                logger.warning("Failed to download Telegram media: %s", e)
+
+        if not content and not media_paths:
             return
 
         # Build topic-aware chat_id for forum groups
         base_chat_id = str(update.effective_chat.id)
-        topic_id = getattr(update.message, "message_thread_id", None)
+        topic_id = getattr(tg_msg, "message_thread_id", None)
         chat_id = f"{base_chat_id}:topic:{topic_id}" if topic_id else base_chat_id
 
         msg = InboundMessage(
@@ -269,6 +322,7 @@ class TelegramAdapter(BaseChannelAdapter):
             sender_id=str(user_id),
             chat_id=chat_id,
             content=content,
+            media=media_paths,
             metadata={"username": update.effective_user.username},
         )
 

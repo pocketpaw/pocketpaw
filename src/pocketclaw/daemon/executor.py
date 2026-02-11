@@ -9,8 +9,8 @@ When an intention triggers:
 """
 
 import logging
-from datetime import datetime
-from typing import AsyncIterator, Callable, Optional
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 
 from ..agents.router import AgentRouter
 from ..config import Settings, get_settings
@@ -33,9 +33,9 @@ class IntentionExecutor:
 
     def __init__(
         self,
-        settings: Optional[Settings] = None,
-        intention_store: Optional[IntentionStore] = None,
-        context_hub: Optional[ContextHub] = None,
+        settings: Settings | None = None,
+        intention_store: IntentionStore | None = None,
+        context_hub: ContextHub | None = None,
     ):
         """
         Initialize the executor.
@@ -50,10 +50,10 @@ class IntentionExecutor:
         self.context_hub = context_hub or get_context_hub()
 
         # Callback for streaming results
-        self.stream_callback: Optional[Callable] = None
+        self.stream_callback: Callable | None = None
 
         # Agent router (created lazily)
-        self._agent_router: Optional[AgentRouter] = None
+        self._agent_router: AgentRouter | None = None
 
     def _get_agent_router(self) -> AgentRouter:
         """Get or create the agent router."""
@@ -91,7 +91,7 @@ class IntentionExecutor:
             "type": "intention_started",
             "intention_id": intention_id,
             "intention_name": intention_name,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(tz=UTC).isoformat(),
         }
 
         try:
@@ -123,7 +123,7 @@ class IntentionExecutor:
                 "type": "intention_completed",
                 "intention_id": intention_id,
                 "intention_name": intention_name,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=UTC).isoformat(),
             }
 
         except Exception as e:
@@ -134,7 +134,7 @@ class IntentionExecutor:
                 "intention_id": intention_id,
                 "intention_name": intention_name,
                 "error": str(e),
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=UTC).isoformat(),
             }
 
     async def execute_and_stream(self, intention: dict) -> None:
@@ -171,7 +171,7 @@ class IntentionExecutor:
                 "type": "intention_error",
                 "intention_id": intention_id,
                 "error": f"Intention not found: {intention_id}",
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=UTC).isoformat(),
             }
             return
 

@@ -110,6 +110,30 @@ class WebhookAdapter(BaseChannelAdapter):
         if not isinstance(extra_metadata, dict):
             extra_metadata = {}
 
+        # Download media URLs if provided
+        media_paths: list[str] = []
+        media_urls = body.get("media_urls", [])
+        if media_urls and isinstance(media_urls, list):
+            try:
+                from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                downloader = get_media_downloader()
+                names = []
+                for url in media_urls:
+                    if not isinstance(url, str):
+                        continue
+                    try:
+                        path = await downloader.download_url(url)
+                        media_paths.append(path)
+                        # Extract filename from path
+                        names.append(path.rsplit("/", 1)[-1])
+                    except Exception as e:
+                        _log.warning("Failed to download webhook media: %s", e)
+                if names:
+                    content += build_media_hint(names)
+            except Exception as e:
+                _log.warning("Webhook media download error: %s", e)
+
         metadata = {
             "webhook_name": slot.name,
             "source": "webhook",
@@ -121,6 +145,7 @@ class WebhookAdapter(BaseChannelAdapter):
             sender_id=str(sender),
             chat_id=request_id,
             content=str(content),
+            media=media_paths,
             metadata=metadata,
         )
 

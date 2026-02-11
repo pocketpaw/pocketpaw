@@ -126,7 +126,7 @@ class TestRebuildSessionIndex:
 
 
 class TestUpdateSessionIndex:
-    def test_update_creates_entry(self, store):
+    async def test_update_creates_entry(self, store):
         data = [
             {
                 "id": "1",
@@ -148,7 +148,7 @@ class TestUpdateSessionIndex:
             role="assistant",
             session_key="websocket:abc123",
         )
-        store._update_session_index("websocket:abc123", entry, data)
+        await store._update_session_index("websocket:abc123", entry, data)
 
         index = store._load_session_index()
         assert "websocket_abc123" in index
@@ -158,27 +158,27 @@ class TestUpdateSessionIndex:
         assert item["message_count"] == 2
         assert "Python is a programming language" in item["preview"]
 
-    def test_update_preserves_user_title(self, store):
+    async def test_update_preserves_user_title(self, store):
         # First write with auto title
         data = [{"id": "1", "role": "user", "content": "Hello", "timestamp": "2026-02-10T10:00:00"}]
         entry = MagicMock(spec=MemoryEntry)
-        store._update_session_index("websocket:test1", entry, data)
+        await store._update_session_index("websocket:test1", entry, data)
 
         # Rename
-        store.update_session_title("websocket_test1", "My Custom Title")
+        await store.update_session_title("websocket_test1", "My Custom Title")
 
         # Update again (new message)
         data.append(
             {"id": "2", "role": "assistant", "content": "Hi!", "timestamp": "2026-02-10T10:01:00"}
         )
-        store._update_session_index("websocket:test1", entry, data)
+        await store._update_session_index("websocket:test1", entry, data)
 
         index = store._load_session_index()
         assert index["websocket_test1"]["title"] == "My Custom Title"
 
 
 class TestDeleteSession:
-    def test_delete_existing(self, populated_store):
+    async def test_delete_existing(self, populated_store):
         store, sessions = populated_store
         safe_key = list(sessions.keys())[0]
         session_file = store.sessions_path / f"{safe_key}.json"
@@ -188,16 +188,16 @@ class TestDeleteSession:
         store.rebuild_session_index()
         assert safe_key in store._load_session_index()
 
-        result = store.delete_session(safe_key)
+        result = await store.delete_session(safe_key)
         assert result is True
         assert not session_file.exists()
         assert safe_key not in store._load_session_index()
 
-    def test_delete_nonexistent(self, store):
-        result = store.delete_session("nonexistent_session")
+    async def test_delete_nonexistent(self, store):
+        result = await store.delete_session("nonexistent_session")
         assert result is False
 
-    def test_delete_removes_compaction(self, store):
+    async def test_delete_removes_compaction(self, store):
         safe_key = "websocket_del123"
         session_file = store.sessions_path / f"{safe_key}.json"
         compaction_file = store.sessions_path / f"{safe_key}_compaction.json"
@@ -206,24 +206,24 @@ class TestDeleteSession:
         )
         compaction_file.write_text('{"watermark":1,"summary":"test"}')
 
-        store.delete_session(safe_key)
+        await store.delete_session(safe_key)
         assert not session_file.exists()
         assert not compaction_file.exists()
 
 
 class TestUpdateSessionTitle:
-    def test_update_title(self, store):
+    async def test_update_title(self, store):
         store._save_session_index({"websocket_abc": {"title": "Original", "channel": "websocket"}})
-        result = store.update_session_title("websocket_abc", "New Title")
+        result = await store.update_session_title("websocket_abc", "New Title")
         assert result is True
 
         index = store._load_session_index()
         assert index["websocket_abc"]["title"] == "New Title"
         assert index["websocket_abc"]["user_title"] == "New Title"
 
-    def test_update_title_not_found(self, store):
+    async def test_update_title_not_found(self, store):
         store._save_session_index({})
-        result = store.update_session_title("nonexistent", "Title")
+        result = await store.update_session_title("nonexistent", "Title")
         assert result is False
 
 

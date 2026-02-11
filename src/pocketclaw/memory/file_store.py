@@ -13,10 +13,18 @@ import asyncio
 import json
 import re
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from pocketclaw.memory.protocol import MemoryEntry, MemoryType
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
 
 # Stop words excluded from word-overlap search scoring
 _STOP_WORDS = frozenset(
@@ -165,6 +173,7 @@ class FileMemoryStore:
         # In-memory index for fast lookup
         self._index: dict[str, MemoryEntry] = {}
         self._session_write_locks: dict[str, asyncio.Lock] = {}
+        self._session_index_lock = asyncio.Lock()  # Protects _index.json read-modify-write
         self._load_index()
 
         # Build session index on first run (migration)
@@ -193,55 +202,56 @@ class FileMemoryStore:
         """Atomic write of session index (write to .tmp then rename)."""
         tmp = self._index_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(index, indent=2), encoding="utf-8")
-        tmp.rename(self._index_path)
+        tmp.replace(self._index_path)
 
-    def _update_session_index(
+    async def _update_session_index(
         self, session_key: str, entry: MemoryEntry, session_data: list[dict]
     ) -> None:
         """Update a single entry in the session index after a message save."""
-        index = self._load_session_index()
-        safe_key = session_key.replace(":", "_").replace("/", "_")
+        async with self._session_index_lock:
+            index = self._load_session_index()
+            safe_key = session_key.replace(":", "_").replace("/", "_")
 
-        # Extract channel from session_key (format: "channel:uuid")
-        parts = session_key.split(":", 1)
-        channel = parts[0] if len(parts) > 1 else "unknown"
+            # Extract channel from session_key (format: "channel:uuid")
+            parts = session_key.split(":", 1)
+            channel = parts[0] if len(parts) > 1 else "unknown"
 
-        # Find first user message for title
-        title = ""
-        for msg in session_data:
-            if msg.get("role") == "user" and msg.get("content", "").strip():
-                title = msg["content"].strip()[:80]
-                break
-        if not title:
-            title = "New Chat"
+            # Find first user message for title
+            title = ""
+            for msg in session_data:
+                if msg.get("role") == "user" and msg.get("content", "").strip():
+                    title = msg["content"].strip()[:80]
+                    break
+            if not title:
+                title = "New Chat"
 
-        # Last message preview
-        last_msg = session_data[-1] if session_data else {}
-        preview = last_msg.get("content", "")[:120]
+            # Last message preview
+            last_msg = session_data[-1] if session_data else {}
+            preview = last_msg.get("content", "")[:120]
 
-        # Timestamps
-        first_msg = session_data[0] if session_data else {}
-        created = first_msg.get("timestamp", datetime.now().isoformat())
-        last_activity = last_msg.get("timestamp", datetime.now().isoformat())
+            # Timestamps
+            first_msg = session_data[0] if session_data else {}
+            created = first_msg.get("timestamp", datetime.now(tz=UTC).isoformat())
+            last_activity = last_msg.get("timestamp", datetime.now(tz=UTC).isoformat())
 
-        # Preserve existing title if user renamed it
-        existing = index.get(safe_key, {})
-        if existing.get("user_title"):
-            title = existing["user_title"]
+            # Preserve existing title if user renamed it
+            existing = index.get(safe_key, {})
+            if existing.get("user_title"):
+                title = existing["user_title"]
 
-        index[safe_key] = {
-            "title": title,
-            "channel": channel,
-            "created": existing.get("created", created),
-            "last_activity": last_activity,
-            "message_count": len(session_data),
-            "preview": preview,
-        }
-        # Preserve user_title flag if set
-        if existing.get("user_title"):
-            index[safe_key]["user_title"] = existing["user_title"]
+            index[safe_key] = {
+                "title": title,
+                "channel": channel,
+                "created": existing.get("created", created),
+                "last_activity": last_activity,
+                "message_count": len(session_data),
+                "preview": preview,
+            }
+            # Preserve user_title flag if set
+            if existing.get("user_title"):
+                index[safe_key]["user_title"] = existing["user_title"]
 
-        self._save_session_index(index)
+            self._save_session_index(index)
 
     def rebuild_session_index(self) -> dict:
         """Full directory scan to build index from all session files."""
@@ -284,7 +294,7 @@ class FileMemoryStore:
         self._save_session_index(index)
         return index
 
-    def delete_session(self, session_key: str) -> bool:
+    async def delete_session(self, session_key: str) -> bool:
         """Delete a session file, compaction cache, and index entry."""
         safe_key = session_key.replace(":", "_").replace("/", "_")
         session_file = self.sessions_path / f"{safe_key}.json"
@@ -297,25 +307,27 @@ class FileMemoryStore:
         if compaction_file.exists():
             compaction_file.unlink()
 
-        # Remove from index
-        index = self._load_session_index()
-        index.pop(safe_key, None)
-        self._save_session_index(index)
+        # Remove from index (protected by lock to prevent lost updates)
+        async with self._session_index_lock:
+            index = self._load_session_index()
+            index.pop(safe_key, None)
+            self._save_session_index(index)
 
         # Clean up write lock
         self._session_write_locks.pop(session_key, None)
 
         return True
 
-    def update_session_title(self, session_key: str, title: str) -> bool:
+    async def update_session_title(self, session_key: str, title: str) -> bool:
         """Update the title of a session in the index."""
         safe_key = session_key.replace(":", "_").replace("/", "_")
-        index = self._load_session_index()
-        if safe_key not in index:
-            return False
-        index[safe_key]["title"] = title
-        index[safe_key]["user_title"] = title  # Mark as user-renamed
-        self._save_session_index(index)
+        async with self._session_index_lock:
+            index = self._load_session_index()
+            if safe_key not in index:
+                return False
+            index[safe_key]["title"] = title
+            index[safe_key]["user_title"] = title  # Mark as user-renamed
+            self._save_session_index(index)
         return True
 
     def _load_index(self) -> None:
@@ -410,7 +422,7 @@ class FileMemoryStore:
             # Session entries use random UUIDs (no collision issue)
             if not entry.id:
                 entry.id = str(uuid.uuid4())
-            entry.updated_at = datetime.now()
+            entry.updated_at = datetime.now(tz=UTC)
             self._index[entry.id] = entry
             await self._save_session_entry(entry)
             return entry.id
@@ -431,7 +443,7 @@ class FileMemoryStore:
 
         entry.id = det_id
         entry.metadata["source"] = str(target_path)
-        entry.updated_at = datetime.now()
+        entry.updated_at = datetime.now(tz=UTC)
         self._index[entry.id] = entry
 
         # Persist to markdown
@@ -441,7 +453,7 @@ class FileMemoryStore:
 
     async def _append_to_markdown(self, path: Path, entry: MemoryEntry) -> None:
         """Append a memory entry to a markdown file."""
-        header = entry.metadata.get("header", datetime.now().strftime("%H:%M"))
+        header = entry.metadata.get("header", datetime.now(tz=UTC).strftime("%H:%M"))
         tags_str = " ".join(f"#{t}" for t in entry.tags) if entry.tags else ""
 
         section = f"\n\n## {header}\n\n{entry.content}"
@@ -463,30 +475,33 @@ class FileMemoryStore:
         async with self._session_write_locks[entry.session_key]:
             session_file = self._get_session_file(entry.session_key)
 
-            # Load existing session
-            session_data = []
-            if session_file.exists():
-                try:
-                    session_data = json.loads(session_file.read_text())
-                except json.JSONDecodeError:
-                    pass
+            # Run blocking file I/O in a thread to avoid freezing the event loop
+            def _read_and_append():
+                session_data = []
+                if session_file.exists():
+                    try:
+                        session_data = json.loads(session_file.read_text())
+                    except json.JSONDecodeError:
+                        pass
+                session_data.append(
+                    {
+                        "id": entry.id,
+                        "role": entry.role,
+                        "content": entry.content,
+                        "timestamp": entry.created_at.isoformat(),
+                        "metadata": entry.metadata,
+                    }
+                )
+                # Atomic write: tmp file + replace to prevent corruption on crash
+                tmp = session_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps(session_data, indent=2))
+                tmp.replace(session_file)
+                return session_data
 
-            # Append new entry
-            session_data.append(
-                {
-                    "id": entry.id,
-                    "role": entry.role,
-                    "content": entry.content,
-                    "timestamp": entry.created_at.isoformat(),
-                    "metadata": entry.metadata,
-                }
-            )
-
-            # Save back
-            session_file.write_text(json.dumps(session_data, indent=2))
+            session_data = await asyncio.to_thread(_read_and_append)
 
             # Update session index
-            self._update_session_index(entry.session_key, entry, session_data)
+            await self._update_session_index(entry.session_key, entry, session_data)
 
     async def get(self, entry_id: str) -> MemoryEntry | None:
         """Get a memory entry by ID."""
@@ -600,7 +615,8 @@ class FileMemoryStore:
             return []
 
         try:
-            data = json.loads(session_file.read_text())
+            raw = await asyncio.to_thread(session_file.read_text)
+            data = json.loads(raw)
             return [
                 MemoryEntry(
                     id=item["id"],
@@ -608,7 +624,7 @@ class FileMemoryStore:
                     content=item["content"],
                     role=item.get("role"),
                     session_key=session_key,
-                    created_at=datetime.fromisoformat(item["timestamp"]),
+                    created_at=_ensure_utc(datetime.fromisoformat(item["timestamp"])),
                     metadata=item.get("metadata", {}),
                 )
                 for item in data
@@ -620,13 +636,16 @@ class FileMemoryStore:
         """Clear session history."""
         session_file = self._get_session_file(session_key)
 
-        if session_file.exists():
-            try:
-                data = json.loads(session_file.read_text())
-                count = len(data)
-                session_file.unlink()
-                return count
-            except json.JSONDecodeError:
-                session_file.unlink()
-                return 0
-        return 0
+        def _clear():
+            if session_file.exists():
+                try:
+                    data = json.loads(session_file.read_text())
+                    count = len(data)
+                    session_file.unlink()
+                    return count
+                except json.JSONDecodeError:
+                    session_file.unlink()
+                    return 0
+            return 0
+
+        return await asyncio.to_thread(_clear)

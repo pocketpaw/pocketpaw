@@ -12,7 +12,7 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -294,7 +294,7 @@ class BrowserDriver:
         page = self._require_page()
 
         if path is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
             path = f"screenshot_{timestamp}.png"
 
         # Ensure path is absolute

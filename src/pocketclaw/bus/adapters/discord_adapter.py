@@ -114,7 +114,29 @@ class DiscordAdapter(BaseChannelAdapter):
             if client.user and is_mention:
                 content = content.replace(f"<@{client.user.id}>", "").strip()
 
-            if not content:
+            # Download attachments
+            media_paths: list[str] = []
+            if message.attachments:
+                try:
+                    from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                    downloader = get_media_downloader()
+                    names = []
+                    for att in message.attachments:
+                        try:
+                            path = await downloader.download_url(
+                                att.url, att.filename, att.content_type
+                            )
+                            media_paths.append(path)
+                            names.append(att.filename)
+                        except Exception as e:
+                            logger.warning("Failed to download Discord attachment: %s", e)
+                    if names:
+                        content += build_media_hint(names)
+                except Exception as e:
+                    logger.warning("Discord media download error: %s", e)
+
+            if not content and not media_paths:
                 return
 
             chat_id = str(message.channel.id)
@@ -123,6 +145,7 @@ class DiscordAdapter(BaseChannelAdapter):
                 sender_id=str(message.author.id),
                 chat_id=chat_id,
                 content=content,
+                media=media_paths,
                 metadata={
                     "username": str(message.author),
                     "guild_id": str(message.guild.id) if message.guild else None,

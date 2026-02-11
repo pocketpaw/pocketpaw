@@ -396,6 +396,15 @@ Examples:
             run_dashboard_mode(settings, host, args.port)
     except KeyboardInterrupt:
         logger.info("👋 PocketPaw stopped.")
+    finally:
+        # Coordinated singleton shutdown
+        from pocketclaw.lifecycle import shutdown_all
+
+        try:
+            asyncio.run(shutdown_all())
+        except RuntimeError:
+            # Event loop already closed — best-effort sync cleanup
+            pass
 
 
 if __name__ == "__main__":

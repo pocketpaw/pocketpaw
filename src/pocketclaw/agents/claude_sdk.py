@@ -191,6 +191,7 @@ class ClaudeAgentSDK:
         self._executor = executor  # Optional - SDK has built-in execution
         self._stop_flag = False
         self._sdk_available = False
+        self._cli_available = False  # Whether the `claude` CLI binary is installed
         self._cwd = Path.home()  # Default working directory
         self._policy = ToolPolicy(
             profile=settings.tool_profile,
@@ -254,7 +255,18 @@ class ClaudeAgentSDK:
                 logger.info("StreamEvent not available - coarse-grained streaming only")
 
             self._sdk_available = True
-            logger.info("✓ Claude Agent SDK ready ─ cwd: %s", self._cwd)
+
+            # Check if the `claude` CLI binary is actually installed
+            import shutil
+
+            if shutil.which("claude"):
+                self._cli_available = True
+                logger.info("✓ Claude Agent SDK ready ─ cwd: %s", self._cwd)
+            else:
+                logger.warning(
+                    "⚠️ Claude Code CLI not found on PATH. "
+                    "Install with: npm install -g @anthropic-ai/claude-code"
+                )
 
         except ImportError as e:
             logger.warning("⚠️ Claude Agent SDK not installed ─ pip install claude-agent-sdk")
@@ -463,9 +475,28 @@ class ClaudeAgentSDK:
         if not self._sdk_available:
             yield AgentEvent(
                 type="error",
-                content="❌ Claude Agent SDK not available.\n\nInstall with: pip install claude-agent-sdk\n\nNote: Requires Claude Code CLI to be installed.",
+                content=(
+                    "❌ Claude Agent SDK Python package not found.\n\n"
+                    "Install with: pip install claude-agent-sdk\n\n"
+                    "Or switch to **PocketPaw Native** backend in **Settings → General**."
+                ),
             )
             return
+
+        if not self._cli_available:
+            yield AgentEvent(
+                type="error",
+                content=(
+                    "❌ Claude Code CLI not found on this machine.\n\n"
+                    "Install with: `npm install -g @anthropic-ai/claude-code`\n\n"
+                    "Or switch to **PocketPaw Native** backend in "
+                    "**Settings → General** — it uses the Anthropic API directly "
+                    "and doesn't need the CLI."
+                ),
+            )
+            return
+
+        import os
 
         self._stop_flag = False
 
@@ -521,8 +552,16 @@ class ClaudeAgentSDK:
                 "system_prompt": final_prompt,
                 "allowed_tools": allowed_tools,
                 "hooks": hooks,
-                "cwd": str(self._cwd),  # Working directory
+                "cwd": str(self._cwd),
+                "max_turns": 25,  # Safety net against runaway tool loops
             }
+
+            # Pass API key to the Claude CLI subprocess via env.
+            # The SDK spawns a subprocess that needs ANTHROPIC_API_KEY in its
+            # environment — settings.anthropic_api_key alone is not enough.
+            api_key = os.environ.get("ANTHROPIC_API_KEY") or self.settings.anthropic_api_key
+            if api_key:
+                options_kwargs["env"] = {"ANTHROPIC_API_KEY": api_key}
 
             # Wire in MCP servers (policy-filtered)
             mcp_servers = self._get_mcp_servers()
@@ -538,10 +577,8 @@ class ClaudeAgentSDK:
             # there is no terminal to show interactive permission prompts.
             # bypassPermissions auto-approves ALL tool calls (including MCP).
             # Dangerous Bash commands are still caught by the PreToolUse hook.
-            options_kwargs["permission_mode"] = "bypassPermissions"
-
-            # Create options
-            options = self._ClaudeAgentOptions(**options_kwargs)
+            if self.settings.bypass_permissions:
+                options_kwargs["permission_mode"] = "bypassPermissions"
 
             # Smart model routing (opt-in)
             if self.settings.smart_routing_enabled:
@@ -556,6 +593,9 @@ class ClaudeAgentSDK:
                     selection.model,
                     selection.reason,
                 )
+
+            # Create options (after all kwargs are set, including model)
+            options = self._ClaudeAgentOptions(**options_kwargs)
 
             logger.debug(f"🚀 Starting Claude Agent SDK query: {message[:100]}...")
 
@@ -661,12 +701,21 @@ class ClaudeAgentSDK:
             if "CLINotFoundError" in error_msg or "not found" in error_msg.lower():
                 yield AgentEvent(
                     type="error",
-                    content="❌ Claude Code CLI not found.\n\nInstall with: npm install -g @anthropic-ai/claude-code",
+                    content=(
+                        "❌ Claude Code CLI not found.\n\n"
+                        "Install with: npm install -g @anthropic-ai/claude-code\n\n"
+                        "Or switch to a different backend in "
+                        "**Settings → General**."
+                    ),
                 )
             elif "API key" in error_msg.lower() or "authentication" in error_msg.lower():
                 yield AgentEvent(
                     type="error",
-                    content="❌ Anthropic API key not configured.\n\nSet ANTHROPIC_API_KEY environment variable.",
+                    content=(
+                        "❌ Anthropic API key not configured.\n\n"
+                        "Open **Settings → API Keys** in the sidebar "
+                        "to add your key."
+                    ),
                 )
             else:
                 yield AgentEvent(type="error", content=f"❌ Agent error: {error_msg}")
@@ -678,13 +727,16 @@ class ClaudeAgentSDK:
 
     async def get_status(self) -> dict:
         """Get current agent status."""
+        ready = self._sdk_available and self._cli_available
         return {
             "backend": "claude_agent_sdk",
-            "available": self._sdk_available,
+            "available": ready,
+            "sdk_installed": self._sdk_available,
+            "cli_installed": self._cli_available,
             "running": not self._stop_flag,
             "cwd": str(self._cwd),
             "features": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
-            if self._sdk_available
+            if ready
             else [],
         }
 

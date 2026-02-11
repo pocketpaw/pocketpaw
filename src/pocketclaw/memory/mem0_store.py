@@ -12,7 +12,7 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -263,7 +263,7 @@ class Mem0MemoryStore:
             )
         elif entry.type == MemoryType.DAILY:
             # Daily notes scoped to user with date
-            metadata["date"] = datetime.now().date().isoformat()
+            metadata["date"] = datetime.now(tz=UTC).date().isoformat()
             result = await self._run_sync(
                 self._memory.add,
                 entry.content,
@@ -551,9 +551,11 @@ class Mem0MemoryStore:
         # Parse timestamps
         created_str = metadata.get("created_at")
         try:
-            created_at = datetime.fromisoformat(created_str) if created_str else datetime.now()
+            created_at = datetime.fromisoformat(created_str) if created_str else datetime.now(tz=UTC)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
         except (ValueError, TypeError):
-            created_at = datetime.now()
+            created_at = datetime.now(tz=UTC)
 
         # Extract role for session memories
         role = metadata.get("role")
@@ -563,7 +565,7 @@ class Mem0MemoryStore:
             type=mem_type,
             content=mem0_item.get("memory", ""),
             created_at=created_at,
-            updated_at=datetime.now(),
+            updated_at=datetime.now(tz=UTC),
             tags=metadata.get("tags", []),
             metadata={
                 k: v

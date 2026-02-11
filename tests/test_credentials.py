@@ -226,8 +226,8 @@ class TestConfigSecretSeparation:
 
         cfg.get_config_dir = original_fn
 
-    def test_secrets_in_config_json_as_fallback(self, env):
-        """Secrets are kept in config.json (chmod 600) as fallback for encrypted store failures."""
+    def test_secrets_not_in_config_json(self, env):
+        """Secrets must NOT be written to config.json in plaintext."""
         from pocketclaw.config import Settings
 
         settings = Settings(
@@ -238,9 +238,15 @@ class TestConfigSecretSeparation:
         settings.save()
 
         config_data = json.loads((env["tmp_path"] / "config.json").read_text())
-        assert config_data["anthropic_api_key"] == "sk-ant-secret"
-        assert config_data["openai_api_key"] == "sk-openai-secret"
-        assert config_data["telegram_bot_token"] == "123:AAFake"
+        assert "anthropic_api_key" not in config_data
+        assert "openai_api_key" not in config_data
+        assert "telegram_bot_token" not in config_data
+
+        # Secrets should be in the encrypted credential store instead
+        store = env["store"]
+        assert store.get("anthropic_api_key") == "sk-ant-secret"
+        assert store.get("openai_api_key") == "sk-openai-secret"
+        assert store.get("telegram_bot_token") == "123:AAFake"
 
     def test_non_secrets_in_config_json(self, env):
         """Non-secret fields should still be in config.json."""

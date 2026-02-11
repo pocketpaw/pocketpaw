@@ -8,7 +8,7 @@ import logging
 import re
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -17,6 +17,16 @@ from apscheduler.triggers.date import DateTrigger
 from dateutil import parser as date_parser
 
 from pocketclaw.daemon.triggers import parse_cron_expression
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC).
+
+    Handles legacy naive timestamps stored before UTC migration.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +53,7 @@ def load_reminders() -> list[dict]:
 def save_reminders(reminders: list[dict]) -> None:
     """Save reminders to file."""
     path = get_reminders_path()
-    data = {"reminders": reminders, "updated_at": datetime.now().isoformat()}
+    data = {"reminders": reminders, "updated_at": datetime.now(tz=UTC).isoformat()}
     path.write_text(json.dumps(data, indent=2))
 
 
@@ -57,7 +67,7 @@ def parse_natural_time(text: str) -> datetime | None:
     - Absolute dates/times
     """
     text = text.lower().strip()
-    now = datetime.now()
+    now = datetime.now(tz=UTC)
 
     # Pattern: "in X minutes/hours/days"
     relative_match = re.search(r"in\s+(\d+)\s*(minute|min|hour|hr|day|second|sec)s?", text)
@@ -161,7 +171,7 @@ class ReminderScheduler:
         self._schedule_self_audit()
 
         # Reschedule active reminders
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         active_reminders = []
 
         for reminder in self.reminders:
@@ -171,7 +181,7 @@ class ReminderScheduler:
                 self._add_recurring_job(reminder)
                 active_reminders.append(reminder)
             else:
-                trigger_time = datetime.fromisoformat(reminder["trigger_at"])
+                trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
                 if trigger_time > now:
                     self._add_job(reminder)
                     active_reminders.append(reminder)
@@ -244,7 +254,7 @@ class ReminderScheduler:
 
     def _add_job(self, reminder: dict):
         """Add a scheduler job for a one-shot reminder."""
-        trigger_time = datetime.fromisoformat(reminder["trigger_at"])
+        trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
         self.scheduler.add_job(
             self._trigger_reminder,
             trigger=DateTrigger(run_date=trigger_time),
@@ -285,7 +295,7 @@ class ReminderScheduler:
             "text": reminder_text,
             "original": message,
             "trigger_at": trigger_time.isoformat(),
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(tz=UTC).isoformat(),
         }
 
         self.reminders.append(reminder)
@@ -319,8 +329,8 @@ class ReminderScheduler:
             "original": f"recurring: {schedule}",
             "type": "recurring",
             "schedule": schedule,
-            "trigger_at": datetime.now().isoformat(),  # creation time
-            "created_at": datetime.now().isoformat(),
+            "trigger_at": datetime.now(tz=UTC).isoformat(),  # creation time
+            "created_at": datetime.now(tz=UTC).isoformat(),
         }
 
         self.reminders.append(reminder)
@@ -361,8 +371,8 @@ class ReminderScheduler:
 
     def format_time_remaining(self, reminder: dict) -> str:
         """Format the time remaining for a reminder."""
-        trigger_time = datetime.fromisoformat(reminder["trigger_at"])
-        delta = trigger_time - datetime.now()
+        trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
+        delta = trigger_time - datetime.now(tz=UTC)
 
         if delta.total_seconds() < 0:
             return "past"
@@ -394,4 +404,12 @@ def get_scheduler() -> ReminderScheduler:
     global _scheduler
     if _scheduler is None:
         _scheduler = ReminderScheduler()
+
+        from pocketclaw.lifecycle import register
+
+        def _reset():
+            global _scheduler
+            _scheduler = None
+
+        register("scheduler", shutdown=_scheduler.stop, reset=_reset)
     return _scheduler

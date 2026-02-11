@@ -17,8 +17,10 @@ printf '\n'
 OS="$(uname -s 2>/dev/null || echo Unknown)"
 case "$OS" in
     CYGWIN*|MINGW*|MSYS*|Windows_NT)
-        printf '\033[31mError:\033[0m Native Windows is not supported.\n'
-        printf '       Please use WSL (Windows Subsystem for Linux):\n'
+        printf '\033[33mNote:\033[0m On Windows, use the PowerShell installer instead:\n'
+        printf '       irm https://raw.githubusercontent.com/pocketpaw/pocketpaw/dev/installer/install.ps1 | iex\n'
+        printf '\n'
+        printf '       Or use WSL (Windows Subsystem for Linux):\n'
         printf '       https://learn.microsoft.com/windows/wsl/install\n'
         exit 1
         ;;

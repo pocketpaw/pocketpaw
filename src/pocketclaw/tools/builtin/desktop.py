@@ -82,7 +82,7 @@ class ScreenshotTool(BaseTool):
         # Let's stick to "saving to file" as the most robust "Agentic" way.
         # It persists the data.
 
-        from datetime import datetime
+        from datetime import datetime, timezone
         import os
         from pocketclaw.config import get_settings
 
@@ -91,7 +91,7 @@ class ScreenshotTool(BaseTool):
         screenshots_dir = jail / "screenshots"
         screenshots_dir.mkdir(exist_ok=True)
 
-        filename = f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        filename = f"screenshot_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}.png"
         path = screenshots_dir / filename
 
         with open(path, "wb") as f:

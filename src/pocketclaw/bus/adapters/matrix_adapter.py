@@ -80,8 +80,16 @@ class MatrixAdapter(BaseChannelAdapter):
                 logger.error("Matrix login failed: %s", resp)
                 return
 
-        # Register message callback
+        # Register message callbacks — text and media types
         self._client.add_event_callback(self._on_message, RoomMessageText)
+
+        try:
+            from nio import RoomMessageAudio, RoomMessageFile, RoomMessageImage, RoomMessageVideo
+
+            for evt_type in (RoomMessageImage, RoomMessageFile, RoomMessageAudio, RoomMessageVideo):
+                self._client.add_event_callback(self._on_media_message, evt_type)
+        except ImportError:
+            logger.debug("Matrix media event types not available in nio")
 
         # Start sync loop
         self._sync_task = asyncio.create_task(self._sync_loop())
@@ -130,6 +138,57 @@ class MatrixAdapter(BaseChannelAdapter):
             sender_id=event.sender,
             chat_id=room.room_id,
             content=content,
+            metadata={
+                "event_id": event.event_id,
+                "room_name": getattr(room, "display_name", ""),
+            },
+        )
+        await self._publish_inbound(msg)
+
+    async def _on_media_message(self, room, event) -> None:
+        """Handle incoming Matrix media messages (image, file, audio, video)."""
+        if event.sender == self.user_id:
+            return
+        if self.allowed_room_ids and room.room_id not in self.allowed_room_ids:
+            return
+
+        content = getattr(event, "body", "") or ""
+        media_paths: list[str] = []
+
+        # Download media via mxc:// URL
+        mxc_url = getattr(event, "url", None)
+        if mxc_url and mxc_url.startswith("mxc://"):
+            try:
+                from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                # Convert mxc://server/media_id to HTTPS download URL
+                parts = mxc_url[len("mxc://") :]
+                server, _, media_id = parts.partition("/")
+                hs = self.homeserver.rstrip("/")
+                download_url = f"{hs}/_matrix/media/v3/download/{server}/{media_id}"
+
+                name = getattr(event, "body", "media") or "media"
+                mime = None
+                info = getattr(event, "source", {}).get("content", {}).get("info", {})
+                if info:
+                    mime = info.get("mimetype")
+
+                downloader = get_media_downloader()
+                path = await downloader.download_url(download_url, name=name, mime=mime)
+                media_paths.append(path)
+                content += build_media_hint([name])
+            except Exception as e:
+                logger.warning("Failed to download Matrix media: %s", e)
+
+        if not content and not media_paths:
+            return
+
+        msg = InboundMessage(
+            channel=Channel.MATRIX,
+            sender_id=event.sender,
+            chat_id=room.room_id,
+            content=content,
+            media=media_paths,
             metadata={
                 "event_id": event.event_id,
                 "room_name": getattr(room, "display_name", ""),

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pocketclaw.config import get_config_dir, get_settings
@@ -32,10 +32,10 @@ def _check_stale_sessions(max_age_days: int = 30) -> tuple[bool, str]:
     if not sessions_dir.exists():
         return True, "No sessions directory"
 
-    now = datetime.now()
+    now = datetime.now(tz=UTC)
     stale = []
     for f in sessions_dir.glob("*.json"):
-        age = now - datetime.fromtimestamp(f.stat().st_mtime)
+        age = now - datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
         if age > timedelta(days=max_age_days):
             stale.append(f.stem)
 
@@ -168,7 +168,7 @@ async def run_self_audit() -> dict:
             issues += 1
 
     report = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(tz=UTC).isoformat(),
         "total_checks": len(results),
         "passed": len(results) - issues,
         "issues": issues,
@@ -177,7 +177,7 @@ async def run_self_audit() -> dict:
 
     # Save report
     try:
-        report_path = _get_reports_dir() / f"{datetime.now().strftime('%Y-%m-%d')}.json"
+        report_path = _get_reports_dir() / f"{datetime.now(tz=UTC).strftime('%Y-%m-%d')}.json"
         report_path.write_text(json.dumps(report, indent=2))
         logger.info(
             "Self-audit complete: %d/%d passed — report at %s",

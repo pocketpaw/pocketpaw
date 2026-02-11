@@ -353,7 +353,7 @@ class TestClaudeAgentSDK:
 
         assert len(events) == 1
         assert events[0].type == "error"
-        assert "not available" in events[0].content.lower()
+        assert "not found" in events[0].content.lower()
 
 
 # =============================================================================

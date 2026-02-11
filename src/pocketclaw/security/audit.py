@@ -9,12 +9,12 @@ It is designed to be immutable and persistent.
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any
 
 from pocketclaw.config import get_settings
 
@@ -53,7 +53,7 @@ class AuditEvent:
     ) -> "AuditEvent":
         return cls(
             id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(tz=UTC).isoformat(),
             severity=severity,
             actor=actor,
             action=action,
@@ -69,7 +69,7 @@ class AuditLogger:
     Writes to ~/.pocketclaw/audit.log in JSONL format.
     """
 
-    def __init__(self, log_path: Optional[Path] = None):
+    def __init__(self, log_path: Path | None = None):
         if log_path:
             self.log_path = log_path
         else:
@@ -123,7 +123,7 @@ class AuditLogger:
 
 
 # Singleton
-_audit_logger: Optional[AuditLogger] = None
+_audit_logger: AuditLogger | None = None
 
 
 def get_audit_logger() -> AuditLogger:

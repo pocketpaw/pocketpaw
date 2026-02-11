@@ -6,7 +6,6 @@ This module provides a secondary LLM check for dangerous actions.
 """
 
 import logging
-from typing import Literal
 
 try:
     from anthropic import AsyncAnthropic
@@ -14,7 +13,7 @@ except ImportError:
     AsyncAnthropic = None
 
 from pocketclaw.config import get_settings
-from pocketclaw.security.audit import get_audit_logger, AuditSeverity, AuditEvent
+from pocketclaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 
 logger = logging.getLogger("guardian")
 
@@ -64,8 +63,21 @@ Respond with valid JSON only:
         await self._ensure_client()
 
         if not self.client:
+            # No API key = Guardian not configured. Log a one-time warning
+            # and allow, but record it in the audit trail so admins notice.
             logger.warning("Guardian disabled (no API key). Allowing command.")
-            return True, "Guardian disabled"
+            self._audit.log(
+                AuditEvent.create(
+                    severity=AuditSeverity.ALERT,
+                    actor="guardian",
+                    action="scan_command",
+                    target="shell",
+                    status="allow",
+                    reason="No API key — Guardian inactive",
+                    command=command,
+                )
+            )
+            return True, "Guardian disabled (no API key)"
 
         # Audit Check
         self._audit.log(

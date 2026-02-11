@@ -100,12 +100,41 @@ class GoogleChatAdapter(BaseChannelAdapter):
             space = payload.get("space", {})
             space_name = space.get("name", "")
 
-            if not text:
-                return
-
             # Space filter
             if self.allowed_space_ids and space_name not in self.allowed_space_ids:
                 logger.debug("Google Chat message from unauthorized space: %s", space_name)
+                return
+
+            # Download attachments
+            media_paths: list[str] = []
+            attachment = message.get("attachment")
+            if attachment:
+                attachments = attachment if isinstance(attachment, list) else [attachment]
+                try:
+                    from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                    downloader = get_media_downloader()
+                    names = []
+                    for att in attachments:
+                        download_uri = att.get("downloadUri") or att.get(
+                            "attachmentDataRef", {}
+                        ).get("resourceName")
+                        if not download_uri:
+                            continue
+                        name = att.get("name", "attachment") or "attachment"
+                        mime = att.get("contentType")
+                        try:
+                            path = await downloader.download_url(download_uri, name=name, mime=mime)
+                            media_paths.append(path)
+                            names.append(name)
+                        except Exception as e:
+                            logger.warning("Failed to download Google Chat attachment: %s", e)
+                    if names:
+                        text += build_media_hint(names)
+                except Exception as e:
+                    logger.warning("Google Chat media download error: %s", e)
+
+            if not text and not media_paths:
                 return
 
             msg = InboundMessage(
@@ -113,6 +142,7 @@ class GoogleChatAdapter(BaseChannelAdapter):
                 sender_id=sender_name,
                 chat_id=space_name,
                 content=text,
+                media=media_paths,
                 metadata={
                     "message_name": message.get("name", ""),
                     "sender_display_name": sender_display,

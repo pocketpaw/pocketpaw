@@ -151,17 +151,45 @@ class TeamsAdapter(BaseChannelAdapter):
 
         sender = activity.from_property.id if activity.from_property else "unknown"
         content = activity.text or ""
-        if not content:
-            return
 
         # Use conversation ID as chat_id
         chat_id = activity.conversation.id if activity.conversation else sender
+
+        # Download attachments
+        media_paths: list[str] = []
+        attachments = getattr(activity, "attachments", None) or []
+        if attachments:
+            try:
+                from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                downloader = get_media_downloader()
+                names = []
+                for att in attachments:
+                    content_url = getattr(att, "content_url", None)
+                    if not content_url:
+                        continue
+                    name = getattr(att, "name", "attachment") or "attachment"
+                    mime = getattr(att, "content_type", None)
+                    try:
+                        path = await downloader.download_url(content_url, name=name, mime=mime)
+                        media_paths.append(path)
+                        names.append(name)
+                    except Exception as e:
+                        logger.warning("Failed to download Teams attachment: %s", e)
+                if names:
+                    content += build_media_hint(names)
+            except Exception as e:
+                logger.warning("Teams media download error: %s", e)
+
+        if not content and not media_paths:
+            return
 
         msg = InboundMessage(
             channel=Channel.TEAMS,
             sender_id=sender,
             chat_id=chat_id,
             content=content,
+            media=media_paths,
             metadata={
                 "activity_id": activity.id,
                 "service_url": activity.service_url or "",
