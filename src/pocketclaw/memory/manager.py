@@ -245,6 +245,12 @@ class MemoryManager:
         """Clear session history."""
         return await self._store.clear_session(session_key)
 
+    async def list_sessions(self) -> list[str]:
+        """List active sessions (if supported by backend)."""
+        if hasattr(self._store, "list_sessions"):
+            return await self._store.list_sessions()
+        return []
+
 
 # Singleton
 _manager: MemoryManager | None = None

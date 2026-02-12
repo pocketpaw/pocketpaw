@@ -10,6 +10,7 @@
 import json
 import re
 import uuid
+import asyncio
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ class FileMemoryStore:
 
         # In-memory index for fast lookup
         self._index: dict[str, MemoryEntry] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
         self._load_index()
 
     def _load_index(self) -> None:
@@ -132,27 +134,58 @@ class FileMemoryStore:
 
         session_file = self._get_session_file(entry.session_key)
 
-        # Load existing session
-        session_data = []
-        if session_file.exists():
+        if entry.session_key not in self._session_locks:
+            self._session_locks[entry.session_key] = asyncio.Lock()
+
+        async with self._session_locks[entry.session_key]:
+            # Load existing session
+            session_data = []
+            if session_file.exists():
+                try:
+                    session_data = json.loads(session_file.read_text())
+                except json.JSONDecodeError:
+                    pass
+
+            # Append new entry
+            session_data.append(
+                {
+                    "id": entry.id,
+                    "role": entry.role,
+                    "content": entry.content,
+                    "timestamp": entry.created_at.isoformat(),
+                    "session_key": entry.session_key,  # Store key for recovery
+                    "metadata": entry.metadata,
+                }
+            )
+
+            # Compaction: Keep only last 100 messages
+            if len(session_data) > 100:
+                session_data = session_data[-100:]
+
+            # Save back
+            session_file.write_text(json.dumps(session_data, indent=2))
+
+    async def list_sessions(self) -> list[str]:
+        """List all available session keys."""
+        sessions = set()
+        if not self.sessions_path.exists():
+            return []
+
+        for session_file in self.sessions_path.glob("*.json"):
             try:
-                session_data = json.loads(session_file.read_text())
-            except json.JSONDecodeError:
-                pass
-
-        # Append new entry
-        session_data.append(
-            {
-                "id": entry.id,
-                "role": entry.role,
-                "content": entry.content,
-                "timestamp": entry.created_at.isoformat(),
-                "metadata": entry.metadata,
-            }
-        )
-
-        # Save back
-        session_file.write_text(json.dumps(session_data, indent=2))
+                data = json.loads(session_file.read_text())
+                if data and isinstance(data, list) and len(data) > 0:
+                    # Try to get key from first entry
+                    first = data[0]
+                    if "session_key" in first:
+                        sessions.add(first["session_key"])
+                    else:
+                        # Fallback to filename (lossy)
+                        sessions.add(session_file.stem)
+            except (json.JSONDecodeError, KeyError, OSError):
+                continue
+                
+        return list(sessions)
 
     async def get(self, entry_id: str) -> MemoryEntry | None:
         """Get a memory entry by ID."""
@@ -228,13 +261,17 @@ class FileMemoryStore:
         """Clear session history."""
         session_file = self._get_session_file(session_key)
 
-        if session_file.exists():
-            try:
-                data = json.loads(session_file.read_text())
-                count = len(data)
-                session_file.unlink()
-                return count
-            except json.JSONDecodeError:
-                session_file.unlink()
-                return 0
-        return 0
+        if session_key not in self._session_locks:
+            self._session_locks[session_key] = asyncio.Lock()
+
+        async with self._session_locks[session_key]:
+            if session_file.exists():
+                try:
+                    data = json.loads(session_file.read_text())
+                    count = len(data)
+                    session_file.unlink()
+                    return count
+                except json.JSONDecodeError:
+                    session_file.unlink()
+                    return 0
+            return 0
