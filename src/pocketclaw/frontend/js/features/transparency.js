@@ -154,6 +154,21 @@ window.PocketPaw.Transparency = {
                     });
             },
 
+            exportSession(format) {
+                if (!this.selectedSession) {
+                    this.showToast('No session selected', 'error');
+                    return;
+                }
+                const url = `/api/memory/session/export?id=${encodeURIComponent(this.selectedSession)}&format=${format}`;
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = '';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                this.showToast(`Exporting session as ${format.toUpperCase()}`, 'success');
+            },
+
             loadLongTermMemory() {
                 fetch('/api/memory/long_term')
                     .then(r => r.json())
