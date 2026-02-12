@@ -26,6 +26,10 @@ import json
 import logging
 import uuid
 from pathlib import Path
+from fastapi.responses import Response
+from pocketclaw.memory.file_store import get_session_history
+from datetime import datetime
+
 
 try:
     import qrcode
@@ -153,6 +157,31 @@ async def broadcast_reminder(reminder: dict):
         await notify(f"Reminder: {reminder.get('text', '')}")
     except Exception:
         pass
+
+
+def _convert_session_to_markdown(session: dict) -> str:
+    """Convert full session data to a clean markdown transcript."""
+    lines = []
+
+    session_id = session.get("id", "unknown")
+    created = session.get("created_at", "")
+
+    lines.append(f"# Session Export\n")
+    lines.append(f"**Session ID:** {session_id}")
+    if created:
+        lines.append(f"**Created:** {created}")
+    lines.append("\n---\n")
+
+    for event in session.get("events", []):
+        role = event.get("role")
+        content = event.get("content", "")
+
+        if role in ("user", "assistant"):
+            lines.append(f"## {role.capitalize()}\n")
+            lines.append(content.strip())
+            lines.append("\n")
+
+    return "\n".join(lines)
 
 
 async def broadcast_intention(intention_id: str, chunk: dict):
@@ -480,6 +509,43 @@ async def get_mcp_status():
     mgr = get_mcp_manager()
     return mgr.get_server_status()
 
+@app.get("/api/sessions/{session_id}/export")
+async def export_session(
+    session_id: str,
+    format: str = Query("json", regex="^(json|md)$")
+):
+    """Export a session as JSON or Markdown."""
+
+    session = get_session_history(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    if format == "json":
+        content = json.dumps(session, indent=2)
+        filename = f"{session_id}_{timestamp}.json"
+
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    if format == "md":
+        markdown = _convert_session_to_markdown(session)
+        filename = f"{session_id}_{timestamp}.md"
+
+        return Response(
+            content=markdown,
+            media_type="text/markdown",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
 
 @app.post("/api/mcp/add")
 async def add_mcp_server(request: Request):
