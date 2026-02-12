@@ -1,0 +1,188 @@
+<!--
+  PocketPaw Dashboard - Memory Modal
+
+  Changes:
+  - 2026-02-03: Extracted from monolithic index.html
+  - 2026-02-05: Added session list view with tabs for Sessions/Long-term
+-->
+<!-- Memory Modal -->
+<div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showMemory" x-transition.opacity @click.self="showMemory = false">
+    <div class="w-full max-w-[900px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+            <h2 class="text-[17px] font-semibold">Memory Banks</h2>
+            <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showMemory = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+
+        <div class="p-6 overflow-y-auto">
+            <div x-show="memoryLoading" class="p-12 text-center text-white/50 flex flex-col items-center gap-3">
+                <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
+                <span>Loading memories...</span>
+            </div>
+
+            <div x-show="!memoryLoading" class="flex flex-col gap-6">
+                <!-- Stats Grid -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-[var(--accent-color)]/30 transition-colors">
+                        <i data-lucide="brain" class="w-5 h-5 text-[var(--accent-color)] mb-1"></i>
+                        <span class="text-2xl font-bold text-white" x-text="memoryStats.total_memories || 0"></span>
+                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Total</span>
+                    </div>
+                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-blue-400/30 transition-colors">
+                        <i data-lucide="message-square" class="w-5 h-5 text-blue-400 mb-1"></i>
+                        <span class="text-2xl font-bold text-white" x-text="memoryStats.active_sessions || 0"></span>
+                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Sessions</span>
+                    </div>
+                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-purple-400/30 transition-colors">
+                        <i data-lucide="bookmark" class="w-5 h-5 text-purple-400 mb-1"></i>
+                        <span class="text-2xl font-bold text-white" x-text="memoryStats.long_term_facts || 0"></span>
+                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Facts</span>
+                    </div>
+                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-green-400/30 transition-colors">
+                        <i data-lucide="user" class="w-5 h-5 text-green-400 mb-1"></i>
+                        <span class="text-2xl font-bold text-white" x-text="memoryStats.user_interactions || 0"></span>
+                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Your Messages</span>
+                    </div>
+                </div>
+
+                <!-- Tabs -->
+                <div class="flex gap-2 border-b border-[var(--glass-border)] pb-2">
+                    <button
+                        class="px-4 py-2 rounded-lg text-[13px] font-medium transition-all"
+                        :class="memoryTab === 'sessions' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' : 'text-white/50 hover:text-white hover:bg-white/5'"
+                        @click="memoryTab = 'sessions'"
+                    >
+                        <i data-lucide="message-square" class="w-4 h-4 inline mr-1.5"></i>Sessions
+                    </button>
+                    <button
+                        class="px-4 py-2 rounded-lg text-[13px] font-medium transition-all"
+                        :class="memoryTab === 'long_term' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' : 'text-white/50 hover:text-white hover:bg-white/5'"
+                        @click="memoryTab = 'long_term'"
+                    >
+                        <i data-lucide="bookmark" class="w-4 h-4 inline mr-1.5"></i>Long-term Facts
+                    </button>
+                </div>
+
+                <!-- Sessions Tab -->
+                <div x-show="memoryTab === 'sessions'" class="flex gap-4">
+                    <!-- Sessions List -->
+                    <div class="w-1/3 flex flex-col gap-2 max-h-[400px] overflow-y-auto pr-2">
+                        <template x-for="session in sessionsList" :key="session.id">
+                            <button
+                                class="text-left p-3 rounded-xl border transition-all"
+                                :class="selectedSession === session.id ? 'bg-blue-500/20 border-blue-500/30' : 'bg-black/30 border-[var(--glass-border)] hover:bg-white/5'"
+                                @click="selectSession(session.id)"
+                            >
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <span class="text-[11px] text-white/40 font-mono" x-text="session.id.slice(0, 12) + '...'"></span>
+                                    <span class="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded" x-text="session.message_count + ' msgs'"></span>
+                                </div>
+                                <p class="text-[12px] text-white/70 line-clamp-2" x-text="session.first_message || 'Empty session'"></p>
+                                <p class="text-[10px] text-white/30 mt-1" x-text="formatDate(session.updated_at)"></p>
+                            </button>
+                        </template>
+                        <div x-show="sessionsList.length === 0" class="p-6 text-center text-white/30 text-[13px] italic">
+                            No sessions yet
+                        </div>
+                    </div>
+
+                    <!-- Session Messages -->
+                    <div class="w-2/3 bg-black/20 rounded-xl border border-[var(--glass-border)] p-4 max-h-[400px] overflow-y-auto">
+                        <div x-show="!selectedSession" class="p-8 text-center text-white/30 text-[14px]">
+                            <i data-lucide="message-square" class="w-8 h-8 mx-auto mb-3 opacity-30"></i>
+                            Select a session to view messages
+                        </div>
+                        <div x-show="selectedSession" class="flex flex-col gap-3">
+                            <div class="flex items-center justify-between pb-2 mb-1 border-b border-white/10">
+                                <span class="text-[11px] text-white/40 font-mono" x-text="'Session: ' + (selectedSession || '').slice(0, 24)"></span>
+                                <div class="flex gap-2">
+                                    <button
+                                        class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-lg bg-white/5 border border-[var(--glass-border)] text-white/60 hover:text-white hover:bg-white/10 transition-all"
+                                        @click="exportSession('json')"
+                                        title="Download as JSON"
+                                    >
+                                        <i data-lucide="download" class="w-3 h-3"></i>JSON
+                                    </button>
+                                    <button
+                                        class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-lg bg-white/5 border border-[var(--glass-border)] text-white/60 hover:text-white hover:bg-white/10 transition-all"
+                                        @click="exportSession('md')"
+                                        title="Download as Markdown"
+                                    >
+                                        <i data-lucide="download" class="w-3 h-3"></i>Markdown
+                                    </button>
+                                </div>
+                            </div>
+                            <template x-for="(msg, idx) in sessionMemory" :key="idx">
+                                <div
+                                    class="p-3 rounded-xl"
+                                    :class="msg.role === 'user' ? 'bg-blue-500/10 border border-blue-500/20 ml-8' : 'bg-white/5 border border-white/10 mr-8'"
+                                >
+                                    <div class="flex items-center gap-2 mb-1.5">
+                                        <span
+                                            class="text-[10px] font-bold uppercase tracking-wider"
+                                            :class="msg.role === 'user' ? 'text-blue-400' : 'text-green-400'"
+                                            x-text="msg.role"
+                                        ></span>
+                                    </div>
+                                    <p class="text-[13px] text-white/80 whitespace-pre-wrap" x-text="msg.content"></p>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Long-term Tab -->
+                <div x-show="memoryTab === 'long_term'" class="flex flex-col gap-3">
+                    <!-- Search -->
+                    <div class="relative group">
+                        <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 group-focus-within:text-[var(--accent-color)] transition-colors"></i>
+                        <input
+                            type="text"
+                            x-model="memorySearch"
+                            placeholder="Search memories..."
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[12px] py-3 pl-11 pr-4 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+                        >
+                    </div>
+
+                    <!-- Long-term Memories List -->
+                    <div class="flex flex-col gap-3 max-h-[350px] overflow-y-auto">
+                        <template x-for="memory in longTermMemory" :key="memory.timestamp">
+                            <div class="bg-black/30 p-4 md:p-5 rounded-xl border border-[var(--glass-border)] hover:bg-white/5 transition-all group">
+                                <div class="flex items-start justify-between gap-4 mb-2">
+                                    <div class="flex gap-2.5">
+                                        <span class="text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider border bg-purple-500/20 text-purple-400 border-purple-500/30">
+                                            fact
+                                        </span>
+                                        <span class="text-[11px] text-[var(--text-tertiary)] flex items-center gap-1.5 opacity-60">
+                                            <i data-lucide="calendar" class="w-3 h-3"></i>
+                                            <span x-text="formatDate(memory.timestamp)"></span>
+                                        </span>
+                                    </div>
+                                    <button
+                                        class="text-white/20 hover:text-[var(--danger-color)] hover:bg-white/10 p-1.5 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                        @click="deleteMemory(memory.timestamp)"
+                                        title="Forget memory"
+                                    >
+                                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                    </button>
+                                </div>
+                                <p class="text-[14px] md:text-[15px] leading-relaxed text-white/90 break-words" x-text="memory.content"></p>
+                                <div class="flex gap-2 mt-3" x-show="memory.tags && memory.tags.length">
+                                    <template x-for="tag in memory.tags" :key="tag">
+                                        <span class="text-[11px] text-[var(--accent-color)] bg-[var(--accent-color)]/10 px-2 py-0.5 rounded border border-[var(--accent-color)]/20">
+                                            #<span x-text="tag"></span>
+                                        </span>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                        <div x-show="longTermMemory.length === 0" class="p-12 text-center text-white/30">
+                            <i data-lucide="bookmark" class="w-8 h-8 mx-auto mb-3 opacity-30"></i>
+                            <p class="text-[14px] italic">No long-term memories yet</p>
+                            <p class="text-[12px] mt-2 text-white/20">Ask me to "remember" something to save it here</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
