@@ -16,6 +16,8 @@ Changes:
   - 2026-02-02: SPEED FIX - Shell commands now use direct subprocess (10x faster).
                 'computer' tool uses OI for complex multi-step tasks only.
   - 2026-02-05: Added 'remember' and 'recall' tools for long-term memory.
+  - 2026-02-13: Issue #34 — Use shared ``format_backend_error`` for user-friendly
+                error messages on auth/network failures.
 """
 
 import asyncio
@@ -26,6 +28,7 @@ from typing import AsyncIterator, Optional
 
 from anthropic import AsyncAnthropic
 
+from pocketclaw.agents.errors import format_backend_error
 from pocketclaw.config import Settings
 from pocketclaw.agents.protocol import AgentEvent
 from pocketclaw.tools.policy import ToolPolicy
@@ -782,7 +785,7 @@ class PocketPawOrchestrator:
                     logger.error(f"Anthropic API error: {api_error}")
                     yield AgentEvent(
                         type="error",
-                        content=f"❌ API Error: {str(api_error)}. Please verify your Anthropic API key in Settings.",
+                        content=format_backend_error(api_error),
                     )
                     return
 
