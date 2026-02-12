@@ -46,7 +46,8 @@ class Settings(BaseSettings):
 
     # Agent Backend
     agent_backend: str = Field(
-        default="claude_agent_sdk",
+        default="pocketpaw_native",
+
         description="Agent backend: 'claude_agent_sdk' (recommended), 'pocketpaw_native', or 'open_interpreter'",
     )
 

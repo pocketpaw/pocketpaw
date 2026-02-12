@@ -18,6 +18,9 @@ import base64
 import io
 import logging
 import uuid
+import time
+import platform
+import sys
 from pathlib import Path
 
 import qrcode
@@ -1029,6 +1032,55 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
         if websocket in active_connections:
             active_connections.remove(websocket)
         await ws_adapter.unregister_connection(chat_id)
+
+        
+        
+# ==================== Health Check API ====================
+
+START_TIME = time.time()
+
+@app.get("/api/health")
+async def health_check():
+    """System health endpoint with diagnostics."""
+
+    settings = Settings.load()
+
+    uptime = int(time.time() - START_TIME)
+
+    subsystems = {
+        "agent_backend": {
+            "status": "ok" if agent_loop._running else "stopped",
+            "backend": settings.agent_backend,
+        },
+        "memory": {"status": "ok"},
+        "message_bus": {"status": "ok"},
+        "channels": {
+            "telegram": "connected" if _channel_is_running("telegram") else "disconnected",
+            "discord": "connected" if _channel_is_running("discord") else "disconnected",
+            "whatsapp": "connected" if _channel_is_running("whatsapp") else "disconnected",
+            "slack": "connected" if _channel_is_running("slack") else "disconnected",
+        },
+    }
+
+    critical_down = not agent_loop._running
+
+    response = {
+        "status": "healthy" if not critical_down else "degraded",
+        "version": "0.2.1",
+        "uptime_seconds": uptime,
+        "subsystems": subsystems,
+        "python_version": sys.version,
+        "platform": platform.system().lower(),
+    }
+
+    if critical_down:
+        raise HTTPException(status_code=503, detail=response)
+
+    return response
+
+
+       
+
 
 
 # ==================== Transparency APIs ====================

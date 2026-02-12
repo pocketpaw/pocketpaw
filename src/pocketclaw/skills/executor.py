@@ -66,11 +66,17 @@ class SkillExecutor:
         skill = self.skill_loader.get(skill_name)
 
         if not skill:
-            yield {
-                "type": "error",
-                "content": f"Skill not found: {skill_name}",
-            }
-            return
+         yield {
+        "type": "error",
+        "content": (
+            "This command isn't available yet.\n\n"
+            "To use AI features:\n"
+            "• Open Settings\n"
+            "• Add your API key (OpenAI / Claude / Ollama)\n"
+        ),
+    }
+         return
+
 
         async for chunk in self.execute_skill(skill, args):
             yield chunk

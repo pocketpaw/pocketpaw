@@ -223,28 +223,62 @@ class AgentLoop:
                 )
 
         except Exception as e:
+                    
             logger.exception(f"❌ Error processing message: {e}")
-            # Send error message
+
+            error_text = str(e).lower()
+
+            # Human-friendly messages
+            if "not logged in" in error_text or "login" in error_text:
+                user_message = (
+                    "You're not logged in.\n\n"
+                    "Run /login to connect your LLM provider (OpenAI, Claude, etc)."
+                )
+
+            elif "authentication" in error_text or "api key" in error_text:
+                user_message = (
+                    "Authentication failed.\n\n"
+                    "Check your API key in Settings and try again."
+                )
+
+            elif "connection" in error_text or "timeout" in error_text:
+                user_message = (
+                    "Cannot reach the LLM backend.\n\n"
+                    "Check:\n"
+                    "• Internet connection\n"
+                    "• API key\n"
+                    "• Backend service running"
+                )
+
+            elif "rate limit" in error_text:
+                user_message = (
+                    "Rate limit reached.\n\n"
+                    "Please wait a moment and try again."
+                )
+
+            else:
+                user_message = (
+                    "Something went wrong while processing your request.\n\n"
+                    "Please try again."
+                )
+
+            # Send friendly message to chat
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
                     chat_id=message.chat_id,
-                    content=f"An error occurred: {str(e)}",
+                    content=user_message,
                 )
             )
-            # Send stream end on error
+
+            # Send stream end marker
             await self.bus.publish_outbound(
                 OutboundMessage(
-                    channel=message.channel, chat_id=message.chat_id, content="", is_stream_end=True
+                    channel=message.channel,
+                    chat_id=message.chat_id,
+                    content="",
+                    is_stream_end=True
                 )
             )
 
-    async def _send_response(self, original: InboundMessage, content: str) -> None:
-        """Helper to send a simple text response."""
-        await self.bus.publish_outbound(
-            OutboundMessage(channel=original.channel, chat_id=original.chat_id, content=content)
-        )
-
-    def reset_router(self) -> None:
-        """Reset the router to pick up new settings."""
-        self._router = None
+   
