@@ -23,7 +23,8 @@ function app() {
         ...window.PocketPaw.Transparency.getState(),
         ...window.PocketPaw.RemoteAccess.getState(),
         ...window.PocketPaw.MissionControl.getState(),
-        ...window.PocketPaw.Channels.getState()
+        ...window.PocketPaw.Channels.getState(),
+        ...window.PocketPaw.Stats.getState()
     };
 
     // Assemble feature methods
@@ -36,7 +37,8 @@ function app() {
         ...window.PocketPaw.Transparency.getMethods(),
         ...window.PocketPaw.RemoteAccess.getMethods(),
         ...window.PocketPaw.MissionControl.getMethods(),
-        ...window.PocketPaw.Channels.getMethods()
+        ...window.PocketPaw.Channels.getMethods(),
+        ...window.PocketPaw.Stats.getMethods()
     };
 
     return {
@@ -151,6 +153,9 @@ function app() {
                 socket.send('get_reminders');
                 socket.send('get_intentions');
                 socket.send('get_skills');
+
+                // Fetch initial stats
+                this.refreshStats();
 
                 // Auto-activate agent mode
                 if (this.agentActive) {

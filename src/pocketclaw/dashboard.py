@@ -583,6 +583,37 @@ async def stop_tunnel():
     return {"active": False}
 
 
+# ==================== Agent Stats API ====================
+
+
+@app.get("/api/stats/summary")
+async def get_stats_summary():
+    """Get summary of agent statistics."""
+    from pocketclaw.stats.manager import get_stats_manager
+    
+    stats_manager = get_stats_manager()
+    return stats_manager.get_summary()
+
+
+@app.get("/api/stats/recent")
+async def get_recent_stats(limit: int = 20):
+    """Get recent agent call statistics."""
+    from pocketclaw.stats.manager import get_stats_manager
+    
+    stats_manager = get_stats_manager()
+    return {"calls": stats_manager.get_recent_calls(limit=limit)}
+
+
+@app.post("/api/stats/clear")
+async def clear_stats():
+    """Clear all statistics history."""
+    from pocketclaw.stats.manager import get_stats_manager
+    
+    stats_manager = get_stats_manager()
+    stats_manager.clear_history()
+    return {"status": "cleared", "message": "Statistics history cleared successfully"}
+
+
 # ============================================================================
 # Telegram Setup API
 # ============================================================================

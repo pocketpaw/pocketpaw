@@ -24,6 +24,7 @@ from pocketclaw.bus import get_message_bus, InboundMessage, OutboundMessage, Cha
 from pocketclaw.memory import get_memory_manager
 from pocketclaw.bootstrap import AgentContextBuilder
 from pocketclaw.agents.router import AgentRouter
+from pocketclaw.stats.manager import get_stats_manager
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,18 @@ class AgentLoop:
         session_key = message.session_key
         logger.info(f"⚡ Processing message from {session_key}")
 
+        # Initialize stats tracking
+        stats_manager = get_stats_manager()
+        settings = Settings.load()
+        call_id = stats_manager.start_call(session_key, settings.agent_backend)
+        
+        # Variables to track token usage and model
+        input_tokens = 0
+        output_tokens = 0
+        model_name = ""
+        success = True
+        error_msg = ""
+
         try:
             # 1. Store User Message
             await self.memory.add_to_session(
@@ -106,6 +119,18 @@ class AgentLoop:
                 chunk_type = chunk.get("type", "")
                 content = chunk.get("content", "")
                 metadata = chunk.get("metadata") or {}
+                
+                # Extract token usage from metadata if available
+                if "usage" in metadata:
+                    usage = metadata["usage"]
+                    if "input_tokens" in usage:
+                        input_tokens = usage["input_tokens"]
+                    if "output_tokens" in usage:
+                        output_tokens = usage["output_tokens"]
+                
+                # Extract model name if available
+                if "model" in metadata and not model_name:
+                    model_name = metadata["model"]
 
                 if chunk_type == "message":
                     # Stream text to user
@@ -190,6 +215,8 @@ class AgentLoop:
 
                 elif chunk_type == "error":
                     # Emit error and send to user
+                    success = False
+                    error_msg = content
                     await self.bus.publish_system(
                         SystemEvent(
                             event_type="tool_result",
@@ -224,6 +251,8 @@ class AgentLoop:
 
         except Exception as e:
             logger.exception(f"❌ Error processing message: {e}")
+            success = False
+            error_msg = str(e)
             # Send error message
             await self.bus.publish_outbound(
                 OutboundMessage(
@@ -238,6 +267,35 @@ class AgentLoop:
                     channel=message.channel, chat_id=message.chat_id, content="", is_stream_end=True
                 )
             )
+        
+        finally:
+            # End stats tracking and record
+            stats = stats_manager.end_call(
+                call_id=call_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model=model_name,
+                success=success,
+                error=error_msg,
+            )
+            
+            # Broadcast stats to dashboard via system event
+            if stats:
+                await self.bus.publish_system(
+                    SystemEvent(
+                        event_type="agent_stats",
+                        data={
+                            "response_time_ms": stats.response_time_ms,
+                            "input_tokens": stats.input_tokens,
+                            "output_tokens": stats.output_tokens,
+                            "total_tokens": stats.total_tokens,
+                            "model": stats.model,
+                            "backend": stats.backend,
+                            "success": stats.success,
+                            "timestamp": stats.timestamp.isoformat(),
+                        }
+                    )
+                )
 
     async def _send_response(self, original: InboundMessage, content: str) -> None:
         """Helper to send a simple text response."""

@@ -76,6 +76,14 @@ window.PocketPaw.Transparency = {
                     return;
                 }
 
+                // Handle agent stats events
+                if (eventType === 'agent_stats') {
+                    if (this.handleStatsUpdate) {
+                        this.handleStatsUpdate(data.data);
+                    }
+                    return;
+                }
+
                 // Handle standard system events
                 let message = '';
                 let level = 'info';

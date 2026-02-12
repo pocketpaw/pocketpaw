@@ -1,6 +1,8 @@
 <!--
   PocketPaw Dashboard - Activity Log Component
 
+  Changes (2026-02-13):
+  - Added Agent Performance Stats section with summary metrics and recent calls
   Changes (2026-02-04):
   - Fixed scrolling: Added overflow-y-auto to make activity log scrollable
   - Added empty state message when no activity
@@ -10,18 +12,95 @@
 -->
 <!-- Activity View -->
 <div class="flex-1 flex flex-col pt-24 px-4 md:px-8 pb-8 overflow-hidden bg-black font-mono" x-show="view === 'activity'">
-    <div class="terminal-output flex-1 overflow-y-auto text-[12px] md:text-[13px] text-[#BBB] leading-relaxed space-y-1" x-ref="activityLog">
-    <!-- Empty state -->
-    <div x-show="activityLog.length === 0" class="flex flex-col items-center justify-center h-full text-white/30">
-        <i data-lucide="activity" class="w-12 h-12 mb-3 opacity-50"></i>
-        <p class="text-sm">No activity yet</p>
-        <p class="text-xs mt-1">Tool calls and agent events will appear here</p>
-    </div>
-    <template x-for="(log, index) in activityLog" :key="index">
-        <div class="flex gap-3" :class="'term-' + log.level">
-        <span class="text-[#555] whitespace-nowrap" x-text="log.time"></span>
-        <span x-html="log.message" class="break-words"></span>
+    
+    <!-- Agent Performance Stats Section -->
+    <div class="mb-6 space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-white text-lg font-semibold flex items-center gap-2">
+                <i data-lucide="bar-chart-3" class="w-5 h-5"></i>
+                Agent Performance
+            </h2>
+            <button 
+                @click="refreshStats()" 
+                class="text-xs text-white/50 hover:text-white transition-colors flex items-center gap-1">
+                <i data-lucide="refresh-cw" class="w-3 h-3"></i>
+                Refresh
+            </button>
         </div>
-    </template>
+
+        <!-- Summary Cards -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-white/5 rounded-lg p-3 border border-white/10">
+                <div class="text-white/50 text-xs mb-1">Total Calls</div>
+                <div class="text-white text-2xl font-bold" x-text="stats.summary.total_calls || 0"></div>
+            </div>
+            <div class="bg-white/5 rounded-lg p-3 border border-white/10">
+                <div class="text-white/50 text-xs mb-1">Avg Response Time</div>
+                <div class="text-white text-2xl font-bold" x-text="(stats.summary.avg_response_time_ms || 0).toFixed(0) + 'ms'"></div>
+            </div>
+            <div class="bg-white/5 rounded-lg p-3 border border-white/10">
+                <div class="text-white/50 text-xs mb-1">Total Tokens</div>
+                <div class="text-white text-2xl font-bold" x-text="(stats.summary.total_tokens || 0).toLocaleString()"></div>
+            </div>
+            <div class="bg-white/5 rounded-lg p-3 border border-white/10">
+                <div class="text-white/50 text-xs mb-1">Success Rate</div>
+                <div class="text-white text-2xl font-bold" x-text="(stats.summary.success_rate || 0).toFixed(1) + '%'"></div>
+            </div>
+        </div>
+
+        <!-- Recent Calls -->
+        <div class="bg-white/5 rounded-lg border border-white/10 overflow-hidden">
+            <div class="p-3 border-b border-white/10 flex items-center justify-between">
+                <h3 class="text-white text-sm font-semibold">Recent Calls</h3>
+                <span class="text-xs text-white/50" x-text="'Last ' + (stats.recent.length || 0) + ' calls'"></span>
+            </div>
+            <div class="max-h-48 overflow-y-auto">
+                <template x-if="stats.recent.length === 0">
+                    <div class="p-6 text-center text-white/30 text-sm">
+                        No calls yet. Start chatting to see statistics!
+                    </div>
+                </template>
+                <template x-for="call in stats.recent" :key="call.timestamp">
+                    <div class="p-3 border-b border-white/5 hover:bg-white/5 transition-colors">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs text-white/70" x-text="new Date(call.timestamp).toLocaleTimeString()"></span>
+                            <span 
+                                class="text-xs px-2 py-0.5 rounded"
+                                :class="call.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'"
+                                x-text="call.success ? '✓ Success' : '✗ Failed'">
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-4 text-xs text-white/50">
+                            <span x-text="call.response_time_ms.toFixed(0) + 'ms'"></span>
+                            <span x-text="call.total_tokens + ' tokens'"></span>
+                            <span x-text="call.model || call.backend" class="truncate"></span>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <!-- Activity Log -->
+    <div class="flex-1 flex flex-col overflow-hidden">
+        <h2 class="text-white text-lg font-semibold mb-3 flex items-center gap-2">
+            <i data-lucide="activity" class="w-5 h-5"></i>
+            Activity Log
+        </h2>
+        <div class="terminal-output flex-1 overflow-y-auto text-[12px] md:text-[13px] text-[#BBB] leading-relaxed space-y-1" x-ref="activityLog">
+            <!-- Empty state -->
+            <div x-show="activityLog.length === 0" class="flex flex-col items-center justify-center h-full text-white/30">
+                <i data-lucide="activity" class="w-12 h-12 mb-3 opacity-50"></i>
+                <p class="text-sm">No activity yet</p>
+                <p class="text-xs mt-1">Tool calls and agent events will appear here</p>
+            </div>
+            <template x-for="(log, index) in activityLog" :key="index">
+                <div class="flex gap-3" :class="'term-' + log.level">
+                    <span class="text-[#555] whitespace-nowrap" x-text="log.time"></span>
+                    <span x-html="log.message" class="break-words"></span>
+                </div>
+            </template>
+        </div>
     </div>
 </div>
+
