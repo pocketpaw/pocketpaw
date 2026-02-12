@@ -24,7 +24,7 @@ import qrcode
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -1097,6 +1097,96 @@ async def get_session_memory(id: str = "", limit: int = 50):
         return []
     manager = get_memory_manager()
     return await manager.get_session_history(id, limit=limit)
+
+
+def _export_session_json(entries: list, session_id: str) -> str:
+    """Format session entries as JSON export."""
+    import json
+    from datetime import UTC, datetime
+
+    messages = []
+    for e in entries:
+        ts = e.created_at.isoformat() if hasattr(e.created_at, "isoformat") else str(e.created_at)
+        messages.append(
+            {
+                "id": e.id,
+                "role": e.role or "user",
+                "content": e.content,
+                "timestamp": ts,
+                "metadata": e.metadata,
+            }
+        )
+
+    return json.dumps(
+        {
+            "export_version": "1.0",
+            "exported_at": datetime.now(UTC).isoformat(),
+            "session_id": session_id,
+            "message_count": len(messages),
+            "messages": messages,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def _export_session_markdown(entries: list, session_id: str) -> str:
+    """Format session entries as readable Markdown."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+    lines = [
+        "# Conversation Export",
+        f"**Session**: `{session_id}` | **Messages**: {len(entries)} | **Exported**: {now}",
+        "",
+        "---",
+    ]
+
+    for e in entries:
+        role = (e.role or "user").capitalize()
+        ts = ""
+        if hasattr(e.created_at, "strftime"):
+            ts = e.created_at.strftime("%H:%M")
+
+        lines.append("")
+        lines.append(f"**{role}** ({ts}):" if ts else f"**{role}**:")
+        lines.append(e.content)
+        lines.append("")
+        lines.append("---")
+
+    return "\n".join(lines)
+
+
+@app.get("/api/memory/session/export")
+async def export_session(id: str = "", format: str = "json"):
+    """Export a session as downloadable JSON or Markdown."""
+    if not id:
+        raise HTTPException(status_code=400, detail="Missing required parameter: id")
+
+    if format not in ("json", "md"):
+        raise HTTPException(status_code=400, detail="Format must be 'json' or 'md'")
+
+    manager = get_memory_manager()
+    entries = await manager._store.get_session(id)
+
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"Session not found: {id}")
+
+    if format == "json":
+        content = _export_session_json(entries, id)
+        media_type = "application/json"
+        ext = "json"
+    else:
+        content = _export_session_markdown(entries, id)
+        media_type = "text/markdown"
+        ext = "md"
+
+    filename = f"pocketpaw-session-{id[:20]}.{ext}"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/memory/long_term")
