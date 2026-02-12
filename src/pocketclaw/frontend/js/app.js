@@ -2,6 +2,11 @@
  * PocketPaw Main Application
  * Alpine.js component for the dashboard
  *
+ * Changes (2026-02-13):
+ * - Issue #39: Moved keyboard shortcuts into dedicated feature module
+ *   (keyboard-shortcuts.js). Replaced inline keydown handler with
+ *   initKeyboardShortcuts() call.
+ *
  * Changes (2026-02-12):
  * - Call initHashRouter() in init() for hash-based URL routing
  *
@@ -183,24 +188,8 @@ function app() {
             // Start status polling (low frequency)
             this.startStatusPolling();
 
-            // Keyboard shortcuts
-            document.addEventListener('keydown', (e) => {
-                // Cmd/Ctrl+N: New chat
-                if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
-                    e.preventDefault();
-                    this.createNewChat();
-                }
-                // Cmd/Ctrl+K: Focus search
-                if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-                    e.preventDefault();
-                    const searchInput = document.querySelector('.session-search-input');
-                    if (searchInput) searchInput.focus();
-                }
-                // Escape: Cancel rename
-                if (e.key === 'Escape' && this.editingSessionId) {
-                    this.cancelRenameSession();
-                }
-            });
+            // Keyboard shortcuts (Issue #39)
+            this.initKeyboardShortcuts();
 
             // Initialize hash-based URL routing
             this.initHashRouter();

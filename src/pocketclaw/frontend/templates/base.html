@@ -1,6 +1,10 @@
 <!--
   PocketPaw Dashboard - Base Template
 
+  Changes (2026-02-13):
+  - Issue #39: Added keyboard-shortcuts.js feature module and help modal
+  - Added keyboard-shortcuts-help.html include in modals
+
   Changes (2026-02-12):
   - Added hash-router.js and project-browser.js feature module script tags
   - Updated top bar view buttons to call navigateToView() for hash routing
@@ -22,205 +26,166 @@
 -->
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>PocketPaw (Beta)</title>
-    <link
-      rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%230A84FF'/><g transform='translate(4,4)' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='4' r='2'/><circle cx='3' cy='7' r='2'/><circle cx='19' cy='7' r='2'/><circle cx='7' cy='19' r='2'/><circle cx='15' cy='19' r='2'/><path d='M8 14v.5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V14a4 4 0 0 0-6 0z'/></g></svg>"
-    />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/static/css/styles.css?v={{ v }}" />
 
-    <!-- UnoCSS Runtime (utilities alongside custom CSS) -->
-    <script>
-      window.__unocss = {
-        theme: {
-          colors: {
-            accent: '#0A84FF',
-            success: '#30D158',
-            danger: '#FF453A',
-            warning: '#FF9F0A',
-          }
-        },
-        shortcuts: {
-          'glass': 'bg-white/10 backdrop-blur-xl border border-white/12 rounded-2xl',
-          'glass-dark': 'bg-black/30 backdrop-blur-xl border border-white/12 rounded-2xl',
-          'nav-item': 'group flex items-center gap-3.5 px-3.5 py-2.5 rounded-xl transition-all text-sm font-medium w-full text-left bg-transparent text-[var(--text-secondary)] hover:text-white hover:bg-white/10 cursor-pointer border-none',
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>PocketPaw (Beta)</title>
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%230A84FF'/><g transform='translate(4,4)' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='4' r='2'/><circle cx='3' cy='7' r='2'/><circle cx='19' cy='7' r='2'/><circle cx='7' cy='19' r='2'/><circle cx='15' cy='19' r='2'/><path d='M8 14v.5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V14a4 4 0 0 0-6 0z'/></g></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/styles.css?v={{ v }}" />
+
+  <!-- UnoCSS Runtime (utilities alongside custom CSS) -->
+  <script>
+    window.__unocss = {
+      theme: {
+        colors: {
+          accent: '#0A84FF',
+          success: '#30D158',
+          danger: '#FF453A',
+          warning: '#FF9F0A',
         }
+      },
+      shortcuts: {
+        'glass': 'bg-white/10 backdrop-blur-xl border border-white/12 rounded-2xl',
+        'glass-dark': 'bg-black/30 backdrop-blur-xl border border-white/12 rounded-2xl',
+        'nav-item': 'group flex items-center gap-3.5 px-3.5 py-2.5 rounded-xl transition-all text-sm font-medium w-full text-left bg-transparent text-[var(--text-secondary)] hover:text-white hover:bg-white/10 cursor-pointer border-none',
       }
-    </script>
-    <script src="https://cdn.jsdelivr.net/npm/@unocss/runtime"></script>
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@unocss/runtime"></script>
 
-    <!-- Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
 
-    <!-- Markdown rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <!-- Markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 
-    <!-- QR code generation (WhatsApp pairing) -->
-    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+  <!-- QR code generation (WhatsApp pairing) -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 
-    <script
-      defer
-      src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.3/dist/cdn.min.js"
-    ></script>
-  </head>
-  <body x-data="{ ...app(), sidebarOpen: false }" x-init="init()" class="flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]">
-    
-    <!-- Mobile Sidebar Overlay -->
-    <div 
-        x-show="sidebarOpen" 
-        x-transition.opacity 
-        class="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
-        @click="sidebarOpen = false"
-    ></div>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.3/dist/cdn.min.js"></script>
+</head>
 
-    {% include "components/sidebar.html" %}
+<body x-data="{ ...app(), sidebarOpen: false }" x-init="init()"
+  class="flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]">
 
-    <!-- Main Content -->
-    <main class="flex-1 flex flex-col relative bg-[radial-gradient(circle_at_50%_30%,#1c1c1e_0%,#000000_100%)] overflow-hidden w-full">
-      <!-- Top Bar -->
-      <header class="absolute top-0 left-0 right-0 z-10 flex justify-between items-center px-4 md:px-8 py-4 bg-gradient-to-b from-black/40 to-transparent pointer-events-none">
-        
-        <!-- Left: Mobile Toggle & View Switcher -->
-        <div class="flex items-center gap-3 pointer-events-auto">
-            <button 
-                class="md:hidden p-2 -ml-2 rounded-lg text-white/70 hover:bg-white/10 hover:text-white transition-colors"
-                @click="sidebarOpen = true"
-            >
-                <i data-lucide="menu" class="w-6 h-6"></i>
-            </button>
+  <!-- Mobile Sidebar Overlay -->
+  <div x-show="sidebarOpen" x-transition.opacity class="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
+    @click="sidebarOpen = false"></div>
 
-            <div class="flex bg-black/20 rounded-[9px] p-0.5 pointer-events-auto backdrop-blur-md border border-white/5">
-            <button
-                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
-                :class="view === 'chat' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="navigateToView('chat')"
-            >
-                Chat
-            </button>
-            <button
-                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
-                :class="view === 'activity' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="navigateToView('activity')"
-            >
-                Activity
-            </button>
-            <button
-                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all hidden sm:block"
-                :class="view === 'terminal' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="navigateToView('terminal')"
-            >
-                Terminal
-            </button>
-            <button
-                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all flex items-center gap-1.5 hidden sm:flex"
-                :class="view === 'missions' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="navigateToView('missions')"
-            >
-                <span class="relative flex h-2 w-2" x-show="missionControl.stats.active_tasks > 0">
-                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
-                    <span class="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
-                </span>
-                Crew
-            </button>
-            </div>
+  {% include "components/sidebar.html" %}
+
+  <!-- Main Content -->
+  <main
+    class="flex-1 flex flex-col relative bg-[radial-gradient(circle_at_50%_30%,#1c1c1e_0%,#000000_100%)] overflow-hidden w-full">
+    <!-- Top Bar -->
+    <header
+      class="absolute top-0 left-0 right-0 z-10 flex justify-between items-center px-4 md:px-8 py-4 bg-gradient-to-b from-black/40 to-transparent pointer-events-none">
+
+      <!-- Left: Mobile Toggle & View Switcher -->
+      <div class="flex items-center gap-3 pointer-events-auto">
+        <button
+          class="md:hidden p-2 -ml-2 rounded-lg text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+          @click="sidebarOpen = true">
+          <i data-lucide="menu" class="w-6 h-6"></i>
+        </button>
+
+        <div class="flex bg-black/20 rounded-[9px] p-0.5 pointer-events-auto backdrop-blur-md border border-white/5">
+          <button class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
+            :class="view === 'chat' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+            @click="navigateToView('chat')">
+            Chat
+          </button>
+          <button class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
+            :class="view === 'activity' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+            @click="navigateToView('activity')">
+            Activity
+          </button>
+          <button class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all hidden sm:block"
+            :class="view === 'terminal' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+            @click="navigateToView('terminal')">
+            Terminal
+          </button>
+          <button
+            class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all flex items-center gap-1.5 hidden sm:flex"
+            :class="view === 'missions' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+            @click="navigateToView('missions')">
+            <span class="relative flex h-2 w-2" x-show="missionControl.stats.active_tasks > 0">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
+            </span>
+            Crew
+          </button>
         </div>
+      </div>
 
-        <!-- Right: Export + Remote -->
-        <div class="flex items-center gap-2 pointer-events-auto">
-            <!-- Export dropdown — only shown in chat view with active session -->
-            <div x-show="view === 'chat' && currentSessionId" class="relative" x-data="{ exportOpen: false }">
-                <button
-                    @click="exportOpen = !exportOpen"
-                    class="flex items-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
-                >
-                    <i data-lucide="download" class="w-4 h-4 text-accent"></i>
-                    <span class="text-sm font-medium text-white/90 hidden md:inline">Export</span>
-                </button>
-                <div
-                    x-show="exportOpen"
-                    @click.away="exportOpen = false"
-                    x-transition
-                    class="absolute right-0 mt-2 w-36 bg-[#2c2c2e] border border-white/10 rounded-xl shadow-xl z-50 overflow-hidden"
-                >
-                    <button
-                        @click="exportSession('json'); exportOpen = false"
-                        class="w-full px-4 py-2 text-sm text-left text-white/80 hover:bg-white/10 transition-colors"
-                    >JSON</button>
-                    <button
-                        @click="exportSession('md'); exportOpen = false"
-                        class="w-full px-4 py-2 text-sm text-left text-white/80 hover:bg-white/10 transition-colors"
-                    >Markdown</button>
-                </div>
-            </div>
-            
-            <!-- Take Your Paw With You button -->
-            <button
-                class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
-                @click="openRemote()"
-            >
-                <i data-lucide="smartphone" class="w-4 h-4 text-accent"></i>
-                <span class="text-sm font-medium text-white/90 hidden md:inline">Take Your Paw With You</span>
-            </button>
-        </div>
-      </header>
+      <!-- Right: Remote Button -->
+      <div class="flex items-center pointer-events-auto">
+        <button
+          class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
+          @click="openRemote()">
+          <i data-lucide="smartphone" class="w-4 h-4 text-accent"></i>
+          <span class="text-sm font-medium text-white/90 hidden md:inline">Take Your Paw With You</span>
+        </button>
+      </div>
+    </header>
 
-      {% include "components/chat.html" %}
+    {% include "components/chat.html" %}
 
-      {% include "components/activity.html" %}
-      {% include "components/terminal.html" %}
-      {% include "components/missions.html" %}
-    </main>
+    {% include "components/activity.html" %}
+    {% include "components/terminal.html" %}
+    {% include "components/missions.html" %}
+  </main>
 
-    {% include "components/modals.html" %}
+  {% include "components/modals.html" %}
 
-    <!-- Toast Container -->
-    <div class="toast-container" x-ref="toasts"></div>
+  <!-- Toast Container -->
+  <div class="toast-container" x-ref="toasts"></div>
 
-    <!-- Scripts (cache-busted via ?v= hash) -->
-    <script src="/static/js/state.js?v={{ v }}"></script>
-    <script src="/static/js/websocket.js?v={{ v }}"></script>
-    <script src="/static/js/tools.js?v={{ v }}"></script>
-    <!-- Loader (registers feature modules for app.js assembly) -->
-    <script src="/static/js/loader.js?v={{ v }}"></script>
-    <!-- Feature modules (loaded before app.js) -->
-    <script src="/static/js/features/sessions.js?v={{ v }}"></script>
-    <script src="/static/js/features/chat.js?v={{ v }}"></script>
-    <script src="/static/js/features/file-browser.js?v={{ v }}"></script>
-    <script src="/static/js/features/reminders.js?v={{ v }}"></script>
-    <script src="/static/js/features/intentions.js?v={{ v }}"></script>
-    <script src="/static/js/features/skills.js?v={{ v }}"></script>
-    <script src="/static/js/features/transparency.js?v={{ v }}"></script>
-    <script src="/static/js/features/remote-access.js?v={{ v }}"></script>
-    <script src="/static/js/features/mission-control.js?v={{ v }}"></script>
-    <script src="/static/js/features/channels.js?v={{ v }}"></script>
-    <script src="/static/js/features/mcp.js?v={{ v }}"></script>
-    <script src="/static/js/features/hash-router.js?v={{ v }}"></script>
-    <script src="/static/js/features/project-browser.js?v={{ v }}"></script>
-    <!-- Main app (assembles features) -->
-    <script src="/static/js/app.js?v={{ v }}"></script>
+  <!-- Scripts (cache-busted via ?v= hash) -->
+  <script src="/static/js/state.js?v={{ v }}"></script>
+  <script src="/static/js/websocket.js?v={{ v }}"></script>
+  <script src="/static/js/tools.js?v={{ v }}"></script>
+  <!-- Loader (registers feature modules for app.js assembly) -->
+  <script src="/static/js/loader.js?v={{ v }}"></script>
+  <!-- Feature modules (loaded before app.js) -->
+  <script src="/static/js/features/sessions.js?v={{ v }}"></script>
+  <script src="/static/js/features/chat.js?v={{ v }}"></script>
+  <script src="/static/js/features/file-browser.js?v={{ v }}"></script>
+  <script src="/static/js/features/reminders.js?v={{ v }}"></script>
+  <script src="/static/js/features/intentions.js?v={{ v }}"></script>
+  <script src="/static/js/features/skills.js?v={{ v }}"></script>
+  <script src="/static/js/features/transparency.js?v={{ v }}"></script>
+  <script src="/static/js/features/remote-access.js?v={{ v }}"></script>
+  <script src="/static/js/features/mission-control.js?v={{ v }}"></script>
+  <script src="/static/js/features/channels.js?v={{ v }}"></script>
+  <script src="/static/js/features/mcp.js?v={{ v }}"></script>
+  <script src="/static/js/features/hash-router.js?v={{ v }}"></script>
+  <script src="/static/js/features/project-browser.js?v={{ v }}"></script>
+  <script src="/static/js/features/keyboard-shortcuts.js?v={{ v }}"></script>
+  <!-- Main app (assembles features) -->
+  <script src="/static/js/app.js?v={{ v }}"></script>
 
-    <!-- Initialize Lucide icons -->
-    <script>
-      // Initial render
-      document.addEventListener('DOMContentLoaded', () => {
-        lucide.createIcons();
-      });
+  <!-- Initialize Lucide icons -->
+  <script>
+    // Initial render
+    document.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+    });
 
-      // Debounced refresh for dynamic content
-      let iconTimeout;
-      window.refreshIcons = () => {
-        clearTimeout(iconTimeout);
-        iconTimeout = setTimeout(() => lucide.createIcons(), 50);
-      };
-    </script>
-  </body>
+    // Debounced refresh for dynamic content
+    let iconTimeout;
+    window.refreshIcons = () => {
+      clearTimeout(iconTimeout);
+      iconTimeout = setTimeout(() => lucide.createIcons(), 50);
+    };
+  </script>
+</body>
+
 </html>
