@@ -53,6 +53,9 @@ function app() {
             battery: '...'
         },
 
+        // Health check status (drives sidebar dot: healthy | degraded | unhealthy)
+        healthStatus: 'healthy',
+
         // Settings
         settings: {
             agentBackend: 'claude_agent_sdk',
@@ -456,11 +459,25 @@ function app() {
          * Start polling for system status (every 10 seconds, only when connected)
          */
         startStatusPolling() {
+            // System metrics via WebSocket (every 10s)
             setInterval(() => {
                 if (socket.isConnected) {
                     socket.runTool('status');
                 }
-            }, 10000); // Poll every 10 seconds, not 3
+            }, 10000);
+
+            // Health endpoint polling (every 30s)
+            const pollHealth = async () => {
+                try {
+                    const res = await fetch('/api/health');
+                    const data = await res.json();
+                    this.healthStatus = data.status || 'unhealthy';
+                } catch {
+                    this.healthStatus = 'unhealthy';
+                }
+            };
+            pollHealth(); // initial fetch
+            setInterval(() => pollHealth(), 30000);
         },
 
         /**

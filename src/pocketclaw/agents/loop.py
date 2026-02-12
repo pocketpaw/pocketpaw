@@ -92,6 +92,10 @@ class AgentLoop:
         self._running = False
         logger.info("🛑 Agent Loop stopped")
 
+    def is_running(self) -> bool:
+        """Whether the agent loop is currently running."""
+        return self._running
+
     async def _loop(self) -> None:
         """Main processing loop."""
         while self._running:

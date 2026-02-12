@@ -144,6 +144,15 @@ class MessageBus:
                 )
 
     # =========================================================================
+    # Diagnostics
+    # =========================================================================
+
+    def get_subscriber_count(self) -> int:
+        """Total number of active subscribers (outbound + system)."""
+        outbound = sum(len(subs) for subs in self._outbound_subscribers.values())
+        return outbound + len(self._system_subscribers)
+
+    # =========================================================================
     # Lifecycle
     # =========================================================================
 

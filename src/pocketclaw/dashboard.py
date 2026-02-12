@@ -24,6 +24,7 @@ import base64
 import io
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
 
@@ -64,6 +65,9 @@ ws_adapter = WebSocketAdapter()
 agent_loop = AgentLoop()
 # Retain active_connections for legacy broadcasts until fully migrated
 active_connections: list[WebSocket] = []
+
+# Health check: track when the app started
+_app_start_time: float = 0.0
 
 # Channel adapters (auto-started when configured, keyed by channel name)
 _channel_adapters: dict[str, object] = {}
@@ -345,6 +349,9 @@ async def _stop_channel_adapter(channel: str) -> bool:
 @app.on_event("startup")
 async def startup_event():
     """Start services on app startup."""
+    global _app_start_time
+    _app_start_time = time.monotonic()
+
     # Start Message Bus Integration
     bus = get_message_bus()
     await ws_adapter.start(bus)
@@ -1047,6 +1054,26 @@ async def reload_skills():
     }
 
 
+# ==================== Health Check ====================
+
+
+@app.get("/api/health")
+async def health_check():
+    """Structured health check for monitoring, launcher, and Docker deployments."""
+    from pocketclaw.health import collect_health
+
+    body, status_code = collect_health(
+        agent_loop=agent_loop,
+        channel_status_fn=_channel_is_running,
+        start_time=_app_start_time,
+    )
+    if status_code != 200:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(content=body, status_code=status_code)
+    return body
+
+
 # ==================== WhatsApp Webhook Routes ====================
 
 
@@ -1668,6 +1695,7 @@ async def auth_middleware(request: Request, call_next):
         "/static",
         "/favicon.ico",
         "/api/qr",
+        "/api/health",
         "/webhook/whatsapp",
         "/webhook/inbound",
         "/api/whatsapp/qr",

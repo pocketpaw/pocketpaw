@@ -684,6 +684,13 @@ class MemoryManager:
         sessions.sort(key=lambda s: s["last_activity"], reverse=True)
         return sessions
 
+    def get_session_count(self) -> int:
+        """Count stored session files (for health diagnostics)."""
+        sessions_dir = getattr(self._store, "sessions_path", None)
+        if sessions_dir and sessions_dir.exists():
+            return sum(1 for _ in sessions_dir.glob("*.jsonl"))
+        return 0
+
 
 # Singleton
 _manager: MemoryManager | None = None
