@@ -1,0 +1,93 @@
+<!-- Keyboard Shortcuts Help Modal -->
+<div
+class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+x-show="showKeyboardHelp"
+x-transition.opacity
+@click.self="showKeyboardHelp = false"
+>
+<div class="w-full max-w-[550px] bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+    <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)]">
+    <h2 class="text-[17px] font-semibold">Keyboard Shortcuts</h2>
+    <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showKeyboardHelp = false">
+        <i data-lucide="x" class="w-5 h-5"></i>
+    </button>
+    </div>
+    
+    <div class="p-6 space-y-6">
+    <!-- General Section -->
+    <div>
+        <h3 class="text-[13px] font-semibold text-[var(--text-secondary)] mb-3 uppercase tracking-wide">General</h3>
+        <div class="space-y-2">
+        <div class="flex items-center justify-between py-2">
+            <span class="text-[14px] text-white/90">Focus chat input</span>
+            <div class="flex items-center gap-1">
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80" x-text="getModifierKey()"></kbd>
+            <span class="text-white/40">+</span>
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80">K</kbd>
+            </div>
+        </div>
+        <div class="flex items-center justify-between py-2">
+            <span class="text-[14px] text-white/90">New conversation</span>
+            <div class="flex items-center gap-1">
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80" x-text="getModifierKey()"></kbd>
+            <span class="text-white/40">+</span>
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80">N</kbd>
+            </div>
+        </div>
+        <div class="flex items-center justify-between py-2">
+            <span class="text-[14px] text-white/90">Settings</span>
+            <div class="flex items-center gap-1">
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80" x-text="getModifierKey()"></kbd>
+            <span class="text-white/40">+</span>
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80">,</kbd>
+            </div>
+        </div>
+        <div class="flex items-center justify-between py-2">
+            <span class="text-[14px] text-white/90">Show this help</span>
+            <div class="flex items-center gap-1">
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80" x-text="getModifierKey()"></kbd>
+            <span class="text-white/40">+</span>
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80">/</kbd>
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <!-- Navigation Section -->
+    <div>
+        <h3 class="text-[13px] font-semibold text-[var(--text-secondary)] mb-3 uppercase tracking-wide">Navigation</h3>
+        <div class="space-y-2">
+        <div class="flex items-center justify-between py-2">
+            <span class="text-[14px] text-white/90">Toggle activity panel</span>
+            <div class="flex items-center gap-1">
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80" x-text="getModifierKey()"></kbd>
+            <span class="text-white/40">+</span>
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80">Shift</kbd>
+            <span class="text-white/40">+</span>
+            <kbd class="px-2 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80">A</kbd>
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <!-- Other Section -->
+    <div>
+        <h3 class="text-[13px] font-semibold text-[var(--text-secondary)] mb-3 uppercase tracking-wide">Other</h3>
+        <div class="space-y-2">
+        <div class="flex items-center justify-between py-2">
+            <span class="text-[14px] text-white/90">Close modal</span>
+            <kbd class="px-3 py-1 bg-black/40 border border-white/10 rounded text-[12px] font-medium text-white/80">Escape</kbd>
+        </div>
+        </div>
+    </div>
+
+    <!-- Footer tip -->
+    <div class="pt-4 border-t border-white/5">
+        <p class="text-[12px] text-white/40 text-center">
+        <i data-lucide="info" class="w-3 h-3 inline-block align-middle mr-1"></i>
+        Shortcuts are disabled while typing in input fields
+        </p>
+    </div>
+    </div>
+</div>
+</div>

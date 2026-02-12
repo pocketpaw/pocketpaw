@@ -23,7 +23,8 @@ function app() {
         ...window.PocketPaw.Transparency.getState(),
         ...window.PocketPaw.RemoteAccess.getState(),
         ...window.PocketPaw.MissionControl.getState(),
-        ...window.PocketPaw.Channels.getState()
+        ...window.PocketPaw.Channels.getState(),
+        ...window.PocketPaw.KeyboardShortcuts.getState()
     };
 
     // Assemble feature methods
@@ -36,7 +37,8 @@ function app() {
         ...window.PocketPaw.Transparency.getMethods(),
         ...window.PocketPaw.RemoteAccess.getMethods(),
         ...window.PocketPaw.MissionControl.getMethods(),
-        ...window.PocketPaw.Channels.getMethods()
+        ...window.PocketPaw.Channels.getMethods(),
+        ...window.PocketPaw.KeyboardShortcuts.getMethods()
     };
 
     return {
@@ -121,6 +123,9 @@ function app() {
 
             // Register event handlers first
             this.setupSocketHandlers();
+
+            // Setup keyboard shortcuts
+            this.setupKeyboardShortcuts();
 
             // Connect WebSocket (singleton - will only connect once)
             socket.connect();
