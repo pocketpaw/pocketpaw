@@ -10,11 +10,11 @@ Changes:
                 - Router with claude_agent_sdk as default
 """
 
-import asyncio
-import pytest
 from pathlib import Path
-from pocketclaw.config import Settings
 
+import pytest
+
+from pocketclaw.config import Settings
 
 # =============================================================================
 # PROTOCOL TESTS
@@ -145,8 +145,9 @@ class TestExecutor:
     @pytest.mark.asyncio
     async def test_read_file(self):
         """read_file should read file contents."""
-        from pocketclaw.agents.executor import OpenInterpreterExecutor
         import tempfile
+
+        from pocketclaw.agents.executor import OpenInterpreterExecutor
 
         settings = Settings()
         executor = OpenInterpreterExecutor(settings)
@@ -165,8 +166,9 @@ class TestExecutor:
     @pytest.mark.asyncio
     async def test_write_file(self):
         """write_file should write content to file."""
-        from pocketclaw.agents.executor import OpenInterpreterExecutor
         import tempfile
+
+        from pocketclaw.agents.executor import OpenInterpreterExecutor
 
         settings = Settings()
         executor = OpenInterpreterExecutor(settings)
@@ -491,8 +493,8 @@ class TestAgentRouter:
 
     def test_router_defaults_to_claude_agent_sdk(self):
         """Should default to Claude Agent SDK (new recommended backend)."""
-        from pocketclaw.agents.router import AgentRouter
         from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketclaw.agents.router import AgentRouter
 
         settings = Settings()  # Default backend is now claude_agent_sdk
         router = AgentRouter(settings)
@@ -502,8 +504,8 @@ class TestAgentRouter:
 
     def test_router_selects_claude_agent_sdk(self):
         """Should select Claude Agent SDK when configured."""
-        from pocketclaw.agents.router import AgentRouter
         from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketclaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="claude_agent_sdk")
         router = AgentRouter(settings)
@@ -513,8 +515,8 @@ class TestAgentRouter:
 
     def test_router_selects_pocketpaw_native(self):
         """Should select PocketPaw Native when configured."""
-        from pocketclaw.agents.router import AgentRouter
         from pocketclaw.agents.pocketpaw_native import PocketPawOrchestrator
+        from pocketclaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="pocketpaw_native", anthropic_api_key="test-key")
         router = AgentRouter(settings)
@@ -524,8 +526,8 @@ class TestAgentRouter:
 
     def test_router_selects_open_interpreter(self):
         """Should select Open Interpreter when configured."""
-        from pocketclaw.agents.router import AgentRouter
         from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
+        from pocketclaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="open_interpreter")
         router = AgentRouter(settings)
@@ -535,8 +537,8 @@ class TestAgentRouter:
 
     def test_router_claude_code_disabled(self):
         """claude_code should fallback to claude_agent_sdk (disabled)."""
-        from pocketclaw.agents.router import AgentRouter, DISABLED_BACKENDS
         from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketclaw.agents.router import DISABLED_BACKENDS, AgentRouter
 
         assert "claude_code" in DISABLED_BACKENDS
 
@@ -549,8 +551,8 @@ class TestAgentRouter:
 
     def test_router_falls_back_on_unknown(self):
         """Should fallback to Claude Agent SDK for unknown backends."""
-        from pocketclaw.agents.router import AgentRouter
         from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketclaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="unknown_backend_xyz")
         router = AgentRouter(settings)
@@ -580,3 +582,35 @@ class TestAgentRouter:
 
         # Should not raise
         await router.stop()
+
+    def test_router_ollama_falls_back_to_open_interpreter(self):
+        """Ollama + claude_agent_sdk should auto-switch to open_interpreter."""
+        from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
+        from pocketclaw.agents.router import AgentRouter
+
+        settings = Settings(llm_provider="ollama", agent_backend="claude_agent_sdk")
+        router = AgentRouter(settings)
+
+        assert isinstance(router._agent, OpenInterpreterAgent)
+
+    def test_router_ollama_native_falls_back_to_open_interpreter(self):
+        """Ollama + pocketpaw_native should auto-switch to open_interpreter."""
+        from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
+        from pocketclaw.agents.router import AgentRouter
+
+        settings = Settings(
+            llm_provider="ollama", agent_backend="pocketpaw_native", anthropic_api_key="test"
+        )
+        router = AgentRouter(settings)
+
+        assert isinstance(router._agent, OpenInterpreterAgent)
+
+    def test_router_ollama_open_interpreter_stays(self):
+        """Ollama + open_interpreter should stay as open_interpreter (no redirect)."""
+        from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
+        from pocketclaw.agents.router import AgentRouter
+
+        settings = Settings(llm_provider="ollama", agent_backend="open_interpreter")
+        router = AgentRouter(settings)
+
+        assert isinstance(router._agent, OpenInterpreterAgent)

@@ -1,6 +1,8 @@
 """Agent Router - routes to the selected agent backend.
 
 Changes:
+  - 2026-02-12: Auto-fallback to open_interpreter when llm_provider is ollama
+                but agent_backend is claude_agent_sdk (which is Anthropic-only).
   - 2026-02-02: Added claude_agent_sdk_full for 2-layer architecture.
   - 2026-02-02: Simplified - removed 2-layer mode (SDK has built-in execution).
   - 2026-02-02: Added pocketpaw_native - custom orchestrator with OI executor.
@@ -9,7 +11,7 @@ Changes:
 """
 
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from pocketclaw.config import Settings
 
@@ -44,6 +46,17 @@ class AgentRouter:
         if backend in DISABLED_BACKENDS:
             logger.warning(f"⚠️ Backend '{backend}' disabled → using claude_agent_sdk")
             backend = "claude_agent_sdk"
+
+        # Ollama requires open_interpreter backend — claude_agent_sdk is Anthropic-only
+        if self.settings.llm_provider == "ollama" and backend in (
+            "claude_agent_sdk",
+            "pocketpaw_native",
+        ):
+            logger.warning(
+                f"⚠️ Ollama selected as LLM provider but '{backend}' only supports Anthropic. "
+                "Auto-switching to open_interpreter backend."
+            )
+            backend = "open_interpreter"
 
         if backend == "claude_agent_sdk":
             from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
