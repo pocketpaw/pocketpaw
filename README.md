@@ -20,6 +20,8 @@
   No subscription. No cloud lock-in. Just you and your Paw.
 </p>
 
+> **🚧 Beta:** This project is under active development. Expect breaking changes between versions.
+
 ---
 
 ## Quick Start
