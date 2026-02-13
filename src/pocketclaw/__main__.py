@@ -15,6 +15,8 @@ import logging
 import sys
 import webbrowser
 
+from importlib.metadata import version as pkg_version
+
 from pocketclaw.config import Settings, get_settings
 from pocketclaw.logging_setup import setup_logging
 
@@ -351,7 +353,13 @@ Examples:
     parser.add_argument(
         "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
     )
-    parser.add_argument("--version", "-v", action="version", version="%(prog)s 0.2.0")
+    parser.add_argument(
+    "--version",
+    "-v",
+    action="version",
+    version=f"pocketpaw: {pkg_version('pocketpaw')}",
+    )
+
 
     args = parser.parse_args()
 
