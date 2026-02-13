@@ -370,18 +370,31 @@ function app() {
          * Handle errors
          */
         handleError(data) {
-            const content = data.content || 'Unknown error';
+            let content = data.content || 'Unknown error';
+
+            // If backend sends structured validation errors
+            if (typeof content === 'object' && content !== null) {
+                const messages = Object.values(content);
+
+                if (messages.length === 1) {
+                    content = messages[0];
+                } else {
+                    content = 'Please fix the following:\n• ' + messages.join('\n• ');
+                }
+            }
+
             this.addMessage('assistant', '❌ ' + content);
             this.log(content, 'error');
             this.showToast(content, 'error');
             this.endStreaming();
 
-            // If file browser is open, show error there
             if (this.showFileBrowser) {
                 this.fileLoading = false;
                 this.fileError = content;
             }
         },
+
+
 
         /**
          * Run a tool

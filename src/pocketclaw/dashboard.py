@@ -2243,81 +2243,66 @@ async def websocket_endpoint(
                 provider = data.get("provider")
                 key = data.get("key", "")
 
+                if not provider or not key:
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": "Invalid API key or provider"
+                    })
+                    continue
+
                 async with _settings_lock:
-                    if provider == "anthropic" and key:
+
+                    if provider == "anthropic"  :
                         settings.anthropic_api_key = key
                         settings.llm_provider = "anthropic"
-                        settings.save()
-                        agent_loop.reset_router()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Anthropic API key saved!"}
-                        )
-                    elif provider == "openai" and key:
+                        settings.openai_api_key = None
+                           
+                    elif provider == "openai" :
                         settings.openai_api_key = key
                         settings.llm_provider = "openai"
-                        settings.save()
-                        agent_loop.reset_router()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ OpenAI API key saved!"}
-                        )
-                    elif provider == "tavily" and key:
+                        settings.anthropic_api_key = None
+                    
+                       
+                    elif provider == "tavily":
                         settings.tavily_api_key = key
-                        settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Tavily API key saved!"}
-                        )
-                    elif provider == "brave" and key:
+                        
+                    elif provider == "brave":
                         settings.brave_search_api_key = key
-                        settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Brave Search API key saved!"}
-                        )
-                    elif provider == "parallel" and key:
+                        
+                    elif provider == "parallel":
                         settings.parallel_api_key = key
-                        settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Parallel AI API key saved!"}
-                        )
-                    elif provider == "elevenlabs" and key:
+                        
+                    elif provider == "elevenlabs":
                         settings.elevenlabs_api_key = key
-                        settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ ElevenLabs API key saved!"}
-                        )
-                    elif provider == "google_oauth_id" and key:
+                        
+                    elif provider == "google_oauth_id":
                         settings.google_oauth_client_id = key
-                        settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Google OAuth Client ID saved!"}
-                        )
-                    elif provider == "google_oauth_secret" and key:
+                        
+                    elif provider == "google_oauth_secret":
                         settings.google_oauth_client_secret = key
-                        settings.save()
-                        await websocket.send_json(
-                            {
-                                "type": "message",
-                                "content": "✅ Google OAuth Client Secret saved!",
-                            }
-                        )
-                    elif provider == "spotify_client_id" and key:
+                        
+                    elif provider == "spotify_client_id":
                         settings.spotify_client_id = key
-                        settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Spotify Client ID saved!"}
-                        )
-                    elif provider == "spotify_client_secret" and key:
+                        
+                    elif provider == "spotify_client_secret":
                         settings.spotify_client_secret = key
-                        settings.save()
-                        await websocket.send_json(
-                            {
-                                "type": "message",
-                                "content": "✅ Spotify Client Secret saved!",
-                            }
-                        )
+                        
                     else:
-                        await websocket.send_json(
-                            {"type": "error", "content": "Invalid API key or provider"}
-                        )
+                        await websocket.send_json({
+                            "type": "error", 
+                            "content": "Invalid API key or provider"
+                        })
+                        continue
+
+                    settings.save()
+
+                    if provider in ("openai" , "anthropic"):
+                        agent_loop.reset_router()
+
+                    await websocket.send_json({
+                        "type": "message",
+                        "content": f"✅ {provider.replace('_', ' ').title()} saved!"
+                    })
 
             # Handle get_settings - return current settings to frontend
             elif action == "get_settings":

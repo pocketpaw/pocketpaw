@@ -7,7 +7,7 @@ Changes:
   - 2026-02-02: Simplified backends - removed 2-layer mode.
   - 2026-02-02: claude_agent_sdk is now RECOMMENDED (uses official SDK).
 """
-
+import re
 import json
 import logging
 from functools import lru_cache
@@ -373,13 +373,56 @@ class Settings(BaseSettings):
         default=5, description="Max parallel conversations processed simultaneously"
     )
 
-    def save(self) -> None:
+    # ... all your fields ...
+
+    def _validate_api_keys(self) -> dict[str, str]:
+
+        errors: dict[str, str] = {}
+        #openAPI token
+        if self.llm_provider == "openai" and self.openai_api_key:
+            if not self.openai_api_key.startswith("sk-"):
+                errors["openai_api_key"] = "OpenAI key should start with 'sk-'"
+
+        #anthropic token
+        if self.llm_provider == "anthropic" and self.anthropic_api_key:
+            if not self.anthropic_api_key.startswith("sk-ant-"):
+                errors["anthropic_api_key"] = "Anthropic key should start with 'sk-ant-'"
+
+        #telegram token
+        if self.telegram_bot_token:
+            if not re.match(r"^\d+:[A-Za-z0-9_-]+$", self.telegram_bot_token):
+                errors["telegram_bot_token"] = "Invalid Telegram bot token format"
+
+        #slack bot token
+        if self.slack_bot_token and not self.slack_bot_token.startswith("xoxb-"):
+            errors["slack_bot_token"] = "Slack bot token usually starts with 'xoxb-'"
+
+        #slack app token
+        if self.slack_app_token and not self.slack_app_token.startswith("xapp-"):
+            errors["slack_app_token"] = "Slack app token usually starts with 'xapp-'"
+
+        #elevenlabs token
+        if self.elevenlabs_api_key and len(self.elevenlabs_api_key) < 20:
+            errors["elevenlabs_api_key"] = "ElevenLabs key looks too short"
+
+        #Google Gemini Token
+        if self.google_api_key and len(self.google_api_key) < 20:
+            errors["google_api_key"] = "Google API key looks too short"
+
+
+        
+        return errors
+
+
+    def save(self) -> dict:
         """Save settings to config file.
 
         Non-secret fields go to config.json. Secret fields (API keys, tokens)
         go to the encrypted credential store.
         """
         from pocketclaw.credentials import SECRET_FIELDS, get_credential_store
+
+        validation_errors = self._validate_api_keys()
 
         config_path = get_config_path()
 
@@ -413,9 +456,9 @@ class Settings(BaseSettings):
             "llm_provider": self.llm_provider,
             "ollama_host": self.ollama_host,
             "ollama_model": self.ollama_model,
-            "openai_api_key": self.openai_api_key or existing.get("openai_api_key"),
+            "openai_api_key": self.openai_api_key,
             "openai_model": self.openai_model,
-            "anthropic_api_key": self.anthropic_api_key or existing.get("anthropic_api_key"),
+            "anthropic_api_key": self.anthropic_api_key,
             "anthropic_model": self.anthropic_model,
             # Discord
             "discord_bot_token": (self.discord_bot_token or existing.get("discord_bot_token")),
@@ -539,6 +582,12 @@ class Settings(BaseSettings):
         safe_fields = {k: v for k, v in all_fields.items() if k not in SECRET_FIELDS}
         config_path.write_text(json.dumps(safe_fields, indent=2))
         _chmod_safe(config_path, 0o600)
+
+        if validation_errors:
+            return {"status": "warning", "errors": validation_errors}
+        
+        return {"status": "success"}
+
 
     @classmethod
     def load(cls) -> "Settings":
