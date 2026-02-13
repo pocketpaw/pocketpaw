@@ -572,12 +572,15 @@ class Settings(BaseSettings):
         return cls()
 
 
-@lru_cache
+_cached_settings: Settings | None = None
+
+
 def get_settings(force_reload: bool = False) -> Settings:
     """Get cached settings instance."""
-    if force_reload:
-        get_settings.cache_clear()
-    return Settings.load()
+    global _cached_settings  # noqa: PLW0603
+    if force_reload or _cached_settings is None:
+        _cached_settings = Settings.load()
+    return _cached_settings
 
 
 def get_access_token() -> str:
@@ -645,6 +648,11 @@ def _migrate_plaintext_keys() -> None:
 
     if migrated_count:
         logger.info("Copied %d secret(s) from config to encrypted store.", migrated_count)
+        # Strip plaintext secrets from config.json to prevent leakage
+        stripped = {k: v for k, v in data.items() if k not in SECRET_FIELDS}
+        config_path.write_text(json.dumps(stripped, indent=2))
+        _chmod_safe(config_path, 0o600)
+        logger.info("Stripped %d plaintext secret(s) from config.json.", migrated_count)
 
     _MIGRATION_DONE_PATH.write_text("1")
     _chmod_safe(_MIGRATION_DONE_PATH, 0o600)
