@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import importlib.util
 import json
 import os
 import platform
@@ -39,18 +38,31 @@ _HAS_RICH = False
 _HAS_INQUIRER = False
 
 
+def _can_import(module_name: str) -> bool:
+    """Return True only when module import succeeds."""
+    try:
+        importlib.import_module(module_name)
+        return True
+    except Exception:
+        return False
+
+
 def _verify_imports(packages: list[str]) -> bool:
-    """Verify packages are actually importable after install. Returns True if all found."""
+    """Verify UI deps are actually importable after install."""
     global _HAS_RICH, _HAS_INQUIRER
     all_ok = True
     for pkg in packages:
-        spec_name = "rich" if pkg == "rich" else "InquirerPy"
-        if importlib.util.find_spec(spec_name) is not None:
-            if spec_name == "rich":
+        module_name = "rich.console" if pkg == "rich" else "InquirerPy"
+        if _can_import(module_name):
+            if pkg == "rich":
                 _HAS_RICH = True
             else:
                 _HAS_INQUIRER = True
         else:
+            if pkg == "rich":
+                _HAS_RICH = False
+            else:
+                _HAS_INQUIRER = False
             all_ok = False
     return all_ok
 
@@ -58,15 +70,29 @@ def _verify_imports(packages: list[str]) -> bool:
 def _bootstrap_deps() -> None:
     """Install InquirerPy and rich if missing, with uv-first cascade."""
     global _HAS_RICH, _HAS_INQUIRER
+
+    def _run_install(cmd: list[str]) -> tuple[bool, str]:
+        """Run install command quietly, returning (ok, stderr_text)."""
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            return result.returncode == 0, (result.stderr or "")
+        except Exception:
+            return False, ""
+
     missing: list[str] = []
-    if importlib.util.find_spec("rich") is None:
-        missing.append("rich")
-    else:
+    if _can_import("rich.console"):
         _HAS_RICH = True
-    if importlib.util.find_spec("InquirerPy") is None:
-        missing.append("InquirerPy")
     else:
+        missing.append("rich")
+    if _can_import("InquirerPy"):
         _HAS_INQUIRER = True
+    else:
+        missing.append("InquirerPy")
 
     if not missing:
         return
@@ -75,68 +101,50 @@ def _bootstrap_deps() -> None:
 
     # Cascade 1: uv pip install --system (target the running Python explicitly)
     if shutil.which("uv"):
-        try:
-            cmd = ["uv", "pip", "install", "-q", "--python", sys.executable] + missing
-            if not _in_virtualenv():
-                cmd.insert(3, "--system")
-            subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        cmd = ["uv", "pip", "install", "-q", "--python", sys.executable] + missing
+        if not _in_virtualenv():
+            cmd.insert(3, "--system")
+        ok, _ = _run_install(cmd)
+        if ok:
             importlib.invalidate_caches()
             if _verify_imports(missing):
                 return
-        except Exception:
-            pass
 
     # Cascade 2: python -m pip install --user
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--user", "-q"] + missing,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+    ok, stderr_text = _run_install(
+        [sys.executable, "-m", "pip", "install", "--user", "-q"] + missing
+    )
+    if ok:
         importlib.invalidate_caches()
         if _verify_imports(missing):
             return
-    except subprocess.CalledProcessError as exc:
-        # Cascade 3: PEP 668 — retry with --break-system-packages
-        stderr_text = exc.stderr.decode(errors="replace") if exc.stderr else ""
-        if "externally-managed-environment" in stderr_text:
-            try:
-                subprocess.check_call(
-                    [
-                        sys.executable,
-                        "-m",
-                        "pip",
-                        "install",
-                        "--user",
-                        "-q",
-                        "--break-system-packages",
-                    ]
-                    + missing,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-                importlib.invalidate_caches()
-                if _verify_imports(missing):
-                    return
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Cascade 3: PEP 668 — retry with --break-system-packages
+    elif "externally-managed-environment" in stderr_text:
+        ok, _ = _run_install(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--user",
+                "-q",
+                "--break-system-packages",
+            ]
+            + missing
+        )
+        if ok:
+            importlib.invalidate_caches()
+            if _verify_imports(missing):
+                return
 
     # Cascade 4: pip3 / pip on PATH
     for pip_bin in ("pip3", "pip"):
         if shutil.which(pip_bin):
-            try:
-                subprocess.check_call(
-                    [pip_bin, "install", "--user", "-q"] + missing,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
+            ok, _ = _run_install([pip_bin, "install", "--user", "-q"] + missing)
+            if ok:
                 importlib.invalidate_caches()
                 if _verify_imports(missing):
                     return
-            except Exception:
-                pass
 
     print(f"  Warning: Could not install {', '.join(missing)}.")
     print("  Falling back to plain text prompts.\n")
@@ -155,17 +163,26 @@ _bootstrap_deps()
 
 # Conditional imports — fallbacks defined below
 if _HAS_RICH:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.table import Table
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
 
-    console = Console()
+        console = Console()
+    except Exception:
+        _HAS_RICH = False
+        console = None  # type: ignore[assignment]
 else:
     console = None  # type: ignore[assignment]
 
 if _HAS_INQUIRER:
-    from InquirerPy import inquirer
-    from InquirerPy.separator import Separator
+    try:
+        from InquirerPy import inquirer
+        from InquirerPy.separator import Separator
+    except Exception:
+        _HAS_INQUIRER = False
+        inquirer = None  # type: ignore[assignment]
+        Separator = None  # type: ignore[assignment]
 else:
     inquirer = None  # type: ignore[assignment]
     Separator = None  # type: ignore[assignment]
