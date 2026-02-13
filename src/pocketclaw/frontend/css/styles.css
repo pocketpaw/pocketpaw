@@ -392,6 +392,37 @@ body {
 }
 
 /* =====================================================
+   Analytics Panel
+   ===================================================== */
+.analytics-stat-card {
+  background: rgba(28, 28, 30, 0.65);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  backdrop-filter: blur(20px);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+.analytics-stat-card:hover {
+  background: rgba(40, 40, 42, 0.7);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.analytics-panel {
+  background: rgba(28, 28, 30, 0.5);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  backdrop-filter: blur(20px);
+}
+.analytics-sparkline {
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.15);
+  padding: 4px;
+}
+.analytics-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+/* =====================================================
    Responsive Overrides
    ===================================================== */
 @media (max-width: 640px) {

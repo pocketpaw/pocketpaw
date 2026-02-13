@@ -1,0 +1,274 @@
+<!--
+  PocketPaw Dashboard - Analytics Panel
+  Created: 2026-02-13
+
+  Agent usage analytics: tool frequency, response times, error rates,
+  session statistics.  Uses Alpine.js directives bound to the Analytics
+  feature module state.
+-->
+
+<div
+    x-show="view === 'analytics'"
+    x-transition:enter="transition ease-out duration-200"
+    x-transition:enter-start="opacity-0 translate-y-2"
+    x-transition:enter-end="opacity-100 translate-y-0"
+    class="absolute inset-0 flex flex-col overflow-hidden"
+    x-init="$watch('view', v => {
+        if (v === 'analytics') startAnalyticsRefresh();
+        else stopAnalyticsRefresh();
+    })"
+>
+    <!-- Scroll container with top padding for header -->
+    <div class="flex-1 overflow-y-auto pt-20 pb-8 px-4 md:px-8 analytics-scroll">
+
+        <!-- Loading State -->
+        <template x-if="analyticsLoading && !analyticsData">
+            <div class="flex items-center justify-center h-64">
+                <div class="flex items-center gap-3 text-white/50">
+                    <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                    </svg>
+                    <span class="text-sm">Loading analytics...</span>
+                </div>
+            </div>
+        </template>
+
+        <!-- Error State -->
+        <template x-if="analyticsError && !analyticsData">
+            <div class="flex items-center justify-center h-64">
+                <div class="text-center">
+                    <i data-lucide="alert-triangle" class="w-8 h-8 text-warning mx-auto mb-3"></i>
+                    <p class="text-sm text-white/50" x-text="analyticsError"></p>
+                    <button
+                        class="mt-3 px-4 py-1.5 text-sm bg-accent/20 text-accent rounded-lg hover:bg-accent/30 transition-colors"
+                        @click="loadAnalytics()"
+                    >Retry</button>
+                </div>
+            </div>
+        </template>
+
+        <!-- Analytics Content -->
+        <template x-if="analyticsData">
+            <div class="max-w-5xl mx-auto space-y-6">
+
+                <!-- Section Title -->
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white flex items-center gap-2">
+                            <i data-lucide="bar-chart-3" class="w-5 h-5 text-accent"></i>
+                            Agent Analytics
+                        </h2>
+                        <p class="text-xs text-white/40 mt-0.5">Real-time usage insights</p>
+                    </div>
+                    <button
+                        class="flex items-center gap-1.5 px-3 py-1.5 text-xs text-white/60 bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5"
+                        @click="loadAnalytics()"
+                        :disabled="analyticsLoading"
+                    >
+                        <i data-lucide="refresh-cw" class="w-3.5 h-3.5" :class="analyticsLoading && 'animate-spin'"></i>
+                        Refresh
+                    </button>
+                </div>
+
+                <!-- Stats Cards Row -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+
+                    <!-- Total Messages -->
+                    <div class="analytics-stat-card">
+                        <div class="flex items-center gap-2 mb-2">
+                            <div class="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center">
+                                <i data-lucide="message-square" class="w-4 h-4 text-accent"></i>
+                            </div>
+                        </div>
+                        <div class="text-2xl font-bold text-white" x-text="(analyticsData.total_messages || 0).toLocaleString()"></div>
+                        <div class="text-xs text-white/40 mt-0.5">Messages Processed</div>
+                    </div>
+
+                    <!-- Tool Calls -->
+                    <div class="analytics-stat-card">
+                        <div class="flex items-center gap-2 mb-2">
+                            <div class="w-8 h-8 rounded-lg bg-[#30D158]/20 flex items-center justify-center">
+                                <i data-lucide="wrench" class="w-4 h-4 text-[#30D158]"></i>
+                            </div>
+                        </div>
+                        <div class="text-2xl font-bold text-white" x-text="(analyticsData.total_tool_calls || 0).toLocaleString()"></div>
+                        <div class="text-xs text-white/40 mt-0.5">Tool Calls</div>
+                    </div>
+
+                    <!-- Error Rate -->
+                    <div class="analytics-stat-card">
+                        <div class="flex items-center gap-2 mb-2">
+                            <div class="w-8 h-8 rounded-lg bg-[#FF453A]/20 flex items-center justify-center">
+                                <i data-lucide="alert-circle" class="w-4 h-4 text-[#FF453A]"></i>
+                            </div>
+                        </div>
+                        <div class="text-2xl font-bold text-white" x-text="formatErrorRate(analyticsData.error_rate)"></div>
+                        <div class="text-xs text-white/40 mt-0.5">Error Rate</div>
+                    </div>
+
+                    <!-- Uptime -->
+                    <div class="analytics-stat-card">
+                        <div class="flex items-center gap-2 mb-2">
+                            <div class="w-8 h-8 rounded-lg bg-[#FF9F0A]/20 flex items-center justify-center">
+                                <i data-lucide="clock" class="w-4 h-4 text-[#FF9F0A]"></i>
+                            </div>
+                        </div>
+                        <div class="text-2xl font-bold text-white" x-text="formatUptime(analyticsData.uptime_seconds)"></div>
+                        <div class="text-xs text-white/40 mt-0.5">Uptime</div>
+                    </div>
+                </div>
+
+                <!-- Two Column Layout: Top Tools + Activity Timeline -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+                    <!-- Top Tools -->
+                    <div class="analytics-panel">
+                        <h3 class="text-sm font-semibold text-white/80 mb-4 flex items-center gap-2">
+                            <i data-lucide="trophy" class="w-4 h-4 text-[#FF9F0A]"></i>
+                            Top Tools
+                        </h3>
+                        <template x-if="analyticsData.top_tools && analyticsData.top_tools.length > 0">
+                            <div class="space-y-2.5">
+                                <template x-for="(tool, idx) in analyticsData.top_tools.slice(0, 8)" :key="tool.name">
+                                    <div class="flex items-center gap-3">
+                                        <span class="text-xs text-white/30 w-4 text-right" x-text="idx + 1"></span>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="flex items-center justify-between mb-1">
+                                                <span class="text-xs font-medium text-white/80 truncate" x-text="tool.name"></span>
+                                                <span class="text-xs text-white/40" x-text="tool.call_count + ' calls'"></span>
+                                            </div>
+                                            <div class="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                                                <div
+                                                    class="h-full rounded-full transition-all duration-500"
+                                                    :style="`width: ${getToolBarWidth(tool)}; background: linear-gradient(90deg, #0A84FF, #30D158)`"
+                                                ></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                        <template x-if="!analyticsData.top_tools || analyticsData.top_tools.length === 0">
+                            <div class="text-center py-8 text-white/30 text-sm">
+                                <i data-lucide="inbox" class="w-8 h-8 mx-auto mb-2 opacity-50"></i>
+                                <p>No tool usage recorded yet</p>
+                            </div>
+                        </template>
+                    </div>
+
+                    <!-- Activity Sparklines -->
+                    <div class="analytics-panel">
+                        <h3 class="text-sm font-semibold text-white/80 mb-4 flex items-center gap-2">
+                            <i data-lucide="activity" class="w-4 h-4 text-accent"></i>
+                            Activity Trend
+                        </h3>
+                        <template x-if="analyticsTimeline.length >= 2">
+                            <div class="space-y-4">
+                                <!-- Messages sparkline -->
+                                <div>
+                                    <div class="flex items-center justify-between mb-1">
+                                        <span class="text-xs text-white/50">Messages</span>
+                                        <span class="text-xs text-accent" x-text="'peak: ' + getSparklineMax('messages')"></span>
+                                    </div>
+                                    <svg viewBox="0 0 280 60" class="w-full h-12 analytics-sparkline">
+                                        <path
+                                            :d="getSparklinePath('messages')"
+                                            fill="none"
+                                            stroke="#0A84FF"
+                                            stroke-width="2"
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                        />
+                                    </svg>
+                                </div>
+                                <!-- Tool calls sparkline -->
+                                <div>
+                                    <div class="flex items-center justify-between mb-1">
+                                        <span class="text-xs text-white/50">Tool Calls</span>
+                                        <span class="text-xs text-[#30D158]" x-text="'peak: ' + getSparklineMax('tool_calls')"></span>
+                                    </div>
+                                    <svg viewBox="0 0 280 60" class="w-full h-12 analytics-sparkline">
+                                        <path
+                                            :d="getSparklinePath('tool_calls')"
+                                            fill="none"
+                                            stroke="#30D158"
+                                            stroke-width="2"
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                        />
+                                    </svg>
+                                </div>
+                                <!-- Errors sparkline -->
+                                <div>
+                                    <div class="flex items-center justify-between mb-1">
+                                        <span class="text-xs text-white/50">Errors</span>
+                                        <span class="text-xs text-[#FF453A]" x-text="'peak: ' + getSparklineMax('errors')"></span>
+                                    </div>
+                                    <svg viewBox="0 0 280 60" class="w-full h-12 analytics-sparkline">
+                                        <path
+                                            :d="getSparklinePath('errors')"
+                                            fill="none"
+                                            stroke="#FF453A"
+                                            stroke-width="2"
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                        />
+                                    </svg>
+                                </div>
+                            </div>
+                        </template>
+                        <template x-if="analyticsTimeline.length < 2">
+                            <div class="text-center py-8 text-white/30 text-sm">
+                                <i data-lucide="trending-up" class="w-8 h-8 mx-auto mb-2 opacity-50"></i>
+                                <p>Need at least 2 days of data for trends</p>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Tool Details Table -->
+                <div class="analytics-panel" x-show="analyticsTools.length > 0">
+                    <h3 class="text-sm font-semibold text-white/80 mb-4 flex items-center gap-2">
+                        <i data-lucide="list" class="w-4 h-4 text-white/50"></i>
+                        Tool Details
+                    </h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs">
+                            <thead>
+                                <tr class="text-left text-white/40 border-b border-white/5">
+                                    <th class="pb-2 pr-4 font-medium">Tool</th>
+                                    <th class="pb-2 pr-4 font-medium text-right">Calls</th>
+                                    <th class="pb-2 pr-4 font-medium text-right">Avg Duration</th>
+                                    <th class="pb-2 pr-4 font-medium text-right">Errors</th>
+                                    <th class="pb-2 font-medium text-right hidden sm:table-cell">Last Used</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="tool in analyticsTools" :key="tool.name">
+                                    <tr class="border-b border-white/5 hover:bg-white/3 transition-colors">
+                                        <td class="py-2 pr-4">
+                                            <span class="text-white/80 font-medium" x-text="tool.name"></span>
+                                        </td>
+                                        <td class="py-2 pr-4 text-right text-white/60" x-text="tool.call_count"></td>
+                                        <td class="py-2 pr-4 text-right text-white/60" x-text="formatDuration(tool.avg_duration_ms)"></td>
+                                        <td class="py-2 pr-4 text-right">
+                                            <span
+                                                :class="tool.error_count > 0 ? 'text-[#FF453A]' : 'text-white/60'"
+                                                x-text="tool.error_count"
+                                            ></span>
+                                        </td>
+                                        <td class="py-2 text-right text-white/40 hidden sm:table-cell">
+                                            <span x-text="tool.last_used ? new Date(tool.last_used).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '—'"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </template>
+    </div>
+</div>

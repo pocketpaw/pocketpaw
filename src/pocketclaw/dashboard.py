@@ -54,6 +54,8 @@ from pocketclaw.scheduler import get_scheduler
 from pocketclaw.security import get_audit_logger
 from pocketclaw.security.rate_limiter import api_limiter, auth_limiter, cleanup_all, ws_limiter
 from pocketclaw.security.session_tokens import create_session_token, verify_session_token
+from pocketclaw.analytics import get_analytics_collector
+from pocketclaw.analytics.store import AnalyticsStore
 from pocketclaw.skills import SkillExecutor, get_skill_loader
 from pocketclaw.tunnel import get_tunnel_manager
 
@@ -430,6 +432,20 @@ async def startup_event():
 
     asyncio.create_task(_rate_limit_cleanup_loop())
 
+    # Start analytics collector — subscribes to system events on the bus
+    try:
+        analytics = get_analytics_collector()
+        bus.subscribe_system(analytics.handle_event)
+        store = AnalyticsStore()
+        snapshot = store.load()
+        if snapshot:
+            analytics.load_snapshot(snapshot)
+            logger.info("Analytics: restored %d tool calls from disk", snapshot.total_tool_calls)
+        else:
+            logger.info("Analytics collector started (fresh)")
+    except Exception as e:
+        logger.warning("Failed to start analytics collector: %s", e)
+
     # Open browser now that the server is actually listening
     if _open_browser_url:
         import webbrowser
@@ -467,6 +483,40 @@ async def shutdown_event():
         await mcp.stop_all()
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)
+
+    # Persist analytics to disk before exit
+    try:
+        analytics = get_analytics_collector()
+        store = AnalyticsStore()
+        store.save(analytics.to_snapshot())
+        logger.info("Analytics saved to disk")
+    except Exception as e:
+        logger.warning("Failed to save analytics: %s", e)
+
+
+# ==================== Analytics API ====================
+
+
+@app.get("/api/analytics/summary")
+async def get_analytics_summary():
+    """Top-level analytics: total messages, tool calls, errors, top tools."""
+    collector = get_analytics_collector()
+    summary = collector.get_summary(top_n=10)
+    return summary.model_dump(mode="json")
+
+
+@app.get("/api/analytics/tools")
+async def get_analytics_tools():
+    """Per-tool breakdown: call count, avg duration, error count."""
+    collector = get_analytics_collector()
+    return {"tools": collector.get_tool_details()}
+
+
+@app.get("/api/analytics/timeline")
+async def get_analytics_timeline(days: int = Query(default=30, ge=1, le=365)):
+    """Daily message/tool/error counts for the last N days."""
+    collector = get_analytics_collector()
+    return {"timeline": collector.get_timeline(days=days)}
 
 
 # ==================== MCP Server API ====================
