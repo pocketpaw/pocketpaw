@@ -4,6 +4,8 @@
 
 import pytest
 import tempfile
+import asyncio
+from unittest.mock import AsyncMock
 from pathlib import Path
 
 from pocketpaw.memory.protocol import MemoryType, MemoryEntry
@@ -232,3 +234,199 @@ class TestMemoryIntegration:
         # 6. Verify files exist
         assert (temp_memory_path / "MEMORY.md").exists()
         assert (temp_memory_path / "sessions").is_dir()
+
+
+class TestFileStoreConcurrency:
+    """Concurrent writes to the same session."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writes_same_session(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+        session_key = "test:concurrent"
+
+        async def write_message(i):
+            entry = MemoryEntry(
+                id="",
+                type=MemoryType.SESSION,
+                content=f"Message {i}",
+                role="user",
+                session_key=session_key,
+            )
+            await store.save(entry)
+
+        # Simulate 25 concurrent writes
+        await asyncio.gather(*(write_message(i) for i in range(25)))
+
+        history = await store.get_session(session_key)
+
+        assert len(history) == 25
+
+        contents = {e.content for e in history}
+        for i in range(25):
+            assert f"Message {i}" in contents
+
+
+class TestFileStoreUnicode:
+    """Storing and retrieving unicode content."""
+
+    @pytest.mark.asyncio
+    async def test_unicode_storage_and_retrieval(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+
+        content = "@Pocket paws 🐾 is the most loyal pup 🐶."
+
+        entry = MemoryEntry(
+            id="",
+            type=MemoryType.LONG_TERM,
+            content=content,
+            metadata={"header": "Agent Personality"},
+        )
+
+        await store.save(entry)
+
+        # Ensure file was created
+        assert store.long_term_file.exists()
+
+        # Ensure unicode preserved in file
+        file_text = store.long_term_file.read_text(encoding="utf-8")
+        assert "🐾" in file_text
+        assert "🐶" in file_text
+        assert "pup" in file_text
+
+        # Ensure retrieval via get_by_type works
+        entries = await store.get_by_type(MemoryType.LONG_TERM)
+        assert len(entries) == 1
+        assert entries[0].content == content
+
+        # Ensure search still works for ASCII tokens
+        results = await store.search("loyal")
+        assert len(results) == 1
+        assert "loyal pup" in results[0].content
+
+
+class TestFileStoreEmptySession:
+    """Handle empty or non-existent sessions."""
+
+    @pytest.mark.asyncio
+    async def test_get_nonexistent_session_returns_empty_list(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+
+        history = await store.get_session("nonexistent:session")
+        assert history == []
+
+    @pytest.mark.asyncio
+    async def test_clear_nonexistent_session_returns_zero(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+
+        count = await store.clear_session("nonexistent:session")
+        assert count == 0
+
+
+class TestSessionCompaction:
+    """Session history exceeding compaction threshold."""
+
+    @pytest.mark.asyncio
+    async def test_session_exceeds_recent_window(self, tmp_path):
+        manager = MemoryManager(base_path=tmp_path)
+        session_key = "test:compaction"
+
+        # Add 25 messages (default recent_window = 10)
+        for i in range(25):
+            await manager.add_to_session(
+                session_key,
+                role="user",
+                content=f"Message number {i}",
+            )
+
+        compacted = await manager.get_compacted_history(session_key)
+
+        # Should not return all 25 raw messages
+        # Expected: 1 summary block + 10 recent messages
+        assert len(compacted) <= 11
+
+        # First message should be the summary block
+        assert "[Earlier conversation]" in compacted[0]["content"]
+
+        # Last 10 messages must be preserved verbatim
+        for i in range(15, 25):
+            assert any(f"Message number {i}" in msg["content"] for msg in compacted)
+
+
+class TestMemoryManagerAutoLearnTrigger:
+    """Auto-learn triggering conditions."""
+
+    @pytest.mark.asyncio
+    async def test_auto_learn_default_does_nothing(self, tmp_path):
+        manager = MemoryManager(base_path=tmp_path)
+
+        result = await manager.auto_learn([{"role": "user", "content": "My name is Pocket"}])
+
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_auto_learn_triggers_when_enabled(self, tmp_path):
+        manager = MemoryManager(base_path=tmp_path)
+
+        manager._file_auto_learn = AsyncMock(return_value={"results": []})
+
+        await manager.auto_learn(
+            [{"role": "user", "content": "My name is Pocket"}],
+            file_auto_learn=True,
+        )
+
+        manager._file_auto_learn.assert_called_once()
+
+
+class TestMemoryManagerSearchNoResults:
+    """Memory search returns empty list when nothing matches."""
+
+    @pytest.mark.asyncio
+    async def test_search_on_empty_store(self, tmp_path):
+        manager = MemoryManager(base_path=tmp_path)
+
+        # No memories added yet
+        results = await manager.search("nonexistent")
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_search_with_no_matching_memory(self, tmp_path):
+        manager = MemoryManager(base_path=tmp_path)
+
+        # Add one memory
+        await manager.remember("Pocket paws")
+
+        # Search for unrelated word
+        results = await manager.search("banana")
+
+        assert results == []
+
+
+class TestMemoryManagerSessionListing:
+    """Session listing and deletion behavior."""
+
+    @pytest.mark.asyncio
+    async def test_session_listing_and_deletion(self, tmp_path):
+        manager = MemoryManager(base_path=tmp_path)
+        session_key = "chat:123"
+
+        # Add messages to create session
+        await manager.add_to_session(session_key, "user", "Hello Paws")
+        await manager.add_to_session(session_key, "assistant", "Hi there!")
+
+        # List sessions
+        sessions = await manager.list_sessions_for_chat(session_key)
+
+        # Verify session appears
+        assert len(sessions) == 1
+        assert sessions[0]["session_key"] == session_key
+        assert sessions[0]["message_count"] == 2
+        assert sessions[0]["is_active"] is True
+
+        # Delete session
+        deleted = await manager.delete_session(session_key)
+        assert deleted is True
+
+        # Listing should now be empty
+        sessions_after = await manager.list_sessions_for_chat(session_key)
+        assert sessions_after == []
