@@ -36,4 +36,6 @@ documentation/
 
 ## Guides
 
-- Planned: Getting started, Configuration, Deployment
+- [Installation](guides/installation.md) - Quick install for macOS, Linux, and Windows
+- [Use Cases](guides/use-cases.md) - Real-world examples (automation, research, coding, multi-agent)
+- Planned: Configuration, Deployment

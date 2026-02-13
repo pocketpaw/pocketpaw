@@ -3,6 +3,10 @@
 Single-file installer with InquirerPy prompts for guided setup.
 No local imports — designed to run standalone.
 
+Changes:
+  - 2026-02-13: Fix uv installing deps to wrong Python (--python sys.executable),
+                verify imports after each cascade instead of blindly setting _HAS_RICH.
+
 Usage:
     python installer.py                          # Interactive mode
     python installer.py --non-interactive --profile recommended  # Headless
@@ -35,6 +39,22 @@ _HAS_RICH = False
 _HAS_INQUIRER = False
 
 
+def _verify_imports(packages: list[str]) -> bool:
+    """Verify packages are actually importable after install. Returns True if all found."""
+    global _HAS_RICH, _HAS_INQUIRER
+    all_ok = True
+    for pkg in packages:
+        spec_name = "rich" if pkg == "rich" else "InquirerPy"
+        if importlib.util.find_spec(spec_name) is not None:
+            if spec_name == "rich":
+                _HAS_RICH = True
+            else:
+                _HAS_INQUIRER = True
+        else:
+            all_ok = False
+    return all_ok
+
+
 def _bootstrap_deps() -> None:
     """Install InquirerPy and rich if missing, with uv-first cascade."""
     global _HAS_RICH, _HAS_INQUIRER
@@ -53,17 +73,16 @@ def _bootstrap_deps() -> None:
 
     print(f"  Installing UI dependencies: {', '.join(missing)}...")
 
-    # Cascade 1: uv pip install --system
+    # Cascade 1: uv pip install --system (target the running Python explicitly)
     if shutil.which("uv"):
         try:
-            cmd = ["uv", "pip", "install", "-q"] + missing
+            cmd = ["uv", "pip", "install", "-q", "--python", sys.executable] + missing
             if not _in_virtualenv():
                 cmd.insert(3, "--system")
             subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             importlib.invalidate_caches()
-            _HAS_RICH = True
-            _HAS_INQUIRER = True
-            return
+            if _verify_imports(missing):
+                return
         except Exception:
             pass
 
@@ -75,9 +94,8 @@ def _bootstrap_deps() -> None:
             stderr=subprocess.PIPE,
         )
         importlib.invalidate_caches()
-        _HAS_RICH = True
-        _HAS_INQUIRER = True
-        return
+        if _verify_imports(missing):
+            return
     except subprocess.CalledProcessError as exc:
         # Cascade 3: PEP 668 — retry with --break-system-packages
         stderr_text = exc.stderr.decode(errors="replace") if exc.stderr else ""
@@ -98,9 +116,8 @@ def _bootstrap_deps() -> None:
                     stderr=subprocess.PIPE,
                 )
                 importlib.invalidate_caches()
-                _HAS_RICH = True
-                _HAS_INQUIRER = True
-                return
+                if _verify_imports(missing):
+                    return
             except Exception:
                 pass
     except Exception:
@@ -116,9 +133,8 @@ def _bootstrap_deps() -> None:
                     stderr=subprocess.PIPE,
                 )
                 importlib.invalidate_caches()
-                _HAS_RICH = True
-                _HAS_INQUIRER = True
-                return
+                if _verify_imports(missing):
+                    return
             except Exception:
                 pass
 
