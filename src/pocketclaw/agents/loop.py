@@ -400,7 +400,7 @@ class AgentLoop:
                     self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn
                 ) or (self.settings.memory_backend == "file" and self.settings.file_auto_learn)
                 if should_auto_learn:
-                    asyncio.create_task(
+                    t = asyncio.create_task(
                         self._auto_learn(
                             message.content,
                             full_response,
