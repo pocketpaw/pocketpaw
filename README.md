@@ -9,16 +9,13 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/pocketpaw/"><img src="https://img.shields.io/pypi/v/pocketpaw.svg" alt="PyPI version"></a>
+  <a href="https://github.com/Rakshanayak24/pocketpaw"><img src="https://img.shields.io/badge/GitHub-Fork-blue.svg" alt="GitHub Fork"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
-  <a href="https://pypi.org/project/pocketpaw/"><img src="https://img.shields.io/pypi/dm/pocketpaw.svg" alt="Downloads"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-macOS-arm64.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
-  &nbsp;
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/Rakshanayak24/pocketpaw/releases/latest/download/PocketPaw-Setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
 </p>
 
 <p align="center">
@@ -30,6 +27,7 @@
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/a15bb8c7-6897-40d2-8111-aa905fe3fdfe" width="700" controls></video>
+
 </p>
 
 ---
@@ -37,12 +35,7 @@
 ## Quick Start
 
 ```bash
-curl -fsSL https://pocketpaw.xyz/install.sh | sh
-```
-
-Or install directly:
-
-```bash
+# Install directly
 pip install pocketpaw && pocketpaw
 ```
 
@@ -56,16 +49,17 @@ I'm your self-hosted, cross-platform personal AI agent. The web dashboard opens 
 <summary>More install options</summary>
 
 ```bash
+# From your fork
+git clone https://github.com/Rakshanayak24/pocketpaw.git
+
+cd pocketpaw
+uv run pocketpaw
+
 # Isolated install
 pipx install pocketpaw && pocketpaw
 
 # Run without installing
 uvx pocketpaw
-
-# From source
-git clone https://github.com/pocketpaw/pocketpaw.git
-cd pocketpaw
-uv run pocketpaw
 ```
 
 </details>
@@ -372,24 +366,11 @@ Full documentation lives in [`documentation/`](documentation/README.md):
 ---
 
 ## Join the Pack
-
-<!-- TODO: Add Product Hunt badge once page is live -->
-<!-- [![Product Hunt](https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=XXXXX)](https://www.producthunt.com/posts/pocketpaw) -->
-
 - Twitter: [@PocketPawAI](https://twitter.com/PocketPaw89242)
 - Discord: Coming Soon
-- Email: pocketpawai@gmail.com
+- Email: [pocketpawai@gmail.com](mailto:pocketpawai@gmail.com)
 
 PRs welcome. Come build with us.
 
 ---
 
-## License
-
-MIT &copy; PocketPaw Team
-
-<p align="center">
-  <img src="paw.png" alt="PocketPaw" width="40">
-  <br>
-  <strong>Made with love for humans who want AI on their own terms</strong>
-</p>
