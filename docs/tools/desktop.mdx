@@ -1,0 +1,80 @@
+---
+title: Desktop
+description: "Capture screenshots and monitor system resources with PocketPaw's desktop tools. Take screenshots of your primary monitor and check CPU, RAM, disk usage, and battery status on demand."
+section: Tools
+ogType: article
+keywords: ["desktop automation", "screenshot", "system status", "cpu monitor", "screen capture"]
+tags: ["tools", "desktop"]
+---
+
+# Desktop
+
+The desktop tools provide system-level interaction: capturing screenshots and monitoring system resources.
+
+## Tools
+
+### take_screenshot
+
+Captures the primary monitor and saves the image.
+
+```
+User: Take a screenshot of my screen
+Agent: [uses take_screenshot] → Screenshot saved to ~/.pocketclaw/file_jail/screenshots/screenshot_20240115_143022.png
+```
+
+Screenshots are saved to `~/.pocketclaw/file_jail/screenshots/` with timestamped filenames.
+
+### get_status
+
+Returns current system metrics — CPU usage, RAM, disk space, and battery status.
+
+```
+User: How's my system doing?
+Agent: [uses get_status] → CPU: 23%, RAM: 8.2/16 GB (51%), Disk: 234/512 GB (46%), Battery: 78% (charging)
+```
+
+## Configuration
+
+The desktop tools require the `desktop` optional dependency:
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the desktop extra manually
+pip install pocketpaw[desktop]
+```
+
+## Policy Group
+
+Desktop tools belong to `group:desktop`. They are included in the `full` tool profile.
+
+```bash
+# Enable desktop tools
+export POCKETCLAW_TOOLS_ALLOW="group:desktop"
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "take_screenshot",
+  "description": "Take a screenshot of the user's primary monitor",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}
+```
+
+```json
+{
+  "name": "get_status",
+  "description": "Get current system status (CPU, RAM, Disk, Battery)",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}
+```

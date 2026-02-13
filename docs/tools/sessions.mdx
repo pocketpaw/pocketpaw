@@ -1,0 +1,79 @@
+---
+title: Session Tools
+description: "Manage conversation sessions through natural language with PocketPaw's 6 session tools: create new sessions, list and switch between them, rename, clear history, or delete conversations entirely."
+section: Tools
+ogType: article
+keywords: ["session management", "conversation history", "multi-session", "chat management"]
+tags: ["tools", "memory", "sessions"]
+---
+
+# Session Tools
+
+PocketPaw provides six tools for managing conversation sessions. The agent invokes these automatically based on natural language — no special commands needed.
+
+## Tools
+
+### new_session
+
+Start a fresh conversation. The previous session is preserved and can be resumed later.
+
+```
+User: Start a new conversation
+Agent: [uses new_session] → Started new session. Previous conversation saved.
+```
+
+### list_sessions
+
+List all sessions for the current chat, showing titles, message counts, and which one is active.
+
+```
+User: Show me my conversations
+Agent: [uses list_sessions] →
+  1. *Project planning* (12 messages) ← active
+  2. Python debugging (8 messages)
+  3. Recipe ideas (3 messages)
+```
+
+### switch_session
+
+Switch to a different session by number or by searching titles.
+
+```
+User: Go back to the Python debugging conversation
+Agent: [uses switch_session] → Switched to "Python debugging" (8 messages)
+```
+
+### clear_session
+
+Clear all messages from the current session. The session itself is kept but history is wiped.
+
+```
+User: Clear this conversation
+Agent: [uses clear_session] → Cleared 12 messages from current session.
+```
+
+### rename_session
+
+Give the current session a new title.
+
+```
+User: Rename this conversation to "API Design Notes"
+Agent: [uses rename_session] → Session renamed to "API Design Notes"
+```
+
+### delete_session
+
+Permanently delete the current session and all its messages.
+
+```
+User: Delete this conversation
+Agent: [uses delete_session] → Session deleted. Next message will start a fresh conversation.
+```
+
+## Parameters
+
+All session tools require a `session_key` parameter (automatically provided by the system prompt). The `switch_session` tool additionally takes a `target` — either a session number from `list_sessions` or text to search in titles.
+
+## Policy Group
+
+Session tools belong to `group:memory` and are available in all tool profiles.

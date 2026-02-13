@@ -1,6 +1,6 @@
 # Tool protocol - simple, string-based tool interface.
 # Created: 2026-02-02
-# Part of Nanobot Pattern Adoption
+
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field

@@ -1,0 +1,130 @@
+---
+title: Gmail
+description: "Full Gmail management with PocketPaw: 9 tools for searching, reading, sending emails, managing labels, trashing messages, and bulk operations. Requires Google OAuth with gmail.modify scope."
+section: Integrations
+ogType: article
+keywords: ["gmail integration", "email management", "gmail api", "send email", "label management"]
+tags: ["integrations", "gmail", "google"]
+---
+
+# Gmail
+
+PocketPaw provides 9 tools for comprehensive Gmail management: search, read, send, label management, trash, and bulk operations.
+
+## Setup
+
+1. Set up [Google OAuth](/integrations/oauth) credentials
+2. Enable the Gmail API in your Google Cloud project
+3. Authorize PocketPaw to access your Gmail
+
+## Tools
+
+### gmail_search
+
+Search your inbox using Gmail search syntax (`from:`, `subject:`, `is:unread`, `newer_than:1d`, etc.):
+
+```
+User: Find emails from John about the project deadline
+Agent: [uses gmail_search] → Found 3 emails:
+  1. "Re: Project deadline" from john@example.com (Jan 15)
+  2. "Deadline update" from john@example.com (Jan 12)
+  3. "Project timeline" from john@example.com (Jan 8)
+```
+
+Supports a `max_results` parameter (default: 5, max: 20).
+
+### gmail_read
+
+Read the full content of a specific email by message ID:
+
+```
+User: Read the first email
+Agent: [uses gmail_read] → Subject: "Re: Project deadline"
+  From: john@example.com
+  Date: Jan 15, 2024
+  Content: "Hi, the deadline has been moved to..."
+```
+
+### gmail_send
+
+Send an email (plain text):
+
+```
+User: Reply to John saying we'll meet the deadline
+Agent: [uses gmail_send] → Email sent to john@example.com
+```
+
+### gmail_list_labels
+
+List all Gmail labels with their IDs and types:
+
+```
+User: Show me my Gmail labels
+Agent: [uses gmail_list_labels] →
+  - INBOX (system)
+  - SENT (system)
+  - Work/Projects (user) — Label_42
+  - Newsletters (user) — Label_15
+```
+
+### gmail_create_label
+
+Create a new Gmail label. Use `/` for nested labels:
+
+```
+User: Create a label called "Work/Urgent"
+Agent: [uses gmail_create_label] → Created label "Work/Urgent" (Label_53)
+```
+
+### gmail_modify
+
+Add or remove labels on a single email. Common label IDs: `INBOX`, `SPAM`, `TRASH`, `UNREAD`, `STARRED`, `IMPORTANT`.
+
+```
+User: Star that email and mark it as important
+Agent: [uses gmail_modify] → Added STARRED, IMPORTANT to message
+```
+
+### gmail_trash
+
+Move a message to trash:
+
+```
+User: Trash the spam email
+Agent: [uses gmail_trash] → Message moved to trash
+```
+
+### gmail_batch_modify
+
+Bulk label operations on multiple messages at once:
+
+```
+User: Mark all 5 newsletters as read and archive them
+Agent: [uses gmail_batch_modify] → Modified 5 messages: removed UNREAD, INBOX
+```
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| Client ID | `POCKETCLAW_GOOGLE_CLIENT_ID` | Google OAuth client ID |
+| Client secret | `POCKETCLAW_GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
+
+## Policy Group
+
+All Gmail tools belong to `group:gmail`.
+
+```bash
+# Enable Gmail tools
+export POCKETCLAW_TOOLS_ALLOW="group:gmail"
+
+# Or disable
+export POCKETCLAW_TOOLS_DENY="group:gmail"
+```
+
+## Required Scopes
+
+PocketPaw requests these Gmail scopes:
+- `gmail.readonly` — For search, read, and label listing
+- `gmail.send` — For sending emails
+- `gmail.modify` — For label management, trash, and bulk operations

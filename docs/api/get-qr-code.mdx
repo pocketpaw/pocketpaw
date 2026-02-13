@@ -1,0 +1,61 @@
+---
+title: Generate QR Login Code
+description: "Generate a QR code for mobile device login to the PocketPaw dashboard. Scan the QR code with your phone to authenticate without manually entering credentials or tokens."
+api: GET /api/qr
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: none
+section: API Reference
+ogType: article
+keywords: ["qr code login", "mobile auth", "qr authentication"]
+tags: ["api", "authentication"]
+---
+
+## Overview
+
+Generates a QR code PNG image that encodes the dashboard URL with an embedded access token. Scanning this QR code on a mobile device automatically authenticates the user.
+
+This endpoint is **auth-exempt** — it can be accessed without a token (intended for the initial login flow).
+
+## Response
+
+Returns a PNG image (`image/png` content type) as a streaming response.
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/qr" -o login-qr.png
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/qr");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    // Use url in an <img> tag or download link
+    console.log("QR code blob URL:", url);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get("http://localhost:8000/api/qr")
+    with open("login-qr.png", "wb") as f:
+        f.write(response.content)
+    print("QR code saved to login-qr.png")
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```
+    Binary PNG image (content-type: image/png)
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

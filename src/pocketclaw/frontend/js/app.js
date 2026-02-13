@@ -2,6 +2,9 @@
  * PocketPaw Main Application
  * Alpine.js component for the dashboard
  *
+ * Changes (2026-02-12):
+ * - Call initHashRouter() in init() for hash-based URL routing
+ *
  * Changes (2026-02-05):
  * - MAJOR REFACTOR: Componentized into feature modules using mixin pattern
  * - Extracted features to js/features/: chat, file-browser, reminders, intentions,
@@ -13,31 +16,9 @@
  */
 
 function app() {
-    // Assemble feature states
-    const featureStates = {
-        ...window.PocketPaw.Chat.getState(),
-        ...window.PocketPaw.FileBrowser.getState(),
-        ...window.PocketPaw.Reminders.getState(),
-        ...window.PocketPaw.Intentions.getState(),
-        ...window.PocketPaw.Skills.getState(),
-        ...window.PocketPaw.Transparency.getState(),
-        ...window.PocketPaw.RemoteAccess.getState(),
-        ...window.PocketPaw.MissionControl.getState(),
-        ...window.PocketPaw.Channels.getState()
-    };
-
-    // Assemble feature methods
-    const featureMethods = {
-        ...window.PocketPaw.Chat.getMethods(),
-        ...window.PocketPaw.FileBrowser.getMethods(),
-        ...window.PocketPaw.Reminders.getMethods(),
-        ...window.PocketPaw.Intentions.getMethods(),
-        ...window.PocketPaw.Skills.getMethods(),
-        ...window.PocketPaw.Transparency.getMethods(),
-        ...window.PocketPaw.RemoteAccess.getMethods(),
-        ...window.PocketPaw.MissionControl.getMethods(),
-        ...window.PocketPaw.Channels.getMethods()
-    };
+    // Assemble all registered feature modules via Loader
+    const { state: featureStates, methods: featureMethods } =
+        window.PocketPaw.Loader.assemble();
 
     return {
         // ==================== Core State ====================
@@ -45,35 +26,88 @@ function app() {
         // View state
         view: 'chat',
         showSettings: false,
+        showWelcome: false,
         showScreenshot: false,
         screenshotSrc: '',
+
+        // Settings panel state
+        settingsSection: 'general',
+        settingsMobileView: 'list',
+        settingsSections: [
+            { id: 'general', label: 'General', icon: 'settings' },
+            { id: 'apikeys', label: 'API Keys', icon: 'key' },
+            { id: 'behavior', label: 'Behavior & Safety', icon: 'brain' },
+            { id: 'memory', label: 'Memory', icon: 'database' },
+            { id: 'services', label: 'Search & Services', icon: 'search' },
+            { id: 'system', label: 'System', icon: 'activity' },
+        ],
 
         // Terminal logs
         logs: [],
 
         // System status
         status: {
-            cpu: '—',
-            ram: '—',
-            disk: '—',
-            battery: '—'
+            cpu: '...',
+            ram: '...',
+            disk: '...',
+            battery: '...'
         },
 
         // Settings
         settings: {
-            agentBackend: 'claude_agent_sdk',  // Default: Claude Agent SDK (recommended)
+            agentBackend: 'claude_agent_sdk',
             llmProvider: 'auto',
             anthropicModel: 'claude-sonnet-4-5-20250929',
-            bypassPermissions: false
+            bypassPermissions: false,
+            webSearchProvider: 'tavily',
+            urlExtractProvider: 'auto',
+            injectionScanEnabled: true,
+            injectionScanLlm: false,
+            toolProfile: 'full',
+            planMode: false,
+            planModeTools: 'shell,write_file,edit_file',
+            smartRoutingEnabled: false,
+            modelTierSimple: 'claude-haiku-4-5-20251001',
+            modelTierModerate: 'claude-sonnet-4-5-20250929',
+            modelTierComplex: 'claude-opus-4-6',
+            ttsProvider: 'openai',
+            ttsVoice: 'alloy',
+            sttModel: 'whisper-1',
+            selfAuditEnabled: true,
+            selfAuditSchedule: '0 3 * * *',
+            memoryBackend: 'file',
+            mem0AutoLearn: true,
+            mem0LlmProvider: 'anthropic',
+            mem0LlmModel: 'claude-haiku-4-5-20251001',
+            mem0EmbedderProvider: 'openai',
+            mem0EmbedderModel: 'text-embedding-3-small',
+            mem0VectorStore: 'qdrant',
+            mem0OllamaBaseUrl: 'http://localhost:11434'
         },
 
         // API Keys (not persisted client-side, but we track if saved on server)
         apiKeys: {
             anthropic: '',
-            openai: ''
+            openai: '',
+            tavily: '',
+            brave: '',
+            parallel: '',
+            elevenlabs: '',
+            google_oauth_id: '',
+            google_oauth_secret: '',
+            spotify_client_id: '',
+            spotify_client_secret: ''
         },
         hasAnthropicKey: false,
         hasOpenaiKey: false,
+        hasTavilyKey: false,
+        hasBraveKey: false,
+        hasParallelKey: false,
+        hasElevenlabsKey: false,
+        hasGoogleOAuthId: false,
+        hasGoogleOAuthSecret: false,
+        hasSpotifyClientId: false,
+        hasSpotifyClientSecret: false,
 
         // Spread feature states
         ...featureStates,
@@ -86,14 +120,31 @@ function app() {
         init() {
             this.log('PocketPaw Dashboard initialized', 'info');
 
-            // Handle Auth Token (URL capture)
+            // Handle Auth Token (URL capture → exchange for session token)
             const urlParams = new URLSearchParams(window.location.search);
-            const token = urlParams.get('token');
-            if (token) {
-                localStorage.setItem('pocketpaw_token', token);
-                // Clean URL
+            const masterToken = urlParams.get('token');
+            if (masterToken) {
+                // Clean URL immediately (don't leave master token visible)
                 window.history.replaceState({}, document.title, window.location.pathname);
-                this.log('Auth token captured and stored', 'success');
+                // Store master token immediately as fallback
+                localStorage.setItem('pocketpaw_token', masterToken);
+                // Exchange master token for a time-limited session token (async)
+                fetch('/api/auth/session', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${masterToken}` }
+                }).then(resp => {
+                    if (resp.ok) return resp.json();
+                    return null;
+                }).then(data => {
+                    if (data && data.session_token) {
+                        localStorage.setItem('pocketpaw_token', data.session_token);
+                        this.log('Session token obtained', 'success');
+                    } else {
+                        this.log('Auth token captured', 'info');
+                    }
+                }).catch(() => {
+                    this.log('Auth token captured (session exchange unavailable)', 'info');
+                });
             }
 
             // --- OVERRIDE FETCH FOR AUTH ---
@@ -112,8 +163,8 @@ function app() {
                 const response = await originalFetch(url, options);
 
                 if (response.status === 401 || response.status === 403) {
-                    this.showToast('Session expired. Please re-authenticate.', 'error');
-                    // Optionally redirect to login page (if we had one)
+                    localStorage.removeItem('pocketpaw_token');
+                    this.showToast('Session expired. Please scan the QR code to re-authenticate.', 'error');
                 }
 
                 return response;
@@ -123,10 +174,36 @@ function app() {
             this.setupSocketHandlers();
 
             // Connect WebSocket (singleton - will only connect once)
-            socket.connect();
+            const lastSession = StateManager.load('lastSession');
+            socket.connect(lastSession);
+
+            // Load sessions for sidebar
+            this.loadSessions();
 
             // Start status polling (low frequency)
             this.startStatusPolling();
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', (e) => {
+                // Cmd/Ctrl+N: New chat
+                if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
+                    e.preventDefault();
+                    this.createNewChat();
+                }
+                // Cmd/Ctrl+K: Focus search
+                if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+                    e.preventDefault();
+                    const searchInput = document.querySelector('.session-search-input');
+                    if (searchInput) searchInput.focus();
+                }
+                // Escape: Cancel rename
+                if (e.key === 'Escape' && this.editingSessionId) {
+                    this.cancelRenameSession();
+                }
+            });
+
+            // Initialize hash-based URL routing
+            this.initHashRouter();
 
             // Refresh Lucide icons after initial render
             this.$nextTick(() => {
@@ -151,6 +228,12 @@ function app() {
                 socket.send('get_reminders');
                 socket.send('get_intentions');
                 socket.send('get_skills');
+
+                // Resume last session if WS connect didn't handle it via query param
+                const lastSession = StateManager.load('lastSession');
+                if (lastSession && !this.currentSessionId) {
+                    this.selectSession(lastSession);
+                }
 
                 // Auto-activate agent mode
                 if (this.agentActive) {
@@ -206,6 +289,10 @@ function app() {
             socket.on('connection_info', (data) => this.handleConnectionInfo(data));
             socket.on('system_event', (data) => this.handleSystemEvent(data));
 
+            // Session handlers
+            socket.on('session_history', (data) => this.handleSessionHistory(data));
+            socket.on('new_session', (data) => this.handleNewSession(data));
+
             // Note: Mission Control events come through system_event
             // They are handled in handleSystemEvent based on event_type prefix 'mc_'
         },
@@ -223,33 +310,49 @@ function app() {
          * Handle settings from server (on connect)
          */
         handleSettings(data) {
-            if (data.content) {
-                const serverSettings = data.content;
-                // Apply server settings to frontend state
-                if (serverSettings.agentBackend) {
-                    this.settings.agentBackend = serverSettings.agentBackend;
-                }
-                if (serverSettings.llmProvider) {
-                    this.settings.llmProvider = serverSettings.llmProvider;
-                }
-                if (serverSettings.anthropicModel) {
-                    this.settings.anthropicModel = serverSettings.anthropicModel;
-                }
-                if (serverSettings.bypassPermissions !== undefined) {
-                    this.settings.bypassPermissions = serverSettings.bypassPermissions;
-                }
-                // Store API key availability (for UI feedback)
-                this.hasAnthropicKey = serverSettings.hasAnthropicKey || false;
-                this.hasOpenaiKey = serverSettings.hasOpenaiKey || false;
+            if (!data.content) return;
+            const s = data.content;
 
-                // Log agent status if available (for debugging)
-                if (serverSettings.agentStatus) {
-                    const status = serverSettings.agentStatus;
-                    this.log(`Agent: ${status.backend} (available: ${status.available})`, 'info');
-                    if (status.features && status.features.length > 0) {
-                        this.log(`Features: ${status.features.join(', ')}`, 'info');
-                    }
+            // Data-driven settings sync: map server keys to local settings
+            const SETTINGS_MAP = [
+                'agentBackend', 'llmProvider', 'anthropicModel',
+                'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
+                'injectionScanEnabled', 'injectionScanLlm', 'toolProfile',
+                'planMode', 'planModeTools', 'smartRoutingEnabled',
+                'modelTierSimple', 'modelTierModerate', 'modelTierComplex',
+                'ttsProvider', 'ttsVoice', 'sttModel',
+                'selfAuditEnabled', 'selfAuditSchedule',
+                'memoryBackend', 'mem0AutoLearn', 'mem0LlmProvider',
+                'mem0LlmModel', 'mem0EmbedderProvider', 'mem0EmbedderModel',
+                'mem0VectorStore', 'mem0OllamaBaseUrl'
+            ];
+            for (const key of SETTINGS_MAP) {
+                if (s[key] !== undefined) this.settings[key] = s[key];
+            }
+
+            // API key availability flags
+            const KEY_FLAGS = {
+                hasAnthropicKey: false, hasOpenaiKey: false,
+                hasTavilyKey: false, hasBraveKey: false,
+                hasParallelKey: false, hasElevenlabsKey: false,
+                hasGoogleOAuthId: false, hasGoogleOAuthSecret: false,
+                hasSpotifyClientId: false, hasSpotifyClientSecret: false
+            };
+            for (const flag of Object.keys(KEY_FLAGS)) {
+                this[flag] = s[flag] || false;
+            }
+
+            // Log agent status if available
+            if (s.agentStatus) {
+                this.log(`Agent: ${s.agentStatus.backend} (available: ${s.agentStatus.available})`, 'info');
+                if (s.agentStatus.features?.length > 0) {
+                    this.log(`Features: ${s.agentStatus.features.join(', ')}`, 'info');
                 }
+            }
+
+            // First-run welcome: show if no API key and not previously dismissed
+            if (!this.hasAnthropicKey && !localStorage.getItem('pocketpaw_setup_dismissed')) {
+                this.showWelcome = true;
             }
         },
 
@@ -296,15 +399,18 @@ function app() {
         },
 
         /**
+         * Open settings modal (resets mobile view)
+         */
+        openSettings() {
+            this.settingsMobileView = 'list';
+            this.showSettings = true;
+        },
+
+        /**
          * Save settings
          */
         saveSettings() {
-            socket.saveSettings(
-                this.settings.agentBackend,
-                this.settings.llmProvider,
-                this.settings.anthropicModel,
-                this.settings.bypassPermissions
-            );
+            socket.saveSettings(this.settings);
             this.log('Settings updated', 'info');
             this.showToast('Settings saved', 'success');
         },
@@ -321,8 +427,29 @@ function app() {
 
             socket.saveApiKey(provider, key);
             this.apiKeys[provider] = ''; // Clear input
+
+            // Update local hasKey flags immediately
+            const keyMap = {
+                'anthropic': 'hasAnthropicKey',
+                'openai': 'hasOpenaiKey',
+                'tavily': 'hasTavilyKey',
+                'brave': 'hasBraveKey',
+                'parallel': 'hasParallelKey',
+                'elevenlabs': 'hasElevenlabsKey',
+                'google_oauth_id': 'hasGoogleOAuthId',
+                'google_oauth_secret': 'hasGoogleOAuthSecret',
+                'spotify_client_id': 'hasSpotifyClientId',
+                'spotify_client_secret': 'hasSpotifyClientSecret'
+            };
+            if (keyMap[provider]) {
+                this[keyMap[provider]] = true;
+            }
+
             this.log(`Saved ${provider} API key`, 'success');
             this.showToast(`${provider.charAt(0).toUpperCase() + provider.slice(1)} API key saved!`, 'success');
+
+            // Refresh settings from backend to confirm key was persisted
+            setTimeout(() => socket.send('get_settings'), 500);
         },
 
         /**
@@ -373,7 +500,7 @@ function app() {
             const labels = {
                 'claude_agent_sdk': '🚀 Claude SDK',
                 'pocketpaw_native': '🐾 PocketPaw',
-                'open_interpreter': '🤖 Open Interpreter'
+                'open_interpreter': '🤖 Open Interpreter (Experimental)'
             };
             return labels[this.settings.agentBackend] || this.settings.agentBackend;
         },
@@ -385,7 +512,7 @@ function app() {
             const descriptions = {
                 'claude_agent_sdk': 'Built-in tools: Bash, WebSearch, WebFetch, Read, Write, Edit, Glob, Grep',
                 'pocketpaw_native': 'Anthropic API + Open Interpreter executor. Direct subprocess for speed.',
-                'open_interpreter': 'Standalone agent. Works with local LLMs (Ollama) or cloud APIs.'
+                'open_interpreter': 'Experimental — Standalone agent. Works with local LLMs (Ollama) or cloud APIs.'
             };
             return descriptions[backend] || '';
         },

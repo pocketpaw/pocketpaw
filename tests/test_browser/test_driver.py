@@ -64,7 +64,7 @@ class TestBrowserDriverLaunch:
         mock_pw_cm = MagicMock()
         mock_pw_cm.start = AsyncMock(return_value=mock_playwright)
 
-        with patch("pocketclaw.browser.driver.async_playwright", return_value=mock_pw_cm):
+        with patch("playwright.async_api.async_playwright", return_value=mock_pw_cm):
             await driver.launch()
 
             assert driver._browser is not None
@@ -87,7 +87,7 @@ class TestBrowserDriverLaunch:
         mock_pw_cm = MagicMock()
         mock_pw_cm.start = AsyncMock(return_value=mock_playwright)
 
-        with patch("pocketclaw.browser.driver.async_playwright", return_value=mock_pw_cm):
+        with patch("playwright.async_api.async_playwright", return_value=mock_pw_cm):
             await driver.launch()
 
             # Should call new_context with viewport

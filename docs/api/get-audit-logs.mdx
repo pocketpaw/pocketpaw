@@ -1,0 +1,94 @@
+---
+title: Get Audit Logs
+description: "Retrieve the append-only security audit log entries from PocketPaw. Returns timestamped security events with severity levels (INFO, WARNING, CRITICAL, ALERT) and structured metadata."
+api: GET /api/audit
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["audit logs", "security events", "audit trail"]
+tags: ["api", "security"]
+---
+
+## Overview
+
+Returns recent entries from the append-only audit log (`~/.pocketclaw/audit.jsonl`). The audit log records tool executions, security events, and Guardian AI decisions.
+
+## Parameters
+
+<ParamTable type="query">
+  <Param name="limit" type="integer" default="50">
+    Maximum number of audit entries to return (most recent first).
+  </Param>
+</ParamTable>
+
+## Response
+
+Returns an array of audit entry objects:
+
+<ResponseField name="timestamp" type="string">ISO 8601 timestamp of the event</ResponseField>
+<ResponseField name="event" type="string">Event type (e.g., `tool_executed`, `threat_detected`, `command_blocked`)</ResponseField>
+<ResponseField name="tool" type="string" nullable>Tool name if applicable</ResponseField>
+<ResponseField name="input" type="string" nullable>Tool input or command that was executed</ResponseField>
+<ResponseField name="result" type="string" nullable>Execution result or outcome</ResponseField>
+<ResponseField name="threat_level" type="string" nullable>Threat level if a security check was triggered</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/audit?limit=50" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/audit?limit=50", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/audit",
+        params={"limit": 50},
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    [
+      {
+        "timestamp": "2024-01-15T11:45:00Z",
+        "event": "tool_executed",
+        "tool": "shell",
+        "input": "python script.py",
+        "result": "success",
+        "threat_level": null
+      },
+      {
+        "timestamp": "2024-01-15T11:44:55Z",
+        "event": "command_blocked",
+        "tool": "shell",
+        "input": "rm -rf /",
+        "result": "blocked by Guardian AI",
+        "threat_level": "critical"
+      }
+    ]
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

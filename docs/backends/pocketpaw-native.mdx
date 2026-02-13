@@ -1,0 +1,75 @@
+---
+title: PocketPaw Native
+description: "PocketPaw Native is a custom orchestrator that pairs Anthropic's SDK for reasoning with Open Interpreter for code execution. Offers fine-grained control over the agent pipeline."
+section: Agent Backends
+ogType: article
+keywords: ["pocketpaw native", "custom orchestrator", "anthropic sdk", "code execution", "hybrid"]
+tags: ["backends", "native"]
+---
+
+# PocketPaw Native
+
+The PocketPaw Native backend is a custom orchestrator that combines Anthropic's SDK for reasoning with Open Interpreter for code execution.
+
+## Overview
+
+This backend provides a balanced approach:
+
+- **Anthropic SDK** handles conversation, reasoning, and tool selection
+- **Open Interpreter** handles actual code execution
+- **Custom tools** are registered through PocketPaw's tool registry
+- **MCP tools** are loaded via `_get_mcp_tools()` and registered with the tool registry
+
+## Configuration
+
+```bash
+export POCKETCLAW_AGENT_BACKEND="pocketpaw_native"
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## How It Works
+
+1. The user message is sent to Claude via the Anthropic SDK
+2. Claude decides which tools to call based on the available tool definitions
+3. Tool calls are routed through PocketPaw's `ToolRegistry`
+4. Code execution tools are delegated to Open Interpreter
+5. Results are sent back to Claude for the next reasoning step
+6. The cycle continues until Claude produces a final response
+
+## Tool Registration
+
+The native backend registers all tools from PocketPaw's tool registry:
+
+```python
+# Built-in tools (web_search, image_gen, etc.)
+tools = registry.get_tool_definitions(format="anthropic")
+
+# MCP tools (loaded from configured MCP servers)
+mcp_tools = await _get_mcp_tools()
+tools.extend(mcp_tools)
+```
+
+MCP tools are named with the pattern `mcp_<server>__<tool>` to avoid naming conflicts.
+
+## Tool Policy
+
+The tool policy system filters available tools. The native backend respects the same profiles and allow/deny lists as the Claude Agent SDK backend.
+
+## When to Use
+
+Choose PocketPaw Native when:
+
+- You want more control over the tool execution pipeline
+- You need to customize how tools are registered and executed
+- You want to combine Anthropic's reasoning with Open Interpreter's execution capabilities
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the native extra manually
+pip install pocketpaw[native]
+```
+
+This installs Open Interpreter as an optional dependency.

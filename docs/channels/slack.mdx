@@ -1,0 +1,90 @@
+---
+title: Slack
+description: "Connect PocketPaw to Slack using Socket Mode — no public URL needed. Supports app_mention events, direct messages, and threaded conversations with thread_ts tracking."
+section: Channels
+ogType: article
+keywords: ["slack bot", "socket mode", "slack-bolt", "app mention", "thread support"]
+tags: ["channels", "slack"]
+---
+
+# Slack
+
+PocketPaw integrates with Slack via `slack-bolt` using **Socket Mode**. No public URL or ngrok tunnel needed — the connection is initiated from your machine.
+
+## Setup
+
+<Steps>
+  <Step title="Create a Slack app">
+    1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
+    2. Enable **Socket Mode** under Settings
+    3. Generate an **App-Level Token** with `connections:write` scope
+  </Step>
+  <Step title="Configure bot permissions">
+    Under OAuth & Permissions, add these Bot Token Scopes:
+    - `app_mentions:read`
+    - `chat:write`
+    - `im:history`
+    - `im:read`
+    - `im:write`
+  </Step>
+  <Step title="Enable events">
+    Under Event Subscriptions, subscribe to:
+    - `app_mention`
+    - `message.im`
+  </Step>
+  <Step title="Install to workspace">
+    Install the app to your workspace and copy the Bot User OAuth Token.
+  </Step>
+  <Step title="Configure PocketPaw">
+    ```bash
+    export POCKETCLAW_SLACK_BOT_TOKEN="xoxb-..."
+    export POCKETCLAW_SLACK_APP_TOKEN="xapp-..."
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw --slack
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| Bot token | `POCKETCLAW_SLACK_BOT_TOKEN` | Bot User OAuth Token (xoxb-) |
+| App token | `POCKETCLAW_SLACK_APP_TOKEN` | App-Level Token (xapp-) |
+| Allowed channels | `POCKETCLAW_SLACK_ALLOWED_CHANNEL_IDS` | Comma-separated channel IDs |
+
+## Features
+
+### Socket Mode
+
+Socket Mode means:
+- **No public URL needed** — Works behind firewalls and NAT
+- **No webhook server** — Connection is outbound from your machine
+- **Low latency** — WebSocket-based real-time events
+
+### Thread Support
+
+Responses are sent as thread replies using `thread_ts` metadata. This keeps conversations organized in Slack channels.
+
+### Interaction Types
+
+- **@mention** — Mention the bot in any channel: `@PocketPaw what time is it?`
+- **Direct message** — Send a DM to the bot for private conversations
+
+### Streaming
+
+Slack responses are buffered and the thread message is updated as tokens arrive.
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the Slack extra manually
+pip install pocketpaw[slack]
+```
+
+This installs `slack-bolt` as an optional dependency.

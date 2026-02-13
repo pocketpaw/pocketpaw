@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, List
+from datetime import UTC, datetime
 
 from .driver import BrowserDriver
 
@@ -24,8 +23,8 @@ class BrowserSession:
 
     session_id: str
     driver: BrowserDriver
-    _created_at: datetime = field(default_factory=datetime.now)
-    _last_used_at: datetime = field(default_factory=datetime.now)
+    _created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
+    _last_used_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 
     @property
     def created_at(self) -> datetime:
@@ -39,7 +38,7 @@ class BrowserSession:
 
     def touch(self) -> None:
         """Update last used timestamp."""
-        self._last_used_at = datetime.now()
+        self._last_used_at = datetime.now(tz=UTC)
 
 
 class BrowserSessionManager:
@@ -58,8 +57,8 @@ class BrowserSessionManager:
 
     def __init__(self) -> None:
         """Initialize the session manager."""
-        self._sessions: Dict[str, BrowserSession] = {}
-        self._locks: Dict[str, asyncio.Lock] = {}
+        self._sessions: dict[str, BrowserSession] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
 
     async def _get_lock(self, session_id: str) -> asyncio.Lock:
@@ -127,7 +126,7 @@ class BrowserSessionManager:
         Returns:
             Number of sessions closed
         """
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         sessions_to_close = []
 
         # Find idle sessions
@@ -148,7 +147,7 @@ class BrowserSessionManager:
         for session_id in session_ids:
             await self.close_session(session_id)
 
-    def list_sessions(self) -> List[str]:
+    def list_sessions(self) -> list[str]:
         """Get list of active session IDs."""
         return list(self._sessions.keys())
 
@@ -171,6 +170,14 @@ def get_browser_session_manager() -> BrowserSessionManager:
     global _manager_instance
     if _manager_instance is None:
         _manager_instance = BrowserSessionManager()
+
+        from pocketclaw.lifecycle import register
+
+        def _reset():
+            global _manager_instance
+            _manager_instance = None
+
+        register("browser_sessions", shutdown=_manager_instance.close_all, reset=_reset)
     return _manager_instance
 
 

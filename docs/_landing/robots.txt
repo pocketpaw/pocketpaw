@@ -1,0 +1,14 @@
+# robots.txt — PocketPaw landing page (pocketpaw.xyz)
+# Allow legitimate crawlers, block common scanner paths
+
+User-agent: *
+Allow: /
+Disallow: /wp-admin/
+Disallow: /wp-login.php
+Disallow: /wordpress/
+Disallow: /.env
+Disallow: /admin/
+Disallow: /cmd_sco
+Disallow: /serverConfig.json
+
+Sitemap: https://pocketpaw.xyz/sitemap.xml

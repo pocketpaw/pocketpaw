@@ -1,6 +1,6 @@
 # Tests for Message Bus System
 # Created: 2026-02-02
-# Part of Nanobot Pattern Adoption
+
 
 from unittest.mock import AsyncMock
 

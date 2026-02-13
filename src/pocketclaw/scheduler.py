@@ -7,13 +7,27 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from dateutil import parser as date_parser
+
+from pocketclaw.daemon.triggers import parse_cron_expression
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC).
+
+    Handles legacy naive timestamps stored before UTC migration.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +54,11 @@ def load_reminders() -> list[dict]:
 def save_reminders(reminders: list[dict]) -> None:
     """Save reminders to file."""
     path = get_reminders_path()
-    data = {"reminders": reminders, "updated_at": datetime.now().isoformat()}
+    data = {"reminders": reminders, "updated_at": datetime.now(tz=UTC).isoformat()}
     path.write_text(json.dumps(data, indent=2))
 
 
-def parse_natural_time(text: str) -> Optional[datetime]:
+def parse_natural_time(text: str) -> datetime | None:
     """Parse natural language time expressions.
 
     Supports:
@@ -54,7 +68,7 @@ def parse_natural_time(text: str) -> Optional[datetime]:
     - Absolute dates/times
     """
     text = text.lower().strip()
-    now = datetime.now()
+    now = datetime.now(tz=UTC)
 
     # Pattern: "in X minutes/hours/days"
     relative_match = re.search(r"in\s+(\d+)\s*(minute|min|hour|hr|day|second|sec)s?", text)
@@ -143,10 +157,10 @@ class ReminderScheduler:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.reminders: list[dict] = []
-        self.callback: Optional[Callable] = None
+        self.callback: Callable | None = None
         self._started = False
 
-    def start(self, callback: Optional[Callable] = None):
+    def start(self, callback: Callable | None = None):
         """Start the scheduler and load saved reminders."""
         if self._started:
             return
@@ -154,17 +168,26 @@ class ReminderScheduler:
         self.callback = callback
         self.reminders = load_reminders()
 
+        # Schedule self-audit daemon if enabled
+        self._schedule_self_audit()
+
         # Reschedule active reminders
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         active_reminders = []
 
         for reminder in self.reminders:
-            trigger_time = datetime.fromisoformat(reminder["trigger_at"])
-            if trigger_time > now:
-                self._add_job(reminder)
+            rtype = reminder.get("type", "one-shot")
+            if rtype == "recurring":
+                # Recurring reminders are always re-scheduled
+                self._add_recurring_job(reminder)
                 active_reminders.append(reminder)
             else:
-                logger.info(f"Skipping past reminder: {reminder['id']}")
+                trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
+                if trigger_time > now:
+                    self._add_job(reminder)
+                    active_reminders.append(reminder)
+                else:
+                    logger.info(f"Skipping past reminder: {reminder['id']}")
 
         self.reminders = active_reminders
         save_reminders(self.reminders)
@@ -172,6 +195,32 @@ class ReminderScheduler:
         self.scheduler.start()
         self._started = True
         logger.info(f"Scheduler started with {len(self.reminders)} reminders")
+
+    def _schedule_self_audit(self) -> None:
+        """Schedule the daily self-audit if enabled in settings."""
+        try:
+            from pocketclaw.config import get_settings
+
+            settings = get_settings()
+            if not settings.self_audit_enabled:
+                return
+
+            cron_kwargs = parse_cron_expression(settings.self_audit_schedule)
+
+            async def _run_audit():
+                from pocketclaw.daemon.self_audit import run_self_audit
+
+                await run_self_audit()
+
+            self.scheduler.add_job(
+                _run_audit,
+                trigger=CronTrigger(**cron_kwargs),
+                id="__self_audit__",
+                replace_existing=True,
+            )
+            logger.info("Self-audit scheduled: %s", settings.self_audit_schedule)
+        except Exception as e:
+            logger.warning("Failed to schedule self-audit: %s", e)
 
     def stop(self):
         """Stop the scheduler."""
@@ -191,13 +240,22 @@ class ReminderScheduler:
         if self.callback:
             await self.callback(reminder)
 
-        # Remove from list
-        self.reminders = [r for r in self.reminders if r["id"] != reminder_id]
-        save_reminders(self.reminders)
+        # Push to notification channels
+        try:
+            from pocketclaw.bus.notifier import notify
+
+            await notify(f"Reminder: {reminder['text']}")
+        except Exception:
+            logger.debug("Notifier dispatch failed for reminder", exc_info=True)
+
+        # Recurring reminders stay; one-shot reminders are removed
+        if reminder.get("type", "one-shot") != "recurring":
+            self.reminders = [r for r in self.reminders if r["id"] != reminder_id]
+            save_reminders(self.reminders)
 
     def _add_job(self, reminder: dict):
-        """Add a scheduler job for a reminder."""
-        trigger_time = datetime.fromisoformat(reminder["trigger_at"])
+        """Add a scheduler job for a one-shot reminder."""
+        trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
         self.scheduler.add_job(
             self._trigger_reminder,
             trigger=DateTrigger(run_date=trigger_time),
@@ -206,7 +264,19 @@ class ReminderScheduler:
             replace_existing=True,
         )
 
-    def add_reminder(self, message: str) -> Optional[dict]:
+    def _add_recurring_job(self, reminder: dict):
+        """Add a scheduler job for a recurring reminder."""
+        schedule = reminder.get("schedule", "")
+        cron_kwargs = parse_cron_expression(schedule)
+        self.scheduler.add_job(
+            self._trigger_reminder,
+            trigger=CronTrigger(**cron_kwargs),
+            args=[reminder["id"]],
+            id=reminder["id"],
+            replace_existing=True,
+        )
+
+    def add_reminder(self, message: str) -> dict | None:
         """Add a reminder from a natural language message.
 
         Args:
@@ -226,7 +296,7 @@ class ReminderScheduler:
             "text": reminder_text,
             "original": message,
             "trigger_at": trigger_time.isoformat(),
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(tz=UTC).isoformat(),
         }
 
         self.reminders.append(reminder)
@@ -237,6 +307,45 @@ class ReminderScheduler:
 
         logger.info(f"Added reminder: {reminder_text} at {trigger_time}")
         return reminder
+
+    def add_recurring(self, message: str, schedule: str) -> dict | None:
+        """Add a recurring reminder using a cron expression or preset.
+
+        Args:
+            message: Reminder text.
+            schedule: Cron expression ("0 8 * * *") or preset name ("every_morning_8am").
+
+        Returns:
+            Reminder dict if successful, None if schedule is invalid.
+        """
+        try:
+            parse_cron_expression(schedule)  # validate
+        except ValueError as e:
+            logger.warning(f"Invalid cron schedule: {e}")
+            return None
+
+        reminder = {
+            "id": str(uuid.uuid4()),
+            "text": message,
+            "original": f"recurring: {schedule}",
+            "type": "recurring",
+            "schedule": schedule,
+            "trigger_at": datetime.now(tz=UTC).isoformat(),  # creation time
+            "created_at": datetime.now(tz=UTC).isoformat(),
+        }
+
+        self.reminders.append(reminder)
+        save_reminders(self.reminders)
+
+        if self._started:
+            self._add_recurring_job(reminder)
+
+        logger.info(f"Added recurring reminder: {message} [{schedule}]")
+        return reminder
+
+    def delete_recurring(self, reminder_id: str) -> bool:
+        """Delete a recurring reminder by ID."""
+        return self.delete_reminder(reminder_id)
 
     def delete_reminder(self, reminder_id: str) -> bool:
         """Delete a reminder by ID."""
@@ -263,8 +372,8 @@ class ReminderScheduler:
 
     def format_time_remaining(self, reminder: dict) -> str:
         """Format the time remaining for a reminder."""
-        trigger_time = datetime.fromisoformat(reminder["trigger_at"])
-        delta = trigger_time - datetime.now()
+        trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
+        delta = trigger_time - datetime.now(tz=UTC)
 
         if delta.total_seconds() < 0:
             return "past"
@@ -288,7 +397,7 @@ class ReminderScheduler:
 
 
 # Singleton instance
-_scheduler: Optional[ReminderScheduler] = None
+_scheduler: ReminderScheduler | None = None
 
 
 def get_scheduler() -> ReminderScheduler:
@@ -296,4 +405,12 @@ def get_scheduler() -> ReminderScheduler:
     global _scheduler
     if _scheduler is None:
         _scheduler = ReminderScheduler()
+
+        from pocketclaw.lifecycle import register
+
+        def _reset():
+            global _scheduler
+            _scheduler = None
+
+        register("scheduler", shutdown=_scheduler.stop, reset=_reset)
     return _scheduler

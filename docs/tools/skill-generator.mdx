@@ -1,0 +1,71 @@
+---
+title: Skill Generator
+description: "Create persistent skill definitions that teach PocketPaw new capabilities. The skill generator writes SKILL.md files to ~/.pocketclaw/skills/ and hot-reloads them into the agent context."
+section: Tools
+ogType: article
+keywords: ["skill generator", "custom skills", "skill.md", "agent training", "persistent skills"]
+tags: ["tools", "skills"]
+---
+
+# Skill Generator
+
+The skill generator tool creates persistent skill definitions (SKILL.md files) that extend PocketPaw's capabilities across sessions.
+
+## How It Works
+
+1. The agent uses `skill_gen` to create a new skill
+2. A SKILL.md file is written to `~/.pocketclaw/skills/`
+3. The skill loader is reloaded to pick up the new skill
+4. The skill is available in all future sessions
+
+## What is a Skill?
+
+A skill is a markdown file that provides instructions for the agent on how to handle specific types of requests. Skills can define:
+
+- **Trigger phrases** — When the skill should be activated
+- **Step-by-step instructions** — How to accomplish the task
+- **Tool chains** — Which tools to use and in what order
+- **Output templates** — How to format the response
+
+## Example
+
+```
+User: Create a skill for writing daily standup summaries
+
+Agent: [uses skill_gen tool]
+  → Creates ~/.pocketclaw/skills/daily-standup.md
+```
+
+The generated skill file might contain:
+
+```markdown
+# Daily Standup Summary
+
+## Trigger
+When the user asks for a standup summary or daily update.
+
+## Steps
+1. Check the user's calendar for today's events
+2. Review recent git commits (if in a project directory)
+3. Summarize completed and upcoming tasks
+
+## Output Format
+- **Yesterday**: [completed items]
+- **Today**: [planned items]
+- **Blockers**: [any blockers]
+```
+
+## Skill Storage
+
+Skills are stored in `~/.pocketclaw/skills/`:
+
+```
+~/.pocketclaw/skills/
+├── daily-standup.md
+├── code-review.md
+└── meeting-notes.md
+```
+
+## Policy Group
+
+Belongs to `group:skills`.

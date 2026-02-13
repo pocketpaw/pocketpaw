@@ -1,6 +1,6 @@
 [project]
 name = "pocketpaw"
-version = "0.2.5"
+version = "0.3.0"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -34,48 +34,57 @@ classifiers = [
 ]
 
 dependencies = [
-    # Telegram Bot
-    "python-telegram-bot>=21.0",
-    # Web Server (QR Pairing)
-    "fastapi>=0.109.0",
-    "jinja2>=3.1.0",
-    "uvicorn[standard]>=0.27.0",
-    "qrcode[pil]>=7.4",
-    # System Tools
-    "psutil>=5.9.0",
-    "pyautogui>=0.9.54",
-    "pillow>=10.0.0",
-    # LLM Clients
-    "httpx>=0.26.0",
-    "openai>=1.60.0",
-    "anthropic>=0.45.0",
-    # Agent Backends
-    "claude-agent-sdk>=0.1.30",
-    "open-interpreter>=0.2.0,<0.5.0",
-    # Browser Automation (auto-installs Chromium on first use)
-    "playwright>=1.50.0",
     # Config
     "pydantic>=2.10.0",
     "pydantic-settings>=2.1.0",
-    "python-multipart>=0.0.22",
+    # HTTP client (used everywhere)
+    "httpx>=0.26.0",
+    # LLM Clients
+    "openai>=1.60.0",
+    "anthropic>=0.45.0",
+    # Agent Backend (recommended default)
+    "claude-agent-sdk>=0.1.30",
+    # Logging & CLI
+    "rich>=13.0.0",
     # Scheduling
     "apscheduler>=3.10.0",
     "python-dateutil>=2.8.0",
     # Logging & CLI
     "rich>=13.0.0",
+    # Credential Encryption
+    "cryptography>=42.0",
+    # Image basics
+    "pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-playwright>=0.4.0",
-    "ruff>=0.4.0",
-    "mypy>=1.8.0",
+# --- Feature extras ---
+dashboard = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "jinja2>=3.1.0",
+    "qrcode[pil]>=7.4",
+    "python-multipart>=0.0.22",
+]
+telegram = [
+    "python-telegram-bot>=21.0",
+]
+browser = [
+    "playwright>=1.50.0",
+]
+desktop = [
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+]
+native = [
+    "open-interpreter>=0.2.0,<0.5.0",
 ]
 memory = [
-    "mem0ai>=0.1.0",  # Semantic memory with vector search
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
 ]
+
+# --- Channel extras ---
 discord = [
     "discord.py>=2.3.0",
 ]
@@ -85,11 +94,61 @@ slack = [
 whatsapp-personal = [
     "neonize>=0.3.0",
 ]
+matrix = [
+    "matrix-nio>=0.24.0",
+]
+teams = [
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+]
+gchat = [
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+]
+
+# --- Tool extras ---
+image = [
+    "google-genai>=1.0.0",
+]
+extract = [
+    "html2text>=2020.1.16",
+]
+voice = [
+    "elevenlabs>=1.0.0",
+]
+ocr = [
+    "pytesseract>=0.3.10",
+]
+mcp = [
+    "mcp>=1.0.0",
+]
+
+# --- Composite extras ---
+recommended = [
+    "pocketpaw[dashboard,browser,memory,desktop]",
+]
 channels = [
-    "pocketpaw[discord,slack]",
+    "pocketpaw[discord,slack,telegram]",
+]
+all-channels = [
+    "pocketpaw[telegram,discord,slack,whatsapp-personal,matrix,teams,gchat]",
+]
+all-tools = [
+    "pocketpaw[browser,desktop,image,extract,voice,ocr,mcp,memory]",
+]
+all-backends = [
+    "pocketpaw[native]",
 ]
 all = [
-    "pocketpaw[memory,channels,whatsapp-personal]",
+    "pocketpaw[recommended,all-channels,all-tools,all-backends]",
+]
+dev = [
+    "pocketpaw[all]",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-playwright>=0.4.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
 ]
 
 [project.scripts]
@@ -116,8 +175,9 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
+    "pocketpaw[all]",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",

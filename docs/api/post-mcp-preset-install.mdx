@@ -1,0 +1,98 @@
+---
+title: Install MCP Preset
+description: "Install an MCP server from a preset template with a single API call. The preset provides pre-configured command, arguments, and environment variables for popular MCP servers."
+api: POST /api/mcp/presets/install
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["install preset", "mcp template", "quick setup"]
+tags: ["api", "mcp"]
+---
+
+## Overview
+
+Installs an MCP server from a preset template. Automatically configures the server with the correct command, args, and transport. Optionally tests the connection after installation.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="preset_id" type="string" required>
+    The preset identifier to install (from the presets list).
+  </Param>
+  <Param name="env" type="object">
+    Environment variables required by the preset (e.g., API keys).
+  </Param>
+  <Param name="extra_args" type="array">
+    Additional command-line arguments to append to the preset defaults.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">`"ok"` on success</ResponseField>
+<ResponseField name="connected" type="boolean">Whether the server connected successfully after installation</ResponseField>
+<ResponseField name="tools" type="array">Tools discovered from the newly installed server</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/mcp/presets/install" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "preset_id": "github",
+        "env": {"GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"}
+      }'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/mcp/presets/install", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        preset_id: "github",
+        env: { GITHUB_TOKEN: "ghp_xxxxxxxxxxxx" }
+      })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/mcp/presets/install",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "preset_id": "github",
+            "env": {"GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"}
+        }
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "status": "ok",
+      "connected": true,
+      "tools": ["create_issue", "list_repos", "create_pull_request", "search_code"]
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

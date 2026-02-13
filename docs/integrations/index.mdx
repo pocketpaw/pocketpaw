@@ -1,0 +1,82 @@
+---
+title: Integrations Overview
+description: "PocketPaw integrates with Google Workspace (Gmail, Calendar, Drive, Docs), Spotify, Reddit, and any MCP server. All integrations use OAuth 2.0 for secure authentication."
+section: Integrations
+ogType: article
+keywords: ["integrations", "google workspace", "spotify", "reddit", "mcp", "oauth"]
+tags: ["integrations", "overview"]
+---
+
+# Integrations
+
+PocketPaw integrates with popular services to extend its capabilities beyond chat.
+
+## Available Integrations
+
+<CardGroup>
+  <Card title="OAuth Framework" icon="lucide:key" href="/integrations/oauth">
+    Built-in OAuth 2.0 framework for secure authentication with Google and Spotify.
+  </Card>
+  <Card title="Gmail" icon="lucide:mail" href="/integrations/gmail">
+    Search, read, and send emails through your Gmail account.
+  </Card>
+  <Card title="Google Calendar" icon="lucide:calendar" href="/integrations/calendar">
+    List, create, and search calendar events.
+  </Card>
+  <Card title="Google Drive" icon="lucide:hard-drive" href="/integrations/google-drive">
+    List, download, upload, and share files in Google Drive.
+  </Card>
+  <Card title="Google Docs" icon="lucide:file-text" href="/integrations/google-docs">
+    Read, create, and search Google Docs.
+  </Card>
+  <Card title="Spotify" icon="lucide:music" href="/integrations/spotify">
+    Search music, control playback, and manage playlists.
+  </Card>
+  <Card title="Reddit" icon="lucide:message-circle" href="/integrations/reddit">
+    Search posts, read threads, and browse trending content. No auth needed.
+  </Card>
+  <Card title="MCP Servers" icon="lucide:server" href="/integrations/mcp-servers">
+    Connect Model Context Protocol servers to extend capabilities infinitely.
+  </Card>
+</CardGroup>
+
+## Google Integrations Setup
+
+All Google integrations (Gmail, Calendar, Drive, Docs) share the same OAuth framework:
+
+<Steps>
+  <Step title="Create Google Cloud project">
+    Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project.
+  </Step>
+  <Step title="Enable APIs">
+    Enable the Gmail API, Calendar API, Drive API, and Docs API.
+  </Step>
+  <Step title="Create OAuth credentials">
+    Create OAuth 2.0 client credentials (Desktop app type).
+  </Step>
+  <Step title="Configure PocketPaw">
+    ```bash
+    export POCKETCLAW_GOOGLE_CLIENT_ID="your-client-id"
+    export POCKETCLAW_GOOGLE_CLIENT_SECRET="your-secret"
+    ```
+  </Step>
+  <Step title="Authorize">
+    The first time you use a Google tool, PocketPaw will open a browser window for authorization.
+  </Step>
+</Steps>
+
+## Integration Architecture
+
+```
+┌──────────────────┐
+│  OAuth Framework │ ← Token management, refresh, multi-provider
+├──────────────────┤
+│   Token Store    │ ← ~/.pocketclaw/tokens/
+├──────────────────┤
+│   API Clients    │ ← gmail.py, gcalendar.py, gdrive.py, etc.
+├──────────────────┤
+│   Tool Layer     │ ← tools/builtin/gmail.py, calendar.py, etc.
+├──────────────────┤
+│  Tool Registry   │ ← Registered with policy system
+└──────────────────┘
+```

@@ -1,0 +1,109 @@
+---
+title: Web Dashboard
+description: "PocketPaw's built-in web dashboard provides real-time streaming chat, session management, channel configuration, MCP server controls, and memory settings in a single interface."
+section: Channels
+ogType: article
+keywords: ["web dashboard", "real-time chat", "session management", "admin panel", "websocket"]
+tags: ["channels", "dashboard"]
+---
+
+# Web Dashboard
+
+The web dashboard is PocketPaw's default interface. It provides a real-time chat experience with session management, tool activity monitoring, and full configuration capabilities.
+
+## Starting the Dashboard
+
+```bash
+# Default mode — starts the web dashboard
+pocketpaw
+
+# Specify host and port
+export POCKETCLAW_DASHBOARD_HOST="0.0.0.0"
+export POCKETCLAW_DASHBOARD_PORT=8000
+pocketpaw
+```
+
+The dashboard opens at `http://localhost:8000`.
+
+## Features
+
+### Real-Time Chat
+
+- **Streaming responses** — See the agent's response as it's generated, token by token
+- **Markdown rendering** — Full markdown support with syntax highlighting
+- **Code blocks** — Copy-to-clipboard for code blocks
+- **Session persistence** — Conversations are saved and can be resumed
+
+### Session Management
+
+- **Session list** — Sidebar shows all sessions grouped by time (Today, Yesterday, This Week, etc.)
+- **Search** — Full-text search across all sessions
+- **New session** — Create a new conversation at any time
+- **Delete session** — Remove individual sessions
+- **Title editing** — Rename sessions for easy identification
+
+### Tool Activity Panel
+
+- **Real-time tool tracking** — See which tools are being called
+- **Tool inputs and outputs** — Inspect what data flows through each tool
+- **Timing** — See how long each tool execution takes
+
+### Channel Management
+
+- **Configure channels** — Set tokens and API keys for each channel
+- **Toggle channels** — Start and stop channels without restarting PocketPaw
+- **Status monitoring** — See which channels are running
+- **Running count badge** — Sidebar shows how many channels are active
+
+### Settings Panel
+
+- **Agent backend** — Switch between Claude SDK, Native, and Open Interpreter
+- **API keys** — Configure all API keys
+- **Tool policy** — Set profiles and allow/deny lists
+- **Memory** — Configure Mem0 settings
+
+### MCP Server Management
+
+- **Add servers** — Configure MCP servers with stdio or HTTP transport
+- **Toggle servers** — Enable and disable individual servers
+- **Tool discovery** — See which tools each MCP server provides
+
+## Architecture
+
+The dashboard is built with:
+
+- **Backend**: FastAPI + Jinja2 templates
+- **Frontend**: Vanilla JS/CSS/HTML (no build step)
+- **Communication**: WebSocket for real-time streaming
+- **State**: `StateManager` with localStorage + LRU cache
+
+### WebSocket Protocol
+
+The dashboard communicates with the backend over WebSocket. Key message types:
+
+| Action | Direction | Description |
+|--------|-----------|-------------|
+| `message` | Client → Server | Send a chat message |
+| `response_chunk` | Server → Client | Streaming response chunk |
+| `stream_end` | Server → Client | End of streaming response |
+| `tool_start` | Server → Client | Tool execution started |
+| `tool_result` | Server → Client | Tool execution completed |
+| `switch_session` | Client → Server | Switch to a different session |
+| `new_session` | Client → Server | Create a new session |
+
+### Feature Module System
+
+The frontend uses a feature module auto-discovery system:
+
+```javascript
+// feature-loader.js discovers and loads all feature modules
+// Each module registers itself with:
+window.featureModules = window.featureModules || [];
+window.featureModules.push({
+  name: 'channels',
+  init: () => initChannels(),
+  cleanup: () => cleanupChannels()
+});
+```
+
+This makes it easy to add new frontend features without modifying the core application code.

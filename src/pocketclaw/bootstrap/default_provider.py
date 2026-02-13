@@ -5,7 +5,7 @@ Created: 2026-02-02
 
 from pathlib import Path
 
-from pocketclaw.bootstrap.protocol import BootstrapProviderProtocol, BootstrapContext
+from pocketclaw.bootstrap.protocol import BootstrapContext, BootstrapProviderProtocol
 from pocketclaw.config import get_config_dir
 
 
@@ -48,15 +48,30 @@ class DefaultBootstrapProvider(BootstrapProviderProtocol):
                 "- Prefer code over prose for technical explanations."
             )
 
+        user_file = self.base_path / "USER.md"
+        if not user_file.exists():
+            user_file.write_text(
+                "# User Profile\n"
+                "Name: (your name)\n"
+                "Timezone: UTC\n"
+                "Preferences: (describe your communication preferences)\n"
+            )
+
     async def get_context(self) -> BootstrapContext:
         """Load context from files."""
         identity = (self.base_path / "IDENTITY.md").read_text()
         soul = (self.base_path / "SOUL.md").read_text()
         style = (self.base_path / "STYLE.md").read_text()
 
+        user_profile = ""
+        user_file = self.base_path / "USER.md"
+        if user_file.exists():
+            user_profile = user_file.read_text().strip()
+
         return BootstrapContext(
             name="PocketPaw",
             identity=identity,
             soul=soul,
             style=style,
+            user_profile=user_profile,
         )

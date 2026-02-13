@@ -1,0 +1,129 @@
+---
+title: Tool Policy
+description: "Control which tools PocketPaw can use with three-tier policy: profiles (minimal, coding, full), allow-lists, and deny-lists. Deny always wins. Supports tool groups like group:gmail and group:shell."
+section: Tools
+ogType: article
+keywords: ["tool policy", "access control", "allow list", "deny list", "profiles", "permissions"]
+tags: ["tools", "security", "policy"]
+---
+
+# Tool Policy
+
+The tool policy system controls which tools are available to the agent. It uses profiles, allow lists, and deny lists with a clear precedence order.
+
+## Profiles
+
+Three built-in profiles provide preset tool collections:
+
+| Profile | Tools Included | Use Case |
+|---------|---------------|----------|
+| `minimal` | Memory tools only | Read-only assistant |
+| `coding` | Filesystem + shell + memory | Software development |
+| `full` | All tools, no restrictions | Full capability |
+
+Set the profile:
+
+```bash
+export POCKETCLAW_TOOL_PROFILE="coding"
+```
+
+## Allow and Deny Lists
+
+Fine-tune tool availability with allow and deny lists:
+
+```bash
+# Allow specific tools (added to profile)
+export POCKETCLAW_TOOLS_ALLOW="web_search,image_gen"
+
+# Deny specific tools (takes precedence over everything)
+export POCKETCLAW_TOOLS_DENY="shell,write_file"
+```
+
+### Using Groups
+
+Reference tool groups with the `group:` prefix:
+
+```bash
+# Allow all search tools
+export POCKETCLAW_TOOLS_ALLOW="group:search"
+
+# Deny all media tools
+export POCKETCLAW_TOOLS_DENY="group:media"
+
+# Deny all MCP tools
+export POCKETCLAW_TOOLS_DENY="group:mcp"
+```
+
+## Precedence
+
+The policy system evaluates in this order:
+
+```
+deny > allow > profile
+```
+
+1. If a tool is in the **deny list**, it is always blocked
+2. If a tool is in the **allow list**, it is permitted (even if not in profile)
+3. Otherwise, the **profile** determines availability
+
+## Examples
+
+### Minimal + Web Search
+
+```bash
+export POCKETCLAW_TOOL_PROFILE="minimal"
+export POCKETCLAW_TOOLS_ALLOW="web_search"
+# Result: memory tools + web_search
+```
+
+### Full Except Shell
+
+```bash
+export POCKETCLAW_TOOL_PROFILE="full"
+export POCKETCLAW_TOOLS_DENY="shell"
+# Result: all tools except shell commands
+```
+
+### Coding + Google Tools
+
+```bash
+export POCKETCLAW_TOOL_PROFILE="coding"
+export POCKETCLAW_TOOLS_ALLOW="group:gmail,group:calendar"
+# Result: filesystem + shell + memory + gmail + calendar
+```
+
+## MCP Tool Policy
+
+MCP server tools use the pattern `mcp:<server>:<tool>`:
+
+```bash
+# Allow all tools from a specific server
+export POCKETCLAW_TOOLS_ALLOW="mcp:filesystem:*"
+
+# Deny a specific MCP tool
+export POCKETCLAW_TOOLS_DENY="mcp:github:delete_repo"
+
+# Deny all MCP tools
+export POCKETCLAW_TOOLS_DENY="group:mcp"
+```
+
+## Tool Groups Reference
+
+| Group | Tools |
+|-------|-------|
+| `group:filesystem` | read_file, write_file, list_dir, edit_file |
+| `group:shell` | shell |
+| `group:memory` | save_memory, recall_memory |
+| `group:search` | web_search |
+| `group:media` | image_gen, voice, stt, ocr |
+| `group:gmail` | gmail_search, gmail_read, gmail_send |
+| `group:calendar` | calendar_list, calendar_create, calendar_search |
+| `group:drive` | gdrive_list, gdrive_download, gdrive_upload, gdrive_share |
+| `group:docs` | gdocs_read, gdocs_create, gdocs_search |
+| `group:spotify` | spotify_search, spotify_now_playing, spotify_playback, spotify_playlist |
+| `group:reddit` | reddit_search, reddit_read, reddit_trending |
+| `group:voice` | voice, stt |
+| `group:research` | research |
+| `group:delegation` | delegate |
+| `group:skills` | skill_gen |
+| `group:mcp` | All MCP server tools |

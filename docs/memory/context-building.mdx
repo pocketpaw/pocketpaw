@@ -1,0 +1,88 @@
+---
+title: Context Building
+description: "The AgentContextBuilder assembles PocketPaw's full context from identity, USER.md profile, skills, long-term facts, semantic memories, and session history — prioritized to fit the model's context window."
+section: Memory
+ogType: article
+keywords: ["context building", "system prompt", "context window", "user profile", "prompt assembly"]
+tags: ["memory", "context"]
+---
+
+# Context Building
+
+The `AgentContextBuilder` assembles the agent's full context from multiple sources before each interaction.
+
+## Context Sources
+
+The builder combines these sources in order:
+
+<Steps>
+  <Step title="Identity">
+    The agent's system prompt with personality, capabilities, and behavioral guidelines.
+  </Step>
+  <Step title="User Profile">
+    Content from `~/.pocketclaw/identity/USER.md` — a user-editable file with preferences and background information.
+  </Step>
+  <Step title="Skills">
+    Loaded skill definitions from `~/.pocketclaw/skills/*.md`.
+  </Step>
+  <Step title="Long-term Facts">
+    Extracted facts from previous sessions (e.g., "User prefers Python", "Uses Arch Linux").
+  </Step>
+  <Step title="Semantic Memories">
+    Relevant memories from Mem0, retrieved via semantic search using the current user query.
+  </Step>
+  <Step title="Session History">
+    Recent messages from the current session, newest first, truncated to fit the context window.
+  </Step>
+</Steps>
+
+## Context Window Management
+
+The builder ensures the total context fits within the model's limits:
+
+1. Identity and user profile are always included (highest priority)
+2. Skills are included in full
+3. Long-term facts are included
+4. Semantic memories are included (limited to top-N matches)
+5. Session history fills the remaining space, truncating oldest messages first
+
+## User Profile (USER.md)
+
+PocketPaw automatically creates `~/.pocketclaw/identity/USER.md` on first run. Users can edit this file to provide context:
+
+```markdown
+# About Me
+
+- Name: Alice
+- Role: Software Engineer
+- Languages: Python, TypeScript
+- OS: Arch Linux
+- Preferences: Dark mode, vim keybindings
+- Projects: Working on a web scraping framework
+```
+
+This context helps the agent provide more relevant and personalized responses.
+
+## Sender-Aware Context
+
+When [memory isolation](/memory/memory-isolation) is configured, the context builder adjusts based on who is messaging:
+
+- **Owner** — Full USER.md profile, all long-term facts, and semantic memories are included
+- **External user** — A neutral identity block is injected instead, and only the user's own scoped memories are loaded
+
+The `sender_id` is extracted from inbound message metadata and compared against the configured `owner_id` to determine which identity block to inject.
+
+## Semantic Memory Query
+
+When Mem0 is enabled, the context builder performs a semantic search using the current user message:
+
+```python
+# Simplified context building with Mem0
+memories = await mem0.search(
+    query=user_message,
+    user_id=session_id,
+    limit=5,
+)
+```
+
+This finds memories that are semantically relevant to what the user is currently asking about, even if the exact words differ.

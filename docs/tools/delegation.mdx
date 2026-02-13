@@ -1,0 +1,74 @@
+---
+title: Delegation
+description: "Delegate complex sub-tasks to a separate Claude Code subprocess for parallel execution. The delegation tool spawns an independent agent that works autonomously and returns results to the parent."
+section: Tools
+ogType: article
+keywords: ["task delegation", "sub-agent", "parallel execution", "claude code", "subprocess"]
+tags: ["tools", "automation", "multi-agent"]
+---
+
+# Delegation
+
+The delegation tool allows PocketPaw to spawn sub-agents for parallel task execution. This is useful for complex tasks that can be broken into independent subtasks.
+
+## How It Works
+
+When the agent uses the `delegate` tool:
+
+1. A new Claude subprocess is spawned
+2. The subtask is sent to the subprocess with its own context
+3. The subprocess executes independently
+4. Results are returned to the parent agent
+5. The parent agent synthesizes the results
+
+## Usage
+
+```
+User: Research three different programming languages and compare them
+
+Agent: I'll delegate this to parallel sub-agents.
+  → delegate("Research Python's strengths and ecosystem")
+  → delegate("Research Rust's strengths and ecosystem")
+  → delegate("Research Go's strengths and ecosystem")
+  → [waits for all three]
+  → Synthesizes comparison from results
+```
+
+## Configuration
+
+Delegation uses the same Anthropic API key as the main agent:
+
+```bash
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "delegate",
+  "description": "Spawn a sub-agent to handle a specific subtask",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "The task to delegate to the sub-agent"
+      },
+      "context": {
+        "type": "string",
+        "description": "Additional context for the sub-agent"
+      }
+    },
+    "required": ["task"]
+  }
+}
+```
+
+## Policy Group
+
+Belongs to `group:delegation`.
+
+<Callout type="warning">
+  Each delegated task spawns a new Claude API call. Be mindful of API costs when delegating multiple tasks.
+</Callout>

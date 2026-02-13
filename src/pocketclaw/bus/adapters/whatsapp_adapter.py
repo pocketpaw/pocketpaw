@@ -8,6 +8,7 @@ import logging
 import httpx
 
 from pocketclaw.bus import BaseChannelAdapter, Channel, InboundMessage, OutboundMessage
+from pocketclaw.bus.format import convert_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +86,8 @@ class WhatsAppAdapter(BaseChannelAdapter):
                             logger.debug(f"WhatsApp message from unauthorized number: {sender}")
                             continue
 
-                        content = self._extract_content(msg_data)
-                        if not content:
+                        content, media_paths = await self._extract_content_and_media(msg_data)
+                        if not content and not media_paths:
                             continue
 
                         msg = InboundMessage(
@@ -94,6 +95,7 @@ class WhatsAppAdapter(BaseChannelAdapter):
                             sender_id=sender,
                             chat_id=sender,
                             content=content,
+                            media=media_paths,
                             metadata={
                                 "message_id": msg_data.get("id", ""),
                                 "message_type": msg_data.get("type", "text"),
@@ -109,26 +111,72 @@ class WhatsAppAdapter(BaseChannelAdapter):
         except Exception as e:
             logger.error(f"Error processing WhatsApp webhook: {e}")
 
-    @staticmethod
-    def _extract_content(msg_data: dict) -> str:
-        """Extract text content from a WhatsApp message."""
+    async def _extract_content_and_media(self, msg_data: dict) -> tuple[str, list[str]]:
+        """Extract text content and download media from a WhatsApp message.
+
+        Returns (content_text, list_of_local_media_paths).
+        """
         msg_type = msg_data.get("type", "text")
+        media_paths: list[str] = []
 
         if msg_type == "text":
-            return msg_data.get("text", {}).get("body", "")
-        elif msg_type == "image":
-            caption = msg_data.get("image", {}).get("caption", "")
-            return caption or "[Image received]"
-        elif msg_type == "document":
-            caption = msg_data.get("document", {}).get("caption", "")
-            return caption or "[Document received]"
-        elif msg_type == "audio":
-            return "[Audio message received]"
-        elif msg_type == "video":
-            caption = msg_data.get("video", {}).get("caption", "")
-            return caption or "[Video received]"
-        else:
-            return f"[{msg_type} message received]"
+            return msg_data.get("text", {}).get("body", ""), []
+
+        # Media types that can carry a caption and media_id
+        media_key_map = {
+            "image": "image",
+            "document": "document",
+            "audio": "audio",
+            "video": "video",
+            "sticker": "sticker",
+        }
+        media_key = media_key_map.get(msg_type)
+        if media_key:
+            media_block = msg_data.get(media_key, {})
+            caption = media_block.get("caption", "")
+            media_id = media_block.get("id")
+            mime = media_block.get("mime_type")
+            filename = media_block.get("filename") or f"{msg_type}"
+
+            if media_id:
+                try:
+                    path = await self._download_whatsapp_media(media_id, filename, mime)
+                    if path:
+                        media_paths.append(path)
+                        from pocketclaw.bus.media import build_media_hint
+
+                        caption += build_media_hint([filename])
+                except Exception as e:
+                    logger.warning("Failed to download WhatsApp media: %s", e)
+
+            return caption or f"[{msg_type} received]", media_paths
+
+        return f"[{msg_type} message received]", []
+
+    async def _download_whatsapp_media(
+        self, media_id: str, name: str, mime: str | None
+    ) -> str | None:
+        """Two-step WhatsApp media download: get URL from media_id, then download."""
+        if not self._http:
+            return None
+
+        # Step 1: Get the media URL
+        url_resp = await self._http.get(f"{WHATSAPP_API_BASE}/{media_id}")
+        if url_resp.status_code != 200:
+            logger.warning("WhatsApp media URL fetch failed: %s", url_resp.text)
+            return None
+
+        media_url = url_resp.json().get("url")
+        if not media_url:
+            return None
+
+        # Step 2: Download the actual file (reuse existing auth headers)
+        from pocketclaw.bus.media import get_media_downloader
+
+        downloader = get_media_downloader()
+        return await downloader.download_url_with_auth(
+            media_url, f"Bearer {self.access_token}", name=name, mime=mime
+        )
 
     async def _mark_as_read(self, message_id: str) -> None:
         """Send read receipt for a message."""
@@ -183,6 +231,7 @@ class WhatsAppAdapter(BaseChannelAdapter):
         """Send a text message via the WhatsApp Cloud API."""
         if not self._http:
             return
+        text = convert_markdown(text, self.channel)
         url = f"{WHATSAPP_API_BASE}/{self.phone_number_id}/messages"
         resp = await self._http.post(
             url,

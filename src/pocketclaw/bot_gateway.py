@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_bot(settings: Settings) -> None:
-    """Run the Telegram bot via Nanobot Agent Loop."""
+    """Run the Telegram bot."""
 
     # 1. Initialize Bus
     bus = get_message_bus()
@@ -25,7 +25,7 @@ async def run_bot(settings: Settings) -> None:
     # 3. Initialize Agent Loop
     agent_loop = AgentLoop()
 
-    logger.info("🚀 Starting PocketPaw (Nanobot V2)...")
+    logger.info("🚀 Starting PocketPaw...")
 
     # Start components
     await adapter.start(bus)

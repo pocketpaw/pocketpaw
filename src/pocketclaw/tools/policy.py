@@ -25,8 +25,34 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "group:fs": ["read_file", "write_file", "edit_file", "list_dir"],
     "group:shell": ["shell"],
     "group:browser": ["browser"],
-    "group:memory": ["remember", "recall"],
+    "group:memory": ["remember", "recall", "forget"],
     "group:desktop": ["desktop"],
+    "group:search": ["web_search", "url_extract"],
+    "group:skills": ["create_skill"],
+    "group:gmail": ["gmail_search", "gmail_read", "gmail_send"],
+    "group:calendar": ["calendar_list", "calendar_create", "calendar_prep"],
+    "group:voice": ["text_to_speech", "speech_to_text"],
+    "group:research": ["research"],
+    "group:delegation": ["delegate_claude_code"],
+    "group:drive": ["drive_list", "drive_download", "drive_upload", "drive_share"],
+    "group:docs": ["docs_read", "docs_create", "docs_search"],
+    "group:spotify": [
+        "spotify_search",
+        "spotify_now_playing",
+        "spotify_playback",
+        "spotify_playlist",
+    ],
+    "group:media": ["image_generate", "ocr"],
+    "group:reddit": ["reddit_search", "reddit_read", "reddit_trending"],
+    "group:sessions": [
+        "new_session",
+        "list_sessions",
+        "switch_session",
+        "clear_session",
+        "rename_session",
+        "delete_session",
+    ],
+    "group:mcp": [],  # Placeholder — MCP tools are dynamic per server
 }
 
 # ---------------------------------------------------------------------------
@@ -34,7 +60,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 TOOL_PROFILES: dict[str, dict] = {
     "minimal": {
-        "allow": ["group:memory"],
+        "allow": ["group:memory", "group:sessions"],
     },
     "coding": {
         "allow": ["group:fs", "group:shell", "group:memory"],
@@ -85,6 +111,53 @@ class ToolPolicy:
         """Return only the names that pass the policy."""
         return [n for n in names if self.is_tool_allowed(n)]
 
+    def is_mcp_server_allowed(self, server_name: str) -> bool:
+        """Return True if an MCP server is allowed by the policy.
+
+        MCP servers use the naming convention ``mcp:<server>:*``.
+        A server is blocked if:
+        - ``mcp:<server>:*`` or ``group:mcp`` is in the deny list
+        A server is allowed if:
+        - the profile is 'full' and there's no explicit allow list, OR
+        - ``mcp:<server>:*`` or ``group:mcp`` is in the allow/profile set
+        """
+        wildcard = f"mcp:{server_name}:*"
+        # Check deny
+        if wildcard in self._denied_set or "group:mcp" in self._denied_set:
+            logger.debug("MCP server '%s' blocked by deny list", server_name)
+            return False
+        # Full profile with no allow list → permit all
+        if not self._allowed_set:
+            return True
+        # Check allow
+        if wildcard in self._allowed_set or "group:mcp" in self._allowed_set:
+            return True
+        logger.debug("MCP server '%s' not in allowed set", server_name)
+        return False
+
+    def is_mcp_tool_allowed(self, server_name: str, tool_name: str) -> bool:
+        """Return True if a specific MCP tool is allowed.
+
+        Checks ``mcp:<server>:<tool>``, ``mcp:<server>:*``, and ``group:mcp``.
+        """
+        specific = f"mcp:{server_name}:{tool_name}"
+        wildcard = f"mcp:{server_name}:*"
+        # Check deny (specific first, then wildcard, then group)
+        if (
+            specific in self._denied_set
+            or wildcard in self._denied_set
+            or "group:mcp" in self._denied_set
+        ):
+            return False
+        # Full profile with no allow list → permit all
+        if not self._allowed_set:
+            return True
+        return (
+            specific in self._allowed_set
+            or wildcard in self._allowed_set
+            or "group:mcp" in self._allowed_set
+        )
+
     # ------------------------------------------------------------------
     # Resolution helpers
     # ------------------------------------------------------------------
@@ -106,11 +179,20 @@ class ToolPolicy:
 
     @staticmethod
     def _expand_names(raw: Sequence[str]) -> set[str]:
-        """Expand a list that may contain group references into tool names."""
+        """Expand a list that may contain group references into tool names.
+
+        Dynamic groups (like ``group:mcp``) with empty tool lists are kept
+        as sentinel values so that ``is_mcp_server_allowed`` can check them.
+        """
         result: set[str] = set()
         for item in raw:
             if item.startswith("group:") and item in TOOL_GROUPS:
-                result.update(TOOL_GROUPS[item])
+                members = TOOL_GROUPS[item]
+                if members:
+                    result.update(members)
+                else:
+                    # Keep the group sentinel (e.g. group:mcp with no static tools)
+                    result.add(item)
             else:
                 result.add(item)
         return result

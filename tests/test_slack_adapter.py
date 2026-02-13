@@ -23,10 +23,18 @@ class MockAsyncApp:
         self.client.chat_postMessage = AsyncMock(return_value={"ts": "1234567890.123456"})
         self.client.chat_update = AsyncMock()
         self._event_handlers = {}
+        self._command_handlers = {}
 
     def event(self, event_type):
         def decorator(func):
             self._event_handlers[event_type] = func
+            return func
+
+        return decorator
+
+    def command(self, cmd_name):
+        def decorator(func):
+            self._command_handlers[cmd_name] = func
             return func
 
         return decorator

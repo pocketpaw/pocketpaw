@@ -16,6 +16,7 @@ class BootstrapContext:
     soul: str  # Deeper philosophical core
     style: str  # Communication style guidelines
     knowledge: list[str] = field(default_factory=list)  # Key background info
+    user_profile: str = ""  # USER.md content
 
     def to_system_prompt(self) -> str:
         """Combine fields into a coherent system prompt."""
@@ -32,6 +33,10 @@ class BootstrapContext:
             parts.append("\n# Key Knowledge")
             for item in self.knowledge:
                 parts.append(f"- {item}")
+
+        if self.user_profile:
+            parts.append("\n# User Profile")
+            parts.append(self.user_profile)
 
         return "\n".join(parts)
 

@@ -1,0 +1,82 @@
+---
+title: List Mission Control Tasks
+description: "List all tasks managed by PocketPaw's Mission Control. Filter by status, assigned agent, or tags. Returns task details including priority, dependencies, project association, and execution state."
+api: GET /api/mission-control/tasks
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["list tasks", "task management", "task filtering"]
+tags: ["api", "mission-control"]
+---
+
+## Overview
+
+Returns all tasks managed by Mission Control. Filter by status, assignee, or tags.
+
+## Query Parameters
+
+<ResponseField name="status" type="string">
+  Filter by task status: `inbox`, `assigned`, `in_progress`, `review`, `done`, `blocked`, `skipped`.
+</ResponseField>
+
+<ResponseField name="assignee_id" type="string">
+  Filter tasks assigned to a specific agent.
+</ResponseField>
+
+<ResponseField name="tags" type="string">
+  Comma-separated list of tags to filter by.
+</ResponseField>
+
+<ResponseField name="limit" type="integer" default="100">
+  Maximum number of tasks to return.
+</ResponseField>
+
+## Response
+
+<ResponseField name="tasks" type="array">
+  List of task objects.
+  <ResponseField name="id" type="string">Task UUID.</ResponseField>
+  <ResponseField name="title" type="string">Task title.</ResponseField>
+  <ResponseField name="status" type="string">Current status.</ResponseField>
+  <ResponseField name="priority" type="string">Priority level.</ResponseField>
+  <ResponseField name="assignee_ids" type="array">Assigned agent IDs.</ResponseField>
+  <ResponseField name="blocked_by" type="array">IDs of blocking tasks.</ResponseField>
+  <ResponseField name="project_id" type="string">Associated Deep Work project ID.</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL"]}>
+  <Tab title="cURL">
+```bash
+curl "http://localhost:8000/api/mission-control/tasks?status=in_progress" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "tasks": [
+    {
+      "id": "task-uuid-1",
+      "title": "Set up project structure",
+      "status": "in_progress",
+      "priority": "high",
+      "assignee_ids": ["agent-uuid-1"],
+      "blocked_by": [],
+      "project_id": "project-uuid-1",
+      "task_type": "agent",
+      "estimated_minutes": 30
+    }
+  ]
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

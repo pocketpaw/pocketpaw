@@ -1,0 +1,162 @@
+---
+title: Project Structure
+description: "Explore the PocketPaw codebase layout — src/pocketclaw package structure, bus adapters, agent backends, tool registry, memory stores, and frontend dashboard files."
+section: Getting Started
+ogType: article
+keywords: ["codebase", "directory layout", "source code", "package structure"]
+tags: ["architecture", "development"]
+---
+
+# Project Structure
+
+PocketPaw's codebase follows a modular architecture. Here's how it's organized.
+
+## Top-Level Layout
+
+```text
+pocketpaw/
+├── src/pocketclaw/          # Main Python package
+│   ├── __main__.py          # CLI entry point
+│   ├── config.py            # Pydantic Settings configuration
+│   ├── scheduler.py         # Cron/recurring task scheduler
+│   ├── _compat.py           # Optional dependency helpers
+│   │
+│   ├── agents/              # Agent backends and orchestration
+│   │   ├── loop.py          # Main AgentLoop (message bus consumer)
+│   │   ├── router.py        # AgentRouter (backend selector)
+│   │   ├── claude_sdk.py    # Claude Agent SDK backend
+│   │   ├── pocketpaw_native.py  # Native backend
+│   │   ├── open_interpreter.py  # Open Interpreter backend
+│   │   ├── model_router.py  # Complexity-based model selection
+│   │   ├── plan_mode.py     # Plan approval workflow
+│   │   └── delegation.py    # Sub-agent delegation
+│   │
+│   ├── bus/                 # Event-driven message bus
+│   │   ├── events.py        # InboundMessage, OutboundMessage, SystemEvent
+│   │   ├── message_bus.py   # Pub/sub message bus
+│   │   └── adapters/        # Channel adapters
+│   │       ├── base.py      # BaseChannelAdapter protocol
+│   │       ├── websocket_adapter.py
+│   │       ├── telegram_adapter.py
+│   │       ├── discord_adapter.py
+│   │       ├── slack_adapter.py
+│   │       ├── whatsapp_adapter.py
+│   │       ├── neonize_adapter.py   # WhatsApp Personal
+│   │       ├── signal_adapter.py
+│   │       ├── matrix_adapter.py
+│   │       ├── teams_adapter.py
+│   │       └── gchat_adapter.py
+│   │
+│   ├── tools/               # Tool system
+│   │   ├── registry.py      # ToolRegistry
+│   │   ├── policy.py        # Tool policy (profiles, allow/deny)
+│   │   └── builtin/         # Built-in tools
+│   │       ├── web_search.py
+│   │       ├── image_gen.py
+│   │       ├── voice.py
+│   │       ├── stt.py
+│   │       ├── research.py
+│   │       ├── ocr.py
+│   │       ├── gmail.py
+│   │       ├── calendar.py
+│   │       ├── gdrive.py
+│   │       ├── gdocs.py
+│   │       ├── spotify.py
+│   │       ├── reddit.py
+│   │       ├── skill_gen.py
+│   │       └── delegate.py
+│   │
+│   ├── memory/              # Memory subsystem
+│   │   ├── manager.py       # MemoryManager factory
+│   │   ├── file_store.py    # File-based session storage
+│   │   ├── mem0_store.py    # Mem0 semantic memory
+│   │   └── context_builder.py  # Context assembly
+│   │
+│   ├── security/            # Security subsystem
+│   │   ├── guardian.py      # Guardian AI safety check
+│   │   ├── injection_scanner.py  # Prompt injection detection
+│   │   ├── audit.py         # Append-only audit log
+│   │   ├── audit_cli.py     # CLI security audit
+│   │   └── self_audit.py    # Self-audit daemon (12 checks)
+│   │
+│   ├── browser/             # Browser automation
+│   │   ├── driver.py        # BrowserDriver (Playwright)
+│   │   └── context.py       # Navigation context
+│   │
+│   ├── bootstrap/           # System prompt assembly
+│   │   ├── context.py       # AgentContextBuilder
+│   │   └── default_provider.py  # Default identity + USER.md
+│   │
+│   ├── integrations/        # Third-party integrations
+│   │   ├── oauth.py         # OAuth framework (Google, Spotify)
+│   │   ├── token_store.py   # Token persistence
+│   │   ├── gmail.py         # Gmail API client
+│   │   ├── gcalendar.py     # Google Calendar client
+│   │   ├── gdrive.py        # Google Drive client
+│   │   ├── gdocs.py         # Google Docs client
+│   │   ├── spotify.py       # Spotify API client
+│   │   └── reddit.py        # Reddit client (no auth)
+│   │
+│   ├── mcp/                 # Model Context Protocol
+│   │   ├── config.py        # MCPServerConfig, load_mcp_config
+│   │   └── manager.py       # MCPManager (stdio/HTTP transport)
+│   │
+│   ├── daemon/              # Background services
+│   │   └── self_audit.py    # Self-audit daemon
+│   │
+│   ├── llm/                 # LLM utilities
+│   │   └── router.py        # LLMRouter (standalone chat)
+│   │
+│   └── frontend/            # Web dashboard
+│       ├── templates/       # Jinja2 HTML templates
+│       ├── static/
+│       │   ├── js/
+│       │   │   ├── app.js           # Main application
+│       │   │   ├── state.js         # StateManager
+│       │   │   ├── sessions.js      # Session management
+│       │   │   ├── channels.js      # Channel management
+│       │   │   ├── mcp.js           # MCP server management
+│       │   │   └── feature-loader.js # Feature auto-discovery
+│       │   └── css/
+│       │       └── style.css
+│       ├── dashboard.py     # FastAPI dashboard server
+│       └── web_server.py    # Static file serving
+│
+├── tests/                   # Test suite (1000+ tests)
+│   ├── test_bus.py
+│   ├── test_tool_policy.py
+│   ├── test_discord_adapter.py
+│   ├── test_slack_adapter.py
+│   ├── test_whatsapp_adapter.py
+│   └── ...
+│
+├── pyproject.toml           # Package configuration
+├── CLAUDE.md                # AI coding assistant instructions
+└── README.md                # Project README
+```
+
+## Key Directories
+
+### `agents/` — Agent Backends
+
+Contains the core agent loop and all backend implementations. The `AgentRouter` selects which backend to use based on configuration.
+
+### `bus/` — Message Bus
+
+The heart of PocketPaw. All communication flows through the message bus using three event types: `InboundMessage`, `OutboundMessage`, and `SystemEvent`.
+
+### `tools/` — Tool System
+
+Built-in tools and the tool registry. Each tool implements the `ToolProtocol` and provides both Anthropic and OpenAI schema exports.
+
+### `memory/` — Memory System
+
+Session history (file-based) and long-term semantic memory (Mem0). The context builder assembles memory into the agent's context window.
+
+### `security/` — Security Layer
+
+Multiple security subsystems including Guardian AI, injection scanning, and audit logging.
+
+### `frontend/` — Web Dashboard
+
+Vanilla JS/CSS/HTML served via FastAPI + Jinja2. No build step required. Communicates with the backend over WebSocket.

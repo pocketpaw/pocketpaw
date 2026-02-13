@@ -1,0 +1,84 @@
+---
+title: Get MCP Status
+description: "Retrieve the status of all configured MCP servers in PocketPaw: running state, transport type (stdio/HTTP), available tools count, and last connection timestamp."
+api: GET /api/mcp/status
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["mcp status", "server status", "mcp servers"]
+tags: ["api", "mcp"]
+---
+
+## Overview
+
+Returns the current status of all configured MCP (Model Context Protocol) servers, including their connection state, transport type, and available tools.
+
+## Response
+
+Returns an object keyed by server name:
+
+<ResponseField name="{server_name}" type="object">
+  <ResponseField name="enabled" type="boolean">Whether the server is enabled in configuration</ResponseField>
+  <ResponseField name="connected" type="boolean">Whether the server is currently connected</ResponseField>
+  <ResponseField name="transport" type="string">Transport type: `stdio` or `http`</ResponseField>
+  <ResponseField name="tools" type="array">List of tool names available from this server</ResponseField>
+  <ResponseField name="error" type="string" nullable>Error message if the server failed to connect</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/mcp/status" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/mcp/status", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/mcp/status",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "filesystem": {
+        "enabled": true,
+        "connected": true,
+        "transport": "stdio",
+        "tools": ["read_file", "write_file", "list_directory"],
+        "error": null
+      },
+      "github": {
+        "enabled": false,
+        "connected": false,
+        "transport": "stdio",
+        "tools": [],
+        "error": null
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -211,6 +211,22 @@ class SkillLoader:
 
         return [s for s in self._skills.values() if s.user_invocable]
 
+    def search(self, query: str = "") -> list[Skill]:
+        """Search user-invocable skills by name and description.
+
+        Args:
+            query: Case-insensitive substring to match against name + description.
+                   Empty string returns all invocable skills.
+
+        Returns:
+            List of matching Skill objects.
+        """
+        invocable = self.get_invocable()
+        if not query:
+            return invocable
+        q = query.lower()
+        return [s for s in invocable if q in s.name.lower() or q in s.description.lower()]
+
     def list_names(self) -> list[str]:
         """Get list of all skill names."""
         if not self._loaded:

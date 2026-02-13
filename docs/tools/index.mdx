@@ -1,0 +1,112 @@
+---
+title: Tools Overview
+description: "PocketPaw ships with 50+ built-in tools across search, media, coding, integrations, and memory categories. All tools are governed by a three-tier policy system with deny-wins precedence."
+section: Tools
+ogType: article
+keywords: ["built-in tools", "tool categories", "tool policy", "50+ tools", "search", "media"]
+tags: ["tools", "overview"]
+---
+
+# Tools
+
+PocketPaw ships with 50+ built-in tools organized into categories. Tools are governed by a policy system that controls availability.
+
+<img src="/Tool-system-architecture-and-policy-system.webp" alt="Tool system architecture: built-in tools across eight categories, ToolProtocol interface with dual-schema export, and three-tier policy engine with strict deny-wins precedence." />
+
+## Tool Categories
+
+<CardGroup>
+  <Card title="Web Search" icon="lucide:search" href="/tools/web-search">
+    Search the web via Tavily or Brave Search APIs.
+  </Card>
+  <Card title="Image Generation" icon="lucide:image" href="/tools/image-generation">
+    Generate images with Google Gemini models.
+  </Card>
+  <Card title="Voice & TTS" icon="lucide:volume-2" href="/tools/voice-tts">
+    Text-to-speech with OpenAI and ElevenLabs.
+  </Card>
+  <Card title="Speech to Text" icon="lucide:mic" href="/tools/speech-to-text">
+    Transcribe audio with OpenAI Whisper.
+  </Card>
+  <Card title="Research" icon="lucide:book-open" href="/tools/research">
+    Multi-step web research with automatic summarization.
+  </Card>
+  <Card title="OCR" icon="lucide:scan" href="/tools/ocr">
+    Extract text from images with GPT-4o Vision.
+  </Card>
+  <Card title="Browser" icon="lucide:globe" href="/tools/browser">
+    Playwright-based web automation using accessibility tree.
+  </Card>
+  <Card title="Delegation" icon="lucide:git-branch" href="/tools/delegation">
+    Spawn sub-agents for parallel task execution.
+  </Card>
+  <Card title="Skill Generator" icon="lucide:wand-2" href="/tools/skill-generator">
+    Create custom skill definitions that persist across sessions.
+  </Card>
+  <Card title="Tool Policy" icon="lucide:shield-check" href="/tools/tool-policy">
+    Control which tools are available with profiles and allow/deny lists.
+  </Card>
+  <Card title="Desktop" icon="lucide:monitor" href="/tools/desktop">
+    Screenshot capture and system status monitoring.
+  </Card>
+  <Card title="Session Tools" icon="lucide:history" href="/tools/sessions">
+    Manage conversation sessions through natural language.
+  </Card>
+  <Card title="Custom Tools" icon="lucide:puzzle" href="/tools/custom-tools">
+    Build your own tools with the ToolProtocol interface.
+  </Card>
+</CardGroup>
+
+## Complete Tool List
+
+| Tool | Group | Description |
+|------|-------|-------------|
+| `shell` / `Bash` | `group:shell` | Execute shell commands |
+| `read_file` / `Read` | `group:filesystem` | Read files |
+| `write_file` / `Write` | `group:filesystem` | Write/create files |
+| `edit_file` / `Edit` | `group:filesystem` | Edit existing files |
+| `list_dir` | `group:filesystem` | List directory contents |
+| `web_search` | `group:search` | Web search (Tavily/Brave) |
+| `image_gen` | `group:media` | Image generation (Gemini) |
+| `voice` | `group:voice` | Text-to-speech |
+| `stt` | `group:voice` | Speech-to-text |
+| `ocr` | `group:media` | Image text extraction |
+| `research` | `group:research` | Multi-step web research |
+| `delegate` | `group:delegation` | Sub-agent delegation |
+| `skill_gen` | `group:skills` | Skill file generator |
+| `gmail_search` | `group:gmail` | Search emails |
+| `gmail_read` | `group:gmail` | Read email content |
+| `gmail_send` | `group:gmail` | Send emails |
+| `calendar_list` | `group:calendar` | List calendar events |
+| `calendar_create` | `group:calendar` | Create calendar events |
+| `calendar_search` | `group:calendar` | Search calendar |
+| `gdrive_list` | `group:drive` | List Drive files |
+| `gdrive_download` | `group:drive` | Download from Drive |
+| `gdrive_upload` | `group:drive` | Upload to Drive |
+| `gdrive_share` | `group:drive` | Share Drive files |
+| `gdocs_read` | `group:docs` | Read Google Docs |
+| `gdocs_create` | `group:docs` | Create Google Docs |
+| `gdocs_search` | `group:docs` | Search Google Docs |
+| `spotify_search` | `group:spotify` | Search Spotify |
+| `spotify_now_playing` | `group:spotify` | Current playback |
+| `spotify_playback` | `group:spotify` | Control playback |
+| `spotify_playlist` | `group:spotify` | Manage playlists |
+| `reddit_search` | `group:reddit` | Search Reddit |
+| `reddit_read` | `group:reddit` | Read Reddit threads |
+| `reddit_trending` | `group:reddit` | Trending content |
+| `save_memory` | `group:memory` | Save to long-term memory |
+| `recall_memory` | `group:memory` | Recall from memory |
+| `forget_memory` | `group:memory` | Delete from memory |
+| `new_session` | `group:memory` | Start a new session |
+| `list_sessions` | `group:memory` | List all sessions |
+| `switch_session` | `group:memory` | Switch to another session |
+| `clear_session` | `group:memory` | Clear session history |
+| `rename_session` | `group:memory` | Rename current session |
+| `delete_session` | `group:memory` | Delete current session |
+| `take_screenshot` | `group:desktop` | Capture screen |
+| `get_status` | `group:desktop` | System resource metrics |
+| `gmail_list_labels` | `group:gmail` | List Gmail labels |
+| `gmail_create_label` | `group:gmail` | Create Gmail label |
+| `gmail_modify` | `group:gmail` | Add/remove labels on email |
+| `gmail_trash` | `group:gmail` | Move email to trash |
+| `gmail_batch_modify` | `group:gmail` | Bulk label operations |

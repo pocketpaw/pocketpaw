@@ -1,0 +1,62 @@
+---
+title: Reddit
+description: "Browse Reddit from PocketPaw with no authentication required: search posts across subreddits, read full threads with comments, and discover trending content with the reddit_trending tool."
+section: Integrations
+ogType: article
+keywords: ["reddit integration", "reddit search", "subreddit", "reddit api", "trending posts"]
+tags: ["integrations", "reddit"]
+---
+
+# Reddit
+
+PocketPaw can search Reddit, read threads, and browse trending content. **No authentication required** — Reddit's public API is used.
+
+## Tools
+
+### reddit_search
+
+Search Reddit for posts:
+
+```
+User: Search Reddit for discussions about home automation
+Agent: [uses reddit_search] → Top results from r/homeautomation:
+  1. "Best smart home setup for beginners" (2.4k upvotes)
+  2. "My Home Assistant dashboard" (1.8k upvotes)
+  3. "Zigbee vs Z-Wave in 2024" (956 upvotes)
+```
+
+### reddit_read
+
+Read the full content of a Reddit post including top comments:
+
+```
+User: Read the first post
+Agent: [uses reddit_read] → "Best smart home setup for beginners"
+  by u/smarthomefan | r/homeautomation | 2.4k upvotes
+
+  Content: "I just moved into a new house and want to..."
+
+  Top comments:
+  - "Start with smart lights, they're the easiest..." (342 upvotes)
+  - "I'd recommend Home Assistant for the hub..." (298 upvotes)
+```
+
+### reddit_trending
+
+Get trending posts from specific subreddits or Reddit overall:
+
+```
+User: What's trending on Reddit today?
+Agent: [uses reddit_trending] → Trending on Reddit:
+  1. r/technology: "New breakthrough in quantum computing"
+  2. r/science: "Mars water discovery confirmed"
+  3. r/worldnews: "Climate summit reaches agreement"
+```
+
+## No Authentication Required
+
+Reddit's public API is used for all operations. No API keys or OAuth tokens needed.
+
+## Policy Group
+
+All Reddit tools belong to `group:reddit`.

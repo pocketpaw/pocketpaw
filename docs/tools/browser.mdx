@@ -1,0 +1,86 @@
+---
+title: Browser Automation
+description: "Automate web browsing with PocketPaw using Playwright. The browser tool navigates pages using accessibility tree snapshots instead of screenshots, enabling fast and accurate web interaction."
+section: Tools
+ogType: article
+keywords: ["browser automation", "playwright", "web scraping", "accessibility tree", "headless browser"]
+tags: ["tools", "automation", "browser"]
+---
+
+# Browser Automation
+
+PocketPaw includes a browser automation tool powered by Playwright. Unlike screenshot-based approaches, it uses **accessibility tree snapshots** for reliable, fast interaction.
+
+## How It Works
+
+The `BrowserDriver` provides:
+
+1. **Navigation** — Open URLs and navigate between pages
+2. **Accessibility tree** — Get a structured representation of the page
+3. **Ref map** — Maps reference numbers to CSS selectors for clicking/typing
+4. **Interaction** — Click elements, type text, scroll, using ref numbers
+
+### Why Accessibility Tree?
+
+Instead of taking screenshots and using vision models, PocketPaw reads the page's accessibility tree. This is:
+
+- **Faster** — No image processing or vision API calls
+- **More reliable** — Structured data instead of visual interpretation
+- **Cheaper** — No vision model tokens
+- **Accessible** — Works with any page, including dynamic SPAs
+
+## Usage
+
+```
+User: Go to news.ycombinator.com and find the top story
+
+Agent: [uses browser tool]
+  → navigate to "https://news.ycombinator.com"
+  → accessibility tree shows: [1] "Story Title" link [2] "comments" link ...
+  → click ref 1
+  → read page content
+```
+
+## Configuration
+
+The browser tool uses Playwright. Install it with:
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the browser extra manually
+pip install pocketpaw[browser]
+playwright install chromium
+```
+
+## NavigationResult
+
+Each browser action returns a `NavigationResult`:
+
+```python
+@dataclass
+class NavigationResult:
+    url: str                    # Current URL
+    title: str                  # Page title
+    accessibility_tree: str     # Structured page content
+    refmap: dict[int, str]      # Ref number → CSS selector mapping
+```
+
+## Policy Group
+
+The browser tool belongs to `group:browser`. It's included in the `coding` profile.
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the browser extra manually
+pip install pocketpaw[browser]
+```
+
+This installs `playwright` as an optional dependency. You also need to install browser binaries:
+
+```bash
+playwright install chromium
+```

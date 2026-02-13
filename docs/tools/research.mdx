@@ -1,0 +1,70 @@
+---
+title: Research
+description: "PocketPaw's research tool performs multi-step web research by chaining search, URL extraction, content fetching, and LLM summarization for thorough answers backed by multiple sources."
+section: Tools
+ogType: article
+keywords: ["deep research", "web research", "multi-step", "summarization", "source synthesis"]
+tags: ["tools", "search", "research"]
+---
+
+# Research
+
+The research tool performs multi-step web research by chaining web search, URL extraction, content fetching, and LLM summarization.
+
+## How It Works
+
+The research pipeline:
+
+1. **Web Search** — Searches for the query using the configured search provider
+2. **URL Extraction** — Extracts the most relevant URLs from search results
+3. **Content Fetching** — Downloads and parses the content from each URL
+4. **LLM Summarization** — Summarizes the gathered information into a coherent response
+
+This produces much more thorough results than a single web search, as it actually reads and synthesizes the content of multiple pages.
+
+## Usage
+
+```
+User: Research the current state of quantum computing in 2024
+Agent: [uses research tool]
+  → web_search: "quantum computing 2024 progress"
+  → fetch: https://example.com/quantum-2024
+  → fetch: https://another.com/quantum-advances
+  → summarize: "Based on multiple sources..."
+```
+
+## Configuration
+
+The research tool uses whatever search provider is configured:
+
+```bash
+export POCKETCLAW_WEB_SEARCH_PROVIDER="tavily"
+export POCKETCLAW_TAVILY_API_KEY="tvly-..."
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "research",
+  "description": "Perform deep research on a topic by searching, reading, and synthesizing multiple sources",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The research topic or question"
+      },
+      "depth": {
+        "type": "integer",
+        "description": "Number of sources to read (default: 3)"
+      }
+    },
+    "required": ["query"]
+  }
+}
+```
+
+## Policy Group
+
+Belongs to `group:research`.

@@ -26,12 +26,12 @@ x-transition.opacity
         <div class="flex flex-col gap-3">
             <input
             type="text"
-            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
             x-model="intentionForm.name"
             placeholder="Name (e.g., Morning Standup)"
             />
             <textarea
-            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20 min-h-[80px] resize-y"
+            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40 min-h-[80px] resize-y"
             x-model="intentionForm.prompt"
             placeholder="Prompt (e.g., Good morning! What are your priorities today?)"
             ></textarea>
@@ -58,7 +58,7 @@ x-transition.opacity
             <input
                 x-show="intentionForm.schedulePreset === 'custom'"
                 type="text"
-                class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+                class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 x-model="intentionForm.customCron"
                 placeholder="0 9 * * 1-5"
             />

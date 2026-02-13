@@ -1,0 +1,159 @@
+---
+title: Mission Control
+description: "Mission Control is PocketPaw's multi-agent task management framework: create AI agent teams, assign tasks with dependencies, track progress via activity feeds, and stream execution results in real time."
+section: Advanced
+ogType: article
+keywords: ["mission control", "multi-agent", "task management", "agent orchestration", "team management"]
+tags: ["advanced", "orchestration", "multi-agent"]
+---
+
+# Mission Control
+
+Mission Control is PocketPaw's internal framework for managing AI agents, tasks, documents, and activities. It provides the execution backbone for [Deep Work](/advanced/deep-work) and can also be used directly via the REST API for custom multi-agent workflows.
+
+## Core Concepts
+
+### Agents
+
+An `AgentProfile` represents a virtual team member with a name, role, specialties, and backend configuration.
+
+| Field | Description |
+|-------|-------------|
+| `name` | Agent name (e.g., `backend-dev`) |
+| `role` | Job title (e.g., `Backend Engineer`) |
+| `specialties` | Skills like `["backend", "database", "api"]` |
+| `backend` | Agent backend (default: `claude_agent_sdk`) |
+| `status` | `IDLE`, `ACTIVE`, `BLOCKED`, or `OFFLINE` |
+| `level` | `INTERN` (needs approval), `SPECIALIST` (independent), `LEAD` (full autonomy) |
+
+### Tasks
+
+Tasks track units of work with status, priority, dependencies, and assignees.
+
+| Status | Description |
+|--------|-------------|
+| `INBOX` | New, unassigned |
+| `ASSIGNED` | Has owner(s), not yet started |
+| `IN_PROGRESS` | Being worked on |
+| `REVIEW` | Done, awaiting approval |
+| `DONE` | Completed |
+| `BLOCKED` | Waiting on something |
+| `SKIPPED` | Manually skipped |
+
+Tasks support dependency chains via `blocked_by` (IDs of tasks that must complete first) and `blocks` (IDs of tasks waiting on this one).
+
+### Documents
+
+Documents store deliverables, research notes, and protocols. Types: `DELIVERABLE`, `RESEARCH`, `PROTOCOL`, `TEMPLATE`, `DRAFT`. Documents are auto-versioned on update.
+
+### Messages & Notifications
+
+Tasks have threaded message boards. Messages support `@mentions` — mentioning an agent by name (e.g., `@backend-dev`) creates a notification for that agent. Use `@all` to notify everyone.
+
+### Activity Feed
+
+All changes (task creation, status updates, messages, heartbeats) generate activity entries for a full audit trail.
+
+## Task Execution
+
+When a task is dispatched for execution:
+
+1. A dedicated `AgentRouter` is created with the assigned agent's backend
+2. The task prompt is built with agent identity, project context, PRD, and upstream deliverables
+3. The agent streams output via the router
+4. Output is broadcast as `mc_task_output` WebSocket events
+5. On completion, the output is saved as a `DELIVERABLE` document
+6. The scheduler callback fires to unblock dependent tasks
+
+Up to 5 tasks can run concurrently. Double-dispatch is prevented by a background launch guard.
+
+## Heartbeat System
+
+The `HeartbeatDaemon` periodically checks agent status using APScheduler:
+
+- Default interval: 15 minutes
+- Checks for unread notifications and assigned tasks
+- Updates agent status (`ACTIVE` if urgent work, `IDLE` otherwise)
+- Agents are woken up with 2-second stagger to avoid thundering herd
+
+## REST API
+
+Mission Control exposes a full CRUD API at `/api/mission-control`.
+
+### Agent Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/agents` | List agents (filter by status) |
+| `POST` | `/agents` | Create agent |
+| `GET` | `/agents/{id}` | Get agent details |
+| `PATCH` | `/agents/{id}` | Update agent |
+| `DELETE` | `/agents/{id}` | Delete agent |
+| `POST` | `/agents/{id}/heartbeat` | Record heartbeat |
+
+### Task Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/tasks` | List tasks (filter by status, assignee, tags) |
+| `POST` | `/tasks` | Create task |
+| `GET` | `/tasks/{id}` | Get task with messages |
+| `PATCH` | `/tasks/{id}` | Update task |
+| `DELETE` | `/tasks/{id}` | Delete task |
+| `POST` | `/tasks/{id}/assign` | Assign to agents |
+| `POST` | `/tasks/{id}/status` | Update status |
+| `POST` | `/tasks/{id}/run` | Execute with agent (background) |
+| `POST` | `/tasks/{id}/stop` | Stop running task |
+| `GET` | `/tasks/running` | List currently executing tasks |
+
+### Message & Document Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/tasks/{id}/messages` | Get task messages |
+| `POST` | `/tasks/{id}/messages` | Post message (auto-detects @mentions) |
+| `GET` | `/tasks/{id}/documents` | Get task documents |
+| `GET` | `/documents` | List all documents |
+| `POST` | `/documents` | Create document |
+| `PATCH` | `/documents/{id}` | Update document (auto-increments version) |
+
+### Activity & Reports
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/activity` | Activity feed (filter by agent/task) |
+| `GET` | `/stats` | Counts by status for all entities |
+| `GET` | `/standup` | Generated standup report (markdown) |
+| `GET` | `/notifications` | List notifications |
+
+## Storage
+
+Mission Control uses file-based JSON storage at `~/.pocketclaw/mission_control/`:
+
+```
+mission_control/
+├── agents.json
+├── tasks.json
+├── messages.json
+├── activities.json
+├── documents.json
+├── notifications.json
+└── projects.json
+```
+
+All writes use atomic temp-file-then-rename for crash safety. The storage backend is protocol-based (`MissionControlStoreProtocol`), so it can be swapped for SQLite, Postgres, or any other backend.
+
+## WebSocket Events
+
+Real-time updates for the dashboard:
+
+| Event | Payload |
+|-------|---------|
+| `mc_task_started` | `task_id`, `agent_id`, `agent_name`, `task_title` |
+| `mc_task_output` | `task_id`, `content`, `output_type` (message/tool_use/tool_result) |
+| `mc_task_completed` | `task_id`, `agent_id`, `status`, `error` |
+| `mc_activity_created` | Full activity object |
+
+<Callout type="info">
+  Mission Control is the execution engine behind [Deep Work](/advanced/deep-work). Deep Work adds the planning layer (research, PRD, task breakdown, team assembly) on top of Mission Control's task management.
+</Callout>

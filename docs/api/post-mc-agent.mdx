@@ -1,0 +1,112 @@
+---
+title: Create Mission Control Agent
+description: "Register a new AI agent in PocketPaw's Mission Control with a name, role, specialties, backend configuration, and autonomy level. Agents can be assigned to tasks for autonomous execution."
+api: POST /api/mission-control/agents
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["create agent", "register agent", "agent profile"]
+tags: ["api", "mission-control"]
+---
+
+## Overview
+
+Creates a new agent profile in Mission Control. Agents can be assigned to tasks and execute them autonomously.
+
+## Request Body
+
+<ResponseField name="name" type="string" required>
+  Agent name (lowercase-hyphenated, e.g., `backend-dev`).
+</ResponseField>
+
+<ResponseField name="role" type="string" required>
+  Job title (e.g., `Backend Engineer`).
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  What this agent is responsible for.
+</ResponseField>
+
+<ResponseField name="specialties" type="array">
+  List of skill domains (e.g., `["backend", "database"]`).
+</ResponseField>
+
+<ResponseField name="backend" type="string" default="claude_agent_sdk">
+  Agent backend to use.
+</ResponseField>
+
+<ResponseField name="level" type="string" default="specialist">
+  Autonomy level: `intern`, `specialist`, or `lead`.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/mission-control/agents \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "backend-dev",
+    "role": "Backend Engineer",
+    "description": "Handles API and database work",
+    "specialties": ["backend", "database", "api"]
+  }'
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch('http://localhost:8000/api/mission-control/agents', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    name: 'backend-dev',
+    role: 'Backend Engineer',
+    specialties: ['backend', 'database', 'api'],
+  }),
+});
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.post(
+    "http://localhost:8000/api/mission-control/agents",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+    json={
+        "name": "backend-dev",
+        "role": "Backend Engineer",
+        "specialties": ["backend", "database", "api"],
+    },
+)
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "agent": {
+    "id": "agent-uuid-1",
+    "name": "backend-dev",
+    "role": "Backend Engineer",
+    "status": "idle",
+    "specialties": ["backend", "database", "api"],
+    "backend": "claude_agent_sdk",
+    "level": "specialist",
+    "created_at": "2024-01-15T14:30:00Z"
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -1,36 +1,140 @@
 <!--
   PocketPaw Dashboard - Audit Log Modal
 
+  Changes (2026-02-12):
+  - Redesigned: relative dates, actor/status badges, formatted context
+  - Added search filter + severity pills + clear button
+  - Defensive null checks on all fields
+  - Use UnoCSS theme colors (accent/success/danger/warning) not CSS vars with /opacity
+
   Changes (2026-02-03):
   - Extracted from monolithic index.html
   - Displays security audit log with severity-colored entries
 -->
 <!-- Audit Log Modal -->
 <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showAudit" x-transition.opacity @click.self="showAudit = false">
-    <div class="w-full max-w-[800px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
-        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
-            <h2 class="text-[17px] font-semibold">Audit Log</h2>
-            <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showAudit = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+    <div class="w-full max-w-[860px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+        <!-- Header -->
+        <div class="flex items-center justify-between px-6 py-4 border-b border-[var(--glass-border)] shrink-0">
+            <div class="flex items-center gap-3">
+                <i data-lucide="shield-check" class="w-5 h-5 text-accent"></i>
+                <h2 class="text-[17px] font-semibold">Audit Log</h2>
+                <span x-show="auditLogs.length > 0" class="text-[11px] text-white/30 font-mono" x-text="auditLogs.length + ' entries'"></span>
+            </div>
+            <div class="flex items-center gap-2">
+                <button
+                    x-show="auditLogs.length > 0"
+                    class="px-2.5 py-1.5 text-[11px] font-medium text-white/40 hover:text-danger hover:bg-danger/10 rounded-lg transition-colors"
+                    @click="clearAuditLog()"
+                    title="Clear all entries"
+                >
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5 inline -mt-0.5"></i> Clear
+                </button>
+                <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showAudit = false">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
         </div>
-        <div class="p-6 overflow-y-auto">
-            <div x-show="auditLoading" class="p-8 text-center"><i data-lucide="loader-2" class="w-8 h-8 animate-spin mx-auto text-white/50"></i></div>
-            <div class="flex flex-col gap-2 font-mono text-xs">
-                <template x-for="log in auditLogs" :key="log.id">
-                    <div class="p-3 rounded-lg border-l-[3px] bg-black/30 hover:bg-white/5 transition-colors" 
+
+        <!-- Filter Bar -->
+        <div x-show="!auditLoading && auditLogs.length > 0" class="px-6 pt-4 pb-2 flex flex-col gap-3 shrink-0">
+            <!-- Search -->
+            <div class="relative">
+                <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30"></i>
+                <input
+                    type="text"
+                    x-model="auditFilter"
+                    placeholder="Filter by action, target, actor..."
+                    class="w-full pl-9 pr-4 py-2 bg-black/30 border border-white/8 rounded-xl text-[13px] text-white placeholder-white/30 focus:outline-none focus:border-accent/40 transition-colors"
+                />
+            </div>
+            <!-- Severity pills -->
+            <div class="flex gap-1.5 flex-wrap">
+                <button
+                    class="px-2.5 py-1 text-[11px] font-medium rounded-full transition-colors border"
+                    :class="auditSeverityFilter === 'all' ? 'bg-white/15 text-white border-white/20' : 'text-white/40 border-transparent hover:text-white/60'"
+                    @click="auditSeverityFilter = 'all'"
+                >All</button>
+                <button
+                    class="px-2.5 py-1 text-[11px] font-medium rounded-full transition-colors border"
+                    :class="auditSeverityFilter === 'info' ? 'bg-accent/20 text-accent border-accent/30' : 'text-white/40 border-transparent hover:text-white/60'"
+                    @click="auditSeverityFilter = 'info'"
+                >Info</button>
+                <button
+                    class="px-2.5 py-1 text-[11px] font-medium rounded-full transition-colors border"
+                    :class="auditSeverityFilter === 'warning' ? 'bg-warning/20 text-warning border-warning/30' : 'text-white/40 border-transparent hover:text-white/60'"
+                    @click="auditSeverityFilter = 'warning'"
+                >Warning</button>
+                <button
+                    class="px-2.5 py-1 text-[11px] font-medium rounded-full transition-colors border"
+                    :class="auditSeverityFilter === 'alert' ? 'bg-danger/20 text-danger border-danger/30' : 'text-white/40 border-transparent hover:text-white/60'"
+                    @click="auditSeverityFilter = 'alert'"
+                >Alert</button>
+                <button
+                    class="px-2.5 py-1 text-[11px] font-medium rounded-full transition-colors border"
+                    :class="auditSeverityFilter === 'critical' ? 'bg-danger/20 text-danger border-danger/30' : 'text-white/40 border-transparent hover:text-white/60'"
+                    @click="auditSeverityFilter = 'critical'"
+                >Critical</button>
+            </div>
+        </div>
+
+        <!-- Content -->
+        <div class="px-6 pb-6 pt-2 overflow-y-auto flex-1 min-h-0">
+            <!-- Loading -->
+            <div x-show="auditLoading" class="p-8 text-center">
+                <i data-lucide="loader-2" class="w-8 h-8 animate-spin mx-auto text-white/50"></i>
+            </div>
+
+            <!-- Empty state -->
+            <div x-show="!auditLoading && auditLogs.length === 0" class="flex flex-col items-center justify-center py-12 text-white/50">
+                <i data-lucide="shield-check" class="w-12 h-12 mb-3 opacity-50"></i>
+                <p class="text-sm">No audit entries yet</p>
+                <p class="text-xs mt-1">Security events will be logged here during agent operation</p>
+            </div>
+
+            <!-- No filter results -->
+            <div x-show="!auditLoading && auditLogs.length > 0 && filteredAuditLogs().length === 0" class="flex flex-col items-center justify-center py-12 text-white/40">
+                <i data-lucide="search-x" class="w-8 h-8 mb-3 opacity-50"></i>
+                <p class="text-sm">No entries match your filter</p>
+            </div>
+
+            <!-- Log Entries -->
+            <div x-show="!auditLoading && filteredAuditLogs().length > 0" class="flex flex-col gap-1.5">
+                <template x-for="log in filteredAuditLogs()" :key="log.id">
+                    <div class="p-3 rounded-xl border-l-[3px] bg-black/30 hover:bg-white/5 transition-colors group"
                             :class="{
-                            'border-[var(--info-color)]': log.severity === 'info',
-                            'border-[var(--warning-color)]': log.severity === 'warning',
-                            'border-[var(--danger-color)]': log.severity === 'critical' || log.severity === 'alert'
+                            'border-accent': (log.severity || '') === 'info',
+                            'border-warning': (log.severity || '') === 'warning',
+                            'border-danger': (log.severity || '') === 'critical' || (log.severity || '') === 'alert'
                             }">
-                        <div class="flex justify-between text-white/40 mb-1.5">
-                            <span x-text="new Date(log.timestamp).toLocaleTimeString()"></span>
-                            <span x-text="log.severity.toUpperCase()" :class="log.severity === 'critical' ? 'text-[var(--danger-color)]' : ''"></span>
+                        <!-- Row 1: date + severity + status -->
+                        <div class="flex items-center justify-between mb-1.5">
+                            <span class="text-[11px] text-white/35 font-mono" x-text="formatAuditDate(log.timestamp)"></span>
+                            <div class="flex items-center gap-2">
+                                <span
+                                    class="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
+                                    :class="auditStatusClass(log.status)"
+                                    x-text="log.status || ''"
+                                ></span>
+                                <span
+                                    class="text-[10px] font-semibold uppercase tracking-wider"
+                                    :class="{
+                                        'text-accent': (log.severity || '') === 'info',
+                                        'text-warning': (log.severity || '') === 'warning',
+                                        'text-danger': (log.severity || '') === 'critical' || (log.severity || '') === 'alert'
+                                    }"
+                                    x-text="(log.severity || '').toUpperCase()"
+                                ></span>
+                            </div>
                         </div>
-                        <div class="flex gap-2.5 mb-1.5">
-                            <span class="bg-white/10 px-1.5 py-0.5 rounded text-[var(--accent-color)] font-semibold" x-text="log.action"></span>
-                            <span class="text-white/90" x-text="log.target"></span>
+                        <!-- Row 2: action + target + actor -->
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="bg-accent/15 text-accent px-2 py-0.5 rounded-md text-[11px] font-semibold" x-text="log.action || ''"></span>
+                            <span class="text-[13px] text-white/90 font-medium" x-text="log.target || ''"></span>
+                            <span x-show="log.actor" class="text-[10px] text-white/30 ml-auto" x-text="'by ' + (log.actor || '')"></span>
                         </div>
-                        <div class="text-white/50 break-all" x-text="JSON.stringify(log.context)"></div>
+                        <!-- Row 3: context (if non-empty) -->
+                        <div x-show="formatAuditContext(log.context)" class="mt-1.5 text-[11px] text-white/40 break-all leading-relaxed" x-text="formatAuditContext(log.context)"></div>
                     </div>
                 </template>
             </div>

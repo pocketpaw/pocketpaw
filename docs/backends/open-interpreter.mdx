@@ -1,0 +1,94 @@
+---
+title: Open Interpreter
+description: "The Open Interpreter backend provides standalone code execution with support for local models via Ollama, plus OpenAI and Anthropic APIs. Ideal for offline or air-gapped deployments."
+section: Agent Backends
+ogType: article
+keywords: ["open interpreter", "ollama", "local models", "offline ai", "code execution"]
+tags: ["backends", "open-interpreter"]
+---
+
+# Open Interpreter
+
+The Open Interpreter backend is a standalone execution engine that supports multiple LLM providers, including **Ollama for fully local operation**.
+
+## Overview
+
+Open Interpreter provides:
+
+- **Multi-provider support**: Ollama, OpenAI, Anthropic
+- **Local models**: Run with Ollama for completely local, offline operation
+- **Code execution**: Built-in code interpreter for Python, JavaScript, and shell
+- **Streaming**: Real-time response streaming
+
+## Configuration
+
+```bash
+export POCKETCLAW_AGENT_BACKEND="open_interpreter"
+
+# For Ollama (local)
+export POCKETCLAW_OI_MODEL="ollama/llama3.2"
+
+# For OpenAI
+export POCKETCLAW_OI_MODEL="gpt-4o"
+export POCKETCLAW_OPENAI_API_KEY="sk-..."
+
+# For Anthropic
+export POCKETCLAW_OI_MODEL="claude-sonnet-4-5-20250929"
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## Local Operation with Ollama
+
+For a completely self-contained setup with no external API calls:
+
+<Steps>
+  <Step title="Install Ollama">
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+  </Step>
+  <Step title="Pull a model">
+    ```bash
+    ollama pull llama3.2
+    ```
+  </Step>
+  <Step title="Configure PocketPaw">
+    ```bash
+    export POCKETCLAW_AGENT_BACKEND="open_interpreter"
+    export POCKETCLAW_OI_MODEL="ollama/llama3.2"
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw
+    ```
+  </Step>
+</Steps>
+
+## When to Use
+
+Choose Open Interpreter when:
+
+- You want **fully local operation** with no external API calls
+- You're running on hardware with a capable GPU for local model inference
+- You want to use **open-source models** like Llama, Mistral, or Phi
+- You need **offline capability**
+
+## Limitations
+
+Compared to the Claude Agent SDK backend:
+
+- No native MCP support (tools registered via tool registry)
+- Tool calling depends on the model's capabilities
+- Smaller models may not reliably use complex tool chains
+- No built-in safety hooks (relies on PocketPaw's Guardian AI)
+
+## Installation
+
+Open Interpreter is included in the core installation:
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+```
+
+For Ollama, install it separately from [ollama.com](https://ollama.com).

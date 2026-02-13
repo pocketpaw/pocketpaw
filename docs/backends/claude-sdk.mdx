@@ -1,0 +1,100 @@
+---
+title: Claude Agent SDK
+description: "The Claude Agent SDK backend is the recommended choice: official Anthropic SDK with built-in Bash, Read, Write, and Edit tools, PreToolUse safety hooks, and MCP server integration."
+section: Agent Backends
+ogType: article
+keywords: ["claude agent sdk", "anthropic sdk", "pretooluse hooks", "mcp integration", "recommended"]
+tags: ["backends", "claude"]
+---
+
+# Claude Agent SDK
+
+The Claude Agent SDK backend is the **recommended** choice for PocketPaw. It uses Anthropic's official SDK with built-in tools and native MCP support.
+
+## Overview
+
+This backend leverages the `claude-agent-sdk` package, which provides:
+
+- **Built-in tools**: Bash, Read, Write, Edit — managed by the SDK
+- **Tool execution hooks**: `PreToolUse` hooks for dangerous command blocking
+- **MCP integration**: Native Model Context Protocol server support
+- **Streaming**: Real-time token-by-token response streaming
+
+## Configuration
+
+```bash
+export POCKETCLAW_AGENT_BACKEND="claude_agent_sdk"
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## Built-in Tools
+
+The Claude Agent SDK provides these tools natively:
+
+| SDK Tool | Description |
+|----------|-------------|
+| `Bash` | Execute shell commands |
+| `Read` | Read files from the filesystem |
+| `Write` | Write/create files |
+| `Edit` | Edit existing files with search/replace |
+
+### Tool Name Mapping
+
+The SDK uses capitalized tool names internally. PocketPaw maps these to the policy system's snake_case names:
+
+| SDK Name | Policy Name |
+|----------|------------|
+| `Bash` | `shell` |
+| `Read` | `read_file` |
+| `Write` | `write_file` |
+| `Edit` | `edit_file` |
+
+This mapping is handled by `_SDK_TO_POLICY` in `claude_sdk.py`.
+
+## Safety Hooks
+
+The backend uses `PreToolUse` hooks to intercept and block dangerous commands before execution:
+
+```python
+# Example: Blocking destructive shell commands
+async def pre_tool_use(tool_name, tool_input):
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if is_dangerous_command(command):
+            return BlockedResponse("This command has been blocked for safety.")
+```
+
+## MCP Server Integration
+
+The Claude Agent SDK has native MCP support. PocketPaw's `_get_mcp_servers()` function translates MCP server configurations into the SDK's expected format:
+
+```python
+# MCP servers are loaded from ~/.pocketclaw/mcp.json
+# and passed to the SDK during initialization
+servers = _get_mcp_servers()
+```
+
+MCP tools are subject to the tool policy system. Use `mcp:<server>:*` patterns in allow/deny lists:
+
+```bash
+# Allow all tools from a specific MCP server
+export POCKETCLAW_TOOLS_ALLOW="mcp:filesystem:*"
+
+# Deny all MCP tools
+export POCKETCLAW_TOOLS_DENY="group:mcp"
+```
+
+## Custom Tools
+
+In addition to the SDK's built-in tools, PocketPaw registers its own tools (web_search, image_gen, etc.) as custom tool definitions passed to the SDK.
+
+## Response Format
+
+The backend yields standardized response chunks:
+
+```python
+{"type": "message", "content": "Here's the result..."}
+{"type": "tool_use", "content": "", "metadata": {"tool": "Bash", "input": {"command": "ls"}}}
+{"type": "tool_result", "content": "file1.txt\nfile2.txt", "metadata": {"tool": "Bash"}}
+{"type": "done", "content": ""}
+```

@@ -1,0 +1,85 @@
+---
+title: Start OAuth Flow
+description: "Initiate an OAuth 2.0 authorization flow for connecting third-party services like Google Workspace or Spotify. Redirects to the provider's consent screen and handles the callback."
+api: GET /api/oauth/authorize
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["oauth flow", "authorization", "google oauth", "spotify oauth"]
+tags: ["api", "authentication"]
+---
+
+## Overview
+
+Starts an OAuth 2.0 authorization code flow by redirecting the user to the provider's consent screen. After the user grants permission, they are redirected back to `/oauth/callback` where the authorization code is exchanged for access and refresh tokens.
+
+## Parameters
+
+<ParamTable type="query">
+  <Param name="service" type="string" required enum={["google_gmail", "google_calendar", "google_drive", "google_docs", "spotify"]}>
+    The service to authorize. Each service requests the appropriate OAuth scopes.
+  </Param>
+</ParamTable>
+
+## Response
+
+Returns an HTTP 302 redirect to the provider's consent screen.
+
+## Supported Services
+
+| Service | Provider | Scopes |
+|---------|----------|--------|
+| `google_gmail` | Google | Gmail read, send, modify |
+| `google_calendar` | Google | Calendar read/write |
+| `google_drive` | Google | Drive file access |
+| `google_docs` | Google | Docs read/write |
+| `spotify` | Spotify | Playback, playlists, user info |
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/oauth/authorize?service=google_gmail" \
+      -H "Authorization: Bearer <token>" \
+      -L
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    // Redirect the browser to the OAuth consent screen
+    window.location.href =
+      "http://localhost:8000/api/oauth/authorize?service=google_gmail";
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/oauth/authorize",
+        params={"service": "google_gmail"},
+        headers={"Authorization": "Bearer <token>"},
+        allow_redirects=False
+    )
+    print("Redirect URL:", response.headers["Location"])
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["302"]}>
+  <Tab title="302">
+    ```
+    HTTP/1.1 302 Found
+    Location: https://accounts.google.com/o/oauth2/v2/auth?client_id=...&redirect_uri=...&scope=...
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>
+
+<Callout type="info">
+  Requires `google_client_id` and `google_client_secret` (or `spotify_client_id`/`spotify_client_secret`) to be configured first.
+</Callout>

@@ -1,0 +1,52 @@
+---
+title: Agent Backends
+description: "Choose between three agent backends: Claude Agent SDK (recommended) for production-grade tool use, PocketPaw Native for custom orchestration, or Open Interpreter for local models."
+section: Agent Backends
+ogType: article
+keywords: ["agent backend", "backend selection", "claude sdk", "pocketpaw native", "open interpreter"]
+tags: ["backends", "configuration"]
+---
+
+# Agent Backends
+
+PocketPaw supports three agent backends. Each provides different capabilities and trade-offs.
+
+## Backend Comparison
+
+| Feature | Claude Agent SDK | PocketPaw Native | Open Interpreter |
+|---------|-----------------|-------------------|------------------|
+| Provider | Anthropic Claude | Anthropic + OI | Ollama/OpenAI/Anthropic |
+| Built-in tools | Bash, Read, Write, Edit | Custom + OI execution | OI tools |
+| Local models | No | No | Yes (Ollama) |
+| Code execution | Claude tools | Open Interpreter | Open Interpreter |
+| Streaming | Yes | Yes | Yes |
+| MCP support | Native | Via tool registry | Via tool registry |
+| Recommended for | Coding, complex tasks | Balanced workflows | Local/offline use |
+
+## Switching Backends
+
+Set the backend via environment variable or config:
+
+```bash
+export POCKETCLAW_AGENT_BACKEND="claude_agent_sdk"  # default
+# or
+export POCKETCLAW_AGENT_BACKEND="pocketpaw_native"
+# or
+export POCKETCLAW_AGENT_BACKEND="open_interpreter"
+```
+
+Or change it in the web dashboard's Settings panel.
+
+## Backend Details
+
+<CardGroup>
+  <Card title="Claude Agent SDK" icon="lucide:sparkles" href="/backends/claude-sdk">
+    The recommended backend with native Claude tools and MCP support.
+  </Card>
+  <Card title="PocketPaw Native" icon="lucide:bot" href="/backends/pocketpaw-native">
+    Custom orchestrator combining Anthropic SDK with Open Interpreter.
+  </Card>
+  <Card title="Open Interpreter" icon="lucide:terminal" href="/backends/open-interpreter">
+    Standalone engine with Ollama support for fully local operation.
+  </Card>
+</CardGroup>

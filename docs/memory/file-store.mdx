@@ -1,0 +1,85 @@
+---
+title: File Store
+description: "PocketPaw's default file store saves conversations as JSON in ~/.pocketclaw/memory/ with an indexed session catalog, atomic writes, full-text search, and automatic migration from legacy formats."
+section: Memory
+ogType: article
+keywords: ["file store", "json storage", "session index", "atomic writes", "conversation history"]
+tags: ["memory", "storage"]
+---
+
+# File Store
+
+The file store is PocketPaw's default memory backend. It stores sessions as JSON files in `~/.pocketclaw/memory/`.
+
+## Directory Structure
+
+```
+~/.pocketclaw/memory/
+├── _index.json              # Session index
+├── session_abc123.json      # Session files
+├── session_def456.json
+└── ...
+```
+
+## Session Index
+
+The `_index.json` file provides fast lookups:
+
+```json
+{
+  "session_abc123": {
+    "title": "Python prime number script",
+    "created_at": "2024-01-15T10:30:00Z",
+    "updated_at": "2024-01-15T11:45:00Z",
+    "message_count": 12,
+    "channel": "web"
+  }
+}
+```
+
+### Index Features
+
+- **Atomic writes** — Uses write-then-rename to prevent corruption
+- **Auto-rebuild** — If `_index.json` is missing or corrupted, it's rebuilt from session files
+- **Migration support** — Automatically indexes pre-existing sessions
+
+## Session Format
+
+Each session is a JSON file:
+
+```json
+{
+  "session_id": "session_abc123",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Write a Python script for prime numbers",
+      "timestamp": "2024-01-15T10:30:00Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Here's a Python script that checks for prime numbers...",
+      "timestamp": "2024-01-15T10:30:15Z"
+    }
+  ],
+  "facts": [
+    "User prefers Python",
+    "User is on Linux"
+  ],
+  "metadata": {
+    "channel": "web",
+    "agent_backend": "claude_agent_sdk"
+  }
+}
+```
+
+## Facts Extraction
+
+The file store automatically extracts key facts from conversations (e.g., user preferences, system details) and stores them in the session's `facts` array. These facts are loaded into context for future conversations.
+
+## Storage Considerations
+
+- Each session is a separate file for simple backup and cleanup
+- No database required — just filesystem operations
+- Suitable for single-user, moderate-volume usage
+- For heavy usage, consider enabling Mem0 for semantic search

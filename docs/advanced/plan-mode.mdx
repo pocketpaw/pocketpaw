@@ -1,0 +1,75 @@
+---
+title: Plan Mode
+description: "Plan Mode adds a structured approval workflow to PocketPaw: the agent proposes a multi-step plan, you review it in the dashboard, approve or modify, then the agent executes with full transparency."
+section: Advanced
+ogType: article
+keywords: ["plan mode", "approval workflow", "structured planning", "user consent", "step-by-step"]
+tags: ["advanced", "workflow"]
+---
+
+# Plan Mode
+
+Plan Mode enables a structured planning workflow where the agent creates a plan and waits for user approval before executing.
+
+## How It Works
+
+<Steps>
+  <Step title="User requests a complex task">
+    The agent determines the task requires planning (multiple steps, significant changes).
+  </Step>
+  <Step title="Agent creates a plan">
+    A structured plan is generated with numbered steps, estimated actions, and any risks.
+  </Step>
+  <Step title="Plan is presented for approval">
+    The plan is displayed in a modal in the web dashboard, or as a formatted message in other channels.
+  </Step>
+  <Step title="User approves or modifies">
+    The user can approve the plan, request changes, or reject it entirely.
+  </Step>
+  <Step title="Agent executes">
+    Once approved, the agent executes the plan step by step, reporting progress.
+  </Step>
+</Steps>
+
+## Dashboard Integration
+
+In the web dashboard, Plan Mode uses a dedicated modal:
+
+- **Plan display** — Formatted markdown with steps
+- **Approve button** — Green button to approve and start execution
+- **Reject button** — Red button to cancel
+- **Modify** — Text input to request changes
+
+## WebSocket Protocol
+
+Plan Mode uses WebSocket messages:
+
+```json
+// Agent sends plan for approval
+{"type": "plan_created", "plan": "## Plan\n1. Step one\n2. Step two"}
+
+// User approves
+{"type": "plan_response", "action": "approve"}
+
+// User rejects
+{"type": "plan_response", "action": "reject", "reason": "Too risky"}
+
+// User requests modification
+{"type": "plan_response", "action": "modify", "feedback": "Add error handling"}
+```
+
+## When Plan Mode Activates
+
+Plan Mode is triggered for tasks that:
+
+- Involve multiple file modifications
+- Require irreversible system changes
+- Include complex multi-step workflows
+- The agent determines would benefit from user review
+
+## Use Cases
+
+- **Refactoring code** — Review planned changes before execution
+- **System administration** — Approve infrastructure changes
+- **Multi-file edits** — Verify scope before modifying many files
+- **Research workflows** — Approve the research strategy

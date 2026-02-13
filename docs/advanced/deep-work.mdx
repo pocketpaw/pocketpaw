@@ -1,0 +1,172 @@
+---
+title: Deep Work
+description: "Deep Work is PocketPaw's AI-powered project orchestrator: describe a project and it researches the domain, writes a PRD, decomposes tasks with dependencies, assembles an agent team, and executes autonomously."
+section: Advanced
+ogType: article
+keywords: ["deep work", "project planning", "task decomposition", "multi-agent", "autonomous execution", "prd"]
+tags: ["advanced", "orchestration", "multi-agent"]
+---
+
+# Deep Work
+
+Deep Work is PocketPaw's orchestration system for complex, multi-step projects. Describe what you want to build, and PocketPaw researches the domain, writes a product requirements document, breaks it into tasks with dependencies, assembles an agent team, and executes everything autonomously.
+
+## How It Works
+
+<Steps>
+  <Step title="Describe Your Project">
+    Provide a natural-language description of what you want to build or accomplish.
+  </Step>
+  <Step title="AI Research & Planning">
+    The planner agent researches the domain, writes a PRD, decomposes the project into atomic tasks, and recommends an agent team.
+  </Step>
+  <Step title="Review & Approve">
+    Review the generated plan — tasks, dependencies, time estimates, and team — in the dashboard. Approve when ready.
+  </Step>
+  <Step title="Autonomous Execution">
+    Tasks execute in dependency order. Agent tasks run via Claude, human tasks notify you for manual completion. Progress streams in real time.
+  </Step>
+  <Step title="Completion">
+    When all tasks finish, the project is marked complete and deliverables are saved to disk.
+  </Step>
+</Steps>
+
+## Project Lifecycle
+
+| Status | Description |
+|--------|-------------|
+| `DRAFT` | Project created, not yet planned |
+| `PLANNING` | Planner agent is researching and decomposing tasks |
+| `AWAITING_APPROVAL` | Plan ready for user review |
+| `APPROVED` | User approved, ready to execute |
+| `EXECUTING` | Tasks are running |
+| `PAUSED` | Execution paused by user |
+| `COMPLETED` | All tasks finished |
+| `FAILED` | Planning or execution error |
+
+## Planning Phases
+
+The planner runs four sequential phases, each broadcasting progress events to the dashboard:
+
+### 1. Research
+
+Gathers domain knowledge before planning. Controlled by `research_depth`:
+
+| Depth | Behavior |
+|-------|----------|
+| `none` | Skip research entirely |
+| `quick` | Minimal analysis from existing knowledge, no web search |
+| `standard` | Balanced research, may use web search |
+| `deep` | Thorough research with extensive web searching |
+
+### 2. Product Requirements Document (PRD)
+
+Generates a structured PRD with:
+- Problem statement
+- Scope (in/out)
+- Functional requirements
+- Non-goals
+- Technical constraints
+
+### 3. Task Breakdown
+
+Decomposes the PRD into atomic tasks. Each task includes:
+
+| Field | Description |
+|-------|-------------|
+| `key` | Short unique identifier (e.g., `t1`, `t2`) |
+| `title` | Human-readable name |
+| `description` | Full description with acceptance criteria |
+| `task_type` | `agent`, `human`, or `review` |
+| `priority` | `low`, `medium`, `high`, or `urgent` |
+| `estimated_minutes` | Time estimate (15-120 min range) |
+| `required_specialties` | Skills needed (e.g., `backend`, `frontend`) |
+| `blocked_by_keys` | Dependencies on other tasks |
+
+### 4. Team Assembly
+
+Recommends the minimal set of AI agents needed. Each agent has a name, role, specialties, and backend. Agents are auto-assigned to tasks based on specialty overlap.
+
+## Dependency Scheduling
+
+Tasks execute in dependency order using a topological sort (Kahn's algorithm):
+
+- Tasks with no blockers run first (concurrently)
+- When a task completes, newly unblocked tasks dispatch automatically
+- The scheduler validates the dependency graph for cycles and missing references before execution
+
+```
+Level 0: [t1, t2]        ← no dependencies, run in parallel
+Level 1: [t3, t4]        ← depend only on level 0
+Level 2: [t5]            ← depends on level 1
+```
+
+## Task Types
+
+| Type | Execution |
+|------|-----------|
+| `agent` | Runs via the agent backend (Claude Agent SDK). Output saved as deliverable document. |
+| `human` | Notification sent to your channels. You complete it manually and mark done in the dashboard. |
+| `review` | Quality gate — agent output is ready for your review before dependents proceed. |
+
+## Usage
+
+### Starting a Project
+
+```
+User: Start a deep work project to build a REST API for a recipe management app
+Agent: Starting Deep Work project... researching domain, writing PRD, decomposing tasks.
+```
+
+Or via the REST API:
+
+```bash
+curl -X POST http://localhost:8000/api/deep-work/start \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Build a REST API for recipe management", "research_depth": "standard"}'
+```
+
+### Reviewing the Plan
+
+The dashboard shows:
+- The generated PRD
+- Task list with dependencies visualized as execution levels
+- Estimated total time
+- Recommended agent team
+
+### Controlling Execution
+
+| Action | API Endpoint |
+|--------|-------------|
+| Approve plan | `POST /api/deep-work/projects/{id}/approve` |
+| Pause execution | `POST /api/deep-work/projects/{id}/pause` |
+| Resume execution | `POST /api/deep-work/projects/{id}/resume` |
+| Skip a task | `POST /api/deep-work/projects/{id}/tasks/{task_id}/skip` |
+
+Skipping a task marks it as `SKIPPED` and unblocks dependents.
+
+## Project Directories
+
+Each project gets a working directory at `~/pocketpaw-projects/{project_id}/`. Agent tasks execute within this directory, and deliverables are saved there.
+
+## Recovery
+
+If the server restarts during execution:
+- Projects stuck in `PLANNING` are marked `FAILED`
+- Projects in `EXECUTING` have their in-progress tasks reset and re-dispatched
+
+## WebSocket Events
+
+The dashboard receives real-time updates:
+
+| Event | When |
+|-------|------|
+| `dw_planning_phase` | Each planning phase starts (research, prd, tasks, team) |
+| `dw_planning_complete` | Planning finishes or fails |
+| `mc_task_started` | A task begins executing |
+| `mc_task_output` | Agent produces output (streamed) |
+| `mc_task_completed` | A task finishes |
+
+<Callout type="info">
+  Deep Work builds on top of [Mission Control](/advanced/mission-control) for task storage, agent management, and the execution engine. The two systems are designed to work together.
+</Callout>

@@ -1,0 +1,126 @@
+---
+title: Memory System
+description: "PocketPaw's two-tier memory system combines file-based session storage for conversation history with optional Mem0 semantic memory for auto-learned long-term knowledge."
+section: Core Concepts
+ogType: article
+keywords: ["memory architecture", "session storage", "semantic memory", "mem0", "knowledge base"]
+tags: ["memory", "architecture"]
+---
+
+# Memory System
+
+PocketPaw has a two-tier memory system: **file-based session storage** for conversation history, and optional **Mem0 semantic memory** for long-term recall.
+
+## Session Storage (File Store)
+
+The default memory backend stores sessions as JSON files in `~/.pocketclaw/memory/`:
+
+```
+~/.pocketclaw/memory/
+├── _index.json              # Session index (titles, timestamps)
+├── session_abc123.json      # Individual session files
+├── session_def456.json
+└── ...
+```
+
+### Session Index
+
+The `_index.json` file provides fast lookups without reading every session file:
+
+```json
+{
+  "session_abc123": {
+    "title": "Python script for prime numbers",
+    "created_at": "2024-01-15T10:30:00Z",
+    "updated_at": "2024-01-15T11:45:00Z",
+    "message_count": 12,
+    "channel": "web"
+  }
+}
+```
+
+The index supports:
+- **Searching** sessions by title or content
+- **Listing** recent sessions
+- **Grouping** sessions by time (Today, Yesterday, This Week, etc.)
+- **Auto-rebuild** if the index is missing or corrupted
+
+### Session Files
+
+Each session file contains the full conversation history:
+
+```json
+{
+  "session_id": "session_abc123",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Write a Python script for prime numbers",
+      "timestamp": "2024-01-15T10:30:00Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Here's a Python script...",
+      "timestamp": "2024-01-15T10:30:15Z"
+    }
+  ],
+  "facts": ["User prefers Python", "Uses Linux"],
+  "metadata": {
+    "channel": "web",
+    "agent_backend": "claude_agent_sdk"
+  }
+}
+```
+
+## Mem0 Semantic Memory
+
+For long-term recall, PocketPaw integrates with [Mem0](https://mem0.ai) — a semantic memory layer that learns from conversations.
+
+### How It Works
+
+1. **Auto-learn**: After each agent response, PocketPaw feeds the conversation to Mem0 in a background task
+2. **Semantic search**: When building context for a new message, Mem0 is queried to find relevant memories
+3. **Context injection**: Matching memories are injected into the system prompt
+
+### Configuration
+
+```bash
+# Enable auto-learning
+export POCKETCLAW_MEM0_AUTO_LEARN=true
+
+# LLM provider for Mem0's processing
+export POCKETCLAW_MEM0_LLM_PROVIDER="ollama"
+export POCKETCLAW_MEM0_LLM_MODEL="llama3.2"
+
+# Embedder for semantic search
+export POCKETCLAW_MEM0_EMBEDDER_PROVIDER="ollama"
+export POCKETCLAW_MEM0_EMBEDDER_MODEL="nomic-embed-text"
+
+# Vector store
+export POCKETCLAW_MEM0_VECTOR_STORE="qdrant"
+```
+
+### Supported Providers
+
+| Component | Providers |
+|-----------|-----------|
+| LLM | Ollama, Anthropic, OpenAI |
+| Embedder | Ollama, OpenAI |
+| Vector Store | Qdrant (default), Chroma |
+
+<Callout type="info">
+  If using Ollama as the LLM provider for Mem0, no API key is needed. This is the recommended setup for fully local operation.
+</Callout>
+
+## Context Building
+
+The `AgentContextBuilder` assembles the agent's context from multiple sources:
+
+1. **Identity** — System prompt with agent personality and capabilities
+2. **User profile** — From `~/.pocketclaw/identity/USER.md`
+3. **Session history** — Recent messages from the current session
+4. **Long-term facts** — Extracted facts from previous sessions
+5. **Semantic memories** — Relevant memories from Mem0 (based on the current query)
+6. **Skills** — Loaded skill definitions from `~/.pocketclaw/skills/`
+
+The context builder ensures the total context fits within the model's context window by truncating older messages first.

@@ -1,0 +1,78 @@
+---
+title: Trigger Self-Audit
+description: "Trigger an immediate run of PocketPaw's self-audit daemon. Executes all 12 background security and operational checks and saves a new report accessible via the audit reports endpoint."
+api: POST /api/self-audit/run
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["trigger audit", "run daemon", "immediate check"]
+tags: ["api", "security"]
+---
+
+## Overview
+
+Triggers an immediate run of the self-audit daemon's 12 checks and returns the full report. The report is also saved to disk for future retrieval via the reports endpoint.
+
+## Response
+
+Returns the full audit report (same format as the individual report endpoint):
+
+<ResponseField name="date" type="string">Today's date</ResponseField>
+<ResponseField name="total" type="integer">Total checks executed (always 12)</ResponseField>
+<ResponseField name="passed" type="integer">Number of passing checks</ResponseField>
+<ResponseField name="issues" type="integer">Number of issues found</ResponseField>
+<ResponseField name="checks" type="array">Detailed results array</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/self-audit/run" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/self-audit/run", {
+      method: "POST",
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/self-audit/run",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "date": "2024-01-15",
+      "total": 12,
+      "passed": 11,
+      "issues": 1,
+      "checks": [
+        {"name": "config_permissions", "passed": true, "message": "OK", "severity": "info"},
+        {"name": "audit_log_integrity", "passed": true, "message": "OK", "severity": "info"},
+        {"name": "memory_store_health", "passed": false, "message": "Qdrant unreachable", "severity": "warning"}
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

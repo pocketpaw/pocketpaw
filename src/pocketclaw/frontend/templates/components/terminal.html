@@ -10,6 +10,12 @@
 <!-- Terminal View -->
 <div class="flex-1 flex flex-col pt-24 px-4 md:px-8 pb-8 overflow-hidden bg-black font-mono" x-show="view === 'terminal'">
     <div class="terminal-output flex-1 overflow-y-auto text-[12px] md:text-[13px] text-[#BBB] leading-relaxed space-y-1" x-ref="terminal">
+    <!-- Empty state -->
+    <div x-show="logs.length === 0" class="flex flex-col items-center justify-center h-full text-white/30">
+        <i data-lucide="terminal" class="w-12 h-12 mb-3 opacity-50"></i>
+        <p class="text-sm">No logs yet</p>
+        <p class="text-xs mt-1">System and agent events will appear here</p>
+    </div>
     <template x-for="(log, index) in logs" :key="index">
         <div class="flex gap-3" :class="'term-' + log.level">
         <span class="text-[#555] whitespace-nowrap" x-text="log.time"></span>

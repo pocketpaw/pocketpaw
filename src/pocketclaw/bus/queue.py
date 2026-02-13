@@ -4,10 +4,10 @@ Created: 2026-02-02
 """
 
 import asyncio
-from typing import Callable, Awaitable, List
 import logging
+from collections.abc import Awaitable, Callable
 
-from pocketclaw.bus.events import InboundMessage, OutboundMessage, SystemEvent, Channel
+from pocketclaw.bus.events import Channel, InboundMessage, OutboundMessage, SystemEvent
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class MessageBus:
         """Consume the next inbound message (used by agent loop)."""
         try:
             return await asyncio.wait_for(self._inbound.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
     def inbound_pending(self) -> int:
@@ -95,7 +95,15 @@ class MessageBus:
 
         # Fan out to all subscribers
         tasks = [sub(message) for sub in subscribers]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(
+                    "Outbound subscriber %d for %s failed: %s",
+                    i,
+                    message.channel.value,
+                    result,
+                )
 
     async def broadcast_outbound(
         self, message: OutboundMessage, exclude: Channel | None = None
@@ -125,7 +133,15 @@ class MessageBus:
     async def publish_system(self, event: SystemEvent) -> None:
         """Publish a system event."""
         tasks = [sub(event) for sub in self._system_subscribers]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(
+                    "System subscriber %d failed for '%s': %s",
+                    i,
+                    event.event_type,
+                    result,
+                )
 
     # =========================================================================
     # Lifecycle
@@ -149,4 +165,12 @@ def get_message_bus() -> MessageBus:
     global _bus
     if _bus is None:
         _bus = MessageBus()
+
+        from pocketclaw.lifecycle import register
+
+        def _reset():
+            global _bus
+            _bus = None
+
+        register("message_bus", reset=_reset)
     return _bus

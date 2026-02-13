@@ -127,3 +127,281 @@ body {
   from { opacity: 0; transform: scale(0.9); }
   to { opacity: 1; transform: scale(1); }
 }
+
+/* =====================================================
+   Settings Panel (Notion-style two-column)
+   ===================================================== */
+
+/* Sidebar nav */
+.settings-nav {
+  width: 100%;
+  border-right: none;
+}
+.settings-nav.is-hidden {
+  display: none;
+}
+.settings-nav.is-visible {
+  display: block;
+}
+@media (min-width: 768px) {
+  .settings-nav,
+  .settings-nav.is-hidden,
+  .settings-nav.is-visible {
+    display: block !important;
+    width: 200px !important;
+    border-right: 1px solid var(--glass-border) !important;
+  }
+}
+
+/* Content area */
+.settings-content.is-hidden {
+  display: none;
+}
+.settings-content.is-visible {
+  display: block;
+}
+@media (min-width: 768px) {
+  .settings-content,
+  .settings-content.is-hidden,
+  .settings-content.is-visible {
+    display: block !important;
+  }
+}
+
+/* Nav items */
+.settings-nav-item {
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* Mobile: larger tap targets + chevron hint */
+@media (max-width: 767px) {
+  .settings-nav-item {
+    padding: 12px 16px;
+    font-size: 15px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0;
+    margin-bottom: 0;
+  }
+  .settings-nav-item::after {
+    content: '\203A';
+    margin-left: auto;
+    font-size: 20px;
+    opacity: 0.3;
+    font-weight: 300;
+  }
+}
+
+/* =====================================================
+   Channels Panel (Two-column, mirrors Settings)
+   ===================================================== */
+
+/* Sidebar nav */
+.channels-nav {
+  width: 100%;
+  border-right: none;
+}
+.channels-nav.is-hidden {
+  display: none;
+}
+.channels-nav.is-visible {
+  display: block;
+}
+@media (min-width: 768px) {
+  .channels-nav,
+  .channels-nav.is-hidden,
+  .channels-nav.is-visible {
+    display: block !important;
+    width: 180px !important;
+    border-right: 1px solid var(--glass-border) !important;
+  }
+}
+
+/* Content area */
+.channels-content.is-hidden {
+  display: none;
+}
+.channels-content.is-visible {
+  display: block;
+}
+@media (min-width: 768px) {
+  .channels-content,
+  .channels-content.is-hidden,
+  .channels-content.is-visible {
+    display: block !important;
+  }
+}
+
+/* Nav items */
+.channels-nav-item {
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* Mobile: larger tap targets + chevron hint */
+@media (max-width: 767px) {
+  .channels-nav-item {
+    padding: 12px 16px;
+    font-size: 15px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0;
+    margin-bottom: 0;
+  }
+  .channels-nav-item::after {
+    content: '\203A';
+    margin-left: auto;
+    font-size: 20px;
+    opacity: 0.3;
+    font-weight: 300;
+  }
+}
+
+/* =====================================================
+   API Key Help Links
+   ===================================================== */
+.api-key-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-color);
+  text-decoration: none;
+  opacity: 0.8;
+  transition: opacity 0.15s ease;
+}
+.api-key-help:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+/* =====================================================
+   Chat Markdown Content
+   ===================================================== */
+.messages {
+  overflow-x: hidden;
+}
+.message-content-wrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  word-break: break-word;
+}
+.message-content-wrapper p {
+  margin: 0 0 0.5em;
+}
+.message-content-wrapper p:last-child {
+  margin-bottom: 0;
+}
+.message-content-wrapper h1,
+.message-content-wrapper h2,
+.message-content-wrapper h3,
+.message-content-wrapper h4,
+.message-content-wrapper h5,
+.message-content-wrapper h6 {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.message-content-wrapper h1 { font-size: 1.3em; }
+.message-content-wrapper h2 { font-size: 1.15em; }
+.message-content-wrapper h3 { font-size: 1.05em; }
+.message-content-wrapper h4,
+.message-content-wrapper h5,
+.message-content-wrapper h6 { font-size: 1em; }
+.message-content-wrapper a {
+  color: var(--accent-color);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.message-content-wrapper a:hover {
+  opacity: 0.85;
+}
+.message-content-wrapper pre {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+  font-size: 0.88em;
+  line-height: 1.5;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.message-content-wrapper pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.message-content-wrapper code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: 'JetBrains Mono', monospace;
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+.message-content-wrapper ul,
+.message-content-wrapper ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.message-content-wrapper li {
+  margin: 0.15em 0;
+}
+.message-content-wrapper blockquote {
+  border-left: 3px solid var(--accent-color);
+  margin: 0.5em 0;
+  padding: 4px 12px;
+  opacity: 0.85;
+}
+.message-content-wrapper table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+  font-size: 0.9em;
+}
+.message-content-wrapper th,
+.message-content-wrapper td {
+  border: 1px solid var(--glass-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.message-content-wrapper th {
+  background: rgba(255, 255, 255, 0.05);
+  font-weight: 600;
+}
+.message-content-wrapper hr {
+  border: none;
+  border-top: 1px solid var(--glass-border);
+  margin: 0.8em 0;
+}
+.message-content-wrapper del {
+  opacity: 0.6;
+}
+.message-content-wrapper img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+/* =====================================================
+   Responsive Overrides
+   ===================================================== */
+@media (max-width: 640px) {
+  .toast-container {
+    top: 16px;
+    right: 16px;
+    left: 16px;
+  }
+  .toast {
+    font-size: 13px;
+    padding: 10px 14px;
+  }
+}

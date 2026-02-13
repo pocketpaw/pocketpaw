@@ -1,0 +1,169 @@
+<!--
+  PocketPaw - Start Deep Work Project Modal
+
+  Created: 2026-02-12
+  Updated: 2026-02-12 — Added 'None' option to research depth (skip research entirely).
+    Research depth selector: None / Quick / Standard / Deep.
+
+  Natural language input modal for starting a new Deep Work project.
+  User describes what they want to build, the planner takes over.
+-->
+
+<!-- Start Deep Work Project Modal -->
+<div
+    x-show="missionControl.showStartProject"
+    x-transition.opacity
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+    @click.self="missionControl.showStartProject = false"
+>
+    <div
+        class="w-full max-w-lg bg-[#1c1c1e] border border-white/10 rounded-2xl shadow-2xl"
+        x-transition:enter="transition ease-out duration-200"
+        x-transition:enter-start="scale-95 opacity-0"
+        x-transition:enter-end="scale-100 opacity-100"
+        @click.stop
+    >
+        <!-- Header -->
+        <div class="flex items-center justify-between px-6 py-4 border-b border-white/5">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center">
+                    <i data-lucide="rocket" class="w-4 h-4 text-accent"></i>
+                </div>
+                <div>
+                    <h3 class="text-base font-semibold text-white">Start a Project</h3>
+                    <p class="text-[11px] text-white/40">Describe what you want to build</p>
+                </div>
+            </div>
+            <button
+                class="p-2 text-white/50 hover:text-white hover:bg-white/10 rounded-lg"
+                @click="missionControl.showStartProject = false"
+                :disabled="missionControl.projectStarting"
+            >
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+
+        <!-- Body -->
+        <div class="p-6 space-y-4">
+            <div>
+                <label class="block text-[10px] text-white/40 uppercase tracking-wider mb-2 font-semibold">Project Description</label>
+                <textarea
+                    x-model="missionControl.projectInput"
+                    placeholder="Describe what you want to build in natural language. For example: Build a REST API with user authentication, a React frontend with dashboard, and deploy to AWS..."
+                    rows="6"
+                    class="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white focus:outline-none focus:border-accent placeholder-white/20 resize-none leading-relaxed"
+                    :disabled="missionControl.projectStarting"
+                    @keydown.meta.enter="startDeepWork()"
+                    @keydown.ctrl.enter="startDeepWork()"
+                ></textarea>
+                <p class="text-[10px] text-white/30 mt-1.5">
+                    The planner will research, write a PRD, break down tasks, and assemble a team.
+                    <span class="text-white/40">Cmd+Enter to submit.</span>
+                </p>
+            </div>
+
+            <!-- Research Depth Selector -->
+            <div>
+                <label class="block text-[10px] text-white/40 uppercase tracking-wider mb-2 font-semibold">Research Depth</label>
+                <div class="flex gap-2">
+                    <button
+                        class="flex-1 flex flex-col items-center gap-1 px-3 py-2.5 rounded-xl border text-center transition-all"
+                        :class="missionControl.researchDepth === 'none'
+                            ? 'bg-white/10 border-white/30 text-white/80'
+                            : 'bg-white/[0.02] border-white/10 text-white/40 hover:border-white/20 hover:text-white/60'"
+                        @click="missionControl.researchDepth = 'none'"
+                        :disabled="missionControl.projectStarting"
+                    >
+                        <i data-lucide="circle-off" class="w-4 h-4"></i>
+                        <span class="text-xs font-medium">None</span>
+                        <span class="text-[9px] opacity-60">Skip research</span>
+                    </button>
+                    <button
+                        class="flex-1 flex flex-col items-center gap-1 px-3 py-2.5 rounded-xl border text-center transition-all"
+                        :class="missionControl.researchDepth === 'quick'
+                            ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                            : 'bg-white/[0.02] border-white/10 text-white/40 hover:border-white/20 hover:text-white/60'"
+                        @click="missionControl.researchDepth = 'quick'"
+                        :disabled="missionControl.projectStarting"
+                    >
+                        <i data-lucide="zap" class="w-4 h-4"></i>
+                        <span class="text-xs font-medium">Quick</span>
+                        <span class="text-[9px] opacity-60">No web search</span>
+                    </button>
+                    <button
+                        class="flex-1 flex flex-col items-center gap-1 px-3 py-2.5 rounded-xl border text-center transition-all"
+                        :class="missionControl.researchDepth === 'standard'
+                            ? 'bg-accent/10 border-accent/30 text-accent'
+                            : 'bg-white/[0.02] border-white/10 text-white/40 hover:border-white/20 hover:text-white/60'"
+                        @click="missionControl.researchDepth = 'standard'"
+                        :disabled="missionControl.projectStarting"
+                    >
+                        <i data-lucide="search" class="w-4 h-4"></i>
+                        <span class="text-xs font-medium">Standard</span>
+                        <span class="text-[9px] opacity-60">Balanced</span>
+                    </button>
+                    <button
+                        class="flex-1 flex flex-col items-center gap-1 px-3 py-2.5 rounded-xl border text-center transition-all"
+                        :class="missionControl.researchDepth === 'deep'
+                            ? 'bg-purple-500/10 border-purple-500/30 text-purple-400'
+                            : 'bg-white/[0.02] border-white/10 text-white/40 hover:border-white/20 hover:text-white/60'"
+                        @click="missionControl.researchDepth = 'deep'"
+                        :disabled="missionControl.projectStarting"
+                    >
+                        <i data-lucide="globe" class="w-4 h-4"></i>
+                        <span class="text-xs font-medium">Deep</span>
+                        <span class="text-[9px] opacity-60">Extensive search</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Planning progress (shown while planner works) -->
+            <div
+                x-show="missionControl.projectStarting"
+                class="bg-blue-500/5 border border-blue-500/20 rounded-xl p-4"
+            >
+                <div class="flex items-center gap-3 mb-3">
+                    <div class="w-6 h-6 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin"></div>
+                    <span class="text-sm text-blue-400 font-medium" x-text="getPlanningPhaseInfo().label + '...'"></span>
+                </div>
+                <p class="text-xs text-white/40" x-text="missionControl.planningMessage || 'This may take a minute...'"></p>
+                <!-- Phase dots -->
+                <div class="flex items-center gap-3 mt-3">
+                    <template x-for="(phase, i) in ['Research', 'PRD', 'Tasks', 'Team']" :key="phase">
+                        <div class="flex items-center gap-1.5">
+                            <div
+                                class="w-2 h-2 rounded-full transition-all"
+                                :class="getPlanningPhaseInfo().step > i ? 'bg-blue-400' : (getPlanningPhaseInfo().step === i ? 'bg-blue-400 animate-pulse' : 'bg-white/10')"
+                            ></div>
+                            <span
+                                class="text-[10px] transition-all"
+                                :class="getPlanningPhaseInfo().step >= i ? 'text-blue-400' : 'text-white/20'"
+                                x-text="phase"
+                            ></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Submit Button -->
+            <button
+                class="w-full py-3 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                @click="startDeepWork()"
+                :disabled="!missionControl.projectInput.trim() || missionControl.projectInput.trim().length < 10 || missionControl.projectStarting"
+            >
+                <template x-if="!missionControl.projectStarting">
+                    <span class="flex items-center gap-2">
+                        <i data-lucide="rocket" class="w-4 h-4"></i>
+                        Start Planning
+                    </span>
+                </template>
+                <template x-if="missionControl.projectStarting">
+                    <span class="flex items-center gap-2">
+                        <div class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                        Planning in progress...
+                    </span>
+                </template>
+            </button>
+        </div>
+    </div>
+</div>

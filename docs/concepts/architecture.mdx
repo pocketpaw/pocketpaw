@@ -1,0 +1,78 @@
+---
+title: Architecture
+description: "PocketPaw uses an event-driven architecture with a central message bus, pluggable agent backends, and protocol-based interfaces for tools, memory, and channel adapters."
+section: Core Concepts
+ogType: article
+keywords: ["event-driven architecture", "message bus pattern", "protocol-oriented", "async"]
+tags: ["architecture", "design"]
+---
+
+# Architecture
+
+PocketPaw is built on an **event-driven message bus** architecture. This design decouples channels from agent backends, making it easy to add new channels and swap backends without touching the core pipeline.
+
+## High-Level Overview
+
+<img src="/pocketpaw-system-architecture.webp" alt="PocketPaw system architecture: event-driven MessageBus connecting 10+ channel adapters, agent processing pipeline with injection scanning, memory-augmented context building, three swappable LLM backends, and real-time streaming delivery." />
+
+## Processing Pipeline
+
+When a user sends a message from any channel, it follows this path:
+
+<Steps>
+  <Step title="Channel Adapter receives message">
+    The channel-specific adapter (Telegram, Discord, etc.) translates the platform's message format into a standardized `InboundMessage` event and publishes it to the message bus.
+  </Step>
+  <Step title="AgentLoop consumes the message">
+    The `AgentLoop` subscribes to `InboundMessage` events. It loads the session context, builds the system prompt with memory and identity, and prepares the request for the agent backend.
+  </Step>
+  <Step title="AgentRouter selects the backend">
+    Based on the `agent_backend` setting, the router delegates to one of three backends: Claude Agent SDK, PocketPaw Native, or Open Interpreter.
+  </Step>
+  <Step title="Backend processes and streams">
+    The selected backend processes the message, executes any tool calls, and yields a stream of response chunks back to the AgentLoop.
+  </Step>
+  <Step title="AgentLoop publishes responses">
+    Response chunks are published as `OutboundMessage` events (with `is_stream_chunk=True` for intermediate chunks and `is_stream_end=True` for the final chunk). Tool executions emit `SystemEvent` events.
+  </Step>
+  <Step title="Channel Adapters deliver">
+    Each channel adapter subscribed to `OutboundMessage` events translates and delivers the response in the appropriate format for its platform (e.g., Telegram messages, Discord embeds, Slack thread replies).
+  </Step>
+</Steps>
+
+## Key Design Principles
+
+### Protocol-Oriented
+
+Core interfaces are Python `Protocol` classes, enabling swappable implementations:
+
+- **`AgentProtocol`** — Agent backend interface
+- **`ToolProtocol`** — Tool interface with schema export
+- **`MemoryStoreProtocol`** — Memory backend interface
+- **`BaseChannelAdapter`** — Channel adapter interface
+
+### Async Everywhere
+
+All agent, bus, memory, and tool interfaces are async. PocketPaw uses `asyncio` throughout, with `pytest-asyncio` for testing.
+
+### Lazy Imports
+
+Agent backends and optional dependencies are imported lazily inside their initialization methods. This avoids loading unused dependencies and keeps startup time fast.
+
+### Event Types
+
+The message bus uses three event types:
+
+| Event | Purpose | Consumers |
+|-------|---------|-----------|
+| `InboundMessage` | User input from any channel | AgentLoop |
+| `OutboundMessage` | Agent responses back to channels | Channel adapters, WebSocket |
+| `SystemEvent` | Internal events (tool_start, tool_result, thinking, error) | Web dashboard Activity panel |
+
+## Subsystem Interactions
+
+The AgentLoop is the central coordinator:
+- **Security** — Guardian AI and injection scanner check every message before processing
+- **Memory** — Context builder assembles session history, long-term facts, and semantic search results
+- **Tools** — The tool registry provides available tools filtered by the policy system
+- **Backends** — The router delegates to the selected agent backend

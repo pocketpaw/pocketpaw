@@ -4,8 +4,8 @@
 
 from typing import Any
 
-from pocketclaw.tools.protocol import BaseTool
 from pocketclaw.memory.manager import get_memory_manager
+from pocketclaw.tools.protocol import BaseTool
 
 
 class RememberTool(BaseTool):
@@ -112,3 +112,55 @@ class RecallTool(BaseTool):
 
         except Exception as e:
             return self._error(f"Failed to search memories: {str(e)}")
+
+
+class ForgetTool(BaseTool):
+    """Remove information from long-term memory.
+
+    Use this tool to delete specific memories that are no longer accurate
+    or that the user wants removed.
+    """
+
+    @property
+    def name(self) -> str:
+        return "forget"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Remove information from long-term memory. Searches for matching memories "
+            "and deletes them. Use when the user wants to correct or remove stored facts."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for and forget",
+                },
+            },
+            "required": ["query"],
+        }
+
+    async def execute(self, query: str) -> str:
+        """Search and delete matching memories."""
+        try:
+            manager = get_memory_manager()
+            results = await manager.search(query, limit=5)
+
+            if not results:
+                return f"No memories found matching: {query}"
+
+            deleted = 0
+            for entry in results:
+                ok = await manager._store.delete(entry.id)
+                if ok:
+                    deleted += 1
+
+            return f"Forgot {deleted} memory(ies) matching: {query}"
+
+        except Exception as e:
+            return self._error(f"Failed to forget memory: {str(e)}")

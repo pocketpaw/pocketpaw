@@ -2,7 +2,8 @@
  * PocketPaw - File Browser Feature Module
  *
  * Created: 2026-02-05
- * Extracted from app.js as part of componentization refactor.
+ * Updated: 2026-02-12 — handleFiles routes sidebar_* context responses to
+ *   ProjectBrowser.handleSidebarFiles() instead of updating modal state.
  *
  * Contains file browser modal functionality:
  * - Directory navigation
@@ -13,6 +14,7 @@
 window.PocketPaw = window.PocketPaw || {};
 
 window.PocketPaw.FileBrowser = {
+    name: 'FileBrowser',
     /**
      * Get initial state for File Browser
      */
@@ -35,6 +37,12 @@ window.PocketPaw.FileBrowser = {
              * Handle file browser data
              */
             handleFiles(data) {
+                // Route sidebar file tree responses to ProjectBrowser
+                if (data.context && data.context.startsWith('sidebar_')) {
+                    this.handleSidebarFiles(data);
+                    return;
+                }
+
                 this.fileLoading = false;
                 this.fileError = null;
 
@@ -118,3 +126,5 @@ window.PocketPaw.FileBrowser = {
         };
     }
 };
+
+window.PocketPaw.Loader.register('FileBrowser', window.PocketPaw.FileBrowser);
