@@ -1,0 +1,75 @@
+---
+title: Cron Scheduler
+description: "PocketPaw's built-in cron scheduler handles recurring tasks and one-time reminders with APScheduler. Tasks persist across restarts, support natural language time parsing, and auto-reschedule after execution."
+section: Advanced
+ogType: article
+keywords: ["cron scheduler", "recurring tasks", "reminders", "apscheduler", "task scheduling"]
+tags: ["advanced", "automation"]
+---
+
+# Cron Scheduler
+
+PocketPaw includes a built-in task scheduler for recurring reminders and scheduled actions.
+
+## Features
+
+- **Recurring tasks** — Schedule tasks with cron-like expressions
+- **Persistence** — Recurring tasks survive restarts
+- **Re-scheduling** — Tasks automatically re-schedule after execution
+- **Management** — Add and delete recurring tasks via tools
+
+## How It Works
+
+The scheduler is built on APScheduler and manages two types of tasks:
+
+### One-time Reminders
+
+```
+User: Remind me to check the build in 30 minutes
+Agent: Set a reminder for 2:30 PM — "Check the build"
+```
+
+### Recurring Tasks
+
+```
+User: Every Monday at 9 AM, summarize my calendar for the week
+Agent: Created recurring task: "Weekly calendar summary" — Every Monday at 9:00 AM
+```
+
+## API
+
+The scheduler provides two main functions:
+
+### add_recurring
+
+```python
+from pocketclaw.scheduler import scheduler
+
+scheduler.add_recurring(
+    task_id="weekly-summary",
+    cron_expression="0 9 * * 1",  # Every Monday at 9 AM
+    callback=async_function,
+    kwargs={"session_id": "..."},
+)
+```
+
+### delete_recurring
+
+```python
+scheduler.delete_recurring("weekly-summary")
+```
+
+## Persistence
+
+Recurring tasks are persisted to the config and re-loaded on startup. One-time reminders are stored in memory and lost on restart.
+
+## Cron Expression Format
+
+Standard cron format: `minute hour day_of_month month day_of_week`
+
+| Expression | Description |
+|------------|-------------|
+| `0 9 * * 1` | Every Monday at 9:00 AM |
+| `*/30 * * * *` | Every 30 minutes |
+| `0 8,17 * * 1-5` | 8 AM and 5 PM on weekdays |
+| `0 0 1 * *` | First day of every month at midnight |

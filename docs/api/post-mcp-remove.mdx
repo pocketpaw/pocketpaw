@@ -1,0 +1,82 @@
+---
+title: Remove MCP Server
+description: "Remove an MCP server configuration from PocketPaw. If the server is currently running, it will be stopped before removal. The server's tools become unavailable immediately."
+api: POST /api/mcp/remove
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["remove mcp server", "uninstall server", "delete mcp"]
+tags: ["api", "mcp"]
+---
+
+## Overview
+
+Removes an MCP server from the configuration. If the server is currently running, it will be stopped first.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="name" type="string" required>
+    The name of the MCP server to remove.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">`"ok"` on success</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/mcp/remove" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"name": "filesystem"}'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/mcp/remove", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ name: "filesystem" })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/mcp/remove",
+        headers={"Authorization": "Bearer <token>"},
+        json={"name": "filesystem"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "404"]}>
+  <Tab title="200">
+    ```json
+    { "status": "ok" }
+    ```
+  </Tab>
+  <Tab title="404">
+    ```json
+    { "detail": "Server not found in configuration" }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

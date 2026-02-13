@@ -1,0 +1,151 @@
+---
+title: Configuration Reference
+description: "Complete reference of all PocketPaw configuration options: environment variables with POCKETCLAW_ prefix, JSON config fields, channel tokens, API keys, tool profiles, and memory backend settings."
+section: API Reference
+ogType: article
+keywords: ["configuration", "environment variables", "settings reference", "config options"]
+tags: ["api", "configuration"]
+---
+
+# Configuration Reference
+
+Complete reference of all configuration settings. All environment variables use the `POCKETCLAW_` prefix.
+
+## Core Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `anthropic_api_key` | `POCKETCLAW_ANTHROPIC_API_KEY` | — | Anthropic API key |
+| `openai_api_key` | `POCKETCLAW_OPENAI_API_KEY` | — | OpenAI API key |
+| `agent_backend` | `POCKETCLAW_AGENT_BACKEND` | `claude_agent_sdk` | Agent backend |
+| `dashboard_host` | `POCKETCLAW_DASHBOARD_HOST` | `0.0.0.0` | Dashboard bind address |
+| `dashboard_port` | `POCKETCLAW_DASHBOARD_PORT` | `8000` | Dashboard port |
+
+## Tool Policy
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `tool_profile` | `POCKETCLAW_TOOL_PROFILE` | `coding` | Tool profile |
+| `tools_allow` | `POCKETCLAW_TOOLS_ALLOW` | `[]` | Allowed tools |
+| `tools_deny` | `POCKETCLAW_TOOLS_DENY` | `[]` | Denied tools |
+
+## Telegram
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `telegram_token` | `POCKETCLAW_TELEGRAM_TOKEN` | — | Bot token |
+| `allowed_telegram_ids` | `POCKETCLAW_ALLOWED_TELEGRAM_IDS` | `[]` | Allowed user IDs |
+
+## Discord
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `discord_bot_token` | `POCKETCLAW_DISCORD_BOT_TOKEN` | — | Bot token |
+| `discord_allowed_guild_ids` | `POCKETCLAW_DISCORD_ALLOWED_GUILD_IDS` | `[]` | Allowed guilds |
+| `discord_allowed_user_ids` | `POCKETCLAW_DISCORD_ALLOWED_USER_IDS` | `[]` | Allowed users |
+
+## Slack
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `slack_bot_token` | `POCKETCLAW_SLACK_BOT_TOKEN` | — | Bot token (xoxb-) |
+| `slack_app_token` | `POCKETCLAW_SLACK_APP_TOKEN` | — | App token (xapp-) |
+| `slack_allowed_channel_ids` | `POCKETCLAW_SLACK_ALLOWED_CHANNEL_IDS` | `[]` | Allowed channels |
+
+## WhatsApp
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `whatsapp_mode` | `POCKETCLAW_WHATSAPP_MODE` | `business` | Mode (personal/business) |
+| `whatsapp_access_token` | `POCKETCLAW_WHATSAPP_ACCESS_TOKEN` | — | Business API token |
+| `whatsapp_phone_number_id` | `POCKETCLAW_WHATSAPP_PHONE_NUMBER_ID` | — | Phone number ID |
+| `whatsapp_verify_token` | `POCKETCLAW_WHATSAPP_VERIFY_TOKEN` | — | Webhook verify token |
+| `whatsapp_allowed_phone_numbers` | `POCKETCLAW_WHATSAPP_ALLOWED_PHONE_NUMBERS` | `[]` | Allowed numbers |
+| `whatsapp_neonize_db` | `POCKETCLAW_WHATSAPP_NEONIZE_DB` | `~/.pocketclaw/neonize.db` | Neonize DB path |
+
+## Signal
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `signal_api_url` | `POCKETCLAW_SIGNAL_API_URL` | — | signal-cli REST API URL |
+| `signal_phone_number` | `POCKETCLAW_SIGNAL_PHONE_NUMBER` | — | Registered number |
+| `signal_allowed_numbers` | `POCKETCLAW_SIGNAL_ALLOWED_NUMBERS` | `[]` | Allowed numbers |
+
+## Matrix
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `matrix_homeserver` | `POCKETCLAW_MATRIX_HOMESERVER` | — | Homeserver URL |
+| `matrix_user_id` | `POCKETCLAW_MATRIX_USER_ID` | — | Bot user ID |
+| `matrix_access_token` | `POCKETCLAW_MATRIX_ACCESS_TOKEN` | — | Auth token |
+| `matrix_device_id` | `POCKETCLAW_MATRIX_DEVICE_ID` | — | Device ID |
+| `matrix_allowed_room_ids` | `POCKETCLAW_MATRIX_ALLOWED_ROOM_IDS` | `[]` | Allowed rooms |
+| `matrix_display_name` | `POCKETCLAW_MATRIX_DISPLAY_NAME` | — | Display name |
+
+## Microsoft Teams
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `teams_app_id` | `POCKETCLAW_TEAMS_APP_ID` | — | Bot Framework App ID |
+| `teams_app_password` | `POCKETCLAW_TEAMS_APP_PASSWORD` | — | App password |
+| `teams_tenant_id` | `POCKETCLAW_TEAMS_TENANT_ID` | — | Azure tenant ID |
+| `teams_allowed_team_ids` | `POCKETCLAW_TEAMS_ALLOWED_TEAM_IDS` | `[]` | Allowed teams |
+
+## Google Chat
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `gchat_project_id` | `POCKETCLAW_GCHAT_PROJECT_ID` | — | GCP project ID |
+| `gchat_service_account_key` | `POCKETCLAW_GCHAT_SERVICE_ACCOUNT_KEY` | — | SA key path |
+| `gchat_mode` | `POCKETCLAW_GCHAT_MODE` | `webhook` | Connection mode |
+| `gchat_subscription` | `POCKETCLAW_GCHAT_SUBSCRIPTION` | — | Pub/Sub subscription |
+| `gchat_allowed_space_ids` | `POCKETCLAW_GCHAT_ALLOWED_SPACE_IDS` | `[]` | Allowed spaces |
+
+## Web Search
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `web_search_provider` | `POCKETCLAW_WEB_SEARCH_PROVIDER` | `tavily` | Search provider |
+| `tavily_api_key` | `POCKETCLAW_TAVILY_API_KEY` | — | Tavily API key |
+| `brave_search_api_key` | `POCKETCLAW_BRAVE_SEARCH_API_KEY` | — | Brave Search key |
+
+## Image Generation
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `google_api_key` | `POCKETCLAW_GOOGLE_API_KEY` | — | Google AI API key |
+| `image_model` | `POCKETCLAW_IMAGE_MODEL` | `gemini-2.0-flash` | Model |
+
+## Voice & STT
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `tts_provider` | `POCKETCLAW_TTS_PROVIDER` | `openai` | TTS provider |
+| `tts_voice` | `POCKETCLAW_TTS_VOICE` | `alloy` | Voice ID |
+| `elevenlabs_api_key` | `POCKETCLAW_ELEVENLABS_API_KEY` | — | ElevenLabs key |
+| `stt_model` | `POCKETCLAW_STT_MODEL` | `whisper-1` | STT model |
+
+## Google Integration
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `google_client_id` | `POCKETCLAW_GOOGLE_CLIENT_ID` | — | OAuth client ID |
+| `google_client_secret` | `POCKETCLAW_GOOGLE_CLIENT_SECRET` | — | OAuth secret |
+
+## Spotify
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `spotify_client_id` | `POCKETCLAW_SPOTIFY_CLIENT_ID` | — | Spotify client ID |
+| `spotify_client_secret` | `POCKETCLAW_SPOTIFY_CLIENT_SECRET` | — | Spotify secret |
+
+## Memory (Mem0)
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `mem0_auto_learn` | `POCKETCLAW_MEM0_AUTO_LEARN` | `false` | Enable auto-learn |
+| `mem0_llm_provider` | `POCKETCLAW_MEM0_LLM_PROVIDER` | `ollama` | LLM provider |
+| `mem0_llm_model` | `POCKETCLAW_MEM0_LLM_MODEL` | `llama3.2` | LLM model |
+| `mem0_embedder_provider` | `POCKETCLAW_MEM0_EMBEDDER_PROVIDER` | `ollama` | Embedder provider |
+| `mem0_embedder_model` | `POCKETCLAW_MEM0_EMBEDDER_MODEL` | `nomic-embed-text` | Embedder model |
+| `mem0_vector_store` | `POCKETCLAW_MEM0_VECTOR_STORE` | `qdrant` | Vector store |

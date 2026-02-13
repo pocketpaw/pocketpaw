@@ -1,0 +1,70 @@
+---
+title: Memory Overview
+description: "PocketPaw uses a two-tier memory system: file-based session storage for conversation history and optional Mem0 semantic memory for auto-learned long-term knowledge with vector search."
+section: Memory
+ogType: article
+keywords: ["memory system", "session storage", "semantic memory", "mem0", "vector search"]
+tags: ["memory", "overview"]
+---
+
+# Memory
+
+PocketPaw uses a two-tier memory system: file-based sessions for conversation history and optional Mem0 for semantic long-term memory.
+
+<CardGroup>
+  <Card title="File Store" icon="lucide:database" href="/memory/file-store">
+    JSON-based session storage with indexing and search.
+  </Card>
+  <Card title="Mem0 Integration" icon="lucide:sparkles" href="/memory/mem0">
+    Semantic memory with auto-learning and vector search.
+  </Card>
+  <Card title="Sessions" icon="lucide:history" href="/memory/sessions">
+    Session management, grouping, and search.
+  </Card>
+  <Card title="Context Building" icon="lucide:layers" href="/memory/context-building">
+    How memory is assembled into the agent's context window.
+  </Card>
+  <Card title="Memory Isolation" icon="lucide:shield" href="/memory/memory-isolation">
+    Per-user memory scoping for multi-channel deployments.
+  </Card>
+</CardGroup>
+
+## Memory Architecture
+
+```
+┌─────────────────────────────────────┐
+│         Context Builder             │
+│  (Assembles context for the agent)  │
+├──────────┬──────────────────────────┤
+│          │                          │
+│  File    │    Mem0 Semantic         │
+│  Store   │    Memory (optional)     │
+│          │                          │
+│ Sessions │    Auto-learn            │
+│ Facts    │    Semantic search       │
+│ Index    │    Vector store          │
+└──────────┴──────────────────────────┘
+```
+
+## Quick Setup
+
+### File Store (Default)
+
+No configuration needed. Sessions are automatically saved to `~/.pocketclaw/memory/`.
+
+### Mem0 (Optional)
+
+For semantic memory with auto-learning:
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the memory extra manually
+pip install pocketpaw[memory]
+
+export POCKETCLAW_MEM0_AUTO_LEARN=true
+export POCKETCLAW_MEM0_LLM_PROVIDER="ollama"
+export POCKETCLAW_MEM0_LLM_MODEL="llama3.2"
+export POCKETCLAW_MEM0_EMBEDDER_PROVIDER="ollama"
+export POCKETCLAW_MEM0_EMBEDDER_MODEL="nomic-embed-text"
+```

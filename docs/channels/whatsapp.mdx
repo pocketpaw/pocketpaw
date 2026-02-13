@@ -1,0 +1,100 @@
+---
+title: WhatsApp
+description: "Connect PocketPaw to WhatsApp via the Business Cloud API or Personal QR pairing mode with neonize. No Meta developer account needed for personal mode — just scan a QR code."
+section: Channels
+ogType: article
+keywords: ["whatsapp bot", "whatsapp business api", "qr pairing", "neonize", "personal mode"]
+tags: ["channels", "whatsapp"]
+---
+
+# WhatsApp
+
+PocketPaw supports WhatsApp through two modes: **Business API** (requires Meta account) and **Personal Mode** (QR code scan, no Meta account needed).
+
+## Personal Mode (Recommended)
+
+Personal mode uses the `neonize` library to connect via WhatsApp Web's multi-device protocol. Just scan a QR code — no Meta Business account, webhooks, or tunnels required.
+
+<Steps>
+  <Step title="Install">
+    ```bash
+    curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+    # Or add the WhatsApp extra manually
+    pip install pocketpaw[whatsapp-personal]
+    ```
+  </Step>
+  <Step title="Configure mode">
+    ```bash
+    export POCKETCLAW_WHATSAPP_MODE="personal"
+    ```
+  </Step>
+  <Step title="Start and scan QR">
+    Start PocketPaw with the web dashboard:
+    ```bash
+    pocketpaw
+    ```
+    Open the Channels modal, go to WhatsApp, and scan the QR code with your phone.
+  </Step>
+</Steps>
+
+### QR Code Pairing
+
+When using Personal mode through the web dashboard:
+
+1. Open the Channels modal → WhatsApp tab
+2. Select "Personal (QR)" mode
+3. Click "Start"
+4. A QR code appears — scan it with WhatsApp on your phone
+5. The bot connects to your WhatsApp account
+
+The QR code endpoint is available at `GET /api/whatsapp/qr`. The frontend polls every 2 seconds until pairing completes.
+
+## Business API Mode
+
+Business mode uses the WhatsApp Business Cloud API via Meta.
+
+<Steps>
+  <Step title="Set up Meta Business">
+    1. Create a Meta Business account
+    2. Set up a WhatsApp Business API app
+    3. Get your access token and phone number ID
+  </Step>
+  <Step title="Configure">
+    ```bash
+    export POCKETCLAW_WHATSAPP_MODE="business"
+    export POCKETCLAW_WHATSAPP_ACCESS_TOKEN="your-token"
+    export POCKETCLAW_WHATSAPP_PHONE_NUMBER_ID="123456"
+    export POCKETCLAW_WHATSAPP_VERIFY_TOKEN="your-verify-token"
+    ```
+  </Step>
+  <Step title="Set up webhook">
+    The dashboard exposes a webhook at `/webhook/whatsapp` (auth-exempt). Point Meta's webhook configuration to your server's public URL.
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| Mode | `POCKETCLAW_WHATSAPP_MODE` | `personal` or `business` |
+| Access token | `POCKETCLAW_WHATSAPP_ACCESS_TOKEN` | Business API token |
+| Phone number ID | `POCKETCLAW_WHATSAPP_PHONE_NUMBER_ID` | Business phone number ID |
+| Verify token | `POCKETCLAW_WHATSAPP_VERIFY_TOKEN` | Webhook verification token |
+| Allowed numbers | `POCKETCLAW_WHATSAPP_ALLOWED_PHONE_NUMBERS` | Comma-separated phone numbers |
+
+## Features
+
+### No Streaming
+
+WhatsApp doesn't support message editing, so responses are accumulated and sent as a complete message when the agent finishes.
+
+### Access Control
+
+```bash
+export POCKETCLAW_WHATSAPP_ALLOWED_PHONE_NUMBERS="+1234567890,+0987654321"
+```
+
+### Session Keys
+
+Each phone number gets a unique session: `whatsapp:{phone_number}`

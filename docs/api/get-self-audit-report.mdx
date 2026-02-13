@@ -1,0 +1,102 @@
+---
+title: Get Self-Audit Report
+description: "Retrieve a specific self-audit daemon report by date. Contains detailed results from 12 automated security and operational checks including pass/fail status and remediation suggestions."
+api: GET /api/self-audit/reports/{date}
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["audit report detail", "security report", "check results"]
+tags: ["api", "security"]
+---
+
+## Overview
+
+Returns the full self-audit report for a specific date. The report contains 12 check results covering configuration, security, and system health.
+
+## Parameters
+
+<ParamTable type="path">
+  <Param name="date" type="string" required>
+    Report date in `YYYY-MM-DD` format.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="date" type="string">Report date</ResponseField>
+<ResponseField name="total" type="integer">Total checks executed</ResponseField>
+<ResponseField name="passed" type="integer">Checks passed</ResponseField>
+<ResponseField name="issues" type="integer">Issues found</ResponseField>
+<ResponseField name="checks" type="array">
+  Detailed results for each of the 12 checks.
+  <ResponseField name="name" type="string">Check identifier</ResponseField>
+  <ResponseField name="passed" type="boolean">Whether the check passed</ResponseField>
+  <ResponseField name="message" type="string">Description of findings</ResponseField>
+  <ResponseField name="severity" type="string">Issue severity (`info`, `warning`, `critical`)</ResponseField>
+</ResponseField>
+
+## Error Responses
+
+| Status | Description |
+|--------|-------------|
+| 404 | No report found for the given date |
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/self-audit/reports/2024-01-15" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/self-audit/reports/2024-01-15", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/self-audit/reports/2024-01-15",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "404"]}>
+  <Tab title="200">
+    ```json
+    {
+      "date": "2024-01-15",
+      "total": 12,
+      "passed": 10,
+      "issues": 2,
+      "checks": [
+        {"name": "config_permissions", "passed": true, "message": "OK", "severity": "info"},
+        {"name": "audit_log_integrity", "passed": true, "message": "OK", "severity": "info"},
+        {"name": "memory_store_health", "passed": false, "message": "Qdrant unreachable", "severity": "warning"}
+      ]
+    }
+    ```
+  </Tab>
+  <Tab title="404">
+    ```json
+    {
+      "detail": "No report found for the given date"
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -1,0 +1,140 @@
+---
+title: Autonomous Messaging
+description: "PocketPaw can send messages proactively using scheduled intentions with cron triggers. The Proactive Daemon orchestrates agent behaviors and delivers results to any configured notification channel."
+section: Advanced
+ogType: article
+keywords: ["autonomous messaging", "proactive daemon", "scheduled intentions", "cron triggers", "notifications"]
+tags: ["advanced", "automation", "notifications"]
+---
+
+# Autonomous Messaging
+
+PocketPaw can send messages proactively — without waiting for user input. This is powered by three components: the **Proactive Daemon** (orchestrator), **Intentions** (scheduled behaviors), and the **Channel Notifier** (delivery).
+
+## How It Works
+
+```
+┌─────────────────────────────────┐
+│       Proactive Daemon          │
+│  (orchestrates intentions)      │
+├──────────┬──────────────────────┤
+│ Trigger  │  Intention           │
+│ Engine   │  Executor            │
+│ (cron)   │  (runs agent)        │
+└────┬─────┴──────────┬───────────┘
+     │                │
+     ▼                ▼
+  APScheduler    Channel Notifier
+  fires trigger  → delivers to channels
+```
+
+## Intentions
+
+An intention is a scheduled agent behavior — a prompt that runs on a trigger.
+
+### Intention Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Human-readable name (e.g., "Morning Standup") |
+| `prompt` | string | The prompt to send to the agent |
+| `trigger` | object | When to fire (cron schedule) |
+| `context_sources` | array | Additional context to inject (e.g., `system_status`) |
+| `enabled` | boolean | Whether the intention is active |
+
+### Creating Intentions
+
+```
+User: Every weekday at 8 AM, check my calendar and summarize today's meetings
+Agent: Created intention "Daily Calendar Brief" — triggers Mon-Fri at 8:00 AM
+```
+
+### Trigger Types
+
+Currently supports cron triggers with standard 5-field expressions:
+
+```
+minute  hour  day  month  day_of_week
+  0       8    *     *       1-5        (weekdays at 8 AM)
+```
+
+Common presets are available:
+
+| Preset | Schedule |
+|--------|----------|
+| `every_minute` | `* * * * *` |
+| `every_5_minutes` | `*/5 * * * *` |
+| `every_hour` | `0 * * * *` |
+| `every_morning_8am` | `0 8 * * *` |
+| `weekday_morning_8am` | `0 8 * * 1-5` |
+| `daily_noon` | `0 12 * * *` |
+| `weekly_monday_9am` | `0 9 * * 1` |
+| `monthly_first_9am` | `0 9 1 * *` |
+
+### Intention Lifecycle
+
+1. **Create** — Define name, prompt, trigger, and context sources
+2. **Schedule** — Trigger engine registers the cron job
+3. **Fire** — When the trigger fires, the executor runs the agent with the prompt
+4. **Deliver** — Results are streamed to the dashboard and optionally pushed to channels
+5. **Repeat** — The trigger re-schedules for the next occurrence
+
+## Channel Notifier
+
+The notifier delivers messages to any configured channel without user interaction.
+
+### Configuration
+
+Set notification targets in settings as `"channel:chat_id"` strings:
+
+```bash
+export POCKETCLAW_NOTIFICATION_CHANNELS='["telegram:123456789","discord:987654321","slack:C0A1B2C3D"]'
+```
+
+Supported channel formats:
+
+| Format | Example |
+|--------|---------|
+| `telegram:{chat_id}` | `telegram:123456789` |
+| `discord:{channel_id}` | `discord:987654321` |
+| `slack:{channel_id}` | `slack:C0A1B2C3D` |
+| `whatsapp:{phone}` | `whatsapp:+1234567890` |
+| `signal:{phone}` | `signal:+1234567890` |
+| `matrix:{room_id}` | `matrix:!abc:matrix.org` |
+| `teams:{conversation_id}` | `teams:19:abc@thread.v2` |
+| `gchat:{space}` | `gchat:spaces/abc123` |
+
+### Usage Points
+
+The notifier is called by:
+- **Scheduler** — When reminders trigger
+- **Proactive Daemon** — When intentions execute
+- **Deep Work** — Human task notifications and project completion alerts
+- **Dashboard** — Broadcast messages
+
+## Owner ID
+
+Set the `owner_id` to identify yourself. This enables the memory system to distinguish between your messages and those from other users on shared channels.
+
+```bash
+export POCKETCLAW_OWNER_ID="your_telegram_user_id"
+```
+
+## Persistence
+
+- Intentions are stored in `~/.pocketclaw/intentions.json`
+- Notification channel targets are stored in config
+- The daemon reloads all intentions on startup and re-schedules triggers
+
+## Dashboard Integration
+
+The web dashboard provides:
+- View and manage all intentions
+- Toggle intentions on/off
+- Trigger an intention manually
+- See next scheduled run time
+- Stream execution results in real time
+
+<Callout type="tip">
+  Combine autonomous messaging with [Gmail](/integrations/gmail) and [Calendar](/integrations/calendar) tools for powerful automated workflows. For example: "Every morning at 8 AM, check my calendar and email, then send a Telegram summary."
+</Callout>

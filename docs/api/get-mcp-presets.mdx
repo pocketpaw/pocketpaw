@@ -1,0 +1,88 @@
+---
+title: List MCP Presets
+description: "Get all available MCP server presets with their installation status. Presets are pre-configured server templates that can be installed with a single click from the dashboard."
+api: GET /api/mcp/presets
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["mcp presets", "server templates", "quick install"]
+tags: ["api", "mcp"]
+---
+
+## Overview
+
+Returns all available MCP server presets (pre-configured server templates). Each preset includes metadata, required environment variables, and whether it's already installed.
+
+## Response
+
+Returns an array of preset objects:
+
+<ResponseField name="id" type="string">Unique preset identifier (e.g., `filesystem`, `github`)</ResponseField>
+<ResponseField name="name" type="string">Human-readable display name</ResponseField>
+<ResponseField name="description" type="string">Description of what the server provides</ResponseField>
+<ResponseField name="icon" type="string">Lucide icon name for the preset</ResponseField>
+<ResponseField name="category" type="string">Category grouping (e.g., `filesystem`, `developer`, `data`)</ResponseField>
+<ResponseField name="installed" type="boolean">Whether this preset is already configured</ResponseField>
+<ResponseField name="env_keys" type="array">List of environment variable names the preset requires</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/mcp/presets" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/mcp/presets", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/mcp/presets",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    [
+      {
+        "id": "filesystem",
+        "name": "Filesystem",
+        "description": "Read, write, and manage files on the local filesystem",
+        "icon": "lucide:folder",
+        "category": "filesystem",
+        "installed": true,
+        "env_keys": []
+      },
+      {
+        "id": "github",
+        "name": "GitHub",
+        "description": "Interact with GitHub repositories, issues, and pull requests",
+        "icon": "lucide:github",
+        "category": "developer",
+        "installed": false,
+        "env_keys": ["GITHUB_TOKEN"]
+      }
+    ]
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

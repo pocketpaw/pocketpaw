@@ -1,0 +1,105 @@
+---
+title: Security Model
+description: "PocketPaw's defense-in-depth security model combines Guardian AI safety checks, prompt injection scanning, append-only audit logging, and configurable tool policies."
+section: Core Concepts
+ogType: article
+keywords: ["defense in depth", "guardian ai", "prompt injection", "audit log", "safety"]
+tags: ["security", "architecture"]
+---
+
+# Security Model
+
+PocketPaw implements multiple layers of security to protect against misuse, prompt injection, and unauthorized actions.
+
+## Security Layers
+
+<img src="/pocketpaw-security-architecture.webp" alt="PocketPaw defense-in-depth security architecture: seven layers covering credential encryption, injection scanning, tool policy enforcement, Guardian AI review, dangerous command blocking, append-only audit logging, and rate-limited session management." />
+
+## Guardian AI
+
+The Guardian AI is a secondary LLM that evaluates every incoming message for safety concerns before the main agent processes it.
+
+- Uses `AsyncAnthropic` directly (not the main agent's LLM)
+- Classifies messages into threat levels: `NONE`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`
+- Messages at `HIGH` or above are blocked with an explanation
+- Runs before any tool execution or code generation
+
+## Injection Scanner
+
+The injection scanner detects prompt injection attempts using a two-tier approach:
+
+1. **Regex tier** — Fast pattern matching for common injection patterns (e.g., "ignore previous instructions", "system prompt override")
+2. **LLM tier** — Secondary LLM analysis for sophisticated injection attempts that bypass regex
+
+Both tiers are applied to:
+- Incoming user messages (in AgentLoop)
+- Tool outputs (in ToolRegistry) to catch indirect injection via web content or file contents
+
+## Tool Policy
+
+The tool policy system controls which tools are available:
+
+- **Profiles**: `minimal` (memory only), `coding` (fs + shell + memory), `full` (all tools)
+- **Allow list**: Explicitly permit specific tools or groups
+- **Deny list**: Explicitly block specific tools or groups (takes precedence)
+- **Precedence**: deny > allow > profile
+
+See [Tool Policy](/tools/tool-policy) for detailed documentation.
+
+## Audit Log
+
+Every significant action is recorded in an append-only JSONL log at `~/.pocketclaw/audit.jsonl`:
+
+```json
+{"timestamp": "2024-01-15T10:30:00Z", "action": "tool_execute", "tool": "shell", "input": "ls -la", "result": "...", "session_id": "abc123"}
+{"timestamp": "2024-01-15T10:30:05Z", "action": "message_blocked", "reason": "injection_detected", "content": "...", "session_id": "abc123"}
+```
+
+The audit log is:
+- **Append-only** — Previous entries cannot be modified
+- **Machine-readable** — JSONL format for easy parsing
+- **Comprehensive** — Records tool executions, blocked messages, security events
+
+## Security Audit CLI
+
+Run automated security checks:
+
+```bash
+pocketpaw --security-audit        # Run all 7 checks
+pocketpaw --security-audit --fix  # Auto-fix issues where possible
+```
+
+Checks include:
+1. Config file permissions (should be 600)
+2. API key exposure in environment
+3. Audit log integrity
+4. Token storage security
+5. MCP server configuration
+6. Tool policy validation
+7. Guardian AI status
+
+## Self-Audit Daemon
+
+The self-audit daemon runs 12 continuous checks in the background:
+
+- Memory usage monitoring
+- Disk space checks
+- API key rotation reminders
+- Session cleanup
+- Audit log rotation
+- And more
+
+Reports are saved as JSON in `~/.pocketclaw/audit/`.
+
+## Dangerous Command Blocking
+
+The Claude Agent SDK backend uses `PreToolUse` hooks to block dangerous shell commands before execution:
+
+- Commands that could destroy data (`rm -rf /`, `mkfs`, etc.)
+- Network scanning tools without explicit permission
+- Privilege escalation attempts
+- System modification commands
+
+<Callout type="warning">
+  PocketPaw's security features are designed for self-hosted, single-user deployments. If exposing PocketPaw to multiple users, additional authentication and authorization layers should be added.
+</Callout>

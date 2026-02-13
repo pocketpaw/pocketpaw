@@ -1,0 +1,62 @@
+---
+title: Security Audit CLI
+description: "Run 7 automated security checks on your PocketPaw installation with the --security-audit CLI flag. Detects common misconfigurations and optionally applies fixes with the --fix option."
+section: Security
+ogType: article
+keywords: ["security audit", "cli tool", "misconfiguration", "auto-fix", "security checks"]
+tags: ["security", "cli", "audit"]
+---
+
+# Security Audit CLI
+
+PocketPaw includes a built-in security audit that checks for common misconfigurations and vulnerabilities.
+
+## Running the Audit
+
+```bash
+# Run all checks
+pocketpaw --security-audit
+
+# Run with auto-fix
+pocketpaw --security-audit --fix
+```
+
+## Checks Performed
+
+| # | Check | Description | Auto-Fix |
+|---|-------|-------------|----------|
+| 1 | Config permissions | `config.json` should be 600 | Yes |
+| 2 | API key exposure | Check for keys in env/logs | No |
+| 3 | Audit log integrity | Verify log file is valid | No |
+| 4 | Token storage | OAuth tokens have proper permissions | Yes |
+| 5 | MCP configuration | Validate MCP server configs | No |
+| 6 | Tool policy | Check for overly permissive policies | No |
+| 7 | Guardian AI status | Verify Guardian AI is active | No |
+
+## Output
+
+The audit produces a report like:
+
+```
+PocketPaw Security Audit
+========================
+
+[PASS] Config file permissions: 600
+[WARN] API key found in environment variable (expected)
+[PASS] Audit log integrity: valid
+[FAIL] Token file permissions: 644 (should be 600)
+[PASS] MCP configuration: valid
+[WARN] Tool policy: full profile (no restrictions)
+[PASS] Guardian AI: active
+
+Results: 4 passed, 2 warnings, 1 failure
+```
+
+## Auto-Fix
+
+When run with `--fix`, the audit automatically resolves issues it can:
+
+- Sets file permissions to 600 for config and token files
+- Creates missing directories with proper permissions
+
+Issues that require manual intervention (like API key management) are reported but not auto-fixed.

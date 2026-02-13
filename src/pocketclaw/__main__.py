@@ -10,7 +10,9 @@ Changes:
 
 import argparse
 import asyncio
+import importlib.util
 import logging
+import sys
 import webbrowser
 
 from pocketclaw.config import Settings, get_settings
@@ -57,7 +59,7 @@ async def run_telegram_mode(settings: Settings) -> None:
         settings = get_settings(force_reload=True)
 
     # Start the bot
-    logger.info("🚀 Starting PocketPaw bot...")
+    logger.info("🚀 Starting PocketPaw (Beta)...")
     await run_bot(settings)
 
 
@@ -118,6 +120,74 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
                 )
             )
 
+    if getattr(args, "signal", False):
+        if not settings.signal_phone_number:
+            logger.error("Signal not configured. Set POCKETCLAW_SIGNAL_PHONE_NUMBER.")
+        else:
+            from pocketclaw.bus.adapters.signal_adapter import SignalAdapter
+
+            adapters.append(
+                SignalAdapter(
+                    api_url=settings.signal_api_url,
+                    phone_number=settings.signal_phone_number,
+                    allowed_phone_numbers=settings.signal_allowed_phone_numbers,
+                )
+            )
+
+    if getattr(args, "matrix", False):
+        if not settings.matrix_homeserver or not settings.matrix_user_id:
+            logger.error(
+                "Matrix not configured. Set POCKETCLAW_MATRIX_HOMESERVER "
+                "and POCKETCLAW_MATRIX_USER_ID."
+            )
+        else:
+            from pocketclaw.bus.adapters.matrix_adapter import MatrixAdapter
+
+            adapters.append(
+                MatrixAdapter(
+                    homeserver=settings.matrix_homeserver,
+                    user_id=settings.matrix_user_id,
+                    access_token=settings.matrix_access_token,
+                    password=settings.matrix_password,
+                    allowed_room_ids=settings.matrix_allowed_room_ids,
+                    device_id=settings.matrix_device_id,
+                )
+            )
+
+    if getattr(args, "teams", False):
+        if not settings.teams_app_id or not settings.teams_app_password:
+            logger.error(
+                "Teams not configured. Set POCKETCLAW_TEAMS_APP_ID "
+                "and POCKETCLAW_TEAMS_APP_PASSWORD."
+            )
+        else:
+            from pocketclaw.bus.adapters.teams_adapter import TeamsAdapter
+
+            adapters.append(
+                TeamsAdapter(
+                    app_id=settings.teams_app_id,
+                    app_password=settings.teams_app_password,
+                    allowed_tenant_ids=settings.teams_allowed_tenant_ids,
+                    webhook_port=settings.teams_webhook_port,
+                )
+            )
+
+    if getattr(args, "gchat", False):
+        if not settings.gchat_service_account_key:
+            logger.error("Google Chat not configured. Set POCKETCLAW_GCHAT_SERVICE_ACCOUNT_KEY.")
+        else:
+            from pocketclaw.bus.adapters.gchat_adapter import GoogleChatAdapter
+
+            adapters.append(
+                GoogleChatAdapter(
+                    mode=settings.gchat_mode,
+                    service_account_key=settings.gchat_service_account_key,
+                    project_id=settings.gchat_project_id,
+                    subscription_id=settings.gchat_subscription_id,
+                    allowed_space_ids=settings.gchat_allowed_space_ids,
+                )
+            )
+
     if not adapters:
         logger.error("No channel adapters could be started. Check your configuration.")
         return
@@ -161,23 +231,75 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
             await adapter.stop()
 
 
-def run_dashboard_mode(settings: Settings, port: int) -> None:
+def _is_headless() -> bool:
+    """Detect headless server (no display)."""
+    import os
+
+    if sys.platform == "darwin":
+        return False  # macOS always has a display
+    return not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+
+
+def run_dashboard_mode(settings: Settings, host: str, port: int) -> None:
     """Run in web dashboard mode."""
     from pocketclaw.dashboard import run_dashboard
 
-    print("\n" + "=" * 50)
-    print("🦀 POCKETCLAW WEB DASHBOARD")
-    print("=" * 50)
-    print(f"\n🌐 Open http://localhost:{port} in your browser\n")
+    run_dashboard(host=host, port=port, open_browser=not _is_headless())
 
-    webbrowser.open(f"http://localhost:{port}")
-    run_dashboard(host="127.0.0.1", port=port)
+
+def _check_extras_installed(args: argparse.Namespace) -> None:
+    """Check that required optional dependencies are installed for the chosen mode.
+
+    Exits with a helpful message if something is missing.
+    """
+    missing: list[tuple[str, str, str]] = []  # (package, import_name, extra)
+
+    has_channel_flag = (
+        args.discord
+        or args.slack
+        or args.whatsapp
+        or getattr(args, "signal", False)
+        or getattr(args, "matrix", False)
+        or getattr(args, "teams", False)
+        or getattr(args, "gchat", False)
+    )
+
+    # Default mode (dashboard) requires fastapi
+    if not args.telegram and not has_channel_flag and not args.security_audit:
+        if importlib.util.find_spec("fastapi") is None:
+            missing.append(("fastapi", "fastapi", "dashboard"))
+        if importlib.util.find_spec("uvicorn") is None:
+            missing.append(("uvicorn", "uvicorn", "dashboard"))
+
+    if args.telegram:
+        if importlib.util.find_spec("telegram") is None:
+            missing.append(("python-telegram-bot", "telegram", "telegram"))
+
+    channel_checks = {
+        "discord": ("discord.py", "discord", "discord"),
+        "slack": ("slack-bolt", "slack_bolt", "slack"),
+    }
+    for flag, (pkg, mod, extra) in channel_checks.items():
+        if getattr(args, flag, False) and importlib.util.find_spec(mod) is None:
+            missing.append((pkg, mod, extra))
+
+    if not missing:
+        return
+
+    print("\n  Missing dependencies detected:\n")
+    extras = set()
+    for pkg, _mod, extra in missing:
+        print(f"    - {pkg}  (extra: {extra})")
+        extras.add(extra)
+    extras_str = ",".join(sorted(extras))
+    print(f"\n  Install with:  pip install 'pocketpaw[{extras_str}]'\n")
+    sys.exit(1)
 
 
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="🐾 PocketPaw - The AI agent that runs on your laptop",
+        description="🐾 PocketPaw (Beta) - The AI agent that runs on your laptop",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -206,26 +328,83 @@ Examples:
     parser.add_argument(
         "--whatsapp", action="store_true", help="Run headless WhatsApp webhook server"
     )
+    parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
+    parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
+    parser.add_argument("--teams", action="store_true", help="Run headless Teams bot")
+    parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
+    parser.add_argument(
+        "--security-audit",
+        action="store_true",
+        help="Run security audit and print report",
+    )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Auto-fix fixable issues found by --security-audit",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
+    )
     parser.add_argument(
         "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
     )
     parser.add_argument("--version", "-v", action="version", version="%(prog)s 0.2.0")
 
     args = parser.parse_args()
+
+    # Fail fast if optional deps are missing for the chosen mode
+    _check_extras_installed(args)
+
     settings = get_settings()
 
-    has_channel_flag = args.discord or args.slack or args.whatsapp
+    # Resolve host: explicit flag > config > auto-detect
+    if args.host is not None:
+        host = args.host
+    elif settings.web_host != "127.0.0.1":
+        host = settings.web_host
+    elif _is_headless():
+        host = "0.0.0.0"
+        logger.info("Headless server detected — binding to 0.0.0.0")
+    else:
+        host = "127.0.0.1"
+
+    has_channel_flag = (
+        args.discord
+        or args.slack
+        or args.whatsapp
+        or args.signal
+        or args.matrix
+        or args.teams
+        or args.gchat
+    )
 
     try:
-        if args.telegram:
+        if args.security_audit:
+            from pocketclaw.security.audit_cli import run_security_audit
+
+            exit_code = asyncio.run(run_security_audit(fix=args.fix))
+            raise SystemExit(exit_code)
+        elif args.telegram:
             asyncio.run(run_telegram_mode(settings))
         elif has_channel_flag:
             asyncio.run(run_multi_channel_mode(settings, args))
         else:
             # Default: web dashboard (also handles --web flag)
-            run_dashboard_mode(settings, args.port)
+            run_dashboard_mode(settings, host, args.port)
     except KeyboardInterrupt:
         logger.info("👋 PocketPaw stopped.")
+    finally:
+        # Coordinated singleton shutdown
+        from pocketclaw.lifecycle import shutdown_all
+
+        try:
+            asyncio.run(shutdown_all())
+        except RuntimeError:
+            # Event loop already closed — best-effort sync cleanup
+            pass
 
 
 if __name__ == "__main__":

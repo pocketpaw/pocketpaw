@@ -24,6 +24,8 @@ def mock_memory():
     mem = MagicMock()
     mem.add_to_session = AsyncMock()
     mem.get_session_history = AsyncMock(return_value=[])
+    mem.get_compacted_history = AsyncMock(return_value=[])
+    mem.resolve_session_key = AsyncMock(side_effect=lambda k: k)
     return mem
 
 
@@ -32,7 +34,7 @@ def mock_router():
     """Mock AgentRouter that yields test responses."""
     router = MagicMock()
 
-    async def mock_run(message):
+    async def mock_run(message, *, system_prompt=None, history=None):
         yield {"type": "message", "content": "Hello ", "metadata": {}}
         yield {"type": "message", "content": "world!", "metadata": {}}
         yield {
@@ -80,6 +82,7 @@ async def test_agent_loop_process_message(
     with patch("pocketclaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
         mock_settings.return_value = settings
 
         with patch("pocketclaw.agents.loop.Settings") as mock_settings_cls:
@@ -123,6 +126,7 @@ async def test_agent_loop_reset_router(
     with patch("pocketclaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
         mock_settings.return_value = settings
 
         loop = AgentLoop()
@@ -150,7 +154,7 @@ async def test_agent_loop_handles_error(
     # Router that raises an error
     error_router = MagicMock()
 
-    async def mock_run_error(message):
+    async def mock_run_error(message, *, system_prompt=None, history=None):
         yield {"type": "error", "content": "Something went wrong", "metadata": {}}
         yield {"type": "done", "content": ""}
 
@@ -163,6 +167,7 @@ async def test_agent_loop_handles_error(
     with patch("pocketclaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
         mock_settings.return_value = settings
 
         with patch("pocketclaw.agents.loop.Settings") as mock_settings_cls:
@@ -209,6 +214,7 @@ async def test_agent_loop_emits_tool_events(
     with patch("pocketclaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
         mock_settings.return_value = settings
 
         with patch("pocketclaw.agents.loop.Settings") as mock_settings_cls:
@@ -232,3 +238,78 @@ async def test_agent_loop_emits_tool_events(
             assert "thinking" in event_types
             assert "tool_start" in event_types
             assert "tool_result" in event_types
+
+
+@patch("pocketclaw.agents.loop.get_message_bus")
+@patch("pocketclaw.agents.loop.get_memory_manager")
+@patch("pocketclaw.agents.loop.AgentContextBuilder")
+@patch("pocketclaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_agent_loop_builds_context_and_passes_to_router(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Test that AgentLoop builds system prompt, retrieves history, and passes both to router."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    # Track what router.run receives
+    captured_kwargs = {}
+
+    async def capturing_run(message, *, system_prompt=None, history=None):
+        captured_kwargs["system_prompt"] = system_prompt
+        captured_kwargs["history"] = history
+        yield {"type": "message", "content": "OK", "metadata": {}}
+        yield {"type": "done", "content": ""}
+
+    router = MagicMock()
+    router.run = capturing_run
+    router.stop = AsyncMock()
+    mock_router_cls.return_value = router
+
+    # Configure builder to return a specific prompt
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(
+        return_value="You are PocketPaw with identity and memory."
+    )
+
+    # Configure memory to return session history
+    session_history = [
+        {"role": "user", "content": "previous question"},
+        {"role": "assistant", "content": "previous answer"},
+    ]
+    mock_memory.get_compacted_history = AsyncMock(return_value=session_history)
+
+    with patch("pocketclaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+
+        with patch("pocketclaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            loop = AgentLoop()
+
+            msg = InboundMessage(
+                channel=Channel.CLI,
+                sender_id="user1",
+                chat_id="chat1",
+                content="What did I ask before?",
+            )
+
+            await loop._process_message(msg)
+
+            # Verify build_system_prompt was called
+            mock_builder_instance.build_system_prompt.assert_called_once()
+
+            # Verify get_compacted_history was called with the session key
+            mock_memory.get_compacted_history.assert_called_once()
+
+            # Verify router.run received the context
+            assert captured_kwargs["system_prompt"] == "You are PocketPaw with identity and memory."
+            assert captured_kwargs["history"] == session_history

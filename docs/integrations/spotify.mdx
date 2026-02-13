@@ -1,0 +1,92 @@
+---
+title: Spotify
+description: "Control Spotify from PocketPaw: search tracks and artists, see what's currently playing, control playback (play, pause, skip), and manage playlists. Requires Spotify OAuth credentials."
+section: Integrations
+ogType: article
+keywords: ["spotify integration", "music control", "spotify api", "playback control", "playlist management"]
+tags: ["integrations", "spotify", "media"]
+---
+
+# Spotify
+
+PocketPaw integrates with Spotify for music search, playback control, and playlist management.
+
+## Setup
+
+<Steps>
+  <Step title="Create Spotify app">
+    Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and create a new app.
+  </Step>
+  <Step title="Set redirect URI">
+    Add `http://localhost:8888/callback` as a redirect URI.
+  </Step>
+  <Step title="Configure">
+    ```bash
+    export POCKETCLAW_SPOTIFY_CLIENT_ID="your-client-id"
+    export POCKETCLAW_SPOTIFY_CLIENT_SECRET="your-secret"
+    ```
+  </Step>
+  <Step title="Authorize">
+    The first time you use a Spotify tool, PocketPaw will open a browser for authorization.
+  </Step>
+</Steps>
+
+## Tools
+
+### spotify_search
+
+Search for tracks, albums, or artists:
+
+```
+User: Find songs by Radiohead
+Agent: [uses spotify_search] → Top results:
+  1. "Creep" - Radiohead (Pablo Honey)
+  2. "Karma Police" - Radiohead (OK Computer)
+  3. "No Surprises" - Radiohead (OK Computer)
+```
+
+### spotify_now_playing
+
+Get the currently playing track:
+
+```
+User: What's playing right now?
+Agent: [uses spotify_now_playing] → Now playing: "Bohemian Rhapsody" by Queen (3:24/5:55)
+```
+
+### spotify_playback
+
+Control playback (play, pause, skip, volume):
+
+```
+User: Skip to the next track
+Agent: [uses spotify_playback] → Skipped to next track
+
+User: Set volume to 50%
+Agent: [uses spotify_playback] → Volume set to 50%
+```
+
+### spotify_playlist
+
+Manage playlists:
+
+```
+User: Add the current song to my favorites playlist
+Agent: [uses spotify_playlist] → Added "Bohemian Rhapsody" to "Favorites"
+```
+
+## Policy Group
+
+All Spotify tools belong to `group:spotify`.
+
+## Required Scopes
+
+- `user-read-playback-state`
+- `user-modify-playback-state`
+- `user-read-currently-playing`
+- `playlist-modify-public`
+- `playlist-modify-private`
+
+<Callout type="info">
+  Spotify requires an active Spotify Premium account for playback control.
+</Callout>

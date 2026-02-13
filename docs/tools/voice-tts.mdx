@@ -1,0 +1,64 @@
+---
+title: Voice & TTS
+description: "Convert text to speech with PocketPaw using OpenAI TTS or ElevenLabs voices. Choose from multiple voice models and providers. Audio files are saved and delivered to your chat channel."
+section: Tools
+ogType: article
+keywords: ["text to speech", "tts", "openai tts", "elevenlabs", "voice synthesis"]
+tags: ["tools", "media", "voice"]
+---
+
+# Voice & TTS
+
+PocketPaw can convert text to speech using OpenAI's TTS API or ElevenLabs.
+
+## Providers
+
+### OpenAI TTS
+
+```bash
+export POCKETCLAW_OPENAI_API_KEY="sk-..."
+export POCKETCLAW_TTS_PROVIDER="openai"
+export POCKETCLAW_TTS_VOICE="alloy"  # alloy, echo, fable, onyx, nova, shimmer
+```
+
+### ElevenLabs
+
+```bash
+export POCKETCLAW_ELEVENLABS_API_KEY="your-key"
+export POCKETCLAW_TTS_PROVIDER="elevenlabs"
+export POCKETCLAW_TTS_VOICE="your-voice-id"
+```
+
+## Usage
+
+```
+User: Read this article aloud: [article text]
+Agent: [uses voice tool] → [audio file]
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "voice",
+  "description": "Convert text to speech audio",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Text to convert to speech"
+      },
+      "voice": {
+        "type": "string",
+        "description": "Voice to use (optional)"
+      }
+    },
+    "required": ["text"]
+  }
+}
+```
+
+## Policy Group
+
+Belongs to `group:voice`. Also included in `group:media`.

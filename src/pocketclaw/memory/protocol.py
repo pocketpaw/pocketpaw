@@ -1,6 +1,5 @@
 # Memory storage protocol - defines the interface for swappable backends.
-# Created: 2026-02-02
-# Part of Nanobot Pattern Adoption - Memory System
+# Created: 2026-02-02 - Memory System
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field

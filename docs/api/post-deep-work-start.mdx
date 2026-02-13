@@ -1,0 +1,111 @@
+---
+title: Start Deep Work Project
+description: "Create a new Deep Work project and start the AI-powered planning pipeline in the background. Returns the project immediately while research, PRD generation, and task breakdown run asynchronously."
+api: POST /api/deep-work/start
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["start project", "deep work", "ai planning", "project creation"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Creates a new Deep Work project and starts the planning pipeline in the background. The project is returned immediately in `PLANNING` status. Track progress via WebSocket events (`dw_planning_phase`, `dw_planning_complete`).
+
+## Request Body
+
+<ResponseField name="description" type="string" required>
+  Natural-language description of the project to plan and execute. Min 10, max 5000 characters.
+</ResponseField>
+
+<ResponseField name="research_depth" type="string" default="standard">
+  How deeply to research before planning. One of: `none`, `quick`, `standard`, `deep`.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the project was created successfully.
+</ResponseField>
+
+<ResponseField name="project" type="object">
+  The created project object.
+  <ResponseField name="id" type="string">Unique project ID.</ResponseField>
+  <ResponseField name="title" type="string">Project title (extracted from PRD after planning).</ResponseField>
+  <ResponseField name="status" type="string">Current status — will be `planning` initially.</ResponseField>
+  <ResponseField name="created_at" type="string">ISO 8601 timestamp.</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/start \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "description": "Build a REST API for recipe management with user auth and search",
+    "research_depth": "standard"
+  }'
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch('http://localhost:8000/api/deep-work/start', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    description: 'Build a REST API for recipe management with user auth and search',
+    research_depth: 'standard',
+  }),
+});
+const data = await res.json();
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.post(
+    "http://localhost:8000/api/deep-work/start",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+    json={
+        "description": "Build a REST API for recipe management with user auth and search",
+        "research_depth": "standard",
+    },
+)
+data = res.json()
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "project": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "title": "",
+    "description": "Build a REST API for recipe management with user auth and search",
+    "status": "planning",
+    "creator_id": "human",
+    "task_ids": [],
+    "team_agent_ids": [],
+    "tags": [],
+    "created_at": "2024-01-15T14:30:00Z",
+    "updated_at": "2024-01-15T14:30:00Z"
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -1,0 +1,89 @@
+---
+title: Discord
+description: "Run PocketPaw as a Discord bot with /paw slash commands, DM and mention support, streaming responses with edit-in-place, and configurable guild and user allow-lists."
+section: Channels
+ogType: article
+keywords: ["discord bot", "slash commands", "discord.py", "dm support", "streaming"]
+tags: ["channels", "discord"]
+---
+
+# Discord
+
+PocketPaw integrates with Discord via `discord.py`. It supports slash commands, direct messages, and @mention in channels.
+
+## Setup
+
+<Steps>
+  <Step title="Create a Discord application">
+    1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
+    2. Click "New Application" and name it
+    3. Go to the "Bot" section and create a bot
+    4. Copy the bot token
+  </Step>
+  <Step title="Set permissions">
+    Under OAuth2 → URL Generator, select:
+    - Scopes: `bot`, `applications.commands`
+    - Permissions: `Send Messages`, `Read Message History`, `Use Slash Commands`
+  </Step>
+  <Step title="Invite to server">
+    Use the generated URL to invite the bot to your Discord server.
+  </Step>
+  <Step title="Configure">
+    ```bash
+    export POCKETCLAW_DISCORD_BOT_TOKEN="your-discord-token"
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw --discord
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| Bot token | `POCKETCLAW_DISCORD_BOT_TOKEN` | Discord bot token |
+| Allowed guilds | `POCKETCLAW_DISCORD_ALLOWED_GUILD_IDS` | Comma-separated guild IDs |
+| Allowed users | `POCKETCLAW_DISCORD_ALLOWED_USER_IDS` | Comma-separated user IDs |
+
+## Features
+
+### Slash Command
+
+The bot registers a `/paw` slash command. Users can interact with:
+
+```
+/paw What files are in the home directory?
+```
+
+### DM and Mention Support
+
+- **Direct messages** — Send a DM to the bot for private conversations
+- **@mention** — Mention the bot in any channel where it's present
+
+### Streaming
+
+Discord supports edit-in-place streaming with a 1.5-second rate limit. The bot sends an initial message and edits it as tokens arrive, batching updates to respect Discord's rate limits.
+
+### Access Control
+
+```bash
+# Restrict to specific servers
+export POCKETCLAW_DISCORD_ALLOWED_GUILD_IDS="111222333,444555666"
+
+# Restrict to specific users
+export POCKETCLAW_DISCORD_ALLOWED_USER_IDS="777888999"
+```
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the Discord extra manually
+pip install pocketpaw[discord]
+```
+
+This installs `discord.py` as an optional dependency.

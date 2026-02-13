@@ -1,0 +1,67 @@
+---
+title: Guardian AI
+description: "Guardian AI is PocketPaw's secondary LLM safety check that screens every incoming message for harmful intent before it reaches the agent. Uses a separate Anthropic API call for independent evaluation."
+section: Security
+ogType: article
+keywords: ["guardian ai", "safety filter", "content moderation", "llm safety", "message screening"]
+tags: ["security", "safety"]
+---
+
+# Guardian AI
+
+Guardian AI is a secondary language model that evaluates every incoming message for safety before the main agent processes it.
+
+## How It Works
+
+1. A user sends a message through any channel
+2. Before the main agent sees it, Guardian AI evaluates the message
+3. The message is classified into a threat level
+4. Messages at HIGH or above are blocked with an explanation
+
+```
+User Message → Guardian AI → Threat Assessment → Allow / Block
+                                                    ↓
+                                              Main Agent (if allowed)
+```
+
+## Threat Levels
+
+| Level | Action | Example |
+|-------|--------|---------|
+| `NONE` | Allow | "What's the weather today?" |
+| `LOW` | Allow (logged) | "How do firewalls work?" |
+| `MEDIUM` | Allow (logged, flagged) | "Explain SQL injection" |
+| `HIGH` | Block | Requests to create malware |
+| `CRITICAL` | Block | Attempts to harm systems |
+
+## Implementation
+
+Guardian AI uses `AsyncAnthropic` directly (not the main agent's LLM router):
+
+```python
+from anthropic import AsyncAnthropic
+
+class GuardianAI:
+    def __init__(self, api_key: str):
+        self.client = AsyncAnthropic(api_key=api_key)
+
+    async def check(self, message: str) -> ThreatAssessment:
+        response = await self.client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            system="You are a safety classifier...",
+            messages=[{"role": "user", "content": message}],
+        )
+        return self._parse_assessment(response)
+```
+
+## Configuration
+
+Guardian AI uses the same Anthropic API key as the main agent:
+
+```bash
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+<Callout type="info">
+  Guardian AI adds a small latency to each message (one additional API call). For latency-sensitive deployments, the threat level threshold can be adjusted.
+</Callout>

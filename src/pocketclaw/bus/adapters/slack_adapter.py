@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from pocketclaw.bus import BaseChannelAdapter, Channel, InboundMessage, OutboundMessage
+from pocketclaw.bus.format import convert_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,42 @@ class SlackAdapter(BaseChannelAdapter):
                 return
             await adapter._handle_slack_event(event)
 
+        # Register native slash commands so Slack doesn't swallow /cmd
+        # messages with "command not found".  These arrive via Socket Mode
+        # and are forwarded to the bus as InboundMessage with command text.
+        # NOTE: Each command must also be registered in the Slack App
+        # manifest at api.slack.com → Slash Commands for this to work.
+        for _cmd_name in (
+            "/new",
+            "/sessions",
+            "/resume",
+            "/clear",
+            "/rename",
+            "/status",
+            "/delete",
+            "/help",
+        ):
+
+            @app.command(_cmd_name)
+            async def _slash_handler(ack, command, _cmd=_cmd_name):
+                await ack()
+                text = command.get("text", "").strip()
+                content = f"{_cmd} {text}" if text else _cmd
+                ch_id = command.get("channel_id", "")
+                user = command.get("user_id", "")
+                thread_ts = command.get("thread_ts")
+                meta: dict[str, Any] = {"channel_id": ch_id}
+                if thread_ts:
+                    meta["thread_ts"] = thread_ts
+                msg = InboundMessage(
+                    channel=Channel.SLACK,
+                    sender_id=user,
+                    chat_id=ch_id,
+                    content=content,
+                    metadata=meta,
+                )
+                await adapter._publish_inbound(msg)
+
         self._slack_app = app
         self._handler = AsyncSocketModeHandler(app, self.app_token)
         self._handler_task = asyncio.create_task(self._handler.start_async())
@@ -92,7 +129,7 @@ class SlackAdapter(BaseChannelAdapter):
         user_id = event.get("user", "")
         text = event.get("text", "")
 
-        if not text or not user_id:
+        if not user_id:
             return
 
         # Channel filter
@@ -103,7 +140,36 @@ class SlackAdapter(BaseChannelAdapter):
         import re
 
         text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
-        if not text:
+
+        # Download attached files
+        media_paths: list[str] = []
+        files = event.get("files", [])
+        if files:
+            try:
+                from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                downloader = get_media_downloader()
+                names = []
+                for f in files:
+                    url = f.get("url_private_download") or f.get("url_private")
+                    if not url:
+                        continue
+                    name = f.get("name", "file")
+                    mime = f.get("mimetype")
+                    try:
+                        path = await downloader.download_url_with_auth(
+                            url, f"Bearer {self.bot_token}", name=name, mime=mime
+                        )
+                        media_paths.append(path)
+                        names.append(name)
+                    except Exception as e:
+                        logger.warning("Failed to download Slack file: %s", e)
+                if names:
+                    text += build_media_hint(names)
+            except Exception as e:
+                logger.warning("Slack media download error: %s", e)
+
+        if not text and not media_paths:
             return
 
         metadata: dict[str, Any] = {
@@ -119,6 +185,7 @@ class SlackAdapter(BaseChannelAdapter):
             sender_id=user_id,
             chat_id=channel_id,
             content=text,
+            media=media_paths,
             metadata=metadata,
         )
         await self._publish_inbound(msg)
@@ -140,7 +207,7 @@ class SlackAdapter(BaseChannelAdapter):
             # Normal message
             kwargs: dict[str, Any] = {
                 "channel": message.chat_id,
-                "text": message.content,
+                "text": convert_markdown(message.content, self.channel),
             }
             thread_ts = message.metadata.get("thread_ts")
             if thread_ts:
@@ -190,7 +257,7 @@ class SlackAdapter(BaseChannelAdapter):
         buf = self._buffers.get(chat_id)
         if not buf:
             return
-        text = buf["text"]
+        text = convert_markdown(buf["text"], self.channel)
         if not text.strip():
             return
         try:

@@ -1,0 +1,116 @@
+---
+title: Mem0 Integration
+description: "Integrate Mem0 for semantic long-term memory with auto-learning: PocketPaw automatically extracts and stores facts from conversations, then retrieves relevant memories via vector similarity search."
+section: Memory
+ogType: article
+keywords: ["mem0", "semantic memory", "auto-learn", "vector search", "long-term memory", "embeddings"]
+tags: ["memory", "mem0", "ai"]
+---
+
+# Mem0 Integration
+
+[Mem0](https://mem0.ai) provides semantic memory capabilities — auto-learning from conversations and retrieving relevant memories via vector search.
+
+## How It Works
+
+1. **Auto-learn**: After each agent response, the conversation is sent to Mem0 in a background task
+2. **Memory extraction**: Mem0's LLM extracts key facts and preferences
+3. **Embedding**: Facts are embedded and stored in a vector database
+4. **Retrieval**: When building context for new messages, relevant memories are retrieved via semantic search
+
+## Setup
+
+```bash
+# Install PocketPaw
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the memory extra manually
+pip install pocketpaw[memory]
+
+# Configure Mem0
+export POCKETCLAW_MEM0_AUTO_LEARN=true
+export POCKETCLAW_MEM0_LLM_PROVIDER="ollama"
+export POCKETCLAW_MEM0_LLM_MODEL="llama3.2"
+export POCKETCLAW_MEM0_EMBEDDER_PROVIDER="ollama"
+export POCKETCLAW_MEM0_EMBEDDER_MODEL="nomic-embed-text"
+export POCKETCLAW_MEM0_VECTOR_STORE="qdrant"
+```
+
+## Provider Configuration
+
+### LLM Provider
+
+The LLM is used by Mem0 to extract facts from conversations:
+
+| Provider | Config | Notes |
+|----------|--------|-------|
+| Ollama | `ollama` / `llama3.2` | Free, local, recommended |
+| Anthropic | `anthropic` / `claude-sonnet-4-5-20250929` | Needs API key |
+| OpenAI | `openai` / `gpt-4o-mini` | Needs API key |
+
+### Embedder Provider
+
+The embedder converts text to vectors for semantic search:
+
+| Provider | Config | Notes |
+|----------|--------|-------|
+| Ollama | `ollama` / `nomic-embed-text` | Free, local |
+| OpenAI | `openai` / `text-embedding-3-small` | Needs API key |
+
+### Vector Store
+
+| Store | Description |
+|-------|-------------|
+| Qdrant | Default, runs embedded or as service |
+| Chroma | Alternative, runs embedded |
+
+## Embedding Dimensions
+
+Embedding dimensions must match between the model and the vector store collection. PocketPaw includes a built-in dimensions lookup and auto-detection for Ollama models:
+
+```python
+_EMBEDDING_DIMS = {
+    "nomic-embed-text": 768,
+    "mxbai-embed-large": 1024,
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+}
+```
+
+For unknown Ollama models, PocketPaw queries the model to auto-detect dimensions.
+
+## Dashboard Configuration
+
+The web dashboard provides a Memory settings panel where you can:
+
+- Enable/disable auto-learning
+- Select LLM and embedder providers
+- Choose models
+- Test memory retrieval
+
+<Callout type="warning">
+  After changing memory settings, you must restart the memory manager. The dashboard handles this via `get_memory_manager(force_reload=True)`. Note that `get_settings()` is LRU-cached — the cache must be cleared after saving settings.
+</Callout>
+
+## Fully Local Setup
+
+For a completely local memory system with no external API calls:
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull models
+ollama pull llama3.2
+ollama pull nomic-embed-text
+
+# Configure
+export POCKETCLAW_MEM0_AUTO_LEARN=true
+export POCKETCLAW_MEM0_LLM_PROVIDER="ollama"
+export POCKETCLAW_MEM0_LLM_MODEL="llama3.2"
+export POCKETCLAW_MEM0_EMBEDDER_PROVIDER="ollama"
+export POCKETCLAW_MEM0_EMBEDDER_MODEL="nomic-embed-text"
+export POCKETCLAW_MEM0_VECTOR_STORE="qdrant"
+```
+
+This runs everything locally — LLM inference, embedding, and vector storage.

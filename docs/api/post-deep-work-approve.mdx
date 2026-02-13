@@ -1,0 +1,85 @@
+---
+title: Approve Deep Work Plan
+description: "Approve a Deep Work project plan and transition it to autonomous execution. All tasks with no blockers are dispatched immediately to their assigned agents for parallel processing."
+api: POST /api/deep-work/projects/{project_id}/approve
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["approve plan", "start execution", "project approval"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Approves a Deep Work project plan and transitions it to `EXECUTING` status. All tasks with no blockers are dispatched immediately.
+
+## Path Parameters
+
+<ResponseField name="project_id" type="string" required>
+  The project ID. Project must be in `awaiting_approval` status.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the project was approved and execution started.
+</ResponseField>
+
+<ResponseField name="project" type="object">
+  The updated project object with `status: "executing"`.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/projects/PROJECT_ID/approve \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch(`http://localhost:8000/api/deep-work/projects/${projectId}/approve`, {
+  method: 'POST',
+  headers: { 'Authorization': 'Bearer YOUR_TOKEN' },
+});
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.post(
+    f"http://localhost:8000/api/deep-work/projects/{project_id}/approve",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+)
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "400"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "project": {
+    "id": "a1b2c3d4...",
+    "status": "executing",
+    "started_at": "2024-01-15T14:35:00Z"
+  }
+}
+```
+  </Tab>
+  <Tab title="400">
+```json
+{
+  "detail": "Project status is not awaiting_approval"
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

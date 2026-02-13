@@ -1,0 +1,92 @@
+---
+title: Remove Webhook Slot
+description: "Delete an inbound webhook slot from PocketPaw. The webhook URL and secret are immediately invalidated and any future payloads sent to it will be rejected."
+api: POST /api/webhooks/remove
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["remove webhook", "delete webhook", "revoke webhook"]
+tags: ["api", "webhooks"]
+---
+
+## Overview
+
+Removes an inbound webhook slot by name. Any future requests to the webhook URL will return 404.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="name" type="string" required>
+    The name of the webhook slot to remove.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">`"ok"` on success</ResponseField>
+
+## Error Responses
+
+| Status | Description |
+|--------|-------------|
+| 404 | Webhook slot not found |
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/webhooks/remove" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"name": "github-events"}'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/webhooks/remove", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ name: "github-events" })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/webhooks/remove",
+        headers={"Authorization": "Bearer <token>"},
+        json={"name": "github-events"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "404"]}>
+  <Tab title="200">
+    ```json
+    {
+      "status": "ok"
+    }
+    ```
+  </Tab>
+  <Tab title="404">
+    ```json
+    {
+      "detail": "Webhook slot not found"
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -1,0 +1,59 @@
+---
+title: Resume Deep Work Project
+description: "Resume a paused Deep Work project and re-dispatch all ready tasks. Tasks whose blockers have been resolved during the pause are included in the next execution wave."
+api: POST /api/deep-work/projects/{project_id}/resume
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["resume project", "continue execution", "restart work"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Resumes a paused Deep Work project. All ready tasks (with no unresolved blockers) are dispatched for execution.
+
+## Path Parameters
+
+<ResponseField name="project_id" type="string" required>
+  The project ID. Project must be in `paused` status.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the project was resumed.
+</ResponseField>
+
+<ResponseField name="project" type="object">
+  The updated project with `status: "executing"`.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/projects/PROJECT_ID/resume \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "project": {
+    "id": "a1b2c3d4...",
+    "status": "executing"
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

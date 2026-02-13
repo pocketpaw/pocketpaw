@@ -1,0 +1,137 @@
+---
+title: Installation
+description: "Install PocketPaw with pip or uv in under a minute. Supports Python 3.11+, optional extras for channels, tools, and integrations. Works on Linux, macOS, and Windows."
+section: Getting Started
+ogType: article
+keywords: ["install", "pip install", "uv sync", "python package", "dependencies"]
+tags: ["setup", "installation"]
+---
+
+# Installation
+
+PocketPaw requires **Python 3.11+** and can be installed via pip or uv.
+
+## Prerequisites
+
+- **Python 3.11** or higher
+- **pip**, **uv**, or **pipx** package manager
+- An **Anthropic API key** (for the default Claude Agent SDK backend)
+
+## Quick Install
+
+The fastest way to get started — the interactive installer handles Python, uv, and feature selection:
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+```
+
+Or install directly with pip:
+
+```bash
+pip install pocketpaw
+```
+
+This installs the core package with minimal dependencies (~10 packages). To add specific features, use extras.
+
+## Using uv (Recommended)
+
+[uv](https://docs.astral.sh/uv/) is the recommended package manager for faster installs:
+
+```bash
+# Install uv if you haven't
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone and install for development
+git clone https://github.com/pocketpaw/pocketpaw.git
+cd pocketpaw
+uv sync --dev
+```
+
+## Package Extras
+
+PocketPaw uses a modular extras system. Install only what you need:
+
+### Channel Extras
+
+```bash
+# Individual channels
+pip install pocketpaw[telegram]
+pip install pocketpaw[discord]
+pip install pocketpaw[slack]
+pip install pocketpaw[whatsapp-personal]  # QR-code pairing
+
+# All channels
+pip install pocketpaw[all-channels]
+```
+
+### Tool Extras
+
+```bash
+# Specific tools
+pip install pocketpaw[browser]    # Playwright browser automation
+pip install pocketpaw[image]      # Google Gemini image generation
+pip install pocketpaw[memory]     # Mem0 semantic memory
+
+# All tools
+pip install pocketpaw[all-tools]
+```
+
+### Backend Extras
+
+```bash
+pip install pocketpaw[native]     # PocketPaw Native backend
+pip install pocketpaw[desktop]    # Desktop automation tools
+```
+
+### Composite Extras
+
+```bash
+# Recommended setup (dashboard + common tools)
+pip install pocketpaw[recommended]
+
+# Everything included
+pip install pocketpaw[all]
+
+# Development (includes test and lint tools)
+pip install pocketpaw[dev]
+```
+
+## Environment Variables
+
+Set your API keys as environment variables. All PocketPaw settings use the `POCKETCLAW_` prefix:
+
+```bash
+# Required: Anthropic API key for Claude
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+
+# Optional: Other API keys
+export POCKETCLAW_OPENAI_API_KEY="sk-..."          # For voice/TTS/STT
+export POCKETCLAW_TAVILY_API_KEY="tvly-..."        # For web search
+export POCKETCLAW_GOOGLE_API_KEY="..."             # For image generation
+export POCKETCLAW_BRAVE_SEARCH_API_KEY="..."       # For Brave Search
+```
+
+Alternatively, you can configure these through the web dashboard's settings panel.
+
+## Verify Installation
+
+```bash
+# Run PocketPaw (starts web dashboard)
+pocketpaw
+
+# Or with uv
+uv run pocketpaw
+```
+
+The web dashboard will start at `http://localhost:8000`. Open it in your browser to verify everything is working.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Quick Start" icon="lucide:rocket" href="/getting-started/quick-start">
+    Set up your first channel and send your first message.
+  </Card>
+  <Card title="Configuration" icon="lucide:settings" href="/getting-started/configuration">
+    Learn about all configuration options.
+  </Card>
+</CardGroup>

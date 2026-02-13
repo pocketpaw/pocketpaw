@@ -1,0 +1,78 @@
+---
+title: Microsoft Teams
+description: "Connect PocketPaw to Microsoft Teams using the Bot Framework SDK. Receives messages via webhook at /api/messages/teams with enterprise-grade authentication and conversation support."
+section: Channels
+ogType: article
+keywords: ["microsoft teams bot", "bot framework", "enterprise", "teams integration", "webhook"]
+tags: ["channels", "teams"]
+---
+
+# Microsoft Teams
+
+PocketPaw integrates with Microsoft Teams via the **Bot Framework SDK**. This is ideal for enterprise environments that use Teams as their primary collaboration tool.
+
+## Setup
+
+<Steps>
+  <Step title="Register a bot">
+    1. Go to the [Azure Portal](https://portal.azure.com)
+    2. Create a new Bot Channels Registration
+    3. Note the App ID and generate a password
+  </Step>
+  <Step title="Configure messaging endpoint">
+    Set the messaging endpoint to your server's public URL:
+    ```
+    https://your-server.com/api/messages/teams
+    ```
+  </Step>
+  <Step title="Configure PocketPaw">
+    ```bash
+    export POCKETCLAW_TEAMS_APP_ID="your-app-id"
+    export POCKETCLAW_TEAMS_APP_PASSWORD="your-app-password"
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw --teams
+    ```
+    Or start via the web dashboard's Channels modal.
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| App ID | `POCKETCLAW_TEAMS_APP_ID` | Bot Framework App ID |
+| App password | `POCKETCLAW_TEAMS_APP_PASSWORD` | Bot Framework password |
+| Tenant ID | `POCKETCLAW_TEAMS_TENANT_ID` | Azure tenant ID (optional) |
+| Allowed teams | `POCKETCLAW_TEAMS_ALLOWED_TEAM_IDS` | Comma-separated team IDs |
+
+## Features
+
+### Webhook-Based
+
+The Teams adapter exposes a webhook endpoint at `/api/messages/teams`. The Bot Framework sends activities to this endpoint when users interact with the bot.
+
+### No Streaming
+
+Teams messages are accumulated and sent as a complete response when the agent finishes processing.
+
+### Session Keys
+
+Each conversation gets a unique session: `teams:{conversation_id}`
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the Teams extra manually
+pip install pocketpaw[teams]
+```
+
+This installs the `botbuilder-core` SDK as an optional dependency.
+
+<Callout type="info">
+  Microsoft Teams integration requires a public URL for the webhook endpoint. Use the web dashboard or set up a reverse proxy with a public domain.
+</Callout>

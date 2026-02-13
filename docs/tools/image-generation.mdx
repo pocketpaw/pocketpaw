@@ -1,0 +1,79 @@
+---
+title: Image Generation
+description: "Generate images with PocketPaw using Google Gemini models. Describe what you want and receive AI-generated images directly in your chat. Requires a Google API key and the image extra."
+section: Tools
+ogType: article
+keywords: ["image generation", "google gemini", "ai art", "text to image", "generative ai"]
+tags: ["tools", "media"]
+---
+
+# Image Generation
+
+PocketPaw can generate images using Google's Gemini models via the `google-genai` SDK.
+
+## Setup
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the image extra manually
+pip install pocketpaw[image]
+
+export POCKETCLAW_GOOGLE_API_KEY="your-google-api-key"
+```
+
+## Configuration
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| API key | `POCKETCLAW_GOOGLE_API_KEY` | — | Google AI API key |
+| Model | `POCKETCLAW_IMAGE_MODEL` | `gemini-2.0-flash` | Model to use for generation |
+
+## Usage
+
+```
+User: Generate an image of a cute robot holding a flower
+Agent: [uses image_gen tool] → [generated image]
+```
+
+The tool returns the generated image which can be displayed in the web dashboard or sent via messaging channels.
+
+## Tool Schema
+
+```json
+{
+  "name": "image_gen",
+  "description": "Generate an image from a text description",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Description of the image to generate"
+      }
+    },
+    "required": ["prompt"]
+  }
+}
+```
+
+## Policy Group
+
+Belongs to `group:media`. Control access with:
+
+```bash
+export POCKETCLAW_TOOLS_ALLOW="group:media"
+```
+
+## Installation
+
+Requires the `image` extra:
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the image extra manually
+pip install pocketpaw[image]
+```
+
+This installs `google-genai` as an optional dependency.

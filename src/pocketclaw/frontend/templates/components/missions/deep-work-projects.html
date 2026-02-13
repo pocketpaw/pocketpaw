@@ -1,0 +1,667 @@
+<!--
+  PocketPaw - Deep Work Projects Component
+
+  Created: 2026-02-12
+  Updated: 2026-02-12 — Bumped contrast on all low-visibility elements:
+    phase headers, chevrons, blocker/blocks icons, estimated time, hover
+    actions, toolbar counts, sidebar meta, timestamps, expanded row labels.
+    Base: /20→/40, /25→/45, /30→/50. Hover bg /[0.03]→/[0.06].
+    Phase separators get stronger bg and borders.
+
+  Layout:
+    No project selected → Left: project cards, Right: placeholder
+    Project selected    → Left: task breakdown (level-grouped), Right: project meta
+-->
+
+<!-- Left: Main Panel -->
+<div class="flex-1 flex flex-col border-r border-white/5 min-w-0">
+
+    <!-- ========== No project selected: show project cards ========== -->
+    <template x-if="!missionControl.selectedProject">
+        <div class="flex-1 flex flex-col overflow-hidden">
+            <!-- Empty State -->
+            <div x-show="missionControl.projects.length === 0" class="flex-1 flex flex-col items-center justify-center text-white/30 p-8">
+                <div class="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+                    <i data-lucide="layers" class="w-8 h-8 text-accent/50"></i>
+                </div>
+                <p class="text-sm font-medium text-white/50">No projects yet</p>
+                <p class="text-xs mt-1 text-white/30 text-center max-w-xs">Describe what you want to build in natural language and the planner will break it into tasks and assemble a team.</p>
+                <button
+                    class="mt-4 flex items-center gap-2 px-4 py-2 text-sm font-medium text-accent bg-accent/10 hover:bg-accent/20 rounded-lg transition-all"
+                    @click="missionControl.showStartProject = true"
+                >
+                    <i data-lucide="rocket" class="w-4 h-4"></i>
+                    Start a Project
+                </button>
+            </div>
+
+            <!-- Project Cards -->
+            <div x-show="missionControl.projects.length > 0" class="flex-1 overflow-y-auto p-4 space-y-2">
+                <template x-for="project in missionControl.projects" :key="project.id">
+                    <div
+                        class="group p-4 rounded-xl border cursor-pointer transition-all bg-white/[0.02] border-white/5 hover:bg-white/[0.04] hover:border-white/10"
+                        @click="selectProject(project)"
+                    >
+                        <div class="flex items-start gap-3 mb-2">
+                            <div
+                                class="mt-0.5 shrink-0 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full"
+                                :class="getProjectStatusColor(project.status)"
+                                x-text="getProjectStatusLabel(project.status)"
+                            ></div>
+                            <h4 class="text-sm font-medium text-white leading-tight line-clamp-2" x-text="project.title"></h4>
+                        </div>
+                        <p class="text-xs text-white/40 line-clamp-2 mb-3" x-text="project.description?.substring(0, 120) + (project.description?.length > 120 ? '...' : '')"></p>
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-3">
+                                <span class="flex items-center gap-1 text-[11px] text-white/50">
+                                    <i data-lucide="list-checks" class="w-3 h-3"></i>
+                                    <span x-text="(project.task_ids || []).length"></span> tasks
+                                </span>
+                                <span class="flex items-center gap-1 text-[11px] text-white/50">
+                                    <i data-lucide="users" class="w-3 h-3"></i>
+                                    <span x-text="(project.team_agent_ids || []).length"></span>
+                                </span>
+                            </div>
+                            <span class="text-[10px] text-white/40" x-text="formatMCDate(project.created_at)"></span>
+                        </div>
+                        <template x-if="['executing', 'paused', 'completed'].includes(project.status)">
+                            <div class="mt-3">
+                                <div class="h-1 rounded-full bg-white/5 overflow-hidden">
+                                    <div
+                                        class="h-full rounded-full transition-all duration-500"
+                                        :class="project.status === 'completed' ? 'bg-emerald-500' : 'bg-accent'"
+                                        :style="'width: ' + Math.round(((project.task_ids || []).filter(id => {
+                                            const t = missionControl.tasks.find(t => t.id === id);
+                                            return t && (t.status === 'done' || t.status === 'skipped');
+                                        }).length / Math.max((project.task_ids || []).length, 1)) * 100) + '%'"
+                                    ></div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========== Project selected: show task breakdown ========== -->
+    <template x-if="missionControl.selectedProject">
+        <div class="flex-1 flex flex-col overflow-hidden">
+
+            <!-- Back + project header -->
+            <div class="flex items-center gap-3 px-4 py-3 border-b border-white/5 bg-black/20">
+                <button
+                    class="p-1.5 text-white/60 hover:text-white hover:bg-white/15 rounded-lg transition-all"
+                    @click="missionControl.selectedProject = null"
+                    title="Back to projects"
+                >
+                    <i data-lucide="arrow-left" class="w-4 h-4"></i>
+                </button>
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2">
+                        <div
+                            class="shrink-0 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider rounded-full"
+                            :class="getProjectStatusColor(missionControl.selectedProject.status)"
+                            x-text="getProjectStatusLabel(missionControl.selectedProject.status)"
+                        ></div>
+                        <h3 class="text-sm font-semibold text-white truncate" x-text="missionControl.selectedProject.title"></h3>
+                    </div>
+                </div>
+                <!-- Approve button inline when awaiting -->
+                <button
+                    x-show="missionControl.selectedProject.status === 'awaiting_approval'"
+                    class="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg text-xs font-medium transition-all shrink-0"
+                    @click="approveProject(missionControl.selectedProject.id)"
+                >
+                    <i data-lucide="check" class="w-3.5 h-3.5"></i>
+                    Approve & Execute
+                </button>
+                <button
+                    x-show="missionControl.selectedProject.status === 'executing'"
+                    class="flex items-center gap-1.5 px-3 py-1.5 bg-orange-500/20 hover:bg-orange-500/30 text-orange-400 rounded-lg text-xs font-medium transition-all shrink-0"
+                    @click="pauseProject(missionControl.selectedProject.id)"
+                >
+                    <i data-lucide="pause" class="w-3.5 h-3.5"></i>
+                    Pause
+                </button>
+                <button
+                    x-show="missionControl.selectedProject.status === 'paused'"
+                    class="flex items-center gap-1.5 px-3 py-1.5 bg-accent/20 hover:bg-accent/30 text-accent rounded-lg text-xs font-medium transition-all shrink-0"
+                    @click="resumeProject(missionControl.selectedProject.id)"
+                >
+                    <i data-lucide="play" class="w-3.5 h-3.5"></i>
+                    Resume
+                </button>
+            </div>
+
+            <!-- Progress bar -->
+            <div x-show="missionControl.projectProgress" class="px-4 py-2 border-b border-white/5">
+                <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-[10px] text-white/55 uppercase tracking-wider font-semibold">Progress</span>
+                    <span class="text-xs text-white/60">
+                        <span class="text-white font-semibold" x-text="(missionControl.projectProgress?.completed || 0) + (missionControl.projectProgress?.skipped || 0)"></span>
+                        / <span x-text="missionControl.projectProgress?.total || 0"></span> tasks
+                        <span x-show="missionControl.projectProgress?.skipped > 0" class="text-white/45">
+                            (<span x-text="missionControl.projectProgress?.skipped"></span> skipped)
+                        </span>
+                    </span>
+                </div>
+                <div class="h-1.5 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                        class="h-full rounded-full transition-all duration-500"
+                        :class="missionControl.selectedProject?.status === 'completed' ? 'bg-emerald-500' : 'bg-accent'"
+                        :style="'width: ' + (missionControl.projectProgress?.percent || 0) + '%'"
+                    ></div>
+                </div>
+            </div>
+
+            <!-- View Toggle Toolbar -->
+            <div class="flex items-center justify-between px-4 py-2 border-b border-white/5 bg-white/[0.01]">
+                <div class="flex bg-white/5 rounded-md p-0.5">
+                    <button
+                        class="px-2.5 py-1 rounded text-[10px] font-medium transition-all flex items-center gap-1"
+                        :class="missionControl.taskViewMode === 'list' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'"
+                        @click="missionControl.taskViewMode = 'list'"
+                    >
+                        <i data-lucide="list" class="w-3 h-3"></i>
+                        List
+                    </button>
+                    <button
+                        class="px-2.5 py-1 rounded text-[10px] font-medium transition-all flex items-center gap-1"
+                        :class="missionControl.taskViewMode === 'timeline' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'"
+                        @click="missionControl.taskViewMode = 'timeline'"
+                    >
+                        <i data-lucide="gantt-chart" class="w-3 h-3"></i>
+                        Timeline
+                    </button>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-[10px] text-white/50">
+                        <span x-text="missionControl.executionLevels.length"></span> phases
+                    </span>
+                    <!-- Running task count -->
+                    <span
+                        x-show="getRunningTaskCount() > 0"
+                        class="flex items-center gap-1 text-[10px] text-green-400 font-medium"
+                    >
+                        <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                        <span x-text="getRunningTaskCount()"></span> running
+                    </span>
+                </div>
+            </div>
+
+            <!-- Planning progress indicator -->
+            <div
+                x-show="missionControl.selectedProject?.status === 'planning' && missionControl.projectStarting"
+                class="px-6 py-8 flex flex-col items-center gap-4"
+            >
+                <div class="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center">
+                    <i data-lucide="loader" class="w-6 h-6 text-accent animate-spin"></i>
+                </div>
+                <div class="text-center">
+                    <p class="text-sm font-medium text-white" x-text="getPlanningPhaseInfo().label + '...'"></p>
+                    <p class="text-xs text-white/50 mt-1" x-text="missionControl.planningMessage"></p>
+                </div>
+                <!-- Phase progress steps -->
+                <div class="flex items-center gap-2 mt-2">
+                    <template x-for="(phase, idx) in ['research', 'prd', 'tasks', 'team']" :key="phase">
+                        <div class="flex items-center gap-2">
+                            <div
+                                class="w-2 h-2 rounded-full transition-all"
+                                :class="{
+                                    'bg-accent': getPlanningPhaseInfo().step > idx + 1,
+                                    'bg-accent animate-pulse': getPlanningPhaseInfo().step === idx + 1,
+                                    'bg-white/15': getPlanningPhaseInfo().step < idx + 1
+                                }"
+                            ></div>
+                            <span
+                                x-show="idx < 3"
+                                class="w-6 h-px"
+                                :class="getPlanningPhaseInfo().step > idx + 1 ? 'bg-accent/40' : 'bg-white/10'"
+                            ></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- ====== LIST VIEW ====== -->
+            <div x-show="missionControl.taskViewMode === 'list'" class="flex-1 overflow-y-auto">
+                <div x-show="missionControl.projectTasks.length === 0 && !missionControl.projectStarting" class="flex flex-col items-center justify-center h-32 text-white/30">
+                    <i data-lucide="list-checks" class="w-8 h-8 mb-2 opacity-30"></i>
+                    <p class="text-xs">No tasks in this project</p>
+                </div>
+
+                <!-- Level-grouped task list -->
+                <template x-for="group in getTasksByLevel()" :key="'level-' + group.level">
+                    <div>
+                        <!-- Phase separator -->
+                        <div class="flex items-center gap-3 px-4 py-2 bg-white/[0.04] border-b border-white/8">
+                            <div class="flex items-center gap-1.5 text-[10px] font-semibold text-white/60 uppercase tracking-wider">
+                                <i data-lucide="layers" class="w-3 h-3"></i>
+                                Phase <span x-text="group.level"></span>
+                            </div>
+                            <span class="text-[10px] text-white/45" x-text="group.tasks.length + ' task' + (group.tasks.length !== 1 ? 's' : '')"></span>
+                            <template x-if="group.level > 0">
+                                <span class="text-[10px] text-white/40 flex items-center gap-1">
+                                    <i data-lucide="arrow-right" class="w-2.5 h-2.5"></i>
+                                    depends on Phase <span x-text="group.level - 1"></span>
+                                </span>
+                            </template>
+                        </div>
+
+                        <!-- Task rows in this level -->
+                        <template x-for="task in group.tasks" :key="task.id">
+                            <div>
+                                <!-- Main row -->
+                                <div
+                                    class="group flex items-center px-4 py-2.5 border-b border-white/5 hover:bg-white/[0.06] cursor-pointer transition-all"
+                                    :class="{ 'opacity-50': task.status === 'skipped' }"
+                                    @click="toggleTaskExpand(task.id)"
+                                >
+                                    <!-- Status dot -->
+                                    <div class="w-8 shrink-0">
+                                        <div
+                                            class="w-3 h-3 rounded-full"
+                                            :class="{
+                                                'bg-blue-500': task.status === 'inbox',
+                                                'bg-cyan-500': task.status === 'assigned',
+                                                'bg-amber-500 animate-pulse': task.status === 'in_progress',
+                                                'bg-purple-500': task.status === 'review',
+                                                'bg-green-500': task.status === 'done',
+                                                'bg-red-500': task.status === 'blocked',
+                                                'bg-gray-500': task.status === 'skipped'
+                                            }"
+                                        ></div>
+                                    </div>
+
+                                    <!-- Title + indicators -->
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center gap-2">
+                                            <!-- Expand chevron -->
+                                            <i
+                                                data-lucide="chevron-right"
+                                                class="w-3 h-3 text-white/40 shrink-0 transition-transform"
+                                                :class="missionControl.expandedTaskId === task.id ? 'rotate-90' : ''"
+                                            ></i>
+                                            <span
+                                                class="text-sm truncate"
+                                                :class="{
+                                                    'text-white/50 line-through': task.status === 'done' || task.status === 'skipped',
+                                                    'text-white font-medium': task.status !== 'done' && task.status !== 'skipped'
+                                                }"
+                                                x-text="task.title"
+                                            ></span>
+                                            <!-- Running indicator with activity button -->
+                                            <span
+                                                x-show="isMCTaskRunning(task.id)"
+                                                class="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-green-500/20 text-green-400 rounded cursor-pointer hover:bg-green-500/30 transition-all"
+                                                @click.stop="openAgentActivitySheet(task.id)"
+                                                title="View live output"
+                                            >
+                                                <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                                                Running
+                                            </span>
+                                            <!-- Blocker count -->
+                                            <span
+                                                x-show="task.blocked_by && task.blocked_by.length > 0 && !['done', 'skipped'].includes(task.status)"
+                                                class="shrink-0 text-[9px] text-amber-400/60 flex items-center gap-1"
+                                                :title="'Blocked by: ' + getBlockerNames(task).join(', ')"
+                                            >
+                                                <i data-lucide="lock" class="w-2.5 h-2.5"></i>
+                                                <span x-text="task.blocked_by.length"></span>
+                                            </span>
+                                            <!-- Blocks count -->
+                                            <span
+                                                x-show="task.blocks && task.blocks.length > 0"
+                                                class="shrink-0 text-[9px] text-blue-400/50 flex items-center gap-1"
+                                                :title="'Unblocks: ' + getBlocksNames(task).join(', ')"
+                                            >
+                                                <i data-lucide="arrow-right-circle" class="w-2.5 h-2.5"></i>
+                                                <span x-text="task.blocks.length"></span>
+                                            </span>
+                                        </div>
+                                        <!-- Agent activity description (shown while running) -->
+                                        <div
+                                            x-show="task.active_description && isMCTaskRunning(task.id)"
+                                            class="pl-6 mt-0.5"
+                                        >
+                                            <span
+                                                class="text-[10px] text-green-400/70 truncate block max-w-md"
+                                                x-text="task.active_description"
+                                            ></span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Type badge -->
+                                    <div class="w-14 shrink-0 text-center hidden sm:block">
+                                        <span
+                                            x-show="task.task_type === 'human'"
+                                            class="inline-block px-1.5 py-0.5 text-[9px] font-medium rounded bg-amber-500/20 text-amber-400"
+                                        >human</span>
+                                        <span
+                                            x-show="task.task_type === 'review'"
+                                            class="inline-block px-1.5 py-0.5 text-[9px] font-medium rounded bg-purple-500/20 text-purple-400"
+                                        >review</span>
+                                        <span
+                                            x-show="task.task_type === 'agent'"
+                                            class="inline-block px-1.5 py-0.5 text-[9px] font-medium rounded bg-blue-500/15 text-blue-400"
+                                        >agent</span>
+                                    </div>
+
+                                    <!-- Assignee -->
+                                    <div class="w-16 shrink-0 flex justify-center hidden md:flex">
+                                        <template x-if="task.assignee_ids && task.assignee_ids.length > 0">
+                                            <div class="flex -space-x-1.5">
+                                                <template x-for="assigneeId in (task.assignee_ids || []).slice(0, 2)" :key="assigneeId">
+                                                    <div
+                                                        class="w-5 h-5 rounded-full bg-gradient-to-br from-accent to-purple-500 ring-2 ring-[#1c1c1e] flex items-center justify-center text-[8px] font-bold text-white"
+                                                        x-text="getAgentInitial(assigneeId)"
+                                                        :title="getAgentName(assigneeId)"
+                                                    ></div>
+                                                </template>
+                                            </div>
+                                        </template>
+                                        <span x-show="!task.assignee_ids || task.assignee_ids.length === 0" class="text-[10px] text-white/35">--</span>
+                                    </div>
+
+                                    <!-- Status Badge -->
+                                    <div class="w-20 shrink-0 text-center hidden lg:block">
+                                        <span
+                                            class="inline-block px-2 py-0.5 text-[10px] font-medium rounded capitalize"
+                                            :class="{
+                                                'bg-blue-500/20 text-blue-400': task.status === 'inbox',
+                                                'bg-cyan-500/20 text-cyan-400': task.status === 'assigned',
+                                                'bg-amber-500/20 text-amber-400': task.status === 'in_progress',
+                                                'bg-purple-500/20 text-purple-400': task.status === 'review',
+                                                'bg-green-500/20 text-green-400': task.status === 'done',
+                                                'bg-red-500/20 text-red-400': task.status === 'blocked',
+                                                'bg-gray-500/20 text-gray-400': task.status === 'skipped'
+                                            }"
+                                            x-text="task.status.replace('_', ' ')"
+                                        ></span>
+                                    </div>
+
+                                    <!-- Inline actions (show on hover) -->
+                                    <div class="w-24 shrink-0 flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <!-- Play button -->
+                                        <button
+                                            x-show="isTaskReady(task) && task.assignee_ids?.length > 0 && !isMCTaskRunning(task.id) && !['done', 'skipped', 'in_progress'].includes(task.status)"
+                                            class="p-1 text-green-400 hover:bg-green-500/20 rounded transition-all"
+                                            @click.stop="runMCTask(task.id, task.assignee_ids[0])"
+                                            title="Run task"
+                                        >
+                                            <i data-lucide="play" class="w-3.5 h-3.5"></i>
+                                        </button>
+                                        <!-- Stop button -->
+                                        <button
+                                            x-show="isMCTaskRunning(task.id)"
+                                            class="p-1 text-red-400 hover:bg-red-500/20 rounded transition-all"
+                                            @click.stop="stopMCTask(task.id)"
+                                            title="Stop task"
+                                        >
+                                            <i data-lucide="square" class="w-3.5 h-3.5"></i>
+                                        </button>
+                                        <!-- Skip button -->
+                                        <button
+                                            x-show="!['done', 'skipped', 'in_progress'].includes(task.status)"
+                                            class="p-1 text-white/50 hover:text-white hover:bg-white/15 rounded transition-all"
+                                            @click.stop="skipProjectTask(task.id)"
+                                            title="Skip task"
+                                        >
+                                            <i data-lucide="skip-forward" class="w-3.5 h-3.5"></i>
+                                        </button>
+                                        <!-- Detail view button -->
+                                        <button
+                                            class="p-1 text-white/50 hover:text-white hover:bg-white/15 rounded transition-all"
+                                            @click.stop="selectMCTask(task)"
+                                            title="Full details"
+                                        >
+                                            <i data-lucide="eye" class="w-3.5 h-3.5"></i>
+                                        </button>
+                                    </div>
+
+                                    <!-- Estimated time -->
+                                    <div class="w-12 shrink-0 text-right hidden md:block">
+                                        <span
+                                            x-show="task.estimated_minutes"
+                                            class="text-[11px] text-white/45"
+                                            x-text="task.estimated_minutes + 'm'"
+                                        ></span>
+                                    </div>
+                                </div>
+
+                                <!-- Expanded row detail -->
+                                <div
+                                    x-show="missionControl.expandedTaskId === task.id"
+                                    x-transition:enter="transition ease-out duration-200"
+                                    x-transition:enter-start="opacity-0 -translate-y-1"
+                                    x-transition:enter-end="opacity-100 translate-y-0"
+                                    class="px-4 py-3 bg-white/[0.035] border-b border-white/8"
+                                >
+                                    <div class="pl-8 space-y-3">
+                                        <!-- Description -->
+                                        <div x-show="task.description">
+                                            <p class="text-xs text-white/60 leading-relaxed" x-text="task.description"></p>
+                                        </div>
+
+                                        <!-- Blocker / Blocks pills -->
+                                        <div class="flex flex-wrap gap-2">
+                                            <!-- Blocked by -->
+                                            <template x-for="name in getBlockerNames(task)" :key="'blocker-' + name">
+                                                <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-red-500/15 text-red-400 border border-red-500/20">
+                                                    <i data-lucide="lock" class="w-2.5 h-2.5"></i>
+                                                    <span x-text="name"></span>
+                                                </span>
+                                            </template>
+                                            <!-- Blocks -->
+                                            <template x-for="name in getBlocksNames(task)" :key="'blocks-' + name">
+                                                <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">
+                                                    <i data-lucide="arrow-right-circle" class="w-2.5 h-2.5"></i>
+                                                    <span x-text="name"></span>
+                                                </span>
+                                            </template>
+                                        </div>
+
+                                        <!-- Assignee detail -->
+                                        <div x-show="task.assignee_ids && task.assignee_ids.length > 0" class="flex items-center gap-2">
+                                            <span class="text-[10px] text-white/50 uppercase tracking-wider">Assigned to:</span>
+                                            <template x-for="aid in task.assignee_ids" :key="aid">
+                                                <span class="text-xs text-white/60" x-text="getAgentName(aid)"></span>
+                                            </template>
+                                        </div>
+
+                                        <!-- Deliverable preview (for completed tasks) -->
+                                        <div x-show="(task.status === 'done') && missionControl.taskDeliverableCache[task.id]?.length > 0">
+                                            <div class="text-[10px] text-white/50 uppercase tracking-wider mb-1.5">Deliverable Preview</div>
+                                            <template x-for="doc in (missionControl.taskDeliverableCache[task.id] || []).slice(0, 1)" :key="doc.id">
+                                                <div class="bg-black/30 rounded-lg p-3 border border-white/5">
+                                                    <div class="flex items-center gap-2 mb-1.5">
+                                                        <i data-lucide="file-check" class="w-3 h-3 text-purple-400"></i>
+                                                        <span class="text-[11px] font-medium text-white/60" x-text="doc.title"></span>
+                                                    </div>
+                                                    <pre class="text-[11px] text-white/55 font-mono whitespace-pre-wrap leading-relaxed max-h-32 overflow-y-auto" x-text="(doc.content || '').substring(0, 500) + (doc.content?.length > 500 ? '\n...' : '')"></pre>
+                                                </div>
+                                            </template>
+                                        </div>
+
+                                        <!-- Meta row -->
+                                        <div class="flex items-center gap-4 text-[10px] text-white/45">
+                                            <span x-show="task.estimated_minutes" x-text="task.estimated_minutes + ' min est.'"></span>
+                                            <span x-text="task.priority" class="capitalize"></span>
+                                            <span x-text="task.task_type"></span>
+                                            <span x-show="task.completed_at" x-text="'Completed ' + formatMCDate(task.completed_at)"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+
+            <!-- ====== TIMELINE VIEW ====== -->
+            <div x-show="missionControl.taskViewMode === 'timeline'" class="flex-1 overflow-y-auto">
+                <div x-show="missionControl.projectTasks.length === 0" class="flex flex-col items-center justify-center h-32 text-white/30">
+                    <i data-lucide="gantt-chart" class="w-8 h-8 mb-2 opacity-30"></i>
+                    <p class="text-xs">No tasks in this project</p>
+                </div>
+
+                <!-- Timeline grouped by level -->
+                <template x-for="group in getTasksByLevel()" :key="'tl-' + group.level">
+                    <div class="border-b border-white/5">
+                        <!-- Phase header -->
+                        <div class="flex items-center gap-2 px-4 py-1.5 bg-white/[0.04]">
+                            <span class="text-[9px] font-semibold text-white/55 uppercase tracking-wider">Phase <span x-text="group.level"></span></span>
+                        </div>
+                        <!-- Timeline bars -->
+                        <template x-for="task in group.tasks" :key="'tl-task-' + task.id">
+                            <div
+                                class="flex items-center gap-3 px-4 py-1.5 hover:bg-white/[0.02] transition-all cursor-pointer"
+                                :class="{ 'opacity-40': task.status === 'skipped' }"
+                                @click="isMCTaskRunning(task.id) ? openAgentActivitySheet(task.id) : toggleTaskExpand(task.id)"
+                            >
+                                <!-- Task title (truncated) -->
+                                <div class="w-40 shrink-0 min-w-0">
+                                    <div class="truncate text-xs" :class="task.status === 'done' || task.status === 'skipped' ? 'text-white/45' : 'text-white/70'" x-text="task.title"></div>
+                                    <div
+                                        x-show="task.active_description && isMCTaskRunning(task.id)"
+                                        class="truncate text-[9px] text-green-400/60 mt-0.5"
+                                        x-text="task.active_description"
+                                    ></div>
+                                </div>
+
+                                <!-- Bar area -->
+                                <div class="flex-1 flex items-center">
+                                    <div
+                                        class="h-5 rounded-sm transition-all duration-300 flex items-center px-2"
+                                        :class="getTimelineBarColor(task.status)"
+                                        :style="'width: ' + Math.max(((task.estimated_minutes || 10) / getMaxEstimatedMinutes()) * 100, 8) + '%'"
+                                    >
+                                        <span x-show="task.estimated_minutes" class="text-[9px] text-white/70 whitespace-nowrap" x-text="task.estimated_minutes + 'm'"></span>
+                                    </div>
+                                </div>
+
+                                <!-- Status icon -->
+                                <div class="w-6 shrink-0 flex justify-center">
+                                    <i
+                                        :data-lucide="getTimelineStatusIcon(task.status)"
+                                        class="w-3.5 h-3.5"
+                                        :class="{
+                                            'text-green-400': task.status === 'done',
+                                            'text-amber-400 animate-spin': task.status === 'in_progress',
+                                            'text-red-400': task.status === 'blocked',
+                                            'text-gray-400': task.status === 'skipped',
+                                            'text-white/50': !['done', 'in_progress', 'blocked', 'skipped'].includes(task.status)
+                                        }"
+                                    ></i>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+</div>
+
+<!-- Right: Project Meta Sidebar -->
+<div class="w-80 lg:w-96 flex flex-col bg-black/20 overflow-hidden">
+
+    <!-- No project selected -->
+    <div x-show="!missionControl.selectedProject" class="flex-1 flex flex-col items-center justify-center text-white/30 p-6">
+        <i data-lucide="mouse-pointer-click" class="w-10 h-10 mb-3 opacity-30"></i>
+        <p class="text-sm">Select a project to view details</p>
+    </div>
+
+    <!-- Project Meta (when selected) -->
+    <template x-if="missionControl.selectedProject">
+        <div class="flex-1 flex flex-col overflow-hidden">
+            <!-- Header -->
+            <div class="p-4 border-b border-white/5">
+                <div class="flex items-center justify-between mb-2">
+                    <div
+                        class="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full"
+                        :class="getProjectStatusColor(missionControl.selectedProject.status)"
+                        x-text="getProjectStatusLabel(missionControl.selectedProject.status)"
+                    ></div>
+                    <div class="flex items-center gap-1">
+                        <button
+                            class="p-1.5 text-white/50 hover:text-white hover:bg-white/15 rounded-lg transition-all"
+                            @click="missionControl.showProjectDetail = true"
+                            title="Open full details"
+                        >
+                            <i data-lucide="maximize-2" class="w-3.5 h-3.5"></i>
+                        </button>
+                        <button
+                            class="p-1.5 text-white/50 hover:text-red-400 hover:bg-red-500/15 rounded-lg transition-all"
+                            @click="deleteProject(missionControl.selectedProject.id)"
+                            title="Delete project"
+                        >
+                            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                        </button>
+                    </div>
+                </div>
+                <h3 class="text-sm font-semibold text-white leading-tight" x-text="missionControl.selectedProject.title"></h3>
+                <p class="text-xs text-white/55 mt-1 line-clamp-4" x-text="missionControl.selectedProject.description"></p>
+            </div>
+
+            <!-- Team Section -->
+            <div
+                x-show="missionControl.selectedProject.team_agent_ids && missionControl.selectedProject.team_agent_ids.length > 0"
+                class="p-4 border-b border-white/5"
+            >
+                <h4 class="text-[10px] text-white/55 uppercase tracking-wider font-semibold mb-3">Team</h4>
+                <div class="flex flex-wrap gap-2">
+                    <template x-for="agentId in missionControl.selectedProject.team_agent_ids" :key="agentId">
+                        <div
+                            class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/5"
+                            :class="getAgentById(agentId)?.status === 'active' ? 'ring-1 ring-green-500/30 bg-green-500/5' : ''"
+                        >
+                            <div class="relative">
+                                <div
+                                    class="w-6 h-6 rounded-full bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center text-[10px] font-bold text-white"
+                                    x-text="getAgentInitial(agentId)"
+                                ></div>
+                                <div
+                                    class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#1c1c1e]"
+                                    :class="{
+                                        'bg-green-500 animate-pulse': getAgentById(agentId)?.status === 'active',
+                                        'bg-blue-500': getAgentById(agentId)?.status === 'idle',
+                                        'bg-gray-500': !getAgentById(agentId) || getAgentById(agentId)?.status === 'offline'
+                                    }"
+                                ></div>
+                            </div>
+                            <div class="flex flex-col">
+                                <span class="text-xs font-medium text-white/70 leading-tight" x-text="getAgentName(agentId)"></span>
+                                <span class="text-[9px] text-white/45 leading-tight" x-text="getAgentById(agentId)?.role || ''"></span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- PRD Preview (collapsible) -->
+            <div x-show="missionControl.projectPrd" class="flex-1 overflow-hidden flex flex-col">
+                <button
+                    class="w-full flex items-center justify-between px-4 py-3 text-[10px] text-white/55 uppercase tracking-wider font-semibold hover:bg-white/[0.06] transition-all shrink-0"
+                    @click="$refs.prdContent.classList.toggle('hidden')"
+                >
+                    <span class="flex items-center gap-1.5">
+                        <i data-lucide="file-text" class="w-3 h-3"></i>
+                        PRD Document
+                    </span>
+                    <i data-lucide="chevron-down" class="w-3 h-3"></i>
+                </button>
+                <div x-ref="prdContent" class="hidden flex-1 overflow-y-auto px-4 pb-4">
+                    <div class="prose prose-invert prose-xs text-xs text-white/60 leading-relaxed" x-html="typeof marked !== 'undefined' ? DOMPurify.sanitize(marked.parse(missionControl.projectPrd?.content || '')) : (missionControl.projectPrd?.content || '')"></div>
+                </div>
+            </div>
+
+            <!-- Timestamps -->
+            <div class="p-4 border-t border-white/8 text-[10px] text-white/45 space-y-0.5">
+                <p>Created <span x-text="formatMCDate(missionControl.selectedProject.created_at)"></span></p>
+                <p x-show="missionControl.selectedProject.started_at">Started <span x-text="formatMCDate(missionControl.selectedProject.started_at)"></span></p>
+            </div>
+        </div>
+    </template>
+</div>

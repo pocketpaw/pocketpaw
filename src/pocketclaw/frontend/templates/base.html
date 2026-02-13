@@ -1,6 +1,11 @@
 <!--
   PocketPaw Dashboard - Base Template
 
+  Changes (2026-02-12):
+  - Added hash-router.js and project-browser.js feature module script tags
+  - Updated top bar view buttons to call navigateToView() for hash routing
+  - Hash-based URL routing: #/chat, #/activity, #/terminal, #/crew, #/project/{id}
+
   Changes (2026-02-05):
   - MAJOR REFACTOR: Componentized JS using mixin pattern
   - Added feature module scripts: chat, file-browser, reminders, intentions,
@@ -19,8 +24,8 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PocketPaw</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>PocketPaw (Beta)</title>
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%230A84FF'/><g transform='translate(4,4)' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='4' r='2'/><circle cx='3' cy='7' r='2'/><circle cx='19' cy='7' r='2'/><circle cx='7' cy='19' r='2'/><circle cx='15' cy='19' r='2'/><path d='M8 14v.5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V14a4 4 0 0 0-6 0z'/></g></svg>"
@@ -30,7 +35,7 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/css/styles.css" />
+    <link rel="stylesheet" href="/static/css/styles.css?v={{ v }}" />
 
     <!-- UnoCSS Runtime (utilities alongside custom CSS) -->
     <script>
@@ -54,6 +59,13 @@
 
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+
+    <!-- QR code generation (WhatsApp pairing) -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 
     <script
       defer
@@ -90,28 +102,28 @@
             <button
                 class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
                 :class="view === 'chat' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="view = 'chat'"
+                @click="navigateToView('chat')"
             >
                 Chat
             </button>
             <button
                 class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
                 :class="view === 'activity' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="view = 'activity'"
+                @click="navigateToView('activity')"
             >
                 Activity
             </button>
             <button
                 class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all hidden sm:block"
                 :class="view === 'terminal' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="view = 'terminal'"
+                @click="navigateToView('terminal')"
             >
                 Terminal
             </button>
             <button
-                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all flex items-center gap-1.5"
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all flex items-center gap-1.5 hidden sm:flex"
                 :class="view === 'missions' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
-                @click="view = 'missions'; loadMCData()"
+                @click="navigateToView('missions')"
             >
                 <span class="relative flex h-2 w-2" x-show="missionControl.stats.active_tasks > 0">
                     <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
@@ -122,40 +134,20 @@
             </div>
         </div>
 
-        <!-- Center: Remote Button (Hidden on Mobile) -->
-        <div class="flex-1 flex justify-center pointer-events-auto hidden md:flex">
-            <button 
-                class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95" 
+        <!-- Right: Remote Button -->
+        <div class="flex items-center pointer-events-auto">
+            <button
+                class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
                 @click="openRemote()"
             >
                 <i data-lucide="smartphone" class="w-4 h-4 text-accent"></i>
-                <span class="text-sm font-medium text-white/90">Take Your Paw With You</span>
+                <span class="text-sm font-medium text-white/90 hidden md:inline">Take Your Paw With You</span>
             </button>
-        </div>
-
-        <!-- Right: Agent Toggle -->
-        <div class="flex items-center gap-3 pointer-events-auto">
-          <span class="text-[13px] font-medium text-[var(--text-secondary)] hidden sm:inline">Agent Mode</span>
-          <label class="relative w-[51px] h-[31px]">
-            <input
-              type="checkbox"
-              x-model="agentActive"
-              @change="toggleAgent()"
-              class="opacity-0 w-0 h-0 peer"
-            />
-            <span class="absolute inset-0 bg-[#787880]/30 rounded-full transition-colors duration-300 peer-checked:bg-[var(--success-color)]"></span>
-            <span class="absolute left-0.5 bottom-0.5 w-[27px] h-[27px] bg-white rounded-full shadow-[0_3px_8px_rgba(0,0,0,0.15)] transition-transform duration-300 peer-checked:translate-x-[20px]"></span>
-          </label>
-          <!-- Agent Mode Badge -->
-          <span
-            x-show="agentActive"
-            class="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 bg-white/10 border border-[var(--glass-border)] rounded-xl text-[11px] font-medium text-[var(--text-secondary)] animate-[badgeFadeIn_0.3s_ease-out]"
-            x-text="getAgentModeLabel()"
-          ></span>
         </div>
       </header>
 
       {% include "components/chat.html" %}
+
       {% include "components/activity.html" %}
       {% include "components/terminal.html" %}
       {% include "components/missions.html" %}
@@ -166,21 +158,28 @@
     <!-- Toast Container -->
     <div class="toast-container" x-ref="toasts"></div>
 
-    <!-- Scripts -->
-    <script src="/static/js/websocket.js"></script>
-    <script src="/static/js/tools.js"></script>
+    <!-- Scripts (cache-busted via ?v= hash) -->
+    <script src="/static/js/state.js?v={{ v }}"></script>
+    <script src="/static/js/websocket.js?v={{ v }}"></script>
+    <script src="/static/js/tools.js?v={{ v }}"></script>
+    <!-- Loader (registers feature modules for app.js assembly) -->
+    <script src="/static/js/loader.js?v={{ v }}"></script>
     <!-- Feature modules (loaded before app.js) -->
-    <script src="/static/js/features/chat.js"></script>
-    <script src="/static/js/features/file-browser.js"></script>
-    <script src="/static/js/features/reminders.js"></script>
-    <script src="/static/js/features/intentions.js"></script>
-    <script src="/static/js/features/skills.js"></script>
-    <script src="/static/js/features/transparency.js"></script>
-    <script src="/static/js/features/remote-access.js"></script>
-    <script src="/static/js/features/mission-control.js"></script>
-    <script src="/static/js/features/channels.js"></script>
+    <script src="/static/js/features/sessions.js?v={{ v }}"></script>
+    <script src="/static/js/features/chat.js?v={{ v }}"></script>
+    <script src="/static/js/features/file-browser.js?v={{ v }}"></script>
+    <script src="/static/js/features/reminders.js?v={{ v }}"></script>
+    <script src="/static/js/features/intentions.js?v={{ v }}"></script>
+    <script src="/static/js/features/skills.js?v={{ v }}"></script>
+    <script src="/static/js/features/transparency.js?v={{ v }}"></script>
+    <script src="/static/js/features/remote-access.js?v={{ v }}"></script>
+    <script src="/static/js/features/mission-control.js?v={{ v }}"></script>
+    <script src="/static/js/features/channels.js?v={{ v }}"></script>
+    <script src="/static/js/features/mcp.js?v={{ v }}"></script>
+    <script src="/static/js/features/hash-router.js?v={{ v }}"></script>
+    <script src="/static/js/features/project-browser.js?v={{ v }}"></script>
     <!-- Main app (assembles features) -->
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v={{ v }}"></script>
 
     <!-- Initialize Lucide icons -->
     <script>

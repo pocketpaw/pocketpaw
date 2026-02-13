@@ -1,0 +1,102 @@
+---
+title: List Sessions
+description: "Retrieve all chat sessions with metadata including titles, message counts, creation dates, and active status. Sessions are returned sorted by most recent activity for easy navigation."
+api: GET /api/sessions
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["list sessions", "session metadata", "chat history"]
+tags: ["api", "sessions"]
+---
+
+## Overview
+
+Returns a paginated list of all chat sessions with their metadata. Uses the fast session index for efficient retrieval.
+
+## Parameters
+
+<ParamTable type="query">
+  <Param name="limit" type="integer" default="50">
+    Maximum number of sessions to return.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="sessions" type="array">
+  Array of session objects, sorted by last activity (most recent first).
+  <ResponseField name="id" type="string">Unique session identifier</ResponseField>
+  <ResponseField name="title" type="string">Session title (auto-generated or user-set)</ResponseField>
+  <ResponseField name="created_at" type="string">ISO 8601 creation timestamp</ResponseField>
+  <ResponseField name="updated_at" type="string">ISO 8601 last activity timestamp</ResponseField>
+  <ResponseField name="message_count" type="integer">Number of messages in the session</ResponseField>
+  <ResponseField name="channel" type="string">Origin channel (web, telegram, discord, etc.)</ResponseField>
+</ResponseField>
+
+<ResponseField name="total" type="integer">
+  Total number of sessions available.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/sessions?limit=50" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/sessions?limit=50", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/sessions",
+        params={"limit": 50},
+        headers={"Authorization": "Bearer <token>"},
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "sessions": [
+        {
+          "id": "session_abc123",
+          "title": "Python prime numbers",
+          "created_at": "2024-01-15T10:30:00Z",
+          "updated_at": "2024-01-15T11:45:00Z",
+          "message_count": 12,
+          "channel": "web"
+        },
+        {
+          "id": "session_def456",
+          "title": "Docker deployment help",
+          "created_at": "2024-01-14T08:00:00Z",
+          "updated_at": "2024-01-14T09:30:00Z",
+          "message_count": 8,
+          "channel": "telegram"
+        }
+      ],
+      "total": 42
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

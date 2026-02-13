@@ -81,6 +81,60 @@ class DiscordAdapter(BaseChannelAdapter):
             )
             await adapter._publish_inbound(msg)
 
+        async def _slash_to_inbound(interaction: discord.Interaction, content: str):
+            """Helper: defer interaction, store it, and publish as InboundMessage."""
+            if not adapter._check_auth(interaction.guild, interaction.user):
+                await interaction.response.send_message("Unauthorized.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            chat_id = str(interaction.channel_id)
+            adapter._pending_interactions[chat_id] = interaction
+            msg = InboundMessage(
+                channel=Channel.DISCORD,
+                sender_id=str(interaction.user.id),
+                chat_id=chat_id,
+                content=content,
+                metadata={
+                    "username": str(interaction.user),
+                    "guild_id": (str(interaction.guild_id) if interaction.guild_id else None),
+                    "interaction_id": str(interaction.id),
+                },
+            )
+            await adapter._publish_inbound(msg)
+
+        @tree.command(name="new", description="Start a fresh PocketPaw conversation")
+        async def new_command(interaction: discord.Interaction):
+            await _slash_to_inbound(interaction, "/new")
+
+        @tree.command(name="sessions", description="List your conversation sessions")
+        async def sessions_command(interaction: discord.Interaction):
+            await _slash_to_inbound(interaction, "/sessions")
+
+        @tree.command(name="resume", description="Resume a previous conversation session")
+        async def resume_command(interaction: discord.Interaction, target: str | None = None):
+            content = "/resume" if not target else f"/resume {target}"
+            await _slash_to_inbound(interaction, content)
+
+        @tree.command(name="clear", description="Clear the current session history")
+        async def clear_command(interaction: discord.Interaction):
+            await _slash_to_inbound(interaction, "/clear")
+
+        @tree.command(name="rename", description="Rename the current session")
+        async def rename_command(interaction: discord.Interaction, title: str):
+            await _slash_to_inbound(interaction, f"/rename {title}")
+
+        @tree.command(name="status", description="Show current session info")
+        async def status_command(interaction: discord.Interaction):
+            await _slash_to_inbound(interaction, "/status")
+
+        @tree.command(name="delete", description="Delete the current session")
+        async def delete_command(interaction: discord.Interaction):
+            await _slash_to_inbound(interaction, "/delete")
+
+        @tree.command(name="help", description="Show PocketPaw help")
+        async def help_command(interaction: discord.Interaction):
+            await _slash_to_inbound(interaction, "/help")
+
         @client.event
         async def on_ready():
             logger.info(f"Discord bot connected as {client.user}")
@@ -114,7 +168,29 @@ class DiscordAdapter(BaseChannelAdapter):
             if client.user and is_mention:
                 content = content.replace(f"<@{client.user.id}>", "").strip()
 
-            if not content:
+            # Download attachments
+            media_paths: list[str] = []
+            if message.attachments:
+                try:
+                    from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                    downloader = get_media_downloader()
+                    names = []
+                    for att in message.attachments:
+                        try:
+                            path = await downloader.download_url(
+                                att.url, att.filename, att.content_type
+                            )
+                            media_paths.append(path)
+                            names.append(att.filename)
+                        except Exception as e:
+                            logger.warning("Failed to download Discord attachment: %s", e)
+                    if names:
+                        content += build_media_hint(names)
+                except Exception as e:
+                    logger.warning("Discord media download error: %s", e)
+
+            if not content and not media_paths:
                 return
 
             chat_id = str(message.channel.id)
@@ -123,6 +199,7 @@ class DiscordAdapter(BaseChannelAdapter):
                 sender_id=str(message.author.id),
                 chat_id=chat_id,
                 content=content,
+                media=media_paths,
                 metadata={
                     "username": str(message.author),
                     "guild_id": str(message.guild.id) if message.guild else None,

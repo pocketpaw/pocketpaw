@@ -1,0 +1,157 @@
+---
+title: API Reference
+description: "Complete REST API reference for the PocketPaw web dashboard: channels, sessions, MCP servers, memory, security, authentication, webhooks, tunnel, Deep Work, and Mission Control endpoints."
+section: API Reference
+ogType: article
+keywords: ["rest api", "api reference", "dashboard api", "endpoints", "http api"]
+tags: ["api", "reference"]
+---
+
+# API Reference
+
+The PocketPaw web dashboard exposes a comprehensive REST API for managing channels, sessions, MCP servers, memory, security, and more. All endpoints are served by the FastAPI backend.
+
+<Card title="Base URL" icon="lucide:globe">
+  ```
+  http://localhost:8000
+  ```
+</Card>
+
+## Endpoint Groups
+
+<CardGroup cols={3}>
+  <Card title="Channels" icon="lucide:radio" href="/api/get-channels-status">
+    Start, stop, and configure messaging channels (Discord, Slack, WhatsApp, Telegram, etc.)
+  </Card>
+
+  <Card title="Sessions" icon="lucide:history" href="/api/get-sessions">
+    List, search, rename, and delete chat sessions.
+  </Card>
+
+  <Card title="MCP Servers" icon="lucide:server" href="/api/get-mcp-status">
+    Add, remove, toggle, and test Model Context Protocol servers.
+  </Card>
+
+  <Card title="Memory" icon="lucide:brain" href="/api/get-memory-long-term">
+    Manage long-term memories, memory settings, and backend statistics.
+  </Card>
+
+  <Card title="Security" icon="lucide:shield" href="/api/get-audit-logs">
+    View audit logs, run security audits, and manage self-audit reports.
+  </Card>
+
+  <Card title="Authentication" icon="lucide:key" href="/api/post-auth-session">
+    Session tokens, QR login, OAuth flows, and token management.
+  </Card>
+
+  <Card title="Webhooks" icon="lucide:webhook" href="/api/get-webhooks">
+    Manage inbound webhook slots and external platform webhooks.
+  </Card>
+
+  <Card title="Tunnel" icon="lucide:cloud" href="/api/get-tunnel-status">
+    Start and stop Cloudflare tunnels for remote access.
+  </Card>
+</CardGroup>
+
+## Authentication
+
+Most API endpoints require authentication. PocketPaw supports multiple auth methods:
+
+<Tabs>
+  <Tab title="Bearer Token">
+    ```bash
+    curl http://localhost:8000/api/sessions \
+      -H "Authorization: Bearer your-access-token"
+    ```
+  </Tab>
+  <Tab title="Query Parameter">
+    ```bash
+    curl "http://localhost:8000/api/sessions?token=your-access-token"
+    ```
+  </Tab>
+  <Tab title="Localhost Bypass">
+    Requests from `127.0.0.1` or `::1` bypass auth automatically (unless a Cloudflare tunnel is active).
+  </Tab>
+</Tabs>
+
+<Callout type="info">
+  Auth-exempt paths: `/webhook/*`, `/oauth/callback`, `/api/qr`, `/static/*`, `/favicon.ico`
+</Callout>
+
+## Quick Reference
+
+### Channels
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/channels/status](/api/get-channels-status) | Get all channel statuses |
+| `POST` | [/api/channels/save](/api/post-channels-save) | Save channel configuration |
+| `POST` | [/api/channels/toggle](/api/post-channels-toggle) | Start or stop a channel |
+
+### Sessions
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/sessions](/api/get-sessions) | List all sessions |
+| `GET` | [/api/sessions/search](/api/get-sessions-search) | Search sessions |
+| `DELETE` | [/api/sessions/\{id\}](/api/delete-session) | Delete a session |
+| `POST` | [/api/sessions/\{id\}/title](/api/post-session-title) | Rename a session |
+| `GET` | [/api/memory/session](/api/get-session-history) | Get session messages |
+
+### MCP Servers
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/mcp/status](/api/get-mcp-status) | Get MCP server statuses |
+| `POST` | [/api/mcp/add](/api/post-mcp-add) | Add an MCP server |
+| `POST` | [/api/mcp/remove](/api/post-mcp-remove) | Remove an MCP server |
+| `POST` | [/api/mcp/toggle](/api/post-mcp-toggle) | Enable/disable MCP server |
+| `POST` | [/api/mcp/test](/api/post-mcp-test) | Test server connection |
+| `GET` | [/api/mcp/presets](/api/get-mcp-presets) | List available presets |
+| `POST` | [/api/mcp/presets/install](/api/post-mcp-preset-install) | Install a preset |
+
+### Memory
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/memory/long_term](/api/get-memory-long-term) | List long-term memories |
+| `DELETE` | [/api/memory/long_term/\{id\}](/api/delete-memory-entry) | Delete a memory entry |
+| `GET` | [/api/memory/settings](/api/get-memory-settings) | Get memory config |
+| `POST` | [/api/memory/settings](/api/post-memory-settings) | Update memory config |
+| `GET` | [/api/memory/stats](/api/get-memory-stats) | Get memory statistics |
+
+### Security & Audit
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/audit](/api/get-audit-logs) | Get audit log entries |
+| `POST` | [/api/security-audit](/api/post-security-audit) | Run security audit |
+| `GET` | [/api/self-audit/reports](/api/get-self-audit-reports) | List audit reports |
+| `GET` | [/api/self-audit/reports/\{date\}](/api/get-self-audit-report) | Get specific report |
+| `POST` | [/api/self-audit/run](/api/post-self-audit-run) | Trigger self-audit |
+
+### Authentication & OAuth
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | [/api/auth/session](/api/post-auth-session) | Get session token |
+| `GET` | [/api/qr](/api/get-qr-code) | Generate QR login code |
+| `POST` | [/api/token/regenerate](/api/post-token-regenerate) | Regenerate access token |
+| `GET` | [/api/oauth/authorize](/api/get-oauth-authorize) | Start OAuth flow |
+
+### Webhooks
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/webhooks](/api/get-webhooks) | List webhook slots |
+| `POST` | [/api/webhooks/add](/api/post-webhooks-add) | Create webhook slot |
+| `POST` | [/api/webhooks/remove](/api/post-webhooks-remove) | Remove webhook slot |
+| `POST` | [/webhook/inbound/\{name\}](/api/post-webhook-inbound) | Receive webhook payload |
+
+### Tunnel
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/remote/status](/api/get-tunnel-status) | Get tunnel status |
+| `POST` | [/api/remote/start](/api/post-tunnel-start) | Start Cloudflare tunnel |
+| `POST` | [/api/remote/stop](/api/post-tunnel-stop) | Stop tunnel |

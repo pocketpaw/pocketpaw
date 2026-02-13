@@ -1,0 +1,102 @@
+---
+title: Toggle Channel
+description: "Start or stop a PocketPaw channel adapter dynamically without restarting the server. Toggle channels on and off from the dashboard or via API calls for runtime channel management."
+api: POST /api/channels/toggle
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["toggle channel", "start stop adapter", "dynamic channel control"]
+tags: ["api", "channels"]
+---
+
+## Overview
+
+Starts or stops a channel adapter at runtime without restarting the server. The channel must be configured (have valid credentials) before it can be started.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="channel" type="string" required>
+    Channel identifier. One of: `discord`, `slack`, `whatsapp`, `telegram`, `signal`, `matrix`, `teams`, `gchat`.
+  </Param>
+  <Param name="action" type="string" required enum={["start", "stop"]}>
+    Whether to start or stop the adapter.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="channel" type="string">The channel that was toggled</ResponseField>
+<ResponseField name="configured" type="boolean">Whether the channel has valid credentials</ResponseField>
+<ResponseField name="running" type="boolean">Whether the channel is now running after the toggle</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/channels/toggle" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "channel": "discord",
+        "action": "start"
+      }'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/channels/toggle", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        action: "start"
+      })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/channels/toggle",
+        headers={"Authorization": "Bearer <token>"},
+        json={"channel": "discord", "action": "start"},
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "400", "500"]}>
+  <Tab title="200">
+    ```json
+    {
+      "channel": "discord",
+      "configured": true,
+      "running": true
+    }
+    ```
+  </Tab>
+  <Tab title="400">
+    ```json
+    { "detail": "Channel is not configured (missing credentials)" }
+    ```
+  </Tab>
+  <Tab title="500">
+    ```json
+    { "detail": "Adapter failed to start" }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

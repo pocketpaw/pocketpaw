@@ -1,0 +1,92 @@
+---
+title: Search Sessions
+description: "Perform full-text search across all PocketPaw session messages. Returns matching sessions with highlighted excerpts, enabling quick retrieval of past conversations by content or keyword."
+api: GET /api/sessions/search
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["search sessions", "full-text search", "conversation search"]
+tags: ["api", "sessions"]
+---
+
+## Overview
+
+Searches session message content for a query string. Returns matching sessions with the specific message that matched and its role.
+
+## Parameters
+
+<ParamTable type="query">
+  <Param name="q" type="string" required>
+    Search query string. Matches against message content.
+  </Param>
+  <Param name="limit" type="integer" default="20">
+    Maximum number of matching sessions to return.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="sessions" type="array">
+  Array of matching sessions with match context.
+  <ResponseField name="id" type="string">Session identifier</ResponseField>
+  <ResponseField name="title" type="string">Session title</ResponseField>
+  <ResponseField name="channel" type="string">Origin channel</ResponseField>
+  <ResponseField name="match" type="string">The matched message content (truncated)</ResponseField>
+  <ResponseField name="match_role" type="string">Role of the matched message (`user` or `assistant`)</ResponseField>
+  <ResponseField name="last_activity" type="string">ISO 8601 last activity timestamp</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/sessions/search?q=prime&limit=20" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/sessions/search?q=prime&limit=20", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/sessions/search",
+        params={"q": "prime", "limit": 20},
+        headers={"Authorization": "Bearer <token>"},
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "sessions": [
+        {
+          "id": "session_abc123",
+          "title": "Python prime numbers",
+          "channel": "web",
+          "match": "Here's a function to check if a number is prime...",
+          "match_role": "assistant",
+          "last_activity": "2024-01-15T11:45:00Z"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

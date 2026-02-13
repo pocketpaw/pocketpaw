@@ -12,7 +12,6 @@ import logging
 from typing import AsyncIterator
 
 from pocketclaw.config import Settings
-from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +60,12 @@ class AgentRouter:
             logger.info("🧠 [bold blue]PocketPaw Native[/] ─ Anthropic + Open Interpreter")
 
         elif backend == "open_interpreter":
+            from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
+
             self._agent = OpenInterpreterAgent(self.settings)
-            logger.info("🤖 [bold yellow]Open Interpreter[/] ─ Local/Cloud LLMs")
+            logger.info(
+                "🤖 [bold yellow]Open Interpreter[/] ─ Local/Cloud LLMs [dim](experimental)[/]"
+            )
 
         else:
             logger.warning(f"Unknown backend: {backend} → using claude_agent_sdk")
@@ -70,8 +73,19 @@ class AgentRouter:
 
             self._agent = ClaudeAgentSDKWrapper(self.settings)
 
-    async def run(self, message: str) -> AsyncIterator[dict]:
+    async def run(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[dict]:
         """Run the agent with the given message.
+
+        Args:
+            message: User message to process.
+            system_prompt: Dynamic system prompt from AgentContextBuilder.
+            history: Recent session history as list of {"role": ..., "content": ...} dicts.
 
         Yields dicts with:
           - type: "message", "tool_use", "tool_result", "error", "done"
@@ -83,7 +97,7 @@ class AgentRouter:
             yield {"type": "done", "content": ""}
             return
 
-        async for chunk in self._agent.run(message):
+        async for chunk in self._agent.run(message, system_prompt=system_prompt, history=history):
             yield chunk
 
     async def stop(self) -> None:

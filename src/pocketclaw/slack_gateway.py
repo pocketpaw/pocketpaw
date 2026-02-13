@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_slack_bot(settings: Settings) -> None:
-    """Run the Slack bot via Nanobot Agent Loop."""
+    """Run the Slack bot."""
 
     bus = get_message_bus()
 

@@ -1,0 +1,127 @@
+---
+title: MCP Servers
+description: "Extend PocketPaw with Model Context Protocol (MCP) servers for unlimited tool expansion. Add servers via stdio or HTTP transport, manage from the dashboard, and use preset templates for quick setup."
+section: Integrations
+ogType: article
+keywords: ["mcp servers", "model context protocol", "tool extension", "stdio transport", "mcp presets"]
+tags: ["integrations", "mcp"]
+---
+
+# MCP Servers
+
+PocketPaw has first-class support for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Connect any MCP server to extend your agent's capabilities.
+
+## What is MCP?
+
+MCP is an open protocol that allows AI agents to connect to external tools and data sources. MCP servers provide tools that the agent can call, similar to built-in tools but running as separate processes.
+
+## Configuration
+
+MCP servers are configured in `~/.pocketclaw/mcp.json`:
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+      "transport": "stdio"
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_..."
+      },
+      "transport": "stdio"
+    },
+    "remote-api": {
+      "url": "http://localhost:3000/mcp",
+      "transport": "http"
+    }
+  }
+}
+```
+
+## Transport Types
+
+### stdio
+
+The most common transport. PocketPaw spawns the MCP server as a subprocess and communicates via stdin/stdout:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"],
+  "transport": "stdio"
+}
+```
+
+### HTTP
+
+For remote MCP servers accessible via HTTP:
+
+```json
+{
+  "url": "http://localhost:3000/mcp",
+  "transport": "http"
+}
+```
+
+## Backend Integration
+
+### Claude Agent SDK
+
+The Claude Agent SDK has native MCP support. PocketPaw translates `mcp.json` configurations into the SDK's expected format and passes them during initialization.
+
+### PocketPaw Native
+
+The native backend loads MCP tools via `_get_mcp_tools()` and registers them with the tool registry using the naming convention `mcp_<server>__<tool>`.
+
+## Dashboard Management
+
+The web dashboard provides a visual interface for managing MCP servers:
+
+1. Open the MCP modal from the sidebar
+2. Add new servers with command, args, and environment variables
+3. Toggle individual servers on/off
+4. View discovered tools from each server
+
+### REST API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/mcp/servers` | GET | List configured servers |
+| `/api/mcp/servers` | POST | Add a new server |
+| `/api/mcp/servers/{name}` | PUT | Update a server |
+| `/api/mcp/servers/{name}` | DELETE | Remove a server |
+| `/api/mcp/servers/{name}/toggle` | POST | Enable/disable a server |
+
+## Tool Policy
+
+MCP tools are subject to the tool policy system:
+
+```bash
+# Allow all MCP tools
+export POCKETCLAW_TOOLS_ALLOW="group:mcp"
+
+# Allow specific server's tools
+export POCKETCLAW_TOOLS_ALLOW="mcp:filesystem:*"
+
+# Deny a specific tool
+export POCKETCLAW_TOOLS_DENY="mcp:github:delete_repo"
+```
+
+## Popular MCP Servers
+
+| Server | Package | Description |
+|--------|---------|-------------|
+| Filesystem | `@modelcontextprotocol/server-filesystem` | File read/write/search |
+| GitHub | `@modelcontextprotocol/server-github` | Issues, PRs, repos |
+| PostgreSQL | `@modelcontextprotocol/server-postgres` | Database queries |
+| Brave Search | `@modelcontextprotocol/server-brave-search` | Web search |
+| Puppeteer | `@modelcontextprotocol/server-puppeteer` | Browser automation |
+
+<Callout type="info">
+  MCP is an open ecosystem. Browse available servers at [modelcontextprotocol.io/servers](https://modelcontextprotocol.io).
+</Callout>

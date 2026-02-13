@@ -1,6 +1,6 @@
 # Filesystem tools.
 # Created: 2026-02-02
-# Part of Nanobot Pattern Adoption
+
 
 from pathlib import Path
 from typing import Any

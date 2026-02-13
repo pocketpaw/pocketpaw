@@ -1,0 +1,65 @@
+---
+title: Audit Log
+description: "PocketPaw maintains an append-only JSONL audit log at ~/.pocketclaw/audit.jsonl recording all security-relevant events with timestamps, severity levels, and structured metadata for compliance."
+section: Security
+ogType: article
+keywords: ["audit log", "jsonl", "security events", "compliance", "append-only log"]
+tags: ["security", "audit"]
+---
+
+# Audit Log
+
+PocketPaw maintains an append-only JSONL audit log at `~/.pocketclaw/audit.jsonl`.
+
+## What Gets Logged
+
+| Event | Description |
+|-------|-------------|
+| `tool_execute` | Every tool execution with name, input, and result |
+| `message_blocked` | Messages blocked by Guardian AI or injection scanner |
+| `injection_detected` | Prompt injection detection events |
+| `auth_event` | OAuth authorization events |
+| `config_change` | Configuration changes |
+| `session_created` | New session creation |
+| `error` | Agent errors and failures |
+
+## Log Format
+
+Each line is a JSON object:
+
+```json
+{"timestamp": "2024-01-15T10:30:00.123Z", "event": "tool_execute", "tool": "shell", "input": {"command": "ls -la"}, "result_length": 1024, "session_id": "abc123", "channel": "web"}
+{"timestamp": "2024-01-15T10:30:05.456Z", "event": "message_blocked", "reason": "guardian_high_threat", "threat_level": "HIGH", "session_id": "abc123"}
+{"timestamp": "2024-01-15T10:31:00.789Z", "event": "injection_detected", "tier": "regex", "pattern": "ignore_instructions", "session_id": "abc123"}
+```
+
+## Properties
+
+- **Append-only**: Previous entries cannot be modified or deleted
+- **JSONL format**: One JSON object per line for easy parsing
+- **Machine-readable**: Easy to process with `jq`, Python, or any JSON parser
+- **Timestamped**: ISO 8601 timestamps with millisecond precision
+
+## Querying the Log
+
+```bash
+# View recent entries
+tail -20 ~/.pocketclaw/audit.jsonl | jq .
+
+# Find all blocked messages
+cat ~/.pocketclaw/audit.jsonl | jq 'select(.event == "message_blocked")'
+
+# Find all shell commands
+cat ~/.pocketclaw/audit.jsonl | jq 'select(.tool == "shell")'
+
+# Count events by type
+cat ~/.pocketclaw/audit.jsonl | jq -r '.event' | sort | uniq -c | sort -rn
+```
+
+## Security
+
+The audit log's integrity is checked by the [Security Audit CLI](/security/audit-cli). It verifies:
+
+- File permissions are restrictive (600)
+- The file hasn't been truncated
+- Entries are valid JSON

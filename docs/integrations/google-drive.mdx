@@ -1,0 +1,70 @@
+---
+title: Google Drive
+description: "Access Google Drive from PocketPaw with 4 tools: list files and folders, download documents, upload new files, and share with collaborators. Supports all file types and MIME type filtering."
+section: Integrations
+ogType: article
+keywords: ["google drive", "file management", "cloud storage", "drive api", "file sharing"]
+tags: ["integrations", "drive", "google"]
+---
+
+# Google Drive
+
+PocketPaw can manage your Google Drive files with four tools: list, download, upload, and share.
+
+## Setup
+
+1. Set up [Google OAuth](/integrations/oauth) credentials
+2. Enable the Google Drive API in your Google Cloud project
+3. Authorize PocketPaw to access your Drive
+
+## Tools
+
+### gdrive_list
+
+List files in your Drive or a specific folder:
+
+```
+User: What files are in my Drive's project folder?
+Agent: [uses gdrive_list] → Found 5 files:
+  1. Project Plan.docx (Google Doc)
+  2. Budget.xlsx (Google Sheet)
+  3. Logo.png (Image)
+  4. Meeting Notes/ (Folder)
+  5. Presentation.pptx (Google Slides)
+```
+
+### gdrive_download
+
+Download a file from Drive to local filesystem:
+
+```
+User: Download the Budget.xlsx file
+Agent: [uses gdrive_download] → Downloaded to ~/Downloads/Budget.xlsx
+```
+
+### gdrive_upload
+
+Upload a local file to Drive:
+
+```
+User: Upload report.pdf to the project folder
+Agent: [uses gdrive_upload] → Uploaded report.pdf to "Project" folder
+```
+
+### gdrive_share
+
+Share a file with someone:
+
+```
+User: Share the project plan with sarah@example.com
+Agent: [uses gdrive_share] → Shared "Project Plan" with sarah@example.com (editor)
+```
+
+## Policy Group
+
+All Drive tools belong to `group:drive`.
+
+## Required Scopes
+
+- `drive.readonly` — For listing and downloading
+- `drive.file` — For uploading and sharing

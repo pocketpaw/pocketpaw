@@ -1,0 +1,76 @@
+---
+title: OAuth Framework
+description: "PocketPaw's built-in OAuth 2.0 framework handles authorization code flows, token refresh, and persistent token storage for Google and Spotify integrations. Configure via the dashboard or env vars."
+section: Integrations
+ogType: article
+keywords: ["oauth 2.0", "authorization", "token management", "google oauth", "spotify oauth"]
+tags: ["integrations", "authentication"]
+---
+
+# OAuth Framework
+
+PocketPaw includes a built-in OAuth 2.0 framework that handles authentication with Google and Spotify services.
+
+## Supported Providers
+
+| Provider | Services | Flow |
+|----------|----------|------|
+| Google | Gmail, Calendar, Drive, Docs | Authorization code |
+| Spotify | Search, playback, playlists | Authorization code |
+
+## How It Works
+
+1. **First use**: When a tool requires OAuth (e.g., Gmail), PocketPaw checks for stored tokens
+2. **No token**: Opens a browser for the OAuth consent flow
+3. **Authorization**: User grants permissions
+4. **Token storage**: Tokens are saved to `~/.pocketclaw/tokens/`
+5. **Refresh**: Expired tokens are automatically refreshed
+
+## Configuration
+
+### Google OAuth
+
+```bash
+export POCKETCLAW_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+export POCKETCLAW_GOOGLE_CLIENT_SECRET="your-client-secret"
+```
+
+Create OAuth credentials at [console.cloud.google.com](https://console.cloud.google.com):
+1. Go to APIs & Services → Credentials
+2. Create Credentials → OAuth client ID
+3. Application type: Desktop app
+4. Download the JSON
+
+### Spotify OAuth
+
+```bash
+export POCKETCLAW_SPOTIFY_CLIENT_ID="your-spotify-client-id"
+export POCKETCLAW_SPOTIFY_CLIENT_SECRET="your-spotify-secret"
+```
+
+Create an app at [developer.spotify.com](https://developer.spotify.com/dashboard):
+1. Create a new app
+2. Set redirect URI to `http://localhost:8888/callback`
+3. Copy the Client ID and Secret
+
+## Token Storage
+
+Tokens are stored in `~/.pocketclaw/tokens/`:
+
+```
+~/.pocketclaw/tokens/
+├── google_token.json
+└── spotify_token.json
+```
+
+Tokens include refresh tokens, so re-authorization is only needed if tokens are revoked.
+
+## Dashboard Integration
+
+The web dashboard provides a visual OAuth flow. When configuring Google or Spotify in the Settings panel, clicking "Authorize" opens the consent screen and automatically stores the tokens.
+
+## Security
+
+- Tokens are stored with restricted file permissions (600)
+- Client secrets are stored in the config file, not in tokens
+- The security audit CLI checks token storage permissions

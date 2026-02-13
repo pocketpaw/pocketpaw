@@ -1,10 +1,13 @@
 <!--
-  PocketPaw Dashboard - Settings Modal
+  PocketPaw Dashboard - Settings Modal (Notion-Style)
 
-  Changes (2026-02-03):
-  - Extracted from monolithic index.html
-  - Contains: Agent Backend, LLM Provider, Anthropic Model selection
-  - Permission bypass toggle, API key inputs
+  Redesigned: 2026-02-10
+  - Two-column layout: sidebar nav + content area
+  - 6 sections: General, API Keys, Behavior & Safety, Memory, Search & Services, System
+  - Mobile: section list / content toggle with back arrow
+  - Fixed height modal (600px / 85vh cap) — content scrolls, height stays stable
+  - All existing form fields preserved with same x-model bindings
+  - API keys consolidated into single section with "Get Key" links
 -->
 <!-- Settings Modal -->
 <div
@@ -13,142 +16,774 @@ x-show="showSettings"
 x-transition.opacity
 @click.self="showSettings = false"
 >
-<div class="w-full max-w-[600px] bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
-    <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)]">
-    <h2 class="text-[17px] font-semibold">Settings</h2>
-    <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showSettings = false">
-        <i data-lucide="x" class="w-5 h-5"></i>
-    </button>
-    </div>
-    
-    <div class="p-6 space-y-5">
-    <!-- Form Group: Agent Backend -->
-    <div class="flex flex-col gap-2">
-        <label class="text-[13px] font-medium text-[var(--text-secondary)]">Agent Backend</label>
-        <div class="relative">
-        <select 
-            x-model="settings.agentBackend" 
-            @change="saveSettings()"
-            class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-        >
-        <option value="claude_agent_sdk">Claude Agent SDK (Recommended)</option>
-        <option value="pocketpaw_native">PocketPaw Native</option>
-        <option value="open_interpreter">Open Interpreter</option>
-        </select>
-        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
-            <i data-lucide="chevron-down" class="w-4 h-4"></i>
-        </div>
-        </div>
-        <small class="text-white/40 text-xs" x-text="getBackendDescription(settings.agentBackend)"></small>
-    </div>
+<div class="settings-modal w-full max-w-[840px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" style="height: min(600px, 85vh);" @click.stop>
 
-    <!-- Form Group: LLM Provider -->
-    <div class="flex flex-col gap-2">
-        <label class="text-[13px] font-medium text-[var(--text-secondary)]">LLM Provider</label>
-        <div class="relative">
-        <select 
-            x-model="settings.llmProvider" 
-            @change="saveSettings()"
-            class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-        >
-        <option value="auto">Auto</option>
-        <option value="anthropic">Anthropic</option>
-        <option value="openai">OpenAI</option>
-        <option value="ollama">Ollama</option>
-        </select>
-        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
-            <i data-lucide="chevron-down" class="w-4 h-4"></i>
+    <!-- Header -->
+    <div class="flex items-center justify-between px-5 py-3.5 border-b border-[var(--glass-border)] shrink-0">
+        <div class="flex items-center gap-2.5">
+            <!-- Mobile: back button -->
+            <button
+                x-show="settingsMobileView === 'content'"
+                class="md:hidden p-1.5 -ml-1 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                @click="settingsMobileView = 'list'"
+            >
+                <i data-lucide="arrow-left" class="w-4.5 h-4.5"></i>
+            </button>
+            <h2 class="text-[16px] font-semibold">Settings</h2>
         </div>
-        </div>
-    </div>
-
-    <!-- Form Group: Anthropic Model -->
-    <div class="flex flex-col gap-2" x-show="settings.llmProvider === 'anthropic' || settings.llmProvider === 'auto'">
-        <label class="text-[13px] font-medium text-[var(--text-secondary)]">Anthropic Model</label>
-        <div class="relative">
-        <select 
-            x-model="settings.anthropicModel" 
-            @change="saveSettings()"
-            class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-        >
-        <optgroup label="Claude 4.5 (Latest)">
-            <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5 (Recommended)</option>
-            <option value="claude-opus-4-5-20250929">Claude Opus 4.5</option>
-            <option value="claude-haiku-4-5-20250929">Claude Haiku 4.5</option>
-        </optgroup>
-        <optgroup label="Claude 4">
-            <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-            <option value="claude-opus-4-20250514">Claude Opus 4</option>
-        </optgroup>
-        </select>
-        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
-            <i data-lucide="chevron-down" class="w-4 h-4"></i>
-        </div>
-        </div>
-    </div>
-
-    <!-- Form Group: Permission Bypass -->
-    <div class="flex flex-col gap-2">
-        <label class="flex items-start gap-3 cursor-pointer group">
-        <input type="checkbox" x-model="settings.bypassPermissions" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
-        <div class="flex flex-col">
-            <span class="text-[14px] font-medium group-hover:text-white transition-colors">Bypass Permission Prompts</span>
-            <span class="text-xs text-[var(--warning-color)] mt-0.5">⚠️ Agent will execute actions without asking for approval. Use with caution.</span>
-        </div>
-        </label>
-    </div>
-
-    <hr class="border-t border-[var(--glass-border)] opacity-50" />
-
-    <h3 class="text-[14px] font-semibold text-[var(--text-secondary)]">API Keys</h3>
-    
-    <!-- API Key Input -->
-    <div class="flex flex-col gap-2">
-        <div class="flex justify-between items-center">
-            <label class="text-[13px] font-medium text-[var(--text-secondary)]">Anthropic API Key</label>
-            <span x-show="hasAnthropicKey" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
-                <i data-lucide="check" class="w-3 h-3"></i> Saved
-            </span>
-        </div>
-        <div class="flex gap-2">
-        <input
-            type="password"
-            x-model="apiKeys.anthropic"
-            :placeholder="hasAnthropicKey ? '••••••••••••••••' : 'sk-ant-...'"
-            class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-        />
-        <button 
-            class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95" 
-            @click="saveApiKey('anthropic')"
-        >
-            Save
+        <button class="p-1.5 -mr-1.5 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showSettings = false">
+            <i data-lucide="x" class="w-4.5 h-4.5"></i>
         </button>
+    </div>
+
+    <!-- Body: sidebar + content -->
+    <div class="flex flex-1 min-h-0 overflow-hidden">
+
+        <!-- Sidebar nav — CSS handles desktop/mobile visibility -->
+        <nav
+            class="settings-nav shrink-0 py-2 px-1.5 overflow-y-auto"
+            :class="settingsMobileView === 'list' ? 'is-visible' : 'is-hidden'"
+        >
+            <template x-for="section in settingsSections" :key="section.id">
+                <button
+                    class="settings-nav-item flex items-center gap-2.5 w-full px-2.5 py-[7px] rounded-lg text-[13px] font-medium transition-all text-left mb-px"
+                    :class="settingsSection === section.id
+                        ? 'bg-white/10 text-white'
+                        : 'text-white/50 hover:text-white/80 hover:bg-white/5'"
+                    @click="settingsSection = section.id; settingsMobileView = 'content'; $nextTick(() => { if (window.refreshIcons) window.refreshIcons(); })"
+                >
+                    <i :data-lucide="section.icon" class="w-4 h-4 shrink-0 opacity-70"></i>
+                    <span x-text="section.label"></span>
+                </button>
+            </template>
+        </nav>
+
+        <!-- Content area — CSS handles desktop/mobile visibility -->
+        <div
+            class="settings-content flex-1 overflow-y-auto px-5 py-4"
+            :class="settingsMobileView === 'content' ? 'is-visible' : 'is-hidden'"
+        >
+
+            <!-- ===================== General ===================== -->
+            <div x-show="settingsSection === 'general'" class="space-y-4">
+                <h3 class="text-[14px] font-semibold text-white/80 mb-3">General</h3>
+
+                <!-- Agent Backend -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Agent Backend</label>
+                    <div class="relative">
+                    <select
+                        x-model="settings.agentBackend"
+                        @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    >
+                    <option value="claude_agent_sdk">Claude Agent SDK (Recommended)</option>
+                    <option value="pocketpaw_native">PocketPaw Native</option>
+                    <option value="open_interpreter">Open Interpreter (Experimental)</option>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                    <small class="text-white/50 text-[11px]" x-text="getBackendDescription(settings.agentBackend)"></small>
+                </div>
+
+                <!-- LLM Provider -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">LLM Provider</label>
+                    <div class="relative">
+                    <select
+                        x-model="settings.llmProvider"
+                        @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    >
+                    <option value="auto">Auto</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- Anthropic Model -->
+                <div class="flex flex-col gap-1.5" x-show="settings.llmProvider === 'anthropic' || settings.llmProvider === 'auto'">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Anthropic Model</label>
+                    <div class="relative">
+                    <select
+                        x-model="settings.anthropicModel"
+                        @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    >
+                    <optgroup label="Claude 4.5 (Latest)">
+                        <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5 (Recommended)</option>
+                        <option value="claude-opus-4-5-20250929">Claude Opus 4.5</option>
+                        <option value="claude-haiku-4-5-20250929">Claude Haiku 4.5</option>
+                    </optgroup>
+                    <optgroup label="Claude 4">
+                        <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                        <option value="claude-opus-4-20250514">Claude Opus 4</option>
+                    </optgroup>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- Permission Bypass -->
+                <div class="pt-1">
+                    <label class="flex items-start gap-2.5 cursor-pointer group">
+                    <input type="checkbox" x-model="settings.bypassPermissions" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+                    <div class="flex flex-col">
+                        <span class="text-[13px] font-medium group-hover:text-white transition-colors">Bypass Permission Prompts</span>
+                        <span class="text-[11px] text-[var(--warning-color)] mt-0.5">Warning: Agent will execute actions without asking for approval.</span>
+                    </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- ===================== API Keys (Consolidated) ===================== -->
+            <div x-show="settingsSection === 'apikeys'" class="space-y-4">
+                <h3 class="text-[14px] font-semibold text-white/80 mb-3">API Keys</h3>
+                <p class="text-[12px] text-white/50 -mt-1 mb-2">Manage all your API keys in one place. Keys are encrypted at rest.</p>
+
+                <!-- Anthropic API Key -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Anthropic API Key</label>
+                        <div class="flex items-center gap-2">
+                            <a href="https://console.anthropic.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                            </a>
+                            <span x-show="hasAnthropicKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                                <i data-lucide="check" class="w-3 h-3"></i> Saved
+                            </span>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.anthropic" :placeholder="hasAnthropicKey ? '••••••••••••••••' : 'sk-ant-...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('anthropic')">Save</button>
+                    </div>
+                </div>
+
+                <!-- OpenAI API Key -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">OpenAI API Key</label>
+                        <div class="flex items-center gap-2">
+                            <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                            </a>
+                            <span x-show="hasOpenaiKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                                <i data-lucide="check" class="w-3 h-3"></i> Saved
+                            </span>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.openai" :placeholder="hasOpenaiKey ? '••••••••••••••••' : 'sk-...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('openai')">Save</button>
+                    </div>
+                </div>
+
+                <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
+                <h4 class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Search Providers</h4>
+
+                <!-- Tavily API Key -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Tavily API Key</label>
+                        <div class="flex items-center gap-2">
+                            <a href="https://app.tavily.com/home" target="_blank" rel="noopener" class="api-key-help">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                            </a>
+                            <span x-show="hasTavilyKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                                <i data-lucide="check" class="w-3 h-3"></i> Saved
+                            </span>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.tavily" :placeholder="hasTavilyKey ? '••••••••••••••••' : 'tvly-...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('tavily')">Save</button>
+                    </div>
+                </div>
+
+                <!-- Brave Search API Key -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Brave Search API Key</label>
+                        <div class="flex items-center gap-2">
+                            <a href="https://api.search.brave.com/app/dashboard" target="_blank" rel="noopener" class="api-key-help">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                            </a>
+                            <span x-show="hasBraveKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                                <i data-lucide="check" class="w-3 h-3"></i> Saved
+                            </span>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.brave" :placeholder="hasBraveKey ? '••••••••••••••••' : 'BSA...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('brave')">Save</button>
+                    </div>
+                </div>
+
+                <!-- Parallel AI API Key -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Parallel AI API Key</label>
+                        <span x-show="hasParallelKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                            <i data-lucide="check" class="w-3 h-3"></i> Saved
+                        </span>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.parallel" :placeholder="hasParallelKey ? '••••••••••••••••' : 'par-...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('parallel')">Save</button>
+                    </div>
+                    <small class="text-white/50 text-[11px]">Used by both web search (parallel provider) and URL extract</small>
+                </div>
+
+                <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
+                <h4 class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Voice & Media</h4>
+
+                <!-- ElevenLabs API Key -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">ElevenLabs API Key</label>
+                        <div class="flex items-center gap-2">
+                            <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener" class="api-key-help">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                            </a>
+                            <span x-show="hasElevenlabsKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                                <i data-lucide="check" class="w-3 h-3"></i> Saved
+                            </span>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.elevenlabs" :placeholder="hasElevenlabsKey ? '••••••••••••••••' : 'xi-...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('elevenlabs')">Save</button>
+                    </div>
+                </div>
+
+                <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
+                <h4 class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Google OAuth</h4>
+
+                <!-- Google OAuth Client ID -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Client ID</label>
+                        <div class="flex items-center gap-2">
+                            <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" class="api-key-help">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                            </a>
+                            <span x-show="hasGoogleOAuthId" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                                <i data-lucide="check" class="w-3 h-3"></i> Saved
+                            </span>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.google_oauth_id" :placeholder="hasGoogleOAuthId ? '••••••••••••••••' : 'client-id...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('google_oauth_id')">Save</button>
+                    </div>
+                </div>
+
+                <!-- Google OAuth Client Secret -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Client Secret</label>
+                        <span x-show="hasGoogleOAuthSecret" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                            <i data-lucide="check" class="w-3 h-3"></i> Saved
+                        </span>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.google_oauth_secret" :placeholder="hasGoogleOAuthSecret ? '••••••••••••••••' : 'client-secret...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('google_oauth_secret')">Save</button>
+                    </div>
+                </div>
+
+                <!-- Google OAuth Authorize Buttons -->
+                <div class="flex flex-col gap-1.5" x-show="hasGoogleOAuthId && hasGoogleOAuthSecret">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)]">Authorize Services</label>
+                    <div class="flex flex-wrap gap-1.5">
+                        <a href="/oauth/authorize/gmail" target="_blank" class="inline-flex items-center gap-1.5 bg-black/30 border border-[var(--glass-border)] hover:border-[var(--accent-color)] text-white/80 hover:text-white px-2.5 py-1.5 rounded-[8px] text-[12px] transition-all">
+                            <i data-lucide="mail" class="w-3 h-3"></i> Gmail
+                        </a>
+                        <a href="/oauth/authorize/google_calendar" target="_blank" class="inline-flex items-center gap-1.5 bg-black/30 border border-[var(--glass-border)] hover:border-[var(--accent-color)] text-white/80 hover:text-white px-2.5 py-1.5 rounded-[8px] text-[12px] transition-all">
+                            <i data-lucide="calendar" class="w-3 h-3"></i> Calendar
+                        </a>
+                        <a href="/oauth/authorize/google_drive" target="_blank" class="inline-flex items-center gap-1.5 bg-black/30 border border-[var(--glass-border)] hover:border-[var(--accent-color)] text-white/80 hover:text-white px-2.5 py-1.5 rounded-[8px] text-[12px] transition-all">
+                            <i data-lucide="hard-drive" class="w-3 h-3"></i> Drive
+                        </a>
+                        <a href="/oauth/authorize/google_docs" target="_blank" class="inline-flex items-center gap-1.5 bg-black/30 border border-[var(--glass-border)] hover:border-[var(--accent-color)] text-white/80 hover:text-white px-2.5 py-1.5 rounded-[8px] text-[12px] transition-all">
+                            <i data-lucide="file-text" class="w-3 h-3"></i> Docs
+                        </a>
+                    </div>
+                </div>
+
+                <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
+                <h4 class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Spotify</h4>
+
+                <!-- Spotify Client ID -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Client ID</label>
+                        <div class="flex items-center gap-2">
+                            <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener" class="api-key-help">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                            </a>
+                            <span x-show="hasSpotifyClientId" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                                <i data-lucide="check" class="w-3 h-3"></i> Saved
+                            </span>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.spotify_client_id" :placeholder="hasSpotifyClientId ? '••••••••••••••••' : 'spotify-client-id...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('spotify_client_id')">Save</button>
+                    </div>
+                </div>
+
+                <!-- Spotify Client Secret -->
+                <div class="flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Client Secret</label>
+                        <span x-show="hasSpotifyClientSecret" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
+                            <i data-lucide="check" class="w-3 h-3"></i> Saved
+                        </span>
+                    </div>
+                    <div class="flex gap-2">
+                    <input type="password" x-model="apiKeys.spotify_client_secret" :placeholder="hasSpotifyClientSecret ? '••••••••••••••••' : 'spotify-client-secret...'"
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95" @click="saveApiKey('spotify_client_secret')">Save</button>
+                    </div>
+                </div>
+
+                <!-- Spotify OAuth Authorize Button -->
+                <div x-show="hasSpotifyClientId && hasSpotifyClientSecret">
+                    <a href="/oauth/authorize/spotify" target="_blank" class="inline-flex items-center gap-1.5 bg-[#1DB954]/20 border border-[#1DB954]/40 hover:border-[#1DB954] text-[#1DB954] hover:text-white px-2.5 py-1.5 rounded-[8px] text-[12px] transition-all">
+                        <i data-lucide="music" class="w-3 h-3"></i> Authorize Spotify
+                    </a>
+                </div>
+            </div>
+
+            <!-- ===================== Behavior & Safety ===================== -->
+            <div x-show="settingsSection === 'behavior'" class="space-y-4">
+                <h3 class="text-[14px] font-semibold text-white/80 mb-3">Behavior & Safety</h3>
+
+                <!-- Tool Profile -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Tool Profile</label>
+                    <div class="relative">
+                    <select
+                        x-model="settings.toolProfile"
+                        @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    >
+                    <option value="full">Full (No restrictions)</option>
+                    <option value="coding">Coding (Filesystem + Shell + Memory)</option>
+                    <option value="minimal">Minimal (Memory only)</option>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- Plan Mode -->
+                <div class="pt-1">
+                    <label class="flex items-start gap-2.5 cursor-pointer group">
+                    <input type="checkbox" x-model="settings.planMode" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+                    <div class="flex flex-col">
+                        <span class="text-[13px] font-medium group-hover:text-white transition-colors">Plan Mode</span>
+                        <span class="text-[11px] text-white/50 mt-0.5">Require approval before executing tools</span>
+                    </div>
+                    </label>
+                </div>
+
+                <!-- Plan Mode Tools -->
+                <div class="flex flex-col gap-1.5 pl-7" x-show="settings.planMode" x-transition>
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Plan Mode Tools</label>
+                    <input
+                        type="text"
+                        x-model="settings.planModeTools"
+                        @change="saveSettings()"
+                        placeholder="shell,write_file,edit_file"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                    />
+                    <small class="text-white/50 text-[11px]">Comma-separated list of tools that require approval</small>
+                </div>
+
+                <!-- Smart Model Routing -->
+                <div class="pt-1">
+                    <label class="flex items-start gap-2.5 cursor-pointer group">
+                    <input type="checkbox" x-model="settings.smartRoutingEnabled" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+                    <div class="flex flex-col">
+                        <span class="text-[13px] font-medium group-hover:text-white transition-colors">Smart Model Routing</span>
+                        <span class="text-[11px] text-white/50 mt-0.5">Automatically select model based on task complexity</span>
+                    </div>
+                    </label>
+                </div>
+
+                <!-- Model Tiers -->
+                <div class="flex flex-col gap-3 pl-7" x-show="settings.smartRoutingEnabled" x-transition>
+                    <div class="flex flex-col gap-1">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Simple Tier</label>
+                        <input type="text" x-model="settings.modelTierSimple" @change="saveSettings()"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+                    <div class="flex flex-col gap-1">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Moderate Tier</label>
+                        <input type="text" x-model="settings.modelTierModerate" @change="saveSettings()"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+                    <div class="flex flex-col gap-1">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Complex Tier</label>
+                        <input type="text" x-model="settings.modelTierComplex" @change="saveSettings()"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+                </div>
+
+                <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
+                <h4 class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Safety</h4>
+
+                <!-- Injection Scanner -->
+                <div>
+                    <label class="flex items-start gap-2.5 cursor-pointer group">
+                    <input type="checkbox" x-model="settings.injectionScanEnabled" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+                    <div class="flex flex-col">
+                        <span class="text-[13px] font-medium group-hover:text-white transition-colors">Injection Scanner</span>
+                        <span class="text-[11px] text-white/50 mt-0.5">Scan inbound messages for prompt injection attacks</span>
+                    </div>
+                    </label>
+                </div>
+
+                <!-- LLM Deep Scan -->
+                <div class="pl-7" x-show="settings.injectionScanEnabled" x-transition>
+                    <label class="flex items-start gap-2.5 cursor-pointer group">
+                    <input type="checkbox" x-model="settings.injectionScanLlm" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+                    <div class="flex flex-col">
+                        <span class="text-[13px] font-medium group-hover:text-white transition-colors">LLM Deep Scan</span>
+                        <span class="text-[11px] text-white/50 mt-0.5">Use a secondary LLM to analyze suspicious content (requires API key)</span>
+                    </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- ===================== Memory ===================== -->
+            <div x-show="settingsSection === 'memory'" class="space-y-4">
+                <h3 class="text-[14px] font-semibold text-white/80 mb-3">Memory</h3>
+
+                <!-- Memory Backend -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Backend</label>
+                    <div class="relative">
+                    <select
+                        x-model="settings.memoryBackend"
+                        @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    >
+                    <option value="file">File (Simple Markdown)</option>
+                    <option value="mem0">Mem0 (Semantic Search + LLM)</option>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                    <small class="text-white/50 text-[11px]" x-text="settings.memoryBackend === 'mem0' ? 'Uses LLM to extract and evolve facts. Requires mem0ai package.' : 'Simple append-only markdown files. No dependencies needed.'"></small>
+                </div>
+
+                <!-- Mem0 Options -->
+                <div x-show="settings.memoryBackend === 'mem0'" x-transition class="flex flex-col gap-3.5 pl-2 border-l-2 border-[var(--accent-color)]/30 ml-1">
+
+                    <!-- Auto-Learn -->
+                    <div>
+                        <label class="flex items-start gap-2.5 cursor-pointer group">
+                        <input type="checkbox" x-model="settings.mem0AutoLearn" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+                        <div class="flex flex-col">
+                            <span class="text-[13px] font-medium group-hover:text-white transition-colors">Auto-Learn</span>
+                            <span class="text-[11px] text-white/50 mt-0.5">Automatically extract facts from every conversation</span>
+                        </div>
+                        </label>
+                    </div>
+
+                    <!-- LLM Provider for Mem0 -->
+                    <div class="flex flex-col gap-1.5">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Mem0 LLM Provider</label>
+                        <div class="relative">
+                        <select
+                            x-model="settings.mem0LlmProvider"
+                            @change="saveSettings()"
+                            class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                        >
+                        <option value="anthropic">Anthropic</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="ollama">Ollama (Local)</option>
+                        </select>
+                        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                        </div>
+                        </div>
+                        <small class="text-white/50 text-[11px]">LLM used for fact extraction and memory consolidation</small>
+                    </div>
+
+                    <!-- LLM Model -->
+                    <div class="flex flex-col gap-1.5">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Mem0 LLM Model</label>
+                        <input type="text" x-model="settings.mem0LlmModel" @change="saveSettings()" placeholder="claude-haiku-4-5-20251001"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+
+                    <!-- Embedder Provider -->
+                    <div class="flex flex-col gap-1.5">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Embedder Provider</label>
+                        <div class="relative">
+                        <select
+                            x-model="settings.mem0EmbedderProvider"
+                            @change="saveSettings()"
+                            class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                        >
+                        <option value="openai">OpenAI</option>
+                        <option value="ollama">Ollama (Local)</option>
+                        <option value="huggingface">HuggingFace</option>
+                        </select>
+                        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                        </div>
+                        </div>
+                    </div>
+
+                    <!-- Embedder Model -->
+                    <div class="flex flex-col gap-1.5">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Embedder Model</label>
+                        <input type="text" x-model="settings.mem0EmbedderModel" @change="saveSettings()" placeholder="text-embedding-3-small"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+
+                    <!-- Vector Store -->
+                    <div class="flex flex-col gap-1.5">
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Vector Store</label>
+                        <div class="relative">
+                        <select
+                            x-model="settings.mem0VectorStore"
+                            @change="saveSettings()"
+                            class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                        >
+                        <option value="qdrant">Qdrant (Default)</option>
+                        <option value="chroma">ChromaDB</option>
+                        </select>
+                        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                        </div>
+                        </div>
+                    </div>
+
+                    <!-- Ollama Base URL -->
+                    <div class="flex flex-col gap-1.5" x-show="settings.mem0LlmProvider === 'ollama' || settings.mem0EmbedderProvider === 'ollama'" x-transition>
+                        <label class="text-[12px] font-medium text-[var(--text-secondary)]">Ollama Base URL</label>
+                        <input type="text" x-model="settings.mem0OllamaBaseUrl" @change="saveSettings()" placeholder="http://localhost:11434"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===================== Search & Services ===================== -->
+            <div x-show="settingsSection === 'services'" class="space-y-4">
+                <h3 class="text-[14px] font-semibold text-white/80 mb-3">Search & Services</h3>
+
+                <!-- Web Search Provider -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Web Search Provider</label>
+                    <div class="relative">
+                    <select x-model="settings.webSearchProvider" @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all">
+                    <option value="tavily">Tavily</option>
+                    <option value="brave">Brave Search</option>
+                    <option value="parallel">Parallel AI</option>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- URL Extract Provider -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">URL Extract Provider</label>
+                    <div class="relative">
+                    <select x-model="settings.urlExtractProvider" @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all">
+                    <option value="auto">Auto (Parallel if key set, else local)</option>
+                    <option value="parallel">Parallel AI</option>
+                    <option value="local">Local (httpx + html2text)</option>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                </div>
+
+                <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
+                <h4 class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Voice</h4>
+
+                <!-- TTS Provider -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">TTS Provider</label>
+                    <div class="relative">
+                    <select x-model="settings.ttsProvider" @change="saveSettings()"
+                        class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all">
+                    <option value="openai">OpenAI</option>
+                    <option value="elevenlabs">ElevenLabs</option>
+                    </select>
+                    <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- TTS Voice -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">TTS Voice</label>
+                    <input type="text" x-model="settings.ttsVoice" @change="saveSettings()" placeholder="alloy"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <small class="text-white/50 text-[11px]">OpenAI: alloy/echo/fable/onyx/nova/shimmer</small>
+                </div>
+
+                <!-- STT Model -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">STT Model</label>
+                    <input type="text" x-model="settings.sttModel" @change="saveSettings()" placeholder="whisper-1"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <small class="text-white/50 text-[11px]">OpenAI Whisper model for speech-to-text transcription</small>
+                </div>
+            </div>
+
+            <!-- ===================== System ===================== -->
+            <div x-show="settingsSection === 'system'" class="space-y-4">
+                <h3 class="text-[14px] font-semibold text-white/80 mb-3">System</h3>
+
+                <!-- Self-Audit Daemon -->
+                <div>
+                    <label class="flex items-start gap-2.5 cursor-pointer group">
+                    <input type="checkbox" x-model="settings.selfAuditEnabled" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+                    <div class="flex flex-col">
+                        <span class="text-[13px] font-medium group-hover:text-white transition-colors">Self-Audit Daemon</span>
+                        <span class="text-[11px] text-white/50 mt-0.5">Run automated security and health checks on a schedule</span>
+                    </div>
+                    </label>
+                </div>
+
+                <!-- Self-Audit Schedule -->
+                <div class="flex flex-col gap-1.5 pl-7" x-show="settings.selfAuditEnabled" x-transition>
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)]">Schedule (cron)</label>
+                    <input type="text" x-model="settings.selfAuditSchedule" @change="saveSettings()" placeholder="0 3 * * *"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    <small class="text-white/50 text-[11px]">Cron expression (default: 3 AM daily)</small>
+                </div>
+
+                <!-- Divider -->
+                <div class="border-t border-[var(--glass-border)] my-2"></div>
+
+                <!-- Security Audit -->
+                <div class="flex flex-col gap-2">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <span class="text-[13px] font-medium">Security Audit</span>
+                            <p class="text-[11px] text-white/50 mt-0.5">Run 7 security checks on your configuration</p>
+                        </div>
+                        <button @click="runSecurityAudit()" :disabled="securityAuditLoading"
+                            class="px-3 py-1.5 text-[12px] font-medium bg-[var(--accent-color)] text-white rounded-lg hover:bg-[var(--accent-hover)] transition-colors disabled:opacity-50">
+                            <span x-show="!securityAuditLoading">Run Audit</span>
+                            <span x-show="securityAuditLoading"><i data-lucide="loader-2" class="w-3 h-3 inline animate-spin"></i> Running...</span>
+                        </button>
+                    </div>
+                    <!-- Security Audit Results -->
+                    <div x-show="securityAuditResults" x-transition class="space-y-1.5 mt-1">
+                        <div class="text-[12px] text-white/50 mb-1">
+                            <span x-text="securityAuditResults?.passed"></span>/<span x-text="securityAuditResults?.total"></span> checks passed
+                        </div>
+                        <template x-for="r in (securityAuditResults?.results || [])" :key="r.check">
+                            <div class="flex items-start gap-2 py-1 px-2 rounded bg-black/20 text-[11px]">
+                                <span x-show="r.passed" class="text-green-400 shrink-0 mt-0.5">PASS</span>
+                                <span x-show="!r.passed" class="text-[var(--warning-color)] shrink-0 mt-0.5">WARN</span>
+                                <div class="min-w-0">
+                                    <span class="text-white/70 font-medium" x-text="r.check"></span>
+                                    <p class="text-white/50 break-words" x-text="r.message"></p>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Divider -->
+                <div class="border-t border-[var(--glass-border)] my-2"></div>
+
+                <!-- Self-Audit Reports -->
+                <div class="flex flex-col gap-2">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <span class="text-[13px] font-medium">Self-Audit Reports</span>
+                            <p class="text-[11px] text-white/50 mt-0.5">Health and security check history</p>
+                        </div>
+                        <div class="flex gap-1.5">
+                            <button @click="loadSelfAuditReports()"
+                                class="px-2.5 py-1.5 text-[12px] font-medium bg-white/5 text-white/60 rounded-lg hover:bg-white/10 transition-colors">
+                                Refresh
+                            </button>
+                            <button @click="triggerSelfAudit()" :disabled="selfAuditRunning"
+                                class="px-3 py-1.5 text-[12px] font-medium bg-[var(--accent-color)] text-white rounded-lg hover:bg-[var(--accent-hover)] transition-colors disabled:opacity-50">
+                                <span x-show="!selfAuditRunning">Run Now</span>
+                                <span x-show="selfAuditRunning"><i data-lucide="loader-2" class="w-3 h-3 inline animate-spin"></i></span>
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Report List -->
+                    <div x-show="selfAuditReports.length > 0" class="space-y-1 mt-1 max-h-[150px] overflow-y-auto">
+                        <template x-for="rpt in selfAuditReports" :key="rpt.date">
+                            <button @click="viewSelfAuditReport(rpt.date)"
+                                class="w-full flex items-center justify-between py-1.5 px-2.5 rounded bg-black/20 hover:bg-white/5 text-[11px] transition-colors"
+                                :class="selfAuditDetail?.timestamp?.startsWith(rpt.date) ? 'border border-[var(--accent-color)]/30' : ''">
+                                <span class="text-white/60" x-text="rpt.date"></span>
+                                <span :class="rpt.issues === 0 ? 'text-green-400' : 'text-[var(--warning-color)]'"
+                                    x-text="rpt.passed + '/' + rpt.total + ' passed'"></span>
+                            </button>
+                        </template>
+                    </div>
+                    <div x-show="selfAuditReports.length === 0" class="text-[11px] text-white/50 py-2 text-center">
+                        No reports yet. Click "Run Now" or enable the daemon.
+                    </div>
+                    <!-- Report Detail -->
+                    <div x-show="selfAuditDetail" x-transition class="mt-1 space-y-1">
+                        <div class="text-[12px] text-white/50 mb-1">
+                            Report: <span x-text="selfAuditDetail?.timestamp"></span>
+                            &mdash; <span x-text="selfAuditDetail?.passed"></span>/<span x-text="selfAuditDetail?.total_checks"></span> passed
+                        </div>
+                        <template x-for="r in (selfAuditDetail?.results || [])" :key="r.check">
+                            <div class="flex items-start gap-2 py-1 px-2 rounded bg-black/20 text-[11px]">
+                                <span x-show="r.passed" class="text-green-400 shrink-0 mt-0.5">PASS</span>
+                                <span x-show="!r.passed" class="text-[var(--warning-color)] shrink-0 mt-0.5">WARN</span>
+                                <div class="min-w-0">
+                                    <span class="text-white/70 font-medium" x-text="r.check"></span>
+                                    <p class="text-white/50 break-words" x-text="r.message"></p>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </div>
 
-    <!-- OpenAI API Key Input -->
-    <div class="flex flex-col gap-2">
-        <div class="flex justify-between items-center">
-            <label class="text-[13px] font-medium text-[var(--text-secondary)]">OpenAI API Key</label>
-            <span x-show="hasOpenaiKey" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
-                <i data-lucide="check" class="w-3 h-3"></i> Saved
-            </span>
-        </div>
-        <div class="flex gap-2">
-        <input
-            type="password"
-            x-model="apiKeys.openai"
-            :placeholder="hasOpenaiKey ? '••••••••••••••••' : 'sk-...'"
-            class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-        />
-        <button 
-            class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95" 
-            @click="saveApiKey('openai')"
-        >
-        Save
-        </button>
-        </div>
-    </div>
-    </div>
+    <!-- Refresh icons when settings opens -->
+    <div x-effect="showSettings && $nextTick(() => { if (window.refreshIcons) window.refreshIcons(); })"></div>
 </div>
 </div>

@@ -2,12 +2,14 @@
   PocketPaw - Task Detail Sheet Component
 
   Created: 2026-02-05
-  Extracted from missions.html as part of template componentization.
+  Updated: 2026-02-12 — Added SKIPPED status support:
+    - Skipped option in status dropdown
+    - Gray color for status dot and badge
 
   Features:
   - Full-height right-sliding panel
   - Task title and description
-  - Status and priority selectors
+  - Status and priority selectors (including skipped)
   - Assignee management (add/remove agents)
   - Run/Stop task buttons
   - Live output panel during execution
@@ -55,7 +57,8 @@
                         'bg-amber-500 animate-pulse': missionControl.selectedTask?.status === 'in_progress' || isMCTaskRunning(missionControl.selectedTask?.id),
                         'bg-purple-500': missionControl.selectedTask?.status === 'review',
                         'bg-green-500': missionControl.selectedTask?.status === 'done',
-                        'bg-red-500': missionControl.selectedTask?.status === 'blocked'
+                        'bg-red-500': missionControl.selectedTask?.status === 'blocked',
+                        'bg-gray-500': missionControl.selectedTask?.status === 'skipped'
                     }"
                 ></div>
                 <h3 class="text-base font-semibold text-white">Task Details</h3>
@@ -91,6 +94,7 @@
                                 <option value="review">Review</option>
                                 <option value="done">Done</option>
                                 <option value="blocked">Blocked</option>
+                                <option value="skipped">Skipped</option>
                             </select>
                         </div>
 
@@ -245,8 +249,8 @@
 
                         <!-- Deliverables Section -->
                         <div
-                            x-show="missionControl.selectedTask.status === 'done'"
-                            x-init="$watch('missionControl.selectedTask', (task) => { if (task?.status === 'done') loadTaskDeliverables(task.id); })"
+                            x-show="missionControl.selectedTask.status === 'done' || missionControl.selectedTask.status === 'skipped'"
+                            x-init="$watch('missionControl.selectedTask', (task) => { if (task?.status === 'done' || task?.status === 'skipped') loadTaskDeliverables(task.id); })"
                             class="pt-3"
                         >
                             <div class="flex items-center justify-between mb-2">

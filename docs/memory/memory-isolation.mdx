@@ -1,0 +1,82 @@
+---
+title: Memory Isolation
+description: "PocketPaw isolates memory per user in multi-channel deployments: the owner gets full memory access while external users receive SHA-256 hashed private memory silos for complete data separation."
+section: Memory
+ogType: article
+keywords: ["memory isolation", "multi-user", "per-user memory", "privacy", "data separation", "owner id"]
+tags: ["memory", "security", "multi-tenant"]
+---
+
+# Memory Isolation
+
+When PocketPaw is connected to shared channels (Discord servers, Slack workspaces, group chats), multiple users interact with the same agent. Memory isolation ensures each user's memories are scoped and private, while the owner gets full access to all stored knowledge.
+
+## How It Works
+
+### Owner vs External Users
+
+PocketPaw distinguishes between two types of users:
+
+| Type | Identification | Memory Access |
+|------|---------------|---------------|
+| **Owner** | Matches `owner_id` in settings | Full access to all memories and facts |
+| **External user** | Any other sender | Scoped to their own memory silo |
+
+### User ID Resolution
+
+When a message arrives from a channel, the system resolves the sender:
+
+1. Extract `sender_id` from the inbound message metadata
+2. Compare against the configured `owner_id`
+3. If it matches (or no `owner_id` is set), treat as owner — use the default memory store
+4. If it doesn't match, hash the sender ID with SHA-256 and use a per-user memory silo
+
+### Memory Silos
+
+External users get isolated storage:
+
+```
+~/.pocketclaw/memory/
+├── MEMORY.md              ← owner's long-term facts
+├── sessions/              ← owner's session history
+└── users/
+    ├── a3f8c2d1e9b0.../   ← user 1's memory (hashed ID)
+    │   └── MEMORY.md
+    └── 7b4e1f9c6a2d.../   ← user 2's memory (hashed ID)
+        └── MEMORY.md
+```
+
+### Mem0 Isolation
+
+When using Mem0 for semantic memory, the `user_id` is passed through to Mem0's storage layer. Each user's memories are tagged with their ID, so semantic search only returns relevant results.
+
+## Configuration
+
+### Setting Your Owner ID
+
+```bash
+export POCKETCLAW_OWNER_ID="123456789"  # Your Telegram user ID, Discord user ID, etc.
+```
+
+The owner ID should match the `sender_id` that your primary channel sends. For Telegram, this is your numeric user ID. For Discord, it's your Discord user ID.
+
+## Context Injection
+
+The agent's system prompt includes an identity block based on who's messaging:
+
+- **Owner**: Gets the full USER.md profile, all long-term facts, and semantic memories
+- **External user**: Gets a neutral identity block and only their own scoped memories
+
+This prevents the agent from leaking your personal information (preferences, API keys, project details) to other users who message through shared channels.
+
+## What Stays Global
+
+Some data is intentionally not scoped per-user:
+
+- **Daily notes** — Global operational context
+- **Skills** — Loaded from `~/.pocketclaw/skills/` for all users
+- **Session history** — Scoped by session key (which already includes channel + chat ID)
+
+<Callout type="warning">
+  If `owner_id` is not set, all users are treated as the owner and share the same memory store. Set your owner ID when deploying to shared channels.
+</Callout>

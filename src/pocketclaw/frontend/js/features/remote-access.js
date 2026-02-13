@@ -13,6 +13,7 @@
 window.PocketPaw = window.PocketPaw || {};
 
 window.PocketPaw.RemoteAccess = {
+    name: 'RemoteAccess',
     /**
      * Get initial state for Remote Access
      */
@@ -197,3 +198,5 @@ window.PocketPaw.RemoteAccess = {
         };
     }
 };
+
+window.PocketPaw.Loader.register('RemoteAccess', window.PocketPaw.RemoteAccess);

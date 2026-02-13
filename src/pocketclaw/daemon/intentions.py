@@ -8,9 +8,8 @@ when to do it (trigger), and what context to gather.
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +28,10 @@ def load_intentions() -> list[dict]:
         return []
 
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             data = json.load(f)
             return data.get("intentions", [])
-    except (json.JSONDecodeError, IOError) as e:
+    except (OSError, json.JSONDecodeError) as e:
         logger.error(f"Failed to load intentions: {e}")
         return []
 
@@ -40,12 +39,12 @@ def load_intentions() -> list[dict]:
 def save_intentions(intentions: list[dict]) -> None:
     """Save intentions to JSON file."""
     path = get_intentions_path()
-    data = {"intentions": intentions, "updated_at": datetime.now().isoformat()}
+    data = {"intentions": intentions, "updated_at": datetime.now(tz=UTC).isoformat()}
 
     try:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
-    except IOError as e:
+    except OSError as e:
         logger.error(f"Failed to save intentions: {e}")
 
 
@@ -87,7 +86,7 @@ class IntentionStore:
         """Get all enabled intentions."""
         return [i for i in self.intentions if i.get("enabled", True)]
 
-    def get_by_id(self, intention_id: str) -> Optional[dict]:
+    def get_by_id(self, intention_id: str) -> dict | None:
         """Get intention by ID."""
         for intention in self.intentions:
             if intention["id"] == intention_id:
@@ -99,7 +98,7 @@ class IntentionStore:
         name: str,
         prompt: str,
         trigger: dict,
-        context_sources: Optional[list[str]] = None,
+        context_sources: list[str] | None = None,
         enabled: bool = True,
     ) -> dict:
         """
@@ -122,7 +121,7 @@ class IntentionStore:
             "trigger": trigger,
             "context_sources": context_sources or [],
             "enabled": enabled,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(tz=UTC).isoformat(),
             "last_run": None,
         }
 
@@ -132,7 +131,7 @@ class IntentionStore:
         logger.info(f"Created intention: {name} ({intention['id']})")
         return intention
 
-    def update(self, intention_id: str, updates: dict) -> Optional[dict]:
+    def update(self, intention_id: str, updates: dict) -> dict | None:
         """
         Update an existing intention.
 
@@ -177,7 +176,7 @@ class IntentionStore:
 
         return False
 
-    def toggle(self, intention_id: str) -> Optional[dict]:
+    def toggle(self, intention_id: str) -> dict | None:
         """
         Toggle enabled state of an intention.
 
@@ -194,7 +193,7 @@ class IntentionStore:
 
     def mark_run(self, intention_id: str) -> None:
         """Update last_run timestamp for an intention."""
-        self.update(intention_id, {"last_run": datetime.now().isoformat()})
+        self.update(intention_id, {"last_run": datetime.now(tz=UTC).isoformat()})
 
     def reload(self) -> None:
         """Reload intentions from disk."""
@@ -202,7 +201,7 @@ class IntentionStore:
 
 
 # Singleton pattern
-_intention_store: Optional[IntentionStore] = None
+_intention_store: IntentionStore | None = None
 
 
 def get_intention_store() -> IntentionStore:

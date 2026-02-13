@@ -1,0 +1,77 @@
+---
+title: Get Memory Settings
+description: "Retrieve the current memory backend configuration including the active provider (file store or Mem0), LLM and embedder settings, vector store configuration, and auto-learn status."
+api: GET /api/memory/settings
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["memory settings", "backend config", "mem0 settings"]
+tags: ["api", "memory"]
+---
+
+## Overview
+
+Returns the current memory backend configuration, including the active backend, mem0 provider settings, and auto-learn status.
+
+## Response
+
+<ResponseField name="memory_backend" type="string">Active memory backend (`file` or `mem0`)</ResponseField>
+<ResponseField name="mem0_llm_provider" type="string">LLM provider for mem0 (`ollama`, `openai`, `anthropic`)</ResponseField>
+<ResponseField name="mem0_llm_model" type="string">LLM model name (e.g., `llama3.2`)</ResponseField>
+<ResponseField name="mem0_embedder_provider" type="string">Embedding provider (`ollama`, `openai`)</ResponseField>
+<ResponseField name="mem0_embedder_model" type="string">Embedding model name (e.g., `nomic-embed-text`)</ResponseField>
+<ResponseField name="mem0_vector_store" type="string">Vector store backend (`qdrant`)</ResponseField>
+<ResponseField name="mem0_ollama_base_url" type="string">Ollama server URL</ResponseField>
+<ResponseField name="mem0_auto_learn" type="boolean">Whether auto-learn is enabled</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/memory/settings" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/memory/settings", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/memory/settings",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "memory_backend": "mem0",
+      "mem0_llm_provider": "ollama",
+      "mem0_llm_model": "llama3.2",
+      "mem0_embedder_provider": "ollama",
+      "mem0_embedder_model": "nomic-embed-text",
+      "mem0_vector_store": "qdrant",
+      "mem0_ollama_base_url": "http://localhost:11434",
+      "mem0_auto_learn": true
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

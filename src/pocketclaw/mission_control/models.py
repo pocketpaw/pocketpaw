@@ -1,6 +1,14 @@
 """Mission Control data models.
 
 Created: 2026-02-05
+Updated: 2026-02-12 — Added SKIPPED status to TaskStatus enum for Deep Work
+  skip-task feature. Extended Task model with Deep Work fields:
+  - project_id: optional project grouping
+  - task_type: "agent" | "human" | "review"
+  - blocks: list of task IDs this task blocks
+  - active_description: present-continuous description for spinner UI
+  - estimated_minutes: optional time estimate
+
 Part of Mission Control feature for multi-agent orchestration.
 
 These models define the core data structures for:
@@ -56,6 +64,7 @@ class TaskStatus(str, Enum):
     REVIEW = "review"  # Done, needs approval
     DONE = "done"  # Completed
     BLOCKED = "blocked"  # Stuck, needs resolution
+    SKIPPED = "skipped"  # Manually skipped by user
 
 
 class TaskPriority(str, Enum):
@@ -217,6 +226,11 @@ class Task:
         created_at: When task was created
         updated_at: Last modification time
         metadata: Extensible key-value data
+        project_id: Optional project grouping ID (Deep Work)
+        task_type: Task type - "agent", "human", or "review" (Deep Work)
+        blocks: List of task IDs this task blocks (Deep Work)
+        active_description: Present-continuous description for spinner UI (Deep Work)
+        estimated_minutes: Optional time estimate in minutes (Deep Work)
     """
 
     id: str = field(default_factory=generate_id)
@@ -235,6 +249,11 @@ class Task:
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     metadata: dict[str, Any] = field(default_factory=dict)
+    project_id: str | None = None
+    task_type: str = "agent"
+    blocks: list[str] = field(default_factory=list)
+    active_description: str = ""
+    estimated_minutes: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -255,6 +274,11 @@ class Task:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "metadata": self.metadata,
+            "project_id": self.project_id,
+            "task_type": self.task_type,
+            "blocks": self.blocks,
+            "active_description": self.active_description,
+            "estimated_minutes": self.estimated_minutes,
         }
 
     @classmethod
@@ -277,6 +301,11 @@ class Task:
             created_at=data.get("created_at", now_iso()),
             updated_at=data.get("updated_at", now_iso()),
             metadata=data.get("metadata", {}),
+            project_id=data.get("project_id"),
+            task_type=data.get("task_type", "agent"),
+            blocks=data.get("blocks", []),
+            active_description=data.get("active_description", ""),
+            estimated_minutes=data.get("estimated_minutes"),
         )
 
 

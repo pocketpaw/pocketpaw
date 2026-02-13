@@ -54,7 +54,7 @@ python -m build
 
 ## Architecture
 
-### Message Bus Pattern ("Nanobot Pattern")
+### Message Bus Pattern
 
 The core architecture is an event-driven message bus (`src/pocketclaw/bus/`). All communication flows through three event types defined in `bus/events.py`:
 
@@ -76,6 +76,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 ### Channel Adapters
 
 `bus/adapters/` contains protocol translators that bridge external channels to the message bus:
+
 - `TelegramAdapter` — python-telegram-bot
 - `WebSocketAdapter` — FastAPI WebSockets
 - `DiscordAdapter` — discord.py (optional dep `pocketpaw[discord]`). Slash command `/paw` + DM/mention support. Stream buffering with edit-in-place (1.5s rate limit).

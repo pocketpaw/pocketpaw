@@ -1,15 +1,17 @@
 # Tests for Bootstrap System
 # Created: 2026-02-02
-# Part of Nanobot Pattern Adoption
 
-import pytest
+
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from pocketclaw.bootstrap.protocol import BootstrapContext
-from pocketclaw.bootstrap.default_provider import DefaultBootstrapProvider
+import pytest
+
 from pocketclaw.bootstrap.context_builder import AgentContextBuilder
+from pocketclaw.bootstrap.default_provider import DefaultBootstrapProvider
+from pocketclaw.bootstrap.protocol import BootstrapContext
+from pocketclaw.bus.events import Channel
 
 
 @pytest.fixture
@@ -97,6 +99,39 @@ class TestAgentContextBuilder:
         assert "Identity" in prompt
         assert "Memory Context" in prompt
         assert "# Memory Context" in prompt
+
+    @pytest.mark.asyncio
+    async def test_build_with_channel_hint(self):
+        mock_provider = MagicMock()
+        mock_provider.get_context = AsyncMock(
+            return_value=BootstrapContext(
+                name="Test", identity="Identity", soul="Soul", style="Style"
+            )
+        )
+        mock_memory = MagicMock()
+        mock_memory.get_context_for_agent = AsyncMock(return_value="")
+
+        builder = AgentContextBuilder(bootstrap_provider=mock_provider, memory_manager=mock_memory)
+
+        prompt = await builder.build_system_prompt(channel=Channel.WHATSAPP)
+        assert "# Response Format" in prompt
+        assert "WhatsApp" in prompt
+
+    @pytest.mark.asyncio
+    async def test_build_passthrough_channel_no_hint(self):
+        mock_provider = MagicMock()
+        mock_provider.get_context = AsyncMock(
+            return_value=BootstrapContext(
+                name="Test", identity="Identity", soul="Soul", style="Style"
+            )
+        )
+        mock_memory = MagicMock()
+        mock_memory.get_context_for_agent = AsyncMock(return_value="")
+
+        builder = AgentContextBuilder(bootstrap_provider=mock_provider, memory_manager=mock_memory)
+
+        prompt = await builder.build_system_prompt(channel=Channel.WEBSOCKET)
+        assert "# Response Format" not in prompt
 
     @pytest.mark.asyncio
     async def test_build_no_memory(self):

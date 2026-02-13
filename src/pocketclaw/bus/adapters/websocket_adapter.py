@@ -68,11 +68,43 @@ class WebSocketAdapter(BaseChannelAdapter):
         action = data.get("action", "chat")
 
         if action == "chat":
+            content = data.get("message", "")
+            media_paths: list[str] = []
+
+            # Handle base64-encoded media items
+            media_items = data.get("media", [])
+            if media_items:
+                try:
+                    import base64
+
+                    from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                    downloader = get_media_downloader()
+                    names = []
+                    for item in media_items:
+                        b64_data = item.get("data", "")
+                        name = item.get("name", "upload")
+                        mime = item.get("mime_type")
+                        if not b64_data:
+                            continue
+                        try:
+                            raw = base64.b64decode(b64_data)
+                            path = await downloader.save_from_bytes(raw, name, mime)
+                            media_paths.append(path)
+                            names.append(name)
+                        except Exception as e:
+                            logger.warning("Failed to save WebSocket media: %s", e)
+                    if names:
+                        content += build_media_hint(names)
+                except Exception as e:
+                    logger.warning("WebSocket media error: %s", e)
+
             message = InboundMessage(
                 channel=Channel.WEBSOCKET,
                 sender_id=chat_id,
                 chat_id=chat_id,
-                content=data.get("message", ""),
+                content=content,
+                media=media_paths,
                 metadata=data,
             )
 
@@ -104,25 +136,16 @@ class WebSocketAdapter(BaseChannelAdapter):
                 await ws.send_json({"type": "stream_end"})
                 return
 
-            # Legacy frontend expects 'message' for chunks too
-            msg_type = "message"
-
-            # If it's the very first chunk, we might want to send stream_start?
-            # But we don't track state easily here.
-            # Let's hope frontend doesn't strictly need stream_start if it's already waiting.
-            # (Legacy dashboard.py sent stream_start before headers)
-
             await ws.send_json(
                 {
-                    "type": msg_type,
+                    "type": "message",
                     "content": message.content,
+                    "is_stream_chunk": message.is_stream_chunk,
                     "metadata": message.metadata,
                 }
             )
-        except Exception:
-            pass  # Connection closed
-
-            pass  # Connection closed
+        except Exception as e:
+            logger.warning("WebSocket send failed: %s", e)
 
     async def broadcast(self, content: Any, msg_type: str = "notification") -> None:
         """Broadcast to all connected clients."""

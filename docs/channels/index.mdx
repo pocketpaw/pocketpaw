@@ -1,0 +1,131 @@
+---
+title: Channels Overview
+description: "Connect PocketPaw to 9+ messaging platforms simultaneously: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, and the built-in web dashboard."
+section: Channels
+ogType: article
+keywords: ["messaging platforms", "telegram", "discord", "slack", "whatsapp", "signal", "matrix"]
+tags: ["channels", "integration"]
+---
+
+# Channels
+
+PocketPaw connects to multiple messaging platforms through **channel adapters**. Each adapter translates between the platform's native protocol and PocketPaw's internal message bus.
+
+## Supported Channels
+
+<CardGroup>
+  <Card title="Web Dashboard" icon="lucide:layout-dashboard" href="/channels/web-dashboard">
+    Built-in real-time web interface with streaming, sessions, and tool activity.
+  </Card>
+  <Card title="Telegram" icon="lucide:send" href="/channels/telegram">
+    Full bot API with topic support, inline keyboards, and streaming via edit-in-place.
+  </Card>
+  <Card title="Discord" icon="lucide:gamepad-2" href="/channels/discord">
+    Slash commands, DM and mention support, streaming with edit-in-place.
+  </Card>
+  <Card title="Slack" icon="lucide:hash" href="/channels/slack">
+    Socket Mode (no public URL needed), thread support, app_mention events.
+  </Card>
+  <Card title="WhatsApp" icon="lucide:message-circle" href="/channels/whatsapp">
+    Business API or Personal mode via QR scan. No Meta account needed for personal.
+  </Card>
+  <Card title="Signal" icon="lucide:lock" href="/channels/signal">
+    Privacy-focused messaging via signal-cli REST API.
+  </Card>
+  <Card title="Matrix" icon="lucide:grid-3x3" href="/channels/matrix">
+    Decentralized, federated protocol via matrix-nio.
+  </Card>
+  <Card title="Microsoft Teams" icon="lucide:users" href="/channels/teams">
+    Bot Framework SDK integration for enterprise collaboration.
+  </Card>
+  <Card title="Google Chat" icon="lucide:message-square" href="/channels/google-chat">
+    Webhook and Pub/Sub modes via Google Chat API.
+  </Card>
+</CardGroup>
+
+## Running Channels
+
+### Web Dashboard (Default)
+
+The web dashboard is the default mode. Simply run:
+
+```bash
+pocketpaw
+```
+
+The dashboard auto-starts all configured channel adapters on startup. You can manage channels from the Channels modal in the sidebar.
+
+### Headless Mode
+
+Run specific channels without the web dashboard:
+
+```bash
+# Single channel
+pocketpaw --telegram
+pocketpaw --discord
+pocketpaw --slack
+
+# Multiple channels
+pocketpaw --discord --slack --whatsapp
+
+# All channel flags
+pocketpaw --telegram --discord --slack --whatsapp --signal --matrix --teams --gchat
+```
+
+### Channel Management API
+
+The web dashboard exposes REST endpoints for channel management:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/channels/status` | GET | Get status of all channels |
+| `/api/channels/save` | POST | Save channel configuration |
+| `/api/channels/toggle` | POST | Start or stop a channel |
+
+## Streaming Behavior
+
+Each channel handles streaming differently based on platform limitations:
+
+| Channel | Streaming Method |
+|---------|-----------------|
+| Web Dashboard | Real-time WebSocket chunks |
+| Telegram | Edit-in-place (message updates) |
+| Discord | Edit-in-place (1.5s rate limit) |
+| Slack | Thread message updates |
+| WhatsApp | Accumulate + send on completion |
+| Signal | Accumulate + send on completion |
+| Matrix | Edit-in-place (m.replace) |
+| Teams | Accumulate + send on completion |
+| Google Chat | Accumulate + send on completion |
+
+## Channel-Specific Session Keys
+
+Each channel generates unique session keys to maintain separate conversations:
+
+- **Telegram**: `{chat_id}` or `{chat_id}:topic:{topic_id}`
+- **Discord**: `{channel_id}` or `dm:{user_id}`
+- **Slack**: `{channel_id}:{thread_ts}`
+- **WhatsApp**: `{phone_number}`
+- **Signal**: `{phone_number}`
+- **Matrix**: `{room_id}`
+- **Teams**: `{conversation_id}`
+- **Google Chat**: `{space_name}`
+
+## Access Control
+
+Each channel supports allow-listing to restrict who can interact with your agent:
+
+```bash
+# Telegram
+export POCKETCLAW_ALLOWED_TELEGRAM_IDS="123456,789012"
+
+# Discord
+export POCKETCLAW_DISCORD_ALLOWED_GUILD_IDS="111,222"
+export POCKETCLAW_DISCORD_ALLOWED_USER_IDS="333,444"
+
+# Slack
+export POCKETCLAW_SLACK_ALLOWED_CHANNEL_IDS="C01,C02"
+
+# WhatsApp
+export POCKETCLAW_WHATSAPP_ALLOWED_PHONE_NUMBERS="+1234567890"
+```

@@ -20,6 +20,9 @@ _EXTRA_PACKAGES: dict[str, str] = {
     "discord": "pocketpaw[discord]",
     "slack": "pocketpaw[slack]",
     "whatsapp-personal": "pocketpaw[whatsapp-personal]",
+    "matrix": "pocketpaw[matrix]",
+    "teams": "pocketpaw[teams]",
+    "gchat": "pocketpaw[gchat]",
 }
 
 
@@ -37,11 +40,20 @@ def auto_install(extra: str, verify_import: str) -> None:
     _log.info("Auto-installing missing dependency: %s", pip_spec)
 
     # Prefer uv (fast), fall back to pip
+    import sys
+
+    in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
     uv = shutil.which("uv")
     if uv:
-        cmd = [uv, "pip", "install", pip_spec]
+        cmd = [uv, "pip", "install"]
+        if not in_venv:
+            cmd.append("--system")
+        cmd.append(pip_spec)
     else:
-        cmd = ["pip", "install", pip_spec]
+        cmd = ["pip", "install"]
+        if not in_venv:
+            cmd.append("--user")
+        cmd.append(pip_spec)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)

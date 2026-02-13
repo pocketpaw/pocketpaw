@@ -6,22 +6,33 @@ Changes:
 """
 
 import asyncio
+import base64
+import logging
 import secrets
 import socket
-from typing import Optional
-import logging
-
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
-import uvicorn
-import qrcode
-import qrcode.image.svg
 from io import BytesIO
-import base64
+from typing import Optional
 
-# Telegram imports for pairing bot
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+try:
+    import qrcode
+    import qrcode.image.svg
+    import uvicorn
+    from fastapi import FastAPI, Form, Request
+    from fastapi.responses import HTMLResponse
+except ImportError as _exc:
+    raise ImportError(
+        "Web server dependencies (fastapi, uvicorn, qrcode) are required "
+        "but not installed. Install them with: pip install 'pocketpaw[dashboard]'"
+    ) from _exc
+
+try:
+    from telegram import Update
+    from telegram.ext import Application, CommandHandler, ContextTypes
+except ImportError as _exc:
+    raise ImportError(
+        "'python-telegram-bot' is required for the pairing flow. "
+        "Install it with: pip install 'pocketpaw[telegram]'"
+    ) from _exc
 
 from pocketclaw.config import Settings
 

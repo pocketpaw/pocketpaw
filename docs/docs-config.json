@@ -1,0 +1,721 @@
+{
+  "metadata": {
+    "name": "PocketPaw",
+    "description": "Self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard",
+    "version": "1.0.0"
+  },
+  "branding": {
+    "favicon": "/paw.webp",
+    "logo": {
+      "light": "/paw.webp",
+      "dark": "/paw.webp",
+      "href": "/"
+    },
+    "colors": {
+      "primary": "#0A84FF",
+      "secondary": "#4a6fa5",
+      "accent": "#d49a5c",
+      "background": "#f9f8f6",
+      "text": "#1a1a2e"
+    },
+    "fonts": {
+      "body": "Plus Jakarta Sans",
+      "code": "JetBrains Mono"
+    }
+  },
+  "theme": {
+    "mode": "auto",
+    "defaultDark": false,
+    "primaryColor": "#0A84FF",
+    "accentColor": "#d49a5c"
+  },
+  "navigation": {
+    "navbar": {
+      "links": [
+        {
+          "label": "Docs",
+          "href": "/introduction"
+        },
+        {
+          "label": "Guides",
+          "type": "dropdown",
+          "items": [
+            {
+              "label": "Channels",
+              "href": "/channels",
+              "description": "Connect to 9+ messaging platforms"
+            },
+            {
+              "label": "Integrations",
+              "href": "/integrations",
+              "description": "Gmail, Calendar, Drive, Spotify, and more"
+            },
+            {
+              "label": "Tools",
+              "href": "/tools",
+              "description": "50+ built-in tools and custom tool creation"
+            },
+            {
+              "label": "API Reference",
+              "href": "/api",
+              "description": "REST and WebSocket APIs"
+            }
+          ]
+        }
+      ],
+      "social": {
+        "github": {
+          "href": "https://github.com/pocketpaw/pocketpaw",
+          "showStars": true
+        }
+      },
+      "cta": {
+        "label": "Get Started",
+        "href": "/getting-started/installation"
+      }
+    },
+    "anchors": [
+      {
+        "label": "Documentation",
+        "href": "/introduction",
+        "icon": "lucide:book-open",
+        "groups": ["Introduction", "Getting Started", "Core Concepts", "Channels", "Agent Backends", "Tools", "Integrations", "Security", "Memory", "Advanced", "Deployment"]
+      },
+      {
+        "label": "API Reference",
+        "href": "/api",
+        "icon": "lucide:code",
+        "color": "#3b82f6",
+        "groups": ["API Reference"]
+      }
+    ],
+    "sidebar": [
+      {
+        "label": "Introduction",
+        "items": [
+          {
+            "label": "Welcome",
+            "href": "/introduction",
+            "icon": "lucide:home"
+          },
+          {
+            "label": "Why PocketPaw?",
+            "href": "/introduction/why-pocketpaw",
+            "icon": "lucide:sparkles"
+          }
+        ]
+      },
+      {
+        "label": "Getting Started",
+        "items": [
+          {
+            "label": "Installation",
+            "href": "/getting-started/installation",
+            "icon": "lucide:download"
+          },
+          {
+            "label": "Quick Start",
+            "href": "/getting-started/quick-start",
+            "icon": "lucide:rocket"
+          },
+          {
+            "label": "Configuration",
+            "href": "/getting-started/configuration",
+            "icon": "lucide:settings"
+          },
+          {
+            "label": "Project Structure",
+            "href": "/getting-started/project-structure",
+            "icon": "lucide:folder-tree"
+          }
+        ]
+      },
+      {
+        "label": "Core Concepts",
+        "items": [
+          {
+            "label": "Architecture",
+            "href": "/concepts/architecture",
+            "icon": "lucide:layers"
+          },
+          {
+            "label": "Message Bus",
+            "href": "/concepts/message-bus",
+            "icon": "lucide:arrow-left-right"
+          },
+          {
+            "label": "Agent Loop",
+            "href": "/concepts/agent-loop",
+            "icon": "lucide:repeat"
+          },
+          {
+            "label": "Memory System",
+            "href": "/concepts/memory-system",
+            "icon": "lucide:brain"
+          },
+          {
+            "label": "Tool System",
+            "href": "/concepts/tool-system",
+            "icon": "lucide:wrench"
+          },
+          {
+            "label": "Security Model",
+            "href": "/concepts/security-model",
+            "icon": "lucide:shield"
+          }
+        ]
+      },
+      {
+        "label": "Channels",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/channels",
+            "icon": "lucide:radio"
+          },
+          {
+            "label": "Web Dashboard",
+            "href": "/channels/web-dashboard",
+            "icon": "lucide:layout-dashboard"
+          },
+          {
+            "label": "Telegram",
+            "href": "/channels/telegram",
+            "icon": "lucide:send"
+          },
+          {
+            "label": "Discord",
+            "href": "/channels/discord",
+            "icon": "lucide:gamepad-2"
+          },
+          {
+            "label": "Slack",
+            "href": "/channels/slack",
+            "icon": "lucide:hash"
+          },
+          {
+            "label": "WhatsApp",
+            "href": "/channels/whatsapp",
+            "icon": "lucide:message-circle"
+          },
+          {
+            "label": "Signal",
+            "href": "/channels/signal",
+            "icon": "lucide:lock"
+          },
+          {
+            "label": "Matrix",
+            "href": "/channels/matrix",
+            "icon": "lucide:grid-3x3"
+          },
+          {
+            "label": "Microsoft Teams",
+            "href": "/channels/teams",
+            "icon": "lucide:users"
+          },
+          {
+            "label": "Google Chat",
+            "href": "/channels/google-chat",
+            "icon": "lucide:message-square"
+          }
+        ]
+      },
+      {
+        "label": "Agent Backends",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/backends",
+            "icon": "lucide:cpu"
+          },
+          {
+            "label": "Claude Agent SDK",
+            "href": "/backends/claude-sdk",
+            "icon": "lucide:sparkles"
+          },
+          {
+            "label": "PocketPaw Native",
+            "href": "/backends/pocketpaw-native",
+            "icon": "lucide:bot"
+          },
+          {
+            "label": "Open Interpreter",
+            "href": "/backends/open-interpreter",
+            "icon": "lucide:terminal"
+          }
+        ]
+      },
+      {
+        "label": "Tools",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/tools",
+            "icon": "lucide:wrench"
+          },
+          {
+            "label": "Web Search",
+            "href": "/tools/web-search",
+            "icon": "lucide:search"
+          },
+          {
+            "label": "Image Generation",
+            "href": "/tools/image-generation",
+            "icon": "lucide:image"
+          },
+          {
+            "label": "Voice & TTS",
+            "href": "/tools/voice-tts",
+            "icon": "lucide:volume-2"
+          },
+          {
+            "label": "Speech to Text",
+            "href": "/tools/speech-to-text",
+            "icon": "lucide:mic"
+          },
+          {
+            "label": "Research",
+            "href": "/tools/research",
+            "icon": "lucide:book-open"
+          },
+          {
+            "label": "OCR",
+            "href": "/tools/ocr",
+            "icon": "lucide:scan"
+          },
+          {
+            "label": "Browser Automation",
+            "href": "/tools/browser",
+            "icon": "lucide:globe"
+          },
+          {
+            "label": "Delegation",
+            "href": "/tools/delegation",
+            "icon": "lucide:git-branch"
+          },
+          {
+            "label": "Skill Generator",
+            "href": "/tools/skill-generator",
+            "icon": "lucide:wand-2"
+          },
+          {
+            "label": "Desktop",
+            "href": "/tools/desktop",
+            "icon": "lucide:monitor"
+          },
+          {
+            "label": "Session Tools",
+            "href": "/tools/sessions",
+            "icon": "lucide:history"
+          },
+          {
+            "label": "Tool Policy",
+            "href": "/tools/tool-policy",
+            "icon": "lucide:shield-check"
+          },
+          {
+            "label": "Custom Tools",
+            "href": "/tools/custom-tools",
+            "icon": "lucide:puzzle"
+          }
+        ]
+      },
+      {
+        "label": "Integrations",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/integrations",
+            "icon": "lucide:plug"
+          },
+          {
+            "label": "OAuth Framework",
+            "href": "/integrations/oauth",
+            "icon": "lucide:key"
+          },
+          {
+            "label": "Gmail",
+            "href": "/integrations/gmail",
+            "icon": "lucide:mail"
+          },
+          {
+            "label": "Google Calendar",
+            "href": "/integrations/calendar",
+            "icon": "lucide:calendar"
+          },
+          {
+            "label": "Google Drive",
+            "href": "/integrations/google-drive",
+            "icon": "lucide:hard-drive"
+          },
+          {
+            "label": "Google Docs",
+            "href": "/integrations/google-docs",
+            "icon": "lucide:file-text"
+          },
+          {
+            "label": "Spotify",
+            "href": "/integrations/spotify",
+            "icon": "lucide:music"
+          },
+          {
+            "label": "Reddit",
+            "href": "/integrations/reddit",
+            "icon": "lucide:message-circle"
+          },
+          {
+            "label": "MCP Servers",
+            "href": "/integrations/mcp-servers",
+            "icon": "lucide:server"
+          }
+        ]
+      },
+      {
+        "label": "Security",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/security",
+            "icon": "lucide:shield"
+          },
+          {
+            "label": "Guardian AI",
+            "href": "/security/guardian-ai",
+            "icon": "lucide:shield-alert"
+          },
+          {
+            "label": "Injection Scanner",
+            "href": "/security/injection-scanner",
+            "icon": "lucide:scan-line"
+          },
+          {
+            "label": "Audit Log",
+            "href": "/security/audit-log",
+            "icon": "lucide:file-check"
+          },
+          {
+            "label": "Security Audit CLI",
+            "href": "/security/audit-cli",
+            "icon": "lucide:terminal"
+          },
+          {
+            "label": "Self-Audit Daemon",
+            "href": "/security/self-audit-daemon",
+            "icon": "lucide:activity"
+          }
+        ]
+      },
+      {
+        "label": "Memory",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/memory",
+            "icon": "lucide:brain"
+          },
+          {
+            "label": "File Store",
+            "href": "/memory/file-store",
+            "icon": "lucide:database"
+          },
+          {
+            "label": "Mem0 Integration",
+            "href": "/memory/mem0",
+            "icon": "lucide:sparkles"
+          },
+          {
+            "label": "Sessions",
+            "href": "/memory/sessions",
+            "icon": "lucide:history"
+          },
+          {
+            "label": "Context Building",
+            "href": "/memory/context-building",
+            "icon": "lucide:layers"
+          },
+          {
+            "label": "Memory Isolation",
+            "href": "/memory/memory-isolation",
+            "icon": "lucide:shield"
+          }
+        ]
+      },
+      {
+        "label": "Advanced",
+        "items": [
+          {
+            "label": "Model Router",
+            "href": "/advanced/model-router",
+            "icon": "lucide:route"
+          },
+          {
+            "label": "Plan Mode",
+            "href": "/advanced/plan-mode",
+            "icon": "lucide:list-checks"
+          },
+          {
+            "label": "Cron Scheduler",
+            "href": "/advanced/scheduler",
+            "icon": "lucide:clock"
+          },
+          {
+            "label": "Skills System",
+            "href": "/advanced/skills",
+            "icon": "lucide:wand-2"
+          },
+          {
+            "label": "Deep Work",
+            "href": "/advanced/deep-work",
+            "icon": "lucide:brain"
+          },
+          {
+            "label": "Mission Control",
+            "href": "/advanced/mission-control",
+            "icon": "lucide:radar"
+          },
+          {
+            "label": "Autonomous Messaging",
+            "href": "/advanced/autonomous-messaging",
+            "icon": "lucide:bell"
+          }
+        ]
+      },
+      {
+        "label": "API Reference",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/api",
+            "icon": "lucide:server"
+          },
+          {
+            "label": "Channels",
+            "items": [
+              { "label": "Get Channel Status", "href": "/api/get-channels-status", "method": "GET" },
+              { "label": "Save Channel Config", "href": "/api/post-channels-save", "method": "POST" },
+              { "label": "Toggle Channel", "href": "/api/post-channels-toggle", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Sessions",
+            "items": [
+              { "label": "List Sessions", "href": "/api/get-sessions", "method": "GET" },
+              { "label": "Search Sessions", "href": "/api/get-sessions-search", "method": "GET" },
+              { "label": "Delete Session", "href": "/api/delete-session", "method": "DELETE" },
+              { "label": "Rename Session", "href": "/api/post-session-title", "method": "POST" },
+              { "label": "Get Session History", "href": "/api/get-session-history", "method": "GET" }
+            ]
+          },
+          {
+            "label": "MCP Servers",
+            "items": [
+              { "label": "Get MCP Status", "href": "/api/get-mcp-status", "method": "GET" },
+              { "label": "Add MCP Server", "href": "/api/post-mcp-add", "method": "POST" },
+              { "label": "Remove MCP Server", "href": "/api/post-mcp-remove", "method": "POST" },
+              { "label": "Toggle MCP Server", "href": "/api/post-mcp-toggle", "method": "POST" },
+              { "label": "Test MCP Server", "href": "/api/post-mcp-test", "method": "POST" },
+              { "label": "List MCP Presets", "href": "/api/get-mcp-presets", "method": "GET" },
+              { "label": "Install MCP Preset", "href": "/api/post-mcp-preset-install", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Memory",
+            "items": [
+              { "label": "List Memories", "href": "/api/get-memory-long-term", "method": "GET" },
+              { "label": "Delete Memory", "href": "/api/delete-memory-entry", "method": "DELETE" },
+              { "label": "Get Memory Settings", "href": "/api/get-memory-settings", "method": "GET" },
+              { "label": "Update Memory Settings", "href": "/api/post-memory-settings", "method": "POST" },
+              { "label": "Get Memory Stats", "href": "/api/get-memory-stats", "method": "GET" }
+            ]
+          },
+          {
+            "label": "Security & Audit",
+            "items": [
+              { "label": "Get Audit Logs", "href": "/api/get-audit-logs", "method": "GET" },
+              { "label": "Run Security Audit", "href": "/api/post-security-audit", "method": "POST" },
+              { "label": "List Audit Reports", "href": "/api/get-self-audit-reports", "method": "GET" },
+              { "label": "Get Audit Report", "href": "/api/get-self-audit-report", "method": "GET" },
+              { "label": "Trigger Self-Audit", "href": "/api/post-self-audit-run", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Authentication",
+            "items": [
+              { "label": "Create Session Token", "href": "/api/post-auth-session", "method": "POST" },
+              { "label": "Generate QR Code", "href": "/api/get-qr-code", "method": "GET" },
+              { "label": "Regenerate Token", "href": "/api/post-token-regenerate", "method": "POST" },
+              { "label": "Start OAuth Flow", "href": "/api/get-oauth-authorize", "method": "GET" }
+            ]
+          },
+          {
+            "label": "Webhooks",
+            "items": [
+              { "label": "List Webhooks", "href": "/api/get-webhooks", "method": "GET" },
+              { "label": "Create Webhook", "href": "/api/post-webhooks-add", "method": "POST" },
+              { "label": "Remove Webhook", "href": "/api/post-webhooks-remove", "method": "POST" },
+              { "label": "Receive Payload", "href": "/api/post-webhook-inbound", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Deep Work",
+            "items": [
+              { "label": "Start Project", "href": "/api/post-deep-work-start", "method": "POST" },
+              { "label": "Get Plan", "href": "/api/get-deep-work-plan", "method": "GET" },
+              { "label": "Approve Plan", "href": "/api/post-deep-work-approve", "method": "POST" },
+              { "label": "Pause Project", "href": "/api/post-deep-work-pause", "method": "POST" },
+              { "label": "Resume Project", "href": "/api/post-deep-work-resume", "method": "POST" },
+              { "label": "Skip Task", "href": "/api/post-deep-work-skip-task", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Mission Control",
+            "items": [
+              { "label": "List Agents", "href": "/api/get-mc-agents", "method": "GET" },
+              { "label": "Create Agent", "href": "/api/post-mc-agent", "method": "POST" },
+              { "label": "List Tasks", "href": "/api/get-mc-tasks", "method": "GET" },
+              { "label": "Create Task", "href": "/api/post-mc-task", "method": "POST" },
+              { "label": "Run Task", "href": "/api/post-mc-run-task", "method": "POST" },
+              { "label": "Get Standup", "href": "/api/get-mc-standup", "method": "GET" }
+            ]
+          },
+          {
+            "label": "Tunnel",
+            "items": [
+              { "label": "Get Tunnel Status", "href": "/api/get-tunnel-status", "method": "GET" },
+              { "label": "Start Tunnel", "href": "/api/post-tunnel-start", "method": "POST" },
+              { "label": "Stop Tunnel", "href": "/api/post-tunnel-stop", "method": "POST" }
+            ]
+          },
+          {
+            "label": "WebSocket Protocol",
+            "href": "/api/websocket",
+            "icon": "lucide:radio"
+          },
+          {
+            "label": "Configuration Reference",
+            "href": "/api/configuration-reference",
+            "icon": "lucide:settings"
+          }
+        ]
+      },
+      {
+        "label": "Deployment",
+        "items": [
+          {
+            "label": "Self-Hosting",
+            "href": "/deployment/self-hosting",
+            "icon": "lucide:server"
+          },
+          {
+            "label": "Docker",
+            "href": "/deployment/docker",
+            "icon": "lucide:container"
+          },
+          {
+            "label": "Systemd Service",
+            "href": "/deployment/systemd",
+            "icon": "lucide:cog"
+          }
+        ]
+      }
+    ]
+  },
+  "seo": {
+    "ogImage": "/pocket-paw-og.webp",
+    "defaultAuthor": "PocketPaw Team",
+    "defaultKeywords": [
+      "ai agent",
+      "self-hosted ai",
+      "local ai assistant",
+      "multi-channel ai bot",
+      "telegram ai bot",
+      "discord ai bot",
+      "slack ai bot",
+      "whatsapp ai bot",
+      "claude agent sdk",
+      "open interpreter",
+      "mcp servers",
+      "ai automation",
+      "pocketpaw",
+      "private ai",
+      "ai tools",
+      "multi-agent orchestration"
+    ],
+    "enableJsonLd": true,
+    "organizationName": "PocketPaw",
+    "organizationLogo": "/paw.webp",
+    "articleType": "TechArticle",
+    "autoCanonical": true,
+    "enableBreadcrumbs": true,
+    "twitterHandle": "@pocketpaw_ai",
+    "twitterSite": "@pocketpaw_ai"
+  },
+  "search": {
+    "enabled": true,
+    "provider": "local",
+    "placeholder": "Search PocketPaw docs..."
+  },
+  "integrations": {
+    "editPage": {
+      "enabled": true,
+      "pattern": "https://github.com/pocketpaw/pocketpaw/edit/main/docs/{path}"
+    },
+    "lastUpdated": {
+      "enabled": true,
+      "format": "long"
+    },
+    "feedback": {
+      "enabled": true
+    },
+    "copyPage": {
+      "enabled": true
+    }
+  },
+  "assets": {
+    "images": "_images",
+    "static": "_assets"
+  },
+  "landing": {
+    "type": "custom",
+    "source": "_landing",
+    "navbar": false,
+    "footer": false
+  },
+  "footer": {
+    "layout": "full",
+    "tagline": "Your AI agent, your rules. Self-hosted, multi-channel, infinitely extensible.",
+    "copyright": "\u00a9 {year} PocketPaw. All rights reserved.",
+    "showBranding": true,
+    "showVersion": true,
+    "socials": {
+      "github": "https://github.com/pocketpaw/pocketpaw"
+    },
+    "links": [
+      {
+        "title": "Documentation",
+        "items": [
+          { "label": "Getting Started", "href": "/getting-started/installation" },
+          { "label": "Architecture", "href": "/concepts/architecture" },
+          { "label": "Channels", "href": "/channels" },
+          { "label": "API Reference", "href": "/api" }
+        ]
+      },
+      {
+        "title": "Features",
+        "items": [
+          { "label": "Tools", "href": "/tools" },
+          { "label": "Integrations", "href": "/integrations" },
+          { "label": "Security", "href": "/security" },
+          { "label": "Memory", "href": "/memory" }
+        ]
+      },
+      {
+        "title": "Community",
+        "items": [
+          { "label": "GitHub", "href": "https://github.com/pocketpaw/pocketpaw", "external": true },
+          { "label": "Issues", "href": "https://github.com/pocketpaw/pocketpaw/issues", "external": true }
+        ]
+      }
+    ]
+  }
+}

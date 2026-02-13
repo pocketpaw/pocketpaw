@@ -1,0 +1,30 @@
+<!-- Plan Approval Modal — shows proposed tool calls for user approval -->
+<div id="plan-approval-modal" class="modal" style="display:none">
+  <div class="modal-content" style="max-width:600px">
+    <div class="modal-header">
+      <h3>Execution Plan</h3>
+      <p style="margin:4px 0 0;opacity:0.7;font-size:0.9em">Review the following actions before they execute:</p>
+    </div>
+
+    <div class="plan-steps" style="max-height:400px;overflow-y:auto;padding:12px 0">
+      <!-- Steps injected by plan_mode.js -->
+    </div>
+
+    <div class="modal-footer" style="display:flex;gap:10px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--border-color, #333)">
+      <button onclick="PlanMode.reject()" class="btn btn-secondary" style="padding:8px 20px">
+        Reject
+      </button>
+      <button onclick="PlanMode.approve()" class="btn btn-primary" style="padding:8px 20px;background:var(--accent-color, #4CAF50);color:#fff;border:none;border-radius:6px;cursor:pointer">
+        Approve
+      </button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .plan-step { padding: 8px 0; border-bottom: 1px solid var(--border-color, #333); }
+  .plan-step:last-child { border-bottom: none; }
+  .plan-step-num { font-weight: bold; margin-right: 6px; }
+  .plan-step-tool { font-family: monospace; color: var(--accent-color, #4CAF50); margin-right: 8px; }
+  .plan-step-preview { margin: 4px 0 0 20px; padding: 6px 10px; background: var(--bg-secondary, #1a1a2e); border-radius: 4px; font-size: 0.85em; white-space: pre-wrap; word-break: break-all; }
+</style>
