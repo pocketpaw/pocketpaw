@@ -1,4 +1,4 @@
-# Memory System - Nanobot Pattern Adoption
+# Memory System
 # Created: 2026-02-02
 # Updated: 2026-02-04 - Added Mem0 backend support
 # Provides session persistence, long-term memory, and daily notes.

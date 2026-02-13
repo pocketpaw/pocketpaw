@@ -13,6 +13,7 @@
 window.PocketPaw = window.PocketPaw || {};
 
 window.PocketPaw.Channels = {
+    name: 'Channels',
     /**
      * Get initial state for Channels
      */
@@ -20,23 +21,37 @@ window.PocketPaw.Channels = {
         return {
             showChannels: false,
             channelsTab: 'discord',
+            channelsMobileView: 'list',
             channelStatus: {
                 discord: { configured: false, running: false },
                 slack: { configured: false, running: false },
                 whatsapp: { configured: false, running: false, mode: 'personal' },
-                telegram: { configured: false, running: false }
+                telegram: { configured: false, running: false },
+                signal: { configured: false, running: false },
+                matrix: { configured: false, running: false },
+                teams: { configured: false, running: false },
+                google_chat: { configured: false, running: false }
             },
             channelForms: {
                 discord: { bot_token: '' },
                 slack: { bot_token: '', app_token: '' },
                 whatsapp: { access_token: '', phone_number_id: '', verify_token: '' },
-                telegram: { bot_token: '' }
+                telegram: { bot_token: '' },
+                signal: { api_url: '', phone_number: '' },
+                matrix: { homeserver: '', user_id: '', access_token: '' },
+                teams: { app_id: '', app_password: '' },
+                google_chat: { service_account_key: '', project_id: '', subscription_id: '', _mode: 'webhook' }
             },
             channelLoading: false,
             // WhatsApp personal mode QR state
             whatsappQr: null,
             whatsappConnected: false,
-            whatsappQrPolling: null
+            whatsappQrPolling: null,
+            // Generic webhooks
+            webhookSlots: [],
+            showAddWebhook: false,
+            newWebhookName: '',
+            newWebhookDescription: ''
         };
     },
 
@@ -46,11 +61,82 @@ window.PocketPaw.Channels = {
     getMethods() {
         return {
             /**
+             * Display name for channel tabs
+             */
+            channelDisplayName(tab) {
+                const names = {
+                    discord: 'Discord',
+                    slack: 'Slack',
+                    whatsapp: 'WhatsApp',
+                    telegram: 'Telegram',
+                    signal: 'Signal',
+                    matrix: 'Matrix',
+                    teams: 'Teams',
+                    google_chat: 'GChat',
+                    webhooks: 'Webhooks'
+                };
+                return names[tab] || tab;
+            },
+
+            /**
+             * Lucide icon name for each channel
+             */
+            channelIcon(tab) {
+                const icons = {
+                    discord: 'gamepad-2',
+                    slack: 'hash',
+                    whatsapp: 'phone',
+                    telegram: 'send',
+                    signal: 'shield',
+                    matrix: 'grid-3x3',
+                    teams: 'users',
+                    google_chat: 'message-circle',
+                    webhooks: 'webhook'
+                };
+                return icons[tab] || 'circle';
+            },
+
+            /**
+             * Setup guide URL per channel
+             */
+            channelGuideUrl(tab) {
+                const urls = {
+                    discord: 'https://discord.com/developers/applications',
+                    slack: 'https://api.slack.com/apps',
+                    whatsapp: 'https://developers.facebook.com/apps/',
+                    telegram: 'https://t.me/BotFather',
+                    signal: 'https://github.com/bbernhard/signal-cli-rest-api',
+                    matrix: 'https://matrix.org/docs/guides/',
+                    teams: 'https://dev.botframework.com/',
+                    google_chat: 'https://developers.google.com/workspace/chat'
+                };
+                return urls[tab] || null;
+            },
+
+            /**
+             * Setup guide link label per channel
+             */
+            channelGuideLabel(tab) {
+                const labels = {
+                    discord: 'Discord Dev Portal',
+                    slack: 'Slack App Dashboard',
+                    whatsapp: 'Meta Dev Portal',
+                    telegram: '@BotFather',
+                    signal: 'signal-cli-rest-api',
+                    matrix: 'Matrix.org Docs',
+                    teams: 'Bot Framework',
+                    google_chat: 'Google Chat API'
+                };
+                return labels[tab] || 'Setup Guide';
+            },
+
+            /**
              * Open Channels modal and fetch status
              */
             async openChannels() {
                 this.showChannels = true;
                 await this.getChannelStatus();
+                await this.loadWebhooks();
                 this.startWhatsAppQrPollingIfNeeded();
                 this.$nextTick(() => {
                     if (window.refreshIcons) window.refreshIcons();
@@ -242,7 +328,130 @@ window.PocketPaw.Channels = {
              */
             runningChannelCount() {
                 return Object.values(this.channelStatus).filter(s => s.running).length;
+            },
+
+            /**
+             * Load webhook slots from backend
+             */
+            async loadWebhooks() {
+                try {
+                    const res = await fetch('/api/webhooks');
+                    if (res.ok) {
+                        const data = await res.json();
+                        this.webhookSlots = data.webhooks || [];
+                    }
+                } catch (e) {
+                    console.error('Failed to load webhooks', e);
+                }
+            },
+
+            /**
+             * Add a new webhook slot
+             */
+            async addWebhook() {
+                if (!this.newWebhookName.trim()) return;
+                this.channelLoading = true;
+                try {
+                    const res = await fetch('/api/webhooks/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: this.newWebhookName.trim(),
+                            description: this.newWebhookDescription.trim()
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'ok') {
+                        this.showToast('Webhook created!', 'success');
+                        this.newWebhookName = '';
+                        this.newWebhookDescription = '';
+                        this.showAddWebhook = false;
+                        await this.loadWebhooks();
+                    } else {
+                        this.showToast(data.detail || 'Failed to create webhook', 'error');
+                    }
+                } catch (e) {
+                    this.showToast('Failed to create webhook: ' + e.message, 'error');
+                } finally {
+                    this.channelLoading = false;
+                }
+            },
+
+            /**
+             * Remove a webhook slot
+             */
+            async removeWebhook(name) {
+                if (!confirm(`Remove webhook "${name}"?`)) return;
+                try {
+                    const res = await fetch('/api/webhooks/remove', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'ok') {
+                        this.showToast('Webhook removed', 'info');
+                        await this.loadWebhooks();
+                    } else {
+                        this.showToast(data.detail || 'Failed to remove', 'error');
+                    }
+                } catch (e) {
+                    this.showToast('Failed to remove webhook: ' + e.message, 'error');
+                }
+            },
+
+            /**
+             * Regenerate a webhook slot's secret
+             */
+            async regenerateWebhookSecret(name) {
+                if (!confirm(`Regenerate secret for "${name}"? Existing integrations will break.`)) return;
+                try {
+                    const res = await fetch('/api/webhooks/regenerate-secret', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'ok') {
+                        this.showToast('Secret regenerated', 'success');
+                        await this.loadWebhooks();
+                    } else {
+                        this.showToast(data.detail || 'Failed to regenerate', 'error');
+                    }
+                } catch (e) {
+                    this.showToast('Failed to regenerate: ' + e.message, 'error');
+                }
+            },
+
+            /**
+             * Generate a QR code as a data URL (client-side, no external API)
+             */
+            generateQrDataUrl(data) {
+                if (!data || typeof qrcode === 'undefined') return '';
+                try {
+                    const qr = qrcode(0, 'L');
+                    qr.addData(data);
+                    qr.make();
+                    return qr.createDataURL(4, 0);
+                } catch (e) {
+                    console.error('QR generation failed', e);
+                    return '';
+                }
+            },
+
+            /**
+             * Copy text to clipboard
+             */
+            async copyToClipboard(text) {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    this.showToast('Copied!', 'success');
+                } catch (e) {
+                    this.showToast('Failed to copy', 'error');
+                }
             }
         };
     }
 };
+
+window.PocketPaw.Loader.register('Channels', window.PocketPaw.Channels);

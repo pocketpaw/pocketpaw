@@ -13,6 +13,7 @@
 window.PocketPaw = window.PocketPaw || {};
 
 window.PocketPaw.Intentions = {
+    name: 'Intentions',
     /**
      * Get initial state for Intentions
      */
@@ -216,3 +217,5 @@ window.PocketPaw.Intentions = {
         };
     }
 };
+
+window.PocketPaw.Loader.register('Intentions', window.PocketPaw.Intentions);

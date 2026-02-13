@@ -9,34 +9,52 @@ const Tools = {
      */
     formatMessage(content) {
         if (!content) return '';
-        
-        // Escape HTML first
+
+        // Use marked + DOMPurify if available, else regex fallback
+        if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+            try {
+                const renderer = new marked.Renderer();
+                // Open links in new tab
+                renderer.link = function ({ href, title, text }) {
+                    const titleAttr = title ? ` title="${title}"` : '';
+                    return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
+                };
+                const html = marked.parse(content, {
+                    breaks: true,
+                    gfm: true,
+                    renderer,
+                });
+                return DOMPurify.sanitize(html, {
+                    ALLOWED_TAGS: [
+                        'p', 'br', 'strong', 'em', 'del', 'a', 'code', 'pre',
+                        'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                        'blockquote', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+                        'hr', 'img', 'span', 'div', 'sup', 'sub',
+                    ],
+                    ALLOWED_ATTR: [
+                        'href', 'target', 'rel', 'title', 'src', 'alt',
+                        'class', 'id',
+                    ],
+                });
+            } catch (_) {
+                // Fall through to regex fallback
+            }
+        }
+
+        // Regex fallback (original behaviour)
         let formatted = content
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
-        
-        // Code blocks
+
         formatted = formatted.replace(
             /```(\w*)\n?([\s\S]*?)```/g,
             '<pre><code>$2</code></pre>'
         );
-        
-        // Inline code
-        formatted = formatted.replace(
-            /`([^`]+)`/g,
-            '<code>$1</code>'
-        );
-        
-        // Bold
-        formatted = formatted.replace(
-            /\*\*(.+?)\*\*/g,
-            '<strong>$1</strong>'
-        );
-        
-        // Line breaks
+        formatted = formatted.replace(/`([^`]+)`/g, '<code>$1</code>');
+        formatted = formatted.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
         formatted = formatted.replace(/\n/g, '<br>');
-        
+
         return formatted;
     },
 

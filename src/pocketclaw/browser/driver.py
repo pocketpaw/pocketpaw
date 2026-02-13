@@ -10,19 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-from playwright.async_api import async_playwright, Browser, Page
 
 from .snapshot import AccessibilityNode, RefMap, SnapshotGenerator
 
 if TYPE_CHECKING:
-    from playwright.async_api import Playwright
+    from playwright.async_api import Browser, Page, Playwright
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +64,14 @@ class BrowserDriver:
         self._refmap: RefMap = RefMap()
         self._snapshot_generator = SnapshotGenerator()
 
+        # Verify playwright is installed early (fail fast with helpful message)
+        try:
+            import playwright  # noqa: F401
+        except ImportError:
+            from pocketclaw._compat import require_extra
+
+            require_extra("playwright", "browser")
+
     async def __aenter__(self) -> BrowserDriver:
         """Async context manager entry - launches browser."""
         await self.launch()
@@ -95,6 +100,8 @@ class BrowserDriver:
         1. System Chrome (no download needed)
         2. Playwright's bundled Chromium (auto-installs if missing)
         """
+        from playwright.async_api import async_playwright
+
         self._playwright = await async_playwright().start()
 
         # Try system Chrome first (no download needed for users)
@@ -287,7 +294,7 @@ class BrowserDriver:
         page = self._require_page()
 
         if path is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
             path = f"screenshot_{timestamp}.png"
 
         # Ensure path is absolute

@@ -13,10 +13,8 @@ with gathered context before execution.
 import logging
 import platform
 import re
-from datetime import datetime
-from typing import Any, Optional
-
-import psutil
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +39,7 @@ class ContextHub:
         self._cache: dict[str, tuple[datetime, Any]] = {}
         self._cache_ttl = 5  # seconds
 
-    async def gather(self, sources: Optional[list[str]] = None) -> dict[str, Any]:
+    async def gather(self, sources: list[str] | None = None) -> dict[str, Any]:
         """
         Gather context from specified sources.
 
@@ -75,7 +73,7 @@ class ContextHub:
         # Check cache
         if source in self._cache:
             cached_time, cached_value = self._cache[source]
-            age = (datetime.now() - cached_time).total_seconds()
+            age = (datetime.now(tz=UTC) - cached_time).total_seconds()
             if age < self._cache_ttl:
                 return cached_value
 
@@ -90,13 +88,22 @@ class ContextHub:
         gatherer = gatherers.get(source)
         if gatherer:
             value = await gatherer()
-            self._cache[source] = (datetime.now(), value)
+            self._cache[source] = (datetime.now(tz=UTC), value)
             return value
 
         return None
 
     async def _gather_system_status(self) -> dict:
         """Gather system status information."""
+        try:
+            import psutil
+        except ImportError:
+            return {
+                "platform": platform.system(),
+                "hostname": platform.node(),
+                "error": "psutil not installed — pip install 'pocketpaw[desktop]'",
+            }
+
         try:
             cpu_percent = psutil.cpu_percent(interval=0.1)
             memory = psutil.virtual_memory()
@@ -130,7 +137,7 @@ class ContextHub:
 
     async def _gather_datetime(self) -> dict:
         """Gather current date and time information."""
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
 
         return {
             "date": now.strftime("%Y-%m-%d"),
@@ -232,7 +239,7 @@ class ContextHub:
 
         return result
 
-    def _get_nested_value(self, data: dict, path: str) -> Optional[Any]:
+    def _get_nested_value(self, data: dict, path: str) -> Any | None:
         """Get a nested value from dict using dot notation."""
         parts = path.split(".")
         current = data
@@ -247,7 +254,7 @@ class ContextHub:
 
 
 # Module-level instance for convenience
-_context_hub: Optional[ContextHub] = None
+_context_hub: ContextHub | None = None
 
 
 def get_context_hub() -> ContextHub:

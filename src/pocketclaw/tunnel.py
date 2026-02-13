@@ -182,4 +182,12 @@ def get_tunnel_manager(port: int = 8888) -> TunnelManager:
     global _tunnel_instance
     if _tunnel_instance is None:
         _tunnel_instance = TunnelManager(port=port)
+
+        from pocketclaw.lifecycle import register
+
+        def _reset():
+            global _tunnel_instance
+            _tunnel_instance = None
+
+        register("tunnel", shutdown=_tunnel_instance.stop, reset=_reset)
     return _tunnel_instance

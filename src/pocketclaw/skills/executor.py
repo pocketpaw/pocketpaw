@@ -8,8 +8,8 @@ Handles:
 """
 
 import logging
-from datetime import datetime
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from ..agents.router import AgentRouter
 from ..config import Settings, get_settings
@@ -25,8 +25,8 @@ class SkillExecutor:
 
     def __init__(
         self,
-        settings: Optional[Settings] = None,
-        skill_loader: Optional[SkillLoader] = None,
+        settings: Settings | None = None,
+        skill_loader: SkillLoader | None = None,
     ):
         """
         Initialize the executor.
@@ -39,7 +39,7 @@ class SkillExecutor:
         self.skill_loader = skill_loader or get_skill_loader()
 
         # Agent router (created lazily)
-        self._agent_router: Optional[AgentRouter] = None
+        self._agent_router: AgentRouter | None = None
 
     def _get_agent_router(self) -> AgentRouter:
         """Get or create the agent router."""
@@ -97,7 +97,7 @@ class SkillExecutor:
             "type": "skill_started",
             "skill_name": skill.name,
             "args": args,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(tz=UTC).isoformat(),
         }
 
         try:
@@ -130,7 +130,7 @@ User request: {args if args else "(no additional input)"}
             yield {
                 "type": "skill_completed",
                 "skill_name": skill.name,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=UTC).isoformat(),
             }
 
         except Exception as e:
@@ -140,7 +140,7 @@ User request: {args if args else "(no additional input)"}
                 "type": "skill_error",
                 "skill_name": skill.name,
                 "error": str(e),
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(tz=UTC).isoformat(),
             }
 
     def reset_agent(self) -> None:
@@ -169,7 +169,7 @@ User request: {args if args else "(no additional input)"}
 
 
 # Singleton instance
-_skill_executor: Optional[SkillExecutor] = None
+_skill_executor: SkillExecutor | None = None
 
 
 def get_skill_executor() -> SkillExecutor:

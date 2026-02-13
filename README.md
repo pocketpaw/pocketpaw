@@ -16,9 +16,20 @@
 </p>
 
 <p align="center">
-  Self-hosted AI agent. Telegram + Web Dashboard. Encrypted credentials.<br>
-  Three LLM backends. Persistent memory. 30-second install.<br>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-macOS-arm64.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
+  &nbsp;
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+</p>
+
+<p align="center">
+  Self-hosted, multi-agent AI platform. Web dashboard + <strong>Discord</strong>, <strong>Slack</strong>, <strong>WhatsApp</strong>, <strong>Telegram</strong>, and more.<br>
   No subscription. No cloud lock-in. Just you and your Paw.
+</p>
+
+> **🚧 Beta:** This project is under active development. Expect breaking changes between versions.
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/a15bb8c7-6897-40d2-8111-aa905fe3fdfe" width="700" controls></video>
 </p>
 
 ---
@@ -26,12 +37,20 @@
 ## Quick Start
 
 ```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+```
+
+Or install directly:
+
+```bash
 pip install pocketpaw && pocketpaw
 ```
 
 **That's it.** One command. 30 seconds. Your own AI agent.
 
-<p align="center"><img src="demo.gif" alt="PocketPaw — install to first Telegram message in 30 seconds" width="600"></p>
+I'm your self-hosted, cross-platform personal AI agent. The web dashboard opens automatically. Talk to me right in your browser, or connect me to Discord, Slack, WhatsApp, or Telegram and control me from anywhere. I run on _your_ machine, respect _your_ privacy, and I'm always here.
+
+**No subscription. No cloud lock-in. Just you and me.**
 
 <details>
 <summary>More install options</summary>
@@ -51,8 +70,7 @@ uv run pocketpaw
 
 </details>
 
-PocketPaw will open your browser, walk you through Telegram bot setup, and be ready to go.
-Scan the QR code to take your Paw mobile via Cloudflare tunnel.
+PocketPaw will open the web dashboard in your browser and be ready to go.
 No Docker. No config files. No YAML. No dependency hell.
 
 **Talk to your agent from anywhere:**
@@ -62,14 +80,41 @@ Telegram · Discord · Slack · WhatsApp · Web Dashboard
 
 ## What Can PocketPaw Do?
 
-### Daily Life
+| Feature | Description |
+| --- | --- |
+| **Web Dashboard** | Browser-based control panel, the default mode. No setup needed. |
+| **Multi-Channel** | Discord, Slack, WhatsApp (Personal + Business), Signal, Matrix, Teams, Google Chat, Telegram |
+| **Claude Agent SDK** | Default backend. Official Claude SDK with built-in tools (Bash, Read, Write). |
+| **Smart Model Router** | Auto-selects Haiku / Sonnet / Opus based on task complexity |
+| **Tool Policy** | Allow/deny control over which tools the agent can use |
+| **Plan Mode** | Require approval before the agent runs shell commands or edits files |
+| **Browser Control** | Browse the web, fill forms, click buttons via accessibility tree |
+| **Gmail Integration** | Search, read, and send emails via OAuth (no app passwords) |
+| **Calendar Integration** | List events, create meetings, meeting prep briefings |
+| **Google Drive & Docs** | List, download, upload, share files; read and create documents |
+| **Web Search & Research** | Tavily/Brave search + multi-step research with source synthesis |
+| **Image Generation** | Google Gemini image generation, saved locally |
+| **Voice / TTS / STT** | Text-to-speech via OpenAI or ElevenLabs, speech-to-text via Whisper |
+| **Spotify** | Search tracks, playback control, playlist management |
+| **Reddit** | Search posts, read threads, browse trending topics |
+| **OCR** | Extract text from images via GPT-4o vision or pytesseract |
+| **Memory & Compaction** | Long-term facts + session history with smart compaction + Mem0 semantic search |
+| **MCP Support** | Connect Model Context Protocol servers (stdio + HTTP) |
+| **Cron Scheduler** | Recurring reminders with natural language time parsing |
+| **Security Suite** | Injection scanner, audit CLI, Guardian AI, self-audit daemon |
+| **Local-First** | Runs on YOUR machine. Your data never leaves your computer. |
+| **Cross-Platform** | macOS, Windows, Linux |
+| **Skill System** | Create reusable agent skills at runtime |
+| **Task Delegation** | Delegate complex sub-tasks to Claude Code CLI |
+
+### Examples
 
 ```
 You:  "Every Sunday evening, remind me which recycling bins to put out"
 Paw:  *creates a recurring schedule*
 Paw:  "Done. I'll check the recycling calendar and message you every Sunday at 6pm."
 
-You:  "Organize my Downloads folder — PDFs by date, images by type, delete duplicates"
+You:  "Organize my Downloads folder. PDFs by date, images by type, delete duplicates"
 Paw:  *scans filesystem, moves 47 files, removes 12 duplicates*
 Paw:  "All clean. Here's what I did: [summary]"
 ```
@@ -77,23 +122,15 @@ Paw:  "All clean. Here's what I did: [summary]"
 ### Research & Browsing
 
 ```
-You:  *drops a link in Telegram*
+You:  *drops a link*
 Paw:  *opens browser, reads the page, researches related topics*
 Paw:  "Here's a summary with 3 key takeaways. Want me to save this to memory?"
-
-You:  "Find the best flights from SFO to Tokyo in March"
-Paw:  *opens browser, navigates flight sites, compares prices*
-Paw:  "Found 4 options. Cheapest is $487 on ANA, departing Mar 12."
 ```
 
 ### Coding & DevOps
 
 ```
-You:  "Set up a new FastAPI project with auth, tests, and Docker"
-Paw:  *scaffolds project, writes boilerplate, creates Dockerfile*
-Paw:  "Project ready at ~/projects/my-api. Run `docker compose up` to start."
-
-You:  "Find that memory leak — the app crashes after 2 hours"
+You:  "Find that memory leak, the app crashes after 2 hours"
 Paw:  *reads logs, profiles code, identifies the issue*
 Paw:  "Found it. The WebSocket handler never closes connections. Here's the fix."
 ```
@@ -110,204 +147,173 @@ Paw:  "3 agents working on it. Agent A is scraping competitor sites,
 
 ---
 
-## Architecture
+## Web Dashboard
 
-```mermaid
-graph TD
-    %% Node Definitions
-    User(["👤 YOU <br/>(Telegram / Web)"])
-    
-    subgraph Channels ["Channel Adapters"]
-        Adapters["Telegram Bot  •  WebSocket Dashboard"]
-    end
+The browser-based dashboard is the default mode. Run `pocketpaw` and it opens at `http://localhost:8888`.
 
-    subgraph Messaging ["Internal Transport"]
-        Bus["<b>Message Bus</b><br/>Async Event Queue • Inbound/Outbound Routing"]
-    end
+What you get:
 
-    subgraph Core ["Core Intelligence"]
-        direction TB
-        subgraph AgentLoop ["Agent Loop"]
-            Context["<b>Context Builder</b><br/>Identity + Soul + Style + Memory"]
-            Router["<b>Agent Router</b>"]
-            SDKs["Claude SDK (Recommended)<br/>Open Interpreter<br/>Native"]
-            Context --> Router --> SDKs
-        end
+- Real-time streaming chat via WebSocket
+- Session management: create, switch, search, and resume conversations
+- Activity panel showing tool calls, thinking, and system events
+- Settings panel for LLM, backend, and tool policy configuration
+- Channel management: configure, start, and stop adapters from the sidebar
+- MCP server management: add, configure, and monitor MCP servers
+- Plan Mode approval modal for reviewing tool calls before execution
 
-        subgraph MissionControl ["Mission Control"]
-            Orch["Multi-agent Orchestration<br/>Task Assignment & Lifecycle<br/>Heartbeat Daemon (15 min)"]
-            Stream["Live Execution Streaming<br/>Document Management<br/>Agent Status Tracking"]
-            Status["Status: INBOX ➔ ASSIGNED ➔<br/>IN_PROGRESS ➔ REVIEW ➔ DONE"]
-        end
-    end
+### Channel Management
 
-    subgraph Tools ["Tool Registry"]
-        Registry["Shell • Filesystem • Browser • Desktop • Memory • HTTP Fetch"]
-    end
+All configured channel adapters auto-start on launch. Use the sidebar "Channels" button to:
 
-    subgraph Support ["Security & Routing"]
-        LLM["<b>LLM Router</b><br/>Anthropic • OpenAI • Ollama<br/>Auto-detection + Fallback"]
-        Security["<b>Security Layer (Guardian AI)</b><br/>Command Blocking • Audit Logs<br/>File Jail (Sandbox) • Panic Button"]
-    end
+- Configure tokens and credentials per channel
+- Start/stop adapters dynamically
+- See running status at a glance
 
-    subgraph Memory ["Memory System"]
-        FileStore["<b>File Store</b> (Default)<br/>Markdown-based<br/>Human-readable"]
-        Mem0["<b>Mem0 Store</b> (Optional)<br/>Semantic Vector Search<br/>Fact Extraction"]
-        API["API: remember() • recall() • search() • get_context()"]
-    end
+Headless mode is also available for running without the dashboard:
 
-    %% Connections
-    User --> Adapters
-    Adapters --> Bus
-    Bus --> AgentLoop
-    Bus --> MissionControl
-    AgentLoop --> Registry
-    Registry --> LLM
-    Registry --> Security
-    LLM --> Memory
-    Security -.-> Registry
-
-    %% Styling
-    classDef default font-family:arial,font-size:14px;
-    classDef highlight fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef coreBox fill:#f5f7ff,stroke:#4a90e2,stroke-width:2px;
-    classDef securityBox fill:#fff5f5,stroke:#e53e3e,stroke-width:1px;
-    
-    class AgentLoop,MissionControl coreBox;
-    class Security securityBox;
+```bash
+pocketpaw --discord              # Discord only
+pocketpaw --slack                # Slack only
+pocketpaw --whatsapp             # WhatsApp only
+pocketpaw --discord --slack      # Multiple channels
+pocketpaw --telegram             # Legacy Telegram mode
 ```
+
+See [Channel Adapters documentation](documentation/features/channels.md) for full setup guides.
 
 ---
 
-## Features
+## Browser
 
-### Core Platform
+Uses your existing Chrome if you have it. No extra downloads. If you don't have Chrome, a small browser is downloaded automatically on first use.
 
-| Feature | Description |
-|---------|-------------|
-| **Multi-Agent Orchestration** | Mission Control coordinates multiple agents on complex tasks with heartbeats, live streaming, and document management |
-| **3 Agent Backends** | Claude Agent SDK (recommended), Open Interpreter, or PocketPaw Native — switch anytime |
-| **Multi-LLM Support** | Anthropic, OpenAI, or Ollama (100% local). Auto-detection with fallback chain |
-| **Telegram-First** | Control from anywhere. QR code pairing, no port forwarding needed |
-| **Web Dashboard** | Real-time WebSocket UI with chat, mission control, file browser, and system monitoring |
+---
 
-### Intelligence
+## Architecture
 
-| Feature | Description |
-|---------|-------------|
-| **Persistent Memory** | Dual backend — file-based markdown + Mem0 semantic vector search. Remembers across sessions |
-| **Persona System** | Identity, Soul, and Style files shape personality. Injected into every conversation |
-| **Skills System** | YAML-based repeatable workflows. Hot-reload, argument substitution, agent-executed |
-| **Browser Automation** | Playwright-powered. Navigates, clicks, types, screenshots. Accessibility tree for semantic page understanding |
-| **Scheduling** | APScheduler-based reminders and recurring tasks with natural language time parsing |
+<p align="center">
+  <img src="assets/diagrams/pocket-paw-system-architecture.png" alt="PocketPaw System Architecture" width="800">
+</p>
 
-### Security
+### Agent Backends
 
-| Feature | Description |
-|---------|-------------|
-| **Guardian AI** | Secondary LLM analyzes every shell command before execution. Blocks dangerous patterns |
-| **Audit Logging** | Append-only log of every tool use, permission check, and security event |
-| **File Jail** | Agents stay within allowed directories |
-| **Panic Button** | Instant kill switch from Telegram or web dashboard |
-| **Single User Lock** | Only your Telegram user ID can control the agent |
+- **Claude Agent SDK (Default, Recommended).** Anthropic's official SDK with built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebSearch). Supports `PreToolUse` hooks for dangerous command blocking.
+- **PocketPaw Native.** Custom orchestrator: Anthropic SDK for reasoning + Open Interpreter for code execution.
+- **Open Interpreter.** Standalone, supports Ollama, OpenAI, or Anthropic. Good for fully local setups with Ollama.
+
+Switch anytime in settings or config.
+
+<details>
+<summary>Tool System Architecture</summary>
+<br>
+<p align="center">
+  <img src="assets/diagrams/tool-system-architecture.png" alt="Tool System Architecture and Policy Engine" width="800">
+</p>
+</details>
 
 ---
 
 ## Memory System
 
-### Default: File-based Memory
+### File-based Memory (Default)
+
 Stores memories as readable markdown in `~/.pocketclaw/memory/`:
-- `MEMORY.md` — Long-term facts about you
-- `sessions/` — Conversation history
+
+- `MEMORY.md`: Long-term facts about you
+- `sessions/`: Conversation history with smart compaction
+
+### Session Compaction
+
+Long conversations are automatically compacted to stay within budget:
+
+- **Recent messages** kept verbatim (configurable window)
+- **Older messages** compressed to one-liner extracts (Tier 1) or LLM summaries (Tier 2, opt-in)
+
+### USER.md Profile
+
+PocketPaw creates identity files at `~/.pocketclaw/identity/` including `USER.md`, a profile loaded into every conversation so the agent knows your preferences.
 
 ### Optional: Mem0 (Semantic Memory)
+
 For smarter memory with vector search and automatic fact extraction:
 
 ```bash
 pip install pocketpaw[memory]
 ```
 
-Then set `MEMORY_BACKEND=mem0` in your environment. Mem0 gives you semantic search, automatic fact extraction, and memory evolution.
-
----
-
-## Telegram Controls
-
-| Button | Action |
-|--------|--------|
-| **Status** | CPU, RAM, disk, battery at a glance |
-| **Fetch** | Browse and download files from your machine |
-| **Screenshot** | Capture what's on screen |
-| **Agent Mode** | Toggle autonomous execution |
-| **Panic** | Emergency stop — halts all agents immediately |
-| **Settings** | Switch LLM provider, agent backend, memory settings |
+See [Memory documentation](documentation/features/memory.md) for details.
 
 ---
 
 ## Configuration
 
-Config lives in `~/.pocketclaw/config.json`. API keys and tokens are **automatically encrypted** in `secrets.enc` — never stored as plain text.
+Config lives in `~/.pocketclaw/config.json`. API keys and tokens are automatically encrypted in `secrets.enc`, never stored as plain text.
 
 ```json
 {
   "agent_backend": "claude_agent_sdk",
-  "llm_provider": "anthropic",
+  "anthropic_api_key": "sk-ant-...",
+  "anthropic_model": "claude-sonnet-4-5-20250929",
+  "tool_profile": "full",
   "memory_backend": "file",
-  "allowed_user_id": 123456789
+  "smart_routing_enabled": false,
+  "plan_mode": false,
+  "injection_scan_enabled": true,
+  "self_audit_enabled": true,
+  "web_search_provider": "tavily",
+  "tts_provider": "openai"
 }
 ```
 
-Sensitive fields (API keys, bot tokens) are managed through the web dashboard or environment variables — PocketPaw encrypts them on first load:
+Or use environment variables (all prefixed with `POCKETCLAW_`):
 
 ```bash
+# Core
 export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
-export POCKETCLAW_LLM_PROVIDER="ollama"
+export POCKETCLAW_AGENT_BACKEND="claude_agent_sdk"
+
+# Channels
+export POCKETCLAW_DISCORD_BOT_TOKEN="..."
+export POCKETCLAW_SLACK_BOT_TOKEN="xoxb-..."
+export POCKETCLAW_SLACK_APP_TOKEN="xapp-..."
+
+# Integrations
+export POCKETCLAW_GOOGLE_OAUTH_CLIENT_ID="..."
+export POCKETCLAW_GOOGLE_OAUTH_CLIENT_SECRET="..."
+export POCKETCLAW_TAVILY_API_KEY="..."
+export POCKETCLAW_GOOGLE_API_KEY="..."
 ```
+
+See the [full configuration reference](documentation/features/) for all available settings.
 
 ---
 
-## Project Structure
+## Security
 
-```
-src/pocketclaw/
-├── agents/              # Agent backends & routing
-│   ├── claude_sdk.py    #   Claude Agent SDK (recommended)
-│   ├── open_interpreter.py  #   Open Interpreter backend
-│   ├── pocketpaw_native.py  #   Native orchestrator
-│   ├── router.py        #   Backend selection & delegation
-│   └── loop.py          #   Main execution loop
-├── mission_control/     # Multi-agent orchestration
-│   ├── models.py        #   Agent, Task, Document, Activity models
-│   ├── api.py           #   REST API endpoints
-│   ├── manager.py       #   High-level facade
-│   ├── executor.py      #   Task execution engine
-│   └── heartbeat.py     #   Agent heartbeat daemon
-├── bus/                 # Message routing
-│   ├── queue.py         #   Async message bus
-│   └── adapters/        #   Telegram & WebSocket adapters
-├── memory/              # Persistent memory
-│   ├── manager.py       #   Memory facade
-│   ├── file_store.py    #   Markdown-based storage
-│   └── mem0_store.py    #   Semantic vector search
-├── tools/               # Tool system
-│   ├── registry.py      #   Tool registry & execution
-│   └── builtin/         #   Shell, filesystem, browser, desktop, memory
-├── browser/             # Web automation
-│   ├── driver.py        #   Playwright wrapper
-│   └── snapshot.py      #   Accessibility tree snapshots
-├── security/            # Safety layer
-│   ├── guardian.py      #   AI command safety filter
-│   └── audit.py         #   Action audit logging
-├── skills/              # Extensible skills
-├── bootstrap/           # Persona & context assembly
-├── daemon/              # Proactive automation
-├── llm/                 # LLM provider routing
-├── config.py            # Settings (Pydantic)
-├── dashboard.py         # Web dashboard (FastAPI)
-├── bot_gateway.py       # Telegram bot gateway
-├── scheduler.py         # Task scheduling
-└── __main__.py          # Entry point
-```
+<p align="center">
+  <img src="assets/diagrams/7-layer-security-stack.png" alt="PocketPaw 7-Layer Security Stack" width="500">
+</p>
+
+- **Guardian AI.** A secondary LLM reviews every shell command before execution and decides if it's safe.
+- **Injection Scanner.** Two-tier detection (regex heuristics + optional LLM deep scan) blocks prompt injection attacks.
+- **Tool Policy.** Restrict agent tool access with profiles (`minimal`, `coding`, `full`) and allow/deny lists.
+- **Plan Mode.** Require human approval before executing shell commands or file edits.
+- **Security Audit CLI.** Run `pocketpaw --security-audit` to check 7 aspects (config permissions, API key exposure, audit log, etc.).
+- **Self-Audit Daemon.** Daily automated health checks (12 checks) with JSON reports at `~/.pocketclaw/audit_reports/`.
+- **Audit Logging.** Append-only log at `~/.pocketclaw/audit.jsonl`.
+- **Single User Lock.** Only authorized users can control the agent.
+- **File Jail.** Operations restricted to allowed directories.
+- **Local LLM Option.** Use Ollama and nothing phones home.
+
+<details>
+<summary>Detailed security architecture</summary>
+<br>
+<p align="center">
+  <img src="assets/diagrams/security-architecture.png" alt="PocketPaw Security Architecture (Defense-in-Depth)" width="800">
+</p>
+</details>
+
+See [Security documentation](documentation/features/security.md) for details.
 
 ---
 
@@ -327,22 +333,41 @@ uv run pytest
 # Lint
 uv run ruff check .
 
-# Run in web dashboard mode
-uv run pocketpaw --web --port 8888
+# Format
+uv run ruff format .
+```
+
+### Optional Extras
+
+```bash
+pip install pocketpaw[discord]             # Discord support
+pip install pocketpaw[slack]               # Slack support
+pip install pocketpaw[whatsapp-personal]   # WhatsApp Personal (QR scan)
+pip install pocketpaw[image]               # Image generation (Google Gemini)
+pip install pocketpaw[memory]             # Mem0 semantic memory
+pip install pocketpaw[matrix]              # Matrix support
+pip install pocketpaw[teams]               # Microsoft Teams support
+pip install pocketpaw[gchat]               # Google Chat support
+pip install pocketpaw[mcp]                 # MCP server support
+pip install pocketpaw[all]                 # Everything
 ```
 
 ---
 
-## Roadmap
+## Documentation
 
-**Next up:**
-- [ ] Web search tool (Brave/Tavily)
-- [ ] Self-generating skills via conversation
-- [ ] Smart model routing (Opus for coding, Haiku for chat)
-- [ ] Telegram group topics for parallel conversations
-- [ ] OAuth framework + Gmail, Calendar, Slack integrations
-- [ ] Plan mode — agent proposes before executing
-- [ ] Image generation & voice/TTS
+Full documentation lives in [`documentation/`](documentation/README.md):
+
+- [Channel Adapters](documentation/features/channels.md): Discord, Slack, WhatsApp, Telegram setup
+- [Tool Policy](documentation/features/tool-policy.md): Profiles, groups, allow/deny
+- [Web Dashboard](documentation/features/web-dashboard.md): Browser UI overview
+- [Security](documentation/features/security.md): Injection scanner, audit CLI, audit logging
+- [Model Router](documentation/features/model-router.md): Smart complexity-based model selection
+- [Plan Mode](documentation/features/plan-mode.md): Approval workflow for tool execution
+- [Integrations](documentation/features/integrations.md): OAuth, Gmail, Calendar, Drive, Docs, Spotify
+- [Tools](documentation/features/tools.md): Web search, research, image gen, voice, delegation, skills
+- [Memory](documentation/features/memory.md): Session compaction, USER.md profile, Mem0
+- [Scheduler](documentation/features/scheduler.md): Cron scheduler, self-audit daemon
 
 ---
 
@@ -355,7 +380,7 @@ uv run pocketpaw --web --port 8888
 - Discord: Coming Soon
 - Email: pocketpawai@gmail.com
 
-PRs welcome. Let's build the future of personal AI together.
+PRs welcome. Come build with us.
 
 ---
 

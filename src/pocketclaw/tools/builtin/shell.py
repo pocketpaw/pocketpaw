@@ -1,6 +1,6 @@
 # Shell execution tool.
 # Created: 2026-02-02
-# Part of Nanobot Pattern Adoption
+
 
 import asyncio
 import subprocess

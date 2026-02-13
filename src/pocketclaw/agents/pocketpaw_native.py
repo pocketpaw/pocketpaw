@@ -18,12 +18,13 @@ Changes:
   - 2026-02-05: Added 'remember' and 'recall' tools for long-term memory.
 """
 
+import asyncio
 import logging
 import re
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 
 from pocketclaw.config import Settings
 from pocketclaw.agents.protocol import AgentEvent
@@ -99,12 +100,15 @@ REDACT_PATTERNS = [
     r"api[_-]?key[\"']?\s*[:=]\s*[\"']([^\"']+)",  # api_key = "..."
 ]
 
-# System prompt - PocketPaw's personality and instructions
-SYSTEM_PROMPT = """You are PocketPaw, a helpful AI assistant that runs locally on the user's computer.
+# Default identity fallback (used when AgentContextBuilder prompt is not available)
+_DEFAULT_IDENTITY = (
+    "You are PocketPaw, a helpful AI assistant that runs locally on the user's computer.\n"
+    "You have access to powerful tools that let you control the computer, access apps, "
+    "and manage files.\nYou are resourceful, careful, and efficient."
+)
 
-You have access to powerful tools that let you control the computer, access apps, and manage files.
-You are resourceful, careful, and efficient.
-
+# Tool-specific guide — appended to every system prompt regardless of source
+_TOOL_GUIDE = """
 ## CRITICAL: Be AGENTIC - Query and Return Data
 
 **DO NOT just open apps. ALWAYS query actual data and tell the user the information.**
@@ -283,6 +287,23 @@ ALWAYS instruct it to RETURN data as text, not open GUI apps.""",
             "required": ["query"],
         },
     },
+    {
+        "name": "forget",
+        "description": (
+            "Remove information from long-term memory. "
+            "Searches for matching memories and deletes them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for and forget",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -306,7 +327,7 @@ class PocketPawOrchestrator:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._client: Optional[Anthropic] = None
+        self._client: Optional[AsyncAnthropic] = None
         self._executor = None
         self._stop_flag = False
         self._file_jail = settings.file_jail_path.resolve()
@@ -324,7 +345,17 @@ class PocketPawOrchestrator:
             logger.error("❌ Anthropic API key required for PocketPaw Native")
             return
 
-        self._client = Anthropic(api_key=self.settings.anthropic_api_key)
+        # Initialize client with timeout to prevent hanging
+        try:
+            self._client = AsyncAnthropic(
+                api_key=self.settings.anthropic_api_key,
+                timeout=60.0,  # 60 second timeout for API requests
+                max_retries=2,  # Limit retries to prevent long hangs
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize Anthropic client: {e}")
+            self._client = None
+            return
 
         # Initialize executor (Open Interpreter)
         try:
@@ -346,8 +377,46 @@ class PocketPawOrchestrator:
         logger.info("=" * 50)
 
     def _get_filtered_tools(self) -> list[dict]:
-        """Return TOOLS filtered by the active tool policy."""
-        return [t for t in TOOLS if self._policy.is_tool_allowed(t["name"])]
+        """Return TOOLS filtered by the active tool policy, plus MCP tools."""
+        base = [t for t in TOOLS if self._policy.is_tool_allowed(t["name"])]
+        base.extend(self._get_mcp_tools())
+        return base
+
+    def _get_mcp_tools(self) -> list[dict]:
+        """Convert MCP tools to Anthropic tool format, filtered by policy."""
+        try:
+            from pocketclaw.mcp.manager import get_mcp_manager
+        except ImportError:
+            return []
+
+        mgr = get_mcp_manager()
+        result = []
+        for tool_info in mgr.get_all_tools():
+            if not self._policy.is_mcp_tool_allowed(tool_info.server_name, tool_info.name):
+                continue
+            # Build unique name: mcp_<server>__<tool>
+            tool_name = f"mcp_{tool_info.server_name}__{tool_info.name}"
+            result.append(
+                {
+                    "name": tool_name,
+                    "description": (f"[MCP:{tool_info.server_name}] {tool_info.description}"),
+                    "input_schema": tool_info.input_schema or {"type": "object", "properties": {}},
+                }
+            )
+        return result
+
+    def _parse_mcp_tool_name(self, tool_name: str) -> tuple[str, str] | None:
+        """Parse an MCP tool name back to (server_name, original_tool_name).
+
+        Returns None if not an MCP tool name.
+        """
+        if not tool_name.startswith("mcp_"):
+            return None
+        rest = tool_name[4:]  # strip "mcp_"
+        parts = rest.split("__", 1)
+        if len(parts) != 2:
+            return None
+        return parts[0], parts[1]
 
     # =========================================================================
     # SECURITY METHODS
@@ -585,7 +654,35 @@ class PocketPawOrchestrator:
 
                 return "\n".join(lines)
 
+            elif tool_name == "forget":
+                from pocketclaw.memory.manager import get_memory_manager
+
+                query = tool_input.get("query", "")
+                if not query:
+                    return "Error: No query provided for forget"
+
+                manager = get_memory_manager()
+                results = await manager.search(query, limit=5)
+                if not results:
+                    return f"No memories found matching: {query}"
+
+                deleted = 0
+                for entry in results:
+                    ok = await manager._store.delete(entry.id)
+                    if ok:
+                        deleted += 1
+                return f"Forgot {deleted} memory(ies) matching: {query}"
+
             else:
+                # Check if it's an MCP tool
+                mcp_parsed = self._parse_mcp_tool_name(tool_name)
+                if mcp_parsed:
+                    server_name, original_tool = mcp_parsed
+                    from pocketclaw.mcp.manager import get_mcp_manager
+
+                    mgr = get_mcp_manager()
+                    result = await mgr.call_tool(server_name, original_tool, tool_input)
+                    return self._redact_secrets(result)
                 return f"Unknown tool: {tool_name}"
 
         except Exception as e:
@@ -593,7 +690,13 @@ class PocketPawOrchestrator:
             # Security: redact secrets from error messages too
             return self._redact_secrets(f"Error executing {tool_name}: {e}")
 
-    async def chat(self, message: str) -> AsyncIterator[AgentEvent]:
+    async def chat(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         """Process a message through the orchestrator.
 
         This is the main agentic loop:
@@ -601,6 +704,12 @@ class PocketPawOrchestrator:
         2. If Claude responds with text → yield it
         3. If Claude wants to use a tool → execute it → feed result back
         4. Repeat until done
+
+        Args:
+            message: User message to process.
+            system_prompt: Dynamic system prompt from AgentContextBuilder.
+            history: Recent session history as {"role", "content"} dicts.
+                Prepended to the messages list for multi-turn context.
         """
         if not self._client:
             yield AgentEvent(
@@ -611,7 +720,17 @@ class PocketPawOrchestrator:
         self._stop_flag = False
 
         # Conversation history for this request
-        messages = [{"role": "user", "content": message}]
+        messages: list[dict] = []
+
+        # Prepend session history for multi-turn context (Anthropic API supports this natively)
+        if history:
+            for msg in history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if content:
+                    messages.append({"role": role, "content": content})
+
+        messages.append({"role": "user", "content": message})
 
         # Maximum iterations to prevent infinite loops
         max_iterations = 10
@@ -622,14 +741,50 @@ class PocketPawOrchestrator:
                 iteration += 1
                 logger.debug(f"Iteration {iteration}/{max_iterations}")
 
-                # Call Claude
-                response = self._client.messages.create(
-                    model=self.settings.anthropic_model,
-                    max_tokens=4096,
-                    system=SYSTEM_PROMPT,
-                    tools=self._get_filtered_tools(),
-                    messages=messages,
-                )
+                # Smart model routing (opt-in)
+                model = self.settings.anthropic_model
+                if self.settings.smart_routing_enabled:
+                    from pocketclaw.agents.model_router import ModelRouter
+
+                    model_router = ModelRouter(self.settings)
+                    selection = model_router.classify(message)
+                    model = selection.model
+                    logger.info(
+                        "Smart routing: %s -> %s (%s)",
+                        selection.complexity.value,
+                        selection.model,
+                        selection.reason,
+                    )
+
+                # Compose final system prompt: identity/memory + tool guide
+                identity = system_prompt or _DEFAULT_IDENTITY
+                final_system = identity + "\n" + _TOOL_GUIDE
+
+                # Call Claude with timeout wrapper for safety
+                try:
+                    response = await asyncio.wait_for(
+                        self._client.messages.create(
+                            model=model,
+                            max_tokens=4096,
+                            system=final_system,
+                            tools=self._get_filtered_tools(),
+                            messages=messages,
+                        ),
+                        timeout=90.0,  # Additional asyncio timeout as safety net
+                    )
+                except asyncio.TimeoutError:
+                    yield AgentEvent(
+                        type="error",
+                        content="⏱️ Request timed out. Please check your network connection and API key.",
+                    )
+                    return
+                except Exception as api_error:
+                    logger.error(f"Anthropic API error: {api_error}")
+                    yield AgentEvent(
+                        type="error",
+                        content=f"❌ API Error: {str(api_error)}. Please verify your Anthropic API key in Settings.",
+                    )
+                    return
 
                 # Process response content blocks
                 assistant_content = []
@@ -690,9 +845,15 @@ class PocketPawOrchestrator:
             logger.error(f"PocketPaw error: {e}")
             yield AgentEvent(type="error", content=f"❌ Error: {e}")
 
-    async def run(self, message: str) -> AsyncIterator[dict]:
+    async def run(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[dict]:
         """Run method for compatibility with router."""
-        async for event in self.chat(message):
+        async for event in self.chat(message, system_prompt=system_prompt, history=history):
             yield {"type": event.type, "content": event.content}
 
     async def stop(self) -> None:

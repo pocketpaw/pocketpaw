@@ -1,15 +1,24 @@
 """System status tool."""
 
 import platform
-from datetime import datetime, timedelta
-
-import psutil
+from datetime import UTC, datetime, timedelta
 
 
 def get_system_status() -> str:
     """Get formatted system status."""
-    # CPU
-    cpu_percent = psutil.cpu_percent(interval=0.5)
+    try:
+        import psutil
+    except ImportError:
+        system = platform.system()
+        machine = platform.machine()
+        return (
+            f"🟡 **System Status (limited)**\n\n"
+            f"💻 **{system} ({machine})**\n\n"
+            f"Install psutil for full stats: pip install 'pocketpaw[desktop]'"
+        )
+
+    # CPU - use interval=0 to avoid blocking (uses cached value)
+    cpu_percent = psutil.cpu_percent(interval=0)
     cpu_count = psutil.cpu_count()
 
     # Memory
@@ -23,8 +32,8 @@ def get_system_status() -> str:
     disk_total_gb = disk.total / (1024**3)
 
     # Uptime
-    boot_time = datetime.fromtimestamp(psutil.boot_time())
-    uptime = datetime.now() - boot_time
+    boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
+    uptime = datetime.now(tz=UTC) - boot_time
     uptime_str = str(timedelta(seconds=int(uptime.total_seconds())))
 
     # Battery (if available)

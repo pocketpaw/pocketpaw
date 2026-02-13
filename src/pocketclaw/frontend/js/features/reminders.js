@@ -13,6 +13,7 @@
 window.PocketPaw = window.PocketPaw || {};
 
 window.PocketPaw.Reminders = {
+    name: 'Reminders',
     /**
      * Get initial state for Reminders
      */
@@ -127,3 +128,5 @@ window.PocketPaw.Reminders = {
         };
     }
 };
+
+window.PocketPaw.Loader.register('Reminders', window.PocketPaw.Reminders);

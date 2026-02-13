@@ -252,10 +252,10 @@ class TestTaskAPI:
         )
         task_id = task_response.json()["task"]["id"]
 
-        # Update status
+        # Update status via JSON body (matches how the frontend sends it)
         response = client.post(
             f"/api/mission-control/tasks/{task_id}/status",
-            params={"status": "in_progress"},
+            json={"status": "in_progress"},
         )
         assert response.status_code == 200
         assert response.json()["task"]["status"] == "in_progress"

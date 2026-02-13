@@ -1,6 +1,9 @@
 # Tests for Mission Control Task Executor
 # Created: 2026-02-05
-# Updated: 2026-02-05 - Fixed fixture isolation, added security feature tests
+# Updated: 2026-02-12 - Added test_background_execution_completes for
+#   execute_task_background self-defeating bug. Updated duplicate test
+#   to use execute_task_background entry point.
+#   Previous: 2026-02-05 - Fixed fixture isolation, added security feature tests
 #
 # Tests for MCTaskExecutor - agent task execution with streaming
 # Includes security tests for:
@@ -283,7 +286,12 @@ class TestMCTaskExecutor:
 
     @pytest.mark.asyncio
     async def test_duplicate_execution_prevented(self, setup_singletons, manager):
-        """Test that same task cannot be executed twice simultaneously."""
+        """Test that same task cannot be dispatched twice via execute_task_background.
+
+        The duplicate guard lives in execute_task_background (not execute_task).
+        A second call while the task is already tracked in _running_tasks is
+        silently skipped, and the API layer returns 409 via is_task_running().
+        """
         executor = get_mc_task_executor()
 
         # Create agent and task
@@ -319,14 +327,52 @@ class TestMCTaskExecutor:
                 await executor.execute_task_background(task.id, agent.id)
                 await asyncio.sleep(0.02)  # Let it start
 
-                # Try to start second execution
-                result = await executor.execute_task(task.id, agent.id)
+                # Verify it's tracked as running
+                assert executor.is_task_running(task.id)
 
-        assert result["status"] == "error"
-        assert "already running" in result["error"]
+                # Second dispatch via execute_task_background is silently skipped
+                await executor.execute_task_background(task.id, agent.id)
+
+                # Still only one entry in _running_tasks
+                assert executor.is_task_running(task.id)
 
         # Cleanup
         await executor.stop_task(task.id)
+
+    @pytest.mark.asyncio
+    async def test_background_execution_completes(self, executor, manager, assigned_task, agent):
+        """Bug: execute_task_background registers task in _running_tasks BEFORE
+        execute_task starts. When execute_task runs, it sees itself as 'already
+        running' and bails out, leaving a zombie entry in _running_tasks.
+
+        This test verifies:
+        1. The task actually executes to completion (status=DONE, not stuck)
+        2. _running_tasks is cleaned up after completion (no zombie entry)
+        3. A subsequent run attempt succeeds (no stale 409)
+        """
+        mock_router = create_mock_router()
+
+        with patch(
+            "pocketclaw.mission_control.executor.AgentRouter",
+            return_value=mock_router,
+        ):
+            with patch("pocketclaw.mission_control.executor.get_message_bus") as mock_bus:
+                mock_bus.return_value.publish_system = AsyncMock()
+
+                await executor.execute_task_background(assigned_task.id, agent.id)
+                await asyncio.sleep(0.5)  # Wait for background task to finish
+
+        # Task should have completed (not stuck at ASSIGNED)
+        task_updated = await manager.get_task(assigned_task.id)
+        assert task_updated.status == TaskStatus.DONE, (
+            f"Expected DONE but got {task_updated.status}. "
+            "execute_task_background likely self-defeated via _running_tasks check."
+        )
+
+        # No zombie in _running_tasks
+        assert not executor.is_task_running(assigned_task.id), (
+            "Zombie: task still in _running_tasks after background execution completed."
+        )
 
     @pytest.mark.asyncio
     async def test_broadcasts_events(self, executor, assigned_task, agent):
@@ -357,7 +403,7 @@ class TestMCTaskExecutor:
     @pytest.mark.asyncio
     async def test_build_task_prompt(self, executor, agent, task):
         """Test prompt building includes task and agent context."""
-        prompt = executor._build_task_prompt(task, agent)
+        prompt = await executor._build_task_prompt(task, agent)
 
         assert "TestAgent" in prompt
         assert "Test Role" in prompt
@@ -418,7 +464,8 @@ class TestSecurityFeatures:
 class TestPromptBuilding:
     """Tests for task prompt construction."""
 
-    def test_prompt_includes_agent_info(self):
+    @pytest.mark.asyncio
+    async def test_prompt_includes_agent_info(self):
         """Test prompt includes agent name, role, description."""
         executor = MCTaskExecutor()
         agent = AgentProfile(
@@ -429,7 +476,7 @@ class TestPromptBuilding:
         )
         task = Task(title="Test", description="Test task", priority=TaskPriority.HIGH)
 
-        prompt = executor._build_task_prompt(task, agent)
+        prompt = await executor._build_task_prompt(task, agent)
 
         assert "Jarvis" in prompt
         assert "Squad Lead" in prompt
@@ -437,7 +484,8 @@ class TestPromptBuilding:
         assert "planning" in prompt
         assert "coordination" in prompt
 
-    def test_prompt_includes_task_info(self):
+    @pytest.mark.asyncio
+    async def test_prompt_includes_task_info(self):
         """Test prompt includes task title, description, priority."""
         executor = MCTaskExecutor()
         agent = AgentProfile(name="Agent", role="Role")
@@ -447,19 +495,20 @@ class TestPromptBuilding:
             priority=TaskPriority.URGENT,
         )
 
-        prompt = executor._build_task_prompt(task, agent)
+        prompt = await executor._build_task_prompt(task, agent)
 
         assert "Research competitors" in prompt
         assert "Full competitive analysis" in prompt
         assert "urgent" in prompt.lower()
 
-    def test_prompt_handles_missing_description(self):
+    @pytest.mark.asyncio
+    async def test_prompt_handles_missing_description(self):
         """Test prompt handles agent/task with no description."""
         executor = MCTaskExecutor()
         agent = AgentProfile(name="Agent", role="Role")
         task = Task(title="Task", priority=TaskPriority.LOW)
 
-        prompt = executor._build_task_prompt(task, agent)
+        prompt = await executor._build_task_prompt(task, agent)
 
         # Should not crash and should still have basic info
         assert "Agent" in prompt

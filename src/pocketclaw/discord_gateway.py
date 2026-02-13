@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_discord_bot(settings: Settings) -> None:
-    """Run the Discord bot via Nanobot Agent Loop."""
+    """Run the Discord bot."""
 
     bus = get_message_bus()
 

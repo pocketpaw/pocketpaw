@@ -1,9 +1,12 @@
 <!--
-  PocketPaw Dashboard - Channels Modal
+  PocketPaw Dashboard - Channels Modal (Two-Column Sidebar)
 
-  Created: 2026-02-06
-  Configure and manage all channel adapters from the web dashboard.
-  4 tabs: Discord / Slack / WhatsApp / Telegram
+  Redesigned: 2026-02-10
+  - Two-column sidebar layout (mirrors Settings pattern)
+  - Shared status badge + start/stop buttons (deduplicated)
+  - "Setup Guide" links per channel
+  - Mobile responsive: list/content toggle with back button
+  - 9 channels: Discord / Slack / WhatsApp / Telegram / Signal / Matrix / Teams / Google Chat / Webhooks
 -->
 <!-- Channels Modal -->
 <div
@@ -12,56 +15,93 @@
   x-transition.opacity
   @click.self="showChannels = false"
 >
-<div class="w-full max-w-[560px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden max-h-[90vh]" @click.stop>
+<div class="w-full max-w-[720px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" style="height: min(600px, 85vh);" @click.stop>
+
     <!-- Header -->
-    <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
-        <div class="flex items-center gap-3">
-            <i data-lucide="radio-tower" class="w-5 h-5 text-accent"></i>
-            <h2 class="text-[17px] font-semibold">Channels</h2>
+    <div class="flex items-center justify-between px-5 py-3.5 border-b border-[var(--glass-border)] shrink-0">
+        <div class="flex items-center gap-2.5">
+            <!-- Mobile: back button -->
+            <button
+                x-show="channelsMobileView === 'content'"
+                class="md:hidden p-1.5 -ml-1 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                @click="channelsMobileView = 'list'"
+            >
+                <i data-lucide="arrow-left" class="w-4.5 h-4.5"></i>
+            </button>
+            <i data-lucide="radio-tower" class="w-4.5 h-4.5 opacity-70"></i>
+            <h2 class="text-[16px] font-semibold">Channels</h2>
         </div>
-        <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showChannels = false">
-            <i data-lucide="x" class="w-5 h-5"></i>
+        <button class="p-1.5 -mr-1.5 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showChannels = false">
+            <i data-lucide="x" class="w-4.5 h-4.5"></i>
         </button>
     </div>
 
-    <!-- Tab Buttons -->
-    <div class="flex border-b border-[var(--glass-border)] shrink-0">
-        <template x-for="tab in ['discord', 'slack', 'whatsapp', 'telegram']" :key="tab">
-            <button
-                class="flex-1 py-3 text-[13px] font-medium transition-all flex items-center justify-center gap-1.5"
-                :class="channelsTab === tab ? 'text-[var(--accent-color)] border-b-2 border-[var(--accent-color)] bg-white/5' : 'text-white/50 hover:text-white/70 hover:bg-white/5'"
-                @click="channelsTab = tab"
-            >
-                <span x-text="tab.charAt(0).toUpperCase() + tab.slice(1)"></span>
-                <!-- Status dot -->
-                <span
-                    class="w-2 h-2 rounded-full shrink-0"
-                    :class="channelStatus[tab]?.running ? 'bg-[var(--success-color)]' : (channelStatus[tab]?.configured ? 'bg-[var(--warning-color)]' : 'bg-white/20')"
-                ></span>
-            </button>
-        </template>
-    </div>
+    <!-- Body: sidebar + content -->
+    <div class="flex flex-1 min-h-0 overflow-hidden">
 
-    <!-- Tab Content -->
-    <div class="p-6 overflow-y-auto">
+        <!-- Sidebar nav -->
+        <nav
+            class="channels-nav shrink-0 py-2 px-1.5 overflow-y-auto"
+            :class="channelsMobileView === 'list' ? 'is-visible' : 'is-hidden'"
+        >
+            <template x-for="tab in ['discord', 'slack', 'whatsapp', 'telegram', 'signal', 'matrix', 'teams', 'google_chat', 'webhooks']" :key="tab">
+                <button
+                    class="channels-nav-item flex items-center gap-2.5 w-full px-2.5 py-[7px] rounded-lg text-[13px] font-medium transition-all text-left mb-px"
+                    :class="channelsTab === tab
+                        ? 'bg-white/10 text-white'
+                        : 'text-white/50 hover:text-white/80 hover:bg-white/5'"
+                    @click="channelsTab = tab; channelsMobileView = 'content'; $nextTick(() => { if (window.refreshIcons) window.refreshIcons(); })"
+                >
+                    <i :data-lucide="channelIcon(tab)" class="w-4 h-4 shrink-0 opacity-70"></i>
+                    <span class="flex-1" x-text="channelDisplayName(tab)"></span>
+                    <!-- Status dot -->
+                    <span
+                        class="w-2 h-2 rounded-full shrink-0"
+                        :class="channelStatus[tab]?.running ? 'bg-[var(--success-color)]' : (channelStatus[tab]?.configured ? 'bg-[var(--warning-color)]' : 'bg-white/20')"
+                        x-show="tab !== 'webhooks'"
+                    ></span>
+                </button>
+            </template>
+        </nav>
 
-        <!-- ==================== Discord Tab ==================== -->
-        <div x-show="channelsTab === 'discord'" x-transition.opacity>
-            <div class="flex flex-col gap-5">
-                <!-- Status Badge -->
-                <div class="flex items-center justify-between">
-                    <span class="text-[13px] text-white/60">Status</span>
-                    <span class="text-[11px] font-bold px-2.5 py-1 rounded-full border"
-                        :class="channelStatus.discord?.running
-                            ? 'bg-[var(--success-color)]/10 text-[var(--success-color)] border-[var(--success-color)]/20'
-                            : (channelStatus.discord?.configured
-                                ? 'bg-[var(--warning-color)]/10 text-[var(--warning-color)] border-[var(--warning-color)]/20'
-                                : 'bg-white/5 text-white/40 border-white/10')"
-                        x-text="channelStatus.discord?.running ? 'RUNNING' : (channelStatus.discord?.configured ? 'CONFIGURED' : 'NOT CONFIGURED')">
-                    </span>
+        <!-- Content area -->
+        <div
+            class="channels-content flex-1 overflow-y-auto px-5 py-4"
+            :class="channelsMobileView === 'content' ? 'is-visible' : 'is-hidden'"
+        >
+            <!-- Shared Status Badge (not for webhooks) -->
+            <template x-if="channelsTab !== 'webhooks'">
+                <div class="flex flex-col gap-5">
+                    <div class="flex items-center justify-between">
+                        <span class="text-[13px] text-white/60">Status</span>
+                        <span class="text-[11px] font-bold px-2.5 py-1 rounded-full border"
+                            :class="channelStatus[channelsTab]?.running
+                                ? 'bg-[var(--success-color)]/20 text-white border-[var(--success-color)]/30'
+                                : (channelStatus[channelsTab]?.configured
+                                    ? 'bg-[var(--warning-color)]/20 text-white border-[var(--warning-color)]/30'
+                                    : 'bg-white/5 text-white/50 border-white/10')"
+                            x-text="channelStatus[channelsTab]?.running
+                                ? (channelsTab === 'whatsapp' && whatsappConnected ? 'CONNECTED' : 'RUNNING')
+                                : (channelStatus[channelsTab]?.configured ? 'CONFIGURED' : 'NOT CONFIGURED')">
+                        </span>
+                    </div>
+
+                    <!-- Setup Guide Link (when not configured) -->
+                    <div x-show="!channelStatus[channelsTab]?.configured && channelGuideUrl(channelsTab)" class="flex items-center gap-2 py-2 px-3 bg-white/5 rounded-[10px] border border-white/10">
+                        <i data-lucide="book-open" class="w-4 h-4 text-white/60 shrink-0"></i>
+                        <div class="flex-1 min-w-0">
+                            <span class="text-[12px] text-white/60">Setup Guide: </span>
+                            <a :href="channelGuideUrl(channelsTab)" target="_blank" rel="noopener"
+                                class="text-[12px] font-medium text-[var(--accent-color)] hover:underline"
+                                x-text="channelGuideLabel(channelsTab)"></a>
+                        </div>
+                        <i data-lucide="external-link" class="w-3 h-3 text-white/40 shrink-0"></i>
+                    </div>
                 </div>
+            </template>
 
-                <!-- Bot Token -->
+            <!-- ==================== Discord ==================== -->
+            <div x-show="channelsTab === 'discord'" class="flex flex-col gap-5 mt-4">
                 <div class="flex flex-col gap-2">
                     <div class="flex justify-between items-center">
                         <label class="text-[13px] font-medium text-[var(--text-secondary)]">Bot Token</label>
@@ -70,63 +110,17 @@
                         </span>
                     </div>
                     <div class="flex gap-2">
-                        <input
-                            type="password"
-                            x-model="channelForms.discord.bot_token"
+                        <input type="password" x-model="channelForms.discord.bot_token"
                             :placeholder="channelStatus.discord?.configured ? '••••••••••••••••' : 'Paste Discord bot token...'"
-                            class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                        />
-                        <button
-                            class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95 disabled:opacity-50"
-                            @click="saveChannelConfig('discord')"
-                            :disabled="channelLoading || !channelForms.discord.bot_token"
-                        >Save</button>
+                            class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                        <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95 disabled:opacity-50"
+                            @click="saveChannelConfig('discord')" :disabled="channelLoading || !channelForms.discord.bot_token">Save</button>
                     </div>
                 </div>
-
-                <!-- Start/Stop Toggle -->
-                <div class="flex gap-2 pt-2 border-t border-[var(--glass-border)]">
-                    <button
-                        x-show="!channelStatus.discord?.running"
-                        class="w-full bg-[var(--success-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                        @click="toggleChannel('discord')"
-                        :disabled="channelLoading || !channelStatus.discord?.configured"
-                    >
-                        <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                        <i x-show="!channelLoading" data-lucide="play" class="w-4 h-4"></i>
-                        Start Discord
-                    </button>
-                    <button
-                        x-show="channelStatus.discord?.running"
-                        class="w-full bg-[var(--danger-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                        @click="toggleChannel('discord')"
-                        :disabled="channelLoading"
-                    >
-                        <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                        <i x-show="!channelLoading" data-lucide="square" class="w-4 h-4"></i>
-                        Stop Discord
-                    </button>
-                </div>
             </div>
-        </div>
 
-        <!-- ==================== Slack Tab ==================== -->
-        <div x-show="channelsTab === 'slack'" x-transition.opacity>
-            <div class="flex flex-col gap-5">
-                <!-- Status Badge -->
-                <div class="flex items-center justify-between">
-                    <span class="text-[13px] text-white/60">Status</span>
-                    <span class="text-[11px] font-bold px-2.5 py-1 rounded-full border"
-                        :class="channelStatus.slack?.running
-                            ? 'bg-[var(--success-color)]/10 text-[var(--success-color)] border-[var(--success-color)]/20'
-                            : (channelStatus.slack?.configured
-                                ? 'bg-[var(--warning-color)]/10 text-[var(--warning-color)] border-[var(--warning-color)]/20'
-                                : 'bg-white/5 text-white/40 border-white/10')"
-                        x-text="channelStatus.slack?.running ? 'RUNNING' : (channelStatus.slack?.configured ? 'CONFIGURED' : 'NOT CONFIGURED')">
-                    </span>
-                </div>
-
-                <!-- Bot Token (xoxb-) -->
+            <!-- ==================== Slack ==================== -->
+            <div x-show="channelsTab === 'slack'" class="flex flex-col gap-5 mt-4">
                 <div class="flex flex-col gap-2">
                     <div class="flex justify-between items-center">
                         <label class="text-[13px] font-medium text-[var(--text-secondary)]">Bot Token (xoxb-...)</label>
@@ -134,154 +128,78 @@
                             <i data-lucide="check" class="w-3 h-3"></i> Saved
                         </span>
                     </div>
-                    <input
-                        type="password"
-                        x-model="channelForms.slack.bot_token"
+                    <input type="password" x-model="channelForms.slack.bot_token"
                         :placeholder="channelStatus.slack?.configured ? '••••••••••••••••' : 'xoxb-...'"
-                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                    />
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
                 </div>
-
-                <!-- App Token (xapp-) -->
                 <div class="flex flex-col gap-2">
                     <label class="text-[13px] font-medium text-[var(--text-secondary)]">App Token (xapp-...)</label>
-                    <input
-                        type="password"
-                        x-model="channelForms.slack.app_token"
+                    <input type="password" x-model="channelForms.slack.app_token"
                         :placeholder="channelStatus.slack?.configured ? '••••••••••••••••' : 'xapp-...'"
-                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                    />
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
                 </div>
-
-                <!-- Save -->
-                <button
-                    class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
-                    @click="saveChannelConfig('slack')"
-                    :disabled="channelLoading || (!channelForms.slack.bot_token && !channelForms.slack.app_token)"
-                >Save Slack Config</button>
-
-                <!-- Start/Stop Toggle -->
-                <div class="flex gap-2 pt-2 border-t border-[var(--glass-border)]">
-                    <button
-                        x-show="!channelStatus.slack?.running"
-                        class="w-full bg-[var(--success-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                        @click="toggleChannel('slack')"
-                        :disabled="channelLoading || !channelStatus.slack?.configured"
-                    >
-                        <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                        <i x-show="!channelLoading" data-lucide="play" class="w-4 h-4"></i>
-                        Start Slack
-                    </button>
-                    <button
-                        x-show="channelStatus.slack?.running"
-                        class="w-full bg-[var(--danger-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                        @click="toggleChannel('slack')"
-                        :disabled="channelLoading"
-                    >
-                        <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                        <i x-show="!channelLoading" data-lucide="square" class="w-4 h-4"></i>
-                        Stop Slack
-                    </button>
-                </div>
+                <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                    @click="saveChannelConfig('slack')" :disabled="channelLoading || (!channelForms.slack.bot_token && !channelForms.slack.app_token)">Save Slack Config</button>
             </div>
-        </div>
 
-        <!-- ==================== WhatsApp Tab ==================== -->
-        <div x-show="channelsTab === 'whatsapp'" x-transition.opacity>
-            <div class="flex flex-col gap-5">
-                <!-- Status Badge -->
-                <div class="flex items-center justify-between">
-                    <span class="text-[13px] text-white/60">Status</span>
-                    <span class="text-[11px] font-bold px-2.5 py-1 rounded-full border"
-                        :class="channelStatus.whatsapp?.running
-                            ? 'bg-[var(--success-color)]/10 text-[var(--success-color)] border-[var(--success-color)]/20'
-                            : (channelStatus.whatsapp?.configured
-                                ? 'bg-[var(--warning-color)]/10 text-[var(--warning-color)] border-[var(--warning-color)]/20'
-                                : 'bg-white/5 text-white/40 border-white/10')"
-                        x-text="channelStatus.whatsapp?.running
-                            ? (whatsappConnected ? 'CONNECTED' : 'RUNNING')
-                            : (channelStatus.whatsapp?.configured ? 'CONFIGURED' : 'NOT CONFIGURED')">
-                    </span>
-                </div>
-
+            <!-- ==================== WhatsApp ==================== -->
+            <div x-show="channelsTab === 'whatsapp'" class="flex flex-col gap-5 mt-4">
                 <!-- Mode Selector -->
                 <div class="flex flex-col gap-2">
                     <label class="text-[13px] font-medium text-[var(--text-secondary)]">Mode</label>
                     <div class="flex gap-2">
-                        <button
-                            class="flex-1 py-2 px-3 rounded-[10px] text-[13px] font-medium transition-all border"
-                            :class="channelStatus.whatsapp?.mode === 'personal'
-                                ? 'bg-[var(--accent-color)]/15 text-[var(--accent-color)] border-[var(--accent-color)]/30'
-                                : 'bg-black/20 text-white/50 border-[var(--glass-border)] hover:text-white/70 hover:bg-white/5'"
-                            @click="saveWhatsAppMode('personal')"
-                        >Personal (QR Scan)</button>
-                        <button
-                            class="flex-1 py-2 px-3 rounded-[10px] text-[13px] font-medium transition-all border"
-                            :class="channelStatus.whatsapp?.mode === 'business'
-                                ? 'bg-[var(--accent-color)]/15 text-[var(--accent-color)] border-[var(--accent-color)]/30'
-                                : 'bg-black/20 text-white/50 border-[var(--glass-border)] hover:text-white/70 hover:bg-white/5'"
-                            @click="saveWhatsAppMode('business')"
-                        >Business (Cloud API)</button>
+                        <button class="flex-1 py-2 px-3 rounded-[10px] text-[13px] font-medium transition-all border"
+                            :class="channelStatus.whatsapp?.mode === 'personal' ? 'bg-[var(--accent-color)] text-white border-[var(--accent-color)]' : 'bg-black/20 text-white/50 border-[var(--glass-border)] hover:text-white/70 hover:bg-white/5'"
+                            @click="saveWhatsAppMode('personal')">Personal (QR Scan)</button>
+                        <button class="flex-1 py-2 px-3 rounded-[10px] text-[13px] font-medium transition-all border"
+                            :class="channelStatus.whatsapp?.mode === 'business' ? 'bg-[var(--accent-color)] text-white border-[var(--accent-color)]' : 'bg-black/20 text-white/50 border-[var(--glass-border)] hover:text-white/70 hover:bg-white/5'"
+                            @click="saveWhatsAppMode('business')">Business (Cloud API)</button>
                     </div>
                 </div>
 
-                <!-- ===== Personal Mode View ===== -->
+                <!-- Personal Mode -->
                 <template x-if="channelStatus.whatsapp?.mode === 'personal'">
                     <div class="flex flex-col gap-4">
-                        <p class="text-[12px] text-white/40">
-                            Scan the QR code with WhatsApp on your phone. No Meta account, webhooks, or tunnels needed.
-                        </p>
-
-                        <!-- QR Code Display -->
-                        <div x-show="whatsappQr && !whatsappConnected" class="flex flex-col items-center gap-3 py-3">
-                            <div class="bg-white p-3 rounded-xl">
-                                <img :src="'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(whatsappQr)" alt="WhatsApp QR" class="w-[200px] h-[200px]" />
+                        <p class="text-[12px] text-white/50">Scan the QR code with WhatsApp on your phone. No Meta account, webhooks, or tunnels needed.</p>
+                        <!-- Not running yet — prompt to start -->
+                        <div x-show="!channelStatus.whatsapp?.running && !whatsappConnected" class="flex flex-col items-center gap-3 py-4">
+                            <div class="flex items-center justify-center w-12 h-12 rounded-full bg-white/5 border border-white/10">
+                                <i data-lucide="qr-code" class="w-6 h-6 text-white/40"></i>
                             </div>
-                            <span class="text-[12px] text-white/50">Scan with WhatsApp &rarr; Linked Devices &rarr; Link a Device</span>
-                        </div>
-
-                        <!-- Connected Indicator -->
-                        <div x-show="whatsappConnected" class="flex items-center justify-center gap-2 py-4 bg-[var(--success-color)]/10 rounded-[12px] border border-[var(--success-color)]/20">
-                            <i data-lucide="check-circle" class="w-5 h-5 text-[var(--success-color)]"></i>
-                            <span class="text-[14px] font-medium text-[var(--success-color)]">WhatsApp Connected</span>
-                        </div>
-
-                        <!-- Waiting state (running but no QR yet and not connected) -->
-                        <div x-show="channelStatus.whatsapp?.running && !whatsappQr && !whatsappConnected" class="flex items-center justify-center gap-2 py-4 text-white/40">
-                            <i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                            <span class="text-[13px]">Waiting for QR code...</span>
-                        </div>
-
-                        <!-- Start/Stop -->
-                        <div class="flex gap-2 pt-2 border-t border-[var(--glass-border)]">
+                            <span class="text-[13px] text-white/50 text-center">Start WhatsApp to generate a QR code for pairing</span>
                             <button
-                                x-show="!channelStatus.whatsapp?.running"
-                                class="w-full bg-[var(--success-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
+                                class="mt-1 bg-[var(--success-color)] hover:brightness-110 text-white py-2.5 px-6 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center gap-2 disabled:opacity-50"
                                 @click="toggleChannel('whatsapp')"
                                 :disabled="channelLoading"
                             >
                                 <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
                                 <i x-show="!channelLoading" data-lucide="play" class="w-4 h-4"></i>
-                                Start WhatsApp
+                                <span>Start &amp; Pair</span>
                             </button>
-                            <button
-                                x-show="channelStatus.whatsapp?.running"
-                                class="w-full bg-[var(--danger-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                                @click="toggleChannel('whatsapp')"
-                                :disabled="channelLoading"
-                            >
-                                <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                                <i x-show="!channelLoading" data-lucide="square" class="w-4 h-4"></i>
-                                Stop WhatsApp
-                            </button>
+                        </div>
+                        <!-- Running, waiting for QR -->
+                        <div x-show="channelStatus.whatsapp?.running && !whatsappQr && !whatsappConnected" class="flex items-center justify-center gap-2 py-4 text-white/50">
+                            <i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
+                            <span class="text-[13px]">Waiting for QR code...</span>
+                        </div>
+                        <!-- QR code visible -->
+                        <div x-show="whatsappQr && !whatsappConnected" class="flex flex-col items-center gap-3 py-3">
+                            <div class="bg-white p-3 rounded-xl">
+                                <img :src="generateQrDataUrl(whatsappQr)" alt="WhatsApp QR" class="w-[200px] h-[200px]" />
+                            </div>
+                            <span class="text-[12px] text-white/50">Scan with WhatsApp &rarr; Linked Devices &rarr; Link a Device</span>
+                        </div>
+                        <!-- Connected -->
+                        <div x-show="whatsappConnected" class="flex items-center justify-center gap-2 py-4 bg-[var(--success-color)]/10 rounded-[12px] border border-[var(--success-color)]/20">
+                            <i data-lucide="check-circle" class="w-5 h-5 text-[var(--success-color)]"></i>
+                            <span class="text-[14px] font-medium text-[var(--success-color)]">WhatsApp Connected</span>
                         </div>
                     </div>
                 </template>
 
-                <!-- ===== Business Mode View ===== -->
+                <!-- Business Mode -->
                 <template x-if="channelStatus.whatsapp?.mode === 'business'">
                     <div class="flex flex-col gap-4">
-                        <!-- Access Token -->
                         <div class="flex flex-col gap-2">
                             <div class="flex justify-between items-center">
                                 <label class="text-[13px] font-medium text-[var(--text-secondary)]">Access Token</label>
@@ -289,88 +207,29 @@
                                     <i data-lucide="check" class="w-3 h-3"></i> Saved
                                 </span>
                             </div>
-                            <input
-                                type="password"
-                                x-model="channelForms.whatsapp.access_token"
+                            <input type="password" x-model="channelForms.whatsapp.access_token"
                                 :placeholder="channelStatus.whatsapp?.configured ? '••••••••••••••••' : 'WhatsApp access token...'"
-                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                            />
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
                         </div>
-
-                        <!-- Phone Number ID -->
                         <div class="flex flex-col gap-2">
                             <label class="text-[13px] font-medium text-[var(--text-secondary)]">Phone Number ID</label>
-                            <input
-                                type="text"
-                                x-model="channelForms.whatsapp.phone_number_id"
+                            <input type="text" x-model="channelForms.whatsapp.phone_number_id"
                                 :placeholder="channelStatus.whatsapp?.configured ? '••••••••' : '123456789012345'"
-                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                            />
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
                         </div>
-
-                        <!-- Verify Token -->
                         <div class="flex flex-col gap-2">
                             <label class="text-[13px] font-medium text-[var(--text-secondary)]">Verify Token (optional)</label>
-                            <input
-                                type="text"
-                                x-model="channelForms.whatsapp.verify_token"
-                                placeholder="Webhook verification token..."
-                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                            />
+                            <input type="text" x-model="channelForms.whatsapp.verify_token" placeholder="Webhook verification token..."
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
                         </div>
-
-                        <!-- Save -->
-                        <button
-                            class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
-                            @click="saveChannelConfig('whatsapp')"
-                            :disabled="channelLoading || (!channelForms.whatsapp.access_token && !channelForms.whatsapp.phone_number_id)"
-                        >Save WhatsApp Config</button>
-
-                        <!-- Start/Stop Toggle -->
-                        <div class="flex gap-2 pt-2 border-t border-[var(--glass-border)]">
-                            <button
-                                x-show="!channelStatus.whatsapp?.running"
-                                class="w-full bg-[var(--success-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                                @click="toggleChannel('whatsapp')"
-                                :disabled="channelLoading || !channelStatus.whatsapp?.configured"
-                            >
-                                <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                                <i x-show="!channelLoading" data-lucide="play" class="w-4 h-4"></i>
-                                Start WhatsApp
-                            </button>
-                            <button
-                                x-show="channelStatus.whatsapp?.running"
-                                class="w-full bg-[var(--danger-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                                @click="toggleChannel('whatsapp')"
-                                :disabled="channelLoading"
-                            >
-                                <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
-                                <i x-show="!channelLoading" data-lucide="square" class="w-4 h-4"></i>
-                                Stop WhatsApp
-                            </button>
-                        </div>
+                        <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                            @click="saveChannelConfig('whatsapp')" :disabled="channelLoading || (!channelForms.whatsapp.access_token && !channelForms.whatsapp.phone_number_id)">Save WhatsApp Config</button>
                     </div>
                 </template>
             </div>
-        </div>
 
-        <!-- ==================== Telegram Tab ==================== -->
-        <div x-show="channelsTab === 'telegram'" x-transition.opacity>
-            <div class="flex flex-col gap-5">
-                <!-- Status Badge -->
-                <div class="flex items-center justify-between">
-                    <span class="text-[13px] text-white/60">Status</span>
-                    <span class="text-[11px] font-bold px-2.5 py-1 rounded-full border"
-                        :class="channelStatus.telegram?.running
-                            ? 'bg-[var(--success-color)]/10 text-[var(--success-color)] border-[var(--success-color)]/20'
-                            : (channelStatus.telegram?.configured
-                                ? 'bg-[var(--warning-color)]/10 text-[var(--warning-color)] border-[var(--warning-color)]/20'
-                                : 'bg-white/5 text-white/40 border-white/10')"
-                        x-text="channelStatus.telegram?.running ? 'RUNNING' : (channelStatus.telegram?.configured ? 'CONFIGURED' : 'NOT CONFIGURED')">
-                    </span>
-                </div>
-
-                <!-- Bot Token -->
+            <!-- ==================== Telegram ==================== -->
+            <div x-show="channelsTab === 'telegram'" class="flex flex-col gap-5 mt-4">
                 <div class="flex flex-col gap-2">
                     <div class="flex justify-between items-center">
                         <label class="text-[13px] font-medium text-[var(--text-secondary)]">Bot Token</label>
@@ -379,50 +238,240 @@
                         </span>
                     </div>
                     <div class="flex gap-2">
-                        <input
-                            type="password"
-                            x-model="channelForms.telegram.bot_token"
+                        <input type="password" x-model="channelForms.telegram.bot_token"
                             :placeholder="channelStatus.telegram?.configured ? '••••••••••••••••' : 'Paste Telegram bot token...'"
-                            class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                        />
-                        <button
-                            class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95 disabled:opacity-50"
-                            @click="saveChannelConfig('telegram')"
-                            :disabled="channelLoading || !channelForms.telegram.bot_token"
-                        >Save</button>
+                            class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                        <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95 disabled:opacity-50"
+                            @click="saveChannelConfig('telegram')" :disabled="channelLoading || !channelForms.telegram.bot_token">Save</button>
                     </div>
-                    <p class="text-[12px] text-white/40">
+                    <p class="text-[12px] text-white/50">
                         Get a token from <a href="https://t.me/BotFather" target="_blank" class="text-[var(--accent-color)] hover:underline">@BotFather</a>.
                         For the full pairing flow, use the <button class="text-[var(--accent-color)] hover:underline bg-transparent border-none cursor-pointer p-0 text-[12px]" @click="showChannels = false; openRemote(); remoteTab = 'telegram'">Remote &rarr; Telegram</button> tab.
                     </p>
                 </div>
+            </div>
 
-                <!-- Start/Stop Toggle -->
-                <div class="flex gap-2 pt-2 border-t border-[var(--glass-border)]">
+            <!-- ==================== Signal ==================== -->
+            <div x-show="channelsTab === 'signal'" class="flex flex-col gap-5 mt-4">
+                <div class="flex flex-col gap-2">
+                    <label class="text-[13px] font-medium text-[var(--text-secondary)]">Signal CLI REST API URL</label>
+                    <input type="text" x-model="channelForms.signal.api_url" placeholder="http://localhost:8080"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <div class="flex flex-col gap-2">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[13px] font-medium text-[var(--text-secondary)]">Phone Number</label>
+                        <span x-show="channelStatus.signal?.configured" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
+                            <i data-lucide="check" class="w-3 h-3"></i> Saved
+                        </span>
+                    </div>
+                    <input type="text" x-model="channelForms.signal.phone_number"
+                        :placeholder="channelStatus.signal?.configured ? '••••••••' : '+1234567890'"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                    @click="saveChannelConfig('signal')" :disabled="channelLoading || !channelForms.signal.phone_number">Save Signal Config</button>
+            </div>
+
+            <!-- ==================== Matrix ==================== -->
+            <div x-show="channelsTab === 'matrix'" class="flex flex-col gap-5 mt-4">
+                <div class="flex flex-col gap-2">
+                    <label class="text-[13px] font-medium text-[var(--text-secondary)]">Homeserver URL</label>
+                    <input type="text" x-model="channelForms.matrix.homeserver" placeholder="https://matrix.org"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <div class="flex flex-col gap-2">
+                    <label class="text-[13px] font-medium text-[var(--text-secondary)]">User ID</label>
+                    <input type="text" x-model="channelForms.matrix.user_id" placeholder="@bot:matrix.org"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <div class="flex flex-col gap-2">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[13px] font-medium text-[var(--text-secondary)]">Access Token</label>
+                        <span x-show="channelStatus.matrix?.configured" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
+                            <i data-lucide="check" class="w-3 h-3"></i> Saved
+                        </span>
+                    </div>
+                    <input type="password" x-model="channelForms.matrix.access_token"
+                        :placeholder="channelStatus.matrix?.configured ? '••••••••••••••••' : 'Matrix access token...'"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                    @click="saveChannelConfig('matrix')" :disabled="channelLoading || (!channelForms.matrix.homeserver && !channelForms.matrix.access_token)">Save Matrix Config</button>
+            </div>
+
+            <!-- ==================== Teams ==================== -->
+            <div x-show="channelsTab === 'teams'" class="flex flex-col gap-5 mt-4">
+                <div class="flex flex-col gap-2">
+                    <label class="text-[13px] font-medium text-[var(--text-secondary)]">App ID (MS Bot Framework)</label>
+                    <input type="text" x-model="channelForms.teams.app_id"
+                        :placeholder="channelStatus.teams?.configured ? '••••••••' : 'Microsoft App ID...'"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <div class="flex flex-col gap-2">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[13px] font-medium text-[var(--text-secondary)]">App Password</label>
+                        <span x-show="channelStatus.teams?.configured" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
+                            <i data-lucide="check" class="w-3 h-3"></i> Saved
+                        </span>
+                    </div>
+                    <input type="password" x-model="channelForms.teams.app_password"
+                        :placeholder="channelStatus.teams?.configured ? '••••••••••••••••' : 'Microsoft App Password...'"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                    @click="saveChannelConfig('teams')" :disabled="channelLoading || (!channelForms.teams.app_id && !channelForms.teams.app_password)">Save Teams Config</button>
+            </div>
+
+            <!-- ==================== Google Chat ==================== -->
+            <div x-show="channelsTab === 'google_chat'" class="flex flex-col gap-5 mt-4">
+                <div class="flex flex-col gap-2">
+                    <label class="text-[13px] font-medium text-[var(--text-secondary)]">Mode</label>
+                    <div class="flex gap-2">
+                        <button class="flex-1 py-2 px-3 rounded-[10px] text-[13px] font-medium transition-all border"
+                            :class="channelForms.google_chat._mode === 'webhook' ? 'bg-[var(--accent-color)] text-white border-[var(--accent-color)]' : 'bg-black/20 text-white/50 border-[var(--glass-border)] hover:text-white/70 hover:bg-white/5'"
+                            @click="channelForms.google_chat._mode = 'webhook'">Webhook</button>
+                        <button class="flex-1 py-2 px-3 rounded-[10px] text-[13px] font-medium transition-all border"
+                            :class="channelForms.google_chat._mode === 'pubsub' ? 'bg-[var(--accent-color)] text-white border-[var(--accent-color)]' : 'bg-black/20 text-white/50 border-[var(--glass-border)] hover:text-white/70 hover:bg-white/5'"
+                            @click="channelForms.google_chat._mode = 'pubsub'">Pub/Sub</button>
+                    </div>
+                </div>
+                <div class="flex flex-col gap-2">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[13px] font-medium text-[var(--text-secondary)]">Service Account Key Path</label>
+                        <span x-show="channelStatus.google_chat?.configured" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
+                            <i data-lucide="check" class="w-3 h-3"></i> Saved
+                        </span>
+                    </div>
+                    <input type="text" x-model="channelForms.google_chat.service_account_key"
+                        :placeholder="channelStatus.google_chat?.configured ? '••••••••' : '/path/to/service-account.json'"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                </div>
+                <template x-if="channelForms.google_chat._mode === 'pubsub'">
+                    <div class="flex flex-col gap-4">
+                        <div class="flex flex-col gap-2">
+                            <label class="text-[13px] font-medium text-[var(--text-secondary)]">GCP Project ID</label>
+                            <input type="text" x-model="channelForms.google_chat.project_id" placeholder="my-project-id"
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                        </div>
+                        <div class="flex flex-col gap-2">
+                            <label class="text-[13px] font-medium text-[var(--text-secondary)]">Pub/Sub Subscription ID</label>
+                            <input type="text" x-model="channelForms.google_chat.subscription_id" placeholder="my-subscription"
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                        </div>
+                    </div>
+                </template>
+                <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                    @click="saveChannelConfig('google_chat')" :disabled="channelLoading || !channelForms.google_chat.service_account_key">Save Google Chat Config</button>
+            </div>
+
+            <!-- Shared Start/Stop (not for webhooks; hidden for WhatsApp personal mode which has inline button) -->
+            <template x-if="channelsTab !== 'webhooks' && !(channelsTab === 'whatsapp' && channelStatus.whatsapp?.mode === 'personal' && !channelStatus.whatsapp?.running)">
+                <div class="flex gap-2 pt-4 mt-4 border-t border-[var(--glass-border)]">
                     <button
-                        x-show="!channelStatus.telegram?.running"
+                        x-show="!channelStatus[channelsTab]?.running"
                         class="w-full bg-[var(--success-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                        @click="toggleChannel('telegram')"
-                        :disabled="channelLoading || !channelStatus.telegram?.configured"
+                        @click="toggleChannel(channelsTab)"
+                        :disabled="channelLoading || !channelStatus[channelsTab]?.configured"
                     >
                         <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
                         <i x-show="!channelLoading" data-lucide="play" class="w-4 h-4"></i>
-                        Start Telegram
+                        <span x-text="'Start ' + channelDisplayName(channelsTab)"></span>
                     </button>
                     <button
-                        x-show="channelStatus.telegram?.running"
+                        x-show="channelStatus[channelsTab]?.running"
                         class="w-full bg-[var(--danger-color)] hover:brightness-110 text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                        @click="toggleChannel('telegram')"
+                        @click="toggleChannel(channelsTab)"
                         :disabled="channelLoading"
                     >
                         <i x-show="channelLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
                         <i x-show="!channelLoading" data-lucide="square" class="w-4 h-4"></i>
-                        Stop Telegram
+                        <span x-text="'Stop ' + channelDisplayName(channelsTab)"></span>
                     </button>
                 </div>
-            </div>
-        </div>
+            </template>
 
+            <!-- ==================== Webhooks ==================== -->
+            <div x-show="channelsTab === 'webhooks'" class="flex flex-col gap-5">
+                <div class="flex items-center justify-between">
+                    <span class="text-[13px] text-white/60" x-text="webhookSlots.length + ' webhook' + (webhookSlots.length !== 1 ? 's' : '') + ' configured'"></span>
+                    <button class="text-[12px] font-medium text-[var(--accent-color)] hover:underline flex items-center gap-1"
+                        @click="showAddWebhook = !showAddWebhook">
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                        <span x-text="showAddWebhook ? 'Cancel' : 'Add Webhook'"></span>
+                    </button>
+                </div>
+
+                <!-- Inline Add Form -->
+                <div x-show="showAddWebhook" x-transition.opacity class="flex flex-col gap-3 p-4 bg-black/20 rounded-[12px] border border-[var(--glass-border)]">
+                    <div class="flex flex-col gap-2">
+                        <label class="text-[13px] font-medium text-[var(--text-secondary)]">Name</label>
+                        <input type="text" x-model="newWebhookName" placeholder="github-events"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+                    <div class="flex flex-col gap-2">
+                        <label class="text-[13px] font-medium text-[var(--text-secondary)]">Description (optional)</label>
+                        <input type="text" x-model="newWebhookDescription" placeholder="GitHub push/PR events"
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                    </div>
+                    <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                        @click="addWebhook()" :disabled="channelLoading || !newWebhookName.trim()">Create Webhook</button>
+                </div>
+
+                <!-- Webhook Slots List -->
+                <template x-if="webhookSlots.length === 0 && !showAddWebhook">
+                    <div class="text-center py-8 text-white/50 text-[13px]">No webhooks configured yet. Click "Add Webhook" to create one.</div>
+                </template>
+
+                <template x-for="slot in webhookSlots" :key="slot.name">
+                    <div class="flex flex-col gap-3 p-4 bg-black/20 rounded-[12px] border border-[var(--glass-border)]">
+                        <div class="flex items-start justify-between">
+                            <div>
+                                <div class="text-[14px] font-medium text-white" x-text="slot.name"></div>
+                                <div x-show="slot.description" class="text-[12px] text-white/50 mt-0.5" x-text="slot.description"></div>
+                            </div>
+                            <button class="p-1.5 text-white/50 hover:text-[var(--danger-color)] hover:bg-[var(--danger-color)]/10 rounded-lg transition-colors"
+                                @click="removeWebhook(slot.name)" title="Remove webhook">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                        <div class="flex flex-col gap-1">
+                            <label class="text-[11px] font-medium text-white/50 uppercase tracking-wider">URL</label>
+                            <div class="flex gap-2 items-center">
+                                <code class="flex-1 text-[12px] text-[var(--accent-color)] bg-black/30 px-3 py-2 rounded-[8px] truncate" x-text="slot.url"></code>
+                                <button class="shrink-0 p-2 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                                    @click="copyToClipboard(slot.url)" title="Copy URL">
+                                    <i data-lucide="copy" class="w-4 h-4"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="flex flex-col gap-1">
+                            <label class="text-[11px] font-medium text-white/50 uppercase tracking-wider">Secret</label>
+                            <div class="flex gap-2 items-center">
+                                <code class="flex-1 text-[12px] text-white/50 bg-black/30 px-3 py-2 rounded-[8px] truncate" x-text="slot.secret.substring(0, 8) + '••••••••••••'"></code>
+                                <button class="shrink-0 p-2 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                                    @click="copyToClipboard(slot.secret)" title="Copy secret">
+                                    <i data-lucide="copy" class="w-4 h-4"></i>
+                                </button>
+                                <button class="shrink-0 p-2 text-white/40 hover:text-[var(--warning-color)] hover:bg-[var(--warning-color)]/10 rounded-lg transition-colors"
+                                    @click="regenerateWebhookSecret(slot.name)" title="Regenerate secret">
+                                    <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
+                <div x-show="webhookSlots.length > 0" class="text-[11px] text-white/50 leading-relaxed">
+                    <strong>Usage:</strong> <code class="text-[11px]">curl -X POST &lt;url&gt; -H "X-Webhook-Secret: &lt;secret&gt;" -H "Content-Type: application/json" -d '{"content": "hello"}'</code>
+                    <br/>Add <code class="text-[11px]">?wait=true</code> to wait for the agent's response.
+                </div>
+            </div>
+
+        </div>
     </div>
+
+    <!-- Refresh icons when modal opens -->
+    <div x-effect="showChannels && $nextTick(() => { if (window.refreshIcons) window.refreshIcons(); })"></div>
 </div>
 </div>

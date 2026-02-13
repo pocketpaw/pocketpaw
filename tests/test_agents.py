@@ -262,12 +262,13 @@ class TestClaudeAgentSDK:
         assert sdk._is_dangerous_command("curl https://example.com") is None  # curl alone is safe
 
     def test_sdk_has_system_prompt(self):
-        """SDK should have a system prompt defined."""
-        from pocketclaw.agents.claude_sdk import SYSTEM_PROMPT
+        """SDK should have identity fallback and tool instructions defined."""
+        from pocketclaw.agents.claude_sdk import _DEFAULT_IDENTITY, _TOOL_INSTRUCTIONS
 
-        assert SYSTEM_PROMPT is not None
-        assert len(SYSTEM_PROMPT) > 100
-        assert "PocketPaw" in SYSTEM_PROMPT
+        assert _DEFAULT_IDENTITY is not None
+        assert "PocketPaw" in _DEFAULT_IDENTITY
+        assert _TOOL_INSTRUCTIONS is not None
+        assert len(_TOOL_INSTRUCTIONS) > 100
 
     def test_sdk_has_dangerous_patterns(self):
         """SDK should have dangerous patterns defined."""
@@ -352,7 +353,7 @@ class TestClaudeAgentSDK:
 
         assert len(events) == 1
         assert events[0].type == "error"
-        assert "not available" in events[0].content.lower()
+        assert "not found" in events[0].content.lower()
 
 
 # =============================================================================

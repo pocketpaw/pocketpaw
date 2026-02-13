@@ -2,19 +2,20 @@
   PocketPaw Dashboard - Crew View (Control Room)
 
   Created: 2026-02-05
-  Updated: 2026-02-05 - Componentized into sub-templates using Jinja2 includes
-
-  Linear-inspired project management dashboard for multi-agent orchestration.
-  Provides real-time visibility into what agents are doing.
+  Updated: 2026-02-12 — Added Deep Work sub-tab (Tasks/Projects) with project
+    list, project detail sheet, and start project modal.
 
   Sub-components:
   - missions/stats-bar.html: Stats + running task banner
   - missions/task-list.html: Task filters + compact table
   - missions/agents-sidebar.html: Agents list + activity feed
+  - missions/deep-work-projects.html: Deep Work project list + detail
   - missions/sheets/task-detail.html: Full-height task detail slide panel
   - missions/sheets/agent-activity.html: Agent activity stream panel
+  - missions/sheets/project-detail.html: Deep Work project detail panel
   - missions/modals/create-task.html: New task modal
   - missions/modals/create-agent.html: New agent modal
+  - missions/modals/start-project.html: Start Deep Work project modal
 -->
 
 <!-- Missions View -->
@@ -33,20 +34,27 @@
 
         {% include "components/missions/stats-bar.html" %}
 
-        <!-- Two Column Layout -->
-        <div class="flex-1 flex overflow-hidden">
+        <!-- Tasks view -->
+        <div class="flex-1 flex overflow-hidden" x-show="missionControl.crewTab === 'tasks'">
             {% include "components/missions/task-list.html" %}
             {% include "components/missions/agents-sidebar.html" %}
+        </div>
+
+        <!-- Projects view (Deep Work) -->
+        <div class="flex-1 flex overflow-hidden" x-show="missionControl.crewTab === 'projects'">
+            {% include "components/missions/deep-work-projects.html" %}
         </div>
     </div>
 
     <!-- Sheets (Slide-out Panels) -->
     {% include "components/missions/sheets/task-detail.html" %}
     {% include "components/missions/sheets/agent-activity.html" %}
+    {% include "components/missions/sheets/project-detail.html" %}
 
     <!-- Modals -->
     {% include "components/missions/modals/create-task.html" %}
     {% include "components/missions/modals/create-agent.html" %}
+    {% include "components/missions/modals/start-project.html" %}
 </div>
 
 <style>

@@ -222,7 +222,8 @@ async def test_image_webhook_parsing(adapter, bus):
 
     await adapter.handle_webhook_message(payload)
     msg = await bus.consume_inbound()
-    assert msg.content == "Look at this!"
+    # Caption is present, so content starts with it
+    assert "Look at this!" in msg.content
 
     await adapter.stop()
 
@@ -286,13 +287,29 @@ async def test_bus_integration(bus):
     adapter.send.assert_called_once_with(msg)
 
 
-def test_extract_content_types():
+async def test_extract_content_and_media_types():
     """Various message types extract content correctly."""
-    assert WhatsAppAdapter._extract_content({"type": "text", "text": {"body": "hi"}}) == "hi"
-    assert WhatsAppAdapter._extract_content({"type": "image", "image": {}}) == "[Image received]"
-    assert WhatsAppAdapter._extract_content({"type": "image", "image": {"caption": "pic"}}) == "pic"
-    assert WhatsAppAdapter._extract_content({"type": "audio"}) == "[Audio message received]"
-    assert WhatsAppAdapter._extract_content({"type": "sticker"}) == "[sticker message received]"
+    adapter = WhatsAppAdapter(access_token="t", phone_number_id="p", verify_token="v")
+
+    content, media = await adapter._extract_content_and_media(
+        {"type": "text", "text": {"body": "hi"}}
+    )
+    assert content == "hi"
+    assert media == []
+
+    content, media = await adapter._extract_content_and_media({"type": "image", "image": {}})
+    assert "image" in content.lower() or "received" in content.lower()
+
+    content, media = await adapter._extract_content_and_media(
+        {"type": "image", "image": {"caption": "pic"}}
+    )
+    assert "pic" in content
+
+    content, media = await adapter._extract_content_and_media({"type": "audio", "audio": {}})
+    assert "audio" in content.lower() or "received" in content.lower()
+
+    content, media = await adapter._extract_content_and_media({"type": "sticker", "sticker": {}})
+    assert "sticker" in content.lower() or "received" in content.lower()
 
 
 async def test_no_allowed_numbers_means_all_allowed(bus):

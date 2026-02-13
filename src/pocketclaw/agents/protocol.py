@@ -17,6 +17,8 @@ class AgentEvent:
         - "code": Code block being executed
         - "tool_use": Tool is being invoked
         - "tool_result": Tool execution result
+        - "thinking": Extended thinking content (Activity panel only, not sent to channels)
+        - "thinking_done": Thinking phase completed
         - "error": Error message
         - "done": Agent finished processing
     """

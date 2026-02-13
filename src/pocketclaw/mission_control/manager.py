@@ -1,6 +1,12 @@
 """Mission Control manager.
 
 Created: 2026-02-05
+Updated: 2026-02-12 — Added project directory management:
+  - create_project() now creates ~/.pocketclaw/projects/{id}/ on disk
+  - delete_project() now removes the project directory via shutil.rmtree()
+  - Added ensure_project_directories() for startup migration
+  Previous: Added skipped count to get_project_progress(), project CRUD.
+
 High-level operations for Mission Control.
 
 Similar to MemoryManager, this provides convenient methods
@@ -10,11 +16,19 @@ that combine storage operations with business logic:
 - Extracting @mentions from messages
 - Managing agent heartbeats
 - Generating daily standups
+- Project lifecycle management (Deep Work)
 """
+
+from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+import shutil
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pocketclaw.deep_work.models import Project
 
 from pocketclaw.mission_control.models import (
     Activity,
@@ -39,6 +53,18 @@ logger = logging.getLogger(__name__)
 
 # Regex for @mentions (e.g., @Jarvis, @all)
 MENTION_PATTERN = re.compile(r"@(\w+)", re.IGNORECASE)
+
+# Base directory for Deep Work project files (visible to user)
+_PROJECTS_BASE = Path.home() / "pocketpaw-projects"
+
+
+def get_project_dir(project_id: str) -> Path:
+    """Return the on-disk directory for a project's working files.
+
+    Projects are stored in ~/pocketpaw-projects/{id}/ so they're
+    easy to find and browse in the user's home directory.
+    """
+    return _PROJECTS_BASE / project_id
 
 
 class MissionControlManager:
@@ -234,6 +260,20 @@ class MissionControlManager:
     async def get_task(self, task_id: str) -> Task | None:
         """Get a task by ID."""
         return await self._store.get_task(task_id)
+
+    async def save_task(self, task: Task) -> str:
+        """Save or update a task (low-level).
+
+        Use this instead of accessing _store directly to keep writes
+        routed through the manager.
+
+        Args:
+            task: Task to save.
+
+        Returns:
+            The task ID.
+        """
+        return await self._store.save_task(task)
 
     async def list_tasks(
         self,
@@ -487,6 +527,14 @@ class MissionControlManager:
 
         return document
 
+    async def save_document(self, document: Document) -> str:
+        """Save or update a document (low-level)."""
+        return await self._store.save_document(document)
+
+    async def save_activity(self, activity: Activity) -> str:
+        """Save an activity (low-level)."""
+        return await self._store.save_activity(activity)
+
     async def get_document(self, document_id: str) -> Document | None:
         """Get a document by ID."""
         return await self._store.get_document(document_id)
@@ -499,6 +547,10 @@ class MissionControlManager:
     ) -> list[Document]:
         """List documents with optional filters."""
         return await self._store.list_documents(doc_type, task_id, tags)
+
+    async def get_task_documents(self, task_id: str) -> list[Document]:
+        """Get all documents linked to a task."""
+        return await self._store.list_documents(task_id=task_id)
 
     async def update_document(
         self, document_id: str, content: str, editor_id: str | None = None
@@ -535,6 +587,163 @@ class MissionControlManager:
         )
 
         return document
+
+    # =========================================================================
+    # Project Operations (Deep Work)
+    # =========================================================================
+
+    async def create_project(
+        self,
+        title: str,
+        description: str = "",
+        creator_id: str = "human",
+        tags: list[str] | None = None,
+    ) -> Project:
+        """Create a new project and log the activity.
+
+        Args:
+            title: Short project name
+            description: Full project description and goals
+            creator_id: Agent or user who created this (default "human")
+            tags: Categorization tags
+
+        Returns:
+            The created Project
+        """
+        from pocketclaw.deep_work.models import Project
+
+        project = Project(
+            title=title,
+            description=description,
+            creator_id=creator_id,
+            tags=tags or [],
+        )
+
+        await self._store.save_project(project)
+
+        # Create project directory on disk
+        project_dir = get_project_dir(project.id)
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        # Log activity (reuse TASK_CREATED for project creation)
+        await self._log_activity(
+            ActivityType.TASK_CREATED,
+            agent_id=creator_id if creator_id != "human" else None,
+            message=f"Created project: {title}",
+        )
+
+        logger.info(f"Created project: {title} (dir: {project_dir})")
+        return project
+
+    async def get_project(self, project_id: str) -> Project | None:
+        """Get a project by ID."""
+        return await self._store.get_project(project_id)
+
+    async def list_projects(self, status: str | None = None) -> list[Project]:
+        """List all projects, optionally filtered by status."""
+        return await self._store.list_projects(status)
+
+    async def get_project_tasks(self, project_id: str) -> list[Task]:
+        """Get all tasks belonging to a project.
+
+        Args:
+            project_id: Project to get tasks for
+
+        Returns:
+            List of tasks with matching project_id
+        """
+        all_tasks = await self._store.list_tasks(limit=0)
+        return [t for t in all_tasks if t.project_id == project_id]
+
+    async def get_project_progress(self, project_id: str) -> dict[str, Any]:
+        """Get progress summary for a project.
+
+        Args:
+            project_id: Project to get progress for
+
+        Returns:
+            Dict with total, completed, skipped, in_progress, blocked, human_pending, percent
+        """
+        tasks = await self.get_project_tasks(project_id)
+        total = len(tasks)
+        completed = len([t for t in tasks if t.status == TaskStatus.DONE])
+        skipped = len([t for t in tasks if t.status == TaskStatus.SKIPPED])
+        in_progress = len([t for t in tasks if t.status == TaskStatus.IN_PROGRESS])
+        blocked = len([t for t in tasks if t.status == TaskStatus.BLOCKED])
+        human_pending = len(
+            [
+                t
+                for t in tasks
+                if t.task_type == "human" and t.status not in (TaskStatus.DONE, TaskStatus.SKIPPED)
+            ]
+        )
+        percent = ((completed + skipped) / total * 100) if total > 0 else 0.0
+
+        return {
+            "total": total,
+            "completed": completed,
+            "skipped": skipped,
+            "in_progress": in_progress,
+            "blocked": blocked,
+            "human_pending": human_pending,
+            "percent": round(percent, 1),
+        }
+
+    async def update_project(self, project: Project) -> str:
+        """Update a project.
+
+        Args:
+            project: Project instance to save
+
+        Returns:
+            The project ID
+        """
+        return await self._store.save_project(project)
+
+    async def delete_project(self, project_id: str) -> bool:
+        """Delete a project and all its tasks.
+
+        Also removes the project directory from disk.
+
+        Args:
+            project_id: Project to delete
+
+        Returns:
+            True if successfully deleted
+        """
+        # Delete project's tasks first
+        tasks = await self.get_project_tasks(project_id)
+        for task in tasks:
+            await self._store.delete_task(task.id)
+
+        # Remove project directory from disk
+        project_dir = get_project_dir(project_id)
+        if project_dir.exists():
+            shutil.rmtree(project_dir)
+            logger.info(f"Removed project directory: {project_dir}")
+
+        return await self._store.delete_project(project_id)
+
+    async def ensure_project_directories(self) -> int:
+        """Create directories for existing projects that lack one.
+
+        Called at startup to migrate projects that existed before
+        directory management was added.
+
+        Returns:
+            Number of directories created
+        """
+        projects = await self._store.list_projects()
+        created = 0
+        for project in projects:
+            project_dir = get_project_dir(project.id)
+            if not project_dir.exists():
+                project_dir.mkdir(parents=True, exist_ok=True)
+                created += 1
+                logger.info(f"Created missing project directory: {project_dir}")
+        if created:
+            logger.info(f"Created {created} missing project directories")
+        return created
 
     # =========================================================================
     # Activity & Notification Operations

@@ -48,6 +48,7 @@ htmlcov/
 
 # Docs (internal/draft)
 docs/
+idocs/
 .claude 
 
 # Config (contains secrets)

@@ -28,6 +28,7 @@ class OpenInterpreterAgent:
         self.settings = settings
         self._interpreter = None
         self._stop_flag = False
+        self._semaphore = asyncio.Semaphore(1)
         self._initialize()
 
     def _initialize(self) -> None:
@@ -86,153 +87,192 @@ class OpenInterpreterAgent:
             logger.error(f"❌ Failed to initialize Open Interpreter: {e}")
             self._interpreter = None
 
-    async def run(self, message: str, system_message: str | None = None) -> AsyncIterator[dict]:
-        """Run a message through Open Interpreter with real-time streaming."""
+    async def run(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+        system_message: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Run a message through Open Interpreter with real-time streaming.
+
+        Args:
+            message: User message to process.
+            system_prompt: Dynamic system prompt from AgentContextBuilder.
+            history: Recent session history (prepended as summary to prompt).
+            system_message: Legacy kwarg, superseded by system_prompt.
+        """
         if not self._interpreter:
             yield {"type": "message", "content": "❌ Open Interpreter not available."}
             return
 
-        self._stop_flag = False
+        # Semaphore(1) ensures only one OI session runs at a time
+        async with self._semaphore:
+            self._stop_flag = False
 
-        # Apply system message if provided
-        if system_message:
-            # We prepend to keep OI's functional instructions
-            # interpreter usually has its own long system_message
-            self._interpreter.system_message = (
-                f"{system_message}\n\n{self._interpreter.system_message}"
-            )
+            # Apply system prompt if provided (prefer system_prompt over legacy system_message)
+            effective_system = system_prompt or system_message
+            if effective_system:
+                # We prepend to keep OI's functional instructions
+                self._interpreter.system_message = (
+                    f"{effective_system}\n\n{self._interpreter.system_message}"
+                )
 
-        # Use a queue to stream chunks from the sync thread to the async generator
-        chunk_queue: asyncio.Queue = asyncio.Queue()
+            # If history provided, prepend a conversation summary to the prompt
+            if history:
+                summary_lines = ["[Recent conversation context]"]
+                for msg in history[-10:]:  # Last 10 messages to keep manageable
+                    role = msg.get("role", "user").capitalize()
+                    content = msg.get("content", "")
+                    if len(content) > 300:
+                        content = content[:300] + "..."
+                    summary_lines.append(f"{role}: {content}")
+                summary_lines.append("[End of context]\n")
+                message = "\n".join(summary_lines) + message
 
-        def run_sync():
-            """Run interpreter in a thread, push chunks to queue.
+            # Use a queue to stream chunks from the sync thread to the async generator
+            chunk_queue: asyncio.Queue = asyncio.Queue()
 
-            Open Interpreter chunk types:
-            - role: "assistant", type: "message" -> Text to show user
-            - role: "assistant", type: "code" -> Code being written
-            - role: "computer", type: "console", start: true -> Execution starting
-            - role: "computer", type: "console", format: "output" -> Final output
-            - role: "computer", type: "console", end: true -> Execution done
-            """
-            current_message = []
-            current_language = None
-            shown_running = False
+            def run_sync():
+                """Run interpreter in a thread, push chunks to queue.
 
-            try:
-                for chunk in self._interpreter.chat(message, stream=True):
-                    if self._stop_flag:
-                        break
+                Open Interpreter chunk types:
+                - role: "assistant", type: "message" -> Text to show user
+                - role: "assistant", type: "code" -> Code being written
+                - role: "computer", type: "console", start: true -> Execution starting
+                - role: "computer", type: "console", format: "output" -> Final output
+                - role: "computer", type: "console", end: true -> Execution done
+                """
+                current_message = []
+                current_language = None
+                shown_running = False
 
-                    if isinstance(chunk, dict):
-                        chunk_role = chunk.get("role", "")
-                        chunk_type = chunk.get("type", "")
-                        content = chunk.get("content", "")
-                        chunk_format = chunk.get("format", "")
-                        is_start = chunk.get("start", False)
-                        is_end = chunk.get("end", False)
+                try:
+                    for chunk in self._interpreter.chat(message, stream=True):
+                        if self._stop_flag:
+                            break
 
-                        # Handle computer/console chunks - emit tool events for Activity
-                        if chunk_role == "computer":
-                            if chunk_type == "console":
-                                if is_start and current_language and not shown_running:
-                                    # Emit tool_use event for Activity panel
-                                    lang_display = current_language.title()
+                        if isinstance(chunk, dict):
+                            chunk_role = chunk.get("role", "")
+                            chunk_type = chunk.get("type", "")
+                            content = chunk.get("content", "")
+                            chunk_format = chunk.get("format", "")
+                            is_start = chunk.get("start", False)
+                            is_end = chunk.get("end", False)
+
+                            # Handle computer/console chunks - emit tool events for Activity
+                            if chunk_role == "computer":
+                                if chunk_type == "console":
+                                    if is_start and current_language and not shown_running:
+                                        # Emit tool_use event for Activity panel
+                                        lang_display = current_language.title()
+                                        asyncio.run_coroutine_threadsafe(
+                                            chunk_queue.put(
+                                                {
+                                                    "type": "tool_use",
+                                                    "content": f"Running {lang_display}...",
+                                                    "metadata": {
+                                                        "name": f"run_{current_language}",
+                                                        "input": {},
+                                                    },
+                                                }
+                                            ),
+                                            loop,
+                                        )
+                                        shown_running = True
+                                    elif is_end:
+                                        # Emit tool_result event for Activity panel
+                                        lang_display = (
+                                            current_language.title() if current_language else "Code"
+                                        )
+                                        asyncio.run_coroutine_threadsafe(
+                                            chunk_queue.put(
+                                                {
+                                                    "type": "tool_result",
+                                                    "content": (
+                                                        f"{lang_display} execution completed"
+                                                    ),
+                                                    "metadata": {
+                                                        "name": (
+                                                            f"run_{current_language or 'code'}"
+                                                        )
+                                                    },
+                                                }
+                                            ),
+                                            loop,
+                                        )
+                                        # Reset for next code block
+                                        shown_running = False
+                                    # Skip verbose active_line, intermediate output
+                                continue
+
+                            # Handle assistant chunks
+                            if chunk_role == "assistant":
+                                if chunk_type == "code":
+                                    # Capture language for progress indicator
+                                    current_language = chunk_format or "code"
+                                    # Flush any pending message
+                                    if current_message:
+                                        asyncio.run_coroutine_threadsafe(
+                                            chunk_queue.put(
+                                                {
+                                                    "type": "message",
+                                                    "content": "".join(current_message),
+                                                }
+                                            ),
+                                            loop,
+                                        )
+                                        current_message = []
+                                    # Don't show raw code fragments
+                                elif chunk_type == "message" and content:
+                                    # Stream message chunks
                                     asyncio.run_coroutine_threadsafe(
-                                        chunk_queue.put(
-                                            {
-                                                "type": "tool_use",
-                                                "content": f"Running {lang_display}...",
-                                                "metadata": {
-                                                    "name": f"run_{current_language}",
-                                                    "input": {},
-                                                },
-                                            }
-                                        ),
+                                        chunk_queue.put({"type": "message", "content": content}),
                                         loop,
                                     )
-                                    shown_running = True
-                                elif is_end:
-                                    # Emit tool_result event for Activity panel
-                                    lang_display = (
-                                        current_language.title() if current_language else "Code"
-                                    )
-                                    asyncio.run_coroutine_threadsafe(
-                                        chunk_queue.put(
-                                            {
-                                                "type": "tool_result",
-                                                "content": f"{lang_display} execution completed",
-                                                "metadata": {
-                                                    "name": f"run_{current_language or 'code'}"
-                                                },
-                                            }
-                                        ),
-                                        loop,
-                                    )
-                                    # Reset for next code block
-                                    shown_running = False
-                                # Skip verbose active_line, intermediate output
-                            continue
+                        elif isinstance(chunk, str) and chunk:
+                            current_message.append(chunk)
 
-                        # Handle assistant chunks
-                        if chunk_role == "assistant":
-                            if chunk_type == "code":
-                                # Capture language for progress indicator
-                                current_language = chunk_format or "code"
-                                # Flush any pending message
-                                if current_message:
-                                    asyncio.run_coroutine_threadsafe(
-                                        chunk_queue.put(
-                                            {"type": "message", "content": "".join(current_message)}
-                                        ),
-                                        loop,
-                                    )
-                                    current_message = []
-                                # Don't show raw code fragments
-                            elif chunk_type == "message" and content:
-                                # Stream message chunks
-                                asyncio.run_coroutine_threadsafe(
-                                    chunk_queue.put({"type": "message", "content": content}), loop
-                                )
-                    elif isinstance(chunk, str) and chunk:
-                        current_message.append(chunk)
-
-                # Flush remaining message
-                if current_message:
+                    # Flush remaining message
+                    if current_message:
+                        asyncio.run_coroutine_threadsafe(
+                            chunk_queue.put(
+                                {"type": "message", "content": "".join(current_message)}
+                            ),
+                            loop,
+                        )
+                except Exception as e:
                     asyncio.run_coroutine_threadsafe(
-                        chunk_queue.put({"type": "message", "content": "".join(current_message)}),
+                        chunk_queue.put({"type": "error", "content": f"Agent error: {str(e)}"}),
                         loop,
                     )
+                finally:
+                    # Signal completion
+                    asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
+
+            try:
+                loop = asyncio.get_event_loop()
+
+                # Start the sync function in a thread
+                executor_future = loop.run_in_executor(None, run_sync)
+
+                # Yield chunks as they arrive
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(chunk_queue.get(), timeout=60.0)
+                        if chunk is None:  # End signal
+                            break
+                        yield chunk
+                    except TimeoutError:
+                        yield {"type": "message", "content": "⏳ Still processing..."}
+
+                # Wait for executor to finish
+                await executor_future
+
             except Exception as e:
-                asyncio.run_coroutine_threadsafe(
-                    chunk_queue.put({"type": "error", "content": f"Agent error: {str(e)}"}), loop
-                )
-            finally:
-                # Signal completion
-                asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
-
-        try:
-            loop = asyncio.get_event_loop()
-
-            # Start the sync function in a thread
-            executor_future = loop.run_in_executor(None, run_sync)
-
-            # Yield chunks as they arrive
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(chunk_queue.get(), timeout=60.0)
-                    if chunk is None:  # End signal
-                        break
-                    yield chunk
-                except TimeoutError:
-                    yield {"type": "message", "content": "⏳ Still processing..."}
-
-            # Wait for executor to finish
-            await executor_future
-
-        except Exception as e:
-            logger.error(f"Open Interpreter error: {e}")
-            yield {"type": "error", "content": f"❌ Agent error: {str(e)}"}
+                logger.error(f"Open Interpreter error: {e}")
+                yield {"type": "error", "content": f"❌ Agent error: {str(e)}"}
 
     async def stop(self) -> None:
         """Stop the agent execution."""

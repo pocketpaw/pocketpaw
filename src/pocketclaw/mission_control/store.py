@@ -1,6 +1,8 @@
 """File-based Mission Control store.
 
 Created: 2026-02-05
+Updated: 2026-02-12 — Added Project entity for Deep Work orchestration layer.
+
 Implements MissionControlStoreProtocol using JSON files.
 
 Storage layout:
@@ -11,6 +13,7 @@ Storage layout:
     activities.json     # Activity feed
     documents.json      # All documents
     notifications.json  # All notifications
+    projects.json       # All Deep Work projects
 
 Design notes:
 - Single JSON file per entity type for simplicity
@@ -19,10 +22,15 @@ Design notes:
 - Suitable for personal use (< 10k records per type)
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pocketclaw.deep_work.models import Project
 
 from pocketclaw.mission_control.models import (
     Activity,
@@ -65,6 +73,7 @@ class FileMissionControlStore:
         self._activities_file = self.base_path / "activities.json"
         self._documents_file = self.base_path / "documents.json"
         self._notifications_file = self.base_path / "notifications.json"
+        self._projects_file = self.base_path / "projects.json"
 
         # In-memory indexes
         self._agents: dict[str, AgentProfile] = {}
@@ -73,6 +82,7 @@ class FileMissionControlStore:
         self._activities: dict[str, Activity] = {}
         self._documents: dict[str, Document] = {}
         self._notifications: dict[str, Notification] = {}
+        self._projects: dict[str, Project] = {}
 
         # Load existing data
         self._load_all()
@@ -98,7 +108,7 @@ class FileMissionControlStore:
         try:
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            temp_path.rename(path)
+            temp_path.replace(path)
         except OSError as e:
             logger.error(f"Error saving {path}: {e}")
             if temp_path.exists():
@@ -136,9 +146,17 @@ class FileMissionControlStore:
             notification = Notification.from_dict(data)
             self._notifications[notification.id] = notification
 
+        # Load projects (lazy import to avoid circular dependency)
+        from pocketclaw.deep_work.models import Project as _Project
+
+        for data in self._load_json(self._projects_file):
+            project = _Project.from_dict(data)
+            self._projects[project.id] = project
+
         logger.info(
             f"Mission Control loaded: {len(self._agents)} agents, "
-            f"{len(self._tasks)} tasks, {len(self._messages)} messages"
+            f"{len(self._tasks)} tasks, {len(self._messages)} messages, "
+            f"{len(self._projects)} projects"
         )
 
     def _persist_agents(self) -> None:
@@ -170,6 +188,11 @@ class FileMissionControlStore:
         """Persist notifications to file."""
         data = [n.to_dict() for n in self._notifications.values()]
         self._save_json(self._notifications_file, data)
+
+    def _persist_projects(self) -> None:
+        """Persist projects to file."""
+        data = [p.to_dict() for p in self._projects.values()]
+        self._save_json(self._projects_file, data)
 
     # =========================================================================
     # Agent Operations
@@ -250,7 +273,11 @@ class FileMissionControlStore:
         tags: list[str] | None = None,
         limit: int = 100,
     ) -> list[Task]:
-        """List tasks with optional filters."""
+        """List tasks with optional filters.
+
+        Args:
+            limit: Max results. 0 means no limit.
+        """
         tasks = list(self._tasks.values())
 
         if status:
@@ -264,7 +291,7 @@ class FileMissionControlStore:
 
         # Sort by updated_at (most recent first)
         tasks.sort(key=lambda t: t.updated_at, reverse=True)
-        return tasks[:limit]
+        return tasks[:limit] if limit else tasks
 
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task."""
@@ -459,6 +486,42 @@ class FileMissionControlStore:
         return False
 
     # =========================================================================
+    # Project Operations
+    # =========================================================================
+
+    async def save_project(self, project: Project) -> str:
+        """Save or update a project."""
+        project.updated_at = now_iso()
+        self._projects[project.id] = project
+        self._persist_projects()
+        return project.id
+
+    async def get_project(self, project_id: str) -> Project | None:
+        """Get a project by ID."""
+        return self._projects.get(project_id)
+
+    async def list_projects(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[Project]:
+        """List projects, optionally filtered by status."""
+        projects = list(self._projects.values())
+        if status:
+            projects = [p for p in projects if p.status.value == status]
+        # Sort by updated_at (most recent first)
+        projects.sort(key=lambda p: p.updated_at, reverse=True)
+        return projects[:limit]
+
+    async def delete_project(self, project_id: str) -> bool:
+        """Delete a project."""
+        if project_id in self._projects:
+            del self._projects[project_id]
+            self._persist_projects()
+            return True
+        return False
+
+    # =========================================================================
     # Utility Operations
     # =========================================================================
 
@@ -472,6 +535,14 @@ class FileMissionControlStore:
         for status in AgentStatus:
             agent_counts[status.value] = len(
                 [a for a in self._agents.values() if a.status == status]
+            )
+
+        from pocketclaw.deep_work.models import ProjectStatus
+
+        project_counts = {}
+        for status in ProjectStatus:
+            project_counts[status.value] = len(
+                [p for p in self._projects.values() if p.status == status]
             )
 
         return {
@@ -491,6 +562,10 @@ class FileMissionControlStore:
                 "undelivered": len([n for n in self._notifications.values() if not n.delivered]),
                 "unread": len([n for n in self._notifications.values() if not n.read]),
             },
+            "projects": {
+                "total": len(self._projects),
+                "by_status": project_counts,
+            },
         }
 
     async def clear_all(self) -> None:
@@ -501,6 +576,7 @@ class FileMissionControlStore:
         self._activities.clear()
         self._documents.clear()
         self._notifications.clear()
+        self._projects.clear()
 
         self._persist_agents()
         self._persist_tasks()
@@ -508,6 +584,7 @@ class FileMissionControlStore:
         self._persist_activities()
         self._persist_documents()
         self._persist_notifications()
+        self._persist_projects()
 
         logger.warning("Mission Control data cleared!")
 

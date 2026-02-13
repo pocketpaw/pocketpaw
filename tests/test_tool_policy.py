@@ -22,9 +22,19 @@ class TestToolGroups:
 class TestProfileResolution:
     """Test ToolPolicy.resolve_profile()."""
 
-    def test_minimal_profile_only_memory(self):
+    def test_minimal_profile_memory_and_sessions(self):
         result = ToolPolicy.resolve_profile("minimal")
-        assert result == {"remember", "recall"}
+        assert result == {
+            "remember",
+            "recall",
+            "forget",
+            "new_session",
+            "list_sessions",
+            "switch_session",
+            "clear_session",
+            "rename_session",
+            "delete_session",
+        }
 
     def test_coding_profile_includes_fs_shell_memory(self):
         result = ToolPolicy.resolve_profile("coding")
@@ -54,7 +64,7 @@ class TestGroupExpansion:
 
     def test_expand_multiple_groups(self):
         result = ToolPolicy._expand_names(["group:shell", "group:memory"])
-        assert result == {"shell", "remember", "recall"}
+        assert result == {"shell", "remember", "recall", "forget"}
 
     def test_expand_mixed_groups_and_names(self):
         result = ToolPolicy._expand_names(["group:memory", "custom_tool"])
@@ -250,3 +260,38 @@ class TestRegistryPolicyIntegration:
         assert "browser" not in registry.allowed_tool_names
         # tool_names should still show all registered
         assert "browser" in registry.tool_names
+
+
+class TestMCPPolicy:
+    """Test MCP-specific policy methods."""
+
+    def test_full_profile_allows_all_mcp(self):
+        policy = ToolPolicy(profile="full")
+        assert policy.is_mcp_server_allowed("filesystem") is True
+        assert policy.is_mcp_tool_allowed("filesystem", "read_file") is True
+
+    def test_deny_specific_server(self):
+        policy = ToolPolicy(profile="full", deny=["mcp:dangerous:*"])
+        assert policy.is_mcp_server_allowed("dangerous") is False
+        assert policy.is_mcp_server_allowed("safe") is True
+
+    def test_deny_group_mcp(self):
+        policy = ToolPolicy(profile="full", deny=["group:mcp"])
+        assert policy.is_mcp_server_allowed("anything") is False
+        assert policy.is_mcp_tool_allowed("anything", "tool") is False
+
+    def test_deny_specific_tool(self):
+        policy = ToolPolicy(profile="full", deny=["mcp:fs:delete_file"])
+        assert policy.is_mcp_tool_allowed("fs", "delete_file") is False
+        assert policy.is_mcp_tool_allowed("fs", "read_file") is True
+        assert policy.is_mcp_server_allowed("fs") is True  # server itself ok
+
+    def test_minimal_profile_blocks_mcp_unless_allowed(self):
+        policy = ToolPolicy(profile="minimal")
+        # minimal has only memory tools — MCP not in allowed set
+        assert policy.is_mcp_server_allowed("fs") is False
+
+    def test_allow_specific_mcp_server(self):
+        policy = ToolPolicy(profile="minimal", allow=["mcp:fs:*"])
+        assert policy.is_mcp_server_allowed("fs") is True
+        assert policy.is_mcp_server_allowed("other") is False

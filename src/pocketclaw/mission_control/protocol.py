@@ -1,6 +1,8 @@
 """Mission Control storage protocol.
 
 Created: 2026-02-05
+Updated: 2026-02-12 — Added Project method signatures for Deep Work orchestration.
+
 Defines the interface for Mission Control storage backends.
 
 Following PocketPaw's protocol-first design pattern (like MemoryStoreProtocol),
@@ -9,7 +11,12 @@ this allows for swappable storage implementations:
 - Future: SQLite, PostgreSQL, Convex, etc.
 """
 
-from typing import Any, Protocol, runtime_checkable
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from pocketclaw.deep_work.models import Project
 
 from pocketclaw.mission_control.models import (
     Activity,
@@ -29,6 +36,33 @@ class MissionControlStoreProtocol(Protocol):
     All storage backends must implement these methods.
     The protocol is divided into sections for each entity type.
     """
+
+    # =========================================================================
+    # Project Operations
+    # =========================================================================
+
+    async def save_project(self, project: Project) -> str:
+        """Save or update a project.
+
+        Returns the project ID.
+        """
+        ...
+
+    async def get_project(self, project_id: str) -> Project | None:
+        """Get a project by ID."""
+        ...
+
+    async def list_projects(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[Project]:
+        """List projects, optionally filtered by status."""
+        ...
+
+    async def delete_project(self, project_id: str) -> bool:
+        """Delete a project. Returns True if deleted."""
+        ...
 
     # =========================================================================
     # Agent Operations

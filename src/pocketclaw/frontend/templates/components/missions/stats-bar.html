@@ -2,47 +2,120 @@
   PocketPaw - Crew Stats Bar Component
 
   Created: 2026-02-05
-  Extracted from missions.html as part of template componentization.
+  Updated: 2026-02-12 — Sub-tab switcher now calls updateHash() for hash routing.
+    Added Tasks/Projects sub-tab switcher, project count stat, "New Project"
+    button, and planning progress banner.
 
   Features:
+  - Sub-tab switcher (Tasks / Projects) with hash routing
   - Live indicator
-  - Agent/task/completion stats
-  - New Task/Agent buttons
+  - Agent/task/project/completion stats
+  - New Task/Agent/Project buttons
   - Running Task Banner with click-to-expand
+  - Planning Progress Banner (during Deep Work planning)
 -->
 
 <!-- Compact Stats Bar -->
 <div class="flex items-center justify-between px-6 py-3 border-b border-white/5 bg-black/20">
     <div class="flex items-center gap-6">
+        <!-- Sub-tab Switcher -->
+        <div class="flex bg-white/5 rounded-lg p-0.5">
+            <button
+                class="px-3 py-1 rounded-md text-xs font-medium transition-all"
+                :class="missionControl.crewTab === 'tasks' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'"
+                @click="missionControl.crewTab = 'tasks'; updateHash('#/crew')"
+            >Tasks</button>
+            <button
+                class="px-3 py-1 rounded-md text-xs font-medium transition-all flex items-center gap-1.5"
+                :class="missionControl.crewTab === 'projects' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'"
+                @click="missionControl.crewTab = 'projects'; loadProjects(); updateHash('#/crew/projects')"
+            >
+                <i data-lucide="layers" class="w-3 h-3"></i>
+                Projects
+                <span
+                    x-show="getActiveProjectCount() > 0"
+                    class="px-1.5 py-0.5 text-[9px] font-bold bg-accent/30 text-accent rounded-full"
+                    x-text="getActiveProjectCount()"
+                ></span>
+            </button>
+        </div>
+
         <div class="flex items-center gap-2">
             <div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
             <span class="text-xs text-white/40 uppercase tracking-wider">Live</span>
         </div>
-        <div class="flex items-center gap-4 text-sm">
+        <div class="flex items-center gap-4 text-sm hidden md:flex">
             <span class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.stats.total_agents || 0"></span> agents</span>
             <span class="text-white/30">·</span>
             <span class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.stats.active_tasks || 0"></span> active</span>
             <span class="text-white/30">·</span>
-            <span class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.stats.completed_today || 0"></span> done today</span>
+            <span class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.stats.completed_today || 0"></span> done</span>
+            <span x-show="missionControl.projects.length > 0" class="text-white/30">·</span>
+            <span x-show="missionControl.projects.length > 0" class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.projects.length"></span> projects</span>
         </div>
     </div>
     <div class="flex items-center gap-2">
-        <button
-            class="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-all"
-            @click="missionControl.showCreateTask = true"
-        >
-            <i data-lucide="plus" class="w-3.5 h-3.5"></i>
-            <span>New Task</span>
-        </button>
-        <button
-            class="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-all"
-            @click="missionControl.showCreateAgent = true"
-        >
-            <i data-lucide="user-plus" class="w-3.5 h-3.5"></i>
-            <span>New Agent</span>
-        </button>
+        <!-- Context-sensitive buttons -->
+        <template x-if="missionControl.crewTab === 'tasks'">
+            <div class="flex items-center gap-2">
+                <button
+                    class="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-all"
+                    @click="missionControl.showCreateTask = true"
+                >
+                    <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                    <span>New Task</span>
+                </button>
+                <button
+                    class="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-all"
+                    @click="missionControl.showCreateAgent = true"
+                >
+                    <i data-lucide="user-plus" class="w-3.5 h-3.5"></i>
+                    <span>New Agent</span>
+                </button>
+            </div>
+        </template>
+        <template x-if="missionControl.crewTab === 'projects'">
+            <button
+                class="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-accent hover:text-white bg-accent/10 hover:bg-accent/20 rounded-lg transition-all"
+                @click="missionControl.showStartProject = true"
+            >
+                <i data-lucide="rocket" class="w-3.5 h-3.5"></i>
+                <span>New Project</span>
+            </button>
+        </template>
     </div>
 </div>
+
+<!-- Planning Progress Banner (shown during Deep Work planning) -->
+<template x-if="missionControl.projectStarting">
+    <div class="relative overflow-hidden">
+        <div class="absolute inset-0 bg-gradient-to-r from-blue-600/90 via-indigo-500/80 to-violet-500/90"></div>
+        <div class="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-shimmer"></div>
+        <div class="relative flex items-center justify-between px-6 py-3">
+            <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center shadow-lg ring-2 ring-white/30">
+                    <i :data-lucide="getPlanningPhaseInfo().icon" class="w-5 h-5 text-white animate-pulse"></i>
+                </div>
+                <div class="flex flex-col">
+                    <div class="flex items-center gap-2">
+                        <span class="text-white font-semibold" x-text="getPlanningPhaseInfo().label"></span>
+                        <span class="text-white/70 text-sm">Deep Work planner active</span>
+                    </div>
+                    <span class="text-white/80 text-sm truncate max-w-md" x-text="missionControl.planningMessage"></span>
+                </div>
+            </div>
+            <!-- Phase progress dots -->
+            <div class="flex items-center gap-2">
+                <template x-for="step in 4" :key="step">
+                    <div
+                        class="w-2.5 h-2.5 rounded-full transition-all"
+                        :class="getPlanningPhaseInfo().step >= step ? 'bg-white' : 'bg-white/30'"
+                    ></div>
+                </template>
+            </div>
+        </div>
+    </div>
+</template>
 
 <!-- Running Task Banner -->
 <template x-if="getRunningTaskCount() > 0">

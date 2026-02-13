@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from pocketclaw.bus import BaseChannelAdapter, Channel, InboundMessage, OutboundMessage
+from pocketclaw.bus.format import convert_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,36 @@ class NeonizeAdapter(BaseChannelAdapter):
                 content = message.conversation or (
                     message.extendedTextMessage.text if message.extendedTextMessage else ""
                 )
-                if not content:
+
+                # Download media if present
+                media_paths: list[str] = []
+                media_msg = (
+                    message.imageMessage
+                    or message.documentMessage
+                    or message.audioMessage
+                    or message.videoMessage
+                    or message.stickerMessage
+                )
+                if media_msg:
+                    try:
+                        from pocketclaw.bus.media import build_media_hint, get_media_downloader
+
+                        data = await client.download_any(message)
+                        mime = getattr(media_msg, "mimetype", None)
+                        fname = getattr(media_msg, "fileName", None) or "media"
+                        # Use caption if available
+                        caption = getattr(media_msg, "caption", "")
+                        if caption and not content:
+                            content = caption
+
+                        downloader = get_media_downloader()
+                        path = await downloader.save_from_bytes(bytes(data), fname, mime)
+                        media_paths.append(path)
+                        content += build_media_hint([fname])
+                    except Exception as e:
+                        logger.warning("Failed to download neonize media: %s", e)
+
+                if not content and not media_paths:
                     return
 
                 msg = InboundMessage(
@@ -136,6 +166,7 @@ class NeonizeAdapter(BaseChannelAdapter):
                     sender_id=sender,
                     chat_id=chat_id,
                     content=content,
+                    media=media_paths,
                     metadata={"source": "neonize"},
                 )
                 await adapter._publish_inbound(msg)
@@ -218,6 +249,7 @@ class NeonizeAdapter(BaseChannelAdapter):
         """Send a text message via neonize."""
         if not self._client:
             return
+        text = convert_markdown(text, self.channel)
         try:
             # Look up the cached JID protobuf; fall back to building from string
             jid = self._jid_cache.get(to)

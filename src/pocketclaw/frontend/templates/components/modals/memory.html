@@ -1,169 +1,194 @@
 <!--
   PocketPaw Dashboard - Memory Modal
-
-  Changes:
-  - 2026-02-03: Extracted from monolithic index.html
-  - 2026-02-05: Added session list view with tabs for Sessions/Long-term
+  Redesigned: 2026-02-12
+  - Single-panel: facts list + collapsible config
+  - Removed stats cards, sessions tab (sidebar handles sessions)
 -->
 <!-- Memory Modal -->
 <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showMemory" x-transition.opacity @click.self="showMemory = false">
-    <div class="w-full max-w-[900px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
-        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
-            <h2 class="text-[17px] font-semibold">Memory Banks</h2>
-            <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showMemory = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+    <div class="w-full max-w-[640px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+
+        <!-- Header -->
+        <div class="flex items-center justify-between px-6 py-4 border-b border-[var(--glass-border)] shrink-0">
+            <div class="flex items-center gap-3">
+                <h2 class="text-[17px] font-semibold">Memory</h2>
+                <span class="text-[11px] text-white/40 bg-white/5 px-2 py-0.5 rounded-full" x-show="longTermMemory.length > 0" x-text="longTermMemory.length + ' facts'"></span>
+            </div>
+            <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showMemory = false">
+                <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
         </div>
 
-        <div class="p-6 overflow-y-auto">
-            <div x-show="memoryLoading" class="p-12 text-center text-white/50 flex flex-col items-center gap-3">
-                <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
-                <span>Loading memories...</span>
+        <!-- Search -->
+        <div class="px-5 pt-4 pb-2 shrink-0">
+            <div class="relative group">
+                <i data-lucide="search" class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 group-focus-within:text-[var(--accent-color)] transition-colors"></i>
+                <input
+                    type="text"
+                    x-model="memorySearch"
+                    placeholder="Search memories..."
+                    class="w-full bg-black/30 border border-[var(--glass-border)] rounded-xl py-2.5 pl-10 pr-4 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 focus:bg-black/40 transition-all placeholder-white/30"
+                >
+            </div>
+        </div>
+
+        <!-- Facts List (scrollable) -->
+        <div class="flex-1 overflow-y-auto px-5 pb-2 min-h-0" style="scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent;">
+
+            <div x-show="memoryLoading" class="py-16 text-center text-white/40 flex flex-col items-center gap-3">
+                <i data-lucide="loader-2" class="w-6 h-6 animate-spin"></i>
+                <span class="text-[13px]">Loading memories...</span>
             </div>
 
-            <div x-show="!memoryLoading" class="flex flex-col gap-6">
-                <!-- Stats Grid -->
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-[var(--accent-color)]/30 transition-colors">
-                        <i data-lucide="brain" class="w-5 h-5 text-[var(--accent-color)] mb-1"></i>
-                        <span class="text-2xl font-bold text-white" x-text="memoryStats.total_memories || 0"></span>
-                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Total</span>
-                    </div>
-                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-blue-400/30 transition-colors">
-                        <i data-lucide="message-square" class="w-5 h-5 text-blue-400 mb-1"></i>
-                        <span class="text-2xl font-bold text-white" x-text="memoryStats.active_sessions || 0"></span>
-                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Sessions</span>
-                    </div>
-                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-purple-400/30 transition-colors">
-                        <i data-lucide="bookmark" class="w-5 h-5 text-purple-400 mb-1"></i>
-                        <span class="text-2xl font-bold text-white" x-text="memoryStats.long_term_facts || 0"></span>
-                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Facts</span>
-                    </div>
-                    <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-green-400/30 transition-colors">
-                        <i data-lucide="user" class="w-5 h-5 text-green-400 mb-1"></i>
-                        <span class="text-2xl font-bold text-white" x-text="memoryStats.user_interactions || 0"></span>
-                        <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Your Messages</span>
-                    </div>
-                </div>
-
-                <!-- Tabs -->
-                <div class="flex gap-2 border-b border-[var(--glass-border)] pb-2">
-                    <button
-                        class="px-4 py-2 rounded-lg text-[13px] font-medium transition-all"
-                        :class="memoryTab === 'sessions' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' : 'text-white/50 hover:text-white hover:bg-white/5'"
-                        @click="memoryTab = 'sessions'"
-                    >
-                        <i data-lucide="message-square" class="w-4 h-4 inline mr-1.5"></i>Sessions
-                    </button>
-                    <button
-                        class="px-4 py-2 rounded-lg text-[13px] font-medium transition-all"
-                        :class="memoryTab === 'long_term' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' : 'text-white/50 hover:text-white hover:bg-white/5'"
-                        @click="memoryTab = 'long_term'"
-                    >
-                        <i data-lucide="bookmark" class="w-4 h-4 inline mr-1.5"></i>Long-term Facts
-                    </button>
-                </div>
-
-                <!-- Sessions Tab -->
-                <div x-show="memoryTab === 'sessions'" class="flex gap-4">
-                    <!-- Sessions List -->
-                    <div class="w-1/3 flex flex-col gap-2 max-h-[400px] overflow-y-auto pr-2">
-                        <template x-for="session in sessionsList" :key="session.id">
-                            <button
-                                class="text-left p-3 rounded-xl border transition-all"
-                                :class="selectedSession === session.id ? 'bg-blue-500/20 border-blue-500/30' : 'bg-black/30 border-[var(--glass-border)] hover:bg-white/5'"
-                                @click="selectSession(session.id)"
-                            >
-                                <div class="flex items-center justify-between mb-1.5">
-                                    <span class="text-[11px] text-white/40 font-mono" x-text="session.id.slice(0, 12) + '...'"></span>
-                                    <span class="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded" x-text="session.message_count + ' msgs'"></span>
-                                </div>
-                                <p class="text-[12px] text-white/70 line-clamp-2" x-text="session.first_message || 'Empty session'"></p>
-                                <p class="text-[10px] text-white/30 mt-1" x-text="formatDate(session.updated_at)"></p>
-                            </button>
-                        </template>
-                        <div x-show="sessionsList.length === 0" class="p-6 text-center text-white/30 text-[13px] italic">
-                            No sessions yet
-                        </div>
-                    </div>
-
-                    <!-- Session Messages -->
-                    <div class="w-2/3 bg-black/20 rounded-xl border border-[var(--glass-border)] p-4 max-h-[400px] overflow-y-auto">
-                        <div x-show="!selectedSession" class="p-8 text-center text-white/30 text-[14px]">
-                            <i data-lucide="message-square" class="w-8 h-8 mx-auto mb-3 opacity-30"></i>
-                            Select a session to view messages
-                        </div>
-                        <div x-show="selectedSession" class="flex flex-col gap-3">
-                            <template x-for="(msg, idx) in sessionMemory" :key="idx">
-                                <div
-                                    class="p-3 rounded-xl"
-                                    :class="msg.role === 'user' ? 'bg-blue-500/10 border border-blue-500/20 ml-8' : 'bg-white/5 border border-white/10 mr-8'"
-                                >
-                                    <div class="flex items-center gap-2 mb-1.5">
-                                        <span
-                                            class="text-[10px] font-bold uppercase tracking-wider"
-                                            :class="msg.role === 'user' ? 'text-blue-400' : 'text-green-400'"
-                                            x-text="msg.role"
-                                        ></span>
-                                    </div>
-                                    <p class="text-[13px] text-white/80 whitespace-pre-wrap" x-text="msg.content"></p>
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Long-term Tab -->
-                <div x-show="memoryTab === 'long_term'" class="flex flex-col gap-3">
-                    <!-- Search -->
-                    <div class="relative group">
-                        <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 group-focus-within:text-[var(--accent-color)] transition-colors"></i>
-                        <input
-                            type="text"
-                            x-model="memorySearch"
-                            placeholder="Search memories..."
-                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[12px] py-3 pl-11 pr-4 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
-                        >
-                    </div>
-
-                    <!-- Long-term Memories List -->
-                    <div class="flex flex-col gap-3 max-h-[350px] overflow-y-auto">
-                        <template x-for="memory in longTermMemory" :key="memory.timestamp">
-                            <div class="bg-black/30 p-4 md:p-5 rounded-xl border border-[var(--glass-border)] hover:bg-white/5 transition-all group">
-                                <div class="flex items-start justify-between gap-4 mb-2">
-                                    <div class="flex gap-2.5">
-                                        <span class="text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider border bg-purple-500/20 text-purple-400 border-purple-500/30">
-                                            fact
-                                        </span>
-                                        <span class="text-[11px] text-[var(--text-tertiary)] flex items-center gap-1.5 opacity-60">
-                                            <i data-lucide="calendar" class="w-3 h-3"></i>
-                                            <span x-text="formatDate(memory.timestamp)"></span>
-                                        </span>
-                                    </div>
-                                    <button
-                                        class="text-white/20 hover:text-[var(--danger-color)] hover:bg-white/10 p-1.5 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                        @click="deleteMemory(memory.timestamp)"
-                                        title="Forget memory"
-                                    >
-                                        <i data-lucide="trash-2" class="w-4 h-4"></i>
-                                    </button>
-                                </div>
-                                <p class="text-[14px] md:text-[15px] leading-relaxed text-white/90 break-words" x-text="memory.content"></p>
-                                <div class="flex gap-2 mt-3" x-show="memory.tags && memory.tags.length">
-                                    <template x-for="tag in memory.tags" :key="tag">
-                                        <span class="text-[11px] text-[var(--accent-color)] bg-[var(--accent-color)]/10 px-2 py-0.5 rounded border border-[var(--accent-color)]/20">
+            <div x-show="!memoryLoading" class="flex flex-col gap-2 py-1">
+                <template x-for="memory in getFilteredMemories()" :key="memory.id">
+                    <div class="group p-3.5 rounded-xl border border-[var(--glass-border)] hover:bg-white/[0.03] transition-all">
+                        <div class="flex items-start gap-3">
+                            <div class="flex-1 min-w-0">
+                                <p class="text-[13px] leading-relaxed text-white/85 break-words" x-text="memory.content"></p>
+                                <div class="flex items-center gap-2 mt-2">
+                                    <span class="text-[10px] text-white/30" x-text="formatDate(memory.timestamp)"></span>
+                                    <template x-for="tag in (memory.tags || [])" :key="tag">
+                                        <span class="text-[10px] text-[var(--accent-color)]/70 bg-[var(--accent-color)]/8 px-1.5 py-0.5 rounded">
                                             #<span x-text="tag"></span>
                                         </span>
                                     </template>
                                 </div>
                             </div>
-                        </template>
-                        <div x-show="longTermMemory.length === 0" class="p-12 text-center text-white/30">
-                            <i data-lucide="bookmark" class="w-8 h-8 mx-auto mb-3 opacity-30"></i>
-                            <p class="text-[14px] italic">No long-term memories yet</p>
-                            <p class="text-[12px] mt-2 text-white/20">Ask me to "remember" something to save it here</p>
+                            <button
+                                class="shrink-0 p-1.5 rounded-lg text-white/0 group-hover:text-white/20 hover:!text-[var(--danger-color)] hover:bg-white/5 transition-all"
+                                @click="deleteMemory(memory.id)"
+                                title="Forget"
+                            >
+                                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                            </button>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Empty state -->
+                <div x-show="longTermMemory.length === 0 && !memoryLoading" class="py-16 text-center">
+                    <i data-lucide="brain" class="w-10 h-10 mx-auto mb-3 text-white/15"></i>
+                    <p class="text-[14px] text-white/40">No memories yet</p>
+                    <p class="text-[12px] text-white/25 mt-1">Ask me to "remember" something to save it here</p>
+                </div>
+
+                <!-- No results -->
+                <div x-show="longTermMemory.length > 0 && getFilteredMemories().length === 0 && memorySearch.trim()" class="py-12 text-center">
+                    <p class="text-[13px] text-white/40">No memories match "<span class="text-white/60" x-text="memorySearch"></span>"</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuration (collapsible) -->
+        <div class="shrink-0 border-t border-[var(--glass-border)]">
+            <button
+                class="flex items-center justify-between w-full px-5 py-3 text-[12px] text-white/40 hover:text-white/60 transition-colors"
+                @click="memoryConfigOpen = !memoryConfigOpen"
+            >
+                <span class="flex items-center gap-2">
+                    <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+                    <span class="font-medium">Configuration</span>
+                    <span class="text-[10px] bg-white/5 px-1.5 py-0.5 rounded text-white/30" x-text="settings.memoryBackend === 'mem0' ? 'Mem0' : 'File'"></span>
+                </span>
+                <i :data-lucide="memoryConfigOpen ? 'chevron-down' : 'chevron-up'" class="w-3.5 h-3.5"></i>
+            </button>
+
+            <div x-show="memoryConfigOpen" x-transition class="px-5 pb-4 flex flex-col gap-3">
+                <!-- Backend -->
+                <div class="flex items-center justify-between gap-4">
+                    <div>
+                        <div class="text-[12px] font-medium text-white/70">Backend</div>
+                        <div class="text-[11px] text-white/30" x-text="settings.memoryBackend === 'mem0' ? 'Semantic search + LLM extraction' : 'Simple markdown files'"></div>
+                    </div>
+                    <div class="relative shrink-0">
+                        <select
+                            x-model="settings.memoryBackend"
+                            @change="saveSettings()"
+                            class="appearance-none bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 pl-3 pr-7 text-[12px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all"
+                        >
+                            <option value="file">File</option>
+                            <option value="mem0">Mem0</option>
+                        </select>
+                        <i data-lucide="chevron-down" class="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none text-white/30"></i>
+                    </div>
+                </div>
+
+                <!-- Mem0 options -->
+                <div x-show="settings.memoryBackend === 'mem0'" x-transition class="flex flex-col gap-2.5 pl-3 border-l-2 border-[var(--accent-color)]/20">
+                    <!-- Auto-Learn -->
+                    <label class="flex items-center justify-between gap-4 cursor-pointer group">
+                        <div>
+                            <div class="text-[12px] font-medium text-white/70 group-hover:text-white/90 transition-colors">Auto-Learn</div>
+                            <div class="text-[11px] text-white/30">Extract facts from conversations</div>
+                        </div>
+                        <div class="relative w-[36px] h-[20px] shrink-0">
+                            <input type="checkbox" x-model="settings.mem0AutoLearn" @change="saveSettings()" class="absolute opacity-0 w-0 h-0 peer" />
+                            <span class="absolute inset-0 bg-[#787880]/30 rounded-full transition-colors duration-300 peer-checked:bg-[var(--success-color)]"></span>
+                            <span class="absolute left-0.5 top-0.5 w-[16px] h-[16px] bg-white rounded-full shadow-[0_1px_3px_rgba(0,0,0,0.2)] transition-transform duration-300 peer-checked:translate-x-[16px]"></span>
+                        </div>
+                    </label>
+
+                    <!-- LLM + Embedder in a compact 2-col grid -->
+                    <div class="grid grid-cols-2 gap-2">
+                        <div class="flex flex-col gap-1">
+                            <label class="text-[10px] font-medium text-white/40 uppercase tracking-wider">LLM</label>
+                            <div class="relative">
+                                <select x-model="settings.mem0LlmProvider" @change="saveSettings()"
+                                    class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 pl-2.5 pr-6 text-[11px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all">
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="ollama">Ollama</option>
+                                </select>
+                                <i data-lucide="chevron-down" class="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none text-white/30"></i>
+                            </div>
+                        </div>
+                        <div class="flex flex-col gap-1">
+                            <label class="text-[10px] font-medium text-white/40 uppercase tracking-wider">LLM Model</label>
+                            <input type="text" x-model="settings.mem0LlmModel" @change="saveSettings()" placeholder="claude-haiku-4-5-20251001"
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 px-2.5 text-[11px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all placeholder-white/20" />
+                        </div>
+                        <div class="flex flex-col gap-1">
+                            <label class="text-[10px] font-medium text-white/40 uppercase tracking-wider">Embedder</label>
+                            <div class="relative">
+                                <select x-model="settings.mem0EmbedderProvider" @change="saveSettings()"
+                                    class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 pl-2.5 pr-6 text-[11px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all">
+                                    <option value="openai">OpenAI</option>
+                                    <option value="ollama">Ollama</option>
+                                    <option value="huggingface">HuggingFace</option>
+                                </select>
+                                <i data-lucide="chevron-down" class="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none text-white/30"></i>
+                            </div>
+                        </div>
+                        <div class="flex flex-col gap-1">
+                            <label class="text-[10px] font-medium text-white/40 uppercase tracking-wider">Embed Model</label>
+                            <input type="text" x-model="settings.mem0EmbedderModel" @change="saveSettings()" placeholder="text-embedding-3-small"
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 px-2.5 text-[11px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all placeholder-white/20" />
+                        </div>
+                    </div>
+
+                    <!-- Vector Store + Ollama URL -->
+                    <div class="grid gap-2" :class="(settings.mem0LlmProvider === 'ollama' || settings.mem0EmbedderProvider === 'ollama') ? 'grid-cols-2' : 'grid-cols-1'">
+                        <div class="flex flex-col gap-1">
+                            <label class="text-[10px] font-medium text-white/40 uppercase tracking-wider">Vector Store</label>
+                            <div class="relative">
+                                <select x-model="settings.mem0VectorStore" @change="saveSettings()"
+                                    class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 pl-2.5 pr-6 text-[11px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all">
+                                    <option value="qdrant">Qdrant</option>
+                                    <option value="chroma">ChromaDB</option>
+                                </select>
+                                <i data-lucide="chevron-down" class="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none text-white/30"></i>
+                            </div>
+                        </div>
+                        <div class="flex flex-col gap-1" x-show="settings.mem0LlmProvider === 'ollama' || settings.mem0EmbedderProvider === 'ollama'" x-transition>
+                            <label class="text-[10px] font-medium text-white/40 uppercase tracking-wider">Ollama URL</label>
+                            <input type="text" x-model="settings.mem0OllamaBaseUrl" @change="saveSettings()" placeholder="http://localhost:11434"
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 px-2.5 text-[11px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all placeholder-white/20" />
                         </div>
                     </div>
                 </div>
             </div>
         </div>
+
     </div>
 </div>
