@@ -246,4 +246,12 @@ def get_injection_scanner() -> InjectionScanner:
     global _scanner
     if _scanner is None:
         _scanner = InjectionScanner()
+
+        from pocketclaw.lifecycle import register
+
+        def _reset() -> None:
+            global _scanner
+            _scanner = None
+
+        register("injection_scanner", reset=_reset)
     return _scanner

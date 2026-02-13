@@ -115,16 +115,12 @@ class AgentLoop:
 
         # Global concurrency limit — blocks until a slot is available
         async with self._global_semaphore:
-            # Per-session lock — serializes messages within the same session
-            if resolved_key not in self._session_locks:
-                self._session_locks[resolved_key] = asyncio.Lock()
-            lock = self._session_locks[resolved_key]
+            # Per-session lock — serializes messages within the same session.
+            # Use setdefault() for atomic lock creation to avoid TOCTOU races
+            # where two coroutines could create duplicate locks.
+            lock = self._session_locks.setdefault(resolved_key, asyncio.Lock())
             async with lock:
                 await self._process_message_inner(message, resolved_key)
-
-            # Clean up lock if no one else is waiting on it
-            if not lock.locked():
-                self._session_locks.pop(resolved_key, None)
 
     _WELCOME_EXCLUDED = frozenset({Channel.WEBSOCKET, Channel.CLI, Channel.SYSTEM})
 
