@@ -266,7 +266,7 @@ class TestFileStoreConcurrency:
             assert f"Message {i}" in contents
 
 
-class TestFileStoreUnicode:
+class TestFileStoreEncoding:
     """Storing and retrieving unicode content."""
 
     @pytest.mark.asyncio
@@ -377,7 +377,7 @@ class TestMemoryManagerAutoLearnTrigger:
         manager._file_auto_learn.assert_called_once()
 
 
-class TestMemoryManagerSearchNoResults:
+class TestMemoryManagerSearch:
     """Memory search returns empty list when nothing matches."""
 
     @pytest.mark.asyncio
@@ -402,7 +402,7 @@ class TestMemoryManagerSearchNoResults:
         assert results == []
 
 
-class TestMemoryManagerSessionListing:
+class TestMemoryManagerSessions:
     """Session listing and deletion behavior."""
 
     @pytest.mark.asyncio
