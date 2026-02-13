@@ -7,7 +7,7 @@ Changes:
   - 2026-02-02: Added Rich logging for beautiful console output.
   - 2026-02-03: Handle port-in-use gracefully with automatic port finding.
 """
-
+from importlib.metadata import version
 import argparse
 import asyncio
 import importlib.util
@@ -351,10 +351,21 @@ Examples:
     parser.add_argument(
         "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
     )
-    parser.add_argument("--version", "-v", action="version", version="%(prog)s 0.2.0")
+
+    parser.add_argument(
+    "--version",
+    "-v",
+    action="store_true",
+    help="Show version and exit",
+    )
 
     args = parser.parse_args()
 
+    if args.version:
+        print(f"pocketpaw v{version('pocketpaw')}")
+        sys.exit(0)
+    
+    
     # Fail fast if optional deps are missing for the chosen mode
     _check_extras_installed(args)
 
