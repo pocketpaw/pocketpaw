@@ -358,6 +358,7 @@ pip install pocketpaw[all]                 # Everything
 
 Full documentation lives in [`documentation/`](documentation/README.md):
 
+- [Use Cases](documentation/guides/use-cases.md): Real-world examples (automation, research, coding, multi-agent workflows)
 - [Channel Adapters](documentation/features/channels.md): Discord, Slack, WhatsApp, Telegram setup
 - [Tool Policy](documentation/features/tool-policy.md): Profiles, groups, allow/deny
 - [Web Dashboard](documentation/features/web-dashboard.md): Browser UI overview
