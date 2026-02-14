@@ -14,6 +14,10 @@ import importlib.util
 import logging
 import sys
 import webbrowser
+from utils.dependency_check import check_dependencies
+
+check_dependencies()
+
 
 from pocketclaw.config import Settings, get_settings
 from pocketclaw.logging_setup import setup_logging
