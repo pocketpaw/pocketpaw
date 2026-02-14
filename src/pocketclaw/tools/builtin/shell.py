@@ -4,29 +4,19 @@
 
 import asyncio
 import subprocess
-import re
 from typing import Any
 
-from pocketclaw.tools.protocol import BaseTool
 from pocketclaw.config import get_settings
 from pocketclaw.security import get_guardian
+from pocketclaw.security.rails import COMPILED_DANGEROUS_PATTERNS
+from pocketclaw.tools.protocol import BaseTool
 
 
 class ShellTool(BaseTool):
     """Execute shell commands."""
 
-    # Dangerous patterns to block
-    DANGEROUS_PATTERNS = [
-        r"rm\s+-rf\s+/",
-        r"rm\s+-rf\s+\*",
-        r">\s*/etc/",
-        r"sudo\s+rm",
-        r"mkfs\.",
-        r"dd\s+if=/dev/",
-        r":\(\)\s*\{\s*:\|:&\s*\}\s*;",  # Fork bomb
-        r"curl.*\|\s*sh",
-        r"wget.*\|\s*bash",
-    ]
+    # Dangerous-command patterns — shared rail (see security/rails.py)
+    DANGEROUS_PATTERNS = COMPILED_DANGEROUS_PATTERNS
 
     def __init__(self, working_dir: str | None = None, timeout: int = 120):
         self.working_dir = working_dir or str(get_settings().file_jail_path)
@@ -61,7 +51,7 @@ class ShellTool(BaseTool):
         """Execute a shell command."""
         # Security check
         for pattern in self.DANGEROUS_PATTERNS:
-            if re.search(pattern, command, re.IGNORECASE):
+            if pattern.search(command):
                 return self._error(f"Dangerous command blocked: {command}")
 
         # Check with Guardian Agent
