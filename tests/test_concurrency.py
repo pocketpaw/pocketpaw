@@ -288,13 +288,18 @@ async def test_pocketpaw_native_uses_async_anthropic():
     settings = MagicMock()
     settings.anthropic_api_key = "sk-test"
     settings.anthropic_model = "claude-sonnet-4-5-20250929"
+    settings.llm_provider = "anthropic"
+    settings.ollama_host = "http://localhost:11434"
+    settings.ollama_model = "llama3.2"
+    settings.openai_api_key = None
+    settings.openai_model = "gpt-4o"
     settings.tool_profile = "full"
     settings.tools_allow = []
     settings.tools_deny = []
     settings.file_jail_path = Path.home()
     settings.smart_routing_enabled = False
 
-    with patch("pocketclaw.agents.pocketpaw_native.AsyncAnthropic") as mock_cls:
+    with patch("anthropic.AsyncAnthropic") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
 
@@ -311,8 +316,8 @@ async def test_pocketpaw_native_uses_async_anthropic():
 
         orch = PocketPawOrchestrator(settings)
 
-        # Confirm AsyncAnthropic was used
-        mock_cls.assert_called_once_with(api_key="sk-test")
+        # Confirm AsyncAnthropic was used with Anthropic provider
+        mock_cls.assert_called_once_with(api_key="sk-test", timeout=60.0, max_retries=2)
 
         # Run a chat and confirm messages.create was awaited
         events = []

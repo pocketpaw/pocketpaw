@@ -7,11 +7,6 @@ This module provides a secondary LLM check for dangerous actions.
 
 import logging
 
-try:
-    from anthropic import AsyncAnthropic
-except ImportError:
-    AsyncAnthropic = None
-
 from pocketclaw.config import get_settings
 from pocketclaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 from pocketclaw.security.rails import COMPILED_DANGEROUS_PATTERNS
@@ -49,12 +44,16 @@ Respond with valid JSON only:
 
     def __init__(self):
         self.settings = get_settings()
-        self.client: AsyncAnthropic | None = None
+        self.client = None
         self._audit = get_audit_logger()
 
     async def _ensure_client(self):
-        if not self.client and self.settings.anthropic_api_key:
-            self.client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+        if not self.client:
+            from pocketclaw.llm.client import resolve_llm_client
+
+            llm = resolve_llm_client(self.settings, force_provider="anthropic")
+            if llm.api_key:
+                self.client = llm.create_anthropic_client()
 
     def _local_safety_check(self, command: str) -> tuple[bool, str]:
         """Deny-by-default local pattern check.

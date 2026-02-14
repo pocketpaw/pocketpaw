@@ -24,10 +24,9 @@ import re
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-from anthropic import AsyncAnthropic
-
-from pocketclaw.config import Settings
 from pocketclaw.agents.protocol import AgentEvent
+from pocketclaw.config import Settings
+from pocketclaw.llm.client import LLMClient, resolve_llm_client
 from pocketclaw.security.rails import DANGEROUS_PATTERNS
 from pocketclaw.tools.policy import ToolPolicy
 
@@ -302,7 +301,8 @@ class PocketPawOrchestrator:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._client: Optional[AsyncAnthropic] = None
+        self._client = None
+        self._llm: LLMClient | None = None
         self._executor = None
         self._stop_flag = False
         self._file_jail = settings.file_jail_path.resolve()
@@ -315,20 +315,20 @@ class PocketPawOrchestrator:
 
     def _initialize(self) -> None:
         """Initialize the orchestrator."""
-        # Initialize Anthropic client
-        if not self.settings.anthropic_api_key:
-            logger.error("❌ Anthropic API key required for PocketPaw Native")
+        self._llm = resolve_llm_client(self.settings)
+
+        if self._llm.provider == "openai":
+            logger.error("❌ PocketPaw Native does not support OpenAI directly")
             return
 
-        # Initialize client with timeout to prevent hanging
+        if self._llm.is_anthropic and not self._llm.api_key:
+            logger.error("❌ No LLM provider available for PocketPaw Native")
+            return
+
         try:
-            self._client = AsyncAnthropic(
-                api_key=self.settings.anthropic_api_key,
-                timeout=60.0,  # 60 second timeout for API requests
-                max_retries=2,  # Limit retries to prevent long hangs
-            )
+            self._client = self._llm.create_anthropic_client()
         except Exception as e:
-            logger.error(f"Failed to initialize Anthropic client: {e}")
+            logger.error(f"Failed to initialize LLM client: {e}")
             self._client = None
             return
 
@@ -341,11 +341,17 @@ class PocketPawOrchestrator:
             logger.warning(f"⚠️ Executor init failed: {e}. Using fallback.")
             self._executor = None
 
+        brain = (
+            f"Ollama ({self._llm.ollama_host})"
+            if self._llm.is_ollama
+            else "Anthropic API (direct)"
+        )
+
         logger.info("=" * 50)
         logger.info("🐾 POCKETPAW NATIVE ORCHESTRATOR")
-        logger.info("   └─ Brain: Anthropic API (direct)")
+        logger.info("   └─ Brain: %s", brain)
         logger.info("   └─ Hands: Open Interpreter")
-        logger.info("   └─ Model: %s", self.settings.anthropic_model)
+        logger.info("   └─ Model: %s", self._llm.model)
         logger.info("   └─ File Jail: %s", self._file_jail)
         logger.info("   └─ Tool Profile: %s", self.settings.tool_profile)
         logger.info("   └─ Security: Enabled (patterns, paths, redaction)")
@@ -716,9 +722,11 @@ class PocketPawOrchestrator:
                 iteration += 1
                 logger.debug(f"Iteration {iteration}/{max_iterations}")
 
-                # Smart model routing (opt-in)
-                model = self.settings.anthropic_model
-                if self.settings.smart_routing_enabled:
+                # Select model based on provider
+                model = self._llm.model
+
+                # Smart model routing (opt-in, skip for Ollama — single model)
+                if self.settings.smart_routing_enabled and not self._llm.is_ollama:
                     from pocketclaw.agents.model_router import ModelRouter
 
                     model_router = ModelRouter(self.settings)
@@ -754,10 +762,10 @@ class PocketPawOrchestrator:
                     )
                     return
                 except Exception as api_error:
-                    logger.error(f"Anthropic API error: {api_error}")
+                    logger.error(f"API error ({self._llm.provider}): {api_error}")
                     yield AgentEvent(
                         type="error",
-                        content=f"❌ API Error: {str(api_error)}. Please verify your Anthropic API key in Settings.",
+                        content=self._llm.format_api_error(api_error),
                     )
                     return
 

@@ -1,0 +1,211 @@
+---
+title: Ollama (Local LLMs)
+description: "Run PocketPaw with local models via Ollama — no API keys, no cloud, no costs. Works with Claude Agent SDK and PocketPaw Native backends using Ollama's Anthropic-compatible Messages API."
+section: Agent Backends
+ogType: article
+keywords: ["ollama", "local llm", "self-hosted", "no api key", "anthropic compatible", "local models"]
+tags: ["backends", "ollama", "local"]
+---
+
+# Ollama (Local LLMs)
+
+Run PocketPaw entirely on your machine with [Ollama](https://ollama.com) — no API keys, no cloud, no costs. Both the **Claude Agent SDK** and **PocketPaw Native** backends work with Ollama out of the box.
+
+## How It Works
+
+Since Ollama v0.14.0, Ollama exposes an **Anthropic Messages API compatible endpoint**. PocketPaw points the same `AsyncAnthropic` client (or Claude SDK subprocess) at your local Ollama server instead of Anthropic's cloud. Same tool format, same streaming, zero format conversion.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install Ollama">
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+  </Step>
+  <Step title="Pull a model">
+    ```bash
+    ollama pull qwen2.5:7b       # Good balance of speed and quality
+    # or
+    ollama pull llama3.2          # Default model
+    ```
+  </Step>
+  <Step title="Start Ollama">
+    ```bash
+    ollama serve
+    ```
+  </Step>
+</Steps>
+
+## Quick Start
+
+<Tabs items={["Environment Variables", "Config File", "Dashboard"]}>
+  <Tab title="Environment Variables">
+    ```bash
+    export POCKETCLAW_LLM_PROVIDER=ollama
+    export POCKETCLAW_OLLAMA_MODEL=qwen2.5:7b
+    pocketpaw
+    ```
+  </Tab>
+  <Tab title="Config File">
+    Edit `~/.pocketclaw/config.json`:
+
+    ```json
+    {
+      "llm_provider": "ollama",
+      "ollama_host": "http://localhost:11434",
+      "ollama_model": "qwen2.5:7b"
+    }
+    ```
+  </Tab>
+  <Tab title="Dashboard">
+    Open the web dashboard, go to **Settings → General**:
+
+    1. Set **LLM Provider** to **Ollama**
+    2. Set **Ollama Host** (defaults to `http://localhost:11434`)
+    3. Set **Ollama Model** to the model you pulled (e.g., `qwen2.5:7b`, `deepseek-r1:8b`)
+
+    <Callout type="warning">
+      The Ollama Host and Ollama Model fields only appear when LLM Provider is set to **Ollama**. Make sure to set the model name to match what you have installed — run `ollama list` to check.
+    </Callout>
+  </Tab>
+</Tabs>
+
+## Verify Setup
+
+Run the built-in connectivity check:
+
+```bash
+pocketpaw --check-ollama
+```
+
+This performs 4 checks:
+
+| Check | What it tests |
+|-------|---------------|
+| Server reachable | Pings `{ollama_host}/api/tags` |
+| Model available | Verifies configured model is pulled locally |
+| Messages API | Tests Anthropic-compatible completion endpoint |
+| Tool calling | Sends a dummy tool and checks the model uses it |
+
+## Configuration
+
+| Setting | Env Var | Default | Description |
+|---------|---------|---------|-------------|
+| `llm_provider` | `POCKETCLAW_LLM_PROVIDER` | `"auto"` | Set to `"ollama"` for explicit Ollama usage |
+| `ollama_host` | `POCKETCLAW_OLLAMA_HOST` | `"http://localhost:11434"` | Ollama server URL |
+| `ollama_model` | `POCKETCLAW_OLLAMA_MODEL` | `"llama3.2"` | Model to use |
+
+### Auto-Detection
+
+When `llm_provider` is `"auto"` (the default):
+
+1. If `anthropic_api_key` is set → uses Anthropic
+2. If no API key is set → falls back to Ollama automatically
+
+This means if you install PocketPaw and Ollama without any API keys, **it just works**.
+
+## Compatible Backends
+
+| Backend | Ollama Support | How |
+|---------|---------------|-----|
+| **Claude Agent SDK** | Yes | Sets `ANTHROPIC_BASE_URL` env var for the SDK subprocess |
+| **PocketPaw Native** | Yes | Uses `AsyncAnthropic(base_url=ollama_host)` directly |
+| **Open Interpreter** | Yes (existing) | Has its own Ollama integration via `OI_MODEL` |
+
+### Claude Agent SDK + Ollama
+
+The default backend. The SDK subprocess receives these environment variables:
+
+- `ANTHROPIC_BASE_URL` → your Ollama host
+- `ANTHROPIC_API_KEY` → `"ollama"` (accepted but not validated)
+
+All SDK built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch) work as usual.
+
+### PocketPaw Native + Ollama
+
+The custom orchestrator creates `AsyncAnthropic(base_url=ollama_host)` and sends tool definitions in standard Anthropic format. The model receives tool schemas and returns `tool_use` blocks just like Claude.
+
+## Recommended Models
+
+| Model | Size | Tool Calling | Notes |
+|-------|------|-------------|-------|
+| `qwen2.5:7b` | 4.7 GB | Good | Best balance for most users |
+| `qwen2.5:14b` | 9 GB | Better | More reliable tool use |
+| `llama3.2` | 2 GB | Fair | Fast, lightweight |
+| `mistral:7b` | 4.1 GB | Good | Strong reasoning |
+| `deepseek-r1:8b` | 4.9 GB | Good | Strong at coding tasks |
+
+## Limitations
+
+- **Smart Model Router is skipped** — When using Ollama, the [Model Router](/advanced/model-router) cannot switch between models. Smart routing is automatically disabled.
+- **Tool calling quality varies** — Smaller models may not use tools reliably. If tools aren't being called, try a larger model.
+- **Ollama v0.14.0+ required** — Older versions don't expose the Anthropic Messages API endpoint.
+
+## Error Messages
+
+PocketPaw provides Ollama-specific error messages instead of generic API errors:
+
+| Error | Meaning | Fix |
+|-------|---------|-----|
+| **Model 'X' not found in Ollama** | The configured model isn't pulled locally | Run `ollama pull <model>` or change the model in **Settings → General → Ollama Model** |
+| **Ollama error: connection refused** | Ollama server isn't running | Run `ollama serve` |
+| **Cannot connect to Ollama** | Wrong host or Ollama is down | Check **Ollama Host** in Settings matches where Ollama is running |
+
+## Troubleshooting
+
+### "Model not found in Ollama"
+
+This means PocketPaw is trying to use a model you haven't pulled. The default model is `llama3.2` — if you use a different model (e.g., `deepseek`), make sure to update the setting:
+
+```bash
+# Check what models you have
+ollama list
+
+# Set the correct model
+export POCKETCLAW_OLLAMA_MODEL="deepseek-r1:8b"
+```
+
+Or update it in the dashboard: **Settings → General → Ollama Model**.
+
+### "Cannot reach Ollama server"
+
+```bash
+# Check Ollama is running
+ollama serve
+
+# Verify it's listening
+curl http://localhost:11434/api/tags
+```
+
+### "Messages API failed"
+
+Your Ollama version may be too old. Update:
+
+```bash
+# macOS
+brew upgrade ollama
+
+# Linux
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+### "Model responded but did not use the tool"
+
+Try a more capable model:
+
+```bash
+ollama pull qwen2.5:14b
+```
+
+Then set `ollama_model` to `qwen2.5:14b` in Settings or config.
+
+## Implementation
+
+| File | Description |
+|------|-------------|
+| `agents/pocketpaw_native.py` | Ollama branch in `_initialize()`, model selection in `chat()` |
+| `agents/claude_sdk.py` | Ollama env vars passed to SDK subprocess in `chat()` |
+| `agents/router.py` | Ollama detection logging in `_initialize_agent()` |
+| `__main__.py` | `--check-ollama` CLI command |
+| `tests/test_ollama_agent.py` | 18 tests covering both backends |

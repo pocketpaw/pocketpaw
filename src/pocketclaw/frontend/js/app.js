@@ -57,6 +57,8 @@ function app() {
         settings: {
             agentBackend: 'claude_agent_sdk',
             llmProvider: 'auto',
+            ollamaHost: 'http://localhost:11434',
+            ollamaModel: 'llama3.2',
             anthropicModel: 'claude-sonnet-4-5-20250929',
             bypassPermissions: false,
             webSearchProvider: 'tavily',
@@ -315,7 +317,7 @@ function app() {
 
             // Data-driven settings sync: map server keys to local settings
             const SETTINGS_MAP = [
-                'agentBackend', 'llmProvider', 'anthropicModel',
+                'agentBackend', 'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
                 'injectionScanEnabled', 'injectionScanLlm', 'toolProfile',
                 'planMode', 'planModeTools', 'smartRoutingEnabled',
@@ -510,8 +512,8 @@ function app() {
          */
         getBackendDescription(backend) {
             const descriptions = {
-                'claude_agent_sdk': 'Built-in tools: Bash, WebSearch, WebFetch, Read, Write, Edit, Glob, Grep',
-                'pocketpaw_native': 'Anthropic API + Open Interpreter executor. Direct subprocess for speed.',
+                'claude_agent_sdk': 'Built-in tools: Bash, WebSearch, WebFetch, Read, Write, Edit, Glob, Grep. Works with Anthropic & Ollama.',
+                'pocketpaw_native': 'Custom orchestrator with shell, files, memory tools. Works with Anthropic & Ollama.',
                 'open_interpreter': 'Experimental — Standalone agent. Works with local LLMs (Ollama) or cloud APIs.'
             };
             return descriptions[backend] || '';

@@ -140,9 +140,10 @@ class LLMRouter:
 
     async def _chat_anthropic(self, message: str) -> str:
         """Chat via Anthropic."""
-        from anthropic import AsyncAnthropic
+        from pocketclaw.llm.client import resolve_llm_client
 
-        client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+        llm = resolve_llm_client(self.settings, force_provider="anthropic")
+        client = llm.create_anthropic_client()
 
         response = await client.messages.create(
             model=self.settings.anthropic_model,

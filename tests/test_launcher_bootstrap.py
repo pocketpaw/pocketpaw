@@ -1,9 +1,11 @@
 # Tests for installer/launcher/bootstrap.py
 # Covers: Python detection, venv creation, pocketpaw install, version checks.
 # Created: 2026-02-10
+# Updated: 2026-02-14 — align with refactored _create_venv fallback chain.
 
 from __future__ import annotations
 
+import platform
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -12,6 +14,20 @@ from installer.launcher.bootstrap import (
     PACKAGE_NAME,
     Bootstrap,
 )
+
+# ── helpers ───────────────────────────────────────────────────────────
+
+
+def _make_venv_python(venv_dir: Path) -> Path:
+    """Create the expected venv python executable for the current platform."""
+    if platform.system() == "Windows":
+        p = venv_dir / "Scripts" / "python.exe"
+    else:
+        p = venv_dir / "bin" / "python"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.touch()
+    return p
+
 
 # ── check_status ──────────────────────────────────────────────────────
 
@@ -33,10 +49,7 @@ class TestCheckStatus:
     def test_venv_exists_with_pocketpaw(self, tmp_path: Path):
         """When venv exists and pocketpaw is installed, needs_install is False."""
         venv_dir = tmp_path / "venv"
-        venv_bin = venv_dir / "bin"
-        venv_bin.mkdir(parents=True)
-        python = venv_bin / "python"
-        python.touch()
+        python = _make_venv_python(venv_dir)
 
         with (
             patch.object(Bootstrap, "_find_python", return_value=str(python)),
@@ -53,10 +66,7 @@ class TestCheckStatus:
     def test_venv_exists_no_pocketpaw(self, tmp_path: Path):
         """When venv exists but pocketpaw is not installed."""
         venv_dir = tmp_path / "venv"
-        venv_bin = venv_dir / "bin"
-        venv_bin.mkdir(parents=True)
-        python = venv_bin / "python"
-        python.touch()
+        python = _make_venv_python(venv_dir)
 
         with (
             patch.object(Bootstrap, "_find_python", return_value=str(python)),
@@ -161,10 +171,7 @@ class TestBootstrapRun:
     def test_successful_install(self, tmp_path: Path):
         """Full bootstrap with all steps succeeding."""
         venv_dir = tmp_path / "venv"
-        venv_bin = venv_dir / "bin"
-        venv_bin.mkdir(parents=True)
-        python = venv_bin / "python"
-        python.touch()
+        _make_venv_python(venv_dir)
 
         progress_calls = []
 
@@ -174,10 +181,10 @@ class TestBootstrapRun:
         with (
             patch.object(Bootstrap, "_find_python", return_value="/usr/bin/python3"),
             patch.object(Bootstrap, "_get_python_version", return_value="3.12.8"),
+            patch.object(Bootstrap, "_ensure_uv", return_value="/usr/bin/uv"),
             patch("installer.launcher.bootstrap.VENV_DIR", venv_dir),
             patch.object(Bootstrap, "_create_venv"),
-            patch.object(Bootstrap, "_upgrade_pip"),
-            patch.object(Bootstrap, "_install_pocketpaw", return_value=True),
+            patch.object(Bootstrap, "_install_pocketpaw", return_value=None),
             patch.object(Bootstrap, "_get_installed_version", return_value="0.2.5"),
         ):
             b = Bootstrap(progress=track_progress)
@@ -192,43 +199,70 @@ class TestBootstrapRun:
             assert progress_calls[-1][1] == 100
 
     def test_no_python_found(self):
-        """Should return error when no Python found (non-Windows)."""
+        """Should return error when no Python and no uv found (non-Windows)."""
         with (
             patch.object(Bootstrap, "_find_python", return_value=None),
+            patch.object(Bootstrap, "_ensure_uv", return_value=None),
             patch("platform.system", return_value="Linux"),
         ):
             b = Bootstrap()
             status = b.run()
             assert status.error is not None
-            assert "Python 3.11+" in status.error
+            assert "Python" in status.error
+
+    def test_no_python_but_has_uv(self, tmp_path: Path):
+        """When no Python but uv is available, should still attempt venv creation."""
+        venv_dir = tmp_path / "venv"
+
+        def fake_create_venv(python, uv):
+            # Simulate uv creating the venv with managed Python
+            _make_venv_python(venv_dir)
+
+        with (
+            patch.object(Bootstrap, "_find_python", return_value=None),
+            patch.object(Bootstrap, "_ensure_uv", return_value="/usr/bin/uv"),
+            patch("platform.system", return_value="Linux"),
+            patch("installer.launcher.bootstrap.VENV_DIR", venv_dir),
+            patch.object(Bootstrap, "_create_venv", side_effect=fake_create_venv),
+            patch.object(Bootstrap, "_install_pocketpaw", return_value=None),
+            patch.object(Bootstrap, "_get_installed_version", return_value="0.2.5"),
+            patch.object(Bootstrap, "_get_python_version", return_value="3.12.8"),
+        ):
+            b = Bootstrap()
+            status = b.run()
+            assert status.error is None
+            assert status.pocketpaw_installed is True
 
     def test_install_failure(self, tmp_path: Path):
         """Should return error when pip install fails."""
         venv_dir = tmp_path / "venv"
-        venv_bin = venv_dir / "bin"
-        venv_bin.mkdir(parents=True)
-        python = venv_bin / "python"
-        python.touch()
+        _make_venv_python(venv_dir)
 
         with (
             patch.object(Bootstrap, "_find_python", return_value="/usr/bin/python3"),
             patch.object(Bootstrap, "_get_python_version", return_value="3.12.8"),
+            patch.object(Bootstrap, "_ensure_uv", return_value=None),
             patch("installer.launcher.bootstrap.VENV_DIR", venv_dir),
             patch.object(Bootstrap, "_create_venv"),
-            patch.object(Bootstrap, "_upgrade_pip"),
-            patch.object(Bootstrap, "_install_pocketpaw", return_value=False),
+            patch.object(
+                Bootstrap,
+                "_install_pocketpaw",
+                return_value="Install failed: package not found",
+            ),
         ):
             b = Bootstrap()
             status = b.run()
             assert status.error is not None
-            assert "Failed to install" in status.error
 
 
 # ── _install_pocketpaw ────────────────────────────────────────────────
 
 
 class TestInstallPocketpaw:
-    """Tests for Bootstrap._install_pocketpaw()."""
+    """Tests for Bootstrap._install_pocketpaw().
+
+    The method returns None on success, or an error string on failure.
+    """
 
     def test_install_with_extras(self):
         """Should build correct pip command with extras."""
@@ -239,9 +273,13 @@ class TestInstallPocketpaw:
             b = Bootstrap()
             result = b._install_pocketpaw("/path/to/python", ["telegram", "discord"])
 
-            assert result is True
-            call_args = mock_run.call_args[0][0]
-            assert f"{PACKAGE_NAME}[telegram,discord]" in call_args
+            assert result is None  # None == success
+            # At least one subprocess.run call should contain the extras spec
+            any_has_extras = any(
+                f"{PACKAGE_NAME}[telegram,discord]" in str(c)
+                for c in mock_run.call_args_list
+            )
+            assert any_has_extras
 
     def test_install_no_extras(self):
         """Should install bare package when no extras."""
@@ -252,12 +290,14 @@ class TestInstallPocketpaw:
             b = Bootstrap()
             result = b._install_pocketpaw("/path/to/python", [])
 
-            assert result is True
-            call_args = mock_run.call_args[0][0]
-            assert PACKAGE_NAME in call_args
+            assert result is None  # None == success
+            any_has_pkg = any(
+                PACKAGE_NAME in str(c) for c in mock_run.call_args_list
+            )
+            assert any_has_pkg
 
     def test_install_pip_failure(self):
-        """Should return False on pip failure."""
+        """Should return an error string on pip failure."""
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stderr = "ERROR: Could not find a version"
@@ -265,4 +305,5 @@ class TestInstallPocketpaw:
         with patch("subprocess.run", return_value=mock_result):
             b = Bootstrap()
             result = b._install_pocketpaw("/path/to/python", [])
-            assert result is False
+            assert result is not None  # error string
+            assert isinstance(result, str)

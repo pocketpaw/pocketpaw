@@ -15,7 +15,7 @@ PocketPaw requires **Python 3.11+** and can be installed via pip or uv.
 
 - **Python 3.11** or higher
 - **pip**, **uv**, or **pipx** package manager
-- An **Anthropic API key** (for the default Claude Agent SDK backend)
+- An **Anthropic API key** (for cloud models) or **Ollama** (for local models — no API key needed)
 
 ## Quick Install
 
@@ -101,8 +101,12 @@ pip install pocketpaw[dev]
 Set your API keys as environment variables. All PocketPaw settings use the `POCKETCLAW_` prefix:
 
 ```bash
-# Required: Anthropic API key for Claude
+# Option A: Anthropic API key for Claude (cloud)
 export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+
+# Option B: Ollama for local models (no API key needed)
+export POCKETCLAW_LLM_PROVIDER="ollama"
+export POCKETCLAW_OLLAMA_MODEL="qwen2.5:7b"
 
 # Optional: Other API keys
 export POCKETCLAW_OPENAI_API_KEY="sk-..."          # For voice/TTS/STT

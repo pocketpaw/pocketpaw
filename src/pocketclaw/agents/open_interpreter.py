@@ -36,40 +36,23 @@ class OpenInterpreterAgent:
         try:
             from interpreter import interpreter
 
+            from pocketclaw.llm.client import resolve_llm_client
+
             # Configure interpreter
             interpreter.auto_run = True  # Don't ask for confirmation
             interpreter.loop = True  # Allow multi-step execution
 
-            # Set LLM based on settings
-            provider = self.settings.llm_provider
+            # Set LLM based on resolved provider
+            llm = resolve_llm_client(self.settings)
 
-            # Explicit provider selection
-            if provider == "anthropic" and self.settings.anthropic_api_key:
-                interpreter.llm.model = self.settings.anthropic_model
-                interpreter.llm.api_key = self.settings.anthropic_api_key
-                logger.info(f"🤖 Using Anthropic: {self.settings.anthropic_model}")
-            elif provider == "openai" and self.settings.openai_api_key:
-                interpreter.llm.model = self.settings.openai_model
-                interpreter.llm.api_key = self.settings.openai_api_key
-                logger.info(f"🤖 Using OpenAI: {self.settings.openai_model}")
-            elif provider == "ollama":
-                interpreter.llm.model = f"ollama/{self.settings.ollama_model}"
-                interpreter.llm.api_base = self.settings.ollama_host
-                logger.info(f"🤖 Using Ollama: {self.settings.ollama_model}")
-            # Auto mode: prioritize cloud APIs, fallback to Ollama
-            elif provider == "auto":
-                if self.settings.anthropic_api_key:
-                    interpreter.llm.model = self.settings.anthropic_model
-                    interpreter.llm.api_key = self.settings.anthropic_api_key
-                    logger.info(f"🤖 Auto-selected Anthropic: {self.settings.anthropic_model}")
-                elif self.settings.openai_api_key:
-                    interpreter.llm.model = self.settings.openai_model
-                    interpreter.llm.api_key = self.settings.openai_api_key
-                    logger.info(f"🤖 Auto-selected OpenAI: {self.settings.openai_model}")
-                else:
-                    interpreter.llm.model = f"ollama/{self.settings.ollama_model}"
-                    interpreter.llm.api_base = self.settings.ollama_host
-                    logger.info(f"🤖 Auto-selected Ollama: {self.settings.ollama_model}")
+            if llm.is_ollama:
+                interpreter.llm.model = f"ollama/{llm.model}"
+                interpreter.llm.api_base = llm.ollama_host
+                logger.info(f"🤖 Using Ollama: {llm.model}")
+            elif llm.api_key:
+                interpreter.llm.model = llm.model
+                interpreter.llm.api_key = llm.api_key
+                logger.info(f"🤖 Using {llm.provider.title()}: {llm.model}")
 
             # Safety settings
             interpreter.safe_mode = "ask"  # Will still ask before dangerous ops

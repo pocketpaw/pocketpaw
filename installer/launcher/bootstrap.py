@@ -197,31 +197,45 @@ class Bootstrap:
                 self.progress("Downloading Python...", 10)
                 python = self._download_embedded_python()
 
-            if not python:
-                status.error = (
-                    "Python 3.11+ not found. Install from https://www.python.org/downloads/"
-                )
-                return status
-
-            status.python_path = python
-            status.python_version = self._get_python_version(python)
-            logger.info("Using Python %s at %s", status.python_version, python)
-
             # Step 2: Get uv (fast Python package installer)
-            self.progress("Setting up uv package manager...", 20)
+            # Acquired before the Python check so we can fall back to
+            # uv-managed Python if no local interpreter is available.
+            self.progress("Setting up uv package manager...", 15)
             uv = self._ensure_uv()
             if not uv:
                 logger.warning("Could not get uv, falling back to pip")
+
+            if not python and not uv:
+                status.error = (
+                    "Python 3.11+ not found and could not download uv. "
+                    "Install Python from https://www.python.org/downloads/"
+                )
+                return status
+
+            if python:
+                status.python_path = python
+                status.python_version = self._get_python_version(python)
+                logger.info("Using Python %s at %s", status.python_version, python)
+            else:
+                logger.info("No local Python found; uv will manage Python for venv creation")
 
             # Step 3: Create venv if needed
             venv_python = self._venv_python()
             if not venv_python or not venv_python.exists():
                 self.progress("Creating virtual environment...", 30)
-                self._create_venv(python, uv)
+                try:
+                    self._create_venv(python, uv)
+                except Exception as exc:
+                    status.error = f"Failed to create venv at {VENV_DIR}: {exc}"
+                    return status
                 venv_python = self._venv_python()
                 if not venv_python or not venv_python.exists():
                     status.error = f"Failed to create venv at {VENV_DIR}"
                     return status
+                # If python was None (uv-managed), update status from the venv
+                if not python:
+                    status.python_path = str(venv_python)
+                    status.python_version = self._get_python_version(str(venv_python))
 
             status.venv_exists = True
 
@@ -475,13 +489,32 @@ class Bootstrap:
             return VENV_DIR / "Scripts" / "python.exe"
         return VENV_DIR / "bin" / "python"
 
-    def _create_venv(self, python: str, uv: str | None = None) -> None:
-        """Create a virtual environment."""
-        logger.info("Creating venv at %s using %s", VENV_DIR, python)
+    def _create_venv(self, python: str | None, uv: str | None = None) -> None:
+        """Create a virtual environment.
+
+        Tries up to five strategies in order:
+        1. ``uv venv --python <path>``   — fastest, uses the detected interpreter.
+        2. ``uv venv --python 3.12``     — lets uv download a full Python
+           (python-build-standalone) which *includes* the venv module,
+           unlike the Windows embeddable package.
+        3. ``python -m venv``            — stdlib, skipped for embedded Python.
+        4. ``venv.create()``             — direct API, skipped for embedded Python.
+        5. Manual venv from embedded Python (Windows-only last resort).
+        """
+        logger.info("Creating venv at %s using python=%s", VENV_DIR, python)
         VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
 
-        if uv:
-            # uv venv is much faster
+        is_embedded = (
+            python is not None
+            and platform.system() == "Windows"
+            and str(Path(python).resolve()).startswith(
+                str(EMBEDDED_PYTHON_DIR.resolve())
+            )
+        )
+        errors: list[str] = []
+
+        # ── Attempt 1: uv venv with the given python path ──────────────
+        if uv and python:
             result = subprocess.run(
                 [uv, "venv", str(VENV_DIR), "--python", python, "--quiet"],
                 capture_output=True,
@@ -490,19 +523,147 @@ class Bootstrap:
             )
             if result.returncode == 0:
                 return
-            logger.warning("uv venv failed (%s), falling back to stdlib", result.stderr.strip())
+            err = result.stderr.strip()
+            errors.append(f"uv venv --python <path>: {err}")
+            logger.warning("uv venv with local python failed: %s", err)
 
-        # Fallback: use subprocess to call the found Python's venv module
-        result = subprocess.run(
-            [python, "-m", "venv", str(VENV_DIR), "--clear"],
-            capture_output=True,
-            text=True,
-            timeout=60,
+        # ── Attempt 2: uv-managed Python download ──────────────────────
+        # uv downloads python-build-standalone distributions that include
+        # the venv module — unlike the Windows embeddable package.
+        if uv:
+            logger.info("Trying uv venv with managed Python 3.12 download")
+            result = subprocess.run(
+                [uv, "venv", str(VENV_DIR), "--python", "3.12", "--quiet"],
+                capture_output=True,
+                text=True,
+                timeout=180,  # may download ~30 MB
+            )
+            if result.returncode == 0:
+                logger.info("Created venv using uv-managed Python")
+                return
+            err = result.stderr.strip()
+            errors.append(f"uv venv --python 3.12: {err}")
+            logger.warning("uv managed-Python fallback also failed: %s", err)
+
+        # ── Attempt 3: stdlib venv via subprocess ──────────────────────
+        if python and not is_embedded:
+            result = subprocess.run(
+                [python, "-m", "venv", str(VENV_DIR), "--clear"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return
+            err = result.stderr.strip()
+            errors.append(f"python -m venv: {err}")
+            logger.warning("subprocess venv failed: %s", err)
+
+            # ── Attempt 4: venv.create (direct API) ────────────────────
+            try:
+                logger.info("Trying venv.create as stdlib last resort")
+                venv.create(str(VENV_DIR), with_pip=True, clear=True)
+                if self._venv_python().exists():
+                    return
+            except Exception as exc:
+                errors.append(f"venv.create: {exc}")
+                logger.warning("venv.create failed: %s", exc)
+        elif is_embedded:
+            msg = "Embedded Python lacks the venv module; skipped stdlib fallbacks"
+            logger.info(msg)
+            errors.append(msg)
+
+        # ── Attempt 5: manual venv from embedded Python (Windows) ──────
+        if is_embedded:
+            try:
+                logger.info("Attempting manual venv from embedded Python")
+                self._create_manual_venv_from_embedded(python)
+                if self._venv_python().exists():
+                    return
+            except Exception as exc:
+                errors.append(f"manual venv: {exc}")
+                logger.error("Manual venv creation failed: %s", exc)
+
+        # All methods exhausted
+        detail = " -> ".join(errors) if errors else "unknown error"
+        raise RuntimeError(
+            f"Could not create virtual environment after {len(errors)} attempts: {detail}"
         )
-        if result.returncode != 0:
-            # Last resort: try venv.create if we're using the same Python
-            logger.warning("subprocess venv failed, trying venv.create: %s", result.stderr)
-            venv.create(str(VENV_DIR), with_pip=True, clear=True)
+
+    def _create_manual_venv_from_embedded(self, python: str) -> None:
+        """Create a venv-like environment from the Windows embedded Python.
+
+        The embeddable package omits the ``venv`` module so we replicate the
+        directory layout that pip / uv expect:
+        * ``Scripts/python.exe`` — copy of the interpreter
+        * ``Lib/site-packages/`` — package install target
+        * ``pyvenv.cfg``         — marks this as a virtual environment
+
+        This is a *last-resort*; ``uv venv --python 3.12`` is preferred.
+        """
+        python_dir = Path(python).parent
+        logger.info("Building manual venv from embedded Python at %s", python_dir)
+
+        if VENV_DIR.exists():
+            shutil.rmtree(VENV_DIR)
+
+        scripts_dir = VENV_DIR / "Scripts"
+        lib_dir = VENV_DIR / "Lib" / "site-packages"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        lib_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy interpreter + essential runtime files
+        for pattern in (
+            "python*.exe", "python*.dll", "vcruntime*.dll",
+            "*.pyd", "libffi*.dll", "sqlite3.dll",
+        ):
+            for src in python_dir.glob(pattern):
+                shutil.copy2(src, scripts_dir / src.name)
+
+        # Standard-library zip (e.g. python312.zip)
+        for src in python_dir.glob("python*.zip"):
+            shutil.copy2(src, scripts_dir / src.name)
+
+        # DLLs directory (if present)
+        dlls_src = python_dir / "DLLs"
+        if dlls_src.is_dir():
+            shutil.copytree(dlls_src, VENV_DIR / "DLLs", dirs_exist_ok=True)
+
+        # pyvenv.cfg
+        version = self._get_python_version(python) or PYTHON_EMBED_VERSION
+        (VENV_DIR / "pyvenv.cfg").write_text(
+            f"home = {python_dir}\n"
+            f"include-system-site-packages = false\n"
+            f"version = {version}\n",
+            encoding="utf-8",
+        )
+
+        # Fix ._pth to enable site-packages
+        for pth in scripts_dir.glob("python*._pth"):
+            text = pth.read_text(encoding="utf-8")
+            text = text.replace("#import site", "import site")
+            if "..\\Lib\\site-packages" not in text:
+                text += "\n..\\Lib\\site-packages\n"
+            pth.write_text(text, encoding="utf-8")
+
+        # Bootstrap pip into the manual venv
+        venv_py = scripts_dir / "python.exe"
+        if venv_py.exists() and not (scripts_dir / "pip.exe").exists():
+            try:
+                get_pip = scripts_dir / "get-pip.py"
+                urllib.request.urlretrieve(
+                    "https://bootstrap.pypa.io/get-pip.py", str(get_pip),
+                )
+                subprocess.run(
+                    [str(venv_py), str(get_pip), "--no-warn-script-location"],
+                    capture_output=True,
+                    timeout=120,
+                )
+                get_pip.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("pip bootstrap in manual venv failed: %s", exc)
+
+        logger.info("Manual venv ready at %s", VENV_DIR)
 
     # ── Package Installation ───────────────────────────────────────────
 

@@ -38,21 +38,20 @@ class OpenInterpreterExecutor:
         try:
             from interpreter import interpreter
 
+            from pocketclaw.llm.client import resolve_llm_client
+
             # Configure for execution mode (minimal LLM usage)
             interpreter.auto_run = True
             interpreter.loop = False  # Single command execution
 
             # Set LLM for any reasoning needed
-            provider = self.settings.llm_provider
-            if provider == "anthropic" and self.settings.anthropic_api_key:
-                interpreter.llm.model = self.settings.anthropic_model
-                interpreter.llm.api_key = self.settings.anthropic_api_key
-            elif provider == "openai" and self.settings.openai_api_key:
-                interpreter.llm.model = self.settings.openai_model
-                interpreter.llm.api_key = self.settings.openai_api_key
-            elif provider == "ollama" or provider == "auto":
-                interpreter.llm.model = f"ollama/{self.settings.ollama_model}"
-                interpreter.llm.api_base = self.settings.ollama_host
+            llm = resolve_llm_client(self.settings)
+            if llm.is_ollama:
+                interpreter.llm.model = f"ollama/{llm.model}"
+                interpreter.llm.api_base = llm.ollama_host
+            elif llm.api_key:
+                interpreter.llm.model = llm.model
+                interpreter.llm.api_key = llm.api_key
 
             self._interpreter = interpreter
             logger.info("=" * 50)

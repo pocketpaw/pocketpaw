@@ -242,6 +242,11 @@
             "label": "Open Interpreter",
             "href": "/backends/open-interpreter",
             "icon": "lucide:terminal"
+          },
+          {
+            "label": "Ollama (Local LLMs)",
+            "href": "/backends/ollama",
+            "icon": "lucide:hard-drive"
           }
         ]
       },

@@ -106,6 +106,36 @@ x-transition.opacity
                         <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
                     </div>
                     </div>
+                    <small class="text-white/50 text-[11px]" x-show="settings.llmProvider === 'ollama'">
+                        Works with Claude SDK and PocketPaw Native backends. Run <code>pocketpaw --check-ollama</code> to verify.
+                    </small>
+                </div>
+
+                <!-- Ollama Host -->
+                <div class="flex flex-col gap-1.5" x-show="settings.llmProvider === 'ollama'">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Ollama Host</label>
+                    <input
+                        type="text"
+                        x-model="settings.ollamaHost"
+                        @change="saveSettings()"
+                        placeholder="http://localhost:11434"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    />
+                </div>
+
+                <!-- Ollama Model -->
+                <div class="flex flex-col gap-1.5" x-show="settings.llmProvider === 'ollama'">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Ollama Model</label>
+                    <input
+                        type="text"
+                        x-model="settings.ollamaModel"
+                        @change="saveSettings()"
+                        placeholder="llama3.2"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    />
+                    <small class="text-white/50 text-[11px]">
+                        Run <code>ollama list</code> to see available models.
+                    </small>
                 </div>
 
                 <!-- Anthropic Model -->

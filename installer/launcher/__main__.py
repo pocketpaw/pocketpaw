@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 # setting __package__ so Python resolves the dot-imports correctly.
 # ---------------------------------------------------------------------------
 if __package__ is None or __package__ == "":
+    import types
+
     # Determine the directory that contains this __main__.py
     _this_dir = Path(__file__).resolve().parent
 
@@ -42,12 +44,17 @@ if __package__ is None or __package__ == "":
         importlib.import_module("launcher")
     except ImportError:
         # If there's no __init__.py reachable, create a virtual package
-        import types
-
         pkg = types.ModuleType("launcher")
         pkg.__path__ = [str(_this_dir)]
         pkg.__package__ = "launcher"
         sys.modules["launcher"] = pkg
+
+    # Frozen exe: PyInstaller bundles "launcher" but not top-level "installer".
+    # Alias installer.launcher -> launcher so "from installer.launcher.common ..." works.
+    if "installer" not in sys.modules:
+        sys.modules["installer"] = types.ModuleType("installer")
+    if "installer.launcher" not in sys.modules:
+        sys.modules["installer.launcher"] = sys.modules["launcher"]
 
 # Set up logging before imports
 from installer.launcher.common import POCKETCLAW_HOME
