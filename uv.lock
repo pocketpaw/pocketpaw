@@ -235,6 +235,19 @@ wheels = [
 ]
 
 [[package]]
+name = "arxiv"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "feedparser" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8d/aa/dc1c6c633f63fce090e7c067af8c528a5e61218a61c266ff615d46cbde0a/arxiv-2.4.0.tar.gz", hash = "sha256:cabe5470d031aa3f22d2744a7600391c62c3489653f0c62bec9019e62bb0554b", size = 74546, upload-time = "2026-01-05T02:43:16.823Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/63/9e71153b2d48c98f8079c90d7211bc65515cc1ad18c3328c3c0472e68f44/arxiv-2.4.0-py3-none-any.whl", hash = "sha256:c02ccb09a777aaadd75d3bc1d2627894ef9c987c651d0dacd864b9f69fb0569f", size = 12065, upload-time = "2026-01-05T02:43:12.542Z" },
+]
+
+[[package]]
 name = "astor"
 version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
@@ -897,6 +910,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/52/08/8c8508db6c7b9aae8f7175046af41baad690771c9bcde676419965e338c7/fastapi-0.128.0.tar.gz", hash = "sha256:1cc179e1cef10a6be60ffe429f79b829dce99d8de32d7acb7e6c8dfdf7f2645a", size = 365682, upload-time = "2025-12-27T15:21:13.714Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/05/5cbb59154b093548acd0f4c7c474a118eda06da25aa75c616b72d8fcd92a/fastapi-0.128.0-py3-none-any.whl", hash = "sha256:aebd93f9716ee3b4f4fcfe13ffb7cf308d99c9f3ab5622d8877441072561582d", size = 103094, upload-time = "2025-12-27T15:21:12.154Z" },
+]
+
+[[package]]
+name = "feedparser"
+version = "6.0.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sgmllib3k" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/79/db7edb5e77d6dfbc54d7d9df72828be4318275b2e580549ff45a962f6461/feedparser-6.0.12.tar.gz", hash = "sha256:64f76ce90ae3e8ef5d1ede0f8d3b50ce26bcce71dd8ae5e82b1cd2d4a5f94228", size = 286579, upload-time = "2025-09-10T13:33:59.486Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/eb/c96d64137e29ae17d83ad2552470bafe3a7a915e85434d9942077d7fd011/feedparser-6.0.12-py3-none-any.whl", hash = "sha256:6bbff10f5a52662c00a2e3f86a38928c37c48f77b3c511aedcd51de933549324", size = 81480, upload-time = "2025-09-10T13:33:58.022Z" },
 ]
 
 [[package]]
@@ -2820,7 +2845,7 @@ wheels = [
 
 [[package]]
 name = "pocketpaw"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -2838,6 +2863,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "arxiv" },
     { name = "botbuilder-core" },
     { name = "botbuilder-integration-aiohttp" },
     { name = "discord-py" },
@@ -2879,6 +2905,7 @@ all-channels = [
     { name = "slack-bolt" },
 ]
 all-tools = [
+    { name = "arxiv" },
     { name = "elevenlabs" },
     { name = "google-genai" },
     { name = "html2text" },
@@ -2910,6 +2937,7 @@ desktop = [
     { name = "pyautogui" },
 ]
 dev = [
+    { name = "arxiv" },
     { name = "botbuilder-core" },
     { name = "botbuilder-integration-aiohttp" },
     { name = "discord-py" },
@@ -2982,6 +3010,9 @@ recommended = [
     { name = "qrcode", extra = ["pil"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
+research = [
+    { name = "arxiv" },
+]
 slack = [
     { name = "slack-bolt" },
 ]
@@ -3012,6 +3043,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.45.0" },
     { name = "apscheduler", specifier = ">=3.10.0" },
+    { name = "arxiv", marker = "extra == 'research'", specifier = ">=2.0.0" },
     { name = "botbuilder-core", marker = "extra == 'teams'", specifier = ">=4.16.0" },
     { name = "botbuilder-integration-aiohttp", marker = "extra == 'teams'", specifier = ">=4.16.0" },
     { name = "claude-agent-sdk", specifier = ">=0.1.30" },
@@ -3036,7 +3068,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.50.0" },
     { name = "pocketpaw", extras = ["all"], marker = "extra == 'dev'" },
-    { name = "pocketpaw", extras = ["browser", "desktop", "image", "extract", "voice", "ocr", "mcp", "memory"], marker = "extra == 'all-tools'" },
+    { name = "pocketpaw", extras = ["browser", "desktop", "image", "extract", "voice", "ocr", "mcp", "memory", "research"], marker = "extra == 'all-tools'" },
     { name = "pocketpaw", extras = ["dashboard", "browser", "memory", "desktop"], marker = "extra == 'recommended'" },
     { name = "pocketpaw", extras = ["discord", "slack", "telegram"], marker = "extra == 'channels'" },
     { name = "pocketpaw", extras = ["native"], marker = "extra == 'all-backends'" },
@@ -3059,7 +3091,7 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'dashboard'", specifier = ">=0.27.0" },
 ]
-provides-extras = ["dashboard", "telegram", "browser", "desktop", "native", "memory", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
+provides-extras = ["dashboard", "telegram", "browser", "desktop", "native", "memory", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "mcp", "research", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4316,6 +4348,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/76/95/faf61eb8363f26aa7
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/b8/f1f62a5e3c0ad2ff1d189590bfa4c46b4f3b6e49cef6f26c6ee4e575394d/setuptools-80.10.2-py3-none-any.whl", hash = "sha256:95b30ddfb717250edb492926c92b5221f7ef3fbcc2b07579bcd4a27da21d0173", size = 1064234, upload-time = "2026-01-25T22:38:15.216Z" },
 ]
+
+[[package]]
+name = "sgmllib3k"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9e/bd/3704a8c3e0942d711c1299ebf7b9091930adae6675d7c8f476a7ce48653c/sgmllib3k-1.0.0.tar.gz", hash = "sha256:7868fb1c8bfa764c1ac563d3cf369c381d1325d36124933a726f29fcdaa812e9", size = 5750, upload-time = "2010-08-24T14:33:52.445Z" }
 
 [[package]]
 name = "shellingham"

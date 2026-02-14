@@ -122,6 +122,9 @@ ocr = [
 mcp = [
     "mcp>=1.0.0",
 ]
+research = [
+    "arxiv>=2.0.0",
+]
 
 # --- Composite extras ---
 recommended = [
@@ -134,7 +137,7 @@ all-channels = [
     "pocketpaw[telegram,discord,slack,whatsapp-personal,matrix,teams,gchat]",
 ]
 all-tools = [
-    "pocketpaw[browser,desktop,image,extract,voice,ocr,mcp,memory]",
+    "pocketpaw[browser,desktop,image,extract,voice,ocr,mcp,memory,research]",
 ]
 all-backends = [
     "pocketpaw[native]",

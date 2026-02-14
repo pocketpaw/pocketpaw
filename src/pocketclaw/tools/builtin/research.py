@@ -128,9 +128,9 @@ class ResearchTool(BaseTool):
         seen: set[str] = set()
         unique: list[str] = []
         for url in urls:
-            # Strip trailing punctuation
-            url = url.rstrip(".,;:)")
-            if url not in seen:
+            # Strip trailing punctuation and common markdown closers
+            url = url.rstrip(".,;:)\"\'>]")
+            if url and url not in seen:
                 seen.add(url)
                 unique.append(url)
         return unique

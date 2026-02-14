@@ -59,6 +59,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ClearSessionTool": (".sessions", "ClearSessionTool"),
     "RenameSessionTool": (".sessions", "RenameSessionTool"),
     "DeleteSessionTool": (".sessions", "DeleteSessionTool"),
+    "ArxivTool": (".arxiv", "ArxivTool"),
 }
 
 

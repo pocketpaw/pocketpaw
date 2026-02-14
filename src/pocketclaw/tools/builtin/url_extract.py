@@ -3,6 +3,7 @@
 
 import logging
 from typing import Any
+import asyncio
 
 import httpx
 
@@ -129,39 +130,36 @@ class UrlExtractTool(BaseTool):
 
         results = []
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            for url in urls:
-                try:
-                    resp = await client.get(url)
-                    resp.raise_for_status()
-
-                    content_type = resp.headers.get("content-type", "")
-                    if "text/html" in content_type:
-                        text = converter.handle(resp.text)
-                    else:
-                        text = resp.text
-
-                    results.append(
-                        {
-                            "url": url,
-                            "title": _extract_title(resp.text)
-                            if "text/html" in content_type
-                            else url,
-                            "full_content": text[:_MAX_CONTENT_CHARS],
-                        }
-                    )
-                except Exception as e:
-                    results.append(
-                        {
-                            "url": url,
-                            "title": url,
-                            "full_content": f"Error fetching URL: {e}",
-                        }
-                    )
+            tasks = [self._fetch_single_url(client, url, converter) for url in urls]
+            results = await asyncio.gather(*tasks)
 
         if not results:
             return self._error("No content extracted from the provided URLs.")
 
         return self._format_results(results, urls)
+
+    async def _fetch_single_url(self, client: httpx.AsyncClient, url: str, converter: Any) -> dict:
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+
+            content_type = resp.headers.get("content-type", "")
+            if "text/html" in content_type:
+                text = converter.handle(resp.text)
+            else:
+                text = resp.text
+
+            return {
+                "url": url,
+                "title": _extract_title(resp.text) if "text/html" in content_type else url,
+                "full_content": text[:_MAX_CONTENT_CHARS],
+            }
+        except Exception as e:
+            return {
+                "url": url,
+                "title": url,
+                "full_content": f"Error fetching URL: {e}",
+            }
 
     @staticmethod
     def _format_results(results: list[dict], urls: list[str]) -> str:
