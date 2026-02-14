@@ -1,4 +1,4 @@
-<p align="center">
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/55c8347c-5e45-4365-b0b6-eb659a6c6961" /><p align="center">
   <img src="paw.png" alt="PocketPaw" width="100">
 </p>
 
@@ -72,6 +72,28 @@ uv run pocketpaw
 
 PocketPaw will open the web dashboard in your browser and be ready to go.
 No Docker. No config files. No YAML. No dependency hell.
+## Troubleshooting (Quick Start)
+
+If PocketPaw does not start as expected, try the following:
+
+### Web dashboard not opening
+- PocketPaw runs at: http://localhost:8888
+- If the page does not open automatically, open it manually in your browser.
+- Ensure port 8888 is not already in use by another application.
+
+### Command not found after install
+- Restart your terminal after installation.
+- If installed with pipx, ensure `pipx ensurepath` has been run.
+- Verify installation with:
+  ```bash
+  pocketpaw --help
+
+That’s it.  
+This **closes the code block**.
+
+Then paste this below it:
+
+
 
 **Talk to your agent from anywhere:**
 Telegram · Discord · Slack · WhatsApp · Web Dashboard
