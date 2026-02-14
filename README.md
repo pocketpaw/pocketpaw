@@ -373,11 +373,8 @@ Full documentation lives in [`documentation/`](documentation/README.md):
 
 ## Join the Pack
 
-<!-- TODO: Add Product Hunt badge once page is live -->
-<!-- [![Product Hunt](https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=XXXXX)](https://www.producthunt.com/posts/pocketpaw) -->
-
 - Twitter: [@PocketPawAI](https://twitter.com/PocketPaw89242)
-- Discord: Coming Soon
+- GitHub Discussions: [Ask questions, share ideas](https://github.com/pocketpaw/pocketpaw/discussions)
 - Email: pocketpawai@gmail.com
 
 PRs welcome. Come build with us.

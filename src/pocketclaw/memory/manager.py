@@ -284,6 +284,37 @@ class MemoryManager:
         """Search all memories."""
         return await self._store.search(query=query, limit=limit)
 
+    async def get_by_type(
+        self,
+        memory_type: MemoryType,
+        limit: int = 50,
+        user_id: str | None = None,
+    ) -> list[MemoryEntry]:
+        """
+        Get memories by type.
+
+        Args:
+            memory_type: The type of memories to retrieve.
+            limit: Maximum number of entries to return.
+            user_id: Optional user ID for scoping (defaults to "default").
+
+        Returns:
+            List of memory entries of the specified type.
+        """
+        return await self._store.get_by_type(memory_type, limit=limit, user_id=user_id)
+
+    async def delete(self, entry_id: str) -> bool:
+        """
+        Delete a memory entry by ID.
+
+        Args:
+            entry_id: The ID of the memory entry to delete.
+
+        Returns:
+            True if the entry was deleted, False otherwise.
+        """
+        return await self._store.delete(entry_id)
+
     async def get_context_for_agent(
         self,
         max_chars: int = 8000,

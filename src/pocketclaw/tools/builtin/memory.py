@@ -156,7 +156,7 @@ class ForgetTool(BaseTool):
 
             deleted = 0
             for entry in results:
-                ok = await manager._store.delete(entry.id)
+                ok = await manager.delete(entry.id)
                 if ok:
                     deleted += 1
 

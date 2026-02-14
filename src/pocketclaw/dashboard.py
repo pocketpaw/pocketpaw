@@ -2825,12 +2825,7 @@ async def export_session(id: str = "", format: str = "json"):
 async def get_long_term_memory(limit: int = 50):
     """Get long-term memories."""
     manager = get_memory_manager()
-    # Access store directly for filtered query, or use get_by_type if exposed
-    # Manager doesn't expose get_by_type publically in facade (it used _store.get_by_type in get_context_for_agent)
-    # So we use filtered search or we should expose it.
-    # For now, let's use _store hack or add method to manager?
-    # I'll rely on a new Manager method or _store for now to keep it simple.
-    items = await manager._store.get_by_type(MemoryType.LONG_TERM, limit=limit)
+    items = await manager.get_by_type(MemoryType.LONG_TERM, limit=limit)
     return [
         {
             "id": item.id,
@@ -2846,7 +2841,7 @@ async def get_long_term_memory(limit: int = 50):
 async def delete_long_term_memory(entry_id: str):
     """Delete a long-term memory entry by ID."""
     manager = get_memory_manager()
-    deleted = await manager._store.delete(entry_id)
+    deleted = await manager.delete(entry_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Memory entry not found")
     return {"ok": True}
