@@ -739,28 +739,57 @@ async def search_mcp_registry(
             # level, remove $schema ($ prefix can confuse Alpine.js proxies),
             # and ensure expected fields have defaults.
             servers = []
-            for entry in data.get("servers", []):
-                srv = entry.get("server", entry)
-                srv["_meta"] = entry.get("_meta", {})
-                # Remove $schema — $ prefix can interfere with Alpine.js
+            raw_entries = data.get("servers", [])
+            if not isinstance(raw_entries, list):
+                raw_entries = []
+
+            for entry in raw_entries:
+                if not isinstance(entry, dict):
+                    continue
+
+                raw_server = entry.get("server", entry)
+                if not isinstance(raw_server, dict):
+                    continue
+
+                srv = dict(raw_server)
+                meta = entry.get("_meta", srv.get("_meta", {}))
+                srv["_meta"] = meta if isinstance(meta, dict) else {}
                 srv.pop("$schema", None)
-                # Ensure expected fields exist
-                srv.setdefault("name", "")
-                srv.setdefault("description", "")
-                srv.setdefault("packages", [])
-                srv.setdefault("remotes", [])
-                srv.setdefault("environmentVariables", [])
-                # Lift env vars from the first package to the server level
+
+                name = srv.get("name")
+                description = srv.get("description")
+                packages = srv.get("packages")
+                remotes = srv.get("remotes")
+                env_vars = srv.get("environmentVariables")
+
+                srv["name"] = name if isinstance(name, str) else ""
+                srv["description"] = description if isinstance(description, str) else ""
+                srv["packages"] = packages if isinstance(packages, list) else []
+                srv["remotes"] = remotes if isinstance(remotes, list) else []
+                srv["environmentVariables"] = env_vars if isinstance(env_vars, list) else []
+
+                # Lift env vars from the first package to the server level.
                 if not srv["environmentVariables"]:
-                    for pkg in srv.get("packages", []):
+                    for pkg in srv["packages"]:
+                        if not isinstance(pkg, dict):
+                            continue
                         pkg_env = pkg.get("environmentVariables")
-                        if pkg_env:
+                        if isinstance(pkg_env, list) and pkg_env:
                             srv["environmentVariables"] = pkg_env
                             break
-                if srv["name"]:  # skip entries without a name
+
+                # Skip entries without a valid name.
+                if srv["name"]:
                     servers.append(srv)
 
-            return {"servers": servers, "metadata": data.get("metadata", {})}
+            metadata = data.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if "nextCursor" not in metadata and "next_cursor" in metadata:
+                metadata["nextCursor"] = metadata["next_cursor"]
+            metadata.setdefault("count", len(servers))
+
+            return {"servers": servers, "metadata": metadata}
     except Exception as exc:
         logger.warning("MCP registry search failed: %s", exc)
         return {"servers": [], "metadata": {"count": 0}, "error": str(exc)}
