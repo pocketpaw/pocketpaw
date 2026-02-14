@@ -6,6 +6,7 @@ Changes:
   - 2026-02-02: Added claude_agent_sdk to agent_backend options.
   - 2026-02-02: Simplified backends - removed 2-layer mode.
   - 2026-02-02: claude_agent_sdk is now RECOMMENDED (uses official SDK).
+  - 2026-02-14: Added reflection config validation and bounds.
 """
 
 import json
@@ -13,7 +14,7 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -243,6 +244,50 @@ class Settings(BaseSettings):
     model_tier_complex: str = Field(
         default="claude-opus-4-6", description="Model for complex tasks (planning, debugging)"
     )
+
+    # Self-Reflection (Response Validation)
+    reflection_enabled: bool = Field(
+        default=False,
+        description="Enable secondary LLM pass to validate and auto-correct agent responses",
+    )
+    reflection_max_retries: int = Field(
+        default=1,
+        description="Maximum correction attempts during reflection (0 = validation only, max 3)",
+        ge=0,
+        le=3,
+    )
+    reflection_confidence_threshold: float = Field(
+        default=0.7,
+        description="Confidence threshold for advanced mode (0.0 to 1.0)",
+        ge=0.0,
+        le=1.0,
+    )
+
+    @field_validator("reflection_max_retries")
+    @classmethod
+    def validate_reflection_retries(cls, v: int) -> int:
+        """Prevent runaway correction loops."""
+        if v > 3:
+            raise ValueError("reflection_max_retries cannot exceed 3 (prevents infinite loops)")
+        return v
+
+    @field_validator("reflection_enabled")
+    @classmethod
+    def warn_reflection_setup(cls, v: bool, info) -> bool:
+        """Warn if reflection enabled without proper backend."""
+        if v:
+            # Check if we have an API key configured
+            data = info.data
+            has_anthropic = data.get("anthropic_api_key")
+            has_openai = data.get("openai_api_key")
+
+            if not has_anthropic and not has_openai:
+                logger.warning(
+                    "⚠️ Reflection enabled but no LLM API key set. "
+                    "Add POCKETCLAW_ANTHROPIC_API_KEY or POCKETCLAW_OPENAI_API_KEY, "
+                    "or disable reflection_enabled."
+                )
+        return v
 
     # Plan Mode
     plan_mode: bool = Field(default=False, description="Require approval before executing tools")

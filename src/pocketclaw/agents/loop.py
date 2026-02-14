@@ -4,12 +4,14 @@ Changes:
   - Added BrowserTool registration
   - 2026-02-05: Refactored to use AgentRouter for all backends.
                 Now properly emits system_event for tool_use/tool_result.
+  - 2026-02-14: Integrated self-reflection for response validation/correction.
 
 This is the core "brain" of PocketPaw. It integrates:
 1. MessageBus (Input/Output)
 2. MemoryManager (Short-term & Long-term memory)
 3. AgentRouter (Backend selection: claude_agent_sdk, pocketpaw_native, open_interpreter)
 4. AgentContextBuilder (Identity & System Prompt)
+5. Reflection (Optional secondary LLM validation pass)
 
 It replaces the old highly-coupled bot loops.
 """
@@ -23,7 +25,9 @@ from pocketclaw.bus import InboundMessage, OutboundMessage, SystemEvent, get_mes
 from pocketclaw.bus.commands import get_command_handler
 from pocketclaw.bus.events import Channel
 from pocketclaw.config import Settings, get_settings
+from pocketclaw.llm.router import LLMRouter
 from pocketclaw.memory import get_memory_manager
+from pocketclaw.reflection import reflect_and_correct, reflect_only
 from pocketclaw.security.injection_scanner import ThreatLevel, get_injection_scanner
 
 logger = logging.getLogger(__name__)
@@ -389,18 +393,55 @@ class AgentLoop:
                 )
             )
 
-            # 5. Store assistant response in memory
+            # 5. Optional: Self-Reflection (validate and optionally correct response)
+            if full_response and self.settings.reflection_enabled:
+                try:
+                    logger.info(f"🔍 Reflection: checking {len(full_response)} char response")
+                    llm_backend = LLMRouter(self.settings)
+
+                    corrected_response, was_corrected, metrics = await reflect_and_correct(
+                        llm_backend=llm_backend,
+                        user_input=message.content,
+                        agent_output=full_response,
+                        max_retries=self.settings.reflection_max_retries,
+                    )
+
+                    # Update response silently (no double stream_end!)
+                    if was_corrected:
+                        logger.info(f"✨ Response improved via reflection")
+                        full_response = corrected_response
+
+                        # Emit observable system event (not user-facing)
+                        await self.bus.publish_system(
+                            SystemEvent(
+                                event_type="reflection_complete",
+                                data={
+                                    "was_corrected": was_corrected,
+                                    "total_attempts": metrics["total_attempts"],
+                                    "corrections_accepted": metrics["corrections_accepted"],
+                                    "reflection_passed": metrics["reflection_passed"],
+                                },
+                            )
+                        )
+                    else:
+                        logger.debug(f"✅ Reflection passed on attempt 1")
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Reflection failed (continuing): {type(e).__name__}")
+                    # Fall through - full_response unchanged
+
+            # 6. Store assistant response in memory (possibly after correction)
             if full_response:
                 await self.memory.add_to_session(
                     session_key=session_key, role="assistant", content=full_response
                 )
 
-                # 6. Auto-learn: extract facts from conversation (non-blocking)
+                # 7. Auto-learn: extract facts from conversation (non-blocking)
                 should_auto_learn = (
                     self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn
                 ) or (self.settings.memory_backend == "file" and self.settings.file_auto_learn)
                 if should_auto_learn:
-                    asyncio.create_task(
+                    t = asyncio.create_task(
                         self._auto_learn(
                             message.content,
                             full_response,
