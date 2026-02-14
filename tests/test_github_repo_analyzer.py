@@ -7,31 +7,12 @@ from pocketclaw.tools.builtin.github_repo_analyzer import (
 )
 
 
-# =========================================================
-# Proper Mock Response Helper
-# =========================================================
-
-def make_mock_response(status=200, json_data=None, headers=None):
+def make_mock_response(status=200, json_data=None):
     response = MagicMock()
     response.status_code = status
-    response.headers = headers or {}
-    response.json.return_value = json_data or {}
-
-    if status >= 400:
-        response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            message="Error",
-            request=None,
-            response=response,
-        )
-    else:
-        response.raise_for_status.return_value = None
-
+    response.json.return_value = json_data or []
     return response
 
-
-# =========================================================
-# TESTS
-# =========================================================
 
 @pytest.mark.asyncio
 async def test_valid_repository():
@@ -42,27 +23,42 @@ async def test_valid_repository():
         "forks_count": 20,
         "open_issues_count": 5,
         "language": "Python",
-        "updated_at": "2026-01-01T00:00:00Z",
         "description": "Test repo",
         "default_branch": "main",
+        "updated_at": "2026-01-01T00:00:00Z",
     }
 
-    contributors_data = [{}, {}, {}]
+    contributors_data = [
+        {"login": "user1", "contributions": 50},
+        {"login": "user2", "contributions": 30},
+        {"login": "user3", "contributions": 10},
+    ]
+
+    pr_data = [
+        {"merged_at": "2026-01-01T00:00:00Z"},
+        {"merged_at": None},
+    ]
+
+    commit_data = [{}, {}, {}]
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
         mock_get.side_effect = [
-            make_mock_response(200, repo_data),
-            make_mock_response(200, contributors_data),
+            make_mock_response(200, repo_data),        # repo
+            make_mock_response(200, contributors_data),# contributors
+            make_mock_response(200, pr_data),          # PRs
+            make_mock_response(200, commit_data),      # commits
         ]
 
         result = await tool.execute(
             repo_url="https://github.com/testuser/testrepo"
         )
 
-        assert "Repository Analysis" in result
+        assert "REPOSITORY DASHBOARD" in result
         assert "Stars: 100" in result
         assert "Forks: 20" in result
         assert "Python" in result
+        assert "Health Score" in result
+        assert "Top Contributors" in result
 
 
 @pytest.mark.asyncio

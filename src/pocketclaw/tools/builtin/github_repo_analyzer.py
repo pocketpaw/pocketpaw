@@ -1,7 +1,7 @@
 import logging
-from typing import Any, List
+from typing import Any, List, Tuple
 from urllib.parse import urlparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import httpx
 
 from pocketclaw.tools.protocol import BaseTool
@@ -20,9 +20,9 @@ class GitHubRepoAnalyzerTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Analyze a GitHub repository and return key insights "
-            "such as stars, forks, issues, contributor rankings, "
-            "and repository health score."
+            "Professional GitHub repository analyzer with dashboard-style "
+            "metrics including health score, contributor ranking, activity "
+            "status, risk level, and PR analytics."
         )
 
     @property
@@ -37,7 +37,7 @@ class GitHubRepoAnalyzerTool(BaseTool):
                 "repo_url": {
                     "type": "string",
                     "description": "GitHub repository URL (https://github.com/owner/repo)",
-                }
+                },
             },
             "required": ["repo_url"],
         }
@@ -49,16 +49,19 @@ class GitHubRepoAnalyzerTool(BaseTool):
         if parsed.netloc != "github.com":
             return self._error("Invalid GitHub repository URL.")
 
-        path_parts = parsed.path.strip("/").split("/")
-        if len(path_parts) < 2:
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) < 2:
             return self._error("Invalid GitHub repository format.")
 
-        owner, repo = path_parts[0], path_parts[1]
+        owner, repo = parts[0], parts[1]
 
         try:
             async with httpx.AsyncClient(timeout=15) as client:
 
-                repo_resp = await client.get(f"{_GITHUB_API_BASE}/{owner}/{repo}")
+                # ---------------- Repo Metadata ----------------
+                repo_resp = await client.get(
+                    f"{_GITHUB_API_BASE}/{owner}/{repo}"
+                )
 
                 if repo_resp.status_code == 404:
                     return self._error("Repository not found.")
@@ -67,6 +70,7 @@ class GitHubRepoAnalyzerTool(BaseTool):
 
                 repo_data = repo_resp.json()
 
+                # ---------------- Contributors ----------------
                 contrib_resp = await client.get(
                     f"{_GITHUB_API_BASE}/{owner}/{repo}/contributors"
                 )
@@ -77,31 +81,83 @@ class GitHubRepoAnalyzerTool(BaseTool):
                     else []
                 )
 
+                contributor_count = len(contributors_data)
+                top_contributors = self._top_contributors(contributors_data)
+
+                # ---------------- PR Stats ----------------
+                pr_resp = await client.get(
+                    f"{_GITHUB_API_BASE}/{owner}/{repo}/pulls?state=all&per_page=100"
+                )
+
+                merged, total = self._analyze_prs(
+                    pr_resp.json() if pr_resp.status_code == 200 else []
+                )
+
+                merge_ratio = (
+                    round((merged / total) * 100, 2)
+                    if total > 0
+                    else 0
+                )
+
+                # ---------------- Recent Commits ----------------
+                since = (
+                    datetime.now(timezone.utc) - timedelta(days=30)
+                ).isoformat()
+
+                commit_resp = await client.get(
+                    f"{_GITHUB_API_BASE}/{owner}/{repo}/commits?since={since}"
+                )
+
+                recent_commits = (
+                    len(commit_resp.json())
+                    if commit_resp.status_code == 200
+                    else 0
+                )
+
+            # Extract metrics
             stars = repo_data.get("stargazers_count", 0)
             forks = repo_data.get("forks_count", 0)
             issues = repo_data.get("open_issues_count", 0)
             language = repo_data.get("language", "Unknown")
-            updated_at = repo_data.get("updated_at")
             description = repo_data.get("description", "No description")
             default_branch = repo_data.get("default_branch", "main")
+            updated_at = repo_data.get("updated_at")
 
-            # Contributor ranking
-            contributor_output = self._format_contributors(contributors_data)
-
-            score, grade = self._calculate_health_score(
-                stars, forks, issues, updated_at
+            health_score = self._calculate_health_score(
+                stars, forks, issues, recent_commits
             )
 
+            project_status = self._project_status(recent_commits)
+            risk_level = self._risk_level(
+                issues, merge_ratio, recent_commits
+            )
+
+            # ---------------- Dashboard Output ----------------
             output = (
-                f"📊 Repository Analysis: {owner}/{repo}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📊 REPOSITORY DASHBOARD\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Repository: {owner}/{repo}\n\n"
                 f"⭐ Stars: {stars}\n"
                 f"🍴 Forks: {forks}\n"
                 f"🐛 Open Issues: {issues}\n"
-                f"💻 Primary Language: {language}\n"
+                f"👥 Contributors: {contributor_count}\n"
+                f"💻 Language: {language}\n"
                 f"🌿 Default Branch: {default_branch}\n"
                 f"📝 Description: {description}\n\n"
-                f"{contributor_output}\n"
-                f"\n💚 Health Score: {score}/100 ({grade})\n"
+                "📈 Activity Metrics\n"
+                "────────────────────────\n"
+                f"🔄 Commits (Last 30d): {recent_commits}\n"
+                f"🔀 PR Merge Ratio: {merge_ratio}%\n\n"
+                "🏆 Top Contributors\n"
+                "────────────────────────\n"
+                f"{top_contributors}\n\n"
+                "🧠 Project Intelligence\n"
+                "────────────────────────\n"
+                f"💚 Health Score: {health_score}/100\n"
+                f"🚦 Status: {project_status}\n"
+                f"⚠ Risk Level: {risk_level}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
 
             return output
@@ -112,73 +168,69 @@ class GitHubRepoAnalyzerTool(BaseTool):
             logger.exception("GitHubRepoAnalyzerTool failed")
             return self._error(str(e))
 
-    # -------------------------------------------------
-    # Contributor Ranking
-    # -------------------------------------------------
+    # =====================================================
+    # Helper Methods
+    # =====================================================
 
-    def _format_contributors(self, contributors: List[dict]) -> str:
+    def _analyze_prs(self, prs: List[dict]) -> Tuple[int, int]:
+        total = len(prs)
+        merged = sum(1 for pr in prs if pr.get("merged_at"))
+        return merged, total
 
+    def _top_contributors(self, contributors: List[dict]) -> str:
         if not contributors:
-            return "👥 Contributors: No contributor data available."
+            return "No contributors data available."
 
         top = sorted(
             contributors,
             key=lambda x: x.get("contributions", 0),
             reverse=True,
-        )[:5]
+        )[:3]
 
-        lines = ["👥 Top Contributors:"]
-        for i, c in enumerate(top, start=1):
-            name = c.get("login", "unknown")
-            commits = c.get("contributions", 0)
-            lines.append(f"   {i}. {name} ({commits} commits)")
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+
+        for i, contributor in enumerate(top):
+            name = contributor.get("login", "Unknown")
+            commits = contributor.get("contributions", 0)
+            lines.append(f"{medals[i]} {name} – {commits} commits")
 
         return "\n".join(lines)
-
-    # -------------------------------------------------
-    # Health Score
-    # -------------------------------------------------
 
     def _calculate_health_score(
         self,
         stars: int,
         forks: int,
         issues: int,
-        updated_at: str | None,
-    ) -> tuple[int, str]:
+        commits: int,
+    ) -> int:
 
         score = 0
-
         score += min(stars / 1000 * 40, 40)
         score += min(forks / 500 * 20, 20)
+        score += 20 if issues < 20 else 10
+        score += 20 if commits > 10 else 10
 
-        if issues < 10:
-            score += 20
-        elif issues < 50:
-            score += 10
+        return int(min(score, 100))
 
-        if updated_at:
-            last_update = datetime.fromisoformat(
-                updated_at.replace("Z", "+00:00")
-            )
-            days_since_update = (
-                datetime.now(timezone.utc) - last_update
-            ).days
-
-            if days_since_update < 30:
-                score += 20
-            elif days_since_update < 90:
-                score += 10
-
-        final_score = int(min(score, 100))
-
-        if final_score >= 80:
-            grade = "Excellent"
-        elif final_score >= 60:
-            grade = "Good"
-        elif final_score >= 40:
-            grade = "Average"
+    def _project_status(self, commits: int) -> str:
+        if commits > 10:
+            return "Active 🚀"
+        elif commits > 3:
+            return "Moderately Active ⚡"
         else:
-            grade = "Needs Attention"
+            return "Low Activity 💤"
 
-        return final_score, grade
+    def _risk_level(
+        self,
+        issues: int,
+        merge_ratio: float,
+        commits: int,
+    ) -> str:
+
+        if issues > 100 or merge_ratio < 40 or commits == 0:
+            return "High 🔴"
+        elif issues > 50 or merge_ratio < 60:
+            return "Medium 🟠"
+        else:
+            return "Low 🟢"
