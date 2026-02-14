@@ -16,33 +16,6 @@
  */
 
 function app() {
-    // Assemble feature states
-    const featureStates = {
-        ...window.PocketPaw.Chat.getState(),
-        ...window.PocketPaw.FileBrowser.getState(),
-        ...window.PocketPaw.Reminders.getState(),
-        ...window.PocketPaw.Intentions.getState(),
-        ...window.PocketPaw.Skills.getState(),
-        ...window.PocketPaw.Transparency.getState(),
-        ...window.PocketPaw.RemoteAccess.getState(),
-        ...window.PocketPaw.MissionControl.getState(),
-        ...window.PocketPaw.Channels.getState(),
-        ...window.PocketPaw.Stats.getState()
-    };
-
-    // Assemble feature methods
-    const featureMethods = {
-        ...window.PocketPaw.Chat.getMethods(),
-        ...window.PocketPaw.FileBrowser.getMethods(),
-        ...window.PocketPaw.Reminders.getMethods(),
-        ...window.PocketPaw.Intentions.getMethods(),
-        ...window.PocketPaw.Skills.getMethods(),
-        ...window.PocketPaw.Transparency.getMethods(),
-        ...window.PocketPaw.RemoteAccess.getMethods(),
-        ...window.PocketPaw.MissionControl.getMethods(),
-        ...window.PocketPaw.Channels.getMethods(),
-        ...window.PocketPaw.Stats.getMethods()
-    };
     // Assemble all registered feature modules via Loader
     const { state: featureStates, methods: featureMethods } =
         window.PocketPaw.Loader.assemble();
