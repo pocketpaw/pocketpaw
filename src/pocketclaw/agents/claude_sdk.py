@@ -27,30 +27,10 @@ from typing import Any
 
 from pocketclaw.agents.protocol import AgentEvent, ExecutorProtocol
 from pocketclaw.config import Settings
+from pocketclaw.security.rails import DANGEROUS_SUBSTRINGS as DANGEROUS_PATTERNS
 from pocketclaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
-
-# Dangerous command patterns to block via PreToolUse hook
-DANGEROUS_PATTERNS = [
-    "rm -rf /",
-    "rm -rf ~",
-    "rm -rf *",
-    "sudo rm",
-    "> /dev/",
-    "format ",
-    "mkfs",
-    "chmod 777 /",
-    ":(){ :|:& };:",  # Fork bomb
-    "dd if=/dev/zero",
-    "dd if=/dev/random",
-    "> /etc/passwd",
-    "> /etc/shadow",
-    "curl | sh",
-    "curl | bash",
-    "wget | sh",
-    "wget | bash",
-]
 
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
