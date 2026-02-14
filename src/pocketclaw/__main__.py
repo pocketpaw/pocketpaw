@@ -463,16 +463,20 @@ Examples:
 
     settings = get_settings()
 
-    # Resolve host: explicit flag > config > auto-detect
+        # Resolve host: explicit flag > Windows default > headless > fallback
     if args.host is not None:
         host = args.host
-    elif settings.web_host != "127.0.0.1":
-        host = settings.web_host
+
+    elif sys.platform.startswith("win"):
+        host = "127.0.0.1"
+
     elif _is_headless():
         host = "0.0.0.0"
         logger.info("Headless server detected — binding to 0.0.0.0")
+
     else:
         host = "127.0.0.1"
+
 
     has_channel_flag = (
         args.discord
