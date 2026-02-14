@@ -1,4 +1,5 @@
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/55c8347c-5e45-4365-b0b6-eb659a6c6961" /><p align="center">
+
+<p align="center">
   <img src="paw.png" alt="PocketPaw" width="100">
 </p>
 
@@ -85,8 +86,7 @@ If PocketPaw does not start as expected, try the following:
 - Restart your terminal after installation.
 - If installed with pipx, ensure `pipx ensurepath` has been run.
 - Verify installation with:
-  ```bash
-  pocketpaw --help
+  
 
 That’s it.  
 This **closes the code block**.
