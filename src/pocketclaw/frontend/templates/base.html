@@ -73,7 +73,31 @@
     ></script>
   </head>
   <body x-data="{ ...app(), sidebarOpen: false }" x-init="init()" class="flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]">
-    
+
+    <!-- Login Overlay (shown when no auth token is available) -->
+    <div x-show="showLogin" x-transition.opacity
+         class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-md">
+      <div class="w-full max-w-sm mx-4 p-8 bg-[#1c1c1e] border border-white/10 rounded-2xl shadow-2xl text-center">
+        <div class="text-4xl mb-3">&#x1F43E;</div>
+        <h2 class="text-xl font-semibold text-white mb-2">Welcome to PocketPaw</h2>
+        <p class="text-sm text-white/60 mb-6">Enter your access token to continue.</p>
+        <form @submit.prevent="submitToken()">
+          <input x-ref="tokenInput" type="password" x-model="loginToken"
+                 placeholder="Paste access token..."
+                 class="w-full px-4 py-3 bg-white/5 border border-white/15 rounded-xl text-white text-sm placeholder-white/30 outline-none focus:border-[#0A84FF] transition-colors mb-2" />
+          <p x-show="loginError" x-text="loginError" class="text-xs text-[#FF453A] mb-2"></p>
+          <button type="submit" :disabled="loginLoading"
+                  class="w-full py-3 bg-[#0A84FF] hover:bg-[#0A84FF]/90 disabled:opacity-50 text-white font-medium rounded-xl transition-colors text-sm">
+            <span x-show="!loginLoading">Connect</span>
+            <span x-show="loginLoading">Connecting...</span>
+          </button>
+        </form>
+        <p class="text-xs text-white/40 mt-4">
+          Run <code class="bg-white/10 px-1.5 py-0.5 rounded text-white/60">docker exec pocketpaw cat /home/pocketpaw/.pocketclaw/access_token</code> to get your token.
+        </p>
+      </div>
+    </div>
+
     <!-- Mobile Sidebar Overlay -->
     <div 
         x-show="sidebarOpen" 

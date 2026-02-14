@@ -117,6 +117,19 @@ export POCKETCLAW_BRAVE_SEARCH_API_KEY="..."       # For Brave Search
 
 Alternatively, you can configure these through the web dashboard's settings panel.
 
+## Docker
+
+For server deployments, PocketPaw includes a production-ready `Dockerfile` and `docker-compose.yml`:
+
+```bash
+git clone https://github.com/pocketpaw/pocketpaw.git
+cd pocketpaw
+cp .env.example .env    # fill in your API keys
+docker compose up -d
+```
+
+The image includes all extras, Playwright Chromium, and OCR support. See the [Docker deployment guide](/deployment/docker) for optional Ollama/Qdrant services and configuration details.
+
 ## Verify Installation
 
 ```bash

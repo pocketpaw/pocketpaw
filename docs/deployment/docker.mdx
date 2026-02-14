@@ -1,6 +1,6 @@
 ---
 title: Docker
-description: "Run PocketPaw in Docker with the official Dockerfile and docker-compose configuration. Includes persistent volume mounts for config and memory, environment variable passthrough, and health checks."
+description: "Run PocketPaw in Docker with the included Dockerfile and docker-compose.yml. Multi-stage build, non-root user, Playwright browser support, optional Ollama and Qdrant services via Compose profiles."
 section: Deployment
 ogType: article
 keywords: ["docker", "container", "docker-compose", "dockerfile", "containerized ai"]
@@ -9,144 +9,166 @@ tags: ["deployment", "docker"]
 
 # Docker Deployment
 
-PocketPaw can be containerized with Docker for easy deployment and isolation.
+PocketPaw ships with a production-ready `Dockerfile` and `docker-compose.yml` in the repository root. The Docker image includes all extras (`[all]`), Playwright Chromium, and tesseract OCR — everything works out of the box.
 
-## Dockerfile
+## Quick Start
 
-```dockerfile
-FROM python:3.11-slim
+```bash
+# Clone the repo
+git clone https://github.com/pocketpaw/pocketpaw.git
+cd pocketpaw
 
-WORKDIR /app
+# Copy the env template and fill in your keys
+cp .env.example .env
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install PocketPaw
-RUN pip install pocketpaw[recommended]
-# Or: RUN curl -fsSL https://pocketpaw.xyz/install.sh | sh
-
-# Create data directory
-RUN mkdir -p /root/.pocketclaw
-
-# Expose dashboard port
-EXPOSE 8000
-
-# Start PocketPaw
-CMD ["pocketpaw"]
+# Build and start
+docker compose up -d
 ```
+
+The dashboard is available at `http://localhost:8888`.
+
+<Callout type="warning">
+  Docker's bridge networking means localhost auth bypass doesn't work inside a container. You'll need to log in with the access token.
+</Callout>
+
+Get the access token and paste it into the login page:
+
+```bash
+docker exec pocketpaw cat /home/pocketpaw/.pocketclaw/access_token
+```
+
+## Dockerfile Overview
+
+The `Dockerfile` uses a multi-stage build for a lean runtime image:
+
+**Builder stage** (`python:3.12-slim`):
+- Installs build dependencies (`gcc`, `python3-dev`, `git`)
+- Creates a virtual environment and installs `pocketpaw[all]`
+- Downloads Playwright Chromium
+
+**Runtime stage** (`python:3.12-slim`):
+- Installs only runtime system deps (tesseract, Chromium shared libs, curl)
+- Copies the venv and Playwright browsers from the builder
+- Runs as a non-root `pocketpaw` user
+- Exposes port `8888` with a healthcheck
+
+<Callout type="info">
+  The container binds to `0.0.0.0:8888` by default (set via `POCKETCLAW_WEB_HOST` and `POCKETCLAW_WEB_PORT` environment variables in the Dockerfile).
+</Callout>
 
 ## Docker Compose
 
-```yaml
-version: '3.8'
+The `docker-compose.yml` defines three services. Only the main `pocketpaw` service starts by default — Ollama and Qdrant are behind [Compose profiles](https://docs.docker.com/compose/profiles/).
 
-services:
-  pocketpaw:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - pocketpaw-data:/root/.pocketclaw
-    environment:
-      - POCKETCLAW_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - POCKETCLAW_DASHBOARD_HOST=0.0.0.0
-      - POCKETCLAW_DASHBOARD_PORT=8000
-      - POCKETCLAW_TOOL_PROFILE=coding
-    restart: unless-stopped
+### Default (PocketPaw only)
 
-volumes:
-  pocketpaw-data:
+```bash
+docker compose up -d
 ```
 
-## With Ollama
+### With Ollama (local LLM)
 
-To use Ollama for local models alongside PocketPaw:
-
-```yaml
-version: '3.8'
-
-services:
-  pocketpaw:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - pocketpaw-data:/root/.pocketclaw
-    environment:
-      - POCKETCLAW_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - POCKETCLAW_MEM0_AUTO_LEARN=true
-      - POCKETCLAW_MEM0_LLM_PROVIDER=ollama
-      - POCKETCLAW_MEM0_LLM_MODEL=llama3.2
-      - POCKETCLAW_MEM0_EMBEDDER_PROVIDER=ollama
-      - POCKETCLAW_MEM0_EMBEDDER_MODEL=nomic-embed-text
-      - OLLAMA_HOST=http://ollama:11434
-    depends_on:
-      - ollama
-    restart: unless-stopped
-
-  ollama:
-    image: ollama/ollama
-    volumes:
-      - ollama-data:/root/.ollama
-    ports:
-      - "11434:11434"
-    restart: unless-stopped
-
-volumes:
-  pocketpaw-data:
-  ollama-data:
+```bash
+docker compose --profile ollama up -d
 ```
 
-After starting, pull the required models:
+Set the Ollama host to the container service name in your `.env`:
+
+```bash
+POCKETCLAW_OLLAMA_HOST=http://ollama:11434
+```
+
+Then pull the models you need:
 
 ```bash
 docker compose exec ollama ollama pull llama3.2
 docker compose exec ollama ollama pull nomic-embed-text
 ```
 
-## Running
+<Callout type="tip">
+  For GPU passthrough with NVIDIA, uncomment the `deploy.resources.reservations` block in `docker-compose.yml`.
+</Callout>
+
+### With Qdrant (vector memory)
 
 ```bash
-# Build and start
-docker compose up -d
+docker compose --profile qdrant up -d
+```
 
-# View logs
-docker compose logs -f pocketpaw
+Qdrant is needed for Mem0 semantic memory. It exposes port `6333` for the REST API.
 
-# Stop
-docker compose down
+### All services
+
+```bash
+docker compose --profile ollama --profile qdrant up -d
+```
+
+## Environment Variables
+
+All configuration is passed via environment variables. Copy `.env.example` to `.env` and fill in the values you need:
+
+```bash
+cp .env.example .env
+```
+
+The `.env.example` file is organized by section (LLM, channels, memory, tools, security) and documents every available `POCKETCLAW_` variable. See the [Configuration reference](/getting-started/configuration) for full details.
+
+You can also change the host port:
+
+```bash
+POCKETPAW_PORT=9000 docker compose up -d
 ```
 
 ## Persistent Data
 
-Mount the `~/.pocketclaw` directory as a volume to persist:
-- Configuration
+A named Docker volume (`pocketpaw-data`) is mounted at `/home/pocketpaw/.pocketclaw` to persist:
+
+- Configuration (`config.json`, `secrets.enc`)
 - Session history
-- Memory data
+- Memory data (file-based and Mem0)
 - OAuth tokens
 - Audit logs
 - MCP server configs
+- Skills
 
-## Browser Automation in Docker
+Data survives `docker compose down` and `docker compose up` cycles. To fully reset, remove the volume:
 
-For browser automation, add Playwright dependencies:
-
-```dockerfile
-FROM python:3.11-slim
-
-# Install Playwright dependencies
-RUN apt-get update && apt-get install -y \
-    libnss3 libnspr4 libdbus-1-3 libatk1.0-0 \
-    libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-    libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-    libasound2 libpango-1.0-0 libcairo2 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN pip install pocketpaw[recommended,browser]
-RUN playwright install chromium
-
-EXPOSE 8000
-CMD ["pocketpaw"]
+```bash
+docker compose down -v
 ```
+
+## Managing the Container
+
+```bash
+# View logs
+docker compose logs -f pocketpaw
+
+# Restart
+docker compose restart pocketpaw
+
+# Stop everything
+docker compose down
+
+# Rebuild after pulling updates
+git pull && docker compose build && docker compose up -d
+```
+
+## Browser Automation
+
+Playwright Chromium is included in the Docker image along with all required shared libraries. Browser tools work out of the box inside the container — no additional setup needed.
+
+## Limitations
+
+- **Desktop tools** (`pyautogui`) require a display server and won't work in a headless container. They fail gracefully at invocation time.
+- **WhatsApp Personal mode** (neonize QR pairing) requires a persistent session. The named volume handles this, but the QR code must be scanned via the web dashboard on first setup.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Self-Hosting" icon="lucide:server" href="/deployment/self-hosting">
+    Reverse proxy, SSL, and production hardening.
+  </Card>
+  <Card title="Systemd Service" icon="lucide:terminal" href="/deployment/systemd">
+    Run PocketPaw as a background service without Docker.
+  </Card>
+</CardGroup>

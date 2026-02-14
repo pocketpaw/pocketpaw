@@ -30,6 +30,12 @@ function app() {
         showScreenshot: false,
         screenshotSrc: '',
 
+        // Login gate
+        showLogin: false,
+        loginToken: '',
+        loginError: '',
+        loginLoading: false,
+
         // Settings panel state
         settingsSection: 'general',
         settingsMobileView: 'list',
@@ -119,6 +125,32 @@ function app() {
         /**
          * Initialize the app
          */
+        /**
+         * Validate token via /api/auth/login (sets HTTP-only cookie) and reload.
+         */
+        async submitToken() {
+            const token = this.loginToken.trim();
+            if (!token) return;
+            this.loginError = '';
+            this.loginLoading = true;
+            try {
+                const resp = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token }),
+                });
+                if (resp.ok) {
+                    window.location.reload();
+                } else {
+                    this.loginError = 'Invalid access token. Please try again.';
+                }
+            } catch {
+                this.loginError = 'Connection failed. Is PocketPaw running?';
+            } finally {
+                this.loginLoading = false;
+            }
+        },
+
         init() {
             this.log('PocketPaw Dashboard initialized', 'info');
 
@@ -151,6 +183,7 @@ function app() {
 
             // --- OVERRIDE FETCH FOR AUTH ---
             const originalFetch = window.fetch;
+            const appRef = this;
             window.fetch = async (url, options = {}) => {
                 const storedToken = localStorage.getItem('pocketpaw_token');
 
@@ -166,12 +199,46 @@ function app() {
 
                 if (response.status === 401 || response.status === 403) {
                     localStorage.removeItem('pocketpaw_token');
-                    this.showToast('Session expired. Please scan the QR code to re-authenticate.', 'error');
+                    // Show login overlay if not already visible
+                    if (!appRef.showLogin) {
+                        appRef.showLogin = true;
+                    }
                 }
 
                 return response;
             };
 
+            // If no token is stored and none was captured from the URL,
+            // probe the API to check if localhost auth bypass is active.
+            // If not (e.g. Docker), show the login overlay instead of
+            // attempting WS/API connections that will fail with 401.
+            const hasToken = !!localStorage.getItem('pocketpaw_token');
+            if (!hasToken && !masterToken) {
+                originalFetch('/api/channels/status').then(resp => {
+                    if (resp.ok) {
+                        // Localhost bypass is active — proceed normally
+                        this._startApp();
+                    } else {
+                        // Auth required — show login
+                        this.showLogin = true;
+                        this.$nextTick(() => {
+                            if (this.$refs.tokenInput) this.$refs.tokenInput.focus();
+                        });
+                    }
+                }).catch(() => {
+                    this.showLogin = true;
+                });
+                return;
+            }
+
+            this._startApp();
+        },
+
+        /**
+         * Start the app after auth is confirmed.
+         * Connects WebSocket, loads sessions, sets up keyboard shortcuts.
+         */
+        _startApp() {
             // Register event handlers first
             this.setupSocketHandlers();
 

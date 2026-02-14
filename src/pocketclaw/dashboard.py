@@ -1670,6 +1670,7 @@ async def auth_middleware(request: Request, call_next):
         "/static",
         "/favicon.ico",
         "/api/qr",
+        "/api/auth/login",
         "/webhook/whatsapp",
         "/webhook/inbound",
         "/api/whatsapp/qr",
@@ -1711,8 +1712,17 @@ async def auth_middleware(request: Request, call_next):
         elif ":" in bearer_value and verify_session_token(bearer_value, current_token):
             is_valid = True
 
-    # 3. Allow genuine localhost (not tunneled proxies)
-    elif _is_genuine_localhost(request):
+    # 3. Check HTTP-only session cookie
+    if not is_valid:
+        cookie_token = request.cookies.get("pocketpaw_session")
+        if cookie_token:
+            if cookie_token == current_token:
+                is_valid = True
+            elif ":" in cookie_token and verify_session_token(cookie_token, current_token):
+                is_valid = True
+
+    # 4. Allow genuine localhost (not tunneled proxies)
+    if not is_valid and _is_genuine_localhost(request):
         is_valid = True
 
     # Allow frontend assets (/, /static/*) through for SPA bootstrap.
@@ -1753,6 +1763,58 @@ async def exchange_session_token(request: Request):
     settings = Settings.load()
     session_token = create_session_token(master, ttl_hours=settings.session_token_ttl_hours)
     return {"session_token": session_token, "expires_in_hours": settings.session_token_ttl_hours}
+
+
+# ==================== Cookie-Based Login ====================
+
+
+@app.post("/api/auth/login")
+async def cookie_login(request: Request):
+    """Validate access token and set an HTTP-only session cookie.
+
+    Expects JSON body ``{"token": "..."}`` with the master access token.
+    Returns an HMAC session token in an HTTP-only cookie so the browser
+    sends it automatically on all subsequent requests (including WebSocket
+    handshakes). This is more secure than localStorage because JavaScript
+    cannot read the cookie value.
+    """
+    from fastapi.responses import JSONResponse
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+
+    submitted = body.get("token", "").strip()
+    master = get_access_token()
+
+    if submitted != master:
+        return JSONResponse(status_code=401, content={"detail": "Invalid access token"})
+
+    settings = Settings.load()
+    session_token = create_session_token(master, ttl_hours=settings.session_token_ttl_hours)
+    max_age = settings.session_token_ttl_hours * 3600
+
+    response = JSONResponse(content={"ok": True})
+    response.set_cookie(
+        key="pocketpaw_session",
+        value=session_token,
+        httponly=True,
+        samesite="strict",
+        path="/",
+        max_age=max_age,
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+async def cookie_logout():
+    """Clear the session cookie."""
+    from fastapi.responses import JSONResponse
+
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(key="pocketpaw_session", path="/")
+    return response
 
 
 # ==================== QR Code & Token API ====================
@@ -2001,6 +2063,11 @@ async def websocket_endpoint(
         if ":" in t and verify_session_token(t, expected_token):
             return True
         return False
+
+    # Check HTTP-only session cookie
+    cookie_token = websocket.cookies.get("pocketpaw_session")
+    if not _token_valid(token) and _token_valid(cookie_token):
+        token = cookie_token  # Use cookie token for subsequent checks
 
     # Allow genuine localhost bypass for WebSocket (not tunneled proxies)
     is_localhost = _is_genuine_localhost(websocket)

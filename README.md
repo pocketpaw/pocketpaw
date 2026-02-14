@@ -71,10 +71,54 @@ uv run pocketpaw
 </details>
 
 PocketPaw will open the web dashboard in your browser and be ready to go.
-No Docker. No config files. No YAML. No dependency hell.
+No config files. No YAML. No dependency hell.
 
 **Talk to your agent from anywhere:**
 Telegram · Discord · Slack · WhatsApp · Web Dashboard
+
+---
+
+## Docker
+
+Run PocketPaw in a container — great for servers, VPS, or always-on setups.
+
+```bash
+# Clone the repo
+git clone https://github.com/pocketpaw/pocketpaw.git
+cd pocketpaw
+
+# Copy and fill in your env vars
+cp .env.example .env
+
+# Start the dashboard
+docker compose up -d
+```
+
+Dashboard is at `http://localhost:8888`. Log in with the access token:
+
+```bash
+docker exec pocketpaw cat /home/pocketpaw/.pocketclaw/access_token
+```
+
+<details>
+<summary>Optional services (Ollama, Qdrant)</summary>
+
+```bash
+# With Ollama for local LLM inference
+docker compose --profile ollama up -d
+
+# With Qdrant for mem0 vector memory
+docker compose --profile qdrant up -d
+
+# Both
+docker compose --profile ollama --profile qdrant up -d
+```
+
+When using Ollama inside Docker, set `POCKETCLAW_OLLAMA_HOST=http://ollama:11434` in your `.env` so PocketPaw reaches the Ollama container by service name.
+
+</details>
+
+Data persists in a named Docker volume across restarts. See [`.env.example`](.env.example) for all available configuration options.
 
 ---
 
