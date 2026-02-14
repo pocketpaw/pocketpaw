@@ -94,7 +94,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Dashboard is at `http://localhost:8888`. Get the access token:
+Dashboard is at `http://localhost:8888`. Log in with the access token:
 
 ```bash
 docker exec pocketpaw cat /home/pocketpaw/.pocketclaw/access_token

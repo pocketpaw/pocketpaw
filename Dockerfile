@@ -65,6 +65,10 @@ WORKDIR /home/pocketpaw
 # Bind to 0.0.0.0 so the container port is reachable from the host
 ENV POCKETCLAW_WEB_HOST=0.0.0.0
 ENV POCKETCLAW_WEB_PORT=8888
+# Disable localhost auth bypass — Docker bridge networking means requests
+# arrive from 172.x.x.x, not 127.0.0.1, so the bypass would never trigger.
+# Users authenticate with the access token instead.
+ENV POCKETCLAW_LOCALHOST_AUTH_BYPASS=false
 
 EXPOSE 8888
 
