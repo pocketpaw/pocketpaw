@@ -61,7 +61,7 @@ class ToolRegistry:
         """Get tool definitions, filtered by the active policy.
 
         Args:
-            format: "openai" or "anthropic"
+            format: "openai", "anthropic", or "gemini"
 
         Returns:
             List of tool definitions in the specified format.
@@ -74,6 +74,8 @@ class ToolRegistry:
             defn = tool.definition
             if format == "anthropic":
                 definitions.append(defn.to_anthropic_schema())
+            elif format == "gemini":
+                definitions.append(defn.to_gemini_schema())
             else:
                 definitions.append(defn.to_openai_schema())
         return definitions

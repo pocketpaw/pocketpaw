@@ -10,6 +10,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 
+from pocketclaw.agents.errors import format_ollama_error, format_openai_error
 from pocketclaw.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -243,8 +244,27 @@ class OpenInterpreterAgent:
                             loop,
                         )
                 except Exception as e:
+                    error_str = str(e)
+                    error_lower = error_str.lower()
+
+                    if self.settings.llm_provider == "ollama" or "ollama" in error_lower:
+                        friendly_msg = format_ollama_error(e, error_str)
+                    elif "openai" in error_lower or "api key" in error_lower:
+                        friendly_msg = format_openai_error(e)
+                    elif "connection" in error_lower or "timeout" in error_lower:
+                        friendly_msg = (
+                            "🌐 **Connection Error**\n\n"
+                            "Couldn't connect to the LLM service.\n\n"
+                            "**Check:**\n"
+                            "- Your internet connection\n"
+                            "- The service is running\n"
+                            "- API key is configured in Settings"
+                        )
+                    else:
+                        friendly_msg = f"⚠️ **Error**: {error_str[:200]}"
+
                     asyncio.run_coroutine_threadsafe(
-                        chunk_queue.put({"type": "error", "content": f"Agent error: {str(e)}"}),
+                        chunk_queue.put({"type": "error", "content": friendly_msg}),
                         loop,
                     )
                 finally:
@@ -272,7 +292,26 @@ class OpenInterpreterAgent:
 
             except Exception as e:
                 logger.error(f"Open Interpreter error: {e}")
-                yield {"type": "error", "content": f"❌ Agent error: {str(e)}"}
+                error_str = str(e)
+                error_lower = error_str.lower()
+
+                if self.settings.llm_provider == "ollama" or "ollama" in error_lower:
+                    friendly_msg = format_ollama_error(e, error_str)
+                elif "openai" in error_lower or "api key" in error_lower:
+                    friendly_msg = format_openai_error(e)
+                elif "connection" in error_lower or "timeout" in error_lower:
+                    friendly_msg = (
+                        "🌐 **Connection Error**\n\n"
+                        "Couldn't connect to the LLM service.\n\n"
+                        "**Check:**\n"
+                        "- Your internet connection\n"
+                        "- The service is running\n"
+                        "- API key is configured in Settings"
+                    )
+                else:
+                    friendly_msg = f"⚠️ **Error**: {error_str[:200]}"
+
+                yield {"type": "error", "content": friendly_msg}
 
     async def stop(self) -> None:
         """Stop the agent execution."""

@@ -21,13 +21,24 @@ Changes:
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import Optional
 
 from anthropic import AsyncAnthropic
+from anthropic import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
-from pocketclaw.config import Settings
+from pocketclaw.agents.errors import format_anthropic_error
 from pocketclaw.agents.protocol import AgentEvent
+from pocketclaw.config import Settings
 from pocketclaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
@@ -775,15 +786,45 @@ class PocketPawOrchestrator:
                 except asyncio.TimeoutError:
                     yield AgentEvent(
                         type="error",
-                        content="⏱️ Request timed out. Please check your network connection and API key.",
+                        content=(
+                            "⏱️ **Request Timed Out**\n\n"
+                            "The request took too long to complete.\n\n"
+                            "**Try:**\n"
+                            "- Check your internet connection\n"
+                            "- Try a smaller model in Settings → General\n"
+                            "- Try again"
+                        ),
                     )
+                    return
+                except AuthenticationError as e:
+                    yield AgentEvent(type="error", content=format_anthropic_error(e))
+                    return
+                except RateLimitError as e:
+                    yield AgentEvent(type="error", content=format_anthropic_error(e))
+                    return
+                except (APIConnectionError, APITimeoutError) as e:
+                    yield AgentEvent(type="error", content=format_anthropic_error(e))
+                    return
+                except (BadRequestError, PermissionDeniedError, NotFoundError) as e:
+                    yield AgentEvent(type="error", content=format_anthropic_error(e))
                     return
                 except Exception as api_error:
                     logger.error(f"Anthropic API error: {api_error}")
-                    yield AgentEvent(
-                        type="error",
-                        content=f"❌ API Error: {str(api_error)}. Please verify your Anthropic API key in Settings.",
-                    )
+                    yield AgentEvent(type="error", content=format_anthropic_error(api_error))
+                    return
+                    return
+                except RateLimitError as e:
+                    yield AgentEvent(type="error", content=format_anthropic_error(e))
+                    return
+                except (APIConnectionError, APITimeoutError) as e:
+                    yield AgentEvent(type="error", content=format_anthropic_error(e))
+                    return
+                except (BadRequestError, PermissionDeniedError, NotFoundError) as e:
+                    yield AgentEvent(type="error", content=format_anthropic_error(e))
+                    return
+                except Exception as api_error:
+                    logger.error(f"Anthropic API error: {api_error}")
+                    yield AgentEvent(type="error", content=format_anthropic_error(api_error))
                     return
 
                 # Process response content blocks
@@ -843,7 +884,7 @@ class PocketPawOrchestrator:
 
         except Exception as e:
             logger.error(f"PocketPaw error: {e}")
-            yield AgentEvent(type="error", content=f"❌ Error: {e}")
+            yield AgentEvent(type="error", content=format_anthropic_error(e))
 
     async def run(
         self,

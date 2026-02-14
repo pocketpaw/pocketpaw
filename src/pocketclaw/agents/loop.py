@@ -448,17 +448,65 @@ class AgentLoop:
             )
         except Exception as e:
             logger.exception(f"❌ Error processing message: {e}")
-            # Kill the backend on error
             try:
                 await router.stop()
             except Exception:
                 pass
 
+            error_str = str(e)
+            error_lower = error_str.lower()
+
+            if (
+                "authentication" in error_lower
+                or "api key" in error_lower
+                or "unauthorized" in error_lower
+            ):
+                user_message = (
+                    "🔐 **Authentication Error**\n\n"
+                    "Failed to authenticate with the AI service.\n\n"
+                    "**Check:**\n"
+                    "- Your API key is correct in Settings → API Keys\n"
+                    "- The API key hasn't expired"
+                )
+            elif (
+                "connection" in error_lower
+                or "refused" in error_lower
+                or "network" in error_lower
+            ):
+                user_message = (
+                    "🌐 **Connection Error**\n\n"
+                    "Couldn't connect to the AI service.\n\n"
+                    "**Check:**\n"
+                    "- Your internet connection\n"
+                    "- The service is running\n"
+                    "- Try again in a moment"
+                )
+            elif "timeout" in error_lower or "timed out" in error_lower:
+                user_message = (
+                    "⏱️ **Request Timed Out**\n\n"
+                    "The request took too long.\n\n"
+                    "**Try:**\n"
+                    "- A smaller model in Settings → General\n"
+                    "- A simpler request\n"
+                    "- Try again"
+                )
+            elif "rate limit" in error_lower or "too many requests" in error_lower:
+                user_message = (
+                    "⏳ **Rate Limit Exceeded**\n\n"
+                    "Too many requests. Please wait a moment and try again."
+                )
+            else:
+                user_message = (
+                    "⚠️ **Something went wrong**\n\n"
+                    f"An unexpected error occurred: {error_str[:100]}\n\n"
+                    "Try again, or check Settings → General to switch to a different backend."
+                )
+
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
                     chat_id=message.chat_id,
-                    content=f"An error occurred: {str(e)}",
+                    content=user_message,
                 )
             )
             await self.bus.publish_outbound(

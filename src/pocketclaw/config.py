@@ -66,7 +66,7 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     llm_provider: str = Field(
-        default="auto", description="LLM provider: 'auto', 'ollama', 'openai', 'anthropic'"
+        default="auto", description="LLM provider: 'auto', 'ollama', 'openai', 'anthropic', 'gemini'"
     )
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
     ollama_model: str = Field(default="llama3.2", description="Ollama model to use")
@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
     anthropic_model: str = Field(
         default="claude-sonnet-4-5-20250929", description="Anthropic model to use"
+    )
+    gemini_api_key: str | None = Field(default=None, description="Gemini API key")
+    gemini_model: str = Field(
+        default="gemini-2.0-pro-exp-02-05", description="Gemini model to use"
     )
 
     # Memory Backend
@@ -417,6 +421,8 @@ class Settings(BaseSettings):
             "openai_model": self.openai_model,
             "anthropic_api_key": self.anthropic_api_key or existing.get("anthropic_api_key"),
             "anthropic_model": self.anthropic_model,
+            "gemini_api_key": self.gemini_api_key or existing.get("gemini_api_key"),
+            "gemini_model": self.gemini_model,
             # Discord
             "discord_bot_token": (self.discord_bot_token or existing.get("discord_bot_token")),
             "discord_allowed_guild_ids": self.discord_allowed_guild_ids,

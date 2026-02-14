@@ -3,8 +3,8 @@
 
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Protocol, Dict, List
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 
 @dataclass
@@ -33,6 +33,14 @@ class ToolDefinition:
             "name": self.name,
             "description": self.description,
             "input_schema": self.parameters,
+        }
+
+    def to_gemini_schema(self) -> dict[str, Any]:
+        """Convert to Google Gemini function calling format."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
         }
 
 
