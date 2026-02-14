@@ -27,6 +27,8 @@ import logging
 import uuid
 from pathlib import Path
 
+from requests.utils import is_valid_cidr
+
 try:
     import qrcode
     import uvicorn
@@ -45,7 +47,13 @@ from pocketclaw.agents.loop import AgentLoop
 from pocketclaw.bootstrap import DefaultBootstrapProvider
 from pocketclaw.bus import get_message_bus
 from pocketclaw.bus.adapters.websocket_adapter import WebSocketAdapter
-from pocketclaw.config import Settings, get_access_token, get_config_path, regenerate_token
+from pocketclaw.config import (
+    Settings,
+    get_access_token,
+    get_config_path,
+    regenerate_token,
+    validate_api_key,
+)
 from pocketclaw.daemon import get_daemon
 from pocketclaw.deep_work.api import router as deep_work_router
 from pocketclaw.memory import MemoryType, get_memory_manager
@@ -952,7 +960,9 @@ async def install_skill(request: Request):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth=1",
+                "git",
+                "clone",
+                "--depth=1",
                 f"https://github.com/{owner}/{repo}.git",
                 tmpdir,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -2243,59 +2253,85 @@ async def websocket_endpoint(
                 provider = data.get("provider")
                 key = data.get("key", "")
 
+                is_valid, error_msg = validate_api_key(provider, key)
+
                 async with _settings_lock:
                     if provider == "anthropic" and key:
                         settings.anthropic_api_key = key
                         settings.llm_provider = "anthropic"
                         settings.save()
                         agent_loop.reset_router()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Anthropic API key saved!"}
-                        )
+                        if not is_valid:
+                            await websocket.send_json(
+                                {
+                                    "type": "notification",
+                                    "content": f"⚠️ {error_msg}\n\n⚠️ Saving anyway",
+                                }
+                            )
+                        else:
+                            await websocket.send_json(
+                                {"type": "notification", "content": "✅ Anthropic API key saved!"}
+                            )
                     elif provider == "openai" and key:
                         settings.openai_api_key = key
                         settings.llm_provider = "openai"
                         settings.save()
                         agent_loop.reset_router()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ OpenAI API key saved!"}
-                        )
+                        if not is_valid:
+                            await websocket.send_json(
+                                {
+                                    "type": "notification",
+                                    "content": f"⚠️ {error_msg}\n\n⚠️ Saving anyway",
+                                }
+                            )
+                        else:
+                            await websocket.send_json(
+                                {"type": "notification", "content": "✅ OpenAI API key saved!"}
+                            )
                     elif provider == "tavily" and key:
                         settings.tavily_api_key = key
                         settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "✅ Tavily API key saved!"}
-                        )
+                        if not is_valid:
+                            await websocket.send_json(
+                                {
+                                    "type": "notification",
+                                    "content": f"⚠️ {error_msg}\n\n⚠️ Saving anyway",
+                                }
+                            )
+                        else:
+                            await websocket.send_json(
+                                {"type": "notification", "content": "✅ Tavily API key saved!"}
+                            )
                     elif provider == "brave" and key:
                         settings.brave_search_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "✅ Brave Search API key saved!"}
+                            {"type": "notification", "content": "✅ Brave Search API key saved!"}
                         )
                     elif provider == "parallel" and key:
                         settings.parallel_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "✅ Parallel AI API key saved!"}
+                            {"type": "notification", "content": "✅ Parallel AI API key saved!"}
                         )
                     elif provider == "elevenlabs" and key:
                         settings.elevenlabs_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "✅ ElevenLabs API key saved!"}
+                            {"type": "notification", "content": "✅ ElevenLabs API key saved!"}
                         )
                     elif provider == "google_oauth_id" and key:
                         settings.google_oauth_client_id = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "✅ Google OAuth Client ID saved!"}
+                            {"type": "notification", "content": "✅ Google OAuth Client ID saved!"}
                         )
                     elif provider == "google_oauth_secret" and key:
                         settings.google_oauth_client_secret = key
                         settings.save()
                         await websocket.send_json(
                             {
-                                "type": "message",
+                                "type": "notification",
                                 "content": "✅ Google OAuth Client Secret saved!",
                             }
                         )
@@ -2303,14 +2339,14 @@ async def websocket_endpoint(
                         settings.spotify_client_id = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "✅ Spotify Client ID saved!"}
+                            {"type": "notification", "content": "✅ Spotify Client ID saved!"}
                         )
                     elif provider == "spotify_client_secret" and key:
                         settings.spotify_client_secret = key
                         settings.save()
                         await websocket.send_json(
                             {
-                                "type": "message",
+                                "type": "notification",
                                 "content": "✅ Spotify Client Secret saved!",
                             }
                         )

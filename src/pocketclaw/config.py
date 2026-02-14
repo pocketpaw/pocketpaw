@@ -648,3 +648,48 @@ def _migrate_plaintext_keys() -> None:
 
     _MIGRATION_DONE_PATH.write_text("1")
     _chmod_safe(_MIGRATION_DONE_PATH, 0o600)
+
+
+def validate_api_key(provider: str, key: str) -> tuple[bool, str]:
+    """Validate Api Key Before saving."""
+    import re
+
+    if not key or not key.strip():
+        return True, ""
+
+    key = key.strip()
+
+    validators: dict[str, tuple[str, str]] = {
+        "anthropic": (
+            r"^sk-ant-",
+            "must start with 'sk-ant-'",
+        ),
+        "openai": (
+            r"^sk-",
+            "must start with 'sk-'",
+        ),
+        "telegram": (
+            r"^\d+:[A-Za-z0-9_-]",
+            "must be in format: NUMBER:STRING",
+        ),
+        "tavily": (
+            r"^tvily-",
+            "must start with 'tvily-'",
+        ),
+    }
+
+    provider_map: dict[str, str] = {
+        "anthropic": "anthropic",
+        "openai": "openai",
+        "telegram": "telegram",
+        "tavily": "tavily",
+    }
+
+    normalized_provider = provider_map.get(provider, provider)
+
+    if normalized_provider in validators:
+        pattern, message = validators[normalized_provider]
+        if not re.match(pattern, key):
+            return False, f"Invalid API key format: {message}"
+
+    return True, ""

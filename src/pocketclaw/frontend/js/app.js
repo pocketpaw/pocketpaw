@@ -446,7 +446,8 @@ function app() {
             }
 
             this.log(`Saved ${provider} API key`, 'success');
-            this.showToast(`${provider.charAt(0).toUpperCase() + provider.slice(1)} API key saved!`, 'success');
+            // Don't show toast here - wait for server response which includes validation
+            // this.showToast(`${provider.charAt(0).toUpperCase() + provider.slice(1)} API key saved!`, 'success');
 
             // Refresh settings from backend to confirm key was persisted
             setTimeout(() => socket.send('get_settings'), 500);
