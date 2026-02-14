@@ -46,8 +46,7 @@ htmlcov/
 .tox/
 .nox/
 
-# Docs (internal/draft)
-docs/
+# Internal drafts
 idocs/
 .claude 
 

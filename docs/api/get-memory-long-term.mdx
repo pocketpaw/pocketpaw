@@ -1,0 +1,88 @@
+---
+title: List Long-Term Memories
+description: "Retrieve stored long-term memory entries from PocketPaw's memory backend. Returns facts, preferences, and knowledge extracted from past conversations via auto-learning."
+api: GET /api/memory/long_term
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["long-term memory", "stored facts", "memory entries"]
+tags: ["api", "memory"]
+---
+
+## Overview
+
+Returns all long-term memory entries stored by the agent. These are facts, preferences, and knowledge that the agent has learned from conversations (either manually or via mem0 auto-learn).
+
+## Parameters
+
+<ParamTable type="query">
+  <Param name="limit" type="integer" default="50">
+    Maximum number of memory entries to return.
+  </Param>
+</ParamTable>
+
+## Response
+
+Returns an array of memory entry objects:
+
+<ResponseField name="id" type="string">Unique identifier for the memory entry</ResponseField>
+<ResponseField name="content" type="string">The memory content text</ResponseField>
+<ResponseField name="timestamp" type="string">ISO 8601 timestamp when the memory was created</ResponseField>
+<ResponseField name="tags" type="array">Optional tags categorizing the memory</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/memory/long_term?limit=50" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/memory/long_term?limit=50", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/memory/long_term",
+        params={"limit": 50},
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    [
+      {
+        "id": "mem_001",
+        "content": "User prefers Python over JavaScript for backend work",
+        "timestamp": "2024-01-15T10:30:00Z",
+        "tags": ["preference", "programming"]
+      },
+      {
+        "id": "mem_002",
+        "content": "User's project uses PostgreSQL with SQLAlchemy ORM",
+        "timestamp": "2024-01-14T08:00:00Z",
+        "tags": ["project", "database"]
+      }
+    ]
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

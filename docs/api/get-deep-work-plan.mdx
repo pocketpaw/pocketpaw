@@ -1,0 +1,124 @@
+---
+title: Get Deep Work Plan
+description: "Retrieve the generated plan for a Deep Work project including the PRD document, task list with dependencies, execution levels for DAG visualization, and overall progress metrics."
+api: GET /api/deep-work/projects/{project_id}/plan
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["get plan", "project plan", "task dependencies", "prd"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Returns the full plan for a Deep Work project including the PRD, task list with dependencies, execution levels, and progress.
+
+## Path Parameters
+
+<ResponseField name="project_id" type="string" required>
+  The project ID.
+</ResponseField>
+
+## Response
+
+<ResponseField name="project" type="object">
+  The project object with all fields.
+</ResponseField>
+
+<ResponseField name="tasks" type="array">
+  List of all tasks in the project with status, priority, assignees, and dependencies.
+</ResponseField>
+
+<ResponseField name="progress" type="object">
+  Progress summary.
+  <ResponseField name="total" type="integer">Total task count.</ResponseField>
+  <ResponseField name="completed" type="integer">Done tasks.</ResponseField>
+  <ResponseField name="in_progress" type="integer">Currently executing.</ResponseField>
+  <ResponseField name="blocked" type="integer">Blocked tasks.</ResponseField>
+  <ResponseField name="percent" type="number">Completion percentage.</ResponseField>
+</ResponseField>
+
+<ResponseField name="prd" type="object">
+  The PRD document (title, content, type) or null if not yet generated.
+</ResponseField>
+
+<ResponseField name="execution_levels" type="array">
+  Task IDs grouped by dependency level for DAG visualization.
+</ResponseField>
+
+<ResponseField name="task_level_map" type="object">
+  Mapping of task ID to its dependency level index.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl http://localhost:8000/api/deep-work/projects/PROJECT_ID/plan \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch(`http://localhost:8000/api/deep-work/projects/${projectId}/plan`, {
+  headers: { 'Authorization': 'Bearer YOUR_TOKEN' },
+});
+const data = await res.json();
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.get(
+    f"http://localhost:8000/api/deep-work/projects/{project_id}/plan",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+)
+data = res.json()
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "project": {
+    "id": "a1b2c3d4...",
+    "title": "Recipe Management API",
+    "status": "awaiting_approval"
+  },
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Set up project structure",
+      "status": "inbox",
+      "priority": "high",
+      "blocked_by": [],
+      "task_type": "agent",
+      "estimated_minutes": 30
+    }
+  ],
+  "progress": {
+    "total": 8,
+    "completed": 0,
+    "in_progress": 0,
+    "blocked": 0,
+    "percent": 0
+  },
+  "prd": {
+    "title": "PRD: Recipe Management API",
+    "content": "## Problem Statement\n...",
+    "type": "protocol"
+  },
+  "execution_levels": [["task-1", "task-2"], ["task-3"]],
+  "task_level_map": {"task-1": 0, "task-2": 0, "task-3": 1}
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

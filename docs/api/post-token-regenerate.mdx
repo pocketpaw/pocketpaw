@@ -1,0 +1,68 @@
+---
+title: Regenerate Access Token
+description: "Generate a new PocketPaw access token and invalidate all existing session tokens. Use this to rotate credentials or revoke access after a security incident or personnel change."
+api: POST /api/token/regenerate
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["token regeneration", "credential rotation", "revoke access"]
+tags: ["api", "authentication"]
+---
+
+## Overview
+
+Generates a new master access token and invalidates all existing session tokens. Use this if you suspect the token has been compromised.
+
+<Callout type="warning">
+  This invalidates **all** active sessions. Every connected client will need to re-authenticate with the new token.
+</Callout>
+
+## Response
+
+<ResponseField name="token" type="string">The newly generated access token</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/token/regenerate" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/token/regenerate", {
+      method: "POST",
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/token/regenerate",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "token": "pk_a1b2c3d4e5f6g7h8i9j0..."
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

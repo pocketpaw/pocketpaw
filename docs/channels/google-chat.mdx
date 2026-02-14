@@ -1,0 +1,83 @@
+---
+title: Google Chat
+description: "Connect PocketPaw to Google Chat for Workspace integration. Supports both webhook mode and Pub/Sub mode for real-time messaging via the Google Chat API v1."
+section: Channels
+ogType: article
+keywords: ["google chat bot", "workspace integration", "pub/sub", "chat api", "google workspace"]
+tags: ["channels", "google-chat"]
+---
+
+# Google Chat
+
+PocketPaw integrates with Google Chat via the **Chat API v1**, supporting both webhook and Pub/Sub modes.
+
+## Setup
+
+<Steps>
+  <Step title="Create a Google Cloud project">
+    1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+    2. Create a new project or select an existing one
+    3. Enable the Google Chat API
+  </Step>
+  <Step title="Create a service account">
+    1. Go to IAM & Admin → Service Accounts
+    2. Create a new service account
+    3. Download the JSON key file
+  </Step>
+  <Step title="Configure the Chat app">
+    1. Go to the [Google Chat API configuration](https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat)
+    2. Configure the app with either webhook or Pub/Sub connection
+  </Step>
+  <Step title="Configure PocketPaw">
+    ```bash
+    export POCKETCLAW_GCHAT_PROJECT_ID="your-project-id"
+    export POCKETCLAW_GCHAT_SERVICE_ACCOUNT_KEY="/path/to/service-account-key.json"
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw --gchat
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| Project ID | `POCKETCLAW_GCHAT_PROJECT_ID` | Google Cloud project ID |
+| Service account key | `POCKETCLAW_GCHAT_SERVICE_ACCOUNT_KEY` | Path to JSON key file |
+| Mode | `POCKETCLAW_GCHAT_MODE` | `webhook` or `pubsub` |
+| Subscription | `POCKETCLAW_GCHAT_SUBSCRIPTION` | Pub/Sub subscription name |
+| Allowed spaces | `POCKETCLAW_GCHAT_ALLOWED_SPACE_IDS` | Comma-separated space IDs |
+
+## Connection Modes
+
+### Webhook Mode
+
+In webhook mode, Google Chat sends HTTP requests to your server. The dashboard exposes a webhook endpoint that handles these requests.
+
+### Pub/Sub Mode
+
+In Pub/Sub mode, PocketPaw subscribes to a Google Cloud Pub/Sub topic. This doesn't require a public URL — the connection is outbound.
+
+## Features
+
+### No Streaming
+
+Google Chat messages are accumulated and sent as a complete response.
+
+### Session Keys
+
+Each space gets a unique session: `gchat:{space_name}`
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the Google Chat extra manually
+pip install pocketpaw[gchat]
+```
+
+This installs `google-api-python-client` as an optional dependency.

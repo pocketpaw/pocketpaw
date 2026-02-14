@@ -1,6 +1,7 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-02-12: Fixed --version to read dynamically from package metadata.
   - 2026-02-06: Web dashboard is now the default mode (no flags needed).
   - 2026-02-06: Added --telegram flag for legacy Telegram-only mode.
   - 2026-02-06: Added --discord, --slack, --whatsapp CLI modes.
@@ -14,6 +15,7 @@ import importlib.util
 import logging
 import sys
 import webbrowser
+from importlib.metadata import version as get_version
 
 from pocketclaw.config import Settings, get_settings
 from pocketclaw.logging_setup import setup_logging
@@ -351,7 +353,9 @@ Examples:
     parser.add_argument(
         "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
     )
-    parser.add_argument("--version", "-v", action="version", version="%(prog)s 0.2.0")
+    parser.add_argument(
+        "--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}"
+    )
 
     args = parser.parse_args()
 

@@ -1,0 +1,56 @@
+---
+title: Model Router
+description: "PocketPaw's model router automatically classifies message complexity as SIMPLE, MODERATE, or COMPLEX using heuristic signals, then selects the optimal model size to balance cost and capability."
+section: Advanced
+ogType: article
+keywords: ["model router", "automatic model selection", "complexity classification", "cost optimization"]
+tags: ["advanced", "optimization"]
+---
+
+# Model Router
+
+The Model Router automatically selects the appropriate model size based on message complexity, optimizing cost and latency.
+
+## How It Works
+
+The router classifies each message into one of three complexity levels:
+
+| Level | Description | Typical Model |
+|-------|-------------|---------------|
+| `SIMPLE` | Greetings, simple questions, short responses | Smaller/faster model |
+| `MODERATE` | Multi-step tasks, moderate reasoning | Default model |
+| `COMPLEX` | Coding, deep analysis, multi-tool chains | Largest model |
+
+## Classification Heuristics
+
+The router uses several signals to determine complexity:
+
+1. **Message length** — Longer messages tend to be more complex
+2. **Keyword detection** — Certain words indicate complexity:
+   - Code-related: "write code", "debug", "refactor", "implement"
+   - Analysis: "analyze", "compare", "explain in detail"
+   - Multi-step: "step by step", "plan", "research"
+3. **Tool mentions** — References to specific tools suggest higher complexity
+4. **Question depth** — Follow-up questions in a chain indicate growing complexity
+
+### Threshold
+
+A message is classified as COMPLEX if it has at least 1 complex signal AND is longer than 30 characters.
+
+## Configuration
+
+The model router is used automatically when enabled. It works with the Claude Agent SDK and PocketPaw Native backends.
+
+## Example Classifications
+
+| Message | Classification |
+|---------|---------------|
+| "Hi!" | SIMPLE |
+| "What time is it?" | SIMPLE |
+| "Write a Python web scraper that handles pagination" | COMPLEX |
+| "Analyze the performance of my database queries" | COMPLEX |
+| "Search for news about AI" | MODERATE |
+
+<Callout type="info">
+  The model router is a heuristic system. For most users, the default model selection works well without the router. Enable it if you want to optimize API costs.
+</Callout>

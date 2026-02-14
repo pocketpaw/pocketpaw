@@ -1,0 +1,116 @@
+---
+title: Save Channel Config
+description: "Save configuration credentials and settings for a PocketPaw channel adapter. Supports Discord, Slack, WhatsApp, Signal, Matrix, Teams, and Google Chat configuration fields."
+api: POST /api/channels/save
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["save channel config", "channel credentials", "adapter configuration"]
+tags: ["api", "channels"]
+---
+
+## Overview
+
+Saves the configuration (tokens, IDs, credentials) for a specific channel adapter. The config keys are mapped to internal Settings fields automatically.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="channel" type="string" required>
+    Channel identifier. One of: `discord`, `slack`, `whatsapp`, `telegram`, `signal`, `matrix`, `teams`, `gchat`.
+  </Param>
+  <Param name="config" type="object" required>
+    Key-value pairs of configuration fields specific to the channel. See examples below.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">
+  Always `"ok"` on success.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/channels/save" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "channel": "discord",
+        "config": {
+          "bot_token": "MTIzNDU2Nzg5.abc.xyz",
+          "allowed_guild_ids": "111222333,444555666",
+          "allowed_user_ids": "999888777"
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/channels/save", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        config: {
+          bot_token: "MTIzNDU2Nzg5.abc.xyz",
+          allowed_guild_ids: "111222333,444555666",
+          allowed_user_ids: "999888777"
+        }
+      })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/channels/save",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "channel": "discord",
+            "config": {
+                "bot_token": "MTIzNDU2Nzg5.abc.xyz",
+                "allowed_guild_ids": "111222333,444555666",
+                "allowed_user_ids": "999888777",
+            },
+        },
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    { "status": "ok" }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>
+
+## Channel Config Keys
+
+| Channel | Config Keys |
+|---------|-------------|
+| Discord | `bot_token`, `allowed_guild_ids`, `allowed_user_ids` |
+| Slack | `bot_token`, `app_token`, `allowed_channel_ids` |
+| WhatsApp | `mode`, `access_token`, `phone_number_id`, `verify_token`, `allowed_phone_numbers`, `neonize_db` |
+| Telegram | `bot_token`, `allowed_user_id` |
+| Signal | `api_url`, `phone_number`, `allowed_phone_numbers` |
+| Matrix | `homeserver`, `user_id`, `access_token`, `password`, `allowed_room_ids`, `device_id` |
+| Teams | `app_id`, `app_password`, `allowed_tenant_ids`, `webhook_port` |
+| Google Chat | `mode`, `service_account_key`, `project_id`, `subscription_id`, `allowed_space_ids` |

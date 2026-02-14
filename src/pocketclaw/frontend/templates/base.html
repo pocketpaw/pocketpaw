@@ -118,6 +118,122 @@
             </span>
             Crew
           </button>
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@unocss/runtime"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+
+    <!-- QR code generation (WhatsApp pairing) -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.3/dist/cdn.min.js"
+    ></script>
+  </head>
+  <body x-data="{ ...app(), sidebarOpen: false }" x-init="init()" class="flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]">
+    
+    <!-- Mobile Sidebar Overlay -->
+    <div 
+        x-show="sidebarOpen" 
+        x-transition.opacity 
+        class="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
+        @click="sidebarOpen = false"
+    ></div>
+
+    {% include "components/sidebar.html" %}
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col relative bg-[radial-gradient(circle_at_50%_30%,#1c1c1e_0%,#000000_100%)] overflow-hidden w-full">
+      <!-- Top Bar -->
+      <header class="absolute top-0 left-0 right-0 z-10 flex justify-between items-center px-4 md:px-8 py-4 bg-gradient-to-b from-black/40 to-transparent pointer-events-none">
+        
+        <!-- Left: Mobile Toggle & View Switcher -->
+        <div class="flex items-center gap-3 pointer-events-auto">
+            <button 
+                class="md:hidden p-2 -ml-2 rounded-lg text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+                @click="sidebarOpen = true"
+            >
+                <i data-lucide="menu" class="w-6 h-6"></i>
+            </button>
+
+            <div class="flex bg-black/20 rounded-[9px] p-0.5 pointer-events-auto backdrop-blur-md border border-white/5">
+            <button
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
+                :class="view === 'chat' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+                @click="navigateToView('chat')"
+            >
+                Chat
+            </button>
+            <button
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
+                :class="view === 'activity' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+                @click="navigateToView('activity')"
+            >
+                Activity
+            </button>
+            <button
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all hidden sm:block"
+                :class="view === 'terminal' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+                @click="navigateToView('terminal')"
+            >
+                Terminal
+            </button>
+            <button
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all flex items-center gap-1.5 hidden sm:flex"
+                :class="view === 'missions' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+                @click="navigateToView('missions')"
+            >
+                <span class="relative flex h-2 w-2" x-show="missionControl.stats.active_tasks > 0">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
+                </span>
+                Crew
+            </button>
+            </div>
+        </div>
+
+        <!-- Right: Export + Remote -->
+        <div class="flex items-center gap-2 pointer-events-auto">
+            <!-- Export dropdown — only shown in chat view with active session -->
+            <div x-show="view === 'chat' && currentSessionId" class="relative" x-data="{ exportOpen: false }">
+                <button
+                    @click="exportOpen = !exportOpen"
+                    class="flex items-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
+                >
+                    <i data-lucide="download" class="w-4 h-4 text-accent"></i>
+                    <span class="text-sm font-medium text-white/90 hidden md:inline">Export</span>
+                </button>
+                <div
+                    x-show="exportOpen"
+                    @click.away="exportOpen = false"
+                    x-transition
+                    class="absolute right-0 mt-2 w-36 bg-[#2c2c2e] border border-white/10 rounded-xl shadow-xl z-50 overflow-hidden"
+                >
+                    <button
+                        @click="exportSession('json'); exportOpen = false"
+                        class="w-full px-4 py-2 text-sm text-left text-white/80 hover:bg-white/10 transition-colors"
+                    >JSON</button>
+                    <button
+                        @click="exportSession('md'); exportOpen = false"
+                        class="w-full px-4 py-2 text-sm text-left text-white/80 hover:bg-white/10 transition-colors"
+                    >Markdown</button>
+                </div>
+            </div>
+            
+            <!-- Take Your Paw With You button -->
+            <button
+                class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
+                @click="openRemote()"
+            >
+                <i data-lucide="smartphone" class="w-4 h-4 text-accent"></i>
+                <span class="text-sm font-medium text-white/90 hidden md:inline">Take Your Paw With You</span>
+            </button>
         </div>
       </div>
 

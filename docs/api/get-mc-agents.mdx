@@ -1,0 +1,91 @@
+---
+title: List Mission Control Agents
+description: "List all AI agents registered in PocketPaw's Mission Control system. Filter by status (idle, active, blocked, offline) and view each agent's name, role, specialties, and last heartbeat."
+api: GET /api/mission-control/agents
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["list agents", "agent status", "mission control agents"]
+tags: ["api", "mission-control"]
+---
+
+## Overview
+
+Returns all agents registered in Mission Control. Optionally filter by status.
+
+## Query Parameters
+
+<ResponseField name="status" type="string">
+  Filter by agent status: `idle`, `active`, `blocked`, or `offline`.
+</ResponseField>
+
+<ResponseField name="limit" type="integer" default="100">
+  Maximum number of agents to return.
+</ResponseField>
+
+## Response
+
+<ResponseField name="agents" type="array">
+  List of agent profiles.
+  <ResponseField name="id" type="string">Agent UUID.</ResponseField>
+  <ResponseField name="name" type="string">Agent name (e.g., `backend-dev`).</ResponseField>
+  <ResponseField name="role" type="string">Agent role (e.g., `Backend Engineer`).</ResponseField>
+  <ResponseField name="status" type="string">Current status.</ResponseField>
+  <ResponseField name="specialties" type="array">List of skill domains.</ResponseField>
+  <ResponseField name="last_heartbeat" type="string">ISO 8601 timestamp of last heartbeat.</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl http://localhost:8000/api/mission-control/agents \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch('http://localhost:8000/api/mission-control/agents', {
+  headers: { 'Authorization': 'Bearer YOUR_TOKEN' },
+});
+const data = await res.json();
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.get(
+    "http://localhost:8000/api/mission-control/agents",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+)
+data = res.json()
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "agents": [
+    {
+      "id": "agent-uuid-1",
+      "name": "backend-dev",
+      "role": "Backend Engineer",
+      "status": "idle",
+      "specialties": ["backend", "database", "api"],
+      "backend": "claude_agent_sdk",
+      "level": "specialist",
+      "last_heartbeat": "2024-01-15T14:30:00Z"
+    }
+  ]
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

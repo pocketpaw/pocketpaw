@@ -1,0 +1,89 @@
+---
+title: Skills System
+description: "Skills are persistent SKILL.md files that teach PocketPaw how to handle specific task types. Define triggers, step-by-step instructions, tool chains, and output formats that load into every interaction."
+section: Advanced
+ogType: article
+keywords: ["skills system", "skill.md", "agent training", "persistent skills", "task templates"]
+tags: ["advanced", "skills"]
+---
+
+# Skills System
+
+Skills are persistent markdown files that teach PocketPaw how to handle specific types of tasks. They're loaded into the agent's context on every interaction.
+
+## What is a Skill?
+
+A skill is a SKILL.md file stored in `~/.pocketclaw/skills/`. Each skill defines:
+
+- **When to activate** — Trigger phrases or conditions
+- **How to execute** — Step-by-step instructions
+- **What tools to use** — Tool chains and sequences
+- **Output format** — Expected response structure
+
+## Creating Skills
+
+### Via the Skill Generator Tool
+
+The agent can create skills using the `skill_gen` tool:
+
+```
+User: Create a skill for writing daily standup summaries
+Agent: [uses skill_gen] → Created skill: daily-standup.md
+```
+
+### Manually
+
+Create a markdown file in `~/.pocketclaw/skills/`:
+
+```markdown
+# Code Review Skill
+
+## Trigger
+When the user asks to review code, a PR, or a diff.
+
+## Steps
+1. Read the file or diff provided
+2. Analyze for:
+   - Bug risks
+   - Performance issues
+   - Security concerns
+   - Code style
+3. Provide structured feedback
+
+## Output Format
+### Summary
+Brief overall assessment.
+
+### Issues Found
+- **[severity]** Description of issue (line X)
+
+### Suggestions
+- Improvement suggestions
+```
+
+## Skill Loading
+
+Skills are loaded by the `AgentContextBuilder`:
+
+1. On startup, all `*.md` files in `~/.pocketclaw/skills/` are read
+2. Skill content is injected into the system prompt
+3. The agent uses skills as reference when handling matching requests
+4. After creating a new skill via `skill_gen`, the loader is reloaded
+
+## Skill Directory
+
+```
+~/.pocketclaw/skills/
+├── daily-standup.md
+├── code-review.md
+├── meeting-notes.md
+└── git-workflow.md
+```
+
+## Best Practices
+
+1. **Keep skills focused** — One skill per task type
+2. **Be specific** — Clear trigger conditions prevent false matches
+3. **Include examples** — Show the expected output format
+4. **Reference tools** — Specify which tools to use
+5. **Test and iterate** — Try the skill and refine it

@@ -1,0 +1,128 @@
+---
+title: Self-Hosting
+description: "Deploy PocketPaw on your own server: system requirements, Python 3.11+ setup, reverse proxy configuration with Nginx, SSL certificates, and production hardening recommendations for self-hosted AI."
+section: Deployment
+ogType: article
+keywords: ["self-hosting", "server deployment", "nginx", "ssl", "production", "ubuntu"]
+tags: ["deployment", "self-hosting"]
+---
+
+# Self-Hosting
+
+PocketPaw is designed to be self-hosted. Here's how to deploy it on your own server.
+
+## Requirements
+
+- **Python 3.11+**
+- **2GB RAM** minimum (4GB recommended with Mem0)
+- **Linux, macOS, or Windows** (Linux recommended for servers)
+- **Anthropic API key** (for Claude Agent SDK backend)
+
+## Basic Deployment
+
+### Install
+
+```bash
+# Create a dedicated user (optional)
+sudo useradd -m -s /bin/bash pocketpaw
+
+# Install PocketPaw
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+```
+
+### Configure
+
+Create the config file:
+
+```bash
+mkdir -p ~/.pocketclaw
+cat > ~/.pocketclaw/config.json << 'EOF'
+{
+  "anthropic_api_key": "sk-ant-your-key",
+  "agent_backend": "claude_agent_sdk",
+  "tool_profile": "coding"
+}
+EOF
+chmod 600 ~/.pocketclaw/config.json
+```
+
+### Run
+
+```bash
+pocketpaw
+```
+
+The dashboard starts on `http://0.0.0.0:8000`.
+
+## Production Deployment
+
+### Behind a Reverse Proxy
+
+For production, put PocketPaw behind nginx or Caddy:
+
+**Caddy (recommended)**:
+
+```
+pocketpaw.example.com {
+    reverse_proxy localhost:8000
+}
+```
+
+**nginx**:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name pocketpaw.example.com;
+
+    ssl_certificate /etc/ssl/certs/pocketpaw.crt;
+    ssl_certificate_key /etc/ssl/private/pocketpaw.key;
+
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+<Callout type="warning">
+  The WebSocket connection requires `Upgrade` and `Connection` headers to be properly proxied. Without these, real-time streaming won't work.
+</Callout>
+
+### Environment Variables
+
+Set environment variables in a `.env` file or your system's environment:
+
+```bash
+# /etc/pocketpaw/env
+POCKETCLAW_ANTHROPIC_API_KEY=sk-ant-...
+POCKETCLAW_DASHBOARD_HOST=127.0.0.1
+POCKETCLAW_DASHBOARD_PORT=8000
+POCKETCLAW_TOOL_PROFILE=coding
+```
+
+### Security Hardening
+
+1. **Run as a dedicated user** — Don't run as root
+2. **Restrict file permissions** — Config files should be 600
+3. **Use a firewall** — Only expose the reverse proxy port
+4. **Enable Guardian AI** — Active by default with Anthropic key
+5. **Set allowed IDs** — Restrict channel access to specific users
+6. **Run security audit** — `pocketpaw --security-audit`
+
+## Resource Planning
+
+| Component | RAM | CPU | Notes |
+|-----------|-----|-----|-------|
+| PocketPaw core | ~100MB | Minimal | FastAPI + agent loop |
+| Mem0 + Qdrant | ~500MB | Minimal | Embedded vector store |
+| Ollama (local) | 4-16GB | GPU recommended | Depends on model size |
+| Playwright | ~200MB | Moderate | Browser automation |
+
+For a typical deployment with Claude Agent SDK (cloud) and Mem0 with Ollama:
+- **Minimum**: 4GB RAM, 2 CPU cores
+- **Recommended**: 8GB RAM, 4 CPU cores

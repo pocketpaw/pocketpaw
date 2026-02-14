@@ -1,0 +1,94 @@
+---
+title: Rename Session
+description: "Update the display title of an existing PocketPaw session. Useful for organizing conversations with descriptive names that appear in the sidebar session list."
+api: POST /api/sessions/{session_id}/title
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["rename session", "session title", "update title"]
+tags: ["api", "sessions"]
+---
+
+## Overview
+
+Updates the display title of a session. By default, sessions are auto-titled based on the first message. Use this endpoint to set a custom title.
+
+## Parameters
+
+<ParamTable type="path">
+  <Param name="session_id" type="string" required>
+    The unique identifier of the session to rename.
+  </Param>
+</ParamTable>
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="title" type="string" required>
+    The new title for the session.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">
+  `"ok"` on successful update.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/sessions/session_abc123/title" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"title": "Docker deployment guide"}'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const sessionId = "session_abc123";
+    const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/title`, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ title: "Docker deployment guide" })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    session_id = "session_abc123"
+    response = requests.post(
+        f"http://localhost:8000/api/sessions/{session_id}/title",
+        headers={"Authorization": "Bearer <token>"},
+        json={"title": "Docker deployment guide"},
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "404"]}>
+  <Tab title="200">
+    ```json
+    { "status": "ok" }
+    ```
+  </Tab>
+  <Tab title="404">
+    ```json
+    { "detail": "Session not found" }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

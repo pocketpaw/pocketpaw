@@ -1,0 +1,109 @@
+---
+title: Why PocketPaw?
+description: "Discover why PocketPaw stands out from other AI assistants: fully self-hosted, multi-channel, 50+ built-in tools, and complete privacy with no cloud dependency."
+section: Introduction
+ogType: article
+keywords: ["comparison", "benefits", "privacy", "open source ai", "features"]
+tags: ["overview", "comparison"]
+---
+
+# Why PocketPaw?
+
+There are many AI assistants and agent frameworks available today. Here's what makes PocketPaw different.
+
+## Self-Hosted, Not Cloud-Dependent
+
+PocketPaw runs **entirely on your machine**. Your conversations, files, and data never leave your control. There's no cloud service to subscribe to, no usage limits imposed by a platform, and no risk of a provider shutting down your access.
+
+| Feature | PocketPaw | Cloud AI Assistants |
+|---------|-----------|-------------------|
+| Data location | Your machine | Provider's servers |
+| Privacy | Full control | Provider's policy |
+| Uptime | You control | Provider controls |
+| Customization | Unlimited | Limited |
+| Cost | API costs only | Subscription + API |
+
+## Multi-Channel by Default
+
+Most AI tools work in a single interface. PocketPaw connects to **9+ messaging platforms simultaneously**:
+
+- **Telegram** — Full bot API with topic support
+- **Discord** — Slash commands, DM, and mention support
+- **Slack** — Socket Mode (no public URL needed)
+- **WhatsApp** — Business API or Personal mode via QR scan
+- **Signal** — Privacy-focused messaging
+- **Matrix** — Decentralized, federated protocol
+- **Microsoft Teams** — Enterprise collaboration
+- **Google Chat** — Workspace integration
+- **Web Dashboard** — Built-in real-time interface
+
+You can run all of them at once. Send a message from Telegram, continue the conversation from Discord, and monitor everything from the web dashboard.
+
+## Three Agent Backends
+
+PocketPaw doesn't lock you into a single AI provider or execution model:
+
+<Tabs>
+  <Tab title="Claude Agent SDK">
+    The recommended backend. Uses Anthropic's official Claude Agent SDK with built-in tools (Bash, Read, Write, Edit). Best for coding tasks and complex reasoning.
+  </Tab>
+  <Tab title="PocketPaw Native">
+    Custom orchestrator that combines Anthropic's SDK for reasoning with Open Interpreter for code execution. Good balance of capability and control.
+  </Tab>
+  <Tab title="Open Interpreter">
+    Standalone execution engine that supports Ollama, OpenAI, and Anthropic models. Best for fully local setups with Ollama.
+  </Tab>
+</Tabs>
+
+## Extensible Tool System
+
+PocketPaw ships with 30+ built-in tools and supports custom tool creation:
+
+- **Web Search** — Tavily and Brave Search providers
+- **Image Generation** — Google Gemini models
+- **Voice & TTS** — OpenAI and ElevenLabs
+- **Speech to Text** — OpenAI Whisper
+- **Browser Automation** — Playwright with accessibility tree
+- **OCR** — GPT-4o Vision with pytesseract fallback
+- **Research** — Multi-step web research chains
+- **Delegation** — Spawn sub-agents for parallel work
+- **Gmail, Calendar, Drive, Docs** — Full Google Workspace
+- **Spotify** — Search, playback control, playlists
+- **Reddit** — Search, read threads, trending content
+- **MCP Servers** — Connect any Model Context Protocol server
+
+Tools are governed by a **policy system** with profiles (minimal, coding, full) and per-tool allow/deny lists.
+
+## Security Built In
+
+PocketPaw takes security seriously with seven independent defense layers:
+
+<img src="/pocketpaw-security-stack.webp" alt="PocketPaw security stack: every request passes through seven defense layers before reaching your system." width="500" />
+
+1. **Credential Encryption** — Fernet AES-128 with machine-derived key
+2. **Session Authentication** — WebSocket token + per-channel allowlists
+3. **Rate Limiting** — Configurable per-channel throttle
+4. **Injection Scanner** — Two-tier detection (regex + LLM) for prompt injection
+5. **Tool Policy Engine** — Per-tool allow/deny with profiles
+6. **Command Blocking** — Dangerous shell command interception
+7. **Guardian AI** — Secondary LLM safety review before execution
+
+## Modular Installation
+
+PocketPaw's core is lightweight (~10 packages). Everything else is an optional extra:
+
+```bash
+# One-line install
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or with pip — pick your extras
+pip install pocketpaw[telegram,discord,slack]
+pip install pocketpaw[all-tools]
+pip install pocketpaw[all]
+```
+
+You only install what you actually use. No bloated dependencies.
+
+## Open Source
+
+PocketPaw is fully open source. You can inspect every line of code, contribute improvements, and fork it to build your own agent. No black boxes, no proprietary lock-in.

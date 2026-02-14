@@ -1,0 +1,78 @@
+---
+title: Web Search
+description: "Search the web from PocketPaw using Tavily or Brave Search APIs. Returns structured results the agent can reason over. Configure your preferred search provider with a single env variable."
+section: Tools
+ogType: article
+keywords: ["web search", "tavily", "brave search", "search api", "internet search"]
+tags: ["tools", "search"]
+---
+
+# Web Search
+
+The web search tool enables PocketPaw to search the internet for real-time information.
+
+## Providers
+
+Two search providers are supported:
+
+### Tavily (Recommended)
+
+[Tavily](https://tavily.com) is an AI-optimized search API that returns clean, structured results.
+
+```bash
+export POCKETCLAW_WEB_SEARCH_PROVIDER="tavily"
+export POCKETCLAW_TAVILY_API_KEY="tvly-your-key"
+```
+
+### Brave Search
+
+[Brave Search](https://brave.com/search/api/) offers a privacy-focused search API.
+
+```bash
+export POCKETCLAW_WEB_SEARCH_PROVIDER="brave"
+export POCKETCLAW_BRAVE_SEARCH_API_KEY="your-key"
+```
+
+## Usage
+
+The agent can use web search automatically when it needs to find information:
+
+```
+User: What's the latest version of Python?
+Agent: [uses web_search tool] → Python 3.13 is the latest stable version...
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "web_search",
+  "description": "Search the web for current information",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query"
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Maximum number of results (default: 5)"
+      }
+    },
+    "required": ["query"]
+  }
+}
+```
+
+## Policy Group
+
+The web search tool belongs to `group:search`. To control access:
+
+```bash
+# Allow web search
+export POCKETCLAW_TOOLS_ALLOW="group:search"
+
+# Or deny it
+export POCKETCLAW_TOOLS_DENY="web_search"
+```

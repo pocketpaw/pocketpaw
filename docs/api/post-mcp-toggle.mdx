@@ -1,0 +1,81 @@
+---
+title: Toggle MCP Server
+description: "Enable or disable an MCP server in PocketPaw without removing its configuration. Disabled servers retain their settings but their tools are not available to the agent."
+api: POST /api/mcp/toggle
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["toggle mcp", "enable disable server", "mcp control"]
+tags: ["api", "mcp"]
+---
+
+## Overview
+
+Enables or disables an MCP server. Disabling a server stops its process and removes its tools from the agent. Enabling starts the server and makes its tools available.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="name" type="string" required>
+    The name of the MCP server to toggle.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">`"ok"` on success</ResponseField>
+<ResponseField name="enabled" type="boolean">The new enabled state of the server</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/mcp/toggle" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"name": "filesystem"}'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/mcp/toggle", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ name: "filesystem" })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/mcp/toggle",
+        headers={"Authorization": "Bearer <token>"},
+        json={"name": "filesystem"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "status": "ok",
+      "enabled": true
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

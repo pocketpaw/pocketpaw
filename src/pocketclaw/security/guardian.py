@@ -6,6 +6,7 @@ This module provides a secondary LLM check for dangerous actions.
 """
 
 import logging
+import re
 
 try:
     from anthropic import AsyncAnthropic
@@ -16,6 +17,40 @@ from pocketclaw.config import get_settings
 from pocketclaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 
 logger = logging.getLogger("guardian")
+
+# ---------------------------------------------------------------------------
+# Local dangerous-command patterns (regex, case-insensitive).
+#
+# Used as a fallback safety net when the LLM-based Guardian is unavailable
+# (no API key configured).  This is the union of patterns from shell.py,
+# pocketpaw_native.py, and claude_sdk.py so that the local check is at
+# least as strict as every other layer in the stack.
+# ---------------------------------------------------------------------------
+_LOCAL_DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        # Destructive file operations
+        r"rm\s+(-[rf]+\s+)*[/~]",
+        r"rm\s+(-[rf]+\s+)*\*",
+        r"sudo\s+rm\b",
+        r">\s*/dev/",
+        r">\s*/etc/",
+        r"mkfs\.",
+        r"dd\s+if=",
+        r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  # Fork bomb
+        r"chmod\s+(-R\s+)?777\s+/",
+        # Remote code execution
+        r"curl\s+.*\|\s*(ba)?sh",
+        r"wget\s+.*\|\s*(ba)?sh",
+        r"curl\s+.*-o\s*/",
+        r"wget\s+.*-O\s*/",
+        # System damage
+        r"systemctl\s+(stop|disable)\s+(ssh|sshd|firewall)",
+        r"iptables\s+-F",
+        r"\bshutdown\b",
+        r"\breboot\b",
+    ]
+]
 
 
 class GuardianAgent:
@@ -55,6 +90,18 @@ Respond with valid JSON only:
         if not self.client and self.settings.anthropic_api_key:
             self.client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
 
+    def _local_safety_check(self, command: str) -> tuple[bool, str]:
+        """Deny-by-default local pattern check.
+
+        Used when the LLM backend is unavailable.  Returns ``(False, reason)``
+        for any command matching a known-dangerous pattern, and
+        ``(True, reason)`` only for commands that do not match any pattern.
+        """
+        for pattern in _LOCAL_DANGEROUS_PATTERNS:
+            if pattern.search(command):
+                return False, f"Blocked by local safety check (pattern: {pattern.pattern})"
+        return True, "Allowed by local safety check (no dangerous pattern matched)"
+
     async def check_command(self, command: str) -> tuple[bool, str]:
         """
         Check if a command is safe.
@@ -63,21 +110,28 @@ Respond with valid JSON only:
         await self._ensure_client()
 
         if not self.client:
-            # No API key = Guardian not configured. Log a one-time warning
-            # and allow, but record it in the audit trail so admins notice.
-            logger.warning("Guardian disabled (no API key). Allowing command.")
+            # No API key — fall back to a strict local pattern check so that
+            # known-dangerous commands are still blocked.  This is fail-closed:
+            # the local check denies anything matching a dangerous pattern.
+            is_safe, reason = self._local_safety_check(command)
+            severity = AuditSeverity.INFO if is_safe else AuditSeverity.ALERT
+            logger.warning(
+                "Guardian LLM unavailable (no API key). Local safety check: %s — %s",
+                "allow" if is_safe else "block",
+                reason,
+            )
             self._audit.log(
                 AuditEvent.create(
-                    severity=AuditSeverity.ALERT,
+                    severity=severity,
                     actor="guardian",
-                    action="scan_command",
+                    action="local_safety_check",
                     target="shell",
-                    status="allow",
-                    reason="No API key — Guardian inactive",
+                    status="allow" if is_safe else "block",
+                    reason=reason,
                     command=command,
                 )
             )
-            return True, "Guardian disabled (no API key)"
+            return is_safe, reason
 
         # Audit Check
         self._audit.log(

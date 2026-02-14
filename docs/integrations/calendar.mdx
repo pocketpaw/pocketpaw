@@ -1,0 +1,60 @@
+---
+title: Google Calendar
+description: "Manage Google Calendar events with PocketPaw: list upcoming events, create new ones with attendees and reminders, and search across all your calendars using natural language queries."
+section: Integrations
+ogType: article
+keywords: ["google calendar", "calendar events", "scheduling", "calendar api", "event management"]
+tags: ["integrations", "calendar", "google"]
+---
+
+# Google Calendar
+
+PocketPaw can manage your Google Calendar with three tools: list, create, and search.
+
+## Setup
+
+1. Set up [Google OAuth](/integrations/oauth) credentials
+2. Enable the Google Calendar API in your Google Cloud project
+3. Authorize PocketPaw to access your calendar
+
+## Tools
+
+### calendar_list
+
+List upcoming calendar events:
+
+```
+User: What's on my calendar for today?
+Agent: [uses calendar_list] → You have 3 events today:
+  - 9:00 AM: Team standup (30 min)
+  - 11:00 AM: Design review (1 hr)
+  - 2:00 PM: Client call (45 min)
+```
+
+### calendar_create
+
+Create a new calendar event:
+
+```
+User: Schedule a meeting with Sarah tomorrow at 3pm for 1 hour
+Agent: [uses calendar_create] → Created event:
+  "Meeting with Sarah" — Tomorrow 3:00 PM - 4:00 PM
+```
+
+### calendar_search
+
+Search for events by keyword or date range:
+
+```
+User: When is my next dentist appointment?
+Agent: [uses calendar_search] → Found: "Dentist appointment" on Feb 20 at 10:00 AM
+```
+
+## Policy Group
+
+All Calendar tools belong to `group:calendar`.
+
+## Required Scopes
+
+- `calendar.readonly` — For listing and searching
+- `calendar.events` — For creating events

@@ -1,0 +1,81 @@
+---
+title: Telegram
+description: "Connect PocketPaw to Telegram as a bot with topic-aware conversations, inline keyboards, and streaming responses. Supports group chats and private messages with session isolation."
+section: Channels
+ogType: article
+keywords: ["telegram bot", "telegram integration", "topic support", "group chat", "bot api"]
+tags: ["channels", "telegram"]
+---
+
+# Telegram
+
+PocketPaw supports Telegram via the `python-telegram-bot` library. It works as a standard Telegram bot with support for topics, inline keyboards, and streaming.
+
+## Setup
+
+<Steps>
+  <Step title="Create a bot">
+    1. Open Telegram and search for `@BotFather`
+    2. Send `/newbot` and follow the prompts
+    3. Copy the bot token
+  </Step>
+  <Step title="Configure">
+    ```bash
+    export POCKETCLAW_TELEGRAM_TOKEN="your-bot-token"
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    # Telegram-only mode
+    pocketpaw --telegram
+
+    # Or via web dashboard (configure in Channels modal)
+    pocketpaw
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| Bot token | `POCKETCLAW_TELEGRAM_TOKEN` | Bot token from BotFather |
+| Allowed user IDs | `POCKETCLAW_ALLOWED_TELEGRAM_IDS` | Comma-separated user IDs |
+
+## Features
+
+### Streaming
+
+Telegram supports edit-in-place streaming. The bot sends an initial message and then edits it as more tokens arrive, giving a real-time typing effect.
+
+### Topic Support
+
+PocketPaw supports Telegram's topic feature (available in groups with topics enabled). Each topic gets its own session:
+
+- Session key format: `{chat_id}:topic:{topic_id}`
+- Messages in different topics maintain separate conversation histories
+
+### Access Control
+
+Restrict access by specifying allowed Telegram user IDs:
+
+```bash
+export POCKETCLAW_ALLOWED_TELEGRAM_IDS="123456,789012"
+```
+
+Only users with these IDs can interact with the bot. If not set, anyone can use the bot.
+
+### Commands
+
+The bot responds to direct messages and can be configured with custom commands via BotFather's `/setcommands`.
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the Telegram extra manually
+pip install pocketpaw[telegram]
+```
+
+This installs `python-telegram-bot` as a dependency.

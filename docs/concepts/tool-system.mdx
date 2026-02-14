@@ -1,0 +1,148 @@
+---
+title: Tool System
+description: "PocketPaw's extensible tool system uses ToolProtocol interfaces with dual-schema export (Anthropic and OpenAI), a policy engine with deny-wins precedence, and 50+ built-in tools."
+section: Core Concepts
+ogType: article
+keywords: ["tool protocol", "tool registry", "policy engine", "anthropic schema", "openai schema"]
+tags: ["tools", "architecture"]
+---
+
+# Tool System
+
+PocketPaw's tool system provides 30+ built-in tools and supports custom tool creation. Tools are governed by a policy system that controls which tools are available.
+
+<img src="/Tool-system-architecture-and-policy-system.webp" alt="Tool system architecture: 21 built-in tools across eight categories, ToolProtocol interface with dual-schema export, and three-tier policy engine (profiles, groups, allow/deny lists) with strict deny-wins precedence." />
+
+## Tool Protocol
+
+Every tool implements the `ToolProtocol`:
+
+```python
+class ToolProtocol(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    @property
+    def definition(self) -> ToolDefinition: ...
+
+    async def execute(self, **kwargs) -> str: ...
+```
+
+The `ToolDefinition` provides schema export for both Anthropic and OpenAI formats, enabling tools to work with any backend.
+
+## Tool Registry
+
+The `ToolRegistry` is the central registry for all tools:
+
+```python
+from pocketclaw.tools.registry import ToolRegistry
+
+registry = ToolRegistry()
+registry.register(MyCustomTool())
+
+# Get tool definitions for the agent
+tools = registry.get_tool_definitions(format="anthropic")
+
+# Execute a tool by name
+result = await registry.execute("my_tool", param1="value")
+```
+
+The registry automatically filters tools based on the active [tool policy](/tools/tool-policy).
+
+## Built-in Tools
+
+PocketPaw ships with these built-in tools:
+
+### Core Tools (Claude Agent SDK)
+- **Bash** — Execute shell commands
+- **Read** — Read files from the filesystem
+- **Write** — Write files to the filesystem
+- **Edit** — Edit existing files
+
+### Search & Research
+- **web_search** — Search the web via Tavily or Brave
+- **research** — Multi-step web research chains
+
+### Media
+- **image_gen** — Generate images with Google Gemini
+- **voice** — Text-to-speech (OpenAI, ElevenLabs)
+- **stt** — Speech-to-text (OpenAI Whisper)
+- **ocr** — Extract text from images (GPT-4o Vision + pytesseract)
+
+### Productivity
+- **gmail** — Search, read, and send emails
+- **calendar** — List, create, and search calendar events
+- **gdrive** — List, download, upload, and share files
+- **gdocs** — Read, create, and search documents
+
+### Entertainment
+- **spotify** — Search, playback, playlists, now playing
+- **reddit** — Search, read threads, trending content
+
+### Agent Tools
+- **delegate** — Spawn sub-agents for parallel work
+- **skill_gen** — Generate custom skill definitions
+
+### Browser
+- **browser** — Playwright-based web automation using accessibility tree snapshots
+
+## Tool Groups
+
+Tools are organized into groups for policy management:
+
+| Group | Tools |
+|-------|-------|
+| `group:filesystem` | read_file, write_file, list_dir |
+| `group:shell` | shell |
+| `group:memory` | save_memory, recall_memory |
+| `group:search` | web_search |
+| `group:media` | image_gen, voice, stt, ocr |
+| `group:gmail` | gmail_search, gmail_read, gmail_send |
+| `group:calendar` | calendar_list, calendar_create, calendar_search |
+| `group:drive` | gdrive_list, gdrive_download, gdrive_upload, gdrive_share |
+| `group:docs` | gdocs_read, gdocs_create, gdocs_search |
+| `group:spotify` | spotify_search, spotify_now_playing, spotify_playback, spotify_playlist |
+| `group:reddit` | reddit_search, reddit_read, reddit_trending |
+| `group:voice` | voice, stt |
+| `group:research` | research |
+| `group:delegation` | delegate |
+| `group:skills` | skill_gen |
+| `group:mcp` | All MCP server tools |
+
+## Schema Export
+
+Tools can export their definitions in both Anthropic and OpenAI formats:
+
+```python
+# Anthropic format (used by Claude Agent SDK)
+{
+    "name": "web_search",
+    "description": "Search the web for information",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"}
+        },
+        "required": ["query"]
+    }
+}
+
+# OpenAI format (used by Open Interpreter)
+{
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Search the web for information",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"}
+            },
+            "required": ["query"]
+        }
+    }
+}
+```

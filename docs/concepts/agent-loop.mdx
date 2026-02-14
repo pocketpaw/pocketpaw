@@ -1,0 +1,104 @@
+---
+title: Agent Loop
+description: "The Agent Loop is PocketPaw's central orchestrator: it consumes messages from the bus, builds context from memory, delegates to the agent backend, and streams responses back."
+section: Core Concepts
+ogType: article
+keywords: ["agent loop", "orchestrator", "message processing", "context building", "streaming"]
+tags: ["architecture", "agent"]
+---
+
+# Agent Loop
+
+The `AgentLoop` is the central orchestrator in PocketPaw. It consumes messages from the bus, builds context, delegates to the agent backend, and streams responses back.
+
+## Responsibilities
+
+The AgentLoop handles:
+
+1. **Message consumption** — Subscribes to `InboundMessage` events from the bus
+2. **Security checks** — Runs Guardian AI and injection scanner on incoming messages
+3. **Context building** — Assembles system prompt with identity, memory, and state
+4. **Backend delegation** — Routes to the configured agent backend via `AgentRouter`
+5. **Response streaming** — Publishes `OutboundMessage` chunks back to the bus
+6. **Memory updates** — Saves conversation history and triggers Mem0 auto-learn
+7. **System events** — Emits tool activity events for the web dashboard
+8. **Inbox updates** — Publishes cross-channel inbox events
+
+## Processing Flow
+
+```python
+# Simplified AgentLoop flow
+async def handle_message(self, message: InboundMessage):
+    # 1. Security check
+    threat = await self.guardian.check(message.content)
+    if threat.level >= ThreatLevel.HIGH:
+        await self.bus.publish(OutboundMessage(
+            content="Message blocked by safety check",
+            ...
+        ))
+        return
+
+    # 2. Injection scan
+    if await self.scanner.scan(message.content):
+        return  # Block injected messages
+
+    # 3. Build context
+    context = await self.context_builder.build(
+        session_id=message.session_id,
+        user_query=message.content,
+    )
+
+    # 4. Delegate to backend
+    async for chunk in self.router.process(context, message.content):
+        if chunk["type"] == "message":
+            await self.bus.publish(OutboundMessage(
+                content=chunk["content"],
+                is_stream_chunk=True,
+                ...
+            ))
+        elif chunk["type"] == "tool_use":
+            await self.bus.publish(SystemEvent(
+                event_type="tool_start",
+                data=chunk["metadata"],
+            ))
+
+    # 5. Save to memory
+    await self.memory.save(message.session_id, message.content, response)
+
+    # 6. Trigger Mem0 auto-learn (background task)
+    if settings.mem0_auto_learn:
+        asyncio.create_task(self.mem0.learn(message.content, response))
+```
+
+## Agent Router
+
+The `AgentRouter` selects and delegates to one of three backends:
+
+| Backend | Setting Value | Best For |
+|---------|--------------|----------|
+| Claude Agent SDK | `claude_agent_sdk` | Coding, complex reasoning, built-in tools |
+| PocketPaw Native | `pocketpaw_native` | Balanced capability and control |
+| Open Interpreter | `open_interpreter` | Local models via Ollama |
+
+The router lazily imports the selected backend to avoid loading unused dependencies.
+
+## Response Standardization
+
+All backends yield standardized dictionaries:
+
+```python
+{
+    "type": "message",      # message, tool_use, tool_result, error, done
+    "content": "...",       # Text content
+    "metadata": {           # Backend-specific metadata
+        "tool_name": "...",
+        "tool_input": {...},
+    }
+}
+```
+
+This ensures consistent behavior regardless of which backend is active.
+
+## Concurrency
+
+The AgentLoop processes one message per session at a time. If a new message arrives while processing, it's queued. Different sessions can be processed concurrently.

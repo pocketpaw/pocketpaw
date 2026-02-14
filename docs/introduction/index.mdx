@@ -1,0 +1,84 @@
+---
+title: Welcome to PocketPaw
+description: "PocketPaw is a self-hosted AI agent that runs locally on your machine and connects to Telegram, Discord, Slack, WhatsApp, and 5 more messaging platforms via a single web dashboard."
+section: Introduction
+ogType: article
+keywords: ["welcome", "overview", "multi-channel ai", "web dashboard"]
+tags: ["overview", "getting-started"]
+---
+
+# Welcome to PocketPaw
+
+<video src="/paw-2.mp4" autoplay loop muted playsinline controls style="display:block;margin:0 auto 1.5rem;border-radius:16px;width:100%;max-width:800px;" />
+
+PocketPaw is a **self-hosted AI agent** that runs on your machine and connects to Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Microsoft Teams, Google Chat, and a built-in web dashboard. It gives you full control over your AI assistant with zero cloud lock-in.
+
+## What is PocketPaw?
+
+PocketPaw is an event-driven AI agent framework that bridges multiple messaging platforms to powerful language model backends. Send a message from any channel, and PocketPaw processes it through a configurable agent pipeline that can:
+
+- **Execute code** on your machine via shell commands
+- **Read and write files** on your local filesystem
+- **Browse the web** with Playwright-based automation
+- **Search the internet** via Tavily or Brave Search
+- **Generate images** with Google's Gemini models
+- **Manage your email** through Gmail integration
+- **Control your calendar** via Google Calendar
+- **Play music** with Spotify integration
+- **And much more** via 30+ built-in tools
+
+## Key Features
+
+<CardGroup>
+  <Card title="Multi-Channel" icon="lucide:radio" href="/channels">
+    Connect 9+ messaging platforms simultaneously. Manage all channels from the web dashboard.
+  </Card>
+  <Card title="3 Agent Backends" icon="lucide:cpu" href="/backends">
+    Claude Agent SDK, PocketPaw Native, or Open Interpreter. Pick the engine that suits your needs.
+  </Card>
+  <Card title="30+ Tools" icon="lucide:wrench" href="/tools">
+    Web search, image gen, voice, browser, OCR, research, delegation, and custom tool support.
+  </Card>
+  <Card title="Security First" icon="lucide:shield" href="/security">
+    Guardian AI safety checks, injection scanning, audit logs, and automated security audits.
+  </Card>
+</CardGroup>
+
+## How It Works
+
+<Steps>
+  <Step title="Install PocketPaw">
+    Install via pip or uv with the extras you need. Core installation is lightweight (~10 packages).
+  </Step>
+  <Step title="Configure your channels">
+    Add your bot tokens and API keys. The web dashboard makes configuration easy.
+  </Step>
+  <Step title="Start chatting">
+    Send messages from any connected channel. PocketPaw processes them through the agent pipeline.
+  </Step>
+  <Step title="Extend with tools">
+    Add integrations, MCP servers, and custom tools to make your agent more capable.
+  </Step>
+</Steps>
+
+## Architecture at a Glance
+
+PocketPaw follows an **event-driven message bus** architecture:
+
+<img src="/pocketpaw-system-architecture.webp" alt="PocketPaw system architecture: event-driven MessageBus connecting 10+ channel adapters, agent processing pipeline with injection scanning, memory-augmented context building, three swappable LLM backends, and real-time streaming delivery." />
+
+Every message flows through the bus, regardless of which channel it comes from. This makes it trivial to add new channels and ensures consistent behavior across all platforms.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Installation" icon="lucide:download" href="/getting-started/installation">
+    Get PocketPaw running on your machine in under 5 minutes.
+  </Card>
+  <Card title="Quick Start" icon="lucide:rocket" href="/getting-started/quick-start">
+    Set up your first channel and start chatting with your agent.
+  </Card>
+  <Card title="Why PocketPaw?" icon="lucide:sparkles" href="/introduction/why-pocketpaw">
+    Learn what makes PocketPaw different from other AI assistants.
+  </Card>
+</CardGroup>

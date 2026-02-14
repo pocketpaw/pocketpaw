@@ -1,0 +1,56 @@
+---
+title: Google Docs
+description: "Read, create, and search Google Docs with PocketPaw. Extract document content as plain text, create new documents with formatted content, and search across your Docs library by title or content."
+section: Integrations
+ogType: article
+keywords: ["google docs", "document management", "docs api", "document creation", "text extraction"]
+tags: ["integrations", "docs", "google"]
+---
+
+# Google Docs
+
+PocketPaw can interact with Google Docs for reading, creating, and searching documents.
+
+## Setup
+
+1. Set up [Google OAuth](/integrations/oauth) credentials
+2. Enable the Google Docs API in your Google Cloud project
+3. Authorize PocketPaw to access your Docs
+
+## Tools
+
+### gdocs_read
+
+Read the content of a Google Doc:
+
+```
+User: Read the meeting notes from last week
+Agent: [uses gdocs_read] → Meeting Notes - Jan 15:
+  - Discussed project timeline
+  - Assigned tasks to team members
+  - Next meeting scheduled for Jan 22
+```
+
+### gdocs_create
+
+Create a new Google Doc:
+
+```
+User: Create a new document called "Sprint Planning" with today's agenda
+Agent: [uses gdocs_create] → Created "Sprint Planning" document
+```
+
+### gdocs_search
+
+Search for documents by title or content:
+
+```
+User: Find all docs about the budget
+Agent: [uses gdocs_search] → Found 2 documents:
+  1. "Q1 Budget Review" (last modified Jan 10)
+  2. "Budget Proposal 2024" (last modified Dec 15)
+```
+
+## Policy Group
+
+All Docs tools belong to `group:docs`.

@@ -1,0 +1,116 @@
+---
+title: Add MCP Server
+description: "Add a new MCP server configuration to PocketPaw. Specify the server name, command, arguments, environment variables, and transport type for stdio or HTTP-based MCP servers."
+api: POST /api/mcp/add
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["add mcp server", "mcp configuration", "server setup"]
+tags: ["api", "mcp"]
+---
+
+## Overview
+
+Adds a new MCP server to the configuration. The server can use either `stdio` transport (local process) or `http` transport (remote URL).
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="name" type="string" required>
+    Unique identifier for the server. Used as the key in config and tool naming (`mcp_<name>__<tool>`).
+  </Param>
+  <Param name="transport" type="string" required enum={["stdio", "http"]}>
+    Transport protocol. Use `stdio` for local processes or `http` for remote servers.
+  </Param>
+  <Param name="command" type="string">
+    Command to execute for `stdio` transport (e.g., `npx`, `python`).
+  </Param>
+  <Param name="args" type="array">
+    Command arguments for `stdio` transport.
+  </Param>
+  <Param name="url" type="string">
+    Server URL for `http` transport.
+  </Param>
+  <Param name="env" type="object">
+    Environment variables to pass to the server process.
+  </Param>
+  <Param name="enabled" type="boolean" default="true">
+    Whether to enable the server immediately.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">`"ok"` on success</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/mcp/add" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "filesystem",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+        "env": {},
+        "enabled": true
+      }'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/mcp/add", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "filesystem",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+        env: {},
+        enabled: true
+      })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/mcp/add",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "name": "filesystem",
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+            "env": {},
+            "enabled": True
+        }
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    { "status": "ok" }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -262,6 +262,24 @@ window.PocketPaw.Sessions = {
             },
 
             /**
+             * Export current session as JSON or Markdown download
+             */
+            exportSession(format) {
+                if (!this.currentSessionId) {
+                    this.showToast('No active session', 'error');
+                    return;
+                }
+                const url = `/api/memory/session/export?id=${encodeURIComponent(this.currentSessionId)}&format=${format}`;
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = '';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                this.showToast(`Exported as ${format.toUpperCase()}`, 'success');
+            },
+
+            /**
              * Auto-title: update session in sidebar after first response
              */
             autoTitleCurrentSession() {

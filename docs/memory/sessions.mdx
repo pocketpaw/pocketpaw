@@ -1,0 +1,84 @@
+---
+title: Sessions
+description: "Sessions are PocketPaw's core conversation units with full lifecycle management: creation, switching, renaming, searching, and deletion. Each channel generates unique session keys for isolation."
+section: Memory
+ogType: article
+keywords: ["sessions", "conversation management", "session keys", "chat history", "session lifecycle"]
+tags: ["memory", "sessions"]
+---
+
+# Sessions
+
+Sessions are the core unit of conversation in PocketPaw. Each session tracks a complete conversation thread with history and metadata.
+
+## Session Lifecycle
+
+1. **Creation** — A new session is created when a user starts a new conversation
+2. **Active** — Messages are added as the conversation progresses
+3. **Suspended** — The user switches to another session or closes the dashboard
+4. **Resumed** — The user returns to a previous session
+5. **Deleted** — The user explicitly deletes the session
+
+## Session Keys
+
+Each channel generates unique session keys:
+
+| Channel | Key Format | Example |
+|---------|------------|---------|
+| Web | Auto-generated UUID | `session_a1b2c3d4` |
+| Telegram | `{chat_id}` | `123456789` |
+| Telegram Topics | `{chat_id}:topic:{topic_id}` | `123456789:topic:42` |
+| Discord | `{channel_id}` or `dm:{user_id}` | `dm:987654321` |
+| Slack | `{channel_id}:{thread_ts}` | `C01ABC:1705123456.789` |
+| WhatsApp | `{phone_number}` | `+1234567890` |
+| Signal | `{phone_number}` | `+1234567890` |
+| Matrix | `{room_id}` | `!abc:matrix.org` |
+| Teams | `{conversation_id}` | `19:abc@thread.v2` |
+| Google Chat | `{space_name}` | `spaces/abc123` |
+
+## Dashboard Session Management
+
+The web dashboard provides full session management:
+
+### Session List
+
+The sidebar shows all sessions grouped by time:
+- **Today** — Sessions from today
+- **Yesterday** — Sessions from yesterday
+- **This Week** — Sessions from this week
+- **Older** — Older sessions
+
+### Session Operations
+
+- **New session** — Create a blank conversation
+- **Switch session** — Click a session in the sidebar
+- **Rename session** — Edit the session title
+- **Delete session** — Remove a session
+- **Search sessions** — Full-text search across all sessions
+
+### REST API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/sessions` | GET | List all sessions |
+| `/api/sessions/{id}` | DELETE | Delete a session |
+| `/api/sessions/{id}/title` | PUT | Rename a session |
+| `/api/sessions/search` | GET | Search sessions |
+| `/api/sessions/recent` | GET | Get recent sessions |
+
+### WebSocket Actions
+
+| Action | Description |
+|--------|-------------|
+| `switch_session` | Switch to a session by ID |
+| `new_session` | Create and switch to a new session |
+| `resume_session` | Resume a session (query param) |
+
+## State Management
+
+The frontend uses a `StateManager` that:
+
+- Caches session data in localStorage for fast switching
+- Uses an LRU cache to limit memory usage
+- Syncs state between the sidebar and chat area
+- Persists the active session ID for page reloads

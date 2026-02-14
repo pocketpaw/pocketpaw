@@ -1,0 +1,134 @@
+---
+title: Quick Start
+description: "Get PocketPaw running in 5 minutes: install the package, set your API key, launch the web dashboard, and send your first message to your self-hosted AI agent."
+section: Getting Started
+ogType: article
+keywords: ["quick start", "first run", "tutorial", "beginner guide", "web dashboard"]
+tags: ["tutorial", "getting-started"]
+---
+
+# Quick Start
+
+This guide gets you from zero to a working AI agent in under 5 minutes.
+
+## Step 1: Install
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+```
+
+## Step 2: Set Your API Key
+
+```bash
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-your-key-here"
+```
+
+## Step 3: Launch
+
+```bash
+pocketpaw
+```
+
+This starts the **web dashboard** at `http://localhost:8000`. Open it in your browser.
+
+## Step 4: Chat
+
+Type a message in the chat input and press Enter. PocketPaw will process it through the Claude Agent SDK and stream the response back in real-time.
+
+Try these example prompts:
+
+- "What files are in my home directory?"
+- "Write a Python script that calculates prime numbers"
+- "Search the web for the latest news about AI"
+
+## Running Headless Channels
+
+You can also run PocketPaw as a headless bot on specific channels:
+
+```bash
+# Telegram only (legacy pairing flow)
+pocketpaw --telegram
+
+# Discord only
+pocketpaw --discord
+
+# Slack only
+pocketpaw --slack
+
+# Multiple channels
+pocketpaw --discord --slack --whatsapp
+
+# All configured channels
+pocketpaw  # Default web dashboard auto-starts configured adapters
+```
+
+## Configuring a Telegram Bot
+
+<Steps>
+  <Step title="Create a bot with BotFather">
+    Open Telegram, search for `@BotFather`, send `/newbot`, and follow the prompts. Copy the token.
+  </Step>
+  <Step title="Set the token">
+    ```bash
+    export POCKETCLAW_TELEGRAM_TOKEN="your-bot-token"
+    ```
+  </Step>
+  <Step title="Start in Telegram mode">
+    ```bash
+    pocketpaw --telegram
+    ```
+  </Step>
+  <Step title="Chat with your bot">
+    Open Telegram, find your bot, and start chatting.
+  </Step>
+</Steps>
+
+## Configuring Discord
+
+<Steps>
+  <Step title="Create a Discord application">
+    Go to the [Discord Developer Portal](https://discord.com/developers/applications), create a new application, and add a bot.
+  </Step>
+  <Step title="Set the token">
+    ```bash
+    export POCKETCLAW_DISCORD_BOT_TOKEN="your-discord-token"
+    ```
+  </Step>
+  <Step title="Invite the bot">
+    Generate an invite URL with the `bot` and `applications.commands` scopes. Add it to your server.
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw --discord
+    ```
+  </Step>
+</Steps>
+
+## Using the Web Dashboard
+
+The web dashboard is the default mode and provides:
+
+- **Real-time chat** with streaming responses
+- **Session management** with history and search
+- **Tool activity panel** showing tool calls in real-time
+- **Channel management** to configure and toggle channels
+- **Settings panel** for all configuration options
+- **MCP server management** to add and configure MCP servers
+- **Memory settings** for configuring Mem0 and session storage
+
+## What's Next?
+
+<CardGroup>
+  <Card title="Configuration" icon="lucide:settings" href="/getting-started/configuration">
+    Explore all configuration options and environment variables.
+  </Card>
+  <Card title="Channels" icon="lucide:radio" href="/channels">
+    Set up additional messaging platforms.
+  </Card>
+  <Card title="Tools" icon="lucide:wrench" href="/tools">
+    Discover all 30+ built-in tools.
+  </Card>
+  <Card title="Security" icon="lucide:shield" href="/security">
+    Learn about PocketPaw's security model.
+  </Card>
+</CardGroup>

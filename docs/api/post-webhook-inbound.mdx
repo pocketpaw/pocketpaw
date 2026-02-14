@@ -1,0 +1,112 @@
+---
+title: Receive Webhook Payload
+description: "Receive an inbound webhook payload and forward it to the PocketPaw agent for processing. Validates the webhook secret, parses the payload, and publishes it to the message bus."
+api: POST /webhook/inbound/{webhook_name}
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: none
+section: API Reference
+ogType: article
+keywords: ["receive payload", "webhook handler", "inbound data"]
+tags: ["api", "webhooks"]
+---
+
+## Overview
+
+Receives an external webhook payload and forwards it to the agent as an inbound message. Supports both async (fire-and-forget) and synchronous (wait for agent response) modes.
+
+Authentication is via webhook secret header, not the standard Bearer token.
+
+## Parameters
+
+<ParamTable type="path">
+  <Param name="webhook_name" type="string" required>
+    The webhook slot name to receive the payload on.
+  </Param>
+</ParamTable>
+
+<ParamTable type="query">
+  <Param name="wait" type="boolean" default="false">
+    If `true`, waits for the agent to process the payload and returns the response synchronously.
+  </Param>
+</ParamTable>
+
+<ParamTable type="header">
+  <Param name="X-Webhook-Secret" type="string">
+    Webhook verification secret (must match the slot's secret).
+  </Param>
+  <Param name="X-Webhook-Signature" type="string">
+    Alternative: HMAC-SHA256 signature of the request body using the slot's secret.
+  </Param>
+</ParamTable>
+
+## Response (Async)
+
+<ResponseField name="status" type="string">`"accepted"`</ResponseField>
+<ResponseField name="request_id" type="string">Unique ID for tracking the webhook delivery</ResponseField>
+
+## Response (Sync — `?wait=true`)
+
+<ResponseField name="status" type="string">`"ok"`</ResponseField>
+<ResponseField name="response" type="string">The agent's response to the webhook payload</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/webhook/inbound/github-events" \
+      -H "X-Webhook-Secret: whsec_a1b2c3d4e5f6..." \
+      -H "Content-Type: application/json" \
+      -d '{"action": "opened", "issue": {"title": "Bug report"}}'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch(
+      "http://localhost:8000/webhook/inbound/github-events",
+      {
+        method: "POST",
+        headers: {
+          "X-Webhook-Secret": "whsec_a1b2c3d4e5f6...",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "opened",
+          issue: { title: "Bug report" }
+        })
+      }
+    );
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/webhook/inbound/github-events",
+        headers={"X-Webhook-Secret": "whsec_a1b2c3d4e5f6..."},
+        json={
+            "action": "opened",
+            "issue": {"title": "Bug report"}
+        }
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["202"]}>
+  <Tab title="202">
+    ```json
+    {
+      "status": "accepted",
+      "request_id": "wh_abc123"
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

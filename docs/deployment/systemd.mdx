@@ -1,0 +1,148 @@
+---
+title: Systemd Service
+description: "Run PocketPaw as a systemd service on Linux for automatic startup, restart on failure, and clean shutdown. Includes a complete unit file with security hardening and journal logging configuration."
+section: Deployment
+ogType: article
+keywords: ["systemd", "linux service", "auto-start", "daemon", "unit file"]
+tags: ["deployment", "systemd", "linux"]
+---
+
+# Systemd Service
+
+Run PocketPaw as a background service on Linux with systemd for automatic startup and restart.
+
+## Service File
+
+Create `/etc/systemd/system/pocketpaw.service`:
+
+```ini
+[Unit]
+Description=PocketPaw AI Agent
+After=network.target
+
+[Service]
+Type=simple
+User=pocketpaw
+Group=pocketpaw
+WorkingDirectory=/home/pocketpaw
+ExecStart=/usr/local/bin/pocketpaw
+Restart=on-failure
+RestartSec=10
+
+# Environment
+EnvironmentFile=/etc/pocketpaw/env
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pocketpaw/.pocketclaw
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Environment File
+
+Create `/etc/pocketpaw/env`:
+
+```bash
+POCKETCLAW_ANTHROPIC_API_KEY=sk-ant-your-key
+POCKETCLAW_DASHBOARD_HOST=127.0.0.1
+POCKETCLAW_DASHBOARD_PORT=8000
+POCKETCLAW_AGENT_BACKEND=claude_agent_sdk
+POCKETCLAW_TOOL_PROFILE=coding
+```
+
+Set permissions:
+
+```bash
+sudo chmod 600 /etc/pocketpaw/env
+sudo chown pocketpaw:pocketpaw /etc/pocketpaw/env
+```
+
+## Setup
+
+```bash
+# Create dedicated user
+sudo useradd -m -s /bin/bash pocketpaw
+
+# Install PocketPaw
+sudo -u pocketpaw pip install --user pocketpaw[recommended]
+
+# Create config directory
+sudo mkdir -p /etc/pocketpaw
+sudo chown pocketpaw:pocketpaw /etc/pocketpaw
+
+# Enable and start service
+sudo systemctl daemon-reload
+sudo systemctl enable pocketpaw
+sudo systemctl start pocketpaw
+```
+
+## Managing the Service
+
+```bash
+# Start
+sudo systemctl start pocketpaw
+
+# Stop
+sudo systemctl stop pocketpaw
+
+# Restart
+sudo systemctl restart pocketpaw
+
+# Check status
+sudo systemctl status pocketpaw
+
+# View logs
+sudo journalctl -u pocketpaw -f
+
+# View recent logs
+sudo journalctl -u pocketpaw --since "1 hour ago"
+```
+
+## Log Rotation
+
+Systemd handles log rotation via journald. For the audit log, add a logrotate config:
+
+```
+/home/pocketpaw/.pocketclaw/audit.jsonl {
+    weekly
+    rotate 12
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+## Auto-Updates
+
+Create a timer for periodic updates:
+
+```ini
+# /etc/systemd/system/pocketpaw-update.timer
+[Unit]
+Description=Update PocketPaw weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```ini
+# /etc/systemd/system/pocketpaw-update.service
+[Unit]
+Description=Update PocketPaw
+
+[Service]
+Type=oneshot
+User=pocketpaw
+ExecStart=/usr/local/bin/pip install --upgrade pocketpaw[recommended]
+ExecStartPost=/bin/systemctl restart pocketpaw
+```

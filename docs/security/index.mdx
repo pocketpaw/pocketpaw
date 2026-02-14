@@ -1,0 +1,58 @@
+---
+title: Security Overview
+description: "PocketPaw's multi-layered security architecture combines Guardian AI safety checks, prompt injection scanning, append-only audit logging, automated security audits, and fine-grained tool policies."
+section: Security
+ogType: article
+keywords: ["ai security", "defense in depth", "safety layers", "audit logging", "prompt injection defense"]
+tags: ["security", "overview"]
+---
+
+# Security
+
+PocketPaw implements defense-in-depth with multiple security layers. Every message is checked before processing, every action is logged, and tools are governed by a policy system.
+
+<img src="/pocketpaw-security-stack.webp" alt="PocketPaw security stack: seven defense layers — credential encryption, session authentication, rate limiting, injection scanning, tool policy engine, command blocking, and Guardian AI." />
+
+## Security Layers
+
+<Steps>
+  <Step title="Guardian AI">
+    Secondary LLM evaluates every message for safety concerns. Messages classified as HIGH or CRITICAL are blocked.
+  </Step>
+  <Step title="Injection Scanner">
+    Two-tier detection (regex + LLM) catches prompt injection in both user messages and tool outputs.
+  </Step>
+  <Step title="Tool Policy">
+    Profiles and allow/deny lists control which tools are available.
+  </Step>
+  <Step title="Dangerous Command Blocking">
+    PreToolUse hooks intercept and block dangerous shell commands.
+  </Step>
+  <Step title="Audit Log">
+    Append-only JSONL log records every significant action.
+  </Step>
+</Steps>
+
+## Security Components
+
+<CardGroup>
+  <Card title="Guardian AI" icon="lucide:shield-alert" href="/security/guardian-ai">
+    Secondary LLM safety check on every incoming message.
+  </Card>
+  <Card title="Injection Scanner" icon="lucide:scan-line" href="/security/injection-scanner">
+    Two-tier prompt injection detection for messages and tool outputs.
+  </Card>
+  <Card title="Audit Log" icon="lucide:file-check" href="/security/audit-log">
+    Append-only action recording in JSONL format.
+  </Card>
+  <Card title="Security Audit CLI" icon="lucide:terminal" href="/security/audit-cli">
+    7 automated security checks with auto-fix option.
+  </Card>
+  <Card title="Self-Audit Daemon" icon="lucide:activity" href="/security/self-audit-daemon">
+    12 continuous background checks with JSON reports.
+  </Card>
+</CardGroup>
+
+<Callout type="warning">
+  PocketPaw is designed for self-hosted, single-user deployments. If exposing to multiple users, add authentication middleware to the web dashboard.
+</Callout>

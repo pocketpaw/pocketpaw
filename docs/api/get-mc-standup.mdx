@@ -1,0 +1,45 @@
+---
+title: Get Standup Report
+description: "Generate a daily standup report summarizing Mission Control activity: completed tasks, in-progress work, blocked items, and agent status across all projects in markdown format."
+api: GET /api/mission-control/standup
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["standup report", "daily summary", "project status"]
+tags: ["api", "mission-control"]
+---
+
+## Overview
+
+Generates a markdown standup report summarizing completed tasks, in-progress work, blocked items, and agent status across all projects.
+
+## Response
+
+<ResponseField name="standup" type="string">
+  Markdown-formatted standup report.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL"]}>
+  <Tab title="cURL">
+```bash
+curl http://localhost:8000/api/mission-control/standup \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "standup": "# Daily Standup\n\n## Completed\n- Set up project structure (backend-dev)\n\n## In Progress\n- Implement auth (backend-dev)\n\n## Blocked\n- None\n\n## Agent Status\n- backend-dev: active\n- frontend-dev: idle"
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

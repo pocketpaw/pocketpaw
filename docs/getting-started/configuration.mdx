@@ -1,0 +1,157 @@
+---
+title: Configuration
+description: "Complete guide to configuring PocketPaw: environment variables with POCKETCLAW_ prefix, JSON config file, API keys, channel tokens, tool profiles, and memory settings."
+section: Getting Started
+ogType: article
+keywords: ["environment variables", "config file", "settings", "api keys", "pocketclaw prefix"]
+tags: ["configuration", "settings"]
+---
+
+# Configuration
+
+PocketPaw uses a layered configuration system built on Pydantic Settings.
+
+## Configuration Sources
+
+Configuration is loaded from these sources (in order of precedence):
+
+1. **Environment variables** — Prefixed with `POCKETCLAW_`
+2. **Config file** — `~/.pocketclaw/config.json`
+3. **Web dashboard** — Settings saved through the UI
+
+## Environment Variables
+
+All settings use the `POCKETCLAW_` prefix:
+
+```bash
+# Core
+export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
+export POCKETCLAW_OPENAI_API_KEY="sk-..."
+export POCKETCLAW_AGENT_BACKEND="claude_agent_sdk"  # or pocketpaw_native, open_interpreter
+
+# Web Dashboard
+export POCKETCLAW_DASHBOARD_PORT=8000
+export POCKETCLAW_DASHBOARD_HOST="0.0.0.0"
+
+# Telegram
+export POCKETCLAW_TELEGRAM_TOKEN="your-bot-token"
+export POCKETCLAW_ALLOWED_TELEGRAM_IDS="123456,789012"
+
+# Discord
+export POCKETCLAW_DISCORD_BOT_TOKEN="your-discord-token"
+export POCKETCLAW_DISCORD_ALLOWED_GUILD_IDS="111,222"
+export POCKETCLAW_DISCORD_ALLOWED_USER_IDS="333,444"
+
+# Slack
+export POCKETCLAW_SLACK_BOT_TOKEN="xoxb-..."
+export POCKETCLAW_SLACK_APP_TOKEN="xapp-..."
+export POCKETCLAW_SLACK_ALLOWED_CHANNEL_IDS="C01,C02"
+
+# WhatsApp Business
+export POCKETCLAW_WHATSAPP_ACCESS_TOKEN="your-token"
+export POCKETCLAW_WHATSAPP_PHONE_NUMBER_ID="123456"
+export POCKETCLAW_WHATSAPP_VERIFY_TOKEN="your-verify-token"
+export POCKETCLAW_WHATSAPP_ALLOWED_PHONE_NUMBERS="+1234567890"
+
+# WhatsApp Personal
+export POCKETCLAW_WHATSAPP_MODE="personal"  # or "business"
+
+# Signal
+export POCKETCLAW_SIGNAL_API_URL="http://localhost:8080"
+export POCKETCLAW_SIGNAL_PHONE_NUMBER="+1234567890"
+
+# Matrix
+export POCKETCLAW_MATRIX_HOMESERVER="https://matrix.org"
+export POCKETCLAW_MATRIX_USER_ID="@bot:matrix.org"
+export POCKETCLAW_MATRIX_ACCESS_TOKEN="your-token"
+
+# Microsoft Teams
+export POCKETCLAW_TEAMS_APP_ID="your-app-id"
+export POCKETCLAW_TEAMS_APP_PASSWORD="your-password"
+
+# Google Chat
+export POCKETCLAW_GCHAT_PROJECT_ID="your-project-id"
+export POCKETCLAW_GCHAT_SERVICE_ACCOUNT_KEY="/path/to/key.json"
+```
+
+## Config File
+
+The JSON config file at `~/.pocketclaw/config.json` stores all settings:
+
+```json
+{
+  "anthropic_api_key": "sk-ant-...",
+  "agent_backend": "claude_agent_sdk",
+  "tool_profile": "coding",
+  "tools_allow": [],
+  "tools_deny": [],
+  "web_search_provider": "tavily",
+  "tavily_api_key": "tvly-...",
+  "mem0_auto_learn": true,
+  "mem0_llm_provider": "ollama",
+  "mem0_llm_model": "llama3.2"
+}
+```
+
+## Tool Policy Configuration
+
+Control which tools are available via profiles and allow/deny lists:
+
+```bash
+# Profile: minimal, coding, or full
+export POCKETCLAW_TOOL_PROFILE="coding"
+
+# Allow specific tools (comma-separated)
+export POCKETCLAW_TOOLS_ALLOW="web_search,image_gen"
+
+# Deny specific tools (takes precedence over allow)
+export POCKETCLAW_TOOLS_DENY="shell,write_file"
+```
+
+See [Tool Policy](/tools/tool-policy) for detailed documentation.
+
+## Memory Configuration
+
+```bash
+# Mem0 semantic memory
+export POCKETCLAW_MEM0_AUTO_LEARN=true
+export POCKETCLAW_MEM0_LLM_PROVIDER="ollama"      # or anthropic, openai
+export POCKETCLAW_MEM0_LLM_MODEL="llama3.2"
+export POCKETCLAW_MEM0_EMBEDDER_PROVIDER="ollama"  # or openai
+export POCKETCLAW_MEM0_EMBEDDER_MODEL="nomic-embed-text"
+export POCKETCLAW_MEM0_VECTOR_STORE="qdrant"
+```
+
+## Google Integration
+
+For Gmail, Calendar, Drive, and Docs:
+
+```bash
+export POCKETCLAW_GOOGLE_CLIENT_ID="your-client-id"
+export POCKETCLAW_GOOGLE_CLIENT_SECRET="your-secret"
+```
+
+OAuth tokens are stored in `~/.pocketclaw/tokens/`.
+
+## Spotify Integration
+
+```bash
+export POCKETCLAW_SPOTIFY_CLIENT_ID="your-client-id"
+export POCKETCLAW_SPOTIFY_CLIENT_SECRET="your-secret"
+```
+
+## Data Directory
+
+PocketPaw stores all data in `~/.pocketclaw/`:
+
+```
+~/.pocketclaw/
+├── config.json          # Configuration file
+├── memory/              # Session history and facts
+├── identity/
+│   └── USER.md          # User profile (auto-created)
+├── skills/              # Custom skill definitions
+├── tokens/              # OAuth tokens
+├── audit.jsonl          # Security audit log
+└── mcp.json             # MCP server configuration
+```

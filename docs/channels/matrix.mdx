@@ -1,0 +1,80 @@
+---
+title: Matrix
+description: "Connect PocketPaw to Matrix for decentralized, federated AI messaging. Uses matrix-nio async client with sync_forever, message edit support via m.replace, and room-based sessions."
+section: Channels
+ogType: article
+keywords: ["matrix bot", "matrix-nio", "federated messaging", "decentralized", "element"]
+tags: ["channels", "matrix"]
+---
+
+# Matrix
+
+PocketPaw connects to the [Matrix](https://matrix.org) protocol via `matrix-nio`. Matrix is an open, decentralized communication protocol ideal for self-hosting enthusiasts.
+
+## Setup
+
+<Steps>
+  <Step title="Create a Matrix account">
+    Create a bot account on your Matrix homeserver (e.g., matrix.org, your own Synapse server).
+  </Step>
+  <Step title="Get an access token">
+    Log in with the bot account to get an access token. You can use Element or curl:
+    ```bash
+    curl -X POST "https://matrix.org/_matrix/client/r0/login" \
+      -H "Content-Type: application/json" \
+      -d '{"type":"m.login.password","user":"@bot:matrix.org","password":"..."}'
+    ```
+  </Step>
+  <Step title="Configure">
+    ```bash
+    export POCKETCLAW_MATRIX_HOMESERVER="https://matrix.org"
+    export POCKETCLAW_MATRIX_USER_ID="@bot:matrix.org"
+    export POCKETCLAW_MATRIX_ACCESS_TOKEN="your-access-token"
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw --matrix
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| Homeserver | `POCKETCLAW_MATRIX_HOMESERVER` | Matrix homeserver URL |
+| User ID | `POCKETCLAW_MATRIX_USER_ID` | Bot's Matrix user ID |
+| Access token | `POCKETCLAW_MATRIX_ACCESS_TOKEN` | Authentication token |
+| Device ID | `POCKETCLAW_MATRIX_DEVICE_ID` | Device ID (auto-generated) |
+| Allowed rooms | `POCKETCLAW_MATRIX_ALLOWED_ROOM_IDS` | Comma-separated room IDs |
+| Display name | `POCKETCLAW_MATRIX_DISPLAY_NAME` | Bot display name |
+
+## Features
+
+### Sync-Based
+
+The adapter uses `nio.AsyncClient.sync_forever()` for real-time message delivery. No polling needed.
+
+### Edit-in-Place Streaming
+
+Matrix supports message editing via `m.replace` events. PocketPaw uses this for streaming — sending an initial message and then editing it as tokens arrive.
+
+### Room Support
+
+The bot responds to messages in any room it's invited to. Use `POCKETCLAW_MATRIX_ALLOWED_ROOM_IDS` to restrict access to specific rooms.
+
+### Session Keys
+
+Each room gets a unique session: `matrix:{room_id}`
+
+## Installation
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+# Or add the Matrix extra manually
+pip install pocketpaw[matrix]
+```
+
+This installs `matrix-nio` as an optional dependency.

@@ -1,0 +1,62 @@
+---
+title: Speech to Text
+description: "Transcribe audio files to text with PocketPaw using OpenAI's Whisper API. Supports multiple audio formats and languages. Upload audio through any connected channel for instant transcription."
+section: Tools
+ogType: article
+keywords: ["speech to text", "whisper", "audio transcription", "stt", "openai whisper"]
+tags: ["tools", "media", "voice"]
+---
+
+# Speech to Text
+
+PocketPaw can transcribe audio files to text using OpenAI's Whisper API.
+
+## Setup
+
+```bash
+export POCKETCLAW_OPENAI_API_KEY="sk-..."
+```
+
+## Configuration
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| Model | `POCKETCLAW_STT_MODEL` | `whisper-1` | Whisper model to use |
+
+## Usage
+
+```
+User: Transcribe this audio file: /path/to/recording.mp3
+Agent: [uses stt tool] → "Here is the transcription..."
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "stt",
+  "description": "Transcribe audio to text using OpenAI Whisper",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "Path to the audio file to transcribe"
+      },
+      "language": {
+        "type": "string",
+        "description": "Language code (optional, auto-detected)"
+      }
+    },
+    "required": ["file_path"]
+  }
+}
+```
+
+## Supported Formats
+
+Whisper supports: mp3, mp4, mpeg, mpga, m4a, wav, webm.
+
+## Policy Group
+
+Belongs to `group:voice`.

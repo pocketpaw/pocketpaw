@@ -1,0 +1,83 @@
+---
+title: Custom Tools
+description: "Build custom tools for PocketPaw using the ToolProtocol interface. Define tool schemas compatible with both Anthropic and OpenAI APIs, register them in the ToolRegistry, and use them immediately."
+section: Tools
+ogType: article
+keywords: ["custom tools", "tool protocol", "tool development", "plugin", "extensible"]
+tags: ["tools", "development"]
+---
+
+# Custom Tools
+
+PocketPaw's tool system is extensible. You can create custom tools by implementing the `ToolProtocol`.
+
+## ToolProtocol Interface
+
+```python
+from pocketclaw.tools.registry import ToolProtocol, ToolDefinition
+
+class MyCustomTool:
+    @property
+    def name(self) -> str:
+        return "my_tool"
+
+    @property
+    def description(self) -> str:
+        return "Does something useful"
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=self.description,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The input query"
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+
+    async def execute(self, **kwargs) -> str:
+        query = kwargs.get("query", "")
+        # Your tool logic here
+        return f"Result for: {query}"
+```
+
+## Registering Custom Tools
+
+Register your tool with the `ToolRegistry`:
+
+```python
+from pocketclaw.tools.registry import ToolRegistry
+
+registry = ToolRegistry()
+registry.register(MyCustomTool())
+```
+
+## Schema Export
+
+`ToolDefinition` supports exporting to both Anthropic and OpenAI formats:
+
+```python
+tool = MyCustomTool()
+
+# Anthropic format
+anthropic_schema = tool.definition.to_anthropic()
+
+# OpenAI format
+openai_schema = tool.definition.to_openai()
+```
+
+## Best Practices
+
+1. **Keep tools focused** — Each tool should do one thing well
+2. **Validate inputs** — Check required parameters before execution
+3. **Return strings** — Tool results are always strings
+4. **Handle errors** — Return error messages instead of raising exceptions
+5. **Be async** — The `execute` method must be async
+6. **Document inputs** — Provide clear descriptions in the schema so the LLM knows how to use the tool

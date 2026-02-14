@@ -1,0 +1,56 @@
+---
+title: Self-Audit Daemon
+description: "PocketPaw's self-audit daemon runs 12 continuous background security and operational checks, generating JSON reports for monitoring. Detect permission issues, stale tokens, and config drift automatically."
+section: Security
+ogType: article
+keywords: ["self-audit daemon", "background checks", "json reports", "monitoring", "automated security"]
+tags: ["security", "daemon", "audit"]
+---
+
+# Self-Audit Daemon
+
+The self-audit daemon runs continuous security and health checks in the background, producing JSON reports.
+
+## Overview
+
+The daemon performs 12 checks at regular intervals:
+
+| Check | Description |
+|-------|-------------|
+| Memory usage | Monitor RAM consumption |
+| Disk space | Check available storage |
+| API key rotation | Remind about old keys |
+| Session cleanup | Remove stale sessions |
+| Audit log rotation | Manage log file size |
+| Config integrity | Validate configuration |
+| Token expiry | Check OAuth token freshness |
+| MCP health | Ping MCP servers |
+| Process health | Monitor agent process |
+| Network connectivity | Basic connectivity check |
+| Dependency versions | Check for outdated packages |
+| File permissions | Verify security-sensitive file permissions |
+
+## Reports
+
+Reports are saved as JSON in `~/.pocketclaw/audit/`:
+
+```json
+{
+  "timestamp": "2024-01-15T10:00:00Z",
+  "checks": [
+    {"name": "memory_usage", "status": "pass", "value": "245MB"},
+    {"name": "disk_space", "status": "pass", "value": "45GB free"},
+    {"name": "api_key_age", "status": "warn", "value": "90 days old"},
+    {"name": "session_count", "status": "pass", "value": "23 active"}
+  ],
+  "summary": {
+    "passed": 10,
+    "warnings": 1,
+    "failures": 1
+  }
+}
+```
+
+## Activation
+
+The self-audit daemon starts automatically with the web dashboard. It can also be triggered manually via the dashboard's settings.

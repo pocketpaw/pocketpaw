@@ -1,0 +1,165 @@
+---
+title: WebSocket Protocol
+description: "PocketPaw's WebSocket protocol enables real-time bidirectional communication between the dashboard and backend: session switching, message streaming, tool events, and Deep Work progress updates."
+section: API Reference
+ogType: article
+keywords: ["websocket", "real-time", "streaming", "bidirectional", "ws protocol"]
+tags: ["api", "websocket"]
+---
+
+# WebSocket Protocol
+
+The web dashboard communicates with the PocketPaw backend over WebSocket for real-time streaming.
+
+## Connection
+
+```
+ws://localhost:8000/ws
+ws://localhost:8000/ws?resume_session=session_abc123
+```
+
+The `resume_session` query parameter automatically loads a previous session on connect.
+
+## Message Format
+
+All messages are JSON objects with a `type` or `action` field.
+
+## Client → Server Messages
+
+### Send Message
+
+```json
+{
+  "action": "message",
+  "content": "Hello, what can you do?",
+  "session_id": "session_abc123"
+}
+```
+
+### Switch Session
+
+```json
+{
+  "action": "switch_session",
+  "session_id": "session_def456"
+}
+```
+
+### New Session
+
+```json
+{
+  "action": "new_session"
+}
+```
+
+### Plan Response
+
+```json
+{
+  "action": "plan_response",
+  "response": "approve"
+}
+```
+
+## Server → Client Messages
+
+### Response Chunk (Streaming)
+
+```json
+{
+  "type": "response_chunk",
+  "content": "Here is the ",
+  "session_id": "session_abc123"
+}
+```
+
+### Stream End
+
+```json
+{
+  "type": "stream_end",
+  "session_id": "session_abc123"
+}
+```
+
+### Tool Start
+
+```json
+{
+  "type": "tool_start",
+  "tool": "web_search",
+  "input": {"query": "Python 3.13 release date"},
+  "session_id": "session_abc123"
+}
+```
+
+### Tool Result
+
+```json
+{
+  "type": "tool_result",
+  "tool": "web_search",
+  "result": "Python 3.13 was released on...",
+  "session_id": "session_abc123"
+}
+```
+
+### Thinking
+
+```json
+{
+  "type": "thinking",
+  "content": "Let me search for that...",
+  "session_id": "session_abc123"
+}
+```
+
+### Error
+
+```json
+{
+  "type": "error",
+  "message": "Failed to execute tool",
+  "session_id": "session_abc123"
+}
+```
+
+### Plan Created
+
+```json
+{
+  "type": "plan_created",
+  "plan": "## Plan\n1. Read the file\n2. Modify the function\n3. Run tests",
+  "session_id": "session_abc123"
+}
+```
+
+### Session Switched
+
+```json
+{
+  "type": "session_switched",
+  "session_id": "session_def456",
+  "messages": [...]
+}
+```
+
+### Inbox Update
+
+```json
+{
+  "type": "inbox_update",
+  "channel": "telegram",
+  "message": "New message from Telegram user",
+  "session_id": "telegram_123"
+}
+```
+
+## Connection Lifecycle
+
+1. Client connects to `/ws` (optionally with `resume_session`)
+2. Server sends session history if resuming
+3. Client sends messages, server streams responses
+4. Client can switch sessions at any time
+5. Connection stays alive with WebSocket keep-alive

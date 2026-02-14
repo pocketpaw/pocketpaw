@@ -1,0 +1,79 @@
+---
+title: Start Tunnel
+description: "Start a Cloudflare tunnel to expose PocketPaw's local server with a public HTTPS URL. Required for WhatsApp Business webhooks and remote dashboard access without port forwarding."
+api: POST /api/remote/start
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["start tunnel", "cloudflare", "public access", "https tunnel"]
+tags: ["api", "tunnel"]
+---
+
+## Overview
+
+Starts a Cloudflare quick tunnel that exposes the local dashboard to the internet. No Cloudflare account is required — uses the free `trycloudflare.com` domain.
+
+<Callout type="warning">
+  When a tunnel is active, localhost auth bypass is disabled. All requests must include a valid token.
+</Callout>
+
+## Response (Success)
+
+<ResponseField name="url" type="string">The public tunnel URL</ResponseField>
+<ResponseField name="active" type="boolean">`true`</ResponseField>
+
+## Response (Failure)
+
+<ResponseField name="error" type="string">Error message</ResponseField>
+<ResponseField name="active" type="boolean">`false`</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/remote/start" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/remote/start", {
+      method: "POST",
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/remote/start",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "url": "https://steep-mountain-abc123.trycloudflare.com",
+      "active": true
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>
+
+<Callout type="info">
+  Requires `cloudflared` to be installed on the system. Install via `brew install cloudflared` or `apt install cloudflared`.
+</Callout>
