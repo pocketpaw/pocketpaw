@@ -38,7 +38,7 @@ try:
 except ImportError as _exc:
     raise ImportError(
         "Dashboard dependencies (fastapi, uvicorn, qrcode, jinja2) are required "
-        "but not installed. Install them with: pip install 'pocketpaw[dashboard]'"
+        "but not installed. Reinstall with: pip install --upgrade pocketpaw"
     ) from _exc
 
 from pocketclaw.agents.loop import AgentLoop
@@ -952,7 +952,9 @@ async def install_skill(request: Request):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth=1",
+                "git",
+                "clone",
+                "--depth=1",
                 f"https://github.com/{owner}/{repo}.git",
                 tmpdir,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -1001,7 +1003,7 @@ async def install_skill(request: Request):
             loader.reload()
             return {"status": "ok", "installed": installed}
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return JSONResponse({"error": "Clone timed out (30s)"}, status_code=504)
     except Exception as exc:
         logger.exception("Skill install failed")
@@ -2161,6 +2163,10 @@ async def websocket_endpoint(
                 async with _settings_lock:
                     settings.agent_backend = data.get("agent_backend", settings.agent_backend)
                     settings.llm_provider = data.get("llm_provider", settings.llm_provider)
+                    if data.get("ollama_host"):
+                        settings.ollama_host = data["ollama_host"]
+                    if data.get("ollama_model"):
+                        settings.ollama_model = data["ollama_model"]
                     if data.get("anthropic_model"):
                         settings.anthropic_model = data.get("anthropic_model")
                     if "bypass_permissions" in data:
@@ -2335,6 +2341,8 @@ async def websocket_endpoint(
                         "content": {
                             "agentBackend": settings.agent_backend,
                             "llmProvider": settings.llm_provider,
+                            "ollamaHost": settings.ollama_host,
+                            "ollamaModel": settings.ollama_model,
                             "anthropicModel": settings.anthropic_model,
                             "bypassPermissions": settings.bypass_permissions,
                             "hasAnthropicKey": bool(settings.anthropic_api_key),

@@ -572,12 +572,20 @@ class ClaudeAgentSDK:
                 "max_turns": 25,  # Safety net against runaway tool loops
             }
 
-            # Pass API key to the Claude CLI subprocess via env.
-            # The SDK spawns a subprocess that needs ANTHROPIC_API_KEY in its
-            # environment — settings.anthropic_api_key alone is not enough.
-            api_key = os.environ.get("ANTHROPIC_API_KEY") or self.settings.anthropic_api_key
-            if api_key:
-                options_kwargs["env"] = {"ANTHROPIC_API_KEY": api_key}
+            # Configure LLM provider for the Claude CLI subprocess.
+            from pocketclaw.llm.client import resolve_llm_client
+
+            llm = resolve_llm_client(self.settings)
+            sdk_env = llm.to_sdk_env()
+            if not sdk_env:
+                # Fall back to env var if settings has no key
+                env_key = os.environ.get("ANTHROPIC_API_KEY")
+                if env_key:
+                    sdk_env = {"ANTHROPIC_API_KEY": env_key}
+            if sdk_env:
+                options_kwargs["env"] = sdk_env
+            if llm.is_ollama:
+                options_kwargs["model"] = llm.model
 
             # Wire in MCP servers (policy-filtered)
             mcp_servers = self._get_mcp_servers()
@@ -596,8 +604,8 @@ class ClaudeAgentSDK:
             if self.settings.bypass_permissions:
                 options_kwargs["permission_mode"] = "bypassPermissions"
 
-            # Smart model routing (opt-in)
-            if self.settings.smart_routing_enabled:
+            # Smart model routing (opt-in, skip for Ollama — model already set)
+            if self.settings.smart_routing_enabled and not llm.is_ollama:
                 from pocketclaw.agents.model_router import ModelRouter
 
                 model_router = ModelRouter(self.settings)
@@ -712,6 +720,22 @@ class ClaudeAgentSDK:
         except Exception as e:
             logger.error(f"Claude Agent SDK error: {e}")
             yield AgentEvent(type="error", content=format_backend_error(e))
+            error_msg = str(e)
+            logger.error(f"Claude Agent SDK error: {error_msg}")
+
+            # Provide helpful error messages
+            if "CLINotFoundError" in error_msg:
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        "❌ Claude Code CLI not found.\n\n"
+                        "Install with: npm install -g @anthropic-ai/claude-code\n\n"
+                        "Or switch to a different backend in "
+                        "**Settings → General**."
+                    ),
+                )
+            else:
+                yield AgentEvent(type="error", content=llm.format_api_error(e))
 
     async def stop(self) -> None:
         """Stop the agent execution."""

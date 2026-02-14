@@ -27,6 +27,18 @@ export POCKETCLAW_AGENT_BACKEND="claude_agent_sdk"
 export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
+### Using with Ollama
+
+The Claude Agent SDK also works with local models via Ollama:
+
+```bash
+export POCKETCLAW_AGENT_BACKEND="claude_agent_sdk"
+export POCKETCLAW_LLM_PROVIDER="ollama"
+export POCKETCLAW_OLLAMA_MODEL="qwen2.5:7b"
+```
+
+See [Ollama (Local LLMs)](/backends/ollama) for full setup instructions.
+
 ## Built-in Tools
 
 The Claude Agent SDK provides these tools natively:

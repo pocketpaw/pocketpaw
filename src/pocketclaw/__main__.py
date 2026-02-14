@@ -1,6 +1,7 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-02-14: Dashboard deps moved to core — `pip install pocketpaw` just works.
   - 2026-02-12: Fixed --version to read dynamically from package metadata.
   - 2026-02-06: Web dashboard is now the default mode (no flags needed).
   - 2026-02-06: Added --telegram flag for legacy Telegram-only mode.
@@ -249,6 +250,114 @@ def run_dashboard_mode(settings: Settings, host: str, port: int) -> None:
     run_dashboard(host=host, port=port, open_browser=not _is_headless())
 
 
+async def check_ollama(settings: Settings) -> int:
+    """Check Ollama connectivity, model availability, and tool calling support.
+
+    Returns 0 on success, 1 on failure.
+    """
+    import httpx
+    from rich.console import Console
+
+    from pocketclaw.llm.client import resolve_llm_client
+
+    console = Console()
+    llm = resolve_llm_client(settings, force_provider="ollama")
+    ollama_host = llm.ollama_host
+    ollama_model = llm.model
+    failures = 0
+
+    # 1. Check server connectivity
+    console.print(f"\n  Checking Ollama at [bold]{ollama_host}[/] ...")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{ollama_host}/api/tags")
+            resp.raise_for_status()
+            tags_data = resp.json()
+        models = [m.get("name", "") for m in tags_data.get("models", [])]
+        console.print(f"  [green]\\[OK][/]  Server reachable — {len(models)} model(s) available")
+    except Exception as e:
+        console.print(f"  [red]\\[FAIL][/] Cannot reach Ollama server: {e}")
+        console.print("         Make sure Ollama is running: [bold]ollama serve[/]")
+        return 1
+
+    # 2. Check configured model is available
+    # Ollama model names may or may not include ":latest" tag
+    model_found = any(m == ollama_model or m.startswith(f"{ollama_model}:") for m in models)
+    if model_found:
+        console.print(f"  [green]\\[OK][/]  Model '{ollama_model}' is available")
+    else:
+        console.print(f"  [yellow]\\[WARN][/] Model '{ollama_model}' not found locally")
+        if models:
+            console.print(f"         Available: {', '.join(models[:10])}")
+        console.print(f"         Pull it with: [bold]ollama pull {ollama_model}[/]")
+        failures += 1
+
+    # 3. Test Anthropic-compatible endpoint (basic completion)
+    console.print("  Testing Anthropic Messages API compatibility ...")
+    try:
+        ac = llm.create_anthropic_client(timeout=60.0, max_retries=1)
+        response = await ac.messages.create(
+            model=ollama_model,
+            max_tokens=32,
+            messages=[{"role": "user", "content": "Say hi"}],
+        )
+        text = response.content[0].text if response.content else ""
+        console.print(f"  [green]\\[OK][/]  Messages API works — response: {text[:60]}")
+    except Exception as e:
+        console.print(f"  [red]\\[FAIL][/] Messages API failed: {e}")
+        console.print("         Ollama v0.14.0+ is required for Anthropic API compatibility")
+        failures += 1
+        # Skip tool test if basic API fails
+        console.print(f"\n  Result: {2 - (1 if model_found else 0)}/3 checks passed")
+        return 1
+
+    # 4. Test tool calling
+    console.print("  Testing tool calling support ...")
+    try:
+        tool_response = await ac.messages.create(
+            model=ollama_model,
+            max_tokens=256,
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[
+                {
+                    "name": "calculator",
+                    "description": "Performs arithmetic calculations",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "expression": {
+                                "type": "string",
+                                "description": "Math expression to evaluate",
+                            }
+                        },
+                        "required": ["expression"],
+                    },
+                }
+            ],
+        )
+        has_tool_use = any(b.type == "tool_use" for b in tool_response.content)
+        if has_tool_use:
+            console.print("  [green]\\[OK][/]  Tool calling works")
+        else:
+            console.print("  [yellow]\\[WARN][/] Model responded but did not use the tool")
+            console.print("         Tool calling quality varies by model. Try a larger model.")
+            failures += 1
+    except Exception as e:
+        console.print(f"  [yellow]\\[WARN][/] Tool calling test failed: {e}")
+        console.print("         Some models may not support tool calling reliably.")
+        failures += 1
+
+    passed = 4 - failures
+    console.print(f"\n  Result: [bold]{passed}/4[/] checks passed")
+    if failures == 0:
+        console.print("  [green]Ollama is ready to use with PocketPaw![/]")
+        console.print(
+            "  Set [bold]llm_provider=ollama[/] in settings"
+            " or [bold]POCKETCLAW_LLM_PROVIDER=ollama[/]\n"
+        )
+    return 1 if failures > 1 else 0
+
+
 def _check_extras_installed(args: argparse.Namespace) -> None:
     """Check that required optional dependencies are installed for the chosen mode.
 
@@ -256,22 +365,7 @@ def _check_extras_installed(args: argparse.Namespace) -> None:
     """
     missing: list[tuple[str, str, str]] = []  # (package, import_name, extra)
 
-    has_channel_flag = (
-        args.discord
-        or args.slack
-        or args.whatsapp
-        or getattr(args, "signal", False)
-        or getattr(args, "matrix", False)
-        or getattr(args, "teams", False)
-        or getattr(args, "gchat", False)
-    )
-
-    # Default mode (dashboard) requires fastapi
-    if not args.telegram and not has_channel_flag and not args.security_audit:
-        if importlib.util.find_spec("fastapi") is None:
-            missing.append(("fastapi", "fastapi", "dashboard"))
-        if importlib.util.find_spec("uvicorn") is None:
-            missing.append(("uvicorn", "uvicorn", "dashboard"))
+    # Dashboard deps are now in core — no need to check for them.
 
     if args.telegram:
         if importlib.util.find_spec("telegram") is None:
@@ -354,6 +448,11 @@ Examples:
         "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
     )
     parser.add_argument(
+        "--check-ollama",
+        action="store_true",
+        help="Check Ollama connectivity, model availability, and tool calling support",
+    )
+    parser.add_argument(
         "--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}"
     )
 
@@ -386,7 +485,10 @@ Examples:
     )
 
     try:
-        if args.security_audit:
+        if args.check_ollama:
+            exit_code = asyncio.run(check_ollama(settings))
+            raise SystemExit(exit_code)
+        elif args.security_audit:
             from pocketclaw.security.audit_cli import run_security_audit
 
             exit_code = asyncio.run(run_security_audit(fix=args.fix))

@@ -191,14 +191,14 @@ class InjectionScanner:
 
         try:
             from pocketclaw.config import get_settings
+            from pocketclaw.llm.client import resolve_llm_client
 
             settings = get_settings()
-            if not settings.anthropic_api_key:
+            llm = resolve_llm_client(settings, force_provider="anthropic")
+            if not llm.api_key:
                 return result
 
-            from anthropic import AsyncAnthropic
-
-            client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+            client = llm.create_anthropic_client()
 
             classifier_prompt = (
                 "You are a prompt injection classifier. Analyze the following content "

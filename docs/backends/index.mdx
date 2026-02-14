@@ -15,9 +15,9 @@ PocketPaw supports three agent backends. Each provides different capabilities an
 
 | Feature | Claude Agent SDK | PocketPaw Native | Open Interpreter |
 |---------|-----------------|-------------------|------------------|
-| Provider | Anthropic Claude | Anthropic + OI | Ollama/OpenAI/Anthropic |
+| Provider | Anthropic or Ollama | Anthropic or Ollama | Ollama/OpenAI/Anthropic |
 | Built-in tools | Bash, Read, Write, Edit | Custom + OI execution | OI tools |
-| Local models | No | No | Yes (Ollama) |
+| Local models | Yes (Ollama) | Yes (Ollama) | Yes (Ollama) |
 | Code execution | Claude tools | Open Interpreter | Open Interpreter |
 | Streaming | Yes | Yes | Yes |
 | MCP support | Native | Via tool registry | Via tool registry |
@@ -48,5 +48,8 @@ Or change it in the web dashboard's Settings panel.
   </Card>
   <Card title="Open Interpreter" icon="lucide:terminal" href="/backends/open-interpreter">
     Standalone engine with Ollama support for fully local operation.
+  </Card>
+  <Card title="Ollama (Local LLMs)" icon="lucide:hard-drive" href="/backends/ollama">
+    Run fully local with any backend — no API keys, no cloud, no costs.
   </Card>
 </CardGroup>

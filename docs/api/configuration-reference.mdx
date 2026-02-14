@@ -21,6 +21,16 @@ Complete reference of all configuration settings. All environment variables use 
 | `dashboard_host` | `POCKETCLAW_DASHBOARD_HOST` | `0.0.0.0` | Dashboard bind address |
 | `dashboard_port` | `POCKETCLAW_DASHBOARD_PORT` | `8000` | Dashboard port |
 
+## LLM Provider
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `llm_provider` | `POCKETCLAW_LLM_PROVIDER` | `auto` | LLM provider (`auto`, `anthropic`, `openai`, `ollama`) |
+| `ollama_host` | `POCKETCLAW_OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
+| `ollama_model` | `POCKETCLAW_OLLAMA_MODEL` | `llama3.2` | Ollama model name |
+
+When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, otherwise falls back to Ollama.
+
 ## Tool Policy
 
 | Setting | Env Variable | Default | Description |

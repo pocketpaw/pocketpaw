@@ -1,6 +1,7 @@
 """Agent Router - routes to the selected agent backend.
 
 Changes:
+  - 2026-02-14: Graceful ImportError handling when a backend dep is missing.
   - 2026-02-02: Added claude_agent_sdk_full for 2-layer architecture.
   - 2026-02-02: Simplified - removed 2-layer mode (SDK has built-in execution).
   - 2026-02-02: Added pocketpaw_native - custom orchestrator with OI executor.
@@ -9,7 +10,7 @@ Changes:
 """
 
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from pocketclaw.config import Settings
 
@@ -38,6 +39,8 @@ class AgentRouter:
 
     def _initialize_agent(self) -> None:
         """Initialize the selected agent backend."""
+        from pocketclaw.llm.client import resolve_llm_client
+
         backend = self.settings.agent_backend
 
         # Check if backend is disabled
@@ -45,33 +48,54 @@ class AgentRouter:
             logger.warning(f"⚠️ Backend '{backend}' disabled → using claude_agent_sdk")
             backend = "claude_agent_sdk"
 
-        if backend == "claude_agent_sdk":
-            from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
-
-            self._agent = ClaudeAgentSDKWrapper(self.settings)
+        # Log Ollama usage
+        llm = resolve_llm_client(self.settings)
+        if llm.is_ollama:
             logger.info(
-                "🚀 [bold green]Claude Agent SDK[/] ─ Bash, WebSearch, WebFetch, Read, Write"
+                "🦙 Ollama provider detected (%s) — using %s backend with local model",
+                llm.ollama_host,
+                backend,
             )
 
-        elif backend == "pocketpaw_native":
-            from pocketclaw.agents.pocketpaw_native import PocketPawOrchestrator
+        try:
+            if backend == "claude_agent_sdk":
+                from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
 
-            self._agent = PocketPawOrchestrator(self.settings)
-            logger.info("🧠 [bold blue]PocketPaw Native[/] ─ Anthropic + Open Interpreter")
+                self._agent = ClaudeAgentSDKWrapper(self.settings)
+                logger.info(
+                    "🚀 [bold green]Claude Agent SDK[/] ─ Bash, WebSearch, WebFetch, Read, Write"
+                )
 
-        elif backend == "open_interpreter":
-            from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
+            elif backend == "pocketpaw_native":
+                from pocketclaw.agents.pocketpaw_native import PocketPawOrchestrator
 
-            self._agent = OpenInterpreterAgent(self.settings)
-            logger.info(
-                "🤖 [bold yellow]Open Interpreter[/] ─ Local/Cloud LLMs [dim](experimental)[/]"
+                self._agent = PocketPawOrchestrator(self.settings)
+                logger.info("🧠 [bold blue]PocketPaw Native[/] ─ Anthropic + Open Interpreter")
+
+            elif backend == "open_interpreter":
+                from pocketclaw.agents.open_interpreter import OpenInterpreterAgent
+
+                self._agent = OpenInterpreterAgent(self.settings)
+                logger.info(
+                    "🤖 [bold yellow]Open Interpreter[/] ─ Local/Cloud LLMs [dim](experimental)[/]"
+                )
+
+            else:
+                logger.warning(f"Unknown backend: {backend} → using claude_agent_sdk")
+                from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+
+                self._agent = ClaudeAgentSDKWrapper(self.settings)
+        except ImportError as exc:
+            install_hints = {
+                "claude_agent_sdk": "pip install claude-agent-sdk",
+                "pocketpaw_native": "pip install 'pocketpaw[native]'",
+                "open_interpreter": "pip install 'pocketpaw[native]'",
+            }
+            hint = install_hints.get(backend, "pip install pocketpaw")
+            logger.error(
+                f"Could not load '{backend}' backend — missing dependency: {exc}. "
+                f"Install it with: {hint}"
             )
-
-        else:
-            logger.warning(f"Unknown backend: {backend} → using claude_agent_sdk")
-            from pocketclaw.agents.claude_sdk import ClaudeAgentSDKWrapper
-
-            self._agent = ClaudeAgentSDKWrapper(self.settings)
 
     async def run(
         self,

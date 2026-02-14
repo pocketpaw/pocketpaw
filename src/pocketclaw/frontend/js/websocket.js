@@ -189,6 +189,8 @@ class PocketPawSocket {
         this.send('settings', {
             agent_backend: settings.agentBackend,
             llm_provider: settings.llmProvider,
+            ollama_host: settings.ollamaHost,
+            ollama_model: settings.ollamaModel,
             anthropic_model: settings.anthropicModel,
             bypass_permissions: settings.bypassPermissions,
             web_search_provider: settings.webSearchProvider,

@@ -44,13 +44,17 @@ dependencies = [
     "anthropic>=0.45.0",
     # Agent Backend (recommended default)
     "claude-agent-sdk>=0.1.30",
+    # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.31.1",
+    "jinja2>=3.1.0",
+    "qrcode[pil]>=7.4",
+    "python-multipart>=0.0.22",
     # Logging & CLI
     "rich>=13.0.0",
     # Scheduling
     "apscheduler>=3.10.0",
     "python-dateutil>=2.8.0",
-    # Logging & CLI
-    "rich>=13.0.0",
     # Credential Encryption
     "cryptography>=42.0",
     # Image basics
@@ -60,11 +64,8 @@ dependencies = [
 [project.optional-dependencies]
 # --- Feature extras ---
 dashboard = [
-    "fastapi>=0.109.0",
-    "uvicorn[standard]>=0.27.0",
-    "jinja2>=3.1.0",
-    "qrcode[pil]>=7.4",
-    "python-multipart>=0.0.22",
+    # Kept for backward compat — dashboard deps are now in core.
+    # Users with `pip install pocketpaw[dashboard]` in scripts won't break.
 ]
 telegram = [
     "python-telegram-bot>=21.0",
@@ -125,7 +126,7 @@ mcp = [
 
 # --- Composite extras ---
 recommended = [
-    "pocketpaw[dashboard,browser,memory,desktop]",
+    "pocketpaw[browser,memory,desktop]",
 ]
 channels = [
     "pocketpaw[discord,slack,telegram]",

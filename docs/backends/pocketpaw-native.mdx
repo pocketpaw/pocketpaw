@@ -27,6 +27,18 @@ export POCKETCLAW_AGENT_BACKEND="pocketpaw_native"
 export POCKETCLAW_ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
+### Using with Ollama
+
+PocketPaw Native also works with local models via Ollama:
+
+```bash
+export POCKETCLAW_AGENT_BACKEND="pocketpaw_native"
+export POCKETCLAW_LLM_PROVIDER="ollama"
+export POCKETCLAW_OLLAMA_MODEL="qwen2.5:7b"
+```
+
+See [Ollama (Local LLMs)](/backends/ollama) for full setup instructions.
+
 ## How It Works
 
 1. The user message is sent to Claude via the Anthropic SDK

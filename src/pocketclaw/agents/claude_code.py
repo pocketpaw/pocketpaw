@@ -21,14 +21,15 @@ class ClaudeCodeAgent:
 
     def _initialize(self) -> None:
         """Initialize the Anthropic client."""
-        if not self.settings.anthropic_api_key:
-            logger.warning("⚠️ Claude Code requires Anthropic API key")
-            return
+        from pocketclaw.llm.client import resolve_llm_client
 
         try:
-            from anthropic import AsyncAnthropic
+            llm = resolve_llm_client(self.settings, force_provider="anthropic")
+            if not llm.api_key:
+                logger.warning("⚠️ Claude Code requires Anthropic API key")
+                return
 
-            self._client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+            self._client = llm.create_anthropic_client()
             logger.info("✅ Claude Code agent initialized")
 
         except ImportError:
