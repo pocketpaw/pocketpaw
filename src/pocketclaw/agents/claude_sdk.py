@@ -18,6 +18,8 @@ Changes:
   - 2026-02-12: Hardened _block_dangerous_hook — wrapped in try/except to prevent
                 unhandled exceptions from tearing down the CLI stream. Updated hook
                 signature to match SDK 0.1.31 types (PreToolUseHookInput, HookContext).
+  - 2026-02-13: Issue #34 — Use shared ``format_backend_error`` for user-friendly
+                error messages on auth/network failures.
 """
 
 import logging
@@ -25,6 +27,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from pocketclaw.agents.errors import format_backend_error
 from pocketclaw.agents.protocol import AgentEvent, ExecutorProtocol
 from pocketclaw.config import Settings
 from pocketclaw.tools.policy import ToolPolicy
@@ -715,6 +718,8 @@ class ClaudeAgentSDK:
             yield AgentEvent(type="done", content="")
 
         except Exception as e:
+            logger.error(f"Claude Agent SDK error: {e}")
+            yield AgentEvent(type="error", content=format_backend_error(e))
             error_msg = str(e)
             logger.error(f"Claude Agent SDK error: {error_msg}")
 

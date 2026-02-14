@@ -16,6 +16,8 @@ Changes:
   - 2026-02-02: SPEED FIX - Shell commands now use direct subprocess (10x faster).
                 'computer' tool uses OI for complex multi-step tasks only.
   - 2026-02-05: Added 'remember' and 'recall' tools for long-term memory.
+  - 2026-02-13: Issue #34 — Use shared ``format_backend_error`` for user-friendly
+                error messages on auth/network failures.
 """
 
 import asyncio
@@ -24,6 +26,10 @@ import re
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
+from anthropic import AsyncAnthropic
+
+from pocketclaw.agents.errors import format_backend_error
+from pocketclaw.config import Settings
 from pocketclaw.agents.protocol import AgentEvent
 from pocketclaw.config import Settings
 from pocketclaw.llm.client import LLMClient, resolve_llm_client
@@ -790,6 +796,7 @@ class PocketPawOrchestrator:
                     logger.error(f"API error ({self._llm.provider}): {api_error}")
                     yield AgentEvent(
                         type="error",
+                        content=format_backend_error(api_error),
                         content=self._llm.format_api_error(api_error),
                     )
                     return

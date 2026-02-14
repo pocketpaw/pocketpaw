@@ -4,6 +4,8 @@ Changes:
   - Added BrowserTool registration
   - 2026-02-05: Refactored to use AgentRouter for all backends.
                 Now properly emits system_event for tool_use/tool_result.
+  - 2026-02-13: Issue #34 — Replaced raw tracebacks with user-friendly
+                error messages via ``format_backend_error``.
 
 This is the core "brain" of PocketPaw. It integrates:
 1. MessageBus (Input/Output)
@@ -17,6 +19,7 @@ It replaces the old highly-coupled bot loops.
 import asyncio
 import logging
 
+from pocketclaw.agents.errors import format_backend_error
 from pocketclaw.agents.router import AgentRouter
 from pocketclaw.bootstrap import AgentContextBuilder
 from pocketclaw.bus import InboundMessage, OutboundMessage, SystemEvent, get_message_bus
@@ -27,6 +30,8 @@ from pocketclaw.memory import get_memory_manager
 from pocketclaw.security.injection_scanner import ThreatLevel, get_injection_scanner
 
 logger = logging.getLogger(__name__)
+
+
 
 
 async def _iter_with_timeout(aiter, first_timeout=30, timeout=120):
@@ -454,11 +459,12 @@ class AgentLoop:
             except Exception:
                 pass
 
+            friendly_msg = format_backend_error(e)
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
                     chat_id=message.chat_id,
-                    content=f"An error occurred: {str(e)}",
+                    content=friendly_msg,
                 )
             )
             await self.bus.publish_outbound(
