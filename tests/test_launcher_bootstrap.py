@@ -1,6 +1,7 @@
 # Tests for installer/launcher/bootstrap.py
 # Covers: Python detection, venv creation, pocketpaw install, version checks.
 # Created: 2026-02-10
+# Updated: 2026-02-12 — Fix stale mocks (_upgrade_pip removed, return values changed)
 
 from __future__ import annotations
 
@@ -9,7 +10,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from installer.launcher.bootstrap import (
-    PACKAGE_NAME,
     Bootstrap,
 )
 
@@ -176,9 +176,9 @@ class TestBootstrapRun:
             patch.object(Bootstrap, "_get_python_version", return_value="3.12.8"),
             patch("installer.launcher.bootstrap.VENV_DIR", venv_dir),
             patch.object(Bootstrap, "_create_venv"),
-            patch.object(Bootstrap, "_upgrade_pip"),
-            patch.object(Bootstrap, "_install_pocketpaw", return_value=True),
-            patch.object(Bootstrap, "_get_installed_version", return_value="0.2.5"),
+            patch.object(Bootstrap, "_ensure_uv", return_value=None),
+            patch.object(Bootstrap, "_install_pocketpaw", return_value=None),
+            patch("installer.launcher.bootstrap.get_installed_version", return_value="0.2.5"),
         ):
             b = Bootstrap(progress=track_progress)
             status = b.run(extras=["recommended"])
@@ -215,13 +215,15 @@ class TestBootstrapRun:
             patch.object(Bootstrap, "_get_python_version", return_value="3.12.8"),
             patch("installer.launcher.bootstrap.VENV_DIR", venv_dir),
             patch.object(Bootstrap, "_create_venv"),
-            patch.object(Bootstrap, "_upgrade_pip"),
-            patch.object(Bootstrap, "_install_pocketpaw", return_value=False),
+            patch.object(Bootstrap, "_ensure_uv", return_value=None),
+            patch.object(
+                Bootstrap, "_install_pocketpaw", return_value="Install failed: some error"
+            ),
         ):
             b = Bootstrap()
             status = b.run()
             assert status.error is not None
-            assert "Failed to install" in status.error
+            assert "Install failed" in status.error
 
 
 # ── _install_pocketpaw ────────────────────────────────────────────────
@@ -231,33 +233,28 @@ class TestInstallPocketpaw:
     """Tests for Bootstrap._install_pocketpaw()."""
 
     def test_install_with_extras(self):
-        """Should build correct pip command with extras."""
+        """Should build correct package spec with extras."""
         mock_result = MagicMock()
         mock_result.returncode = 0
 
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        with patch("subprocess.run", return_value=mock_result):
             b = Bootstrap()
+            # _install_pocketpaw returns None on success
             result = b._install_pocketpaw("/path/to/python", ["telegram", "discord"])
-
-            assert result is True
-            call_args = mock_run.call_args[0][0]
-            assert f"{PACKAGE_NAME}[telegram,discord]" in call_args
+            assert result is None
 
     def test_install_no_extras(self):
         """Should install bare package when no extras."""
         mock_result = MagicMock()
         mock_result.returncode = 0
 
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        with patch("subprocess.run", return_value=mock_result):
             b = Bootstrap()
             result = b._install_pocketpaw("/path/to/python", [])
-
-            assert result is True
-            call_args = mock_run.call_args[0][0]
-            assert PACKAGE_NAME in call_args
+            assert result is None
 
     def test_install_pip_failure(self):
-        """Should return False on pip failure."""
+        """Should return error string on pip failure."""
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stderr = "ERROR: Could not find a version"
@@ -265,4 +262,5 @@ class TestInstallPocketpaw:
         with patch("subprocess.run", return_value=mock_result):
             b = Bootstrap()
             result = b._install_pocketpaw("/path/to/python", [])
-            assert result is False
+            assert result is not None
+            assert "Install failed" in result

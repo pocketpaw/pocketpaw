@@ -2,6 +2,8 @@
 # Detects Python, creates venv, installs pocketpaw via uv (falls back to pip).
 # On Windows, downloads the Python embeddable package if Python is missing.
 # Created: 2026-02-10
+# Updated: 2026-02-12 — Graceful extras fallback (recommended → dashboard → bare)
+#   to fix Windows installation failures caused by native deps (mem0ai, playwright).
 
 from __future__ import annotations
 
@@ -225,7 +227,7 @@ class Bootstrap:
 
             status.venv_exists = True
 
-            # Step 4: Install pocketpaw
+            # Step 4: Install pocketpaw (with fallback chain for extras)
             source_label = "PocketPaw"
             if local_path:
                 source_label = f"PocketPaw (local: {local_path})"
@@ -239,6 +241,35 @@ class Bootstrap:
                 branch=branch,
                 local_path=local_path,
             )
+
+            # Fallback chain: if extras fail, try lighter sets
+            # recommended (dashboard+browser+memory+desktop) → dashboard → bare
+            if install_err and extras:
+                fallback_chain = self._build_fallback_chain(extras)
+                for fallback_extras in fallback_chain:
+                    fallback_label = f"[{','.join(fallback_extras)}]" if fallback_extras else "core"
+                    logger.warning(
+                        "Install with [%s] failed, trying %s",
+                        ",".join(extras),
+                        fallback_label,
+                    )
+                    self.progress(f"Retrying with {fallback_label}...", 55)
+                    install_err = self._install_pocketpaw(
+                        str(venv_python),
+                        fallback_extras,
+                        uv,
+                        branch=branch,
+                        local_path=local_path,
+                    )
+                    if not install_err:
+                        skipped = set(extras) - set(fallback_extras)
+                        if skipped:
+                            logger.info(
+                                "Installed without optional extras: %s", ", ".join(sorted(skipped))
+                            )
+                        break
+                    extras = fallback_extras  # narrow for next fallback
+
             if install_err:
                 status.error = install_err
                 return status
@@ -505,6 +536,25 @@ class Bootstrap:
             venv.create(str(VENV_DIR), with_pip=True, clear=True)
 
     # ── Package Installation ───────────────────────────────────────────
+
+    def _build_fallback_chain(self, extras: list[str]) -> list[list[str]]:
+        """Build a list of progressively lighter extras to try on install failure.
+
+        E.g. ["recommended"] → [["dashboard"], []]
+        E.g. ["dashboard", "browser"] → [["dashboard"], []]
+        """
+        chain: list[list[str]] = []
+
+        # If the original includes composite extras, try dashboard-only first
+        heavy_extras = {"recommended", "all", "all-tools", "all-backends", "all-channels"}
+        if heavy_extras & set(extras):
+            chain.append(["dashboard"])
+        elif "dashboard" in extras and len(extras) > 1:
+            chain.append(["dashboard"])
+
+        # Always try bare install as last resort
+        chain.append([])
+        return chain
 
     def _install_pocketpaw(
         self,
