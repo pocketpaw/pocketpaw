@@ -6,6 +6,7 @@ Changes:
   - 2026-02-06: Added --discord, --slack, --whatsapp CLI modes.
   - 2026-02-02: Added Rich logging for beautiful console output.
   - 2026-02-03: Handle port-in-use gracefully with automatic port finding.
+  - 2026-02-13: Fixed UTF-8 encoding for Windows console output.
 """
 
 import argparse
@@ -17,6 +18,12 @@ import webbrowser
 
 from pocketclaw.config import Settings, get_settings
 from pocketclaw.logging_setup import setup_logging
+
+# Fix UTF-8 encoding for Windows console output
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")
