@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import Any, List
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 import httpx
@@ -20,8 +20,9 @@ class GitHubRepoAnalyzerTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Analyze a GitHub repository and return key insights such as "
-            "stars, forks, issues, contributors, language, and health score."
+            "Analyze a GitHub repository and return key insights "
+            "such as stars, forks, issues, contributor rankings, "
+            "and repository health score."
         )
 
     @property
@@ -43,29 +44,21 @@ class GitHubRepoAnalyzerTool(BaseTool):
 
     async def execute(self, repo_url: str) -> str:
 
-        # -----------------------------
-        # Validate URL
-        # -----------------------------
         parsed = urlparse(repo_url)
 
         if parsed.netloc != "github.com":
             return self._error("Invalid GitHub repository URL.")
 
-        parts = parsed.path.strip("/").split("/")
-        if len(parts) < 2:
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) < 2:
             return self._error("Invalid GitHub repository format.")
 
-        owner, repo = parts[0], parts[1]
+        owner, repo = path_parts[0], path_parts[1]
 
         try:
             async with httpx.AsyncClient(timeout=15) as client:
 
-                # -----------------------------
-                # Fetch repository metadata
-                # -----------------------------
-                repo_resp = await client.get(
-                    f"{_GITHUB_API_BASE}/{owner}/{repo}"
-                )
+                repo_resp = await client.get(f"{_GITHUB_API_BASE}/{owner}/{repo}")
 
                 if repo_resp.status_code == 404:
                     return self._error("Repository not found.")
@@ -74,22 +67,16 @@ class GitHubRepoAnalyzerTool(BaseTool):
 
                 repo_data = repo_resp.json()
 
-                # -----------------------------
-                # Fetch contributors
-                # -----------------------------
                 contrib_resp = await client.get(
                     f"{_GITHUB_API_BASE}/{owner}/{repo}/contributors"
                 )
 
-                contributors = (
-                    len(contrib_resp.json())
+                contributors_data = (
+                    contrib_resp.json()
                     if contrib_resp.status_code == 200
-                    else 0
+                    else []
                 )
 
-            # -----------------------------
-            # Extract key fields
-            # -----------------------------
             stars = repo_data.get("stargazers_count", 0)
             forks = repo_data.get("forks_count", 0)
             issues = repo_data.get("open_issues_count", 0)
@@ -98,26 +85,23 @@ class GitHubRepoAnalyzerTool(BaseTool):
             description = repo_data.get("description", "No description")
             default_branch = repo_data.get("default_branch", "main")
 
-            # -----------------------------
-            # Calculate Health Score
-            # -----------------------------
+            # Contributor ranking
+            contributor_output = self._format_contributors(contributors_data)
+
             score, grade = self._calculate_health_score(
                 stars, forks, issues, updated_at
             )
 
-            # -----------------------------
-            # Format Output
-            # -----------------------------
             output = (
                 f"📊 Repository Analysis: {owner}/{repo}\n\n"
                 f"⭐ Stars: {stars}\n"
                 f"🍴 Forks: {forks}\n"
                 f"🐛 Open Issues: {issues}\n"
-                f"👥 Contributors: {contributors}\n"
                 f"💻 Primary Language: {language}\n"
                 f"🌿 Default Branch: {default_branch}\n"
-                f"💚 Health Score: {score}/100 ({grade})\n"
-                f"📝 Description: {description}\n"
+                f"📝 Description: {description}\n\n"
+                f"{contributor_output}\n"
+                f"\n💚 Health Score: {score}/100 ({grade})\n"
             )
 
             return output
@@ -129,7 +113,30 @@ class GitHubRepoAnalyzerTool(BaseTool):
             return self._error(str(e))
 
     # -------------------------------------------------
-    # Health Score Logic
+    # Contributor Ranking
+    # -------------------------------------------------
+
+    def _format_contributors(self, contributors: List[dict]) -> str:
+
+        if not contributors:
+            return "👥 Contributors: No contributor data available."
+
+        top = sorted(
+            contributors,
+            key=lambda x: x.get("contributions", 0),
+            reverse=True,
+        )[:5]
+
+        lines = ["👥 Top Contributors:"]
+        for i, c in enumerate(top, start=1):
+            name = c.get("login", "unknown")
+            commits = c.get("contributions", 0)
+            lines.append(f"   {i}. {name} ({commits} commits)")
+
+        return "\n".join(lines)
+
+    # -------------------------------------------------
+    # Health Score
     # -------------------------------------------------
 
     def _calculate_health_score(
@@ -142,34 +149,26 @@ class GitHubRepoAnalyzerTool(BaseTool):
 
         score = 0
 
-        # Stars contribution (max 40)
-        score += min((stars / 1000) * 40, 40)
+        score += min(stars / 1000 * 40, 40)
+        score += min(forks / 500 * 20, 20)
 
-        # Forks contribution (max 20)
-        score += min((forks / 500) * 20, 20)
-
-        # Issue health (max 20)
         if issues < 10:
             score += 20
         elif issues < 50:
             score += 10
 
-        # Recent activity (max 20)
         if updated_at:
-            try:
-                last_update = datetime.fromisoformat(
-                    updated_at.replace("Z", "+00:00")
-                )
-                days_since_update = (
-                    datetime.now(timezone.utc) - last_update
-                ).days
+            last_update = datetime.fromisoformat(
+                updated_at.replace("Z", "+00:00")
+            )
+            days_since_update = (
+                datetime.now(timezone.utc) - last_update
+            ).days
 
-                if days_since_update < 30:
-                    score += 20
-                elif days_since_update < 90:
-                    score += 10
-            except Exception:
-                pass
+            if days_since_update < 30:
+                score += 20
+            elif days_since_update < 90:
+                score += 10
 
         final_score = int(min(score, 100))
 
