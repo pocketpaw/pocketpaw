@@ -30,6 +30,9 @@
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%230A84FF'/><g transform='translate(4,4)' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='4' r='2'/><circle cx='3' cy='7' r='2'/><circle cx='19' cy='7' r='2'/><circle cx='7' cy='19' r='2'/><circle cx='15' cy='19' r='2'/><path d='M8 14v.5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V14a4 4 0 0 0-6 0z'/></g></svg>"
     />
+    
+    <!-- Critical: dark background to prevent white flash before CSS loads -->
+    <style>html,body{background:#000}</style>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
@@ -74,6 +77,27 @@
   </head>
   <body x-data="{ ...app(), sidebarOpen: false }" x-init="init()" class="flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]">
     
+    <!-- Loading Screen (prevents FOUC) -->
+    <div id="paw-loader">
+      <div class="paw-spinner">
+        <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="16" cy="16" r="15" fill="#0A84FF"/>
+          <g transform="translate(4,4)" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="4" r="2"/>
+            <circle cx="3" cy="7" r="2"/>
+            <circle cx="19" cy="7" r="2"/>
+            <circle cx="7" cy="19" r="2"/>
+            <circle cx="15" cy="19" r="2"/>
+            <path d="M8 14v.5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V14a4 4 0 0 0-6 0z"/>
+          </g>
+        </svg>
+      </div>
+      <div class="paw-loader-text">Loading PocketPaw...</div>
+    </div>
+    
+    <!-- Main App Content (hidden until ready) -->
+    <div class="paw-content">
+
     <!-- Mobile Sidebar Overlay -->
     <div 
         x-show="sidebarOpen" 
@@ -184,6 +208,8 @@
 
     <!-- Toast Container -->
     <div class="toast-container" x-ref="toasts"></div>
+    
+    </div><!-- /paw-content -->
 
     <!-- Scripts (cache-busted via ?v= hash) -->
     <script src="/static/js/state.js?v={{ v }}"></script>
@@ -208,11 +234,20 @@
     <!-- Main app (assembles features) -->
     <script src="/static/js/app.js?v={{ v }}"></script>
 
-    <!-- Initialize Lucide icons -->
+    <!-- Initialize Lucide icons and hide loader -->
     <script>
-      // Initial render
+      // Initial render and hide loader
       document.addEventListener('DOMContentLoaded', () => {
         lucide.createIcons();
+        
+        // Show content and hide loader via CSS transition
+        document.body.classList.add('ready');
+        
+        // Remove loader from DOM after transition completes
+        setTimeout(() => {
+          const loader = document.getElementById('paw-loader');
+          if (loader) loader.remove();
+        }, 350);
       });
 
       // Debounced refresh for dynamic content

@@ -27,6 +27,21 @@
     class="messages flex-1 flex flex-col gap-2.5 overflow-y-auto p-4 md:p-8 pb-8 min-h-0"
     x-ref="messages"
   >
+    <!-- Empty state: welcome message for new chats with no history -->
+    <div
+      x-show="messages.length === 0 && !isStreaming"
+      class="flex-1 flex items-center justify-center text-center text-[var(--text-secondary)] px-4"
+    >
+      <div class="max-w-md space-y-1.5">
+        <div class="text-sm md:text-base font-semibold">
+          Welcome to PocketPaw
+        </div>
+        <div class="text-xs md:text-sm text-[var(--text-tertiary)]">
+          This is a new chat. Ask your first question to get started.
+        </div>
+      </div>
+    </div>
+
     <template x-for="(msg, index) in messages" :key="index">
       <!-- Message Item -->
       <div
