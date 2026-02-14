@@ -32,24 +32,39 @@ class RepoInsightsTool(BaseTool):
         if not os.path.exists(path):
             return self._error("Repository path does not exist.")
 
+        files_data = self._scan_files(path)
+        git_data = self._git_stats(path)
+        health = self._calculate_health(git_data)
+
+        report = self._build_report(files_data, git_data, health)
+
+        return self._success(report)
+
+    def _scan_files(self, path):
         total_files = 0
         total_lines = 0
         extensions = Counter()
 
         for root, _, files in os.walk(path):
             for f in files:
-                file_path = os.path.join(root, f)
+                fp = os.path.join(root, f)
                 total_files += 1
 
-                ext = os.path.splitext(f)[1]
-                extensions[ext] += 1
+                extensions[os.path.splitext(f)[1]] += 1
 
-                try:
-                    with open(file_path, "r", errors="ignore") as fh:
-                        total_lines += sum(1 for _ in fh)
-                except Exception:
-                    pass
+            try:
+                with open(fp, "r", errors="ignore") as fh:
+                    total_lines += sum(1 for _ in fh)
+            except Exception as e:
+                print(f"Skipped file: {fp} → {e}")
 
+        return {
+                "files": total_files,
+                "lines": total_lines,
+                "extensions": extensions,
+        }
+
+    def _git_stats(self, path):
         def safe_git(cmd):
             try:
                 return subprocess.check_output(
@@ -60,70 +75,43 @@ class RepoInsightsTool(BaseTool):
             except Exception:
                 return ""
 
-        commits = safe_git(["rev-list", "--count", "HEAD"]).strip() or "N/A"
-
         contributors = safe_git(["shortlog", "-sn"]).splitlines()[:5]
-        recent_commits = safe_git(["log", "--oneline", "-5"]).splitlines()
+        recent = safe_git(["log", "--oneline", "-5"]).splitlines()
 
         hotspot_raw = safe_git(["log", "--name-only", "--pretty=format:"])
-        hotspot_counter = Counter(
+        hotspots = Counter(
             f for f in hotspot_raw.splitlines() if f.strip()
-        )
-        hotspots = hotspot_counter.most_common(5)
-        # --- Health scoring ---
+        ).most_common(5)
 
-        contributor_count = len(contributors)
+        return {
+        "contributors": contributors,
+        "recent": recent,
+        "hotspots": hotspots,
+        "last_commit": safe_git(["log", "-1", "--format=%cr"]).strip(),
+    }
 
-        # Last commit date
-        last_commit = safe_git(["log", "-1", "--format=%cr"]).strip() or "Unknown"
+    def _calculate_health(self, git_data):
+        churn = sum(c for _, c in git_data["hotspots"])
+        activity = 30 if git_data["recent"] else 5
+        collab = min(len(git_data["contributors"]) * 10, 30)
+        stability = max(40 - churn // 3, 5)
 
-        # Churn = number of hotspot entries
-        churn_score = min(sum(count for _, count in hotspots), 100)
+        return min(activity + collab + stability, 100)
 
-        # Activity scoring
-        activity_score = 30 if recent_commits else 5
-
-        # Contributor scoring
-        collab_score = min(contributor_count * 10, 30)
-
-        # Stability scoring (lower churn = better)
-        stability_score = max(40 - churn_score // 3, 5)
-
-        health_score = min(activity_score + collab_score + stability_score, 100)
-
-        report = f"""
+def _build_report(self, files, git, health):
+    report = f"""
 📊 Repository Insights
 
-Files: {total_files}
-Lines: {total_lines}
-Commits: {commits}
-Last activity: {last_commit}
+Files: {files['files']}
+Lines: {files['lines']}
+Last activity: {git['last_commit']}
 
-
-🏥 Repo Health Score: {health_score}/100
-
-Signals:
-  Activity → {activity_score}
-  Collaboration → {collab_score}
-  Stability → {stability_score}
-
+🏥 Health Score: {health}/100
 
 Top file types:
 """
 
-        for ext, count in extensions.most_common(5):
-            report += f"  {ext or '[no ext]'} → {count}\n"
+    for ext, count in files["extensions"].most_common(5):
+        report += f"  {ext or '[no ext]'} → {count}\n"
 
-        report += "\n👥 Top contributors:\n"
-        for c in contributors:
-            report += f"  {c}\n"
-
-        report += "\n🕒 Recent commits:\n"
-        for c in recent_commits:
-            report += f"  {c}\n"
-
-        report += "\n🔥 Hotspot files:\n"
-        for file, count in hotspots:
-            report += f"  {file} → {count} changes\n"
-
-        return self._success(report)
+    return report
