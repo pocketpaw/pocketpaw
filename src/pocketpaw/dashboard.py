@@ -2314,7 +2314,36 @@ async def websocket_endpoint(
             # Handle API key save
             elif action == "save_api_key":
                 provider = data.get("provider")
-                key = data.get("key", "")
+                raw_key = data.get("key", "")
+                key = raw_key.strip()
+
+                if not provider:
+                    await websocket.send_json(
+                        {"type": "error", "content": "Missing API key provider"}
+                    )
+                    continue
+
+                # Prevent empty or whitespace-only keys
+                if not key:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": f"Please enter a valid {provider.replace('_', ' ').title()} API key",
+                        }
+                    )
+                    continue
+
+                # Prevent no-op saves (masked or unchanged keys)
+                existing_key = getattr(settings, f"{provider}_api_key", None)
+                if existing_key and existing_key == key:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": "API key is unchanged",
+                        }
+                    )
+                    continue
+
 
                 async with _settings_lock:
                     if provider == "anthropic" and key:
