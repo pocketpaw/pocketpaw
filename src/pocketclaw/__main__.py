@@ -17,7 +17,6 @@ import webbrowser
 
 from pocketclaw.config import Settings, get_settings
 from pocketclaw.logging_setup import setup_logging
-from tests.test_model_router import settings
 
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")
