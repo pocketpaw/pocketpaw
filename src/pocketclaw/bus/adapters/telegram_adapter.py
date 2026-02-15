@@ -219,6 +219,7 @@ class TelegramAdapter(BaseChannelAdapter):
 
         if chat_id not in self._buffers:
             # Send initial message (topic-aware)
+            real_chat_id, topic_id = self._parse_chat_id(chat_id)
             real_chat_id, topic_id = self._parse_chat_id(chat_id) # Parse chat_id here to use for send_chat_action
             await self.app.bot.send_chat_action(chat_id=real_chat_id, action=ChatAction.TYPING)
             # Send initial message (topic-aware)
