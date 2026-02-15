@@ -601,8 +601,13 @@ class ClaudeAgentSDK:
             if self.settings.bypass_permissions:
                 options_kwargs["permission_mode"] = "bypassPermissions"
 
-            # Smart model routing (opt-in, skip for Ollama — model already set)
+            # Model selection priority:
+            # 1. Smart routing (auto-select by complexity)
+            # 2. claude_model setting (user-specified alias)
+            # 3. SDK default (if Ollama, model already set above)
+
             if self.settings.smart_routing_enabled and not llm.is_ollama:
+                # Smart model routing (opt-in)
                 from pocketpaw.agents.model_router import ModelRouter
 
                 model_router = ModelRouter(self.settings)
@@ -614,6 +619,21 @@ class ClaudeAgentSDK:
                     selection.model,
                     selection.reason,
                 )
+            elif self.settings.claude_model and not llm.is_ollama:
+                # Use claude_model alias/setting
+                model_alias = self.settings.claude_model
+
+                # Resolve "opusplan" alias: Opus in plan mode, Sonnet during execution
+                if model_alias == "opusplan":
+                    model_alias = "opus" if self.settings.plan_mode else "sonnet"
+                    logger.info(
+                        "Resolved 'opusplan' -> '%s' (plan_mode=%s)",
+                        model_alias,
+                        self.settings.plan_mode,
+                    )
+
+                options_kwargs["model"] = model_alias
+                logger.info("Using claude_model: %s", model_alias)
 
             # Create options (after all kwargs are set, including model)
             options = self._ClaudeAgentOptions(**options_kwargs)

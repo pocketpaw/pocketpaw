@@ -97,6 +97,10 @@ class Settings(BaseSettings):
         default="claude_agent_sdk",
         description="Agent backend: 'claude_agent_sdk' (recommended), 'pocketpaw_native', or 'open_interpreter' (experimental)",
     )
+    claude_model: str = Field(
+        default="sonnet",
+        description="Claude model alias when using claude_agent_sdk backend: 'sonnet' (daily coding), 'opus' (complex reasoning), 'haiku' (simple tasks), 'sonnet[1m]' (extended context), 'opusplan' (opus in plan mode, sonnet during execution)",
+    )
 
     # LLM Configuration
     llm_provider: str = Field(
@@ -430,6 +434,7 @@ class Settings(BaseSettings):
             "telegram_bot_token": self.telegram_bot_token or existing.get("telegram_bot_token"),
             "allowed_user_id": self.allowed_user_id or existing.get("allowed_user_id"),
             "agent_backend": self.agent_backend,
+            "claude_model": self.claude_model,
             "memory_backend": self.memory_backend,
             "memory_use_inference": self.memory_use_inference,
             "mem0_llm_provider": self.mem0_llm_provider,

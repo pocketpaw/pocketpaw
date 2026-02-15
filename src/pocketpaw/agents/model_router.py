@@ -71,10 +71,38 @@ class ModelRouter:
     - Short messages + simple patterns -> SIMPLE (Haiku)
     - Complex signals (plan, debug, architect) + long messages -> COMPLEX (Opus)
     - Default -> MODERATE (Sonnet)
+
+    When agent_backend is 'claude_agent_sdk', only routes between Claude models.
     """
+
+    # Claude model identifiers (official model names and aliases)
+    _CLAUDE_MODELS = {
+        "claude",  # Matches any claude-* model
+        "sonnet",
+        "opus",
+        "haiku",
+        "sonnet[1m]",
+        "opusplan",
+    }
 
     def __init__(self, settings: Settings):
         self.settings = settings
+
+    @staticmethod
+    def is_claude_model(model: str) -> bool:
+        """Check if a model identifier is a Claude model.
+
+        Args:
+            model: Model name or alias (e.g., "claude-sonnet-4-5", "sonnet", "gpt-4o")
+
+        Returns:
+            True if it's a Claude model
+        """
+        if not model:
+            return False
+        model_lower = model.lower()
+        # Check if it starts with "claude" or matches known aliases
+        return model_lower.startswith("claude") or model_lower in ModelRouter._CLAUDE_MODELS
 
     def classify(self, message: str) -> ModelSelection:
         """Classify a message and return the recommended model.
@@ -84,37 +112,56 @@ class ModelRouter:
         message = message.strip()
         msg_len = len(message)
 
+        # Determine complexity and select model
+        selected_complexity = TaskComplexity.MODERATE
+        selected_model = self.settings.model_tier_moderate
+        reason = "Default moderate complexity"
+
         # Check simple patterns first
         if msg_len <= _SHORT_THRESHOLD:
             for pattern in _SIMPLE_PATTERNS:
                 if pattern.search(message):
-                    return ModelSelection(
-                        complexity=TaskComplexity.SIMPLE,
-                        model=self.settings.model_tier_simple,
-                        reason="Short message with simple pattern",
-                    )
+                    selected_complexity = TaskComplexity.SIMPLE
+                    selected_model = self.settings.model_tier_simple
+                    reason = "Short message with simple pattern"
+                    break
 
-        # Check complex signals
-        complex_hits = sum(1 for p in _COMPLEX_SIGNALS if p.search(message))
+        # Check complex signals (if not already classified as simple)
+        if selected_complexity != TaskComplexity.SIMPLE:
+            complex_hits = sum(1 for p in _COMPLEX_SIGNALS if p.search(message))
 
-        if complex_hits >= 2 or (complex_hits >= 1 and msg_len > _SHORT_THRESHOLD):
-            return ModelSelection(
-                complexity=TaskComplexity.COMPLEX,
-                model=self.settings.model_tier_complex,
-                reason=f"{complex_hits} complex signal(s), message length {msg_len}",
-            )
+            if complex_hits >= 2 or (complex_hits >= 1 and msg_len > _SHORT_THRESHOLD):
+                selected_complexity = TaskComplexity.COMPLEX
+                selected_model = self.settings.model_tier_complex
+                reason = f"{complex_hits} complex signal(s), message length {msg_len}"
+            # Very long messages default to complex
+            elif msg_len > _LONG_THRESHOLD * 2:
+                selected_complexity = TaskComplexity.COMPLEX
+                selected_model = self.settings.model_tier_complex
+                reason = f"Very long message ({msg_len} chars)"
 
-        # Very long messages default to complex
-        if msg_len > _LONG_THRESHOLD * 2:
-            return ModelSelection(
-                complexity=TaskComplexity.COMPLEX,
-                model=self.settings.model_tier_complex,
-                reason=f"Very long message ({msg_len} chars)",
-            )
+        # Validate: When using claude_agent_sdk backend, ensure Claude model is selected
+        if self.settings.agent_backend == "claude_agent_sdk":
+            if not self.is_claude_model(selected_model):
+                # Fallback to safe Claude defaults by complexity
+                fallback_map = {
+                    TaskComplexity.SIMPLE: "haiku",
+                    TaskComplexity.MODERATE: "sonnet",
+                    TaskComplexity.COMPLEX: "opus",
+                }
+                fallback = fallback_map[selected_complexity]
+                logger.warning(
+                    "Smart routing with claude_agent_sdk: model '%s' is not a Claude model. "
+                    "Falling back to '%s' for %s complexity.",
+                    selected_model,
+                    fallback,
+                    selected_complexity.value,
+                )
+                selected_model = fallback
+                reason += f" (fallback to Claude {fallback})"
 
-        # Default: moderate
         return ModelSelection(
-            complexity=TaskComplexity.MODERATE,
-            model=self.settings.model_tier_moderate,
-            reason="Default moderate complexity",
+            complexity=selected_complexity,
+            model=selected_model,
+            reason=reason,
         )
