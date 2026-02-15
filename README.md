@@ -437,3 +437,5 @@ MIT &copy; PocketPaw Team
   <br>
   <strong>Made with love for humans who want AI on their own terms</strong>
 </p>
+
+Contributed by Sai Sanjibani Nayak
