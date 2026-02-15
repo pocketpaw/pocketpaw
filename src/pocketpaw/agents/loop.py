@@ -243,8 +243,11 @@ class AgentLoop:
             full_response = ""
 
             run_iter = router.run(content, system_prompt=system_prompt, history=history)
+            # External endpoints (OpenAI-compatible, Ollama) may need longer
+            # for the first response — especially thinking/reasoning models.
+            ft = 120 if self.settings.llm_provider == "openai_compatible" else 30
             try:
-                async for chunk in _iter_with_timeout(run_iter):
+                async for chunk in _iter_with_timeout(run_iter, first_timeout=ft):
                     chunk_type = chunk.get("type", "")
                     content = chunk.get("content", "")
                     metadata = chunk.get("metadata") or {}
@@ -400,7 +403,7 @@ class AgentLoop:
                     self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn
                 ) or (self.settings.memory_backend == "file" and self.settings.file_auto_learn)
                 if should_auto_learn:
-                    asyncio.create_task(
+                    t = asyncio.create_task(
                         self._auto_learn(
                             message.content,
                             full_response,

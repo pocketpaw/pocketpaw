@@ -2236,6 +2236,12 @@ async def websocket_endpoint(
                         settings.ollama_model = data["ollama_model"]
                     if data.get("anthropic_model"):
                         settings.anthropic_model = data.get("anthropic_model")
+                    if data.get("openai_compatible_base_url") is not None:
+                        settings.openai_compatible_base_url = data["openai_compatible_base_url"]
+                    if data.get("openai_compatible_api_key"):
+                        settings.openai_compatible_api_key = data["openai_compatible_api_key"]
+                    if data.get("openai_compatible_model") is not None:
+                        settings.openai_compatible_model = data["openai_compatible_model"]
                     if "bypass_permissions" in data:
                         settings.bypass_permissions = bool(data.get("bypass_permissions"))
                     if data.get("web_search_provider"):
@@ -2411,6 +2417,9 @@ async def websocket_endpoint(
                             "ollamaHost": settings.ollama_host,
                             "ollamaModel": settings.ollama_model,
                             "anthropicModel": settings.anthropic_model,
+                            "openaiCompatibleBaseUrl": settings.openai_compatible_base_url,
+                            "openaiCompatibleModel": settings.openai_compatible_model,
+                            "hasOpenaiCompatibleKey": bool(settings.openai_compatible_api_key),
                             "bypassPermissions": settings.bypass_permissions,
                             "hasAnthropicKey": bool(settings.anthropic_api_key),
                             "hasOpenaiKey": bool(settings.openai_api_key),

@@ -101,6 +101,7 @@ x-transition.opacity
                     <option value="anthropic">Anthropic</option>
                     <option value="openai">OpenAI</option>
                     <option value="ollama">Ollama</option>
+                    <option value="openai_compatible">OpenAI-Compatible</option>
                     </select>
                     <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
                         <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
@@ -108,6 +109,53 @@ x-transition.opacity
                     </div>
                     <small class="text-white/50 text-[11px]" x-show="settings.llmProvider === 'ollama'">
                         Works with Claude SDK and PocketPaw Native backends. Run <code>pocketpaw --check-ollama</code> to verify.
+                    </small>
+                    <small class="text-white/50 text-[11px]" x-show="settings.llmProvider === 'openai_compatible'">
+                        Connect to any OpenAI-compatible endpoint (NVIDIA NIM, OpenRouter, LiteLLM, vLLM, etc.).
+                        Works best with <b>PocketPaw Native</b> backend.
+                        Run <code>pocketpaw --check-openai-compatible</code> to verify.
+                    </small>
+                </div>
+
+                <!-- OpenAI-Compatible Base URL -->
+                <div class="flex flex-col gap-1.5" x-show="settings.llmProvider === 'openai_compatible'">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Base URL</label>
+                    <input
+                        type="text"
+                        x-model="settings.openaiCompatibleBaseUrl"
+                        @change="saveSettings()"
+                        placeholder="http://localhost:4000/v1"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    />
+                    <small class="text-white/50 text-[11px]">
+                        The base URL of your Anthropic-compatible endpoint (e.g. LiteLLM, vLLM, OpenRouter).
+                    </small>
+                </div>
+
+                <!-- OpenAI-Compatible API Key -->
+                <div class="flex flex-col gap-1.5" x-show="settings.llmProvider === 'openai_compatible'">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">API Key</label>
+                    <input
+                        type="password"
+                        x-model="settings.openaiCompatibleApiKey"
+                        @change="saveSettings()"
+                        :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'Optional — leave empty if not needed'"
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    />
+                </div>
+
+                <!-- OpenAI-Compatible Model -->
+                <div class="flex flex-col gap-1.5" x-show="settings.llmProvider === 'openai_compatible'">
+                    <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Model</label>
+                    <input
+                        type="text"
+                        x-model="settings.openaiCompatibleModel"
+                        @change="saveSettings()"
+                        placeholder="gpt-4o / claude-sonnet-4-5-20250929 / etc."
+                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                    />
+                    <small class="text-white/50 text-[11px]">
+                        Model name as expected by the endpoint.
                     </small>
                 </div>
 

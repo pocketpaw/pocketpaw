@@ -66,6 +66,9 @@ function app() {
             ollamaHost: 'http://localhost:11434',
             ollamaModel: 'llama3.2',
             anthropicModel: 'claude-sonnet-4-5-20250929',
+            openaiCompatibleBaseUrl: '',
+            openaiCompatibleApiKey: '',
+            openaiCompatibleModel: '',
             bypassPermissions: false,
             webSearchProvider: 'tavily',
             urlExtractProvider: 'auto',
@@ -108,6 +111,7 @@ function app() {
         },
         hasAnthropicKey: false,
         hasOpenaiKey: false,
+        hasOpenaiCompatibleKey: false,
         hasTavilyKey: false,
         hasBraveKey: false,
         hasParallelKey: false,
@@ -385,6 +389,7 @@ function app() {
             // Data-driven settings sync: map server keys to local settings
             const SETTINGS_MAP = [
                 'agentBackend', 'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
+                'openaiCompatibleBaseUrl', 'openaiCompatibleModel',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
                 'injectionScanEnabled', 'injectionScanLlm', 'toolProfile',
                 'planMode', 'planModeTools', 'smartRoutingEnabled',
@@ -401,7 +406,7 @@ function app() {
 
             // API key availability flags
             const KEY_FLAGS = {
-                hasAnthropicKey: false, hasOpenaiKey: false,
+                hasAnthropicKey: false, hasOpenaiKey: false, hasOpenaiCompatibleKey: false,
                 hasTavilyKey: false, hasBraveKey: false,
                 hasParallelKey: false, hasElevenlabsKey: false,
                 hasGoogleOAuthId: false, hasGoogleOAuthSecret: false,

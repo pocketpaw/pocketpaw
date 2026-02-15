@@ -21,8 +21,8 @@ Changes:
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator, Optional
 
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
@@ -346,12 +346,19 @@ class PocketPawOrchestrator:
             logger.error("❌ PocketPaw Native does not support OpenAI directly")
             return
 
+        if self._llm.is_openai_compatible and not self._llm.openai_compatible_base_url:
+            logger.error("❌ OpenAI-compatible base URL not configured")
+            return
+
         if self._llm.is_anthropic and not self._llm.api_key:
             logger.error("❌ No LLM provider available for PocketPaw Native")
             return
 
         try:
-            self._client = self._llm.create_anthropic_client()
+            if self._llm.is_openai_compatible:
+                self._client = self._llm.create_openai_client()
+            else:
+                self._client = self._llm.create_anthropic_client()
         except Exception as e:
             logger.error(f"Failed to initialize LLM client: {e}")
             self._client = None
@@ -366,11 +373,12 @@ class PocketPawOrchestrator:
             logger.warning(f"⚠️ Executor init failed: {e}. Using fallback.")
             self._executor = None
 
-        brain = (
-            f"Ollama ({self._llm.ollama_host})"
-            if self._llm.is_ollama
-            else "Anthropic API (direct)"
-        )
+        if self._llm.is_ollama:
+            brain = f"Ollama ({self._llm.ollama_host})"
+        elif self._llm.is_openai_compatible:
+            brain = f"OpenAI-compatible ({self._llm.openai_compatible_base_url})"
+        else:
+            brain = "Anthropic API (direct)"
 
         logger.info("=" * 50)
         logger.info("🐾 POCKETPAW NATIVE ORCHESTRATOR")
@@ -425,10 +433,150 @@ class PocketPawOrchestrator:
         return parts[0], parts[1]
 
     # =========================================================================
+    # OPENAI-COMPATIBLE FORMAT HELPERS
+    # =========================================================================
+
+    @staticmethod
+    def _anthropic_tools_to_openai(tools: list[dict]) -> list[dict]:
+        """Convert Anthropic tool definitions to OpenAI function-calling format."""
+        result = []
+        for t in tools:
+            result.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "parameters": t.get("input_schema", {"type": "object"}),
+                    },
+                }
+            )
+        return result
+
+    @staticmethod
+    def _build_openai_messages(system_prompt: str, messages: list[dict]) -> list[dict]:
+        """Build OpenAI-format messages from Anthropic-format messages.
+
+        Anthropic uses a separate ``system`` parameter and ``content`` can be
+        a list of block objects.  OpenAI puts the system prompt in a message
+        and expects ``content`` to be a string (for user/assistant text).
+        """
+        oai: list[dict] = [{"role": "system", "content": system_prompt}]
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", "")
+
+            if role == "user" and isinstance(content, list):
+                # Tool result list → individual tool_result messages
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        oai.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": block["tool_use_id"],
+                                "content": block.get("content", ""),
+                            }
+                        )
+                    else:
+                        oai.append({"role": "user", "content": str(block)})
+            elif role == "assistant" and isinstance(content, list):
+                # Assistant blocks (text + tool_use) → single assistant message
+                text_parts = []
+                tool_calls = []
+                for block in content:
+                    if hasattr(block, "type"):
+                        if block.type == "text" and getattr(block, "text", ""):
+                            text_parts.append(block.text)
+                        elif block.type == "tool_use":
+                            import json
+
+                            tool_calls.append(
+                                {
+                                    "id": block.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.name,
+                                        "arguments": json.dumps(block.input),
+                                    },
+                                }
+                            )
+                am: dict = {
+                    "role": "assistant",
+                    "content": "\n".join(text_parts) or None,
+                }
+                if tool_calls:
+                    am["tool_calls"] = tool_calls
+                oai.append(am)
+            else:
+                oai.append({"role": role, "content": str(content)})
+        return oai
+
+    async def _call_openai_compatible(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        tools: list[dict],
+        messages: list[dict],
+    ):
+        """Call the OpenAI-compatible endpoint and return a normalized response.
+
+        Returns an object that mimics the Anthropic response shape so the
+        existing processing loop can handle it unchanged.
+        """
+        import json
+        from types import SimpleNamespace
+
+        oai_messages = self._build_openai_messages(system_prompt, messages)
+        oai_tools = self._anthropic_tools_to_openai(tools)
+
+        kwargs: dict = {
+            "model": model,
+            "max_tokens": 4096,
+            "messages": oai_messages,
+        }
+        if oai_tools:
+            kwargs["tools"] = oai_tools
+
+        response = await self._client.chat.completions.create(**kwargs)
+        choice = response.choices[0]
+        msg = choice.message
+
+        # Build Anthropic-compatible content blocks
+        content_blocks = []
+        if msg.content:
+            content_blocks.append(SimpleNamespace(type="text", text=msg.content))
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
+                    inp = json.loads(tc.function.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    inp = {}
+                content_blocks.append(
+                    SimpleNamespace(
+                        type="tool_use",
+                        id=tc.id,
+                        name=tc.function.name,
+                        input=inp,
+                    )
+                )
+
+        # Map finish_reason to Anthropic stop_reason
+        finish = choice.finish_reason
+        if finish == "stop":
+            stop_reason = "end_turn"
+        elif finish == "tool_calls":
+            stop_reason = "tool_use"
+        else:
+            stop_reason = finish or "end_turn"
+
+        return SimpleNamespace(content=content_blocks, stop_reason=stop_reason)
+
+    # =========================================================================
     # SECURITY METHODS
     # =========================================================================
 
-    def _is_dangerous_command(self, command: str) -> Optional[str]:
+    def _is_dangerous_command(self, command: str) -> str | None:
         """Check if a command matches dangerous patterns using regex."""
         for pattern in DANGEROUS_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
@@ -580,7 +728,7 @@ class PocketPawOrchestrator:
                 if self._executor:
                     content = await self._executor.read_file(path)
                 else:
-                    with open(Path(path).expanduser(), "r") as f:
+                    with open(Path(path).expanduser()) as f:
                         content = f.read()
 
                 # Security: redact secrets from file content
@@ -751,7 +899,11 @@ class PocketPawOrchestrator:
                 model = self._llm.model
 
                 # Smart model routing (opt-in, skip for Ollama — single model)
-                if self.settings.smart_routing_enabled and not self._llm.is_ollama:
+                if (
+                    self.settings.smart_routing_enabled
+                    and not self._llm.is_ollama
+                    and not self._llm.is_openai_compatible
+                ):
                     from pocketpaw.agents.model_router import ModelRouter
 
                     model_router = ModelRouter(self.settings)
@@ -768,19 +920,34 @@ class PocketPawOrchestrator:
                 identity = system_prompt or _DEFAULT_IDENTITY
                 final_system = identity + "\n" + _TOOL_GUIDE
 
-                # Call Claude with timeout wrapper for safety
+                # Call LLM with timeout wrapper for safety
+                filtered_tools = self._get_filtered_tools()
+                # OpenAI-compatible endpoints (especially thinking models)
+                # may need longer for first response.
+                api_timeout = 180.0 if self._llm.is_openai_compatible else 90.0
                 try:
-                    response = await asyncio.wait_for(
-                        self._client.messages.create(
-                            model=model,
-                            max_tokens=4096,
-                            system=final_system,
-                            tools=self._get_filtered_tools(),
-                            messages=messages,
-                        ),
-                        timeout=90.0,  # Additional asyncio timeout as safety net
-                    )
-                except asyncio.TimeoutError:
+                    if self._llm.is_openai_compatible:
+                        response = await asyncio.wait_for(
+                            self._call_openai_compatible(
+                                model=model,
+                                system_prompt=final_system,
+                                tools=filtered_tools,
+                                messages=messages,
+                            ),
+                            timeout=api_timeout,
+                        )
+                    else:
+                        response = await asyncio.wait_for(
+                            self._client.messages.create(
+                                model=model,
+                                max_tokens=4096,
+                                system=final_system,
+                                tools=filtered_tools,
+                                messages=messages,
+                            ),
+                            timeout=api_timeout,
+                        )
+                except TimeoutError:
                     yield AgentEvent(
                         type="error",
                         content="⏱️ Request timed out. Please check your network connection and API key.",

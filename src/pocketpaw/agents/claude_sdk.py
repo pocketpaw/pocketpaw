@@ -581,7 +581,7 @@ class ClaudeAgentSDK:
                     sdk_env = {"ANTHROPIC_API_KEY": env_key}
             if sdk_env:
                 options_kwargs["env"] = sdk_env
-            if llm.is_ollama:
+            if llm.is_ollama or llm.is_openai_compatible:
                 options_kwargs["model"] = llm.model
 
             # Wire in MCP servers (policy-filtered)
@@ -602,7 +602,11 @@ class ClaudeAgentSDK:
                 options_kwargs["permission_mode"] = "bypassPermissions"
 
             # Smart model routing (opt-in, skip for Ollama — model already set)
-            if self.settings.smart_routing_enabled and not llm.is_ollama:
+            if (
+                self.settings.smart_routing_enabled
+                and not llm.is_ollama
+                and not llm.is_openai_compatible
+            ):
                 from pocketpaw.agents.model_router import ModelRouter
 
                 model_router = ModelRouter(self.settings)
@@ -614,6 +618,15 @@ class ClaudeAgentSDK:
                     selection.model,
                     selection.reason,
                 )
+
+            # Capture stderr for better error diagnostics
+            _stderr_lines: list[str] = []
+
+            def _on_stderr(line: str) -> None:
+                _stderr_lines.append(line)
+                logger.debug("Claude CLI stderr: %s", line)
+
+            options_kwargs["stderr"] = _on_stderr
 
             # Create options (after all kwargs are set, including model)
             options = self._ClaudeAgentOptions(**options_kwargs)
@@ -730,7 +743,11 @@ class ClaudeAgentSDK:
                     ),
                 )
             else:
-                yield AgentEvent(type="error", content=llm.format_api_error(e))
+                stderr_text = "\n".join(_stderr_lines) if _stderr_lines else ""
+                yield AgentEvent(
+                    type="error",
+                    content=llm.format_api_error(e, stderr=stderr_text),
+                )
 
     async def stop(self) -> None:
         """Stop the agent execution."""

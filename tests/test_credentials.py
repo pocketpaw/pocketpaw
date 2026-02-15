@@ -448,6 +448,7 @@ class TestSecretFieldsList:
             "telegram_bot_token",
             "openai_api_key",
             "anthropic_api_key",
+            "openai_compatible_api_key",
             "discord_bot_token",
             "slack_bot_token",
             "slack_app_token",

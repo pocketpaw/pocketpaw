@@ -100,10 +100,21 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     llm_provider: str = Field(
-        default="auto", description="LLM provider: 'auto', 'ollama', 'openai', 'anthropic'"
+        default="auto",
+        description="LLM provider: 'auto', 'ollama', 'openai', 'anthropic', 'openai_compatible'",
     )
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
     ollama_model: str = Field(default="llama3.2", description="Ollama model to use")
+    openai_compatible_base_url: str = Field(
+        default="",
+        description="Base URL for OpenAI-compatible endpoint (LiteLLM, OpenRouter, vLLM, etc.)",
+    )
+    openai_compatible_api_key: str | None = Field(
+        default=None, description="API key for OpenAI-compatible endpoint"
+    )
+    openai_compatible_model: str = Field(
+        default="", description="Model name for OpenAI-compatible endpoint"
+    )
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-4o", description="OpenAI model to use")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
@@ -451,6 +462,12 @@ class Settings(BaseSettings):
             "openai_model": self.openai_model,
             "anthropic_api_key": self.anthropic_api_key or existing.get("anthropic_api_key"),
             "anthropic_model": self.anthropic_model,
+            # OpenAI-Compatible
+            "openai_compatible_base_url": self.openai_compatible_base_url,
+            "openai_compatible_api_key": (
+                self.openai_compatible_api_key or existing.get("openai_compatible_api_key")
+            ),
+            "openai_compatible_model": self.openai_compatible_model,
             # Discord
             "discord_bot_token": (self.discord_bot_token or existing.get("discord_bot_token")),
             "discord_allowed_guild_ids": self.discord_allowed_guild_ids,
