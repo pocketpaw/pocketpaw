@@ -17,6 +17,7 @@ import webbrowser
 
 from pocketclaw.config import Settings, get_settings
 from pocketclaw.logging_setup import setup_logging
+from tests.test_model_router import settings
 
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")
@@ -361,15 +362,25 @@ Examples:
     settings = get_settings()
 
     # Resolve host: explicit flag > config > auto-detect
+
     if args.host is not None:
         host = args.host
-    elif settings.web_host != "127.0.0.1":
+
+    elif settings.web_host and settings.web_host != "127.0.0.1":
         host = settings.web_host
-    elif _is_headless():
-        host = "0.0.0.0"
-        logger.info("Headless server detected — binding to 0.0.0.0")
+
     else:
-        host = "127.0.0.1"
+        # Windows should NEVER auto-bind to 0.0.0.0
+        if sys.platform.startswith("win"):
+             host = "127.0.0.1"
+
+        elif _is_headless():
+            host = "0.0.0.0"
+            logger.info("Headless server detected — binding to 0.0.0.0")
+
+        else:
+            host = "127.0.0.1"
+
 
     has_channel_flag = (
         args.discord
