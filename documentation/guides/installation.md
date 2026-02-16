@@ -72,3 +72,7 @@ The installer handles Python and package manager setup automatically. If you alr
 5. Installs `pocketpaw` and opens the web dashboard
 
 No sudo required on macOS. On Linux, system package installs (apt/dnf) may prompt for sudo.
+
+## Common Issues
+
+For detailed solutions, see the Troubleshooting Guide.
