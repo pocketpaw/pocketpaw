@@ -329,6 +329,11 @@ class AgentLoop:
                             )
                         )
 
+                    elif chunk_type == "token_usage":
+                        await self.bus.publish_system(
+                            SystemEvent(event_type="token_usage", data=metadata)
+                        )
+
                     elif chunk_type == "tool_use":
                         # Emit tool_start system event for Activity panel
                         tool_name = metadata.get("name") or metadata.get("tool", "unknown")

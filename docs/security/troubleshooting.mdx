@@ -1,0 +1,129 @@
+---
+title: Troubleshooting
+description: "Common issues with PocketPaw's credential store, encryption, and security features — with step-by-step fixes."
+section: Security
+ogType: article
+keywords: ["troubleshooting", "credentials", "secrets.enc", "decryption failed", "credential store", "encryption"]
+tags: ["security", "troubleshooting", "credentials"]
+---
+
+# Troubleshooting
+
+Common issues related to PocketPaw's security and credential subsystems.
+
+## "Failed to decrypt secrets.enc" Warning
+
+```
+WARNING  Failed to decrypt secrets.enc (machine changed? corrupted?): .
+         Starting with empty credential store.
+```
+
+This means PocketPaw cannot decrypt `~/.pocketpaw/secrets.enc` — the encrypted credential store. PocketPaw will still start, but all stored API keys and tokens will be unavailable until you re-enter them.
+
+### How the Credential Store Works
+
+PocketPaw encrypts API keys and tokens using [Fernet](https://cryptography.io/en/latest/fernet/) symmetric encryption. The encryption key is derived from three machine-specific values:
+
+- **Hostname** — `platform.node()`
+- **MAC address** — `uuid.getnode()`
+- **Username** — `os.getlogin()`
+
+A random salt is stored at `~/.pocketpaw/.salt` and combined with the above to derive the key via PBKDF2. If **any** of these values change between when the file was written and when it's read, decryption fails.
+
+### Common Causes
+
+| Cause | Example |
+|-------|---------|
+| Hostname changed | Renamed your machine, moved to a new host |
+| MAC address changed | Different network adapter active, VM restart with dynamic MAC |
+| Username changed | Running under a different user account, or `os.getlogin()` returns differently in some shells vs. systemd |
+| Salt file deleted or corrupted | `~/.pocketpaw/.salt` was removed independently of `secrets.enc` |
+| File copied from another machine | `secrets.enc` is bound to the machine that created it |
+| Docker/VM rebuild | Container or VM got a new hostname or MAC |
+
+### Fix
+
+Delete both the encrypted store and its salt so they get recreated together on next startup:
+
+```bash
+rm ~/.pocketpaw/secrets.enc ~/.pocketpaw/.salt
+```
+
+Then restart PocketPaw. A fresh salt and encryption key will be generated automatically.
+
+<Callout type="warning">
+  Deleting these files means all previously stored API keys and tokens are lost. You will need to re-enter them through the dashboard settings, environment variables, or `config.json`.
+</Callout>
+
+<Callout type="info">
+  Deleting only `secrets.enc` without `.salt` may not fix the issue — if the salt was created under a different machine identity, the new `secrets.enc` will be encrypted with a mismatched key and fail on the next read.
+</Callout>
+
+### Prevention
+
+- **Avoid changing your hostname** after initial setup, or re-enter credentials afterward.
+- **Pin MAC addresses** in VMs and Docker containers to prevent identity drift.
+- **Use environment variables** (`POCKETPAW_ANTHROPIC_API_KEY`, etc.) as a fallback — they are always read regardless of the credential store.
+- When running under **systemd**, ensure the service runs as the same user that created the credentials. The `os.getlogin()` call can return different values in service contexts vs. interactive shells.
+
+## API Keys Not Loading
+
+If your API keys seem to vanish after restart but there's no decryption warning:
+
+<Steps>
+  <Step title="Check environment variables">
+    Environment variables (`POCKETPAW_*`) always take precedence over stored values. If an env var is set to an empty string, it overrides the stored key with nothing.
+  </Step>
+  <Step title="Check config.json">
+    Secret fields are stripped from `config.json` during save (they go to `secrets.enc` instead). If you manually edited `config.json` to add an API key, it will be migrated to the encrypted store on first load and removed from the JSON file.
+  </Step>
+  <Step title="Verify the migration marker">
+    The file `~/.pocketpaw/.secrets_migrated` indicates that plaintext keys have already been moved from `config.json` to `secrets.enc`. If you delete this file, migration will re-run on next startup — useful if you've manually added keys back to `config.json`.
+  </Step>
+</Steps>
+
+## File Permission Issues
+
+PocketPaw enforces strict permissions on credential files:
+
+| File | Expected | Purpose |
+|------|----------|---------|
+| `~/.pocketpaw/` | `700` | Config directory |
+| `~/.pocketpaw/config.json` | `600` | Settings (non-secret) |
+| `~/.pocketpaw/secrets.enc` | `600` | Encrypted credentials |
+| `~/.pocketpaw/.salt` | `600` | Encryption salt |
+
+If files have wrong permissions (e.g., after restoring from a backup), run:
+
+```bash
+chmod 700 ~/.pocketpaw
+chmod 600 ~/.pocketpaw/config.json ~/.pocketpaw/secrets.enc ~/.pocketpaw/.salt
+```
+
+Or use the built-in security audit with auto-fix:
+
+```bash
+pocketpaw --security-audit --fix
+```
+
+## Docker and Container Environments
+
+When running PocketPaw in Docker, the machine identity (hostname + MAC) changes on every container restart by default. To keep credentials stable:
+
+```yaml
+# docker-compose.yml
+services:
+  pocketpaw:
+    hostname: pocketpaw          # Pin hostname
+    mac_address: "02:42:ac:11:00:02"  # Pin MAC address
+    volumes:
+      - pocketpaw-data:/home/app/.pocketpaw  # Persist config directory
+```
+
+Alternatively, pass all secrets as environment variables so the credential store isn't needed:
+
+```yaml
+environment:
+  POCKETPAW_ANTHROPIC_API_KEY: "sk-ant-..."
+  POCKETPAW_OPENAI_API_KEY: "sk-..."
+```
