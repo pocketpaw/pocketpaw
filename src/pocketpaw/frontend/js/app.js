@@ -261,6 +261,9 @@ function app() {
 
             // Load sessions for sidebar
             this.loadSessions();
+            if (this.loadIdentityData) { 
+                this.loadIdentityData(); 
+            }
 
             // Start status polling (low frequency)
             this.startStatusPolling();
