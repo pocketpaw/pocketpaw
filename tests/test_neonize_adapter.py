@@ -290,3 +290,32 @@ async def test_bus_integration(bus):
     adapter.send.assert_called_once_with(msg)
 
     await adapter.stop()
+
+
+async def test_preflight_check_passes_when_reachable():
+    """Preflight check succeeds when the host is reachable."""
+    with patch(
+        "pocketpaw.bus.adapters.neonize_adapter._tcp_probe", return_value=None
+    ):
+        # Should not raise
+        await NeonizeAdapter._preflight_connectivity_check()
+
+
+async def test_preflight_check_raises_when_unreachable():
+    """Preflight check raises ConnectionError when host is unreachable."""
+    with patch(
+        "pocketpaw.bus.adapters.neonize_adapter._tcp_probe",
+        side_effect=OSError("Connection refused"),
+    ):
+        with pytest.raises(ConnectionError, match="Cannot reach"):
+            await NeonizeAdapter._preflight_connectivity_check()
+
+
+async def test_preflight_error_message_mentions_vpn():
+    """Error message hints at VPN/network issues."""
+    with patch(
+        "pocketpaw.bus.adapters.neonize_adapter._tcp_probe",
+        side_effect=OSError("timed out"),
+    ):
+        with pytest.raises(ConnectionError, match="VPN"):
+            await NeonizeAdapter._preflight_connectivity_check()
