@@ -482,6 +482,16 @@
             "label": "Autonomous Messaging",
             "href": "/advanced/autonomous-messaging",
             "icon": "lucide:bell"
+          },
+          {
+            "label": "WebMCP",
+            "href": "/advanced/webmcp",
+            "icon": "lucide:globe"
+          },
+          {
+            "label": "Roadmap",
+            "href": "/advanced/roadmap",
+            "icon": "lucide:map"
           }
         ]
       },

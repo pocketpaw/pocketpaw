@@ -1,0 +1,98 @@
+---
+title: Roadmap
+description: "What we've shipped, what we're building next, and where PocketPaw is headed."
+section: Advanced
+ogType: article
+keywords: ["roadmap", "pocketpaw roadmap", "upcoming features", "release plan", "webmcp"]
+tags: ["advanced", "roadmap"]
+---
+
+# Roadmap
+
+This page tracks what's shipped and what's coming. Updated as priorities shift.
+
+## Shipped
+
+### v0.1 - Foundation
+
+- Message bus architecture (event-driven core)
+- Agent loop with memory management
+- Tool protocol and registry
+- File-based memory system
+- Telegram adapter with QR pairing
+- Web dashboard (Alpine.js, WebSocket streaming)
+- Ollama, OpenAI, Anthropic LLM support
+
+### v0.2 - Browser and security
+
+- Playwright browser automation with accessibility tree snapshots
+- Element reference system (`[ref=N]` for clicking, typing)
+- Guardian AI safety layer (secondary LLM check before shell commands)
+- Audit logging (append-only `~/.pocketpaw/audit.jsonl`)
+- File jail and single-user lock
+- Proactive daemon with cron triggers
+
+### v0.3 - Channels and integrations
+
+- Discord adapter (slash commands, DM, mention support)
+- Slack adapter (Socket Mode, no public URL needed)
+- WhatsApp Business Cloud API adapter
+- Gmail, Calendar, Drive, Docs integrations via OAuth
+- Spotify and Reddit tools
+- Web search (Tavily, Brave, Google)
+- Image generation (Google Gemini)
+- Voice and TTS (OpenAI, ElevenLabs)
+- Speech-to-text (Whisper)
+- OCR (GPT-4o vision, pytesseract)
+- Research tool with source synthesis
+- MCP server support (stdio + HTTP)
+
+### v0.4 - Production hardening (current)
+
+- Encrypted credential store (Fernet AES, auto-migration from plaintext)
+- 7-layer security stack
+- Injection scanner (regex + optional LLM deep scan)
+- Security audit CLI (`pocketpaw --security-audit`)
+- Self-audit daemon (12 daily checks, JSON reports)
+- Tool policy engine (profiles: minimal, coding, full)
+- Plan mode (approval workflow for tool execution)
+- Smart model router (Haiku, Sonnet, Opus based on complexity)
+- Session compaction (tiered compression for long conversations)
+- Deep Work mode (focused multi-step execution)
+- Mission Control (multi-agent orchestration)
+- Skills system (runtime agent training via SKILL.md files)
+- Channel management UI (configure, start, stop from dashboard)
+- Docker support
+- 130+ tests passing
+
+## Coming next
+
+### v0.5 - Desktop and onboarding
+
+- Native installers (.exe for Windows, .dmg for macOS, .AppImage for Linux)
+- First-run setup wizard in the web dashboard
+- System tray app (start, stop, open dashboard)
+- One-click Ollama detection and install
+- Auto-update mechanism
+- Backup and restore (export config + memory)
+
+### v0.6 - WebMCP and browser upgrades
+
+- [WebMCP integration](/advanced/webmcp) for structured website interaction
+- Hybrid browsing: WebMCP where available, accessibility tree fallback
+- Token usage tracking and cost dashboard
+- Model failover and context overflow recovery
+
+### Future
+
+- Signal, Matrix, Microsoft Teams, Google Chat adapters
+- Docker sandbox for shell command isolation
+- Hybrid memory search (vector + keyword)
+- Plugin architecture
+- Multi-user support
+- Session teleportation (cross-device continuity)
+- Desktop notifications center
+
+## How we prioritize
+
+We ship what unblocks users first. Security and reliability fixes jump the queue. Feature requests from GitHub issues influence what gets built, so if you want something, [open an issue](https://github.com/pocketpaw/pocketpaw/issues).
