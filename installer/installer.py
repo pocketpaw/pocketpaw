@@ -799,6 +799,12 @@ class PackageInstaller:
             cmd_parts.append("--upgrade")
         cmd_parts.append(pkg)
 
+        if "uv" in self.pip_cmd:
+            overrides_files = Path.home() / ".pocketpaw" / "uv-overrides.txt"
+            overrides_files.parent.mkdir(parents=True, exist_ok=True)
+            overrides_files.write_text("tiktoken>=0.7.0\n", encoding="utf-8")
+            cmd_parts.extend(["--override", str(overrides_files)])
+
         if _HAS_RICH and console:
             with console.status(f"[bold cyan]Installing {pkg}...[/bold cyan]"):
                 ok, stderr_text = self._run_cmd_capture(cmd_parts)
@@ -830,21 +836,49 @@ class PackageInstaller:
         else:
             cmd.append(pkg)
 
+        overrides_files = Path.home() / ".pocketpaw" / "uv-overrides.txt"
+        overrides_files.parent.mkdir(parents=True, exist_ok=True)
+        overrides_files.write_text("tiktoken>=0.7.0\n", encoding="utf-8")
+        cmd.extend(["--override", str(overrides_files)])
+
         if _HAS_RICH and console:
             with console.status(f"[bold cyan]Installing {pkg} (uv tool)...[/bold cyan]"):
                 return self._run_cmd(cmd)
         else:
             print(f"  Installing {pkg} (uv tool)...")
             return self._run_cmd(cmd)
+        
+    def _uv_tool_python(self) -> str:
+        """Find the Python inside the uv tool venv, falling back to sys.executable."""
+        import platform
+        tool_dir = Path.home() / ".local" / "share" / "uv" / "tools" / PACKAGE
+        if platform.system() == "Windows":
+            candidate = tool_dir / "Scripts" / "python.exe"
+        else:
+            candidate = tool_dir / "bin" / "python"
+        return str(candidate) if candidate.exists() else sys.executable
 
     def install_playwright(self) -> bool:
-        """Install Playwright browsers."""
+        py = self._uv_tool_python()
+        # Check if playwright package is importable in the uv tool venv
+        try:
+            subprocess.run([py, "-c", "import playwright"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Playwright package not found — install into uv tool venv (not system)
+            if _HAS_RICH and console:
+                console.print("[dim]  Playwright package missing — installing into venv...[/dim]")
+            else:
+                print("  Playwright package missing — installing into venv...")
+            if not self._run_cmd([py, "-m", "pip", "install", "playwright"]):
+                return False
+
+        # Install browser binaries
         if _HAS_RICH and console:
             with console.status("[bold cyan]Installing Playwright browsers...[/bold cyan]"):
-                return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+                return self._run_cmd([py, "-m", "playwright", "install", "chromium"])
         else:
             print("  Installing Playwright browsers...")
-            return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+            return self._run_cmd([py, "-m", "playwright", "install", "chromium"])
 
     def _run_cmd(self, cmd: list[str]) -> bool:
         """Run a command, return True on success."""
@@ -1007,6 +1041,7 @@ class PocketPawInstaller:
                 self._print_success()
                 return 0
             # reconfigure / add_extras / reinstall all continue below
+        self._reinstall = (action=="reinstall")
 
         # 3. Profile selection
         self.profile = self.ui.prompt_profile()
@@ -1022,6 +1057,9 @@ class PocketPawInstaller:
         # 5. Backend selection
         self.backend = self.ui.prompt_backend()
         if self.backend == "pocketpaw_native" and "native" not in self.extras:
+            self.extras.append("native")
+
+        if self.backend == "open_interpreter" and "native" not in self.extras:
             self.extras.append("native")
 
         # 6. LLM provider
@@ -1083,7 +1121,7 @@ class PocketPawInstaller:
         pkg_installer = PackageInstaller(self.pip_cmd, from_git=self.from_git)
 
         # Install package
-        upgrade = self.system_info is not None and self.system_info.existing_version is not None
+        upgrade = self.system_info is not None and self.system_info.existing_version is not None and not getattr(self, "_reinstall", False)
         if not pkg_installer.install(self.extras, upgrade=upgrade):
             print("  Installation failed. Check the errors above.\n")
             print("  Suggestions:")
@@ -1148,11 +1186,11 @@ class PocketPawInstaller:
         """Launch pocketpaw."""
         print("  Starting PocketPaw...\n")
         try:
-            os.execvp("pocketpaw", ["pocketpaw"])
+            subprocess.Popen(["pocketpaw"])
         except FileNotFoundError:
             # Might not be on PATH yet, try python -m
             try:
-                os.execvp(sys.executable, [sys.executable, "-m", "pocketpaw"])
+                subprocess.Popen([sys.executable, "-m", "pocketpaw"])
             except Exception as exc:
                 print(f"  Could not launch: {exc}")
                 print("  Try running 'pocketpaw' manually.\n")
