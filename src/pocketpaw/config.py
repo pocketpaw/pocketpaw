@@ -265,7 +265,7 @@ class Settings(BaseSettings):
 
     # Smart Model Routing
     smart_routing_enabled: bool = Field(
-        default=False, description="Enable automatic model selection based on task complexity"
+        default=True, description="Enable automatic model selection based on task complexity"
     )
     model_tier_simple: str = Field(
         default="claude-haiku-4-5-20251001", description="Model for simple tasks (greetings, facts)"

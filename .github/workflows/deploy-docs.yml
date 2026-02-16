@@ -35,6 +35,11 @@ jobs:
       - name: Build docs
         run: npx --yes @litodocs/cli build -i ./docs
 
+      - name: Copy installer scripts into build output
+        run: |
+          cp installer/install.sh ./dist/install.sh
+          cp installer/install.ps1 ./dist/install.ps1
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

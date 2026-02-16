@@ -27,6 +27,7 @@ from typing import AsyncIterator, Optional
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.llm.client import LLMClient, resolve_llm_client
+from pocketpaw.security.rails import DANGEROUS_PATTERNS
 from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
@@ -35,32 +36,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # SECURITY CONFIGURATION
 # =============================================================================
-
-# Dangerous command patterns (regex for better matching)
-DANGEROUS_PATTERNS = [
-    # Destructive file operations
-    r"rm\s+(-[rf]+\s+)*[/~]",  # rm -rf /, rm -r -f ~, etc.
-    r"rm\s+(-[rf]+\s+)*\*",  # rm -rf *
-    r"sudo\s+rm\b",  # Any sudo rm
-    r">\s*/dev/",  # Write to devices
-    r"mkfs\.",  # Format filesystem
-    r"dd\s+if=",  # Disk operations
-    r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  # Fork bomb
-    r"chmod\s+(-R\s+)?777\s+/",  # Dangerous permissions
-    # Remote code execution
-    r"curl\s+.*\|\s*(ba)?sh",  # curl | sh
-    r"wget\s+.*\|\s*(ba)?sh",  # wget | sh
-    r"curl\s+.*-o\s*/",  # curl download to root
-    r"wget\s+.*-O\s*/",  # wget download to root
-    # System damage
-    r">\s*/etc/passwd",  # Overwrite passwd
-    r">\s*/etc/shadow",  # Overwrite shadow
-    r"systemctl\s+(stop|disable)\s+(ssh|sshd|firewall)",  # Disable security
-    r"iptables\s+-F",  # Flush firewall
-    r"shutdown",  # Shutdown system
-    r"reboot",  # Reboot system
-    r"init\s+0",  # Halt system
-]
 
 # Sensitive paths that should never be read or written
 SENSITIVE_PATHS = [

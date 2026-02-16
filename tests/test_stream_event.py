@@ -47,12 +47,18 @@ def _make_sdk(settings=None):
         tools_allow=[],
         tools_deny=[],
         bypass_permissions=True,
+        smart_routing_enabled=False,
+        llm_provider="anthropic",
+        anthropic_api_key="sk-test",
+        anthropic_model="claude-sonnet-4-5-20250929",
+        ollama_host="http://localhost:11434",
     )
     with patch.object(ClaudeAgentSDK, "_initialize"):
         sdk = ClaudeAgentSDK(s)
 
     # Wire up fake types
     sdk._sdk_available = True
+    sdk._cli_available = True
     sdk._StreamEvent = FakeStreamEvent
     sdk._AssistantMessage = FakeAssistantMessage
     sdk._TextBlock = FakeTextBlock

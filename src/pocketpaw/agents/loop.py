@@ -215,22 +215,22 @@ class AgentLoop:
                 metadata=message.metadata,
             )
 
-            # 2. Build dynamic system prompt (identity + memory context + channel hint)
+            # 2. Build system prompt + session history concurrently (independent I/O)
             sender_id = message.sender_id
-            system_prompt = await self.context_builder.build_system_prompt(
-                user_query=content,
-                channel=message.channel,
-                sender_id=sender_id,
-                session_key=message.session_key,
-            )
-
-            # 2a. Retrieve session history with compaction
-            history = await self.memory.get_compacted_history(
-                session_key,
-                recent_window=self.settings.compaction_recent_window,
-                char_budget=self.settings.compaction_char_budget,
-                summary_chars=self.settings.compaction_summary_chars,
-                llm_summarize=self.settings.compaction_llm_summarize,
+            system_prompt, history = await asyncio.gather(
+                self.context_builder.build_system_prompt(
+                    user_query=content,
+                    channel=message.channel,
+                    sender_id=sender_id,
+                    session_key=message.session_key,
+                ),
+                self.memory.get_compacted_history(
+                    session_key,
+                    recent_window=self.settings.compaction_recent_window,
+                    char_budget=self.settings.compaction_char_budget,
+                    summary_chars=self.settings.compaction_summary_chars,
+                    llm_summarize=self.settings.compaction_llm_summarize,
+                ),
             )
 
             # 2b. Emit thinking event

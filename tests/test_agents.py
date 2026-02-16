@@ -271,7 +271,7 @@ class TestClaudeAgentSDK:
         assert len(_TOOL_INSTRUCTIONS) > 100
 
     def test_sdk_has_dangerous_patterns(self):
-        """SDK should have dangerous patterns defined."""
+        """SDK should have dangerous patterns defined (via shared rail)."""
         from pocketpaw.agents.claude_sdk import DANGEROUS_PATTERNS
 
         assert isinstance(DANGEROUS_PATTERNS, list)
@@ -380,7 +380,7 @@ class TestPocketPawNative:
         assert orchestrator is not None
 
     def test_dangerous_patterns_defined(self):
-        """Should have dangerous patterns defined."""
+        """Should have dangerous patterns defined (via shared rail)."""
         from pocketpaw.agents.pocketpaw_native import DANGEROUS_PATTERNS
 
         assert isinstance(DANGEROUS_PATTERNS, list)

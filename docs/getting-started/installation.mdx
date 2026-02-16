@@ -23,7 +23,31 @@ The fastest way to get started — the interactive installer handles Python, uv,
 
 ```bash
 curl -fsSL https://pocketpaw.xyz/install.sh | sh
+````
+
+### Windows PowerShell Note
+
+> On **Windows PowerShell**, the above command **will fail** because `sh` is not recognized.
+
+```text
+sh : The term 'sh' is not recognized as the name of a cmdlet...
 ```
+
+**Workarounds:**
+
+1. Use PowerShell-specific script (if available):
+
+```powershell
+# Set execution policy to allow scripts
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# Run PocketPaw installer
+powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
+```
+
+2. Use **Git Bash** or **WSL** to run the original Unix install script.
+
+---
 
 Or install directly with pip:
 

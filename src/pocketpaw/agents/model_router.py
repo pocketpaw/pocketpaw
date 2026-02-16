@@ -84,17 +84,15 @@ class ModelRouter:
         message = message.strip()
         msg_len = len(message)
 
-        # Check simple patterns first
-        if msg_len <= _SHORT_THRESHOLD:
-            for pattern in _SIMPLE_PATTERNS:
-                if pattern.search(message):
-                    return ModelSelection(
-                        complexity=TaskComplexity.SIMPLE,
-                        model=self.settings.model_tier_simple,
-                        reason="Short message with simple pattern",
-                    )
+        # Empty / whitespace-only → trivially simple
+        if msg_len == 0:
+            return ModelSelection(
+                complexity=TaskComplexity.SIMPLE,
+                model=self.settings.model_tier_simple,
+                reason="Empty message",
+            )
 
-        # Check complex signals
+        # Check complex signals first (so short technical messages stay complex)
         complex_hits = sum(1 for p in _COMPLEX_SIGNALS if p.search(message))
 
         if complex_hits >= 2 or (complex_hits >= 1 and msg_len > _SHORT_THRESHOLD):
@@ -111,6 +109,16 @@ class ModelRouter:
                 model=self.settings.model_tier_complex,
                 reason=f"Very long message ({msg_len} chars)",
             )
+
+        # Check explicit simple patterns (English greetings, reminders)
+        if msg_len <= _SHORT_THRESHOLD:
+            for pattern in _SIMPLE_PATTERNS:
+                if pattern.search(message):
+                    return ModelSelection(
+                        complexity=TaskComplexity.SIMPLE,
+                        model=self.settings.model_tier_simple,
+                        reason="Short message with simple pattern",
+                    )
 
         # Default: moderate
         return ModelSelection(
