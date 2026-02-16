@@ -2820,7 +2820,7 @@ wheels = [
 
 [[package]]
 name = "pocketpaw"
-version = "0.4.0"
+version = "0.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -2994,6 +2994,7 @@ dev = [
     { name = "pocketpaw", extra = ["all"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-playwright" },
     { name = "ruff" },
 ]
 
@@ -3057,6 +3058,7 @@ dev = [
     { name = "pocketpaw", extras = ["all"] },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-playwright", specifier = ">=0.4.0" },
     { name = "ruff", specifier = ">=0.4.0" },
 ]
 
