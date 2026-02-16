@@ -30,6 +30,9 @@ from pocketpaw.mission_control.models import (
     now_iso,
 )
 
+# Valid research depth values
+VALID_RESEARCH_DEPTHS = {"none", "quick", "standard", "deep"}
+
 logger = logging.getLogger(__name__)
 
 
@@ -181,109 +184,129 @@ class DeepWorkSession:
         )
 
     async def plan_existing_project(
-        self, project_id: str, user_input: str, research_depth: str = "standard"
-    ) -> Project:
-        """Run planner on an already-created project.
-
-        Called by start() or by the async API endpoint. Broadcasts a
-        dw_planning_complete event when done (success or failure).
+    self, project_id: str, user_input: str, research_depth: str = "standard"
+) -> Project:
+        """Plan an existing project by generating tasks and team.
 
         Args:
-            project_id: ID of the project to plan.
-            user_input: Natural language project description.
-            research_depth: How thorough to research — "none", "quick",
-                "standard", or "deep".
+            project_id: ID of the project to plan
+            user_input: Natural language project description
+            research_depth: How thorough to research. Must be one of:
+                "none" (skip research), "quick", "standard", or "deep"
 
         Returns:
-            The updated Project.
+            Updated Project with tasks and agents
+
+        Raises:
+            ValueError: If research_depth is invalid or user_input is empty
         """
+        # Validate research_depth parameter
+        if research_depth not in VALID_RESEARCH_DEPTHS:
+            raise ValueError(
+                f"Invalid research_depth '{research_depth}'. "
+                f"Must be one of: {', '.join(sorted(VALID_RESEARCH_DEPTHS))}"
+            )
+
+        # Validate user_input is not empty
+        if not user_input or not user_input.strip():
+            raise ValueError("user_input cannot be empty")
+
+        # Validate user_input is not too long
+        if len(user_input) > 5000:
+            raise ValueError(
+                f"user_input too long ({len(user_input)} chars). Maximum 5000 characters."
+            )
+
+        # Get the project
         project = await self.manager.get_project(project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
 
+        # Update status to planning
+        project.status = ProjectStatus.PLANNING
+        await self.manager.update_project(project)
+
+        # Run the planner
         try:
-            # Plan
-            project.status = ProjectStatus.PLANNING
-            await self.manager.update_project(project)
-
             result = await self.planner.plan(
-                user_input, project_id=project.id, research_depth=research_depth
+                project_description=user_input,
+                project_id=project_id,
+                research_depth=research_depth,
             )
-
-            # Set project title from PRD (first heading or fallback)
-            title = _extract_title(result.prd_content) or user_input[:80]
-            project.title = title
-
-            # Save PRD as Document
-            if result.prd_content:
-                prd_doc = await self.manager.create_document(
-                    title=f"PRD: {title}",
-                    content=result.prd_content,
-                    doc_type=DocumentType.PROTOCOL,
-                    tags=["prd", "deep-work", "auto-generated"],
-                )
-                project.prd_document_id = prd_doc.id
-
-            # Validate dependency graph
-            all_tasks = result.tasks + result.human_tasks
-            is_valid, error_msg = DependencyScheduler.validate_graph(all_tasks)
-            if not is_valid:
-                project.status = ProjectStatus.FAILED
-                project.metadata["error"] = f"Invalid dependency graph: {error_msg}"
-                await self.manager.update_project(project)
-                self._broadcast_planning_complete(project)
-                return project
-
-            # Handle empty task list
-            if not all_tasks:
-                project.status = ProjectStatus.FAILED
-                project.metadata["error"] = "Planner produced no tasks"
-                await self.manager.update_project(project)
-                self._broadcast_planning_complete(project)
-                return project
-
-            # Create MC Tasks
-            key_to_id = await self._materialize_tasks(project, all_tasks)
-
-            # Create agent team
-            for agent_spec in result.team_recommendation:
-                existing = await self.manager.get_agent_by_name(agent_spec.name)
-                if existing:
-                    project.team_agent_ids.append(existing.id)
-                else:
-                    agent = await self.manager.create_agent(
-                        name=agent_spec.name,
-                        role=agent_spec.role,
-                        description=agent_spec.description,
-                        specialties=agent_spec.specialties,
-                        backend=agent_spec.backend,
-                    )
-                    project.team_agent_ids.append(agent.id)
-
-            # Auto-assign tasks to agents
-            await self._assign_tasks_to_agents(project, result, key_to_id)
-
-            # Transition to AWAITING_APPROVAL
-            project.status = ProjectStatus.AWAITING_APPROVAL
+        except Exception as e:
+            project.status = ProjectStatus.FAILED
+            project.metadata["error"] = f"Planning failed: {str(e)}"
             await self.manager.update_project(project)
+            raise e
 
-            # Notify
-            task_count = len(all_tasks)
+        # Update project with results
+        project.status = ProjectStatus.AWAITING_APPROVAL
+        project.metadata["planning_complete"] = True
+
+        # Set project title from PRD (first heading or fallback)
+        title = _extract_title(result.prd_content) or user_input[:80]
+        project.title = title
+
+        # Save PRD as Document
+        if result.prd_content:
+            prd_doc = await self.manager.create_document(
+                title=f"PRD: {title}",
+                content=result.prd_content,
+                doc_type=DocumentType.PROTOCOL,
+                tags=["prd", "deep-work", "auto-generated"],
+            )
+            project.prd_document_id = prd_doc.id
+
+        # Validate dependency graph
+        all_tasks = result.tasks + result.human_tasks
+        if not all_tasks:
+            is_valid = False
+            error_msg = "Planner produced no tasks"
+        else:
+            is_valid, error_msg = DependencyScheduler.validate_graph(all_tasks)
+
+        if not is_valid:
+            project.status = ProjectStatus.FAILED
+            project.metadata["error"] = f"Invalid plan: {error_msg}"
+            await self.manager.update_project(project)
+            raise ValueError(f"Plan validation failed: {error_msg}")
+
+        # Save agents if any were recommended
+        for agent_rec in result.team_recommendation:
+            # Check if agent exists
+            existing = await self.manager.get_agent_by_name(agent_rec.name)
+            if existing:
+                agent_id = existing.id
+            else:
+                agent = await self.manager.create_agent(
+                    name=agent_rec.name,
+                    role=agent_rec.role,
+                    description=agent_rec.description or "",
+                    specialties=agent_rec.specialties,
+                )
+                agent_id = agent.id
+
+            if agent_id not in project.team_agent_ids:
+                project.team_agent_ids.append(agent_id)
+
+        # Save tasks and resolve dependencies
+        all_specs = result.tasks + result.human_tasks
+        key_to_id = await self._materialize_tasks(project, all_specs)
+
+        # Assign tasks to agents
+        await self._assign_tasks_to_agents(project, result, key_to_id)
+
+        # Update and return project
+        await self.manager.update_project(project)
+
+        # Notify user that plan is ready
+        if self.human_router:
+            task_count = len(result.tasks) + len(result.human_tasks)
             await self.human_router.notify_plan_ready(
                 project,
                 task_count=task_count,
                 estimated_minutes=result.estimated_total_minutes,
             )
-
-            self._broadcast_planning_complete(project)
-
-        except Exception as e:
-            logger.exception(f"Planning failed for project {project.id}: {e}")
-            project.status = ProjectStatus.FAILED
-            project.metadata["error"] = str(e)
-            await self.manager.update_project(project)
-            self._broadcast_planning_complete(project)
-            raise
 
         return project
 
