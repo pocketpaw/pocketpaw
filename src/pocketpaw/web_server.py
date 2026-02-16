@@ -1,4 +1,18 @@
-"""Web server for QR code pairing flow.
+"""Web server for the Telegram QR code pairing flow.
+
+This module exposes a small FastAPI application and a temporary
+`python-telegram-bot` instance that work together to:
+
+* collect the user's Telegram bot token and optional LLM API keys,
+* generate a deep link and QR code for ``/start <secret>``,
+* wait for the user to start the bot with that secret, and
+* persist the resulting `allowed_user_id` back into `Settings`.
+
+The `run_pairing_server()` coroutine is intended to be invoked once during
+an interactive setup flow. It starts a Uvicorn server bound to
+``settings.web_host``/``settings.web_port`` (probing for a free port when
+necessary), blocks until pairing completes, then shuts down both the
+temporary Telegram bot and the web server.
 
 Changes:
   - 2026-02-03: Optimised deep link flow. Now fetches bot username and listens for /start <secret>.
@@ -38,9 +52,11 @@ from pocketpaw.config import Settings
 
 
 def find_available_port(start_port: int, max_attempts: int = 10) -> int:
-    """Find an available port starting from start_port.
+    """Find an available localhost port starting from ``start_port``.
 
-    Tries start_port first, then increments until finding an available one.
+    Attempts to bind sequential ports on ``127.0.0.1`` up to ``max_attempts``
+    times. The first port that can be bound is returned. If no ports are
+    available in the probed range, an :class:`OSError` is raised.
     """
     for offset in range(max_attempts):
         port = start_port + offset
@@ -55,17 +71,17 @@ def find_available_port(start_port: int, max_attempts: int = 10) -> int:
     )
 
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
-# Global state for pairing
-_pairing_complete = asyncio.Event()
+# Global state for the one-shot pairing flow.
+_pairing_complete: asyncio.Event = asyncio.Event()
 _session_secret: Optional[str] = None
 _settings: Optional[Settings] = None
 _temp_bot_app: Optional[Application] = None
 
 
 def generate_qr_svg(deep_link: str) -> str:
-    """Generate QR code as SVG string."""
+    """Generate a QR code data URL (PNG encoded as base64) for a deep link."""
     qr = qrcode.QRCode(version=1, box_size=10, border=2)
     qr.add_data(deep_link)
     qr.make(fit=True)
@@ -78,8 +94,14 @@ def generate_qr_svg(deep_link: str) -> str:
     return f"data:image/png;base64,{img_base64}"
 
 
-async def _handle_pairing_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start <secret> during pairing."""
+async def _handle_pairing_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle ``/start <secret>`` during the pairing handshake.
+
+    Validates that the secret embedded in the command matches the current
+    pairing session and, on success, records the calling user's ID into the
+    in-memory ``Settings`` instance and marks the global pairing event as
+    complete.
+    """
     global _settings, _pairing_complete
 
     if not update.message or not update.effective_user:
@@ -125,7 +147,21 @@ async def _handle_pairing_start(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 def create_app(settings: Settings) -> FastAPI:
-    """Create the FastAPI app for pairing."""
+    """Create and configure the FastAPI app used for pairing.
+
+    The returned app exposes:
+
+    * ``GET /`` — interactive HTML setup page,
+    * ``POST /setup`` — form handler that verifies the bot token and starts
+      a temporary Telegram bot, returning a QR code data URL,
+    * ``GET /status`` — JSON endpoint polled by the frontend to detect when
+      pairing has completed, and
+    * ``POST /complete`` — internal hook to mark pairing as complete and
+      persist the ``allowed_user_id``.
+
+    The caller is responsible for running the app via Uvicorn or an ASGI
+    server; see :func:`run_pairing_server` for the default orchestration.
+    """
     global _session_secret, _settings
     _settings = settings
     _session_secret = secrets.token_urlsafe(32)
@@ -351,8 +387,14 @@ def create_app(settings: Settings) -> FastAPI:
         bot_token: str = Form(...),
         openai_key: Optional[str] = Form(None),
         anthropic_key: Optional[str] = Form(None),
-    ):
-        """Handle setup form submission."""
+    ) -> dict[str, Optional[str]]:
+        """Handle setup form submission and bootstrap temporary Telegram bot.
+
+        Validates the provided bot token by calling Telegram's ``getMe``,
+        generates a deep-link QR code, and starts a temporary polling bot
+        that listens for ``/start <secret>``. On error, returns a JSON object
+        with an ``\"error\"`` message, which the frontend displays to the user.
+        """
         global _settings, _temp_bot_app
 
         # Save the bot token
@@ -385,20 +427,22 @@ def create_app(settings: Settings) -> FastAPI:
 
             _temp_bot_app = app
 
+            logger.info("Temporary Telegram bot started for pairing flow")
+
             return {"qr_url": qr_data, "session_secret": _session_secret}
 
-        except Exception as e:
-            logger.error(f"Setup failed: {e}")
-            return {"error": f"Failed to connect to Telegram: {str(e)}"}
+        except Exception:
+            logger.exception("Setup failed while connecting to Telegram")
+            return {"error": "Failed to connect to Telegram. Please check your bot token."}
 
     @app.get("/status")
-    async def status():
-        """Check pairing status."""
+    async def status() -> dict[str, bool]:
+        """Check pairing status from the browser polling loop."""
         return {"paired": _pairing_complete.is_set()}
 
     @app.post("/complete")
-    async def complete(user_id: int):
-        """Called internally when pairing is complete."""
+    async def complete(user_id: int) -> dict[str, bool]:
+        """Internal hook to mark pairing as complete and persist `allowed_user_id`."""
         global _settings
         _settings.allowed_user_id = user_id
         _settings.save()
@@ -409,9 +453,24 @@ def create_app(settings: Settings) -> FastAPI:
 
 
 async def run_pairing_server(settings: Settings) -> int:
-    """Run the pairing server until pairing is complete.
+    """Run the pairing server until the user completes the Telegram handshake.
 
-    Returns the port that was used (may differ from settings if port was busy).
+    This coroutine:
+
+    * creates the FastAPI application via :func:`create_app`,
+    * finds an available port, preferring ``settings.web_port``,
+    * starts a Uvicorn server bound to ``settings.web_host``/resolved port,
+    * blocks until the global ``_pairing_complete`` event is set, then
+    * gracefully shuts down the temporary Telegram bot and web server.
+
+    Args:
+        settings: Loaded application settings providing ``web_host`` and
+            ``web_port`` configuration as well as a mutable `Settings`
+            instance into which pairing results are saved.
+
+    Returns:
+        The port that was actually used (may differ from
+        ``settings.web_port`` if the preferred port was busy).
     """
     app = create_app(settings)
 
@@ -424,6 +483,8 @@ async def run_pairing_server(settings: Settings) -> int:
 
     if port != settings.web_port:
         logger.info(f"Port {settings.web_port} busy, using port {port} instead")
+
+    logger.info("Starting pairing web server on %s:%s", settings.web_host, port)
 
     config = uvicorn.Config(app, host=settings.web_host, port=port, log_level="warning")
     server = uvicorn.Server(config)
@@ -439,17 +500,27 @@ async def run_pairing_server(settings: Settings) -> int:
         await asyncio.sleep(1)
 
     finally:
+        logger.info("Shutting down pairing Telegram bot and web server")
+
         # Shutdown temporary bot
         global _temp_bot_app
         if _temp_bot_app:
-            if _temp_bot_app.updater.running:
-                await _temp_bot_app.updater.stop()
-            if _temp_bot_app.running:
-                await _temp_bot_app.stop()
-            await _temp_bot_app.shutdown()
+            try:
+                if _temp_bot_app.updater.running:
+                    await _temp_bot_app.updater.stop()
+                if _temp_bot_app.running:
+                    await _temp_bot_app.stop()
+                await _temp_bot_app.shutdown()
+            except Exception:
+                logger.exception("Error while shutting down temporary Telegram bot used for pairing")
+                raise
 
         # Shutdown web server
-        server.should_exit = True
-        await server_task
+        try:
+            server.should_exit = True
+            await server_task
+        except Exception:
+            logger.exception("Error while shutting down pairing web server")
+            raise
 
     return port

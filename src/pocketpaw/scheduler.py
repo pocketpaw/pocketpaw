@@ -1,6 +1,11 @@
-"""PocketPaw Scheduler - Proactive reminders and scheduled tasks.
+"""PocketPaw Scheduler - proactive reminders and scheduled tasks.
 
-Simple reminder system with natural language time parsing.
+Provides a simple, persisted reminder system with natural language time
+parsing backed by APScheduler. Reminders are stored under
+``~/.pocketpaw/reminders.json`` and replayed on startup. A singleton
+`ReminderScheduler` instance is exposed via ``get_scheduler()``, which is
+integrated with the central lifecycle registry in ``pocketpaw.lifecycle``
+for graceful shutdown and test-time reset.
 """
 
 import json
@@ -29,7 +34,7 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt
 
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 def get_reminders_path() -> Path:
@@ -152,16 +157,31 @@ def extract_reminder_text(message: str) -> str:
 
 
 class ReminderScheduler:
-    """Manages scheduled reminders with APScheduler."""
+    """Manage scheduled reminders using an AsyncIO-based APScheduler.
 
-    def __init__(self):
+    This class is responsible for loading and persisting reminder metadata,
+    registering APScheduler jobs for one-shot and recurring reminders, and
+    invoking callback hooks when reminders fire.
+    """
+
+    def __init__(self) -> None:
+        """Initialize an empty scheduler; does not start it yet."""
         self.scheduler = AsyncIOScheduler()
         self.reminders: list[dict] = []
         self.callback: Callable | None = None
         self._started = False
 
-    def start(self, callback: Callable | None = None):
-        """Start the scheduler and load saved reminders."""
+    def start(self, callback: Callable | None = None) -> None:
+        """Start the scheduler and load saved reminders.
+
+        This method is idempotent: subsequent calls after the first return
+        immediately. On first start it:
+
+        * attaches the provided ``callback`` to be invoked when reminders fire,
+        * schedules the self-audit daemon if enabled in settings, and
+        * reloads persisted reminders, re-scheduling only future one-shot
+          reminders and all recurring reminders.
+        """
         if self._started:
             return
 
@@ -197,7 +217,14 @@ class ReminderScheduler:
         logger.info(f"Scheduler started with {len(self.reminders)} reminders")
 
     def _schedule_self_audit(self) -> None:
-        """Schedule the daily self-audit if enabled in settings."""
+        """Schedule the daily self-audit job if enabled in settings.
+
+        Uses ``pocketpaw.config.get_settings()`` and
+        ``pocketpaw.daemon.triggers.parse_cron_expression()`` to compute a
+        cron trigger. Any errors while configuring or registering the job are
+        caught and logged as warnings so reminder scheduling is never blocked
+        by self-audit misconfiguration.
+        """
         try:
             from pocketpaw.config import get_settings
 
@@ -222,14 +249,25 @@ class ReminderScheduler:
         except Exception as e:
             logger.warning("Failed to schedule self-audit: %s", e)
 
-    def stop(self):
-        """Stop the scheduler."""
+    def stop(self) -> None:
+        """Stop the underlying APScheduler instance.
+
+        Used by the lifecycle system during application shutdown. This does
+        not clear persisted reminders; they are reloaded on the next start.
+        """
         if self._started:
             self.scheduler.shutdown(wait=False)
             self._started = False
 
-    async def _trigger_reminder(self, reminder_id: str):
-        """Called when a reminder is due."""
+    async def _trigger_reminder(self, reminder_id: str) -> None:
+        """Internal callback invoked by APScheduler when a reminder is due.
+
+        Looks up the reminder metadata, logs the event, calls the optional
+        user callback, and dispatches a notification via
+        ``pocketpaw.bus.notifier.notify`` when available. One-shot reminders
+        are removed from both memory and disk; recurring reminders remain
+        registered.
+        """
         reminder = next((r for r in self.reminders if r["id"] == reminder_id), None)
         if not reminder:
             return
@@ -253,8 +291,13 @@ class ReminderScheduler:
             self.reminders = [r for r in self.reminders if r["id"] != reminder_id]
             save_reminders(self.reminders)
 
-    def _add_job(self, reminder: dict):
-        """Add a scheduler job for a one-shot reminder."""
+    def _add_job(self, reminder: dict) -> None:
+        """Add a scheduler job for a one-shot reminder.
+
+        Jobs are keyed by the reminder's unique ``id`` and use
+        ``replace_existing=True`` to safely overwrite any existing job with
+        the same identifier.
+        """
         trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
         self.scheduler.add_job(
             self._trigger_reminder,
@@ -264,8 +307,13 @@ class ReminderScheduler:
             replace_existing=True,
         )
 
-    def _add_recurring_job(self, reminder: dict):
-        """Add a scheduler job for a recurring reminder."""
+    def _add_recurring_job(self, reminder: dict) -> None:
+        """Add a scheduler job for a recurring reminder.
+
+        The cron schedule is parsed from ``reminder['schedule']`` using
+        ``parse_cron_expression`` and the job is registered under the
+        reminder's ``id`` with ``replace_existing=True`` for safe updates.
+        """
         schedule = reminder.get("schedule", "")
         cron_kwargs = parse_cron_expression(schedule)
         self.scheduler.add_job(
@@ -348,7 +396,12 @@ class ReminderScheduler:
         return self.delete_reminder(reminder_id)
 
     def delete_reminder(self, reminder_id: str) -> bool:
-        """Delete a reminder by ID."""
+        """Delete a reminder and its scheduled job by ID.
+
+        Removes the job from APScheduler (if present) and persists the updated
+        reminders list. Returns ``True`` if the reminder existed, otherwise
+        ``False``.
+        """
         reminder = next((r for r in self.reminders if r["id"] == reminder_id), None)
         if not reminder:
             return False
@@ -401,7 +454,13 @@ _scheduler: ReminderScheduler | None = None
 
 
 def get_scheduler() -> ReminderScheduler:
-    """Get the singleton scheduler instance."""
+    """Get the process-wide singleton scheduler instance.
+
+    On first use, creates a `ReminderScheduler` and registers its lifecycle
+    hooks with ``pocketpaw.lifecycle.register()``, wiring ``stop`` into the
+    global shutdown flow and a private reset function into test teardown.
+    Subsequent calls return the same instance.
+    """
     global _scheduler
     if _scheduler is None:
         _scheduler = ReminderScheduler()

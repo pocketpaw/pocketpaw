@@ -4,26 +4,41 @@ import re
 import shutil
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class TunnelManager:
-    """
-    Manages a Cloudflare Tunnel (cloudflared) process to expose the local server.
+    """Manage a transient Cloudflare Tunnel (``cloudflared``) process.
+
+    The tunnel exposes a local PocketPaw dashboard (typically running on
+    ``http://localhost:<port>``) to the public internet using a one-off
+    "quick tunnel" URL on ``*.trycloudflare.com``. This is intended for
+    short-lived remote access sessions and **not** as a long-term
+    production ingress replacement.
+
+    Instances of this class are usually accessed via
+    :func:`get_tunnel_manager`, which wires the manager into the global
+    lifecycle registry so tunnels are stopped on application shutdown.
     """
 
-    def __init__(self, port: int = 8888):
-        self.port = port
+    def __init__(self, port: int = 8888) -> None:
+        """Create a new manager bound to the given local HTTP port."""
+        self.port: int = port
         self.process: Optional[asyncio.subprocess.Process] = None
         self.public_url: Optional[str] = None
-        self._shutdown_event = asyncio.Event()
+        self._shutdown_event: asyncio.Event = asyncio.Event()
 
     def is_installed(self) -> bool:
-        """Check if cloudflared is installed."""
+        """Return ``True`` if ``cloudflared`` is available on ``$PATH``."""
         return shutil.which("cloudflared") is not None
 
     async def install(self) -> bool:
-        """Attempt to install cloudflared via Homebrew."""
+        """Attempt to install ``cloudflared`` via Homebrew (macOS only).
+
+        This helper is best-effort and primarily for developer convenience.
+        In CI or production environments, ``cloudflared`` should be managed
+        by the system's package manager or deployment tooling instead.
+        """
         if self.is_installed():
             return True
 
@@ -50,14 +65,16 @@ class TunnelManager:
                 logger.error(f"Failed to install cloudflared: {stderr.decode()}")
                 return False
         except Exception as e:
-            logger.error(f"Installation failed: {e}")
+            logger.error("Installation of cloudflared failed: %s", e)
             return False
 
     async def start(self) -> str:
-        """
-        Start the tunnel.
-        Returns the public URL if successful.
-        Raises RuntimeError if start fails.
+        """Start a new Cloudflare tunnel and return its public URL.
+
+        If a tunnel is already running and a public URL has been discovered,
+        the existing URL is returned. If the ``cloudflared`` binary is not
+        present and auto‑installation fails, a :class:`RuntimeError` is
+        raised.
         """
         if not self.is_installed():
             logger.info("cloudflared missing, attempting auto-install...")
@@ -69,11 +86,16 @@ class TunnelManager:
 
         if self.process:
             if self.public_url:
+                logger.info("Reusing existing Cloudflare Tunnel at %s", self.public_url)
                 return self.public_url
             # Process running but no URL yet? Stop and restart.
+            logger.warning(
+                "cloudflared process already running for port %s but no URL discovered; restarting.",
+                self.port,
+            )
             await self.stop()
 
-        logger.info(f"Starting Cloudflare Tunnel for localhost:{self.port}...")
+        logger.info("Starting Cloudflare Tunnel for http://localhost:%s ...", self.port)
 
         # cloudflared tunnel --url http://localhost:8888
         # Output is printed to stderr usually.
@@ -89,15 +111,19 @@ class TunnelManager:
         try:
             # Wait for URL in stderr
             self.public_url = await self._wait_for_url()
-            logger.info(f"Tunnel established at: {self.public_url}")
+            logger.info("Cloudflare Tunnel established at %s", self.public_url)
             return self.public_url
         except Exception as e:
-            logger.error(f"Failed to start tunnel: {e}")
+            logger.error("Failed to start Cloudflare Tunnel: %s", e)
             await self.stop()
             raise
 
     async def _wait_for_url(self, timeout: int = 30) -> str:
-        """Monitor stderr for the trycloudflare.com URL."""
+        """Monitor ``cloudflared`` stderr for the ``trycloudflare.com`` URL.
+
+        Reads stderr line-by-line until a matching URL is found, the process
+        exits unexpectedly, or the timeout is reached.
+        """
         if not self.process or not self.process.stderr:
             raise RuntimeError("Process not started correctly")
 
@@ -127,7 +153,7 @@ class TunnelManager:
 
                 line = line_bytes.decode("utf-8", errors="ignore").strip()
                 if line:
-                    logger.debug(f"[cloudflared] {line}")
+                    logger.debug("[cloudflared] %s", line)
 
                 # Check for URL
                 # Example output: ... trycloudflare.com ...
@@ -146,10 +172,13 @@ class TunnelManager:
             except asyncio.TimeoutError:
                 continue
 
-        raise RuntimeError("Stream ended without finding URL")
+        raise RuntimeError("Stream ended without finding Cloudflare Tunnel URL")
 
-    async def stop(self):
-        """Stop the tunnel process."""
+    async def stop(self) -> None:
+        """Stop the tunnel process if it is currently running.
+
+        This method is idempotent and safe to call multiple times.
+        """
         if self.process:
             logger.info("Stopping Cloudflare Tunnel...")
             try:
@@ -159,13 +188,19 @@ class TunnelManager:
                 except asyncio.TimeoutError:
                     self.process.kill()
             except ProcessLookupError:
-                pass  # Already dead
+                # Process already exited; nothing to do.
+                logger.debug("cloudflared process already stopped.")
             finally:
                 self.process = None
                 self.public_url = None
+                logger.info("Cloudflare Tunnel stopped.")
 
     def get_status(self) -> dict:
-        """Get current tunnel status."""
+        """Return a JSON-serializable view of the current tunnel status.
+
+        The returned dict is designed to be consumed by the dashboard
+        (`/api/remote/status`) and never includes sensitive information.
+        """
         active = (
             self.process is not None
             and self.process.returncode is None
@@ -174,18 +209,24 @@ class TunnelManager:
         return {"active": active, "url": self.public_url, "installed": self.is_installed()}
 
 
-# Global instance
+# Global process-wide TunnelManager instance used by the dashboard.
 _tunnel_instance: Optional[TunnelManager] = None
 
 
 def get_tunnel_manager(port: int = 8888) -> TunnelManager:
+    """Return the singleton :class:`TunnelManager` bound to the given port.
+
+    On first call, creates a new manager for ``port`` and registers it with
+    :mod:`pocketpaw.lifecycle` so the tunnel is shut down on application
+    teardown and reset between tests.
+    """
     global _tunnel_instance
     if _tunnel_instance is None:
         _tunnel_instance = TunnelManager(port=port)
 
         from pocketpaw.lifecycle import register
 
-        def _reset():
+        def _reset() -> None:
             global _tunnel_instance
             _tunnel_instance = None
 

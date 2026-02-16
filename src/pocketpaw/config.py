@@ -17,7 +17,7 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 def _chmod_safe(path: Path, mode: int) -> None:
@@ -28,7 +28,7 @@ def _chmod_safe(path: Path, mode: int) -> None:
         pass
 
 
-_OLD_CONFIG_WARNING_SHOWN = False
+_OLD_CONFIG_WARNING_SHOWN: bool = False
 
 
 def _warn_old_config() -> None:
@@ -80,7 +80,7 @@ def get_token_path() -> Path:
 
 
 class Settings(BaseSettings):
-    """PocketPaw settings with env and file support."""
+    """Application settings loaded from POCKETPAW_* env vars and ~/.pocketpaw/config.json."""
 
     model_config = SettingsConfigDict(env_prefix="POCKETPAW_", env_file=".env", extra="ignore")
 
@@ -244,13 +244,20 @@ class Settings(BaseSettings):
     )
     localhost_auth_bypass: bool = Field(
         default=True,
-        description="Allow unauthenticated localhost access (disable for non-CF proxies)",
+        description=(
+            "Allow unauthenticated HTTP access from localhost. Disable when exposing the "
+            "web server beyond localhost or via non-Cloudflare proxies."
+        ),
     )
     session_token_ttl_hours: int = Field(
         default=24, description="TTL in hours for HMAC session tokens issued via /api/auth/session"
     )
     file_jail_path: Path = Field(
-        default_factory=Path.home, description="Root path for file operations"
+        default_factory=Path.home,
+        description=(
+            "Root directory jail for file-tool operations; all file access is sandboxed "
+            "under this path."
+        ),
     )
     injection_scan_enabled: bool = Field(
         default=True, description="Enable prompt injection scanning on inbound messages"
@@ -368,7 +375,10 @@ class Settings(BaseSettings):
     # Generic Inbound Webhooks
     webhook_configs: list[dict] = Field(
         default_factory=list,
-        description="Configured webhook slots [{name, secret, description, sync_timeout}]",
+        description=(
+            "Configured inbound webhook slots. Each item is a dict with keys "
+            "{name, secret, description, sync_timeout}."
+        ),
     )
     webhook_sync_timeout: int = Field(
         default=30, description="Default timeout (seconds) for sync webhook responses"

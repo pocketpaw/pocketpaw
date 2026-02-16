@@ -1,6 +1,40 @@
-"""PocketPaw Web Dashboard - API Server
+"""PocketPaw Web Dashboard - API & control plane server.
 
-Lightweight FastAPI server that serves the frontend and handles WebSocket communication.
+This module exposes the FastAPI-based dashboard used to:
+
+* serve the SPA frontend and static assets,
+* broker WebSocket connections between the browser and the internal message
+  bus (`WebSocketAdapter` → `AgentLoop`),
+* manage channel adapters (Telegram, Discord, Slack, WhatsApp, etc.) and
+  webhook integrations,
+* surface configuration, memory, and audit data from the agent runtime, and
+* orchestrate background services such as the reminder scheduler, Mission
+  Control, Deep Work, and the proactive daemon.
+
+Architecture highlights:
+
+* The dashboard runs as a standalone FastAPI app; `run_dashboard()` (in
+  ``__main__.py``) is responsible for starting Uvicorn with this app and
+  coordinating with the pairing web server in :mod:`pocketpaw.web_server`.
+* A process-wide `AgentLoop` and `WebSocketAdapter` are instantiated here and
+  wired to the shared message bus returned by :func:`get_message_bus`.
+* Application startup/shutdown is coordinated via FastAPI events
+  (``@app.on_event("startup")`` / ``"shutdown"``), which start and stop the
+  agent loop, channel adapters, scheduler, MCP servers, and the proactive
+  daemon in a well-defined order.
+* Session state, memory, and long‑term storage are owned by dedicated
+  subsystems (e.g. :mod:`pocketpaw.memory`, :mod:`pocketpaw.scheduler`); this
+  module provides thin HTTP/WebSocket facades over those APIs.
+
+Security & observability:
+
+* All HTTP endpoints and WebSocket connections are protected by token-based
+  auth and optional session cookies, implemented in this module.
+* Security headers and CORS policies are applied globally via middleware to
+  harden the dashboard when exposed over a tunnel or reverse proxy.
+* Logging is centralized through the standard logging subsystem configured in
+  :mod:`pocketpaw.logging_setup`; no logs include user secrets, API keys, or
+  other sensitive credential values.
 
 Changes:
   - 2026-02-06: WebSocket auth via first message instead of URL query param; accept wss://.
@@ -57,32 +91,33 @@ from pocketpaw.security.session_tokens import create_session_token, verify_sessi
 from pocketpaw.skills import SkillExecutor, get_skill_loader
 from pocketpaw.tunnel import get_tunnel_manager
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
-
-ws_adapter = WebSocketAdapter()
-agent_loop = AgentLoop()
-# Retain active_connections for legacy broadcasts until fully migrated
+# WebSocket bridge between browser clients and the internal message bus.
+ws_adapter: WebSocketAdapter = WebSocketAdapter()
+# Long‑running, shared agent loop that processes bus messages.
+agent_loop: AgentLoop = AgentLoop()
+# Retain active_connections for legacy broadcasts until fully migrated to ws_adapter.
 active_connections: list[WebSocket] = []
 
-# Channel adapters (auto-started when configured, keyed by channel name)
+# Channel adapters (auto-started when configured, keyed by channel name).
 _channel_adapters: dict[str, object] = {}
 
-# Protects settings read-modify-write from concurrent WebSocket clients
-_settings_lock = asyncio.Lock()
+# Protects Settings read‑modify‑write operations across concurrent WebSocket clients.
+_settings_lock: asyncio.Lock = asyncio.Lock()
 
-# Set by run_dashboard() so the startup event can open the browser once the server is ready
+# Set by run_dashboard() so the startup event can open the browser once the server is ready.
 _open_browser_url: str | None = None
 
-# Get frontend directory
-FRONTEND_DIR = Path(__file__).parent / "frontend"
-TEMPLATES_DIR = FRONTEND_DIR / "templates"
+# Frontend filesystem layout (templated SPA + static assets).
+FRONTEND_DIR: Path = Path(__file__).parent / "frontend"
+TEMPLATES_DIR: Path = FRONTEND_DIR / "templates"
 
-# Initialize Templates
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+# Initialize Jinja2 templates for the shell HTML page.
+templates: Jinja2Templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# Create FastAPI app
-app = FastAPI(title="PocketPaw Dashboard")
+# Create FastAPI app; Uvicorn/ASGI server is configured by the CLI/entrypoint.
+app: FastAPI = FastAPI(title="PocketPaw Dashboard")
 
 # CORS — restrict to localhost + Cloudflare tunnel subdomains
 app.add_middleware(
@@ -99,7 +134,12 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
-    """Add security headers to all responses."""
+    """Add clickjacking, content-type, and CSP protections to all responses.
+
+    This middleware is applied before any route handler and ensures that
+    standard security headers (X-Frame-Options, HSTS, CSP, etc.) are present
+    on every response from the dashboard, regardless of success or error.
+    """
     response = await call_next(request)
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -133,8 +173,13 @@ app.include_router(mission_control_router, prefix="/api/mission-control")
 app.include_router(deep_work_router, prefix="/api/deep-work")
 
 
-async def broadcast_reminder(reminder: dict):
-    """Broadcast a reminder notification to all connected clients."""
+async def broadcast_reminder(reminder: dict) -> None:
+    """Broadcast a reminder notification to all connected dashboard clients.
+
+    The reminder is sent through both the new `WebSocketAdapter` (for
+    structured bus events) and the legacy ``active_connections`` list until
+    all consumers are migrated.
+    """
     # Use new adapter for broadcast
     await ws_adapter.broadcast(reminder, msg_type="reminder")
 
@@ -155,8 +200,12 @@ async def broadcast_reminder(reminder: dict):
         pass
 
 
-async def broadcast_intention(intention_id: str, chunk: dict):
-    """Broadcast intention execution results to all connected clients."""
+async def broadcast_intention(intention_id: str, chunk: dict) -> None:
+    """Broadcast intention execution results to all connected dashboard clients.
+
+    Each ``chunk`` is a partial result emitted by the deep work / intention
+    executor and is forwarded to the browser as an ``intention_event``.
+    """
     message = {"type": "intention_event", "intention_id": intention_id, **chunk}
     for ws in active_connections[:]:
         try:
@@ -175,8 +224,12 @@ async def broadcast_intention(intention_id: str, chunk: dict):
             pass
 
 
-async def _broadcast_audit_entry(entry: dict):
-    """Broadcast a new audit log entry to all connected WebSocket clients."""
+async def _broadcast_audit_entry(entry: dict) -> None:
+    """Broadcast a new audit log entry to all connected WebSocket clients.
+
+    Used by the process-wide audit logger to push structured security and
+    safety events into the live dashboard stream.
+    """
     message = {"type": "system_event", "event_type": "audit_entry", "data": entry}
     for ws in active_connections[:]:
         try:
@@ -187,7 +240,14 @@ async def _broadcast_audit_entry(entry: dict):
 
 
 async def _start_channel_adapter(channel: str, settings: Settings | None = None) -> bool:
-    """Start a single channel adapter. Returns True on success."""
+    """Start a single channel adapter for the given channel name.
+
+    Adapters are started only when their required configuration (tokens,
+    IDs, etc.) is present in :class:`Settings`. Returns ``True`` when an
+    adapter was started, and ``False`` when the channel is disabled or
+    misconfigured. Any raised exceptions must be caught by the caller so
+    that one failing channel does not prevent the dashboard from starting.
+    """
     if settings is None:
         settings = Settings.load()
     bus = get_message_bus()

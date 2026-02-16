@@ -1,5 +1,8 @@
-"""
-Beautiful logging setup using Rich.
+"""Logging configuration for PocketPaw.
+
+Provides a Rich-powered console handler for human-friendly logs and a
+`SecretFilter` to redact common API key / token patterns before they are
+written to any handler. Falls back to standard logging if Rich is unavailable.
 
 Created: 2026-02-02
 Changes:
@@ -22,7 +25,12 @@ _SECRET_PATTERNS = [
 
 
 class SecretFilter(logging.Filter):
-    """Scrub API key patterns from log output."""
+    """Logging filter that scrubs API key–like secrets from log records.
+
+    The filter searches both the main log message and any string arguments
+    for known API key/token patterns and replaces matches with
+    ``\"***REDACTED***\"`` before the record reaches any handlers.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
@@ -41,10 +49,15 @@ class SecretFilter(logging.Filter):
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Configure beautiful logging with Rich.
+    """Initialize global logging configuration for the application.
+
+    Prefers a Rich-based console handler for readable, colorized logs and
+    falls back to standard stream logging if Rich is not installed. Also
+    reduces noise from common HTTP/async libraries and installs the
+    `SecretFilter` on the root logger.
 
     Args:
-        level: Log level (DEBUG, INFO, WARNING, ERROR)
+        level: Log level name (e.g. ``\"DEBUG\"``, ``\"INFO\"``, ``\"WARNING\"``, ``\"ERROR\"``).
     """
     try:
         from rich.console import Console

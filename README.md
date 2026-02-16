@@ -437,3 +437,22 @@ MIT &copy; PocketPaw Team
   <br>
   <strong>Made with love for humans who want AI on their own terms</strong>
 </p>
+
+## Improvements and Stability Updates
+
+While working through the PocketPaw services runtime, I focused on improving areas around lifecycle management, scheduling behaviour, configuration handling, and gateway stability.  
+The intention was to make startup and shutdown behaviour clearer and safer, and to improve overall runtime reliability without changing the existing architecture.
+
+### Key updates
+
+- Improved lifecycle shutdown handling so registered callbacks execute safely and are consistently logged.
+- Strengthened scheduler flow and documentation around job registration and execution.
+- Clarified configuration loading and persistence behaviour using BaseSettings.
+- Enhanced logging setup for more consistent runtime visibility.
+- Added stability and behaviour notes across gateway modules (bot, Discord, Slack, WhatsApp).
+- Improved tunnel and web server integration points to make connectivity and startup flow easier to follow.
+- Added docstrings and inline comments across core runtime modules to clarify control flow.
+- Observed and validated the WebSocket reconnect behaviour during dashboard
+reload and QR session refresh to ensure stable real-time communication.
+
+These updates keep all existing functionality intact while making the services easier to reason about and more robust during runtime.

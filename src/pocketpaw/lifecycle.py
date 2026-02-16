@@ -1,8 +1,14 @@
 """Coordinated singleton lifecycle management.
 
 Provides a central registry for singletons that need graceful shutdown
-and/or test-time reset. Modules register their cleanup callbacks via
-``register()``, and the app teardown path calls ``shutdown_all()``.
+and/or test-time reset. Typical flow:
+
+* Modules create their singletons and immediately call ``register()``
+  with optional ``shutdown`` and/or ``reset`` callbacks.
+* Application shutdown paths (e.g. FastAPI lifespan handlers, CLI teardown)
+  call ``shutdown_all()`` once to gracefully stop all registered components.
+* Test suites call ``reset_all()`` between tests to clear cached instances
+  so subsequent ``get_*()`` helpers recreate fresh singletons.
 
 Created: 2026-02-12
 """
@@ -28,6 +34,9 @@ def register(
 ) -> None:
     """Register a singleton's lifecycle callbacks.
 
+    Subsequent calls with the same ``name`` overwrite any existing entry,
+    allowing modules to re-register updated callbacks during tests.
+
     Args:
         name: Unique identifier (e.g. ``"scheduler"``, ``"mcp_manager"``).
         shutdown: Async or sync callable for graceful teardown.
@@ -39,8 +48,11 @@ def register(
 async def shutdown_all() -> None:
     """Gracefully shut down all registered singletons.
 
-    Calls each registered shutdown callback, awaiting async ones.
-    Errors are logged but don't prevent other shutdowns from running.
+    Iterates over the current registry and invokes each ``shutdown``
+    callback, awaiting it when a coroutine is returned. Errors are logged
+    but do not prevent remaining shutdown callbacks from running. The
+    registry is left intact so that ``reset_all()`` or subsequent calls
+    can still see what was registered.
     """
     for name, (shutdown_cb, _) in list(_registry.items()):
         if shutdown_cb is None:
@@ -57,8 +69,9 @@ async def shutdown_all() -> None:
 def reset_all() -> None:
     """Reset all registered singletons to their initial state.
 
-    Intended for test teardown — clears cached instances so the next
-    ``get_*()`` call creates a fresh one.
+    Intended primarily for test teardown — invokes each ``reset`` callback
+    (when provided) and then clears the registry so the next ``get_*()``
+    helper call recreates fresh instances.
     """
     for name, (_, reset_cb) in list(_registry.items()):
         if reset_cb is None:
