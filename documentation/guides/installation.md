@@ -75,4 +75,4 @@ No sudo required on macOS. On Linux, system package installs (apt/dnf) may promp
 
 ## Common Issues
 
-For detailed solutions, see the Troubleshooting Guide.
+For detailed solutions, see the [Troubleshooting Guide](troubleshooting.md).
