@@ -36,27 +36,23 @@
 
 ## Quick Start
 
-```bash
-curl -fsSL https://pocketpaw.xyz/install.sh | sh
-```
-
-Or install directly:
-
-```bash
+### 🐧 Linux / macOS
+```sh
 pip install pocketpaw && pocketpaw
 ```
 
-**That's it.** One command. 30 seconds. Your own AI agent.
+### 🪟 Windows (PowerShell)
+```powershell
+pip install pocketpaw
+pocketpaw
+```
 
-I'm your self-hosted, cross-platform personal AI agent. The web dashboard opens automatically. Talk to me right in your browser, or connect me to Discord, Slack, WhatsApp, or Telegram and control me from anywhere. I run on _your_ machine, respect _your_ privacy, and I'm always here.
+> **Note for Windows users:** Some features (browser automation, shell tools) work best
+> under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
 
-**No subscription. No cloud lock-in. Just you and me.**
-
-<details>
-<summary>More install options</summary>
-
-```bash
-# Isolated install
+### Other install options
+```sh
+# Isolated install (recommended — no global pip pollution)
 pipx install pocketpaw && pocketpaw
 
 # Run without installing
@@ -68,7 +64,8 @@ cd pocketpaw
 uv run pocketpaw
 ```
 
-</details>
+> ⚠️ **Note:** The `curl -fsSL https://pocketpaw.xyz/install.sh | sh` one-liner is
+> temporarily unavailable. Use the pip install above — it's equally fast.
 
 PocketPaw will open the web dashboard in your browser and be ready to go.
 No config files. No YAML. No dependency hell.
