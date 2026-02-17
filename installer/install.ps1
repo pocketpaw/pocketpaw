@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     PocketPaw Installer for Windows.
@@ -206,24 +206,31 @@ $InstallerUrl = "https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/inst
 $FallbackUrl = "https://raw.githubusercontent.com/pocketpaw/pocketpaw/dev/installer/installer.py"
 $TempInstaller = Join-Path $env:TEMP "pocketpaw_installer.py"
 
-# Configure proxy if set
-$webParams = @{ Uri = $InstallerUrl; OutFile = $TempInstaller; UseBasicParsing = $true }
-if ($env:HTTP_PROXY) {
-    $webParams.Proxy = $env:HTTP_PROXY
-}
+# Check for local installer (dev mode)
+$LocalInstaller = Join-Path $PSScriptRoot "installer.py"
+if (Test-Path $LocalInstaller) {
+    Write-Step "Using local installer ($LocalInstaller)..."
+    Copy-Item $LocalInstaller $TempInstaller -Force
+} else {
+    # Configure proxy if set
+    $webParams = @{ Uri = $InstallerUrl; OutFile = $TempInstaller; UseBasicParsing = $true }
+    if ($env:HTTP_PROXY) {
+        $webParams.Proxy = $env:HTTP_PROXY
+    }
 
-Write-Step "Downloading installer..."
-try {
-    Invoke-WebRequest @webParams -ErrorAction Stop
-} catch {
-    Write-Warn "Primary download failed, trying fallback..."
-    $webParams.Uri = $FallbackUrl
+    Write-Step "Downloading installer..."
     try {
         Invoke-WebRequest @webParams -ErrorAction Stop
     } catch {
-        Write-Err "Could not download installer."
-        Write-Host "       Try manually: $InstallerUrl"
-        exit 1
+        Write-Warn "Primary download failed, trying fallback..."
+        $webParams.Uri = $FallbackUrl
+        try {
+            Invoke-WebRequest @webParams -ErrorAction Stop
+        } catch {
+            Write-Err "Could not download installer."
+            Write-Host "       Try manually: $InstallerUrl"
+            exit 1
+        }
     }
 }
 

@@ -340,10 +340,16 @@ class SystemCheck:
         # Pip command
         info.pip_cmd = self.pip_cmd or self._detect_pip()
         if not info.pip_cmd:
-            info.errors.append(
-                "No package installer found. Install uv: "
-                "curl -LsSf https://astral.sh/uv/install.sh | sh"
-            )
+            if platform.system() == "Windows":
+                info.errors.append(
+                    "No package installer found. Install uv: "
+                    'irm https://astral.sh/uv/install.ps1 | iex'
+                )
+            else:
+                info.errors.append(
+                    "No package installer found. Install uv: "
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh"
+                )
             info.ok = False
 
         # Disk space
@@ -809,12 +815,20 @@ class PackageInstaller:
 
     def install_playwright(self) -> bool:
         """Install Playwright browsers."""
+        # Use uvx if available (works even if playwright not in current env)
+        if shutil.which("uvx"):
+            cmd = ["uvx", "playwright", "install", "chromium"]
+        elif shutil.which("uv"):
+            cmd = ["uv", "tool", "run", "playwright", "install", "chromium"]
+        else:
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+
         if _HAS_RICH and console:
             with console.status("[bold cyan]Installing Playwright browsers...[/bold cyan]"):
-                return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+                return self._run_cmd(cmd)
         else:
             print("  Installing Playwright browsers...")
-            return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+            return self._run_cmd(cmd)
 
     def _run_cmd(self, cmd: list[str]) -> bool:
         """Run a command, return True on success."""
@@ -1120,6 +1134,19 @@ class PocketPawInstaller:
         try:
             os.execvp("pocketpaw", ["pocketpaw"])
         except FileNotFoundError:
+            # Try launching with uvx if available (handles tools not yet in PATH)
+            if shutil.which("uvx"):
+                try:
+                    os.execvp("uvx", ["uvx", "pocketpaw"])
+                except FileNotFoundError:
+                    pass
+            elif shutil.which("uv"):
+                 # Try `uv tool run` style if uvx is missing
+                 try:
+                     os.execvp("uv", ["uv", "tool", "run", "pocketpaw"])
+                 except FileNotFoundError:
+                     pass
+
             # Might not be on PATH yet, try python -m
             try:
                 os.execvp(sys.executable, [sys.executable, "-m", "pocketpaw"])
