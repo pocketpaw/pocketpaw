@@ -1,3 +1,4 @@
+Add Windows installation instructions and uv prerequisite
 <p align="center">
   <img src="paw.png" alt="PocketPaw" width="100">
 </p>
