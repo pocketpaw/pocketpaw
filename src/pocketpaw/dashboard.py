@@ -3,6 +3,8 @@
 Lightweight FastAPI server that serves the frontend and handles WebSocket communication.
 
 Changes:
+  - 2026-02-17: Health heartbeat — periodic checks every 5 min via APScheduler, broadcasts health_update on status transitions.
+  - 2026-02-17: Health Engine API (GET /api/health, POST /api/health/check, WS get_health/run_health_check).
   - 2026-02-06: WebSocket auth via first message instead of URL query param; accept wss://.
   - 2026-02-06: Channel config REST API (GET /api/channels/status, POST save/toggle).
   - 2026-02-06: Refactored adapter storage to _channel_adapters dict; auto-start all configured.
@@ -178,6 +180,17 @@ async def broadcast_intention(intention_id: str, chunk: dict):
 async def _broadcast_audit_entry(entry: dict):
     """Broadcast a new audit log entry to all connected WebSocket clients."""
     message = {"type": "system_event", "event_type": "audit_entry", "data": entry}
+    for ws in active_connections[:]:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            if ws in active_connections:
+                active_connections.remove(ws)
+
+
+async def _broadcast_health_update(summary: dict):
+    """Broadcast health status update to all connected WebSocket clients."""
+    message = {"type": "health_update", "data": summary}
     for ws in active_connections[:]:
         try:
             await ws.send_json(message)
@@ -408,6 +421,18 @@ async def startup_event():
     except Exception as e:
         logger.warning("Failed to start MCP servers: %s", e)
 
+    # Initialize health engine and run startup checks
+    try:
+        from pocketpaw.health import get_health_engine
+
+        health_engine = get_health_engine()
+        health_engine.run_startup_checks()
+        # Fire connectivity checks in background (non-blocking)
+        asyncio.create_task(health_engine.run_connectivity_checks())
+        logger.info("Health engine initialized: %s", health_engine.overall_status)
+    except Exception as e:
+        logger.warning("Failed to initialize health engine: %s", e)
+
     # Register audit log callback for live updates
     audit_logger = get_audit_logger()
     audit_logger.on_log(lambda entry: asyncio.ensure_future(_broadcast_audit_entry(entry)))
@@ -419,6 +444,38 @@ async def startup_event():
     # Start proactive daemon
     daemon = get_daemon()
     daemon.start(stream_callback=broadcast_intention)
+
+    # Health heartbeat — periodic checks every 5 min, broadcast on status transitions
+    try:
+        from pocketpaw.health import get_health_engine
+
+        _health_engine = get_health_engine()
+        _prev_status = _health_engine.overall_status
+
+        async def _health_heartbeat():
+            nonlocal _prev_status
+            try:
+                _health_engine.run_startup_checks()
+                await _health_engine.run_connectivity_checks()
+                new_status = _health_engine.overall_status
+                if new_status != _prev_status:
+                    logger.info("Health status changed: %s -> %s", _prev_status, new_status)
+                    _prev_status = new_status
+                    await _broadcast_health_update(_health_engine.summary)
+            except Exception as e:
+                logger.warning("Health heartbeat error: %s", e)
+
+        # Reuse the daemon's APScheduler
+        daemon.trigger_engine.scheduler.add_job(
+            _health_heartbeat,
+            "interval",
+            minutes=5,
+            id="health_heartbeat",
+            replace_existing=True,
+        )
+        logger.info("Health heartbeat registered (every 5 min)")
+    except Exception as e:
+        logger.warning("Failed to register health heartbeat: %s", e)
 
     # Hourly rate-limiter cleanup
     async def _rate_limit_cleanup_loop():
@@ -1618,10 +1675,28 @@ def _static_version() -> str:
     return hashlib.md5("|".join(mtimes).encode()).hexdigest()[:8]
 
 
+@app.get("/api/version")
+async def get_version_info():
+    """Return current version and update availability."""
+    from importlib.metadata import version as get_version
+
+    from pocketpaw.config import get_config_dir
+    from pocketpaw.update_check import check_for_updates
+
+    current = get_version("pocketpaw")
+    info = check_for_updates(current, get_config_dir())
+    return info or {"current": current, "latest": current, "update_available": False}
+
+
 @app.get("/")
 async def index(request: Request):
     """Serve the main dashboard page."""
-    return templates.TemplateResponse("base.html", {"request": request, "v": _static_version()})
+    from importlib.metadata import version as get_version
+
+    return templates.TemplateResponse(
+        "base.html",
+        {"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
+    )
 
 
 # ==================== Auth Middleware ====================
@@ -2528,6 +2603,44 @@ async def websocket_endpoint(
                 path = data.get("path", "")
                 await handle_file_navigation(websocket, path, settings)
 
+            # Health engine actions
+            elif action == "get_health":
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    await websocket.send_json({"type": "health_update", "data": engine.summary})
+                except Exception as e:
+                    await websocket.send_json(
+                        {"type": "health_update", "data": {"status": "unknown", "error": str(e)}}
+                    )
+
+            elif action == "run_health_check":
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    await engine.run_all_checks()
+                    await websocket.send_json({"type": "health_update", "data": engine.summary})
+                except Exception as e:
+                    await websocket.send_json(
+                        {"type": "health_update", "data": {"status": "unknown", "error": str(e)}}
+                    )
+
+            elif action == "get_health_errors":
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    limit = data.get("limit", 20)
+                    search = data.get("search", "")
+                    errors = engine.get_recent_errors(limit=limit, search=search)
+                    await websocket.send_json({"type": "health_errors", "errors": errors})
+                except Exception as e:
+                    await websocket.send_json(
+                        {"type": "health_errors", "errors": [], "error": str(e)}
+                    )
+
             # Handle file browser
             elif action == "browse":
                 path = data.get("path", "~")
@@ -3138,6 +3251,62 @@ async def run_self_audit_endpoint():
 
     report = await run_self_audit()
     return report
+
+
+# ==================== Health Engine API ====================
+
+
+@app.get("/api/health")
+async def get_health_status():
+    """Get current health engine summary."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        return engine.summary
+    except Exception as e:
+        return {"status": "unknown", "check_count": 0, "issues": [], "error": str(e)}
+
+
+@app.get("/api/health/errors")
+async def get_health_errors(limit: int = 20, search: str = ""):
+    """Get recent errors from the persistent error log."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        return engine.get_recent_errors(limit=limit, search=search)
+    except Exception:
+        return []
+
+
+@app.delete("/api/health/errors")
+async def clear_health_errors():
+    """Clear the persistent error log."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        engine.error_store.clear()
+        return {"cleared": True}
+    except Exception as e:
+        return {"cleared": False, "error": str(e)}
+
+
+@app.post("/api/health/check")
+async def trigger_health_check():
+    """Run all health checks (startup + connectivity) and return results."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        await engine.run_all_checks()
+        summary = engine.summary
+        # Broadcast to all connected clients
+        await _broadcast_health_update(summary)
+        return summary
+    except Exception as e:
+        return {"status": "unknown", "error": str(e)}
 
 
 async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data: dict):

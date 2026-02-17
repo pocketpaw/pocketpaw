@@ -1,6 +1,8 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-02-17: Run startup health checks after settings load (prints colored summary).
+  - 2026-02-16: Add startup version check against PyPI (cached daily, silent on error).
   - 2026-02-14: Dashboard deps moved to core — `pip install pocketpaw` just works.
   - 2026-02-12: Fixed --version to read dynamically from package metadata.
   - 2026-02-06: Web dashboard is now the default mode (no flags needed).
@@ -563,6 +565,41 @@ Examples:
     _check_extras_installed(args)
 
     settings = get_settings()
+
+    # Run startup health checks (non-blocking, informational only)
+    if settings.health_check_on_startup:
+        try:
+            from pocketpaw.health import get_health_engine
+
+            engine = get_health_engine()
+            results = engine.run_startup_checks()
+            issues = [r for r in results if r.status != "ok"]
+            if issues:
+                print()
+                for r in results:
+                    if r.status == "ok":
+                        print(f"  \033[32m[OK]\033[0m   {r.name}: {r.message}")
+                    elif r.status == "warning":
+                        print(f"  \033[33m[WARN]\033[0m {r.name}: {r.message}")
+                        if r.fix_hint:
+                            print(f"         {r.fix_hint}")
+                    else:
+                        print(f"  \033[31m[FAIL]\033[0m {r.name}: {r.message}")
+                        if r.fix_hint:
+                            print(f"         {r.fix_hint}")
+                status = engine.overall_status
+                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(status, "0")
+                print(f"\n  System: \033[{color}m{status.upper()}\033[0m\n")
+        except Exception:
+            pass  # Health engine failure never blocks startup
+
+    # Check for updates (cached daily, silent on error)
+    from pocketpaw.config import get_config_dir
+    from pocketpaw.update_check import check_for_updates, print_update_notice
+
+    update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
+    if update_info and update_info.get("update_available"):
+        print_update_notice(update_info)
 
     # Resolve host: explicit flag > config > auto-detect
     if args.host is not None:

@@ -1,6 +1,7 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-02-17: Added health_check_on_startup field for Health Engine.
   - 2026-02-14: Add migration warning for old ~/.pocketclaw/ config dir and POCKETCLAW_ env vars.
   - 2026-02-06: Secrets stored encrypted via CredentialStore; auto-migrate plaintext keys.
   - 2026-02-06: Harden file/directory permissions (700 dir, 600 files).
@@ -307,6 +308,11 @@ class Settings(BaseSettings):
     self_audit_enabled: bool = Field(default=True, description="Enable daily self-audit daemon")
     self_audit_schedule: str = Field(
         default="0 3 * * *", description="Cron schedule for self-audit (default: 3 AM daily)"
+    )
+
+    # Health Engine
+    health_check_on_startup: bool = Field(
+        default=True, description="Run health checks when PocketPaw starts"
     )
 
     # OAuth

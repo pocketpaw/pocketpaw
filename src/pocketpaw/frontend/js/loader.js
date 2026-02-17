@@ -2,6 +2,9 @@
  * PocketPaw - Feature Module Loader
  *
  * Created: 2026-02-11
+ * Updated: 2026-02-17 — assemble() now deep-merges one level of nesting so
+ *   multiple modules can contribute to the same top-level state key
+ *   (e.g. missionControl).
  *
  * Auto-discovers and assembles feature modules into the Alpine.js app.
  * Feature modules self-register via PocketPaw.Loader.register(name, module).
@@ -51,7 +54,21 @@ window.PocketPaw.Loader = (() => {
 
             for (const [name, mod] of _modules) {
                 if (typeof mod.getState === 'function') {
-                    Object.assign(state, mod.getState());
+                    const modState = mod.getState();
+                    for (const key of Object.keys(modState)) {
+                        if (
+                            state[key] &&
+                            typeof state[key] === 'object' &&
+                            !Array.isArray(state[key]) &&
+                            typeof modState[key] === 'object' &&
+                            !Array.isArray(modState[key])
+                        ) {
+                            // Deep-merge one level: merge into existing object
+                            Object.assign(state[key], modState[key]);
+                        } else {
+                            state[key] = modState[key];
+                        }
+                    }
                 }
                 if (typeof mod.getMethods === 'function') {
                     Object.assign(methods, mod.getMethods());
