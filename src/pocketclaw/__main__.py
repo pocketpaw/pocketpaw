@@ -17,7 +17,6 @@ import webbrowser
 
 from pocketclaw.config import Settings, get_settings
 from pocketclaw.logging_setup import setup_logging
-
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
@@ -360,7 +359,11 @@ Examples:
 
     settings = get_settings()
 
+<<<<<<< Updated upstream
     # Resolve host: explicit flag > config > auto-detect
+=======
+    # Resolve host: explicit flag > config > platform-safe auto-detect
+>>>>>>> Stashed changes
 
     if args.host is not None:
         host = args.host
@@ -371,7 +374,11 @@ Examples:
     else:
         # Windows should NEVER auto-bind to 0.0.0.0
         if sys.platform.startswith("win"):
+<<<<<<< Updated upstream
              host = "127.0.0.1"
+=======
+            host = "127.0.0.1"
+>>>>>>> Stashed changes
 
         elif _is_headless():
             host = "0.0.0.0"
