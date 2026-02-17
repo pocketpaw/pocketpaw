@@ -297,8 +297,10 @@ def _plain_secret(message: str) -> str:
 
 def _plain_text(message: str, default: str = "") -> str:
     """Fallback text prompt."""
+    # Strip trailing colon — _safe_text callers include it for InquirerPy
+    msg = message.rstrip(": ").rstrip(":")
     suffix = f" [{default}]" if default else ""
-    val = input(f"{message}{suffix}: ").strip()
+    val = input(f"{msg}{suffix}: ").strip()
     return val or default
 
 
@@ -314,7 +316,8 @@ def _plain_confirm(message: str, default: bool = True) -> bool:
 # ── Safe InquirerPy wrappers (Issue #184) ─────────────────────────────
 # On macOS, running via `curl | sh` with stdin redirected from /dev/tty
 # causes prompt_toolkit (InquirerPy's backend) to raise OSError(22).
-# These wrappers catch the error and fall back to plain text prompts.
+# EOFError can also occur if the terminal disconnects mid-prompt.
+# These wrappers catch both and fall back to plain text prompts.
 # After the first failure, _HAS_INQUIRER is set to False globally.
 
 
@@ -333,7 +336,7 @@ def _safe_select(message: str, choices: list[dict[str, str]]) -> str:
     if _HAS_INQUIRER and inquirer:
         try:
             return inquirer.select(message=message, choices=choices).execute()
-        except OSError as e:
+        except (OSError, EOFError) as e:
             _disable_inquirer(str(e))
     return _plain_select(message, choices)
 
@@ -343,7 +346,7 @@ def _safe_checkbox(message: str, choices: list) -> list[str]:
     if _HAS_INQUIRER and inquirer and Separator:
         try:
             return inquirer.checkbox(message=message, choices=choices).execute()
-        except OSError as e:
+        except (OSError, EOFError) as e:
             _disable_inquirer(str(e))
     return _plain_checkbox(message, choices)
 
@@ -353,7 +356,7 @@ def _safe_secret(message: str, default: str = "") -> str:
     if _HAS_INQUIRER and inquirer:
         try:
             return inquirer.secret(message=message, default=default).execute()
-        except OSError as e:
+        except (OSError, EOFError) as e:
             _disable_inquirer(str(e))
     return _plain_secret(message)
 
@@ -373,7 +376,7 @@ def _safe_text(
             if invalid_message:
                 kwargs["invalid_message"] = invalid_message
             return inquirer.text(**kwargs).execute()
-        except OSError as e:
+        except (OSError, EOFError) as e:
             _disable_inquirer(str(e))
     return _plain_text(message, default)
 
@@ -383,7 +386,7 @@ def _safe_confirm(message: str, default: bool = True) -> bool:
     if _HAS_INQUIRER and inquirer:
         try:
             return inquirer.confirm(message=message, default=default).execute()
-        except OSError as e:
+        except (OSError, EOFError) as e:
             _disable_inquirer(str(e))
     return _plain_confirm(message, default)
 
