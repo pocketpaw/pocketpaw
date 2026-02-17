@@ -26,7 +26,17 @@ async def session(tmp_path):
     executor.stop_task = AsyncMock()
     executor.is_task_running = MagicMock(return_value=False)
 
-    session = DeepWorkSession(manager=manager, executor=executor)
+    # Create mock planner to avoid LLM calls
+    planner = MagicMock()
+    # Configure planner result to avoid attribute errors downstream
+    mock_result = MagicMock()
+    mock_result.prd_content = "Test PRD"
+    mock_result.tasks = []
+    mock_result.human_tasks = []
+    mock_result.team_recommendation = []
+    planner.plan = AsyncMock(return_value=mock_result)
+
+    session = DeepWorkSession(manager=manager, executor=executor, planner=planner)
     
     # Create a test project
     project = await manager.create_project(
