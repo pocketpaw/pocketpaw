@@ -262,6 +262,9 @@ class DiscordAdapter(BaseChannelAdapter):
 
             if message.is_stream_end:
                 await self._flush_stream_buffer(message.chat_id)
+                # Send any attached media files
+                for path in message.media or []:
+                    await self._send_media_file(message.chat_id, path)
                 return
 
             # Normal (non-streaming) message
@@ -278,6 +281,24 @@ class DiscordAdapter(BaseChannelAdapter):
 
         except Exception as e:
             logger.error(f"Failed to send Discord message: {e}")
+
+    # --- Media sending ---
+
+    async def _send_media_file(self, chat_id: str, file_path: str) -> None:
+        """Send a media file to a Discord channel."""
+        import os
+
+        if not self._client or not os.path.isfile(file_path):
+            return
+
+        try:
+            import discord
+
+            channel = self._client.get_channel(int(chat_id))
+            if channel:
+                await channel.send(file=discord.File(file_path))
+        except Exception as e:
+            logger.warning("Failed to send Discord media file: %s", e)
 
     # --- Stream buffering ---
 

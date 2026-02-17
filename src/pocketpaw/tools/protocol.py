@@ -102,6 +102,17 @@ class BaseTool(ABC):
         """Execute the tool."""
         ...
 
+    def _media_result(self, path: str, text: str = "") -> str:
+        """Format a result that includes a media file path.
+
+        The returned string embeds a ``<!-- media:path -->`` tag that
+        AgentLoop uses to attach the file to the outbound message.
+        """
+        tag = f"<!-- media:{path} -->"
+        if text and text.strip():
+            return f"{text}\n{tag}"
+        return tag
+
     def _error(self, message: str) -> str:
         """Format an error response."""
         return f"Error: {message}"

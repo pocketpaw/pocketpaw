@@ -18,6 +18,9 @@ Changes:
   - 2026-02-12: Hardened _block_dangerous_hook — wrapped in try/except to prevent
                 unhandled exceptions from tearing down the CLI stream. Updated hook
                 signature to match SDK 0.1.31 types (PreToolUseHookInput, HookContext).
+  - 2026-02-16: Fixed CLI OAuth auth bug — chat() now passes force_provider="anthropic"
+                to resolve_llm_client() so the CLI subprocess uses its own OAuth
+                credentials instead of falling back to Ollama when no API key is set.
 """
 
 import logging
@@ -27,30 +30,10 @@ from typing import Any
 
 from pocketpaw.agents.protocol import AgentEvent, ExecutorProtocol
 from pocketpaw.config import Settings
+from pocketpaw.security.rails import DANGEROUS_SUBSTRINGS as DANGEROUS_PATTERNS
 from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
-
-# Dangerous command patterns to block via PreToolUse hook
-DANGEROUS_PATTERNS = [
-    "rm -rf /",
-    "rm -rf ~",
-    "rm -rf *",
-    "sudo rm",
-    "> /dev/",
-    "format ",
-    "mkfs",
-    "chmod 777 /",
-    ":(){ :|:& };:",  # Fork bomb
-    "dd if=/dev/zero",
-    "dd if=/dev/random",
-    "> /etc/passwd",
-    "> /etc/shadow",
-    "curl | sh",
-    "curl | bash",
-    "wget | sh",
-    "wget | bash",
-]
 
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
@@ -202,8 +185,16 @@ class ClaudeAgentSDK:
             deny=settings.tools_deny,
         )
 
+        # Persistent client — reuses subprocess across messages.
+        # _client_in_use prevents concurrent queries on the same client
+        # (cross-session messages fall back to stateless query()).
+        self._client = None
+        self._client_options_key: str | None = None
+        self._client_in_use = False
+
         # SDK imports (set during initialization)
         self._query = None
+        self._ClaudeSDKClient = None
         self._ClaudeAgentOptions = None
         self._HookMatcher = None
         self._AssistantMessage = None
@@ -226,6 +217,7 @@ class ClaudeAgentSDK:
             from claude_agent_sdk import (
                 AssistantMessage,
                 ClaudeAgentOptions,
+                ClaudeSDKClient,
                 HookMatcher,
                 ResultMessage,
                 SystemMessage,
@@ -238,6 +230,7 @@ class ClaudeAgentSDK:
 
             # Store references
             self._query = query
+            self._ClaudeSDKClient = ClaudeSDKClient
             self._ClaudeAgentOptions = ClaudeAgentOptions
             self._HookMatcher = HookMatcher
             self._AssistantMessage = AssistantMessage
@@ -464,6 +457,146 @@ class ClaudeAgentSDK:
             servers[cfg.name] = entry
         return servers
 
+    @staticmethod
+    def _merge_consecutive_roles(messages: list[dict]) -> list[dict]:
+        """Merge consecutive messages with the same role for API compliance.
+
+        The Anthropic API requires alternating user/assistant roles.
+        Consecutive same-role messages are concatenated with newlines.
+        """
+        if not messages:
+            return []
+        merged: list[dict] = [messages[0].copy()]
+        for msg in messages[1:]:
+            if msg["role"] == merged[-1]["role"]:
+                merged[-1]["content"] += "\n" + msg["content"]
+            else:
+                merged.append(msg.copy())
+        return merged
+
+    async def _fast_chat(
+        self,
+        message: str,
+        *,
+        system_prompt: str,
+        history: list[dict] | None = None,
+        model: str,
+    ) -> AsyncIterator[AgentEvent]:
+        """Direct Anthropic API path for simple messages.
+
+        Bypasses the Claude CLI subprocess entirely, saving ~1.5-3s of
+        process fork + Node.js startup + CLI initialization overhead.
+        No tools are provided (simple messages don't need them).
+        """
+        try:
+            import time
+
+            from pocketpaw.llm.client import resolve_llm_client
+
+            t0 = time.monotonic()
+            llm = resolve_llm_client(self.settings)
+            client = llm.create_anthropic_client()
+            t1 = time.monotonic()
+            logger.info("Fast-path: client created in %.0fms", (t1 - t0) * 1000)
+
+            # Build API messages from history + current message
+            api_messages: list[dict] = []
+            if history:
+                for msg in history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role in ("user", "assistant") and content:
+                        api_messages.append({"role": role, "content": content})
+            api_messages.append({"role": "user", "content": message})
+
+            # Merge consecutive same-role messages for API compliance
+            api_messages = self._merge_consecutive_roles(api_messages)
+
+            logger.info(
+                "Fast-path: calling %s (system=%d chars, msgs=%d)",
+                model,
+                len(system_prompt),
+                len(api_messages),
+            )
+            t2 = time.monotonic()
+
+            async with client.messages.stream(
+                model=model,
+                system=system_prompt,
+                messages=api_messages,
+                max_tokens=1024,
+            ) as stream:
+                t3 = time.monotonic()
+                logger.info("Fast-path: stream opened in %.0fms", (t3 - t2) * 1000)
+                first_token = True
+                async for text in stream.text_stream:
+                    if first_token:
+                        t4 = time.monotonic()
+                        logger.info(
+                            "Fast-path: first token in %.0fms (total %.0fms)",
+                            (t4 - t3) * 1000,
+                            (t4 - t0) * 1000,
+                        )
+                        first_token = False
+                    if self._stop_flag:
+                        logger.info("Fast-path: stop flag set, breaking stream")
+                        break
+                    yield AgentEvent(type="message", content=text)
+
+            yield AgentEvent(type="done", content="")
+
+        except Exception as e:
+            from pocketpaw.llm.client import resolve_llm_client
+
+            llm = resolve_llm_client(self.settings)
+            logger.error("Fast-path API error: %s", e)
+            yield AgentEvent(type="error", content=llm.format_api_error(e))
+
+    async def _get_or_create_client(self, options: Any) -> Any:
+        """Get or create a persistent ClaudeSDKClient.
+
+        Reuses the existing subprocess if model and tools haven't changed.
+        Reconnects when configuration changes are detected.
+        """
+        import time
+
+        key = (
+            f"{getattr(options, 'model', '')}:{sorted(getattr(options, 'allowed_tools', []) or [])}"
+        )
+
+        if self._client is not None and self._client_options_key == key:
+            logger.debug("Reusing persistent client (key=%s)", key)
+            return self._client
+
+        # Disconnect stale client
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+
+        # Create and connect new client
+        t0 = time.monotonic()
+        self._client = self._ClaudeSDKClient(options=options)
+        await self._client.connect()
+        self._client_options_key = key
+        t1 = time.monotonic()
+        logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
+        return self._client
+
+    async def cleanup(self) -> None:
+        """Disconnect the persistent client and release resources."""
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+            self._client_options_key = None
+            self._client_in_use = False
+            logger.info("Persistent client disconnected")
+
     async def chat(
         self,
         message: str,
@@ -514,7 +647,73 @@ class ClaudeAgentSDK:
         self._stop_flag = False
 
         try:
+            # Resolve LLM provider early — needed for routing + env.
+            # Force anthropic: the Claude SDK backend runs the CLI as a subprocess,
+            # which has its own OAuth credentials. Without force_provider, auto-
+            # resolution with no API key falls back to Ollama (wrong for SDK).
+            from pocketpaw.llm.client import resolve_llm_client
+
+            llm = resolve_llm_client(self.settings, force_provider="anthropic")
+
+            # Gemini & plain OpenAI are not compatible with Claude SDK —
+            # the SDK speaks Anthropic Messages API, but Gemini/OpenAI
+            # endpoints speak the OpenAI Chat Completions API format.
+            if llm.is_gemini:
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        "❌ Gemini is not compatible with the **Claude Agent SDK** "
+                        "backend.\n\n"
+                        "The Claude SDK uses the Anthropic Messages API format, "
+                        "but Gemini's endpoint speaks OpenAI format.\n\n"
+                        "**Fix:** Switch to **PocketPaw Native** backend in "
+                        "**Settings → General → Agent Backend**. "
+                        "PocketPaw Native fully supports Gemini."
+                    ),
+                )
+                return
+
+            # Smart model routing — classify BEFORE prompt composition so we
+            # can skip tool instructions for SIMPLE messages and dispatch to
+            # the fast-path (direct API) for simple queries.
+            is_simple = False
+            selection = None
+            if (
+                self.settings.smart_routing_enabled
+                and not llm.is_ollama
+                and not llm.is_openai_compatible
+                and not llm.is_gemini
+            ):
+                from pocketpaw.agents.model_router import ModelRouter, TaskComplexity
+
+                model_router = ModelRouter(self.settings)
+                selection = model_router.classify(message)
+                is_simple = selection.complexity == TaskComplexity.SIMPLE
+                logger.info(
+                    "Smart routing: %s -> %s (%s)",
+                    selection.complexity.value,
+                    selection.model,
+                    selection.reason,
+                )
+
+            # Fast path: bypass CLI subprocess entirely for simple messages.
+            # Requires an API key — the Claude CLI uses OAuth which we can't
+            # reuse here. Fall back to standard path if no key is available.
+            has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
+            if is_simple and selection is not None and has_api_key:
+                identity = system_prompt or _DEFAULT_IDENTITY
+                async for event in self._fast_chat(
+                    message,
+                    system_prompt=identity,
+                    history=history,
+                    model=selection.model,
+                ):
+                    yield event
+                return
+
             # Compose final system prompt: identity/memory + tool docs
+            # Always include tool instructions — even SIMPLE messages may need tools
+            # (e.g., "remind me to call mom" is short but requires scheduler access)
             identity = system_prompt or _DEFAULT_IDENTITY
             final_prompt = identity + "\n" + _TOOL_INSTRUCTIONS
 
@@ -570,9 +769,6 @@ class ClaudeAgentSDK:
             }
 
             # Configure LLM provider for the Claude CLI subprocess.
-            from pocketpaw.llm.client import resolve_llm_client
-
-            llm = resolve_llm_client(self.settings)
             sdk_env = llm.to_sdk_env()
             if not sdk_env:
                 # Fall back to env var if settings has no key
@@ -581,7 +777,7 @@ class ClaudeAgentSDK:
                     sdk_env = {"ANTHROPIC_API_KEY": env_key}
             if sdk_env:
                 options_kwargs["env"] = sdk_env
-            if llm.is_ollama:
+            if llm.is_ollama or llm.is_openai_compatible or llm.is_gemini:
                 options_kwargs["model"] = llm.model
 
             # Wire in MCP servers (policy-filtered)
@@ -602,121 +798,184 @@ class ClaudeAgentSDK:
                 options_kwargs["permission_mode"] = "bypassPermissions"
 
             # Smart model routing (opt-in, skip for Ollama — model already set)
-            if self.settings.smart_routing_enabled and not llm.is_ollama:
+            if (
+                self.settings.smart_routing_enabled
+                and not llm.is_ollama
+                and not llm.is_openai_compatible
+                and not llm.is_gemini
+            ):
                 from pocketpaw.agents.model_router import ModelRouter
 
                 model_router = ModelRouter(self.settings)
                 selection = model_router.classify(message)
                 options_kwargs["model"] = selection.model
-                logger.info(
-                    "Smart routing: %s -> %s (%s)",
-                    selection.complexity.value,
-                    selection.model,
-                    selection.reason,
-                )
+
+            # Capture stderr for better error diagnostics
+            _stderr_lines: list[str] = []
+
+            def _on_stderr(line: str) -> None:
+                _stderr_lines.append(line)
+                logger.debug("Claude CLI stderr: %s", line)
+
+            options_kwargs["stderr"] = _on_stderr
 
             # Create options (after all kwargs are set, including model)
             options = self._ClaudeAgentOptions(**options_kwargs)
 
             logger.debug(f"🚀 Starting Claude Agent SDK query: {message[:100]}...")
 
+            # Try persistent client first, fall back to stateless query.
+            # _client_in_use guard prevents concurrent queries on the same
+            # subprocess — cross-session messages fall back to stateless query.
+            event_stream = None
+            if not self._client_in_use:
+                try:
+                    self._client_in_use = True
+                    client = await self._get_or_create_client(options)
+                    await client.query(message)
+                    event_stream = client.receive_response()
+                except Exception as client_err:
+                    logger.warning(
+                        "Persistent client failed, falling back to stateless query: %s",
+                        client_err,
+                    )
+                    # Clear broken client so next call creates a fresh one
+                    self._client = None
+                    self._client_options_key = None
+                    self._client_in_use = False
+
+            if event_stream is None:
+                event_stream = self._query(prompt=message, options=options)
+
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False
             _announced_tools: set[str] = set()
 
-            # Stream responses from the SDK
-            async for event in self._query(prompt=message, options=options):
-                if self._stop_flag:
-                    logger.info("🛑 Stop flag set, breaking stream")
-                    break
+            # Stream responses — release the persistent client guard when done
+            try:
+                async for event in event_stream:
+                    if self._stop_flag:
+                        logger.info("🛑 Stop flag set, breaking stream")
+                        break
 
-                # Handle different message types using isinstance checks
+                    # Handle different message types using isinstance checks
 
-                # ========== StreamEvent - token-by-token streaming ==========
-                if self._StreamEvent and isinstance(event, self._StreamEvent):
-                    raw = getattr(event, "event", None) or {}
-                    event_type = raw.get("type", "")
-                    delta = raw.get("delta", {})
+                    # ========== StreamEvent - token-by-token streaming ==========
+                    if self._StreamEvent and isinstance(event, self._StreamEvent):
+                        raw = getattr(event, "event", None) or {}
+                        event_type = raw.get("type", "")
+                        delta = raw.get("delta", {})
 
-                    if event_type == "content_block_delta":
-                        if "text" in delta:
-                            yield AgentEvent(type="message", content=delta["text"])
-                            _streamed_via_events = True
-                        elif "thinking" in delta:
-                            yield AgentEvent(type="thinking", content=delta["thinking"])
-                    elif event_type == "content_block_start":
-                        cb = raw.get("content_block", {})
-                        if cb.get("type") == "tool_use":
-                            tool_name = cb.get("name", "unknown")
-                            _announced_tools.add(tool_name)
-                            yield AgentEvent(
-                                type="tool_use",
-                                content=f"Using {tool_name}...",
-                                metadata={"name": tool_name, "input": {}},
-                            )
-                    elif event_type == "content_block_stop":
-                        # Detect thinking block stop via the partial field
-                        if getattr(event, "_block_type", None) == "thinking":
-                            yield AgentEvent(type="thinking_done", content="")
-                    continue
+                        if event_type == "content_block_delta":
+                            if "text" in delta:
+                                yield AgentEvent(type="message", content=delta["text"])
+                                _streamed_via_events = True
+                            elif "thinking" in delta:
+                                yield AgentEvent(type="thinking", content=delta["thinking"])
+                        elif event_type == "content_block_start":
+                            cb = raw.get("content_block", {})
+                            if cb.get("type") == "tool_use":
+                                tool_name = cb.get("name", "unknown")
+                                _announced_tools.add(tool_name)
+                                yield AgentEvent(
+                                    type="tool_use",
+                                    content=f"Using {tool_name}...",
+                                    metadata={"name": tool_name, "input": {}},
+                                )
+                        elif event_type == "content_block_stop":
+                            if getattr(event, "_block_type", None) == "thinking":
+                                yield AgentEvent(type="thinking_done", content="")
+                        continue
 
-                # ========== SystemMessage - metadata, skip ==========
-                if self._SystemMessage and isinstance(event, self._SystemMessage):
-                    subtype = getattr(event, "subtype", "")
-                    logger.debug(f"SystemMessage: {subtype}")
-                    continue
+                    # ========== SystemMessage - metadata, skip ==========
+                    if self._SystemMessage and isinstance(event, self._SystemMessage):
+                        subtype = getattr(event, "subtype", "")
+                        logger.debug(f"SystemMessage: {subtype}")
+                        continue
 
-                # ========== UserMessage - echo, skip ==========
-                if self._UserMessage and isinstance(event, self._UserMessage):
-                    logger.debug("UserMessage (echo), skipping")
-                    continue
+                    # ========== UserMessage - extract media from tool results ==========
+                    if self._UserMessage and isinstance(event, self._UserMessage):
+                        # UserMessages in multi-turn SDK flow contain ToolResultBlocks
+                        # with the raw output of Bash commands (including media tags).
+                        if hasattr(event, "content") and isinstance(event.content, list):
+                            for block in event.content:
+                                if not (
+                                    self._ToolResultBlock
+                                    and isinstance(block, self._ToolResultBlock)
+                                ):
+                                    continue
+                                block_content = getattr(block, "content", "")
+                                if isinstance(block_content, str):
+                                    result_text = block_content
+                                elif isinstance(block_content, list):
+                                    result_text = " ".join(
+                                        getattr(b, "text", "")
+                                        for b in block_content
+                                        if hasattr(b, "text")
+                                    )
+                                else:
+                                    continue
+                                if result_text and "<!-- media:" in result_text:
+                                    yield AgentEvent(
+                                        type="tool_result",
+                                        content=result_text,
+                                        metadata={"name": "bash"},
+                                    )
+                        logger.debug("UserMessage processed")
+                        continue
 
-                # ========== AssistantMessage - main content ==========
-                if self._AssistantMessage and isinstance(event, self._AssistantMessage):
-                    # Skip text if already streamed via StreamEvent deltas
-                    if not _streamed_via_events:
-                        text = self._extract_text_from_message(event)
-                        if text:
-                            yield AgentEvent(type="message", content=text)
+                    # ========== AssistantMessage - main content ==========
+                    if self._AssistantMessage and isinstance(event, self._AssistantMessage):
+                        if not _streamed_via_events:
+                            text = self._extract_text_from_message(event)
+                            if text:
+                                yield AgentEvent(type="message", content=text)
 
-                    # Emit tool_use events only for tools NOT already announced
-                    tools = self._extract_tool_info(event)
-                    for tool in tools:
-                        if tool["name"] not in _announced_tools:
-                            logger.info(f"🔧 Tool: {tool['name']}")
-                            yield AgentEvent(
-                                type="tool_use",
-                                content=f"Using {tool['name']}...",
-                                metadata={"name": tool["name"], "input": tool["input"]},
-                            )
+                        tools = self._extract_tool_info(event)
+                        for tool in tools:
+                            if tool["name"] not in _announced_tools:
+                                logger.info(f"🔧 Tool: {tool['name']}")
+                                yield AgentEvent(
+                                    type="tool_use",
+                                    content=f"Using {tool['name']}...",
+                                    metadata={
+                                        "name": tool["name"],
+                                        "input": tool["input"],
+                                    },
+                                )
 
-                    # Reset for next turn in multi-turn loops
-                    _streamed_via_events = False
-                    _announced_tools.clear()
-                    continue
+                        _streamed_via_events = False
+                        _announced_tools.clear()
+                        continue
 
-                # ========== ResultMessage - final result ==========
-                if self._ResultMessage and isinstance(event, self._ResultMessage):
-                    is_error = getattr(event, "is_error", False)
-                    result = getattr(event, "result", "")
+                    # ========== ResultMessage - final result ==========
+                    if self._ResultMessage and isinstance(event, self._ResultMessage):
+                        is_error = getattr(event, "is_error", False)
+                        result = getattr(event, "result", "")
 
-                    if is_error:
-                        logger.error(f"ResultMessage error: {result}")
-                        yield AgentEvent(type="error", content=str(result))
-                    else:
-                        logger.debug(f"ResultMessage: {str(result)[:100]}...")
-                        # Result is usually a summary, text was already streamed
-                    continue
+                        if is_error:
+                            logger.error(f"ResultMessage error: {result}")
+                            yield AgentEvent(type="error", content=str(result))
+                        else:
+                            logger.debug(f"ResultMessage: {str(result)[:100]}...")
+                        continue
 
-                # ========== Unknown event type - log it ==========
-                event_class = event.__class__.__name__
-                logger.debug(f"Unknown event type: {event_class}")
+                    # ========== Unknown event type - log it ==========
+                    event_class = event.__class__.__name__
+                    logger.debug(f"Unknown event type: {event_class}")
+            finally:
+                self._client_in_use = False
 
             yield AgentEvent(type="done", content="")
 
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Claude Agent SDK error: {error_msg}")
+
+            # Clear client on unexpected errors
+            self._client = None
+            self._client_options_key = None
+            self._client_in_use = False
 
             # Provide helpful error messages
             if "CLINotFoundError" in error_msg:
@@ -730,11 +989,21 @@ class ClaudeAgentSDK:
                     ),
                 )
             else:
-                yield AgentEvent(type="error", content=llm.format_api_error(e))
+                stderr_text = "\n".join(_stderr_lines) if _stderr_lines else ""
+                yield AgentEvent(
+                    type="error",
+                    content=llm.format_api_error(e, stderr=stderr_text),
+                )
 
     async def stop(self) -> None:
-        """Stop the agent execution."""
+        """Stop the agent execution and disconnect persistent client."""
         self._stop_flag = True
+        if self._client is not None:
+            try:
+                await self._client.interrupt()
+            except Exception:
+                pass
+        await self.cleanup()
         logger.info("🛑 Claude Agent SDK stop requested")
 
     async def get_status(self) -> dict:

@@ -739,28 +739,57 @@ async def search_mcp_registry(
             # level, remove $schema ($ prefix can confuse Alpine.js proxies),
             # and ensure expected fields have defaults.
             servers = []
-            for entry in data.get("servers", []):
-                srv = entry.get("server", entry)
-                srv["_meta"] = entry.get("_meta", {})
-                # Remove $schema — $ prefix can interfere with Alpine.js
+            raw_entries = data.get("servers", [])
+            if not isinstance(raw_entries, list):
+                raw_entries = []
+
+            for entry in raw_entries:
+                if not isinstance(entry, dict):
+                    continue
+
+                raw_server = entry.get("server", entry)
+                if not isinstance(raw_server, dict):
+                    continue
+
+                srv = dict(raw_server)
+                meta = entry.get("_meta", srv.get("_meta", {}))
+                srv["_meta"] = meta if isinstance(meta, dict) else {}
                 srv.pop("$schema", None)
-                # Ensure expected fields exist
-                srv.setdefault("name", "")
-                srv.setdefault("description", "")
-                srv.setdefault("packages", [])
-                srv.setdefault("remotes", [])
-                srv.setdefault("environmentVariables", [])
-                # Lift env vars from the first package to the server level
+
+                name = srv.get("name")
+                description = srv.get("description")
+                packages = srv.get("packages")
+                remotes = srv.get("remotes")
+                env_vars = srv.get("environmentVariables")
+
+                srv["name"] = name if isinstance(name, str) else ""
+                srv["description"] = description if isinstance(description, str) else ""
+                srv["packages"] = packages if isinstance(packages, list) else []
+                srv["remotes"] = remotes if isinstance(remotes, list) else []
+                srv["environmentVariables"] = env_vars if isinstance(env_vars, list) else []
+
+                # Lift env vars from the first package to the server level.
                 if not srv["environmentVariables"]:
-                    for pkg in srv.get("packages", []):
+                    for pkg in srv["packages"]:
+                        if not isinstance(pkg, dict):
+                            continue
                         pkg_env = pkg.get("environmentVariables")
-                        if pkg_env:
+                        if isinstance(pkg_env, list) and pkg_env:
                             srv["environmentVariables"] = pkg_env
                             break
-                if srv["name"]:  # skip entries without a name
+
+                # Skip entries without a valid name.
+                if srv["name"]:
                     servers.append(srv)
 
-            return {"servers": servers, "metadata": data.get("metadata", {})}
+            metadata = data.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if "nextCursor" not in metadata and "next_cursor" in metadata:
+                metadata["nextCursor"] = metadata["next_cursor"]
+            metadata.setdefault("count", len(servers))
+
+            return {"servers": servers, "metadata": metadata}
     except Exception as exc:
         logger.warning("MCP registry search failed: %s", exc)
         return {"servers": [], "metadata": {"count": 0}, "error": str(exc)}
@@ -2236,6 +2265,18 @@ async def websocket_endpoint(
                         settings.ollama_model = data["ollama_model"]
                     if data.get("anthropic_model"):
                         settings.anthropic_model = data.get("anthropic_model")
+                    if data.get("openai_compatible_base_url") is not None:
+                        settings.openai_compatible_base_url = data["openai_compatible_base_url"]
+                    if data.get("openai_compatible_api_key"):
+                        settings.openai_compatible_api_key = data["openai_compatible_api_key"]
+                    if data.get("openai_compatible_model") is not None:
+                        settings.openai_compatible_model = data["openai_compatible_model"]
+                    if "openai_compatible_max_tokens" in data:
+                        val = data["openai_compatible_max_tokens"]
+                        if isinstance(val, (int, float)) and 0 <= val <= 1000000:
+                            settings.openai_compatible_max_tokens = int(val)
+                    if data.get("gemini_model"):
+                        settings.gemini_model = data["gemini_model"]
                     if "bypass_permissions" in data:
                         settings.bypass_permissions = bool(data.get("bypass_permissions"))
                     if data.get("web_search_provider"):
@@ -2270,8 +2311,14 @@ async def websocket_endpoint(
                         settings.tts_provider = data["tts_provider"]
                     if "tts_voice" in data:
                         settings.tts_voice = data["tts_voice"]
+                    if data.get("stt_provider"):
+                        settings.stt_provider = data["stt_provider"]
                     if data.get("stt_model"):
                         settings.stt_model = data["stt_model"]
+                    if data.get("ocr_provider"):
+                        settings.ocr_provider = data["ocr_provider"]
+                    if data.get("sarvam_tts_language"):
+                        settings.sarvam_tts_language = data["sarvam_tts_language"]
                     if "self_audit_enabled" in data:
                         settings.self_audit_enabled = bool(data["self_audit_enabled"])
                     if data.get("self_audit_schedule"):
@@ -2333,6 +2380,14 @@ async def websocket_endpoint(
                         await websocket.send_json(
                             {"type": "message", "content": "✅ OpenAI API key saved!"}
                         )
+                    elif provider == "google" and key:
+                        settings.google_api_key = key
+                        settings.llm_provider = "gemini"
+                        settings.save()
+                        agent_loop.reset_router()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Google API key saved!"}
+                        )
                     elif provider == "tavily" and key:
                         settings.tavily_api_key = key
                         settings.save()
@@ -2387,6 +2442,12 @@ async def websocket_endpoint(
                                 "content": "✅ Spotify Client Secret saved!",
                             }
                         )
+                    elif provider == "sarvam" and key:
+                        settings.sarvam_api_key = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Sarvam AI API key saved!"}
+                        )
                     else:
                         await websocket.send_json(
                             {"type": "error", "content": "Invalid API key or provider"}
@@ -2411,6 +2472,12 @@ async def websocket_endpoint(
                             "ollamaHost": settings.ollama_host,
                             "ollamaModel": settings.ollama_model,
                             "anthropicModel": settings.anthropic_model,
+                            "openaiCompatibleBaseUrl": settings.openai_compatible_base_url,
+                            "openaiCompatibleModel": settings.openai_compatible_model,
+                            "openaiCompatibleMaxTokens": settings.openai_compatible_max_tokens,
+                            "hasOpenaiCompatibleKey": bool(settings.openai_compatible_api_key),
+                            "geminiModel": settings.gemini_model,
+                            "hasGoogleApiKey": bool(settings.google_api_key),
                             "bypassPermissions": settings.bypass_permissions,
                             "hasAnthropicKey": bool(settings.anthropic_api_key),
                             "hasOpenaiKey": bool(settings.openai_api_key),
@@ -2430,7 +2497,10 @@ async def websocket_endpoint(
                             "modelTierComplex": settings.model_tier_complex,
                             "ttsProvider": settings.tts_provider,
                             "ttsVoice": settings.tts_voice,
+                            "sttProvider": settings.stt_provider,
                             "sttModel": settings.stt_model,
+                            "ocrProvider": settings.ocr_provider,
+                            "sarvamTtsLanguage": settings.sarvam_tts_language,
                             "selfAuditEnabled": settings.self_audit_enabled,
                             "selfAuditSchedule": settings.self_audit_schedule,
                             "memoryBackend": settings.memory_backend,
@@ -2446,6 +2516,7 @@ async def websocket_endpoint(
                             "hasGoogleOAuthSecret": bool(settings.google_oauth_client_secret),
                             "hasSpotifyClientId": bool(settings.spotify_client_id),
                             "hasSpotifyClientSecret": bool(settings.spotify_client_secret),
+                            "hasSarvamKey": bool(settings.sarvam_api_key),
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },

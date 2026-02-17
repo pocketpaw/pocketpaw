@@ -159,6 +159,11 @@
             "icon": "lucide:wrench"
           },
           {
+            "label": "LLM Providers & Models",
+            "href": "/concepts/llm-providers",
+            "icon": "lucide:cpu"
+          },
+          {
             "label": "Security Model",
             "href": "/concepts/security-model",
             "icon": "lucide:shield"

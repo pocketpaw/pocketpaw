@@ -78,6 +78,22 @@ def auto_install(extra: str, verify_import: str) -> None:
         )
 
 
+_AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus", ".wma"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
+
+
+def guess_media_type(path: str) -> str:
+    """Return ``'audio'``, ``'image'``, or ``'document'`` based on file extension."""
+    import os
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _AUDIO_EXTS:
+        return "audio"
+    if ext in _IMAGE_EXTS:
+        return "image"
+    return "document"
+
+
 class ChannelAdapter(Protocol):
     """Protocol for channel adapters (Telegram, WebSocket, etc.)."""
 

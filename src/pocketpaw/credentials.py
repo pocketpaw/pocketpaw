@@ -15,7 +15,6 @@ import os
 import platform
 from functools import lru_cache
 from pathlib import Path
-from uuid import getnode
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
@@ -29,6 +28,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "telegram_bot_token",
         "openai_api_key",
         "anthropic_api_key",
+        "openai_compatible_api_key",
         "discord_bot_token",
         "slack_bot_token",
         "slack_app_token",
@@ -48,6 +48,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "teams_app_id",
         "teams_app_password",
         "gchat_service_account_key",
+        "sarvam_api_key",
     }
 )
 
@@ -88,11 +89,31 @@ class CredentialStore:
         self._salt_path = config_dir / ".salt"
         self._cache: dict[str, str] | None = None
 
+    def _get_machine_id(self) -> str:
+        """Return a persistent machine identifier.
+
+        Tries (in order):
+          1. /etc/machine-id  (Linux — systemd)
+          2. /var/lib/dbus/machine-id  (Linux — older dbus)
+          3. platform.node()  (hostname — fallback)
+
+        uuid.getnode() is intentionally NOT used because it returns a
+        random MAC on systems without a discoverable NIC, producing a
+        different value on every process start.
+        """
+        for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            try:
+                mid = Path(p).read_text().strip()
+                if mid:
+                    return mid
+            except OSError:
+                continue
+        return platform.node()
+
     def _get_machine_identity(self) -> bytes:
         """Build a machine-bound identity string."""
         parts = [
-            platform.node(),
-            str(getnode()),
+            self._get_machine_id(),
         ]
         try:
             parts.append(os.getlogin())

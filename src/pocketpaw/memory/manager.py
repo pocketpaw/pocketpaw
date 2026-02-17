@@ -297,20 +297,22 @@ class MemoryManager:
 
         Returns a formatted string with relevant memories.
         """
+        import asyncio
+
         parts = []
         user_id = self._resolve_user_id(sender_id)
 
-        # Long-term memories (scoped to user)
-        long_term = await self._store.get_by_type(
-            MemoryType.LONG_TERM, limit=long_term_limit, user_id=user_id
+        # Fetch long-term + daily concurrently (independent stores/files)
+        long_term, daily = await asyncio.gather(
+            self._store.get_by_type(MemoryType.LONG_TERM, limit=long_term_limit, user_id=user_id),
+            self._store.get_by_type(MemoryType.DAILY, limit=daily_limit),
         )
+
         if long_term:
             parts.append("## Long-term Memory\n")
             for entry in long_term:
                 parts.append(f"- {entry.content[:entry_max_chars]}")
 
-        # Today's notes
-        daily = await self._store.get_by_type(MemoryType.DAILY, limit=daily_limit)
         if daily:
             parts.append("\n## Today's Notes\n")
             for entry in daily:

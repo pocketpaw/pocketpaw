@@ -289,6 +289,71 @@ window.PocketPaw.MCP = {
                 return preset ? !!preset.needs_args : false;
             },
 
+            /**
+             * Normalize one registry entry to a flat server object.
+             * Accepts both wrapped shape ({server, _meta}) and flat shape.
+             */
+            normalizeRegistryServer(entry) {
+                if (!entry || typeof entry !== 'object') return null;
+
+                const raw = (entry.server && typeof entry.server === 'object')
+                    ? entry.server
+                    : entry;
+                if (!raw || typeof raw !== 'object') return null;
+
+                const server = { ...raw };
+                const meta = (entry._meta && typeof entry._meta === 'object')
+                    ? entry._meta
+                    : ((server._meta && typeof server._meta === 'object') ? server._meta : {});
+
+                server._meta = meta;
+                delete server.$schema;
+
+                server.name = typeof server.name === 'string' ? server.name : '';
+                server.title = typeof server.title === 'string' ? server.title : '';
+                server.description = typeof server.description === 'string' ? server.description : '';
+                server.version = typeof server.version === 'string' ? server.version : '';
+                server.packages = Array.isArray(server.packages) ? server.packages : [];
+                server.remotes = Array.isArray(server.remotes) ? server.remotes : [];
+                server.environmentVariables = Array.isArray(server.environmentVariables)
+                    ? server.environmentVariables
+                    : [];
+
+                // Lift env vars from package metadata when server-level list is missing.
+                if (server.environmentVariables.length === 0) {
+                    for (const pkg of server.packages) {
+                        if (!pkg || typeof pkg !== 'object') continue;
+                        if (Array.isArray(pkg.environmentVariables) && pkg.environmentVariables.length > 0) {
+                            server.environmentVariables = pkg.environmentVariables;
+                            break;
+                        }
+                    }
+                }
+
+                return server.name ? server : null;
+            },
+
+            /**
+             * Normalize a registry server list into safe flat entries.
+             */
+            normalizeRegistryServers(entries) {
+                if (!Array.isArray(entries)) return [];
+                const normalized = [];
+                for (const entry of entries) {
+                    const server = this.normalizeRegistryServer(entry);
+                    if (server) normalized.push(server);
+                }
+                return normalized;
+            },
+
+            /**
+             * Normalize next-cursor variants returned by registry metadata.
+             */
+            registryNextCursor(metadata) {
+                if (!metadata || typeof metadata !== 'object') return null;
+                return metadata.nextCursor || metadata.next_cursor || null;
+            },
+
             // ==================== Registry Methods ====================
 
             /**
@@ -308,8 +373,14 @@ window.PocketPaw.MCP = {
                     const res = await fetch(url);
                     if (res.ok) {
                         const data = await res.json();
-                        this.mcpRegistryResults = data.servers || [];
-                        this.mcpRegistryCursor = data.metadata?.nextCursor || null;
+                        this.mcpRegistryResults = this.normalizeRegistryServers(data.servers);
+                        this.mcpRegistryCursor = this.registryNextCursor(data.metadata);
+                        if (data.error) {
+                            this.showToast(`Registry search failed: ${data.error}`, 'error');
+                        }
+                    } else {
+                        this.mcpRegistryResults = [];
+                        this.mcpRegistryCursor = null;
                     }
                 } catch (e) {
                     console.error('Registry search failed', e);
@@ -332,7 +403,7 @@ window.PocketPaw.MCP = {
                     const res = await fetch('/api/mcp/registry/search?limit=30');
                     if (res.ok) {
                         const data = await res.json();
-                        this.mcpRegistryFeatured = data.servers || [];
+                        this.mcpRegistryFeatured = this.normalizeRegistryServers(data.servers);
                         if (data.error) {
                             this.mcpRegistryFeaturedError = true;
                         }
@@ -371,9 +442,9 @@ window.PocketPaw.MCP = {
                     const res = await fetch(url);
                     if (res.ok) {
                         const data = await res.json();
-                        const newServers = data.servers || [];
+                        const newServers = this.normalizeRegistryServers(data.servers);
                         this.mcpRegistryResults = [...this.mcpRegistryResults, ...newServers];
-                        this.mcpRegistryCursor = data.metadata?.nextCursor || null;
+                        this.mcpRegistryCursor = this.registryNextCursor(data.metadata);
                     }
                 } catch (e) {
                     console.error('Registry load more failed', e);

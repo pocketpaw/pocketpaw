@@ -133,7 +133,10 @@ class WebSocketAdapter(BaseChannelAdapter):
         """Send to a specific WebSocket."""
         try:
             if message.is_stream_end:
-                await ws.send_json({"type": "stream_end"})
+                payload: dict[str, Any] = {"type": "stream_end"}
+                if message.media:
+                    payload["media"] = message.media
+                await ws.send_json(payload)
                 return
 
             await ws.send_json(

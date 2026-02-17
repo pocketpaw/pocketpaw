@@ -26,7 +26,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 PACKAGE = "pocketpaw"
 GIT_REPO = "https://github.com/pocketpaw/pocketpaw.git"
 GIT_BRANCH = "main"

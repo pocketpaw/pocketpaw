@@ -9,6 +9,7 @@ Created: 2026-02-06
 
 import asyncio
 import logging
+import socket
 import threading
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,16 @@ def _ensure_neonize_loop_running() -> None:
         thread.start()
         _neonize_loop_started = True
         logger.debug("neonize event_global_loop started in background thread")
+
+
+def _tcp_probe(host: str, port: int, timeout: float) -> None:
+    """Blocking TCP connect probe — run in an executor."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+    finally:
+        sock.close()
 
 
 class NeonizeAdapter(BaseChannelAdapter):
@@ -176,6 +187,12 @@ class NeonizeAdapter(BaseChannelAdapter):
         self._client = client
         self._jid2string = Jid2String
 
+        # Pre-flight: verify we can reach WhatsApp servers before letting
+        # neonize's Go runtime attempt the WebSocket dial.  A Go panic on
+        # connection failure kills the entire process, so we check first and
+        # raise a catchable Python exception instead.
+        await self._preflight_connectivity_check()
+
         # Schedule connect() on neonize's own event loop (not FastAPI's)
         from neonize.aioze.events import event_global_loop
 
@@ -186,6 +203,29 @@ class NeonizeAdapter(BaseChannelAdapter):
         # Give the client a moment to initialize and produce a QR code
         await asyncio.sleep(3)
         logger.info("WhatsApp (neonize) Adapter started — scan QR code to pair")
+
+    @staticmethod
+    async def _preflight_connectivity_check(
+        host: str = "web.whatsapp.com", port: int = 443, timeout: float = 5.0
+    ) -> None:
+        """Verify WhatsApp servers are reachable before connecting.
+
+        Neonize wraps whatsmeow (Go).  If the WebSocket dial to
+        web.whatsapp.com fails, the Go runtime panics and kills the entire
+        Python process.  A quick TCP probe lets us fail gracefully with a
+        normal exception instead.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(loop.run_in_executor(
+                None, _tcp_probe, host, port, timeout
+            ), timeout=timeout + 1)
+        except Exception as exc:
+            raise ConnectionError(
+                f"Cannot reach {host}:{port} — WhatsApp (neonize) adapter "
+                f"requires internet access to web.whatsapp.com. "
+                f"Check your network or VPN settings."
+            ) from exc
 
     async def _on_stop(self) -> None:
         """Stop neonize client."""

@@ -293,7 +293,7 @@
                 </div>
 
                 <div class="flex flex-col gap-2">
-                    <template x-for="server in registryDisplayResults()" :key="server.name">
+                    <template x-for="server in registryDisplayResults()" :key="server.name + '-' + server.version">
                         <div class="bg-white/5 rounded-xl border border-white/5 overflow-hidden">
                             <!-- Card row -->
                             <div class="flex items-center gap-3 p-3">
@@ -304,6 +304,7 @@
                                     <div class="font-medium text-[13px] truncate" x-text="registryServerName(server)"></div>
                                     <div class="text-[11px] text-white/40 truncate" x-text="server.description || registryServerSource(server)"></div>
                                     <div class="text-[10px] text-white/25 mt-0.5 font-mono truncate" x-text="server.name"></div>
+                                    <div class="text-[10px] text-white/25 mt-0.5 font-mono" x-text="server.version ? 'Version: ' + server.version : 'Version: unknown'"></div>
                                 </div>
                                 <div class="flex items-center gap-2 shrink-0">
                                     <span class="px-1.5 py-0.5 text-[9px] font-medium bg-white/5 text-white/40 rounded"

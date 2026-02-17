@@ -160,8 +160,7 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
     if getattr(args, "teams", False):
         if not settings.teams_app_id or not settings.teams_app_password:
             logger.error(
-                "Teams not configured. Set POCKETPAW_TEAMS_APP_ID "
-                "and POCKETPAW_TEAMS_APP_PASSWORD."
+                "Teams not configured. Set POCKETPAW_TEAMS_APP_ID and POCKETPAW_TEAMS_APP_PASSWORD."
             )
         else:
             from pocketpaw.bus.adapters.teams_adapter import TeamsAdapter
@@ -358,6 +357,103 @@ async def check_ollama(settings: Settings) -> int:
     return 1 if failures > 1 else 0
 
 
+async def check_openai_compatible(settings: Settings) -> int:
+    """Check OpenAI-compatible endpoint connectivity and tool calling support.
+
+    Returns 0 on success, 1 on failure.
+    """
+    from rich.console import Console
+
+    from pocketpaw.llm.client import resolve_llm_client
+
+    console = Console()
+    llm = resolve_llm_client(settings, force_provider="openai_compatible")
+    base_url = llm.openai_compatible_base_url
+    model = llm.model
+
+    if not base_url:
+        console.print("\n  [red]\\[FAIL][/] No base URL configured.")
+        console.print(
+            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_BASE_URL[/] or configure in Settings.\n"
+        )
+        return 1
+
+    if not model:
+        console.print("\n  [red]\\[FAIL][/] No model configured.")
+        console.print(
+            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_MODEL[/] or configure in Settings.\n"
+        )
+        return 1
+
+    failures = 0
+
+    # 1. Test OpenAI Chat Completions API
+    console.print(f"\n  Checking endpoint at [bold]{base_url}[/] ...")
+    console.print(f"  Model: [bold]{model}[/]")
+    console.print("  Testing Chat Completions API ...")
+    try:
+        oc = llm.create_openai_client(timeout=60.0, max_retries=1)
+        response = await oc.chat.completions.create(
+            model=model,
+            max_tokens=32,
+            messages=[{"role": "user", "content": "Say hi"}],
+        )
+        text = response.choices[0].message.content or ""
+        console.print(f"  [green]\\[OK][/]  Chat Completions API works — response: {text[:60]}")
+    except Exception as e:
+        console.print(f"  [red]\\[FAIL][/] Chat Completions API failed: {e}")
+        console.print("\n  Result: 0/2 checks passed")
+        return 1
+
+    # 2. Test tool calling
+    console.print("  Testing tool calling support ...")
+    try:
+        tool_response = await oc.chat.completions.create(
+            model=model,
+            max_tokens=256,
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "calculator",
+                        "description": "Performs arithmetic calculations",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "expression": {
+                                    "type": "string",
+                                    "description": "Math expression to evaluate",
+                                }
+                            },
+                            "required": ["expression"],
+                        },
+                    },
+                }
+            ],
+        )
+        has_tool_use = bool(response.choices[0].message.tool_calls)
+        if has_tool_use:
+            console.print("  [green]\\[OK][/]  Tool calling works")
+        else:
+            console.print("  [yellow]\\[WARN][/] Model responded but did not use the tool")
+            console.print("         Tool calling quality varies by model.")
+            failures += 1
+    except Exception as e:
+        console.print(f"  [yellow]\\[WARN][/] Tool calling test failed: {e}")
+        failures += 1
+
+    passed = 2 - failures
+    console.print(f"\n  Result: [bold]{passed}/2[/] checks passed")
+    if failures == 0:
+        console.print("  [green]Endpoint is ready to use with PocketPaw![/]")
+        console.print(
+            "  Set [bold]llm_provider=openai_compatible[/] in settings"
+            " or [bold]POCKETPAW_LLM_PROVIDER=openai_compatible[/]\n"
+        )
+    return 1 if failures > 1 else 0
+
+
 def _check_extras_installed(args: argparse.Namespace) -> None:
     """Check that required optional dependencies are installed for the chosen mode.
 
@@ -453,6 +549,11 @@ Examples:
         help="Check Ollama connectivity, model availability, and tool calling support",
     )
     parser.add_argument(
+        "--check-openai-compatible",
+        action="store_true",
+        help="Check OpenAI-compatible endpoint connectivity and tool calling support",
+    )
+    parser.add_argument(
         "--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}"
     )
 
@@ -487,6 +588,9 @@ Examples:
     try:
         if args.check_ollama:
             exit_code = asyncio.run(check_ollama(settings))
+            raise SystemExit(exit_code)
+        elif args.check_openai_compatible:
+            exit_code = asyncio.run(check_openai_compatible(settings))
             raise SystemExit(exit_code)
         elif args.security_audit:
             from pocketpaw.security.audit_cli import run_security_audit

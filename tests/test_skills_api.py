@@ -523,6 +523,71 @@ class TestMCPRegistryEndpoints:
             params = call_kwargs.kwargs.get("params") or call_kwargs[1].get("params")
             assert params["limit"] == 100
 
+    async def test_search_registry_accepts_flat_entries(self):
+        """Flat server rows (no nested 'server' key) are normalized correctly."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "servers": [
+                {
+                    "name": "org/flat-server",
+                    "description": "Flat format row",
+                    "packages": [],
+                    "remotes": [],
+                }
+            ],
+            "metadata": {"count": 1, "next_cursor": "cursor123"},
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            from pocketclaw.dashboard import search_mcp_registry
+
+            result = await search_mcp_registry(q="flat", limit=10, cursor="")
+            assert result["servers"][0]["name"] == "org/flat-server"
+            # next_cursor is normalized for frontend compatibility
+            assert result["metadata"]["nextCursor"] == "cursor123"
+
+    async def test_search_registry_skips_malformed_rows(self):
+        """Malformed rows are skipped instead of crashing the whole result set."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "servers": [
+                None,
+                {"server": None},
+                {
+                    "server": {
+                        "name": "org/good-server",
+                        "description": "Good row",
+                        "packages": [{"environmentVariables": [{"name": "API_KEY"}]}],
+                        "remotes": [],
+                    }
+                },
+            ],
+            "metadata": "invalid-metadata-type",
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            from pocketclaw.dashboard import search_mcp_registry
+
+            result = await search_mcp_registry(q="good", limit=10, cursor="")
+            assert len(result["servers"]) == 1
+            assert result["servers"][0]["name"] == "org/good-server"
+            # env vars should be lifted from package metadata
+            assert result["servers"][0]["environmentVariables"][0]["name"] == "API_KEY"
+            # invalid metadata falls back to normalized dict with count
+            assert result["metadata"]["count"] == 1
+
     async def test_install_from_registry_missing_name(self):
         """POST /api/mcp/registry/install with empty server name returns 400."""
         from pocketpaw.dashboard import install_from_registry

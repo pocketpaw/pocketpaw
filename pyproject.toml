@@ -1,6 +1,6 @@
 [project]
 name = "pocketpaw"
-version = "0.4.0"
+version = "0.4.1"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -120,6 +120,9 @@ voice = [
 ocr = [
     "pytesseract>=0.3.10",
 ]
+sarvam = [
+    "sarvamai>=0.1.25",
+]
 mcp = [
     "mcp>=1.0.0",
 ]
@@ -135,7 +138,7 @@ all-channels = [
     "pocketpaw[telegram,discord,slack,whatsapp-personal,matrix,teams,gchat]",
 ]
 all-tools = [
-    "pocketpaw[browser,desktop,image,extract,voice,ocr,mcp,memory]",
+    "pocketpaw[browser,desktop,image,extract,voice,ocr,sarvam,mcp,memory]",
 ]
 all-backends = [
     "pocketpaw[native]",

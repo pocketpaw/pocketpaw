@@ -4,14 +4,14 @@
   Changes (2026-02-12):
   - Added hash-router.js and project-browser.js feature module script tags
   - Updated top bar view buttons to call navigateToView() for hash routing
-  - Hash-based URL routing: #/chat, #/activity, #/terminal, #/crew, #/project/{id}
+  - Hash-based URL routing: #/chat, #/activity, #/terminal, #/deep-work, #/project/{id}
 
   Changes (2026-02-05):
   - MAJOR REFACTOR: Componentized JS using mixin pattern
   - Added feature module scripts: chat, file-browser, reminders, intentions,
     skills, transparency, remote-access, mission-control
   - Scripts load order: websocket.js -> tools.js -> features/*.js -> app.js
-  - Added "Crew" tab (multi-agent control room) with live indicator badge
+  - Added "Deep Work" tab (multi-agent command center) with live indicator badge
   - Added missions.html component include
 
   Changes (2026-02-03):
@@ -145,7 +145,7 @@
                 Terminal
             </button>
             <button
-                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all flex items-center gap-1.5 hidden sm:flex"
+                class="relative px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all flex items-center gap-1.5 hidden sm:flex"
                 :class="view === 'missions' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
                 @click="navigateToView('missions')"
             >
@@ -153,7 +153,8 @@
                     <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
                     <span class="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
                 </span>
-                Crew
+                Deep Work
+                <span class="absolute -bottom-2.5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 text-[7px] font-semibold uppercase tracking-wider rounded-full bg-accent/20 text-accent leading-none whitespace-nowrap">Command Center</span>
             </button>
             </div>
         </div>

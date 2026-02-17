@@ -202,6 +202,9 @@ class SlackAdapter(BaseChannelAdapter):
 
             if message.is_stream_end:
                 await self._flush_stream_buffer(message.chat_id)
+                # Send any attached media files
+                for path in message.media or []:
+                    await self._send_media_file(message.chat_id, path)
                 return
 
             # Normal message
@@ -217,6 +220,24 @@ class SlackAdapter(BaseChannelAdapter):
 
         except Exception as e:
             logger.error(f"Failed to send Slack message: {e}")
+
+    # --- Media sending ---
+
+    async def _send_media_file(self, channel_id: str, file_path: str) -> None:
+        """Upload a media file to a Slack channel."""
+        import os
+
+        if not self._slack_app or not os.path.isfile(file_path):
+            return
+
+        try:
+            await self._slack_app.client.files_upload_v2(
+                channel=channel_id,
+                file=file_path,
+                filename=os.path.basename(file_path),
+            )
+        except Exception as e:
+            logger.warning("Failed to upload Slack media file: %s", e)
 
     # --- Stream buffering ---
 

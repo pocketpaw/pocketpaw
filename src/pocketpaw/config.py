@@ -100,10 +100,28 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     llm_provider: str = Field(
-        default="auto", description="LLM provider: 'auto', 'ollama', 'openai', 'anthropic'"
+        default="auto",
+        description=(
+            "LLM provider: 'auto', 'ollama', 'openai', 'anthropic', 'openai_compatible', 'gemini'"
+        ),
     )
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
     ollama_model: str = Field(default="llama3.2", description="Ollama model to use")
+    openai_compatible_base_url: str = Field(
+        default="",
+        description="Base URL for OpenAI-compatible endpoint (LiteLLM, OpenRouter, vLLM, etc.)",
+    )
+    openai_compatible_api_key: str | None = Field(
+        default=None, description="API key for OpenAI-compatible endpoint"
+    )
+    openai_compatible_model: str = Field(
+        default="", description="Model name for OpenAI-compatible endpoint"
+    )
+    openai_compatible_max_tokens: int = Field(
+        default=0,
+        description="Max output tokens for OpenAI-compatible endpoint (0 = no limit)",
+    )
+    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model to use")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-4o", description="OpenAI model to use")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
@@ -265,7 +283,7 @@ class Settings(BaseSettings):
 
     # Smart Model Routing
     smart_routing_enabled: bool = Field(
-        default=False, description="Enable automatic model selection based on task complexity"
+        default=True, description="Enable automatic model selection based on task complexity"
     )
     model_tier_simple: str = Field(
         default="claude-haiku-4-5-20251001", description="Model for simple tasks (greetings, facts)"
@@ -301,13 +319,28 @@ class Settings(BaseSettings):
 
     # Voice/TTS
     tts_provider: str = Field(
-        default="openai", description="TTS provider: 'openai' or 'elevenlabs'"
+        default="openai", description="TTS provider: 'openai', 'elevenlabs', or 'sarvam'"
     )
     elevenlabs_api_key: str | None = Field(default=None, description="ElevenLabs API key for TTS")
     tts_voice: str = Field(
         default="alloy", description="TTS voice name (OpenAI: alloy/echo/fable/onyx/nova/shimmer)"
     )
+    stt_provider: str = Field(default="openai", description="STT provider: 'openai' or 'sarvam'")
     stt_model: str = Field(default="whisper-1", description="OpenAI Whisper model for STT")
+
+    # OCR
+    ocr_provider: str = Field(
+        default="openai", description="OCR provider: 'openai', 'sarvam', or 'tesseract'"
+    )
+
+    # Sarvam AI
+    sarvam_api_key: str | None = Field(default=None, description="Sarvam AI API subscription key")
+    sarvam_tts_model: str = Field(default="bulbul:v3", description="Sarvam TTS model")
+    sarvam_tts_speaker: str = Field(default="shubh", description="Sarvam TTS speaker voice")
+    sarvam_tts_language: str = Field(
+        default="hi-IN", description="Sarvam TTS target language (BCP-47 code)"
+    )
+    sarvam_stt_model: str = Field(default="saaras:v3", description="Sarvam STT model")
 
     # Spotify
     spotify_client_id: str | None = Field(default=None, description="Spotify OAuth client ID")
@@ -451,6 +484,15 @@ class Settings(BaseSettings):
             "openai_model": self.openai_model,
             "anthropic_api_key": self.anthropic_api_key or existing.get("anthropic_api_key"),
             "anthropic_model": self.anthropic_model,
+            # OpenAI-Compatible
+            "openai_compatible_base_url": self.openai_compatible_base_url,
+            "openai_compatible_api_key": (
+                self.openai_compatible_api_key or existing.get("openai_compatible_api_key")
+            ),
+            "openai_compatible_model": self.openai_compatible_model,
+            "openai_compatible_max_tokens": self.openai_compatible_max_tokens,
+            # Gemini
+            "gemini_model": self.gemini_model,
             # Discord
             "discord_bot_token": (self.discord_bot_token or existing.get("discord_bot_token")),
             "discord_allowed_guild_ids": self.discord_allowed_guild_ids,
@@ -515,7 +557,16 @@ class Settings(BaseSettings):
             "tts_provider": self.tts_provider,
             "elevenlabs_api_key": (self.elevenlabs_api_key or existing.get("elevenlabs_api_key")),
             "tts_voice": self.tts_voice,
+            "stt_provider": self.stt_provider,
             "stt_model": self.stt_model,
+            # OCR
+            "ocr_provider": self.ocr_provider,
+            # Sarvam AI
+            "sarvam_api_key": self.sarvam_api_key or existing.get("sarvam_api_key"),
+            "sarvam_tts_model": self.sarvam_tts_model,
+            "sarvam_tts_speaker": self.sarvam_tts_speaker,
+            "sarvam_tts_language": self.sarvam_tts_language,
+            "sarvam_stt_model": self.sarvam_stt_model,
             # Spotify
             "spotify_client_id": (self.spotify_client_id or existing.get("spotify_client_id")),
             "spotify_client_secret": (

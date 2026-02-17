@@ -102,10 +102,9 @@ class ImageGenerateTool(BaseTool):
             image.save(out_path)
 
             logger.info("Generated image: %s", out_path)
-            return (
-                f"Image generated and saved to: {out_path}\n"
-                f"Prompt: {prompt}\n"
-                f"Aspect ratio: {aspect_ratio}"
+            return self._media_result(
+                str(out_path),
+                f"Image generated (prompt: {prompt}, aspect ratio: {aspect_ratio})",
             )
 
         except Exception as e:

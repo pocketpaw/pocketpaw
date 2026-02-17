@@ -16,6 +16,7 @@ It replaces the old highly-coupled bot loops.
 
 import asyncio
 import logging
+import re
 
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
@@ -27,6 +28,26 @@ from pocketpaw.memory import get_memory_manager
 from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
 
 logger = logging.getLogger(__name__)
+
+_MEDIA_TAG_RE = re.compile(r"<!-- media:(.+?) -->")
+# Fallback: detect file paths in ~/.pocketpaw/generated/ mentioned in agent text.
+# The Claude SDK backend runs tools via Bash; the media tag stays inside the SDK
+# and never surfaces. The agent echoes the path in its text response instead.
+_GENERATED_PATH_RE = re.compile(
+    r"[`\s(/]("  # preceded by backtick, space, paren, or slash
+    r"(?:/[^\s`*]+/\.pocketpaw/generated/[^\s`*\)]+)"  # absolute path under generated/
+    r")"
+)
+
+
+def _extract_media_paths(text: str) -> list[str]:
+    """Extract media file paths from <!-- media:/path --> tags in text."""
+    return _MEDIA_TAG_RE.findall(text)
+
+
+def _extract_generated_paths(text: str) -> list[str]:
+    """Fallback: extract file paths under ~/.pocketpaw/generated/ from agent text."""
+    return _GENERATED_PATH_RE.findall(text)
 
 
 async def _iter_with_timeout(aiter, first_timeout=30, timeout=120):
@@ -215,22 +236,27 @@ class AgentLoop:
                 metadata=message.metadata,
             )
 
-            # 2. Build dynamic system prompt (identity + memory context + channel hint)
-            sender_id = message.sender_id
-            system_prompt = await self.context_builder.build_system_prompt(
-                user_query=content,
-                channel=message.channel,
-                sender_id=sender_id,
-                session_key=message.session_key,
-            )
+            # 1b. Inject inbound media file paths so the agent can use them
+            if message.media:
+                paths_info = ", ".join(message.media)
+                content += f"\n[Media files on disk: {paths_info}]"
 
-            # 2a. Retrieve session history with compaction
-            history = await self.memory.get_compacted_history(
-                session_key,
-                recent_window=self.settings.compaction_recent_window,
-                char_budget=self.settings.compaction_char_budget,
-                summary_chars=self.settings.compaction_summary_chars,
-                llm_summarize=self.settings.compaction_llm_summarize,
+            # 2. Build system prompt + session history concurrently (independent I/O)
+            sender_id = message.sender_id
+            system_prompt, history = await asyncio.gather(
+                self.context_builder.build_system_prompt(
+                    user_query=content,
+                    channel=message.channel,
+                    sender_id=sender_id,
+                    session_key=message.session_key,
+                ),
+                self.memory.get_compacted_history(
+                    session_key,
+                    recent_window=self.settings.compaction_recent_window,
+                    char_budget=self.settings.compaction_char_budget,
+                    summary_chars=self.settings.compaction_summary_chars,
+                    llm_summarize=self.settings.compaction_llm_summarize,
+                ),
             )
 
             # 2b. Emit thinking event
@@ -241,10 +267,14 @@ class AgentLoop:
             # 3. Run through AgentRouter (handles all backends)
             router = self._get_router()
             full_response = ""
+            media_paths: list[str] = []
 
             run_iter = router.run(content, system_prompt=system_prompt, history=history)
+            # External endpoints (OpenAI-compatible, Ollama) may need longer
+            # for the first response — especially thinking/reasoning models.
+            ft = 120 if self.settings.llm_provider == "openai_compatible" else 30
             try:
-                async for chunk in _iter_with_timeout(run_iter):
+                async for chunk in _iter_with_timeout(run_iter, first_timeout=ft):
                     chunk_type = chunk.get("type", "")
                     content = chunk.get("content", "")
                     metadata = chunk.get("metadata") or {}
@@ -326,6 +356,11 @@ class AgentLoop:
                             )
                         )
 
+                    elif chunk_type == "token_usage":
+                        await self.bus.publish_system(
+                            SystemEvent(event_type="token_usage", data=metadata)
+                        )
+
                     elif chunk_type == "tool_use":
                         # Emit tool_start system event for Activity panel
                         tool_name = metadata.get("name") or metadata.get("tool", "unknown")
@@ -350,6 +385,8 @@ class AgentLoop:
                                 },
                             )
                         )
+                        # Extract media file paths from tool output
+                        media_paths.extend(_extract_media_paths(content))
 
                     elif chunk_type == "error":
                         # Emit error and send to user
@@ -379,13 +416,24 @@ class AgentLoop:
                 # Always close the async generator to kill any subprocess
                 await run_iter.aclose()
 
-            # 4. Send stream end marker
+            # 4. Send stream end marker (with any media files detected)
+            # Fallback: if no media tags found in tool_result chunks,
+            # check full_response for generated file paths (Claude SDK backend
+            # runs tools via Bash — media tags stay inside the SDK and the
+            # agent echoes the path in its text response instead).
+            if not media_paths and full_response:
+                media_paths.extend(_extract_generated_paths(full_response))
+
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            media_paths = [p for p in media_paths if not (p in seen or seen.add(p))]
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
                     chat_id=message.chat_id,
                     content="",
                     is_stream_end=True,
+                    media=media_paths,
                 )
             )
 
@@ -400,7 +448,7 @@ class AgentLoop:
                     self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn
                 ) or (self.settings.memory_backend == "file" and self.settings.file_auto_learn)
                 if should_auto_learn:
-                    asyncio.create_task(
+                    t = asyncio.create_task(
                         self._auto_learn(
                             message.content,
                             full_response,

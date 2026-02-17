@@ -43,6 +43,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "spotify_playlist",
     ],
     "group:media": ["image_generate", "ocr"],
+    "group:translate": ["translate"],
     "group:reddit": ["reddit_search", "reddit_read", "reddit_trending"],
     "group:sessions": [
         "new_session",

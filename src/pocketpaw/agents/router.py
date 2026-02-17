@@ -56,6 +56,12 @@ class AgentRouter:
                 llm.ollama_host,
                 backend,
             )
+        if llm.is_openai_compatible:
+            logger.info(
+                "🔗 OpenAI-compatible provider detected (%s) — using %s backend",
+                llm.openai_compatible_base_url,
+                backend,
+            )
 
         try:
             if backend == "claude_agent_sdk":

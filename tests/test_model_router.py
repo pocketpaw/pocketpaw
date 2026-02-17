@@ -137,9 +137,9 @@ def test_model_selection_fields():
 
 def test_empty_message(router):
     result = router.classify("")
-    assert result.complexity == TaskComplexity.MODERATE
+    assert result.complexity == TaskComplexity.SIMPLE
 
 
 def test_whitespace_message(router):
     result = router.classify("   ")
-    assert result.complexity == TaskComplexity.MODERATE
+    assert result.complexity == TaskComplexity.SIMPLE

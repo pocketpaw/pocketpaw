@@ -50,6 +50,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SpotifyPlaybackTool": (".spotify", "SpotifyPlaybackTool"),
     "SpotifyPlaylistTool": (".spotify", "SpotifyPlaylistTool"),
     "OCRTool": (".ocr", "OCRTool"),
+    "TranslateTool": (".translate", "TranslateTool"),
     "RedditSearchTool": (".reddit", "RedditSearchTool"),
     "RedditReadTool": (".reddit", "RedditReadTool"),
     "RedditTrendingTool": (".reddit", "RedditTrendingTool"),

@@ -192,47 +192,60 @@ fi
 
 printf '\n'
 
-# ── Download installer.py ──────────────────────────────────────────────
-TMPDIR="${TMPDIR:-/tmp}"
-INSTALLER="$TMPDIR/pocketpaw_installer.py"
+# ── Locate installer.py ────────────────────────────────────────────────
+# Prefer the local installer.py next to this script (repo / release bundle).
+# Fall back to downloading from GitHub when running via curl|sh.
 
-# Clean up on exit
-cleanup() { rm -f "$INSTALLER"; }
-trap cleanup EXIT INT TERM
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+LOCAL_INSTALLER="$SCRIPT_DIR/installer.py"
+NEED_CLEANUP=0
 
-INSTALLER_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py"
-
-if command -v curl >/dev/null 2>&1; then
-    DOWNLOAD="curl -fsSL"
-elif command -v wget >/dev/null 2>&1; then
-    DOWNLOAD="wget -qO-"
+if [ -f "$LOCAL_INSTALLER" ] && head -1 "$LOCAL_INSTALLER" | grep -q "^#\|^\"\"\"\|^import\|^from\|^def\|^class"; then
+    INSTALLER="$LOCAL_INSTALLER"
+    printf '  Using local installer.py\n'
 else
-    printf '\033[31mError:\033[0m Neither curl nor wget found.\n'
-    exit 1
-fi
+    TMPDIR="${TMPDIR:-/tmp}"
+    INSTALLER="$TMPDIR/pocketpaw_installer.py"
+    NEED_CLEANUP=1
 
-printf '  Downloading installer...\n'
-if ! $DOWNLOAD "$INSTALLER_URL" > "$INSTALLER" 2>/dev/null; then
-    printf '\033[33mWarn:\033[0m Primary download failed, trying fallback...\n'
-    FALLBACK_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/dev/installer/installer.py"
-    if ! $DOWNLOAD "$FALLBACK_URL" > "$INSTALLER" 2>/dev/null; then
-        printf '\033[31mError:\033[0m Could not download installer.\n'
-        printf '       Try manually: %s\n' "$INSTALLER_URL"
+    INSTALLER_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py"
+
+    if command -v curl >/dev/null 2>&1; then
+        DOWNLOAD="curl -fsSL"
+    elif command -v wget >/dev/null 2>&1; then
+        DOWNLOAD="wget -qO-"
+    else
+        printf '\033[31mError:\033[0m Neither curl nor wget found.\n'
+        exit 1
+    fi
+
+    printf '  Downloading installer...\n'
+    if ! $DOWNLOAD "$INSTALLER_URL" > "$INSTALLER" 2>/dev/null; then
+        printf '\033[33mWarn:\033[0m Primary download failed, trying fallback...\n'
+        FALLBACK_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/dev/installer/installer.py"
+        if ! $DOWNLOAD "$FALLBACK_URL" > "$INSTALLER" 2>/dev/null; then
+            printf '\033[31mError:\033[0m Could not download installer.\n'
+            printf '       Try manually: %s\n' "$INSTALLER_URL"
+            exit 1
+        fi
+    fi
+
+    # Verify it looks like Python
+    if ! head -1 "$INSTALLER" | grep -q "^#\|^\"\"\"\|^import\|^from\|^def\|^class"; then
+        printf '\033[31mError:\033[0m Downloaded file does not look like a Python script.\n'
+        printf '       Check your network connection and try again.\n'
         exit 1
     fi
 fi
 
-# Verify it looks like Python
-if ! head -1 "$INSTALLER" | grep -q "^#\|^\"\"\"\|^import\|^from\|^def\|^class"; then
-    printf '\033[31mError:\033[0m Downloaded file does not look like a Python script.\n'
-    printf '       Check your network connection and try again.\n'
-    exit 1
-fi
+# Clean up only if we downloaded a temp file
+cleanup() { [ "$NEED_CLEANUP" = "1" ] && rm -f "$INSTALLER"; }
+trap cleanup EXIT INT TERM
 
 printf '  Launching interactive installer...\n\n'
 
 # ── Run installer ──────────────────────────────────────────────────────
-EXTRA_FLAGS="--from-git"
+EXTRA_FLAGS=""
 if [ "$UV_AVAILABLE" = "1" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --uv-available"
 fi

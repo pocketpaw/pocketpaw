@@ -151,6 +151,13 @@ window.PocketPaw.Transparency = {
                     const rStr = String(data.data.result || '').substring(0, 50).replace(/&/g, '&amp;').replace(/</g, '&lt;');
                     const rMore = String(data.data.result || '').length > 50 ? '...' : '';
                     message = `${isError ? '❌' : '✅'} <b>${rName}</b> result: <span class="text-white/50">${rStr}${rMore}</span>`;
+                } else if (eventType === 'token_usage') {
+                    const d = data.data || {};
+                    const inp = d.input_tokens || 0;
+                    const out = d.output_tokens || 0;
+                    const total = d.total_tokens || (inp + out);
+                    message = `<span class="text-white/40">Tokens: <b>${inp.toLocaleString()}</b> in · <b>${out.toLocaleString()}</b> out · <b>${total.toLocaleString()}</b> total</span>`;
+                    level = 'info';
                 } else {
                     message = `Unknown event: ${eventType}`;
                 }
@@ -160,6 +167,9 @@ window.PocketPaw.Transparency = {
                 // Also feed plain-text version into Terminal logs
                 if (eventType === 'thinking') {
                     this.log('Thinking...', 'info');
+                } else if (eventType === 'token_usage') {
+                    const d = data.data || {};
+                    this.log(`[TOKENS] ${d.input_tokens || 0} in / ${d.output_tokens || 0} out`, 'info');
                 } else if (eventType === 'tool_start') {
                     const name = data.data?.name || 'unknown';
                     const params = JSON.stringify(data.data?.params || {}).substring(0, 80);

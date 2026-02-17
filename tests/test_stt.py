@@ -42,18 +42,22 @@ def _mock_settings():
     settings = MagicMock()
     settings.openai_api_key = "test-key"
     settings.stt_model = "whisper-1"
+    settings.stt_provider = "openai"
     with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=settings):
         yield settings
 
 
-async def test_stt_no_api_key():
+async def test_stt_no_api_key(tmp_path):
     from pocketpaw.tools.builtin.stt import SpeechToTextTool
 
     tool = SpeechToTextTool()
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"\x00" * 100)
     settings = MagicMock()
     settings.openai_api_key = None
+    settings.stt_provider = "openai"
     with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=settings):
-        result = await tool.execute(audio_file="/tmp/test.mp3")
+        result = await tool.execute(audio_file=str(audio_file))
     assert result.startswith("Error:")
     assert "API key" in result
 

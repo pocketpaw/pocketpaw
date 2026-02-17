@@ -32,8 +32,9 @@ class TextToSpeechTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Convert text to speech audio (MP3). Supports OpenAI TTS (tts-1 model) "
-            "and ElevenLabs. Output saved to ~/.pocketpaw/generated/audio/."
+            "Convert text to speech audio. Supports OpenAI TTS (tts-1), ElevenLabs, "
+            "and Sarvam AI Bulbul (11 Indian languages, 39 voices). "
+            "Output saved to ~/.pocketpaw/generated/audio/."
         )
 
     @property
@@ -53,7 +54,8 @@ class TextToSpeechTool(BaseTool):
                     "type": "string",
                     "description": (
                         "Voice name (OpenAI: alloy/echo/fable/onyx/nova/shimmer"
-                        "; ElevenLabs: voice ID)"
+                        "; ElevenLabs: voice ID"
+                        "; Sarvam: Shubh/Kriti/Amol/Amartya/Diya/etc.)"
                     ),
                 },
             },
@@ -69,8 +71,12 @@ class TextToSpeechTool(BaseTool):
             return await self._tts_openai(text, voice)
         elif provider == "elevenlabs":
             return await self._tts_elevenlabs(text, voice)
+        elif provider == "sarvam":
+            return await self._tts_sarvam(text, voice)
         else:
-            return self._error(f"Unknown TTS provider: {provider}. Use 'openai' or 'elevenlabs'.")
+            return self._error(
+                f"Unknown TTS provider: {provider}. Use 'openai', 'elevenlabs', or 'sarvam'."
+            )
 
     async def _tts_openai(self, text: str, voice: str) -> str:
         """Generate speech using OpenAI TTS API."""
@@ -101,7 +107,9 @@ class TextToSpeechTool(BaseTool):
             output_path = _get_audio_dir() / filename
             output_path.write_bytes(resp.content)
 
-            return f"Audio generated: {output_path} ({len(resp.content)} bytes)"
+            return self._media_result(
+                str(output_path), f"Audio generated ({len(resp.content)} bytes)"
+            )
 
         except httpx.HTTPStatusError as e:
             return self._error(f"OpenAI TTS error: {e.response.status_code}")
@@ -137,9 +145,55 @@ class TextToSpeechTool(BaseTool):
             output_path = _get_audio_dir() / filename
             output_path.write_bytes(resp.content)
 
-            return f"Audio generated: {output_path} ({len(resp.content)} bytes)"
+            return self._media_result(
+                str(output_path), f"Audio generated ({len(resp.content)} bytes)"
+            )
 
         except httpx.HTTPStatusError as e:
             return self._error(f"ElevenLabs error: {e.response.status_code}")
         except Exception as e:
             return self._error(f"TTS failed: {e}")
+
+    async def _tts_sarvam(self, text: str, voice: str) -> str:
+        """Generate speech using Sarvam AI Bulbul TTS."""
+        settings = get_settings()
+        api_key = settings.sarvam_api_key
+        if not api_key:
+            return self._error("Sarvam API key not configured. Set POCKETPAW_SARVAM_API_KEY.")
+
+        try:
+            import asyncio
+
+            from sarvamai import SarvamAI
+
+            client = SarvamAI(api_subscription_key=api_key)
+            speaker = voice or settings.sarvam_tts_speaker
+            language = settings.sarvam_tts_language or "hi-IN"
+
+            response = await asyncio.to_thread(
+                client.text_to_speech.convert,
+                text=text[:2500],
+                target_language_code=language,
+                speaker=speaker.lower(),
+                model=settings.sarvam_tts_model,
+            )
+
+            # SDK returns audio bytes
+            audio_bytes = response if isinstance(response, bytes) else response.audios[0]
+            if isinstance(audio_bytes, str):
+                import base64
+
+                audio_bytes = base64.b64decode(audio_bytes)
+
+            filename = f"tts_{uuid.uuid4().hex[:8]}.wav"
+            output_path = _get_audio_dir() / filename
+            output_path.write_bytes(audio_bytes)
+
+            return self._media_result(
+                str(output_path), f"Audio generated ({len(audio_bytes)} bytes)"
+            )
+
+        except ImportError:
+            return self._error("Sarvam SDK not installed. Run: pip install 'pocketpaw[sarvam]'")
+        except Exception as e:
+            return self._error(f"Sarvam TTS failed: {e}")

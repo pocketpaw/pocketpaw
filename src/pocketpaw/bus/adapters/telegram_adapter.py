@@ -8,7 +8,7 @@ import logging
 from typing import Any
 
 try:
-    from telegram import Update
+    from telegram import Update, ChatAction
     from telegram.ext import (
         Application,
         CommandHandler,
@@ -193,6 +193,9 @@ class TelegramAdapter(BaseChannelAdapter):
             if message.is_stream_end:
                 # Flush buffer
                 await self._flush_stream_buffer(message.chat_id)
+                # Send any attached media files
+                for path in message.media or []:
+                    await self._send_media_file(message.chat_id, path)
                 return
 
             # Normal message (not stream)
@@ -219,7 +222,9 @@ class TelegramAdapter(BaseChannelAdapter):
 
         if chat_id not in self._buffers:
             # Send initial message (topic-aware)
-            real_chat_id, topic_id = self._parse_chat_id(chat_id)
+            real_chat_id, topic_id = self._parse_chat_id(chat_id) # Parse chat_id here to use for send_chat_action
+            await self.app.bot.send_chat_action(chat_id=real_chat_id, action=ChatAction.TYPING)
+            # Send initial message (topic-aware)
             send_kwargs: dict[str, Any] = {"chat_id": real_chat_id, "text": "🧠 ..."}
             if topic_id is not None:
                 send_kwargs["message_thread_id"] = topic_id
@@ -259,6 +264,34 @@ class TelegramAdapter(BaseChannelAdapter):
             )
         except Exception as e:
             logger.warning(f"Failed to update message: {e}")
+
+    # --- Media sending ---
+
+    async def _send_media_file(self, chat_id: str, file_path: str) -> None:
+        """Send a media file (audio/image/document) to a Telegram chat."""
+        import os
+
+        if not self.app or not os.path.isfile(file_path):
+            return
+
+        from pocketpaw.bus.adapters import guess_media_type
+
+        media_type = guess_media_type(file_path)
+        real_chat_id, topic_id = self._parse_chat_id(chat_id)
+        kwargs: dict[str, Any] = {"chat_id": real_chat_id}
+        if topic_id is not None:
+            kwargs["message_thread_id"] = topic_id
+
+        try:
+            with open(file_path, "rb") as f:
+                if media_type == "audio":
+                    await self.app.bot.send_audio(**kwargs, audio=f)
+                elif media_type == "image":
+                    await self.app.bot.send_photo(**kwargs, photo=f)
+                else:
+                    await self.app.bot.send_document(**kwargs, document=f)
+        except Exception as e:
+            logger.warning("Failed to send Telegram media file: %s", e)
 
     # --- Handlers ---
 
