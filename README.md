@@ -36,38 +36,39 @@
 
 ## Quick Start
 
+### 🍎 macOS / 🐧 Linux
 ```bash
-curl -fsSL https://pocketpaw.xyz/install.sh | sh
-```
+curl -fsSL [https://pocketpaw.xyz/install.sh](https://pocketpaw.xyz/install.sh) | sh
+🪟 Windows
+Run in PowerShell:
 
-Or install directly:
+PowerShell
+# Option 1: Standard Install (easiest)
+pip install pocketpaw
+pocketpaw
 
-```bash
-pip install pocketpaw && pocketpaw
-```
+# Option 2: Isolated Install (recommended)
+pipx install pocketpaw
+pocketpaw
+(Note: If you use Git Bash, you can also use the Linux curl command above).
 
-**That's it.** One command. 30 seconds. Your own AI agent.
+That's it. One command. 30 seconds. Your own AI agent.
 
-I'm your self-hosted, cross-platform personal AI agent. The web dashboard opens automatically. Talk to me right in your browser, or connect me to Discord, Slack, WhatsApp, or Telegram and control me from anywhere. I run on _your_ machine, respect _your_ privacy, and I'm always here.
+I'm your self-hosted, cross-platform personal AI agent. The web dashboard opens automatically. Talk to me right in your browser, or connect me to Discord, Slack, WhatsApp, or Telegram and control me from anywhere. I run on your machine, respect your privacy, and I'm always here.
 
-**No subscription. No cloud lock-in. Just you and me.**
+No subscription. No cloud lock-in. Just you and me.
 
 <details>
 <summary>More install options</summary>
 
-```bash
-# Isolated install
-pipx install pocketpaw && pocketpaw
-
-# Run without installing
+Bash
+# Run without installing (requires uv)
 uvx pocketpaw
 
 # From source
-git clone https://github.com/pocketpaw/pocketpaw.git
+git clone [https://github.com/pocketpaw/pocketpaw.git](https://github.com/pocketpaw/pocketpaw.git)
 cd pocketpaw
 uv run pocketpaw
-```
-
 </details>
 
 PocketPaw will open the web dashboard in your browser and be ready to go.
