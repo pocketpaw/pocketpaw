@@ -38,9 +38,23 @@
 
 ```bash
 curl -fsSL https://pocketpaw.xyz/install.sh | sh
+
+### Windows
+
+The above command uses `sh` which is not available on Windows.
+
+Use:
+
+```bash
+pip install pocketpaw
+pocketpaw
 ```
 
-Or install directly:
+If the command is not found after installation, restart the terminal and run again.
+
+
+Or install directly (cross-platform):
+
 
 ```bash
 pip install pocketpaw && pocketpaw
