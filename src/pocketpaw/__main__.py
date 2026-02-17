@@ -365,7 +365,33 @@ def _check_extras_installed(args: argparse.Namespace) -> None:
     """
     missing: list[tuple[str, str, str]] = []  # (package, import_name, extra)
 
-    # Dashboard deps are now in core — no need to check for them.
+    # Core dependencies for all modes
+    if importlib.util.find_spec("rich") is None:
+        missing.append(("rich", "rich", "core"))
+    if importlib.util.find_spec("dotenv") is None:
+        missing.append(("python-dotenv", "dotenv", "core"))
+
+    # Dashboard dependencies for dashboard mode (--web or default)
+    dashboard_mode = (
+        getattr(args, "web", False)
+        or (
+            not getattr(args, "telegram", False)
+            and not getattr(args, "discord", False)
+            and not getattr(args, "slack", False)
+            and not getattr(args, "whatsapp", False)
+            and not getattr(args, "signal", False)
+            and not getattr(args, "matrix", False)
+            and not getattr(args, "teams", False)
+            and not getattr(args, "gchat", False)
+            and not getattr(args, "check_ollama", False)
+            and not getattr(args, "security_audit", False)
+        )
+    )
+    if dashboard_mode:
+        if importlib.util.find_spec("fastapi") is None:
+            missing.append(("fastapi", "fastapi", "dashboard"))
+        if importlib.util.find_spec("playwright") is None:
+            missing.append(("playwright", "playwright", "dashboard"))
 
     if args.telegram:
         if importlib.util.find_spec("telegram") is None:
@@ -515,3 +541,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+    # No code insertion needed here: main() is already called above.
