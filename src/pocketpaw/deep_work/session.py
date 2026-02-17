@@ -238,7 +238,7 @@ class DeepWorkSession:
             project.metadata["error"] = f"Planning failed: {str(e)}"
             await self.manager.update_project(project)
             self._broadcast_planning_complete(project)
-            return project
+            raise e
 
         # Update project with results
         project.status = ProjectStatus.AWAITING_APPROVAL
@@ -302,7 +302,6 @@ class DeepWorkSession:
 
         # Update and return project
         await self.manager.update_project(project)
-        return project
 
         # Notify user that plan is ready
         if self.human_router:
