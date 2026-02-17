@@ -1,79 +1,50 @@
 import sys
-from unittest.mock import patch
+from types import SimpleNamespace
 
-import pytest
-
-from pocketclaw.__main__ import _is_headless
+import pocketclaw.__main__ as main_module
 
 
-# -------------------------------------------
-# Helper: Host resolution logic replica
-# (matches logic inside main())
-# -------------------------------------------
-
-def resolve_host(args_host, settings_host, platform, headless):
-    """
-    Mimics the host resolution logic inside main().
-    """
-
-    if args_host is not None:
-        return args_host
-
-    if settings_host != "127.0.0.1":
-        return settings_host
-
-    if headless:
-        return "0.0.0.0"
-
-    return "127.0.0.1"
-
-
-# -------------------------------------------
-# TESTS
-# -------------------------------------------
-
-def test_windows_defaults_to_localhost():
-    """
-    On Windows (non-headless), host should default to 127.0.0.1
-    """
-
-    with patch.object(sys, "platform", "win32"):
-        host = resolve_host(
-            args_host=None,
-            settings_host="127.0.0.1",
-            platform="win32",
-            headless=False,
-        )
-
-        assert host == "127.0.0.1"
-
-
-def test_headless_linux_binds_all_interfaces():
-    """
-    On headless Linux, host should be 0.0.0.0
-    """
-
-    with patch.object(sys, "platform", "linux"):
-        host = resolve_host(
-            args_host=None,
-            settings_host="127.0.0.1",
-            platform="linux",
-            headless=True,
-        )
-
-        assert host == "0.0.0.0"
+class DummySettings:
+    def __init__(self, web_host="127.0.0.1"):
+        self.web_host = web_host
 
 
 def test_explicit_host_overrides_all():
-    """
-    If --host is provided, it must override everything.
-    """
+    args = SimpleNamespace(host="192.168.1.10")
+    settings = DummySettings()
 
-    host = resolve_host(
-        args_host="192.168.1.10",
-        settings_host="127.0.0.1",
-        platform="win32",
-        headless=False,
-    )
+    host = main_module._resolve_host(args, settings)
 
     assert host == "192.168.1.10"
+
+
+def test_config_host_used():
+    args = SimpleNamespace(host=None)
+    settings = DummySettings(web_host="192.168.1.20")
+
+    host = main_module._resolve_host(args, settings)
+
+    assert host == "192.168.1.20"
+
+
+def test_windows_defaults_to_localhost(monkeypatch):
+    args = SimpleNamespace(host=None)
+    settings = DummySettings()
+
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    host = main_module._resolve_host(args, settings)
+
+    assert host == "127.0.0.1"
+
+
+def test_headless_linux_binds_all_interfaces(monkeypatch):
+    args = SimpleNamespace(host=None)
+    settings = DummySettings()
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(main_module, "_is_headless", lambda: True)
+
+    host = main_module._resolve_host(args, settings)
+
+    assert host == "0.0.0.0"

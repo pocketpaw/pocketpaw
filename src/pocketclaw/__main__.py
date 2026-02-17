@@ -294,6 +294,25 @@ def _check_extras_installed(args: argparse.Namespace) -> None:
     print(f"\n  Install with:  pip install 'pocketpaw[{extras_str}]'\n")
     sys.exit(1)
 
+def _resolve_host(args, settings):
+    """Resolve host binding based on CLI args, config, and platform."""
+
+    if args.host is not None:
+        return args.host
+
+    if settings.web_host and settings.web_host != "127.0.0.1":
+        return settings.web_host
+
+    # Windows should NEVER auto-bind to 0.0.0.0
+    if sys.platform.startswith("win"):
+        return "127.0.0.1"
+
+    if _is_headless():
+        logger.info("Headless server detected — binding to 0.0.0.0")
+        return "0.0.0.0"
+
+    return "127.0.0.1"
+
 
 def main() -> None:
     """Main entry point."""
@@ -359,25 +378,7 @@ Examples:
 
     settings = get_settings()
 
-    # Resolve host: explicit flag > config > platform-safe auto-detect
-
-    if args.host is not None:
-        host = args.host
-
-    elif settings.web_host and settings.web_host != "127.0.0.1":
-        host = settings.web_host
-
-    else:
-        # Windows should NEVER auto-bind to 0.0.0.0
-        if sys.platform.startswith("win"):
-            host = "127.0.0.1"
-
-        elif _is_headless():
-            host = "0.0.0.0"
-            logger.info("Headless server detected — binding to 0.0.0.0")
-
-        else:
-            host = "127.0.0.1"
+    host = _resolve_host(args, settings)
 
 
     has_channel_flag = (
