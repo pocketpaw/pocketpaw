@@ -71,6 +71,27 @@ Follow these steps to install PocketPaw on Windows:
 6. The dashboard will open at:
    http://localhost:8888
 
+## Troubleshooting
+
+If you face issues during installation or running PocketPaw, try the following:
+
+1. Make sure Python 3.10 or higher is installed:
+   python --version
+
+2. If 'pocketpaw' command is not recognized:
+   - Restart your Command Prompt or PowerShell
+   - Run:
+     pip install --upgrade pocketpaw
+
+3. Make sure Python is added to PATH during installation.
+
+4. If the dashboard does not open automatically, open your browser and go to:
+   http://localhost:8888
+
+5. If installation fails, try upgrading pip:
+   python -m pip install --upgrade pip
+
+
 
 More install options
 PocketPaw will open the web dashboard...
