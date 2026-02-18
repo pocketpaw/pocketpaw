@@ -859,6 +859,7 @@ class PackageInstaller:
         return str(candidate) if candidate.exists() else sys.executable
 
     def install_playwright(self) -> bool:
+        """Install Playwright browsers."""
         py = self._uv_tool_python()
         # Check if playwright package is importable in the uv tool venv
         try:
@@ -869,7 +870,11 @@ class PackageInstaller:
                 console.print("[dim]  Playwright package missing — installing into venv...[/dim]")
             else:
                 print("  Playwright package missing — installing into venv...")
-            if not self._run_cmd([py, "-m", "pip", "install", "playwright"]):
+            if shutil.which("uv"):
+                install_cmd = [py, "-m", "uv", "pip", "install", "playwright"]
+            else:
+                install_cmd = [py, "-m", "pip", "install", "playwright"]
+            if not self._run_cmd(install_cmd):
                 return False
 
         # Install browser binaries
