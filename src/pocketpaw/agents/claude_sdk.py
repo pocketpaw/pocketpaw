@@ -185,6 +185,7 @@ class ClaudeAgentSDK:
         "Grep": "shell",  # search is shell-adjacent
         "WebSearch": "browser",
         "WebFetch": "browser",
+        "Skill": "skill",
     }
 
     def __init__(self, settings: Settings, executor: ExecutorProtocol | None = None):
@@ -754,6 +755,7 @@ class ClaudeAgentSDK:
                 "Grep",
                 "WebSearch",
                 "WebFetch",
+                "Skill",
             ]
             allowed_tools = [
                 t
@@ -778,9 +780,10 @@ class ClaudeAgentSDK:
             options_kwargs = {
                 "system_prompt": final_prompt,
                 "allowed_tools": allowed_tools,
+                "setting_sources": ["user", "project"],
                 "hooks": hooks,
                 "cwd": str(self._cwd),
-                "max_turns": 25,  # Safety net against runaway tool loops
+                "max_turns": self.settings.claude_sdk_max_turns,
             }
 
             # Configure LLM provider for the Claude CLI subprocess.
@@ -812,18 +815,19 @@ class ClaudeAgentSDK:
             if self.settings.bypass_permissions:
                 options_kwargs["permission_mode"] = "bypassPermissions"
 
-            # Smart model routing (opt-in, skip for Ollama — model already set)
-            if (
-                self.settings.smart_routing_enabled
-                and not llm.is_ollama
-                and not llm.is_openai_compatible
-                and not llm.is_gemini
-            ):
-                from pocketpaw.agents.model_router import ModelRouter
+            # Model selection for Anthropic providers:
+            # 1. Smart routing (opt-in) — overrides with complexity-based model
+            # 2. Explicit claude_sdk_model — user-chosen fixed model
+            # 3. Neither set — let Claude Code CLI auto-select (recommended)
+            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
+                if self.settings.smart_routing_enabled:
+                    from pocketpaw.agents.model_router import ModelRouter
 
-                model_router = ModelRouter(self.settings)
-                selection = model_router.classify(message)
-                options_kwargs["model"] = selection.model
+                    model_router = ModelRouter(self.settings)
+                    selection = model_router.classify(message)
+                    options_kwargs["model"] = selection.model
+                elif self.settings.claude_sdk_model:
+                    options_kwargs["model"] = self.settings.claude_sdk_model
 
             # Capture stderr for better error diagnostics
             _stderr_lines: list[str] = []

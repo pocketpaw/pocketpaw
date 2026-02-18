@@ -1,7 +1,10 @@
 <!--
   PocketPaw Dashboard - Sidebar Component
 
-  Updated: 2026-02-17
+  Updated: 2026-02-18
+  - Version footer: update available now links to health modal (doctor integration)
+
+  Previous: 2026-02-17
   - Added health indicator dot next to Beta badge (green/yellow/red pulsing)
   - Added Health button in Tools & Config grid
 
@@ -410,7 +413,7 @@
         <div class="text-[10px] text-white/30 font-mono">
           v<span x-text="appVersion || '...'"></span>
           <template x-if="updateAvailable">
-            <span class="text-amber-400 ml-1">
+            <span class="text-amber-400 ml-1 cursor-pointer" @click="openHealthPanel()">
               &rarr; <span x-text="latestVersion"></span> available
             </span>
           </template>
@@ -418,7 +421,7 @@
         <a href="https://github.com/pocketpaw/pocketpaw/releases"
            target="_blank" rel="noopener"
            class="text-[10px] text-white/20 hover:text-white/50 transition-colors">
-          Get release updates
+          Release notes
         </a>
       </div>
     </div>

@@ -14,8 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 def _get_skills_dir() -> Path:
-    """Get (and create) the PocketPaw skills directory."""
-    d = get_config_dir() / "skills"
+    """Get (and create) the user skills directory.
+
+    Writes to ``~/.claude/skills/`` — the standard location used by the
+    Claude Agent SDK for auto-discovery.  PocketPaw's SkillLoader also
+    scans this directory so skills are available in both systems.
+    """
+    d = Path.home() / ".claude" / "skills"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

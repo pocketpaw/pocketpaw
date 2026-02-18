@@ -420,7 +420,10 @@ class TestStartEdgeCases:
         assert "no tasks" in project.metadata.get("error", "").lower()
 
     @pytest.mark.asyncio
-    async def test_start_planner_exception(self, manager, mock_executor, mock_human_router):
+    @patch("pocketpaw.health.get_health_engine")
+    async def test_start_planner_exception(
+        self, mock_health, manager, mock_executor, mock_human_router
+    ):
         """Verify project fails when planner raises an exception."""
         planner = MagicMock()
         planner.plan = AsyncMock(side_effect=RuntimeError("LLM API error"))

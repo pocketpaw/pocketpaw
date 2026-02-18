@@ -27,6 +27,34 @@ export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"
 export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
+### Claude SDK Settings
+
+These settings apply specifically to the Claude Agent SDK backend:
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `claude_sdk_model` | `POCKETPAW_CLAUDE_SDK_MODEL` | `""` (auto) | Model override. Leave empty to let Claude Code auto-select the best model (recommended). |
+| `claude_sdk_max_turns` | `POCKETPAW_CLAUDE_SDK_MAX_TURNS` | `25` | Maximum tool-use turns per query. Safety net against runaway tool loops. |
+
+```bash
+# Let Claude Code auto-select the model (recommended — no override needed)
+export POCKETPAW_CLAUDE_SDK_MODEL=""
+
+# Or force a specific model
+export POCKETPAW_CLAUDE_SDK_MODEL="claude-sonnet-4-5-20250929"
+
+# Increase max turns for complex multi-step tasks
+export POCKETPAW_CLAUDE_SDK_MAX_TURNS=50
+```
+
+<Callout type="info">
+  **Why let Claude Code auto-select?** Claude Code has its own sophisticated model routing that picks the best model for each task. Setting an explicit model override disables this. Only override if you have a specific reason (e.g., cost control or testing).
+</Callout>
+
+<Callout type="warning">
+  **Smart Model Routing conflict:** PocketPaw's Smart Model Router (in Settings → Behavior) is disabled by default because it conflicts with Claude Code's built-in routing. Enabling it will override Claude Code's model selection, which may produce worse results.
+</Callout>
+
 ### Using with Ollama
 
 The Claude Agent SDK also works with local models via Ollama:
@@ -49,6 +77,7 @@ The Claude Agent SDK provides these tools natively:
 | `Read` | Read files from the filesystem |
 | `Write` | Write/create files |
 | `Edit` | Edit existing files with search/replace |
+| `Skill` | Execute skills from SKILL.md files |
 
 ### Tool Name Mapping
 
@@ -60,6 +89,7 @@ The SDK uses capitalized tool names internally. PocketPaw maps these to the poli
 | `Read` | `read_file` |
 | `Write` | `write_file` |
 | `Edit` | `edit_file` |
+| `Skill` | `skill` |
 
 This mapping is handled by `_SDK_TO_POLICY` in `claude_sdk.py`.
 
@@ -99,6 +129,15 @@ export POCKETPAW_TOOLS_DENY="group:mcp"
 ## Custom Tools
 
 In addition to the SDK's built-in tools, PocketPaw registers its own tools (web_search, image_gen, etc.) as custom tool definitions passed to the SDK.
+
+## Skill Auto-Discovery
+
+The backend passes `setting_sources=["user", "project"]` to the SDK, enabling automatic discovery of SKILL.md files from:
+
+- `~/.claude/skills/` — User-level skills
+- `.claude/skills/` — Project-level skills
+
+This means skills created by the `skill_gen` tool (which writes to `~/.claude/skills/`) are automatically available to the SDK without additional configuration.
 
 ## Response Format
 

@@ -1,0 +1,357 @@
+---
+title: Health Engine
+description: "PocketPaw's self-diagnostic system: validates configuration, tests LLM connectivity, logs persistent errors, and gives the agent tools to diagnose and fix problems itself."
+section: Core Concepts
+ogType: article
+keywords:
+  [
+    "health checks",
+    "diagnostics",
+    "error logging",
+    "self-healing",
+    "system status",
+    "config validation",
+  ]
+tags: ["architecture", "diagnostics", "health"]
+---
+
+# Health Engine
+
+The health engine gives PocketPaw self-awareness of its own system state. It validates configuration, tests LLM connectivity, persists errors to disk, and injects diagnostic context into the agent's system prompt so it can help users troubleshoot problems.
+
+## Overview
+
+Here's the problem the health engine solves: you start a Deep Work project, it fails halfway through because your API key expired, the error flashes as a toast notification, you miss it, and now there's no way to find out what went wrong. You ask the agent "what happened?" and it has no idea — the error vanished with the page refresh.
+
+The health engine fixes this by:
+
+1. **Running checks** on startup and every 5 minutes to catch config/connectivity issues early
+2. **Persisting every error** to an append-only log on disk that survives restarts
+3. **Injecting health state** into the agent's system prompt so it knows about problems before you ask
+4. **Giving the agent diagnostic tools** so it can look up errors and suggest fixes itself
+
+The entire health engine is **LLM-independent**. All checks are pure Python — no API calls to the LLM are needed. If the LLM is down, the health engine still works. The agent is a *consumer* of health state, not a producer.
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    HealthEngine                       │
+│                                                       │
+│  run_startup_checks()    run_connectivity_checks()   │
+│         │                         │                   │
+│         ▼                         ▼                   │
+│  ┌─────────────┐          ┌─────────────┐            │
+│  │  10 Startup  │          │ 1 Connectivity│           │
+│  │   Checks     │          │    Check      │           │
+│  │  (sync/fast) │          │  (async/5s)   │           │
+│  └──────┬──────┘          └──────┬──────┘            │
+│         │                         │                   │
+│         └───────────┬─────────────┘                   │
+│                     ▼                                 │
+│           ┌─────────────────┐                         │
+│           │ overall_status  │                         │
+│           │ healthy/degraded│                         │
+│           │ /unhealthy      │                         │
+│           └────────┬────────┘                         │
+│                    │                                  │
+│    ┌───────────────┼───────────────┐                  │
+│    ▼               ▼               ▼                  │
+│ Dashboard     System Prompt    ErrorStore             │
+│ Health Dot    Injection        (JSONL on disk)        │
+│ + Modal       (when degraded)                         │
+└──────────────────────────────────────────────────────┘
+```
+
+The `HealthEngine` class lives in `pocketpaw.health.engine` and is accessed as a singleton via `get_health_engine()`. It orchestrates all checks, computes overall status, delegates error storage to `ErrorStore`, and provides the prompt injection block.
+
+## Health Checks
+
+The engine runs 11 checks across three categories:
+
+### Startup Checks (sync, fast)
+
+These run synchronously at startup and during each heartbeat. They never block or make network calls.
+
+| Check ID | Name | Category | Severity | What it checks |
+| --- | --- | --- | --- | --- |
+| `config_exists` | Config File | config | warning | `~/.pocketpaw/config.json` exists |
+| `config_valid_json` | Config JSON Valid | config | critical | Config file parses as valid JSON |
+| `config_permissions` | Config Permissions | config | warning | File permissions are 600 (Unix only) |
+| `api_key_primary` | Primary API Key | config | critical | API key exists for the selected backend |
+| `api_key_format` | API Key Format | config | warning | API keys match expected prefix patterns (`sk-ant-` for Anthropic, `sk-` for OpenAI) |
+| `backend_deps` | Backend Dependencies | config | critical | Required Python packages are importable for the selected backend |
+| `secrets_encrypted` | Secrets Encrypted | config | warning | `secrets.enc` exists and contains a valid Fernet token |
+| `disk_space` | Disk Space | storage | warning | `~/.pocketpaw/` directory is under 500 MB |
+| `audit_log_writable` | Audit Log Writable | storage | warning | `audit.jsonl` can be opened for append |
+| `memory_dir_accessible` | Memory Directory | storage | warning | `~/.pocketpaw/memory/` exists and is a directory |
+
+### Connectivity Checks (async, background)
+
+These make network calls and can be slow (5-second timeout).
+
+| Check ID | Name | Category | Severity | What it checks |
+| --- | --- | --- | --- | --- |
+| `llm_reachable` | LLM Reachable | connectivity | critical | LLM API responds (Anthropic: hits `/v1/models`; Ollama: hits `/api/tags`) |
+
+Each check returns a `HealthCheckResult` dataclass with `check_id`, `name`, `category`, `status` (ok/warning/critical), `message`, `fix_hint`, and `timestamp`.
+
+## Status Computation
+
+The engine computes `overall_status` from individual check results using a simple priority rule:
+
+```python
+if any check has status "critical":
+    overall_status = "unhealthy"
+elif any check has status "warning":
+    overall_status = "degraded"
+else:
+    overall_status = "healthy"
+```
+
+Three possible states:
+
+| Status | Meaning | Dashboard indicator | Prompt injection |
+| --- | --- | --- | --- |
+| **healthy** | All checks passed | Green dot | None (saves context window) |
+| **degraded** | At least one warning, no criticals | Yellow dot | Issues injected into system prompt |
+| **unhealthy** | At least one critical failure | Red dot | Issues injected into system prompt |
+
+<Callout type="info">
+When the system is healthy, the health engine adds **nothing** to the system prompt. This is intentional — it preserves context window space for actual conversation.
+</Callout>
+
+## Persistent Error Log
+
+The `ErrorStore` persists errors to `~/.pocketpaw/health/errors.jsonl` as append-only JSONL. Errors survive page refresh, browser close, and server restart.
+
+### Error entry format
+
+Each line is a JSON object:
+
+```json
+{
+  "id": "a1b2c3d4e5f6",
+  "timestamp": "2025-03-15T10:30:00+00:00",
+  "source": "agent_loop",
+  "severity": "error",
+  "message": "Anthropic API returned 401: Invalid API key",
+  "traceback": "Traceback (most recent call last):\n  ...",
+  "context": { "session_id": "abc123", "backend": "claude_agent_sdk" }
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | 12-char hex UUID (e.g. `a1b2c3d4e5f6`) |
+| `timestamp` | string | ISO 8601 UTC timestamp |
+| `source` | string | Where the error originated (e.g. `agent_loop`, `deep_work`, `tool_execution`) |
+| `severity` | string | `error` or `warning` |
+| `message` | string | Human-readable error description |
+| `traceback` | string | Python traceback (if available) |
+| `context` | object | Additional metadata (session ID, backend, tool name, etc.) |
+
+### Rotation
+
+When `errors.jsonl` exceeds 10 MB, the store rotates:
+
+- `errors.jsonl` → `errors.jsonl.1`
+- `errors.jsonl.1` → `errors.jsonl.2`
+- ... up to `errors.jsonl.5` (oldest gets deleted)
+
+This keeps disk usage bounded without losing recent history.
+
+## Agent Diagnostic Tools
+
+The health engine registers three tools that the agent can use to diagnose problems:
+
+| Tool | Description | Parameters |
+| --- | --- | --- |
+| `health_check` | Run system health diagnostics. Returns check results with status and fix hints. | `include_connectivity` (bool, default: false) — also run connectivity checks (slower) |
+| `error_log` | Read recent errors from the persistent error log. | `limit` (int, default: 10) — max errors to return; `search` (string) — filter by text |
+| `config_doctor` | Validate configuration with playbook-backed diagnosis. Returns a report with symptoms, causes, and fix steps. | `section` (string) — focus area: `api_keys`, `backend`, `storage`, or empty for all |
+
+### Self-diagnosis flow
+
+When a user says "something went wrong" or "why did that fail?", the agent can:
+
+1. Call `health_check` to see if any checks are failing
+2. Call `error_log` to find the specific error with traceback
+3. Call `config_doctor` to get playbook-backed fix suggestions
+4. Explain the problem and suggest concrete steps to resolve it
+
+```
+User: "My Deep Work project failed and I don't know why"
+
+Agent: [calls health_check] → sees "LLM Reachable: critical"
+Agent: [calls error_log(search="deep_work")] → finds the specific API timeout
+Agent: "Your Anthropic API key appears to be invalid. The health check shows
+        the API returned a 401 error. Go to Settings > API Keys and paste
+        a fresh key, then retry your Deep Work project."
+```
+
+<Callout type="info">
+The agent doesn't need to be told about these tools — they're automatically registered in the tool registry alongside all other built-in tools.
+</Callout>
+
+## System Prompt Injection
+
+When the system is **degraded** or **unhealthy**, the health engine injects a block into the agent's system prompt via the `AgentContextBuilder`. This happens in `bootstrap/context_builder.py`:
+
+```python
+from pocketpaw.health import get_health_engine
+
+health_block = get_health_engine().get_health_prompt_section()
+if health_block:
+    parts.append(health_block)
+```
+
+The injected block looks like:
+
+```
+# System Health Status
+System is currently: DEGRADED
+
+Known issues:
+- [WARNING] Config Permissions: Config file permissions too open: 0o644 (should be 600)
+  Fix: Run: chmod 600 ~/.pocketpaw/config.json
+- [CRITICAL] LLM Reachable: Cannot reach Anthropic API: Connection timed out
+  Fix: Check your internet connection or https://status.anthropic.com
+
+If the user reports problems, check these issues first.
+Use the `health_check` tool for diagnostics and `error_log` for recent errors.
+```
+
+This means the agent is pre-loaded with knowledge of system problems before the user even asks. When healthy, nothing is injected — zero context window overhead.
+
+<Callout type="warning">
+The prompt injection is wrapped in a try-except that silently catches all errors. Health engine failures never break prompt building or block the agent from starting.
+</Callout>
+
+## Repair Playbooks
+
+Playbooks are pure data mappings from `check_id` to diagnostic information. They live in `pocketpaw.health.playbooks` and are used by the `config_doctor` tool and the dashboard health modal.
+
+Each playbook contains:
+
+| Field | Description |
+| --- | --- |
+| `symptom` | What the user experiences (e.g. "Agent fails to respond or returns authentication errors") |
+| `causes` | List of possible root causes |
+| `fix_steps` | Ordered list of steps to resolve the issue |
+| `auto_fixable` | Whether the system can fix this automatically (currently only `config_permissions`) |
+
+Playbooks exist for: `api_key_primary`, `llm_reachable`, `config_valid_json`, `backend_deps`, `disk_space`, `config_permissions`, and `secrets_encrypted`.
+
+Example playbook:
+
+```python
+"llm_reachable": {
+    "symptom": "Agent times out or returns network errors",
+    "causes": [
+        "Internet connection is down",
+        "Anthropic API is experiencing an outage",
+        "Firewall or proxy blocking API requests",
+        "Ollama is not running (if using ollama backend)",
+    ],
+    "fix_steps": [
+        "Check your internet connection",
+        "Visit https://status.anthropic.com for API status",
+        "If using Ollama: run 'ollama serve' in a terminal",
+        "Check if a firewall/VPN is blocking api.anthropic.com",
+    ],
+    "auto_fixable": False,
+}
+```
+
+## Dashboard UI
+
+### Health dot
+
+The sidebar displays a small colored dot next to the PocketPaw logo:
+
+- **Green** — healthy (all checks pass)
+- **Yellow** — degraded (warnings present)
+- **Red** — unhealthy (critical failures)
+
+### Health modal
+
+Clicking the health dot opens a modal showing:
+
+1. Overall status with a colored badge
+2. List of all check results with status icons
+3. For failing checks: the error message and fix hint
+4. A **Fix Issues** button that opens relevant settings (e.g. API Keys if the key is missing)
+
+### WebSocket updates
+
+Health status changes are broadcast to all connected WebSocket clients as:
+
+```json
+{
+  "type": "health_update",
+  "data": {
+    "status": "degraded",
+    "check_count": 11,
+    "issues": [...],
+    "last_check": "2025-03-15T10:30:00+00:00"
+  }
+}
+```
+
+The dashboard listens for `health_update` messages and updates the dot color and modal content in real time — no polling needed.
+
+## Configuration
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `health_check_on_startup` | `true` | Run startup checks when PocketPaw launches and print a colored summary to the terminal |
+
+When enabled, you'll see output like this on startup:
+
+```
+  [OK]   Config File: Config file exists at /home/user/.pocketpaw/config.json
+  [OK]   Config JSON Valid: Config file is valid JSON
+  [WARN] Config Permissions: Config file permissions too open: 0o644 (should be 600)
+         Run: chmod 600 ~/.pocketpaw/config.json
+  [OK]   Primary API Key: Anthropic API key is configured
+  [OK]   API Key Format: API key formats look correct
+  [OK]   Backend Dependencies: All dependencies available for claude_agent_sdk
+  [OK]   Secrets Encrypted: Encrypted secrets file is valid (256 bytes)
+  [OK]   Disk Space: Data directory: 12.3 MB
+  [OK]   Audit Log Writable: Audit log is writable
+  [OK]   Memory Directory: Memory directory is accessible
+
+  System: DEGRADED
+```
+
+## Heartbeat
+
+The health engine registers a background job via APScheduler that runs every 5 minutes:
+
+1. Runs all startup checks (sync)
+2. Runs connectivity checks (async, 5-second timeout)
+3. Compares the new `overall_status` against the previous status
+4. If the status changed (e.g. `healthy` → `degraded`), broadcasts a `health_update` to all WebSocket clients
+5. Logs status transitions to the server log
+
+The heartbeat reuses the existing APScheduler instance from the ProactiveDaemon — no additional scheduler process is created.
+
+<Callout type="info">
+The heartbeat only broadcasts on **status transitions**, not every 5 minutes. If the system stays healthy, no WebSocket messages are sent. This avoids unnecessary network traffic and UI updates.
+</Callout>
+
+## REST API
+
+The health engine exposes 4 REST endpoints. See the [API Reference](/api) for full details:
+
+- [`GET /api/health`](/api/get-health-status) — Get current health status summary
+- [`GET /api/health/errors`](/api/get-health-errors) — Query the persistent error log
+- [`POST /api/health/check`](/api/run-health-check) — Trigger a full health check run
+- [`DELETE /api/health/errors`](/api/clear-health-errors) — Clear the persistent error log
+
+## Related
+
+- [Agent Loop](/concepts/agent-loop) — How the agent processes messages and uses diagnostic tools
+- [Security Model](/concepts/security-model) — Guardian AI, audit logging, and the security layer
+- [API Reference](/api) — Full REST endpoint documentation

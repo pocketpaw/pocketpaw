@@ -36,6 +36,9 @@ else
     exit 1
 fi
 
+INSTALLER_URL="${POCKETPAW_INSTALLER_URL:-https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py}"
+FALLBACK_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/dev/installer/installer.py"
+
 # ── ensure_uv() — install uv if not present ────────────────────────────
 UV_AVAILABLE=0
 
@@ -64,9 +67,18 @@ ensure_uv() {
 find_python() {
     for cmd in python3 python3.13 python3.12 python3.11 python; do
         if command -v "$cmd" >/dev/null 2>&1; then
-            ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
-            major=$(echo "$ver" | cut -d. -f1)
-            minor=$(echo "$ver" | cut -d. -f2)
+            # Using a marker helps filter out stray warning messages (e.g. from sitecustomize.py)
+            ver=$("$cmd" -c "import sys; print(f'__PPTVER__{sys.version_info.major}.{sys.version_info.minor}__END__')" 2>/dev/null || echo "0.0")
+            
+            # Extract the version string between markers
+            clean_ver=$(echo "$ver" | grep -o "__PPTVER__[0-9]\+\.[0-9]\+__END__" | sed 's/__PPTVER__//;s/__END__//')
+            
+            if [ -z "$clean_ver" ]; then
+                continue
+            fi
+            
+            major=$(echo "$clean_ver" | cut -d. -f1)
+            minor=$(echo "$clean_ver" | cut -d. -f2)
             if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
                 PYTHON="$cmd"
                 return 0
@@ -208,7 +220,7 @@ else
     INSTALLER="$TMPDIR/pocketpaw_installer.py"
     NEED_CLEANUP=1
 
-    INSTALLER_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py"
+    INSTALLER_URL="${POCKETPAW_INSTALLER_URL:-https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py}"
 
     if command -v curl >/dev/null 2>&1; then
         DOWNLOAD="curl -fsSL"

@@ -149,6 +149,11 @@
             "icon": "lucide:repeat"
           },
           {
+            "label": "Health Engine",
+            "href": "/concepts/health-engine",
+            "icon": "lucide:activity"
+          },
+          {
             "label": "Memory System",
             "href": "/concepts/memory-system",
             "icon": "lucide:brain"
@@ -535,7 +540,8 @@
               { "label": "Toggle MCP Server", "href": "/api/post-mcp-toggle", "method": "POST" },
               { "label": "Test MCP Server", "href": "/api/post-mcp-test", "method": "POST" },
               { "label": "List MCP Presets", "href": "/api/get-mcp-presets", "method": "GET" },
-              { "label": "Install MCP Preset", "href": "/api/post-mcp-preset-install", "method": "POST" }
+              { "label": "Install MCP Preset", "href": "/api/post-mcp-preset-install", "method": "POST" },
+              { "label": "MCP OAuth Callback", "href": "/api/get-mcp-oauth-callback", "method": "GET" }
             ]
           },
           {
@@ -585,6 +591,15 @@
               { "label": "Pause Project", "href": "/api/post-deep-work-pause", "method": "POST" },
               { "label": "Resume Project", "href": "/api/post-deep-work-resume", "method": "POST" },
               { "label": "Skip Task", "href": "/api/post-deep-work-skip-task", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Health",
+            "items": [
+              { "label": "Get Health Status", "href": "/api/get-health-status", "method": "GET" },
+              { "label": "Get Health Errors", "href": "/api/get-health-errors", "method": "GET" },
+              { "label": "Run Health Check", "href": "/api/run-health-check", "method": "POST" },
+              { "label": "Clear Health Errors", "href": "/api/clear-health-errors", "method": "DELETE" }
             ]
           },
           {

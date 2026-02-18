@@ -188,6 +188,8 @@ class PocketPawSocket {
     saveSettings(settings) {
         this.send('settings', {
             agent_backend: settings.agentBackend,
+            claude_sdk_model: settings.claudeSdkModel,
+            claude_sdk_max_turns: parseInt(settings.claudeSdkMaxTurns) || 25,
             llm_provider: settings.llmProvider,
             ollama_host: settings.ollamaHost,
             ollama_model: settings.ollamaModel,

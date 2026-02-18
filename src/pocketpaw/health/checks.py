@@ -1,5 +1,6 @@
 # Health check functions — pure Python, no LLM.
 # Created: 2026-02-17
+# Updated: 2026-02-18 — added check_version_update (PyPI version check via update_check module).
 # Updated: 2026-02-17 — fix check_secrets_encrypted: was doing json.loads() on
 #   Fernet-encrypted bytes (always fails). Now checks for Fernet token signature.
 # Each check returns a HealthCheckResult dataclass.
@@ -654,6 +655,63 @@ async def check_llm_reachable() -> HealthCheckResult:
 
 
 # =============================================================================
+# Update checks (sync, uses cached PyPI data — 2s timeout max)
+# =============================================================================
+
+
+def check_version_update() -> HealthCheckResult:
+    """Check if a newer version of PocketPaw is available on PyPI."""
+    try:
+        from importlib.metadata import version as get_version
+
+        from pocketpaw.config import get_config_dir
+        from pocketpaw.update_check import check_for_updates
+
+        current = get_version("pocketpaw")
+        config_dir = get_config_dir()
+        info = check_for_updates(current, config_dir)
+
+        if info is None:
+            return HealthCheckResult(
+                check_id="version_update",
+                name="Version Update",
+                category="updates",
+                status="ok",
+                message=f"Running v{current} (update check unavailable)",
+                fix_hint="",
+            )
+
+        if info.get("update_available"):
+            latest = info["latest"]
+            return HealthCheckResult(
+                check_id="version_update",
+                name="Version Update",
+                category="updates",
+                status="warning",
+                message=f"Update available: v{current} \u2192 v{latest}",
+                fix_hint=f"Run: pip install --upgrade pocketpaw  |  Changelog: github.com/pocketpaw/pocketpaw/releases/tag/v{latest}",
+            )
+
+        return HealthCheckResult(
+            check_id="version_update",
+            name="Version Update",
+            category="updates",
+            status="ok",
+            message=f"Running v{current} (latest)",
+            fix_hint="",
+        )
+    except Exception as e:
+        return HealthCheckResult(
+            check_id="version_update",
+            name="Version Update",
+            category="updates",
+            status="ok",
+            message=f"Could not check version: {e}",
+            fix_hint="",
+        )
+
+
+# =============================================================================
 # Check registry
 # =============================================================================
 
@@ -669,6 +727,7 @@ STARTUP_CHECKS = [
     check_disk_space,
     check_audit_log_writable,
     check_memory_dir_accessible,
+    check_version_update,
 ]
 
 # Async checks (run in background, may be slow)

@@ -71,6 +71,8 @@ function app() {
         // Settings
         settings: {
             agentBackend: 'claude_agent_sdk',
+            claudeSdkModel: '',
+            claudeSdkMaxTurns: 25,
             llmProvider: 'auto',
             ollamaHost: 'http://localhost:11434',
             ollamaModel: 'llama3.2',
@@ -434,7 +436,8 @@ function app() {
 
             // Data-driven settings sync: map server keys to local settings
             const SETTINGS_MAP = [
-                'agentBackend', 'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
+                'agentBackend', 'claudeSdkModel', 'claudeSdkMaxTurns',
+                'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
                 'geminiModel',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',

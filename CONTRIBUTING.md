@@ -43,6 +43,9 @@ We welcome contributions of all kinds: bug fixes, new tools, channel adapters, d
 # Run the app (web dashboard)
 uv run pocketpaw
 
+# Run with auto-reload (watches *.py, *.html, *.js, *.css)
+uv run pocketpaw --dev
+
 # Run tests (skip e2e, they need Playwright browsers)
 uv run pytest --ignore=tests/e2e
 

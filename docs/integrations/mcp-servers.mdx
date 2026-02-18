@@ -1,15 +1,15 @@
 ---
 title: MCP Servers
-description: "Extend PocketPaw with Model Context Protocol (MCP) servers for unlimited tool expansion. Add servers via stdio or HTTP transport, manage from the dashboard, and use preset templates for quick setup."
+description: "Extend PocketPaw with Model Context Protocol (MCP) servers for unlimited tool expansion. Add servers via stdio, HTTP, or SSE transport with optional OAuth authentication. Install from 55+ presets or configure custom servers."
 section: Integrations
 ogType: article
-keywords: ["mcp servers", "model context protocol", "tool extension", "stdio transport", "mcp presets"]
+keywords: ["mcp servers", "model context protocol", "tool extension", "stdio transport", "mcp presets", "mcp oauth"]
 tags: ["integrations", "mcp"]
 ---
 
 # MCP Servers
 
-PocketPaw has first-class support for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Connect any MCP server to extend your agent's capabilities.
+PocketPaw has first-class support for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Connect any MCP server to extend your agent's capabilities — including remote servers that use OAuth authentication.
 
 ## What is MCP?
 
@@ -28,16 +28,13 @@ MCP servers are configured in `~/.pocketpaw/mcp.json`:
       "transport": "stdio"
     },
     "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_TOKEN": "ghp_..."
-      },
-      "transport": "stdio"
+      "url": "https://api.githubcopilot.com/mcp/",
+      "transport": "http",
+      "oauth": true
     },
     "remote-api": {
       "url": "http://localhost:3000/mcp",
-      "transport": "http"
+      "transport": "streamable-http"
     }
   }
 }
@@ -47,7 +44,7 @@ MCP servers are configured in `~/.pocketpaw/mcp.json`:
 
 ### stdio
 
-The most common transport. PocketPaw spawns the MCP server as a subprocess and communicates via stdin/stdout:
+The most common transport for local servers. PocketPaw spawns the MCP server as a subprocess and communicates via stdin/stdout:
 
 ```json
 {
@@ -57,16 +54,128 @@ The most common transport. PocketPaw spawns the MCP server as a subprocess and c
 }
 ```
 
-### HTTP
+### http (auto-detect)
 
-For remote MCP servers accessible via HTTP:
+For remote MCP servers. PocketPaw tries **Streamable HTTP** first, then falls back to **SSE** automatically:
 
 ```json
 {
-  "url": "http://localhost:3000/mcp",
+  "url": "https://example.com/mcp",
   "transport": "http"
 }
 ```
+
+This is the recommended transport for remote servers when you're unsure which protocol they support.
+
+### streamable-http
+
+Explicitly use the Streamable HTTP transport (modern MCP servers):
+
+```json
+{
+  "url": "https://example.com/mcp",
+  "transport": "streamable-http"
+}
+```
+
+### sse
+
+Explicitly use the SSE (Server-Sent Events) transport (older MCP servers):
+
+```json
+{
+  "url": "https://example.com/mcp/sse",
+  "transport": "sse"
+}
+```
+
+## OAuth Authentication
+
+Remote MCP servers (like GitHub, Notion, Linear) can use OAuth 2.1 for authentication. When a server requires OAuth:
+
+1. Set `"oauth": true` in the server config (presets do this automatically)
+2. On first connection, PocketPaw opens a browser popup for authentication
+3. After authorization, tokens are stored in `~/.pocketpaw/mcp_oauth/{server_name}.json`
+4. Tokens are refreshed automatically on subsequent connections
+
+### How It Works
+
+PocketPaw implements the full OAuth 2.1 flow:
+
+- **Metadata discovery** — automatically finds the server's OAuth endpoints
+- **PKCE** — uses Proof Key for Code Exchange for security
+- **Dynamic client registration** — registers as an OAuth client automatically
+- **CIMD fallback** — if a server supports Client ID Metadata Documents, PocketPaw can use a pre-configured client URL instead of dynamic registration
+- **Token persistence** — tokens are saved to disk (chmod 0600) and reused across restarts
+
+### CIMD (Client ID Metadata Document)
+
+The OAuth 2.1 specification for MCP supports two ways for a client to identify itself:
+
+1. **Dynamic client registration** — the client registers itself automatically with the OAuth server on first use. This is the simplest approach but not all servers support it.
+2. **CIMD** — the client publishes a JSON metadata document at a public URL, and uses that URL as its `client_id`. The OAuth server fetches the CIMD to verify the client's identity and redirect URIs.
+
+#### Why GitHub MCP Needs CIMD
+
+GitHub's MCP server (`https://api.githubcopilot.com/mcp/`) does **not** support dynamic client registration. When PocketPaw tries to register as an OAuth client, GitHub rejects the request with a "Registration failed" error.
+
+The solution is CIMD: you host a small JSON file at a publicly accessible URL, and PocketPaw uses that URL as its `client_id` instead of attempting dynamic registration. GitHub then fetches the CIMD to validate the redirect URIs before initiating the OAuth flow.
+
+#### Setting Up CIMD
+
+1. Host a CIMD JSON file at a public URL. The file should look like:
+
+```json
+{
+  "client_name": "PocketPaw",
+  "redirect_uris": [
+    "http://localhost:8888/api/mcp/oauth/callback",
+    "http://127.0.0.1:8888/api/mcp/oauth/callback"
+  ],
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "client_uri": "https://github.com/pocketpaw/pocketpaw",
+  "software_id": "pocketpaw",
+  "software_version": "0.4.1"
+}
+```
+
+<Callout type="info">
+  A sample file is included at `docs/public/mcp-client.json`. If you deploy the PocketPaw docs site, this file is already publicly accessible.
+</Callout>
+
+2. Set the URL in PocketPaw's config:
+
+```bash
+export POCKETPAW_MCP_CLIENT_METADATA_URL="https://docs.pocketpaw.xyz/mcp-client.json"
+```
+
+Or set it in `~/.pocketpaw/config.json`:
+
+```json
+{
+  "mcp_client_metadata_url": "https://docs.pocketpaw.xyz/mcp-client.json"
+}
+```
+
+3. The `redirect_uris` in the CIMD must match your PocketPaw dashboard URL. If you run on a different port, update the CIMD accordingly.
+
+<Callout type="warning">
+  OAuth servers get a 300-second connection timeout (vs 30s for non-OAuth) to allow time for the browser authentication flow.
+</Callout>
+
+## Preset Catalog
+
+PocketPaw includes 55+ pre-configured server templates that can be installed from the dashboard with a single click. Presets cover:
+
+- **Developer tools** — GitHub, GitLab, Linear, Sentry
+- **Productivity** — Notion, Slack, Google Drive, Obsidian
+- **Data & Search** — PostgreSQL, Brave Search, Exa
+- **DevOps** — Kubernetes, Docker, Cloudflare
+- **And more** — Figma, Stripe, Spotify, Todoist
+
+Presets that use OAuth are marked with an `oauth` flag and handle authentication automatically.
 
 ## Backend Integration
 
@@ -83,19 +192,23 @@ The native backend loads MCP tools via `_get_mcp_tools()` and registers them wit
 The web dashboard provides a visual interface for managing MCP servers:
 
 1. Open the MCP modal from the sidebar
-2. Add new servers with command, args, and environment variables
-3. Toggle individual servers on/off
-4. View discovered tools from each server
+2. Browse the preset catalog or add custom servers
+3. For OAuth servers, a browser popup handles authentication
+4. Toggle individual servers on/off
+5. View discovered tools from each server
 
 ### REST API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/mcp/servers` | GET | List configured servers |
-| `/api/mcp/servers` | POST | Add a new server |
-| `/api/mcp/servers/{name}` | PUT | Update a server |
-| `/api/mcp/servers/{name}` | DELETE | Remove a server |
-| `/api/mcp/servers/{name}/toggle` | POST | Enable/disable a server |
+| `/api/mcp/status` | GET | Server status and tools |
+| `/api/mcp/add` | POST | Add a new server |
+| `/api/mcp/remove` | POST | Remove a server |
+| `/api/mcp/toggle` | POST | Enable/disable a server |
+| `/api/mcp/test` | POST | Test server connection |
+| `/api/mcp/presets` | GET | List preset templates |
+| `/api/mcp/presets/install` | POST | Install from preset |
+| `/api/mcp/oauth/callback` | GET | OAuth redirect callback |
 
 ## Tool Policy
 
@@ -112,15 +225,13 @@ export POCKETPAW_TOOLS_ALLOW="mcp:filesystem:*"
 export POCKETPAW_TOOLS_DENY="mcp:github:delete_repo"
 ```
 
-## Popular MCP Servers
+## Error Handling
 
-| Server | Package | Description |
-|--------|---------|-------------|
-| Filesystem | `@modelcontextprotocol/server-filesystem` | File read/write/search |
-| GitHub | `@modelcontextprotocol/server-github` | Issues, PRs, repos |
-| PostgreSQL | `@modelcontextprotocol/server-postgres` | Database queries |
-| Brave Search | `@modelcontextprotocol/server-brave-search` | Web search |
-| Puppeteer | `@modelcontextprotocol/server-puppeteer` | Browser automation |
+PocketPaw provides actionable error messages for MCP server failures:
+
+- **ExceptionGroup unwrapping** — the MCP library wraps errors in anyio cancel-scope exceptions; PocketPaw walks the exception tree to surface the root cause
+- **OAuth registration failures** — if dynamic client registration fails, the error message suggests configuring `mcp_client_metadata_url` or using an API token instead
+- **Timeout handling** — clear messages distinguish connection timeouts from OAuth flow timeouts
 
 <Callout type="info">
   MCP is an open ecosystem. Browse available servers at [modelcontextprotocol.io/servers](https://modelcontextprotocol.io).
