@@ -770,6 +770,7 @@ class PackageInstaller:
     def __init__(self, pip_cmd: str, from_git: bool = False) -> None:
         self.pip_cmd = pip_cmd
         self.from_git = from_git
+        self.used_uv_tool = False  # Track if uv tool install was used
 
     def _build_pkg_spec(self, extras: list[str]) -> str:
         """Build the package specifier, optionally pointing at git."""
@@ -786,6 +787,7 @@ class PackageInstaller:
         if shutil.which("uv"):
             ok = self._install_with_uv_tool(pkg, extras, upgrade)
             if ok:
+                self.used_uv_tool = True  # Track that uv tool was used
                 return True
 
         # Fallback: pip-style install
@@ -839,12 +841,19 @@ class PackageInstaller:
 
     def install_playwright(self) -> bool:
         """Install Playwright browsers."""
+        # When using uv tool install, the package is in an isolated environment.
+        # Use 'uv run' to execute playwright in that environment.
+        if self.used_uv_tool and shutil.which("uv"):
+            cmd = ["uv", "run", "--with", f"{PACKAGE}[browser]", "playwright", "install", "chromium"]
+        else:
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+
         if _HAS_RICH and console:
             with console.status("[bold cyan]Installing Playwright browsers...[/bold cyan]"):
-                return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+                return self._run_cmd(cmd)
         else:
             print("  Installing Playwright browsers...")
-            return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+            return self._run_cmd(cmd)
 
     def _run_cmd(self, cmd: list[str]) -> bool:
         """Run a command, return True on success."""
