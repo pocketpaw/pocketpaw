@@ -69,10 +69,10 @@ find_python() {
         if command -v "$cmd" >/dev/null 2>&1; then
             # Using a marker helps filter out stray warning messages (e.g. from sitecustomize.py)
             ver=$("$cmd" -c "import sys; print(f'__PPTVER__{sys.version_info.major}.{sys.version_info.minor}__END__')" 2>/dev/null || echo "0.0")
-            
-            # Extract the version string between markers
-            clean_ver=$(echo "$ver" | grep -o "__PPTVER__[0-9]\+\.[0-9]\+__END__" | sed 's/__PPTVER__//;s/__END__//')
-            
+
+            # Extract the version string between markers (tail -1 ensures we get the last line, ignoring any preceding warnings)
+            clean_ver=$(echo "$ver" | tail -1 | grep -o "__PPTVER__[0-9]\+\.[0-9]\+__END__" | sed 's/__PPTVER__//;s/__END__//')
+
             if [ -z "$clean_ver" ]; then
                 continue
             fi
