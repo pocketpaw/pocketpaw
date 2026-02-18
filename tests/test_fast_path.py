@@ -44,6 +44,9 @@ def _make_settings(**overrides):
         "ollama_model": "",
         "ollama_host": "http://localhost:11434",
         "bypass_permissions": False,
+        "claude_sdk_max_turns": 0,
+        "claude_sdk_model": "",
+        "max_budget_usd": None,
     }
     defaults.update(overrides)
     mock = MagicMock()

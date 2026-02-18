@@ -51,18 +51,23 @@ def _extract_generated_paths(text: str) -> list[str]:
     return _GENERATED_PATH_RE.findall(text)
 
 
-async def _iter_with_timeout(aiter, first_timeout=30, timeout=120):
+async def _iter_with_timeout(aiter, first_timeout=30, inter_timeout=120):
     """Yield items from an async iterator with per-item timeouts.
 
     Uses a shorter timeout for the first item (to detect dead/hung backends
     quickly) and a longer timeout for subsequent items (to allow for tool
     execution, file operations, etc.).
+
+    Args:
+        aiter: Async iterator to consume.
+        first_timeout: Seconds to wait for the first event.
+        inter_timeout: Seconds to wait between subsequent events.
     """
     ait = aiter.__aiter__()
     first = True
     while True:
         try:
-            t = first_timeout if first else timeout
+            t = first_timeout if first else inter_timeout
             yield await asyncio.wait_for(ait.__anext__(), timeout=t)
             first = False
         except StopAsyncIteration:
@@ -271,11 +276,20 @@ class AgentLoop:
             media_paths: list[str] = []
 
             run_iter = router.run(content, system_prompt=system_prompt, history=history)
-            # External endpoints (OpenAI-compatible, Ollama) may need longer
-            # for the first response — especially thinking/reasoning models.
-            ft = 120 if self.settings.llm_provider == "openai_compatible" else 30
+            # First-response timeout: how long to wait for the agent backend
+            # to yield its first event before declaring it dead.
+            # Claude SDK needs 300s — tool chains (search, fetch, summarize)
+            # execute inside the subprocess before yielding any events.
+            # OpenAI-compatible/Ollama need 120s for thinking models.
+            # Native backend only needs 30s (streams immediately).
+            if self.settings.agent_backend == "claude_agent_sdk":
+                ft, it = 300, 300
+            elif self.settings.llm_provider == "openai_compatible":
+                ft, it = 120, 120
+            else:
+                ft, it = 30, 120
             try:
-                async for chunk in _iter_with_timeout(run_iter, first_timeout=ft):
+                async for chunk in _iter_with_timeout(run_iter, first_timeout=ft, inter_timeout=it):
                     chunk_type = chunk.get("type", "")
                     content = chunk.get("content", "")
                     metadata = chunk.get("metadata") or {}
@@ -461,7 +475,13 @@ class AgentLoop:
                     t.add_done_callback(self._background_tasks.discard)
 
         except TimeoutError:
-            logger.error("Agent backend timed out")
+            logger.error(
+                "Agent backend timed out (backend=%s, first_timeout=%ss, "
+                "inter_timeout=%ss, bypass_permissions=%s, got_events=%s)",
+                self.settings.agent_backend, ft, it,
+                self.settings.bypass_permissions,
+                bool(full_response),
+            )
             # Record to persistent health error log
             try:
                 from pocketpaw.health import get_health_engine

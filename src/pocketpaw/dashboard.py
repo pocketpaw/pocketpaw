@@ -2289,6 +2289,12 @@ async def websocket_endpoint(
                         settings.model_tier_moderate = data["model_tier_moderate"]
                     if data.get("model_tier_complex"):
                         settings.model_tier_complex = data["model_tier_complex"]
+                    if "max_agent_turns" in data:
+                        val = data["max_agent_turns"]
+                        settings.claude_sdk_max_turns = int(val) if val else 0
+                    if "max_budget_usd" in data:
+                        val = data["max_budget_usd"]
+                        settings.max_budget_usd = float(val) if val else None
                     if data.get("tts_provider"):
                         settings.tts_provider = data["tts_provider"]
                     if "tts_voice" in data:
@@ -2479,6 +2485,8 @@ async def websocket_endpoint(
                             "modelTierSimple": settings.model_tier_simple,
                             "modelTierModerate": settings.model_tier_moderate,
                             "modelTierComplex": settings.model_tier_complex,
+                            "maxAgentTurns": settings.claude_sdk_max_turns,
+                            "maxBudgetUsd": settings.max_budget_usd or 0,
                             "ttsProvider": settings.tts_provider,
                             "ttsVoice": settings.tts_voice,
                             "sttProvider": settings.stt_provider,

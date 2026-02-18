@@ -115,13 +115,15 @@ window.PocketPaw.Chat = {
                 this.isStreaming = true;
                 this.isThinking = true;
                 this.streamingContent = '';
-                // Safety timeout — prevent infinite spinner if backend hangs
+                // Safety timeout — prevent infinite spinner if backend hangs.
+                // 5 minutes: complex tasks (research + tool chains) can take
+                // 2-3 min before the first token arrives from the SDK subprocess.
                 this._streamTimeout = setTimeout(() => {
                     if (this.isStreaming) {
                         this.addMessage('assistant', 'Response timed out. The agent may not be configured — check Settings.');
                         this.endStreaming();
                     }
-                }, 90000);
+                }, 300000);
             },
 
             /**

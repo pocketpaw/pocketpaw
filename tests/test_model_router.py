@@ -86,12 +86,13 @@ class TestComplex:
         result = router.classify("a " * 250)
         assert result.complexity == TaskComplexity.COMPLEX
 
-    def test_research_task(self, router):
+    def test_research_task_is_moderate(self, router):
+        # Research tasks route to MODERATE (Sonnet) — tool-heavy, not reasoning-heavy
         result = router.classify(
             "Research the best approach for implementing real-time updates "
             "and provide a comprehensive comparison of WebSockets vs SSE"
         )
-        assert result.complexity == TaskComplexity.COMPLEX
+        assert result.complexity == TaskComplexity.MODERATE
 
 
 # ---------------------------------------------------------------------------

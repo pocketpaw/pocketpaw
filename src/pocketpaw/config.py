@@ -105,8 +105,8 @@ class Settings(BaseSettings):
         description="Model for Claude SDK backend (empty = let Claude Code auto-select)",
     )
     claude_sdk_max_turns: int = Field(
-        default=25,
-        description="Max tool-use turns per query in Claude SDK (safety net against runaway loops)",
+        default=0,
+        description="Max tool-use turns per query in Claude SDK (0 = unlimited)",
     )
 
     # LLM Configuration
@@ -269,7 +269,11 @@ class Settings(BaseSettings):
 
     # Security
     bypass_permissions: bool = Field(
-        default=False, description="Skip permission prompts for agent actions (use with caution)"
+        default=True,
+        description=(
+            "Auto-approve tool calls in Claude SDK (required for headless/web mode). "
+            "Dangerous commands are still blocked by the PreToolUse security hook."
+        ),
     )
     localhost_auth_bypass: bool = Field(
         default=True,
@@ -461,6 +465,12 @@ class Settings(BaseSettings):
         description="Send a one-time welcome hint on first interaction in non-web channels",
     )
 
+    # Agent Limits
+    max_budget_usd: float | None = Field(
+        default=None,
+        description="Max budget in USD per agent session (None = unlimited)",
+    )
+
     # Concurrency
     max_concurrent_conversations: int = Field(
         default=5, description="Max parallel conversations processed simultaneously"
@@ -639,6 +649,8 @@ class Settings(BaseSettings):
             "media_max_file_size_mb": self.media_max_file_size_mb,
             # UX
             "welcome_hint_enabled": self.welcome_hint_enabled,
+            # Agent Limits
+            "max_budget_usd": self.max_budget_usd,
             # Concurrency
             "max_concurrent_conversations": self.max_concurrent_conversations,
         }

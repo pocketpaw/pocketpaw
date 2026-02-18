@@ -122,46 +122,55 @@ class UrlExtractTool(BaseTool):
                 "html2text not installed. Install with: pip install 'pocketpaw[extract]'"
             )
 
+        import asyncio
+
         converter = html2text.HTML2Text()
         converter.ignore_links = False
         converter.ignore_images = True
         converter.body_width = 0
 
+        async def _fetch_one(client: httpx.AsyncClient, url: str) -> dict:
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "")
+                if "text/html" in content_type:
+                    text = converter.handle(resp.text)
+                else:
+                    text = resp.text
+                return {
+                    "url": url,
+                    "title": _extract_title(resp.text)
+                    if "text/html" in content_type
+                    else url,
+                    "full_content": text[:_MAX_CONTENT_CHARS],
+                    "_ok": True,
+                }
+            except Exception as e:
+                return {"url": url, "title": url, "_ok": False, "_error": str(e)}
+
+        # Fetch all URLs concurrently (10s per-URL timeout, 30s total)
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            fetched = await asyncio.gather(*[_fetch_one(client, u) for u in urls])
+
         results = []
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            for url in urls:
-                try:
-                    resp = await client.get(url)
-                    resp.raise_for_status()
-
-                    content_type = resp.headers.get("content-type", "")
-                    if "text/html" in content_type:
-                        text = converter.handle(resp.text)
-                    else:
-                        text = resp.text
-
-                    results.append(
-                        {
-                            "url": url,
-                            "title": _extract_title(resp.text)
-                            if "text/html" in content_type
-                            else url,
-                            "full_content": text[:_MAX_CONTENT_CHARS],
-                        }
-                    )
-                except Exception as e:
-                    results.append(
-                        {
-                            "url": url,
-                            "title": url,
-                            "full_content": f"Error fetching URL: {e}",
-                        }
-                    )
+        failed = 0
+        for item in fetched:
+            if item.pop("_ok", False):
+                results.append(item)
+            else:
+                failed += 1
+                logger.warning("URL fetch failed: %s — %s", item["url"], item.get("_error"))
 
         if not results:
-            return self._error("No content extracted from the provided URLs.")
+            return self._error(
+                f"All {len(urls)} URLs failed to fetch. Check network or try different sources."
+            )
 
-        return self._format_results(results, urls)
+        output = self._format_results(results, urls)
+        if failed:
+            output += f"\n\n*({failed}/{len(urls)} URLs failed to fetch)*"
+        return output
 
     @staticmethod
     def _format_results(results: list[dict], urls: list[str]) -> str:

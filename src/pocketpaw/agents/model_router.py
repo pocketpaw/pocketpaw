@@ -50,11 +50,23 @@ _COMPLEX_SIGNALS: list[re.Pattern] = [
     for p in [
         r"\b(plan|architect|design|strategy|refactor)\b",
         r"\b(debug|investigate|diagnose|root\s*cause)\b",
-        r"\b(implement|build|create) .{20,}",
         r"\b(analyze|compare|evaluate|trade-?off)\b",
         r"\b(multi-?step|step.by.step|detailed)\b",
         r"\b(optimize|performance|scale|security audit)\b",
+    ]
+]
+
+# Tool-heavy patterns — route to MODERATE (Sonnet), not COMPLEX (Opus).
+# These tasks involve chaining tools (search, fetch, generate) where the
+# bottleneck is tool I/O, not model reasoning.  Opus doesn't make tools
+# run faster; Sonnet orchestrates just as well and responds quicker.
+_TOOL_HEAVY_PATTERNS: list[re.Pattern] = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"\b(research|deep dive|comprehensive)\b",
+        r"\b(search|find|look up) .{10,}",
+        r"\b(implement|build|create|generate|make) .{20,}",
+        r"\b(create|generate|make) .{0,20}(pdf|report|document|summary)\b",
     ]
 ]
 
@@ -92,7 +104,17 @@ class ModelRouter:
                 reason="Empty message",
             )
 
-        # Check complex signals first (so short technical messages stay complex)
+        # Check tool-heavy patterns first — these should use Sonnet (MODERATE)
+        # not Opus, because the bottleneck is tool I/O, not reasoning.
+        tool_hits = sum(1 for p in _TOOL_HEAVY_PATTERNS if p.search(message))
+        if tool_hits >= 1 and msg_len > _SHORT_THRESHOLD:
+            return ModelSelection(
+                complexity=TaskComplexity.MODERATE,
+                model=self.settings.model_tier_moderate,
+                reason=f"Tool-heavy task ({tool_hits} signal(s)), using Sonnet",
+            )
+
+        # Check complex signals (pure reasoning tasks: plan, debug, analyze)
         complex_hits = sum(1 for p in _COMPLEX_SIGNALS if p.search(message))
 
         if complex_hits >= 2 or (complex_hits >= 1 and msg_len > _SHORT_THRESHOLD):

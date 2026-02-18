@@ -303,7 +303,8 @@ class TestUrlExtractTool:
             )
 
         assert "Good" in result
-        assert "Error fetching URL" in result
+        # Failed URLs are excluded from results; summary note appended
+        assert "1/2 URLs failed to fetch" in result
 
     @patch("pocketpaw.tools.builtin.url_extract.get_settings")
     async def test_unknown_provider(self, mock_settings, tool):

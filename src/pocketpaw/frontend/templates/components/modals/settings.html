@@ -147,12 +147,14 @@
                 type="number"
                 x-model="settings.claudeSdkMaxTurns"
                 @change="saveSettings()"
-                min="1"
-                max="200"
+                min="0"
+                max="1000"
+                placeholder="0 (unlimited)"
                 class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
               />
               <small class="text-white/50 text-[11px]"
-                >Max agent tool-use loops per query (default: 25)</small
+                >Max tool-use turns per query. 0 = unlimited
+                (recommended for research/complex tasks)</small
               >
             </div>
           </div>
@@ -1140,6 +1142,57 @@
                 class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
               />
             </div>
+          </div>
+
+          <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
+          <h4
+            class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide"
+          >
+            Agent Limits
+          </h4>
+
+          <!-- Max Agent Turns -->
+          <div class="flex flex-col gap-1.5">
+            <label
+              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
+              >Max Agent Turns</label
+            >
+            <input
+              type="number"
+              x-model.number="settings.maxAgentTurns"
+              @change="saveSettings()"
+              min="0"
+              max="10000"
+              placeholder="Unlimited"
+              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+            />
+            <small class="text-white/50 text-[11px]">
+              Max conversation turns per session. 0 or empty = unlimited.
+              Lower values stop runaway loops; higher values let the agent
+              handle complex multi-step tasks.
+            </small>
+          </div>
+
+          <!-- Max Budget USD -->
+          <div class="flex flex-col gap-1.5">
+            <label
+              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
+              >Max Budget (USD)</label
+            >
+            <input
+              type="number"
+              x-model.number="settings.maxBudgetUsd"
+              @change="saveSettings()"
+              min="0"
+              max="1000"
+              step="0.5"
+              placeholder="Unlimited"
+              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+            />
+            <small class="text-white/50 text-[11px]">
+              Cost cap per session in USD. 0 or empty = unlimited.
+              The agent stops when the budget is exhausted.
+            </small>
           </div>
 
           <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />

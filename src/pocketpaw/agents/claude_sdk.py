@@ -783,8 +783,11 @@ class ClaudeAgentSDK:
                 "setting_sources": ["user", "project"],
                 "hooks": hooks,
                 "cwd": str(self._cwd),
-                "max_turns": self.settings.claude_sdk_max_turns,
+                "max_turns": self.settings.claude_sdk_max_turns or None,
             }
+
+            if self.settings.max_budget_usd is not None:
+                options_kwargs["max_budget_usd"] = self.settings.max_budget_usd
 
             # Configure LLM provider for the Claude CLI subprocess.
             sdk_env = llm.to_sdk_env()
@@ -812,8 +815,16 @@ class ClaudeAgentSDK:
             # there is no terminal to show interactive permission prompts.
             # bypassPermissions auto-approves ALL tool calls (including MCP).
             # Dangerous Bash commands are still caught by the PreToolUse hook.
-            if self.settings.bypass_permissions:
-                options_kwargs["permission_mode"] = "bypassPermissions"
+            #
+            # IMPORTANT: Without bypass, the CLI subprocess blocks forever
+            # waiting for terminal input → zero events → guaranteed timeout.
+            # Always enable bypass in headless mode regardless of the setting.
+            options_kwargs["permission_mode"] = "bypassPermissions"
+            if not self.settings.bypass_permissions:
+                logger.warning(
+                    "bypass_permissions is disabled but PocketPaw runs headless — "
+                    "forcing bypassPermissions to prevent subprocess hang"
+                )
 
             # Model selection for Anthropic providers:
             # 1. Smart routing (opt-in) — overrides with complexity-based model
@@ -971,12 +982,39 @@ class ClaudeAgentSDK:
                     if self._ResultMessage and isinstance(event, self._ResultMessage):
                         is_error = getattr(event, "is_error", False)
                         result = getattr(event, "result", "")
+                        num_turns = getattr(event, "num_turns", 0)
+                        cost = getattr(event, "total_cost_usd", None)
+                        subtype = getattr(event, "subtype", "")
 
                         if is_error:
-                            logger.error(f"ResultMessage error: {result}")
-                            yield AgentEvent(type="error", content=str(result))
+                            # Build a user-friendly error with diagnostics
+                            detail = str(result) if result else "Unknown error"
+                            if "max_turns" in subtype or (
+                                num_turns
+                                and self.settings.claude_sdk_max_turns
+                                and num_turns >= self.settings.claude_sdk_max_turns
+                            ):
+                                detail = (
+                                    f"Agent stopped after {num_turns} turns "
+                                    f"(limit: {self.settings.claude_sdk_max_turns}).\n\n"
+                                    "The task needed more steps to complete. "
+                                    "Increase **Max Tool Turns** in Settings, "
+                                    "or set to 0 for unlimited."
+                                )
+                            logger.error(
+                                "ResultMessage error: subtype=%s turns=%s cost=$%s — %s",
+                                subtype, num_turns, cost, result,
+                            )
+                            yield AgentEvent(type="error", content=detail)
                         else:
-                            logger.debug(f"ResultMessage: {str(result)[:100]}...")
+                            try:
+                                cost_str = f"${float(cost):.4f}" if cost else "n/a"
+                            except (TypeError, ValueError):
+                                cost_str = str(cost)
+                            logger.info(
+                                "Agent done: %s turns, cost %s",
+                                num_turns, cost_str,
+                            )
                         continue
 
                     # ========== Unknown event type - log it ==========

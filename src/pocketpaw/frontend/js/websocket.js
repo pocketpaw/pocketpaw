@@ -211,6 +211,8 @@ class PocketPawSocket {
             model_tier_simple: settings.modelTierSimple,
             model_tier_moderate: settings.modelTierModerate,
             model_tier_complex: settings.modelTierComplex,
+            max_agent_turns: settings.maxAgentTurns || null,
+            max_budget_usd: settings.maxBudgetUsd || null,
             tts_provider: settings.ttsProvider,
             tts_voice: settings.ttsVoice,
             stt_provider: settings.sttProvider,
