@@ -1171,11 +1171,11 @@ class PocketPawInstaller:
                 except FileNotFoundError:
                     pass
             elif shutil.which("uv"):
-                 # Try `uv tool run` style if uvx is missing
-                 try:
-                     os.execvp("uv", ["uv", "tool", "run", "pocketpaw"])
-                 except FileNotFoundError:
-                     pass
+                # Try `uv tool run` style if uvx is missing
+                try:
+                    os.execvp("uv", ["uv", "tool", "run", "pocketpaw"])
+                except FileNotFoundError:
+                    pass
 
             # Might not be on PATH yet, try python -m
             try:
