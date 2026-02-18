@@ -2,14 +2,14 @@
  * PocketPaw - MCP Servers Feature Module
  *
  * Created: 2026-02-07
- * Updated: 2026-02-12 — Registry tab (browse official MCP registry), dynamic categories, needs_args.
+ * Updated: 2026-02-17 — Removed Registry tab, added paste-command input.
  *
  * Manages MCP (Model Context Protocol) server connections:
  * - List/add/remove servers
  * - Enable/disable servers
  * - View tool inventory
- * - Browse & install presets from the catalog
- * - Search & install from the official MCP Registry (16K+ servers)
+ * - Browse & install presets from the curated catalog
+ * - Paste a full command to auto-fill Add Server form
  */
 
 window.PocketPaw = window.PocketPaw || {};
@@ -28,7 +28,8 @@ window.PocketPaw.MCP = {
                 transport: 'stdio',
                 command: '',
                 args: '',
-                url: ''
+                url: '',
+                fullCommand: ''
             },
             mcpLoading: false,
             mcpShowAddForm: false,
@@ -38,17 +39,8 @@ window.PocketPaw.MCP = {
             mcpInstallEnv: {},
             mcpInstallArgs: '',
             mcpInstalling: false,
-            mcpCategoryFilter: 'all',
-            // Registry state
-            mcpRegistryQuery: '',
-            mcpRegistryResults: [],
-            mcpRegistryFeatured: [],
-            mcpRegistryLoading: false,
-            mcpRegistryFeaturedError: false,
-            mcpRegistryCursor: null,
-            mcpRegistryLoadingMore: false,
-            mcpRegistryInstalling: null,
-            mcpRegistryInstallEnv: {}
+            mcpInstallAbort: null,
+            mcpCategoryFilter: 'all'
         };
     },
 
@@ -64,6 +56,31 @@ window.PocketPaw.MCP = {
                 this.showMCP = true;
                 await this.getMCPStatus();
                 await this.loadPresets();
+
+                // Register WS handler for OAuth redirect (once)
+                if (!window.PocketPaw._mcpOAuthRegistered && window.socket) {
+                    window.socket.on('mcp_oauth_redirect', (data) => {
+                        if (!data.url) return;
+                        // Navigate pre-opened popup or show fallback
+                        const popup = window.PocketPaw._oauthPopup;
+                        if (popup && !popup.closed) {
+                            popup.location = data.url;
+                        } else {
+                            // Popup was blocked — show clickable link
+                            const name = data.server || 'server';
+                            if (this.showToast) {
+                                this.showToast(
+                                    `Open auth link for ${name}: ` +
+                                    data.url.substring(0, 60) + '...',
+                                    'info'
+                                );
+                            }
+                            window.open(data.url, '_blank');
+                        }
+                    });
+                    window.PocketPaw._mcpOAuthRegistered = true;
+                }
+
                 this.$nextTick(() => {
                     if (window.refreshIcons) window.refreshIcons();
                 });
@@ -108,7 +125,7 @@ window.PocketPaw.MCP = {
                     const data = await res.json();
                     if (data.status === 'ok') {
                         this.showToast(`MCP server "${this.mcpForm.name}" added`, 'success');
-                        this.mcpForm = { name: '', transport: 'stdio', command: '', args: '', url: '' };
+                        this.mcpForm = { name: '', transport: 'stdio', command: '', args: '', url: '', fullCommand: '' };
                         await this.getMCPStatus();
                     } else {
                         this.showToast(data.error || 'Failed to add server', 'error');
@@ -200,11 +217,28 @@ window.PocketPaw.MCP = {
             },
 
             /**
+             * Cancel an in-progress install (abort fetch, reset state, close popup)
+             */
+            cancelInstall() {
+                if (this.mcpInstallAbort) {
+                    this.mcpInstallAbort.abort();
+                    this.mcpInstallAbort = null;
+                }
+                this.mcpInstalling = false;
+                this.mcpInstallId = null;
+                const popup = window.PocketPaw._oauthPopup;
+                if (popup && !popup.closed) {
+                    try { popup.close(); } catch (_) { /* cross-origin */ }
+                }
+                window.PocketPaw._oauthPopup = null;
+            },
+
+            /**
              * Show install form for a preset
              */
             showInstallForm(presetId) {
                 if (this.mcpInstallId === presetId) {
-                    this.mcpInstallId = null;
+                    this.cancelInstall();
                     return;
                 }
                 this.mcpInstallId = presetId;
@@ -228,6 +262,21 @@ window.PocketPaw.MCP = {
             async installPreset() {
                 if (!this.mcpInstallId) return;
                 this.mcpInstalling = true;
+
+                // AbortController so Cancel can kill the pending fetch
+                const abort = new AbortController();
+                this.mcpInstallAbort = abort;
+
+                // For OAuth presets: open a blank popup NOW (in user click context)
+                // so the browser allows it. The WS handler will navigate it later.
+                const isOAuth = this.presetIsOAuth(this.mcpInstallId);
+                if (isOAuth) {
+                    window.PocketPaw._oauthPopup = window.open(
+                        'about:blank', 'pocketpaw_oauth',
+                        'width=600,height=700,scrollbars=yes'
+                    );
+                }
+
                 try {
                     const body = {
                         preset_id: this.mcpInstallId,
@@ -240,7 +289,8 @@ window.PocketPaw.MCP = {
                     const res = await fetch('/api/mcp/presets/install', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
+                        body: JSON.stringify(body),
+                        signal: abort.signal
                     });
                     const data = await res.json();
                     if (res.ok && data.status === 'ok') {
@@ -256,9 +306,21 @@ window.PocketPaw.MCP = {
                         this.showToast(data.error || 'Install failed', 'error');
                     }
                 } catch (e) {
+                    if (e.name === 'AbortError') return; // User cancelled
                     this.showToast('Install failed: ' + e.message, 'error');
                 } finally {
                     this.mcpInstalling = false;
+                    this.mcpInstallAbort = null;
+                    // Close leftover OAuth popup if still blank
+                    const popup = window.PocketPaw._oauthPopup;
+                    if (popup && !popup.closed) {
+                        try {
+                            if (popup.location.href === 'about:blank') {
+                                popup.close();
+                            }
+                        } catch (_) { /* cross-origin — popup navigated, leave it */ }
+                    }
+                    window.PocketPaw._oauthPopup = null;
                     this.$nextTick(() => {
                         if (window.refreshIcons) window.refreshIcons();
                     });
@@ -290,294 +352,62 @@ window.PocketPaw.MCP = {
             },
 
             /**
-             * Normalize one registry entry to a flat server object.
-             * Accepts both wrapped shape ({server, _meta}) and flat shape.
+             * Check if a preset uses OAuth authentication
              */
-            normalizeRegistryServer(entry) {
-                if (!entry || typeof entry !== 'object') return null;
+            presetIsOAuth(presetId) {
+                const preset = this.mcpPresets.find(p => p.id === presetId);
+                return preset ? !!preset.oauth : false;
+            },
 
-                const raw = (entry.server && typeof entry.server === 'object')
-                    ? entry.server
-                    : entry;
-                if (!raw || typeof raw !== 'object') return null;
+            /**
+             * Get button text for a preset based on OAuth status and install state
+             */
+            presetButtonText(presetId) {
+                if (this.mcpInstallId === presetId) return 'Cancel';
+                return this.presetIsOAuth(presetId) ? 'Authenticate' : 'Install';
+            },
 
-                const server = { ...raw };
-                const meta = (entry._meta && typeof entry._meta === 'object')
-                    ? entry._meta
-                    : ((server._meta && typeof server._meta === 'object') ? server._meta : {});
+            /**
+             * Parse a pasted full command string and auto-populate the Add Server form.
+             * Handles patterns like:
+             *   "npx -y @some/package"
+             *   "uvx mcp-server-git"
+             *   "docker run -i --rm ghcr.io/org/img"
+             */
+            parseFullCommand() {
+                const raw = (this.mcpForm.fullCommand || '').trim();
+                if (!raw) return;
 
-                server._meta = meta;
-                delete server.$schema;
+                const parts = raw.split(/\s+/);
+                if (parts.length === 0) return;
 
-                server.name = typeof server.name === 'string' ? server.name : '';
-                server.title = typeof server.title === 'string' ? server.title : '';
-                server.description = typeof server.description === 'string' ? server.description : '';
-                server.version = typeof server.version === 'string' ? server.version : '';
-                server.packages = Array.isArray(server.packages) ? server.packages : [];
-                server.remotes = Array.isArray(server.remotes) ? server.remotes : [];
-                server.environmentVariables = Array.isArray(server.environmentVariables)
-                    ? server.environmentVariables
-                    : [];
+                const command = parts[0];
+                const args = parts.slice(1);
 
-                // Lift env vars from package metadata when server-level list is missing.
-                if (server.environmentVariables.length === 0) {
-                    for (const pkg of server.packages) {
-                        if (!pkg || typeof pkg !== 'object') continue;
-                        if (Array.isArray(pkg.environmentVariables) && pkg.environmentVariables.length > 0) {
-                            server.environmentVariables = pkg.environmentVariables;
-                            break;
-                        }
+                this.mcpForm.command = command;
+                this.mcpForm.args = args.join(', ');
+
+                // Auto-derive a name from the last arg that looks like a package
+                let name = '';
+                for (let i = args.length - 1; i >= 0; i--) {
+                    const a = args[i];
+                    // Skip flags and version suffixes
+                    if (a.startsWith('-')) continue;
+                    // Use the package-like arg
+                    name = a
+                        .replace(/@latest$/, '')
+                        .replace(/@[\d.]+.*$/, '');
+                    // Extract short name: "@scope/pkg" -> "pkg", "mcp-server-git" -> "mcp-server-git"
+                    if (name.includes('/')) {
+                        name = name.split('/').pop() || name;
                     }
+                    name = name.replace(/^@/, '');
+                    break;
                 }
 
-                return server.name ? server : null;
-            },
-
-            /**
-             * Normalize a registry server list into safe flat entries.
-             */
-            normalizeRegistryServers(entries) {
-                if (!Array.isArray(entries)) return [];
-                const normalized = [];
-                for (const entry of entries) {
-                    const server = this.normalizeRegistryServer(entry);
-                    if (server) normalized.push(server);
+                if (name && !this.mcpForm.name) {
+                    this.mcpForm.name = name;
                 }
-                return normalized;
-            },
-
-            /**
-             * Normalize next-cursor variants returned by registry metadata.
-             */
-            registryNextCursor(metadata) {
-                if (!metadata || typeof metadata !== 'object') return null;
-                return metadata.nextCursor || metadata.next_cursor || null;
-            },
-
-            // ==================== Registry Methods ====================
-
-            /**
-             * Search the official MCP Registry (debounced via Alpine @input.debounce)
-             */
-            async searchRegistry() {
-                const q = this.mcpRegistryQuery.trim();
-                if (!q) {
-                    this.mcpRegistryResults = [];
-                    this.mcpRegistryCursor = null;
-                    return;
-                }
-
-                this.mcpRegistryLoading = true;
-                try {
-                    const url = `/api/mcp/registry/search?q=${encodeURIComponent(q)}&limit=30`;
-                    const res = await fetch(url);
-                    if (res.ok) {
-                        const data = await res.json();
-                        this.mcpRegistryResults = this.normalizeRegistryServers(data.servers);
-                        this.mcpRegistryCursor = this.registryNextCursor(data.metadata);
-                        if (data.error) {
-                            this.showToast(`Registry search failed: ${data.error}`, 'error');
-                        }
-                    } else {
-                        this.mcpRegistryResults = [];
-                        this.mcpRegistryCursor = null;
-                    }
-                } catch (e) {
-                    console.error('Registry search failed', e);
-                } finally {
-                    this.mcpRegistryLoading = false;
-                    this.$nextTick(() => {
-                        if (window.refreshIcons) window.refreshIcons();
-                    });
-                }
-            },
-
-            /**
-             * Load featured/popular registry servers for initial view
-             */
-            async loadRegistryFeatured() {
-                if (this.mcpRegistryFeatured.length > 0) return;
-                this.mcpRegistryLoading = true;
-                this.mcpRegistryFeaturedError = false;
-                try {
-                    const res = await fetch('/api/mcp/registry/search?limit=30');
-                    if (res.ok) {
-                        const data = await res.json();
-                        this.mcpRegistryFeatured = this.normalizeRegistryServers(data.servers);
-                        if (data.error) {
-                            this.mcpRegistryFeaturedError = true;
-                        }
-                    } else {
-                        this.mcpRegistryFeaturedError = true;
-                    }
-                } catch (e) {
-                    console.error('Failed to load registry featured', e);
-                    this.mcpRegistryFeaturedError = true;
-                } finally {
-                    this.mcpRegistryLoading = false;
-                    this.$nextTick(() => {
-                        if (window.refreshIcons) window.refreshIcons();
-                    });
-                }
-            },
-
-            /**
-             * Retry loading featured servers (clears cache first)
-             */
-            async retryRegistryFeatured() {
-                this.mcpRegistryFeatured = [];
-                await this.loadRegistryFeatured();
-            },
-
-            /**
-             * Load more registry results (pagination)
-             */
-            async loadMoreRegistry() {
-                if (!this.mcpRegistryCursor || this.mcpRegistryLoadingMore) return;
-                this.mcpRegistryLoadingMore = true;
-                try {
-                    const q = this.mcpRegistryQuery.trim();
-                    let url = `/api/mcp/registry/search?limit=30&cursor=${encodeURIComponent(this.mcpRegistryCursor)}`;
-                    if (q) url += `&q=${encodeURIComponent(q)}`;
-                    const res = await fetch(url);
-                    if (res.ok) {
-                        const data = await res.json();
-                        const newServers = this.normalizeRegistryServers(data.servers);
-                        this.mcpRegistryResults = [...this.mcpRegistryResults, ...newServers];
-                        this.mcpRegistryCursor = this.registryNextCursor(data.metadata);
-                    }
-                } catch (e) {
-                    console.error('Registry load more failed', e);
-                } finally {
-                    this.mcpRegistryLoadingMore = false;
-                    this.$nextTick(() => {
-                        if (window.refreshIcons) window.refreshIcons();
-                    });
-                }
-            },
-
-            /**
-             * Get the list to display in registry view
-             */
-            registryDisplayResults() {
-                return this.mcpRegistryQuery.trim()
-                    ? this.mcpRegistryResults
-                    : this.mcpRegistryFeatured;
-            },
-
-            /**
-             * Extract a short display name from a registry server
-             */
-            registryServerName(server) {
-                if (server.title) return server.title;
-                const name = server.name || '';
-                return name.includes('/') ? name.split('/').pop() : name;
-            },
-
-            /**
-             * Extract a source label (e.g. "npm: @mcp/server" or "HTTP")
-             */
-            registryServerSource(server) {
-                const remotes = server.remotes || [];
-                const packages = server.packages || [];
-                if (remotes.length > 0) return 'HTTP';
-                if (packages.length > 0) {
-                    const pkg = packages[0];
-                    const type = pkg.registryType || 'npm';
-                    return `${type}: ${pkg.name || ''}`;
-                }
-                return server.name || '';
-            },
-
-            /**
-             * Check if a registry server is already installed locally
-             */
-            isRegistryServerInstalled(server) {
-                const rawName = server.name || '';
-                const installed = Object.keys(this.mcpServers).map(n => n.toLowerCase());
-                // Check both the full derived name and the simple last-segment name
-                const parts = rawName.split('/');
-                const lastPart = (parts.pop() || '').toLowerCase();
-                const orgPart = parts.length > 0
-                    ? (parts[0].includes('.') ? parts[0].split('.').pop() : parts[0]).replace(/^@/, '').toLowerCase()
-                    : '';
-                const generic = ['mcp', 'server', 'mcp-server', 'main', 'app', 'api'];
-                const derivedName = generic.includes(lastPart) && orgPart
-                    ? `${orgPart}-${lastPart}`
-                    : lastPart;
-                return installed.includes(derivedName) || installed.includes(lastPart);
-            },
-
-            /**
-             * Get env vars required by a registry server
-             */
-            registryServerEnvVars(server) {
-                return (server.environmentVariables || []).filter(ev => ev.required !== false);
-            },
-
-            /**
-             * Show install form for a registry server
-             */
-            showRegistryInstallForm(serverName) {
-                if (this.mcpRegistryInstalling === serverName) {
-                    this.mcpRegistryInstalling = null;
-                    return;
-                }
-                this.mcpRegistryInstalling = serverName;
-                // Pre-fill env
-                const results = this.registryDisplayResults();
-                const server = results.find(s => s.name === serverName);
-                const env = {};
-                if (server) {
-                    for (const ev of (server.environmentVariables || [])) {
-                        env[ev.name] = '';
-                    }
-                }
-                this.mcpRegistryInstallEnv = env;
-                this.$nextTick(() => {
-                    if (window.refreshIcons) window.refreshIcons();
-                });
-            },
-
-            /**
-             * Install a server from the registry
-             */
-            async installFromRegistry(server) {
-                const serverName = server.name;
-                this.mcpRegistryInstalling = serverName;
-                try {
-                    const res = await fetch('/api/mcp/registry/install', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            server: server,
-                            env: this.mcpRegistryInstallEnv
-                        })
-                    });
-                    const data = await res.json();
-                    if (res.ok && data.status === 'ok') {
-                        const toolCount = data.tools ? data.tools.length : 0;
-                        let msg;
-                        if (data.connected) {
-                            msg = `Installed "${data.name}" — ${toolCount} tools`;
-                        } else {
-                            msg = `Installed "${data.name}" (not yet connected)`;
-                            if (data.error) msg += `: ${data.error}`;
-                        }
-                        this.showToast(msg, data.connected ? 'success' : 'warning');
-                        this.mcpRegistryInstalling = null;
-                        await this.getMCPStatus();
-                    } else {
-                        this.showToast(data.error || 'Install failed', 'error');
-                        this.mcpRegistryInstalling = null;
-                    }
-                } catch (e) {
-                    this.showToast('Install failed: ' + e.message, 'error');
-                    this.mcpRegistryInstalling = null;
-                }
-                this.$nextTick(() => {
-                    if (window.refreshIcons) window.refreshIcons();
-                });
             }
         };
     }

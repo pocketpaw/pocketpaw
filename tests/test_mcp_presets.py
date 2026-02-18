@@ -40,6 +40,15 @@ class TestPresetRegistry:
                 "data",
                 "search",
                 "devops",
+                "ai",
+                "finance",
+                "design",
+                "communication",
+                "analytics",
+                "cms",
+                "marketing",
+                "monitoring",
+                "security",
             ), f"Preset {p.id} has invalid category: {p.category}"
             if p.transport == "stdio":
                 assert p.command, f"Preset {p.id} (stdio) missing command"
@@ -69,7 +78,7 @@ class TestPresetRegistry:
     def test_get_all_presets_returns_list(self):
         presets = get_all_presets()
         assert isinstance(presets, list)
-        assert len(presets) >= 15
+        assert len(presets) >= 53
 
     def test_get_presets_by_category_filters(self):
         dev = get_presets_by_category("dev")
@@ -201,7 +210,7 @@ class TestPresetRoutes:
         assert res.status_code == 200
         data = res.json()
         assert isinstance(data, list)
-        assert len(data) >= 28
+        assert len(data) >= 53
 
         # Check installed flag
         sentry = next(p for p in data if p["id"] == "sentry")

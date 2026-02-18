@@ -12,6 +12,7 @@ mock_telegram.Update = MagicMock()
 mock_telegram.ForceReply = MagicMock()
 mock_telegram.error = MagicMock()
 sys.modules["telegram"] = mock_telegram
+sys.modules["telegram.constants"] = mock_telegram.constants
 sys.modules["telegram.error"] = mock_telegram.error
 sys.modules["telegram.ext"] = MagicMock()
 

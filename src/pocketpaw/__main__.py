@@ -1,6 +1,8 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-02-17: Run startup health checks after settings load (prints colored summary).
+  - 2026-02-16: Add startup version check against PyPI (cached daily, silent on error).
   - 2026-02-14: Dashboard deps moved to core — `pip install pocketpaw` just works.
   - 2026-02-12: Fixed --version to read dynamically from package metadata.
   - 2026-02-06: Web dashboard is now the default mode (no flags needed).
@@ -242,11 +244,11 @@ def _is_headless() -> bool:
     return not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
 
 
-def run_dashboard_mode(settings: Settings, host: str, port: int) -> None:
+def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
     """Run in web dashboard mode."""
     from pocketpaw.dashboard import run_dashboard
 
-    run_dashboard(host=host, port=port, open_browser=not _is_headless())
+    run_dashboard(host=host, port=port, open_browser=not _is_headless() and not dev, dev=dev)
 
 
 async def check_ollama(settings: Settings) -> int:
@@ -501,6 +503,7 @@ Examples:
   pocketpaw --slack                  Start headless Slack bot (Socket Mode)
   pocketpaw --whatsapp               Start headless WhatsApp webhook server
   pocketpaw --discord --slack        Run Discord + Slack simultaneously
+  pocketpaw --dev                    Start dashboard with auto-reload (dev mode)
 """,
     )
 
@@ -544,6 +547,9 @@ Examples:
         "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
     )
     parser.add_argument(
+        "--dev", action="store_true", help="Development mode with auto-reload"
+    )
+    parser.add_argument(
         "--check-ollama",
         action="store_true",
         help="Check Ollama connectivity, model availability, and tool calling support",
@@ -563,6 +569,41 @@ Examples:
     _check_extras_installed(args)
 
     settings = get_settings()
+
+    # Run startup health checks (non-blocking, informational only)
+    if settings.health_check_on_startup:
+        try:
+            from pocketpaw.health import get_health_engine
+
+            engine = get_health_engine()
+            results = engine.run_startup_checks()
+            issues = [r for r in results if r.status != "ok"]
+            if issues:
+                print()
+                for r in results:
+                    if r.status == "ok":
+                        print(f"  \033[32m[OK]\033[0m   {r.name}: {r.message}")
+                    elif r.status == "warning":
+                        print(f"  \033[33m[WARN]\033[0m {r.name}: {r.message}")
+                        if r.fix_hint:
+                            print(f"         {r.fix_hint}")
+                    else:
+                        print(f"  \033[31m[FAIL]\033[0m {r.name}: {r.message}")
+                        if r.fix_hint:
+                            print(f"         {r.fix_hint}")
+                status = engine.overall_status
+                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(status, "0")
+                print(f"\n  System: \033[{color}m{status.upper()}\033[0m\n")
+        except Exception:
+            pass  # Health engine failure never blocks startup
+
+    # Check for updates (cached daily, silent on error)
+    from pocketpaw.config import get_config_dir
+    from pocketpaw.update_check import check_for_updates, print_update_notice
+
+    update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
+    if update_info and update_info.get("update_available"):
+        print_update_notice(update_info)
 
     # Resolve host: explicit flag > config > auto-detect
     if args.host is not None:
@@ -603,7 +644,7 @@ Examples:
             asyncio.run(run_multi_channel_mode(settings, args))
         else:
             # Default: web dashboard (also handles --web flag)
-            run_dashboard_mode(settings, host, args.port)
+            run_dashboard_mode(settings, host, args.port, dev=args.dev)
     except KeyboardInterrupt:
         logger.info("👋 PocketPaw stopped.")
     finally:

@@ -10,6 +10,7 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 
 Created: 2026-02-02
 Changes:
+  - 2026-02-17: Added health/diagnostics tools to system prompt (health_check, error_log, config_doctor).
   - 2026-02-02: Initial implementation with streaming support.
   - 2026-02-02: Added set_executor() for 2-layer architecture wiring.
   - 2026-02-02: Fixed streaming - properly handle all SDK message types.
@@ -135,6 +136,20 @@ directly — never use a tool to look up what you already know.
 ### Delegation
 - `delegate_claude_code '{"task": "refactor the auth module", "timeout": 300}'` — delegate to Claude Code CLI
 
+### Health & Diagnostics
+- `health_check '{}'` — run all system health checks (config, API keys, dependencies, storage)
+- `health_check '{"include_connectivity": true}'` — include LLM reachability test
+- `error_log '{}'` — read recent errors from the persistent error log
+- `error_log '{"limit": 5, "search": "deep_work"}'` — search errors by keyword
+- `config_doctor '{}'` — full config diagnosis with fix hints
+- `config_doctor '{"section": "api_keys"}'` — diagnose a specific section (api_keys, storage)
+
+**When the user reports something isn't working**, use these tools to diagnose:
+1. Run `health_check` to see what's broken
+2. Check `error_log` for recent errors with tracebacks
+3. Use `config_doctor` for step-by-step fix instructions
+4. Fix the issue, then run `health_check` again to verify
+
 ## Guidelines
 
 1. **Be AGENTIC** — execute tasks using tools, don't just describe how.
@@ -170,6 +185,7 @@ class ClaudeAgentSDK:
         "Grep": "shell",  # search is shell-adjacent
         "WebSearch": "browser",
         "WebFetch": "browser",
+        "Skill": "skill",
     }
 
     def __init__(self, settings: Settings, executor: ExecutorProtocol | None = None):
@@ -739,6 +755,7 @@ class ClaudeAgentSDK:
                 "Grep",
                 "WebSearch",
                 "WebFetch",
+                "Skill",
             ]
             allowed_tools = [
                 t
@@ -763,9 +780,10 @@ class ClaudeAgentSDK:
             options_kwargs = {
                 "system_prompt": final_prompt,
                 "allowed_tools": allowed_tools,
+                "setting_sources": ["user", "project"],
                 "hooks": hooks,
                 "cwd": str(self._cwd),
-                "max_turns": 25,  # Safety net against runaway tool loops
+                "max_turns": self.settings.claude_sdk_max_turns,
             }
 
             # Configure LLM provider for the Claude CLI subprocess.
@@ -797,18 +815,19 @@ class ClaudeAgentSDK:
             if self.settings.bypass_permissions:
                 options_kwargs["permission_mode"] = "bypassPermissions"
 
-            # Smart model routing (opt-in, skip for Ollama — model already set)
-            if (
-                self.settings.smart_routing_enabled
-                and not llm.is_ollama
-                and not llm.is_openai_compatible
-                and not llm.is_gemini
-            ):
-                from pocketpaw.agents.model_router import ModelRouter
+            # Model selection for Anthropic providers:
+            # 1. Smart routing (opt-in) — overrides with complexity-based model
+            # 2. Explicit claude_sdk_model — user-chosen fixed model
+            # 3. Neither set — let Claude Code CLI auto-select (recommended)
+            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
+                if self.settings.smart_routing_enabled:
+                    from pocketpaw.agents.model_router import ModelRouter
 
-                model_router = ModelRouter(self.settings)
-                selection = model_router.classify(message)
-                options_kwargs["model"] = selection.model
+                    model_router = ModelRouter(self.settings)
+                    selection = model_router.classify(message)
+                    options_kwargs["model"] = selection.model
+                elif self.settings.claude_sdk_model:
+                    options_kwargs["model"] = self.settings.claude_sdk_model
 
             # Capture stderr for better error diagnostics
             _stderr_lines: list[str] = []

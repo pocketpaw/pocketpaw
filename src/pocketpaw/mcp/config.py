@@ -29,9 +29,14 @@ class MCPServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     timeout: int = 30  # Connection timeout in seconds
+    # Legacy: original registry identifier (e.g. "@cmd8/excalidraw-mcp@0.1.4").
+    # Kept for backward compatibility with servers installed from the now-removed
+    # MCP Registry tab. Not used by new installations.
+    registry_ref: str = ""
+    oauth: bool = False  # True if server uses OAuth authentication
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "transport": self.transport,
             "command": self.command,
@@ -41,6 +46,11 @@ class MCPServerConfig:
             "enabled": self.enabled,
             "timeout": self.timeout,
         }
+        if self.registry_ref:
+            d["registry_ref"] = self.registry_ref
+        if self.oauth:
+            d["oauth"] = True
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> MCPServerConfig:
@@ -53,6 +63,8 @@ class MCPServerConfig:
             env=data.get("env", {}),
             enabled=data.get("enabled", True),
             timeout=data.get("timeout", 30),
+            registry_ref=data.get("registry_ref", ""),
+            oauth=data.get("oauth", False),
         )
 
 

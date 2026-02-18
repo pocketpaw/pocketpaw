@@ -14,12 +14,42 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from pocketpaw.mcp.config import MCPServerConfig, load_mcp_config, save_mcp_config
 
 logger = logging.getLogger(__name__)
+
+# OAuth callback coordination: state -> Future[(code, state)]
+_oauth_pending: dict[str, asyncio.Future] = {}
+
+# WebSocket broadcast function injected by dashboard at startup
+_ws_broadcast: Callable | None = None
+
+
+def set_ws_broadcast(fn: Callable) -> None:
+    """Set the WebSocket broadcast function (called by dashboard at startup)."""
+    global _ws_broadcast
+    _ws_broadcast = fn
+
+
+def set_oauth_callback_result(state: str, code: str) -> bool:
+    """Resolve a pending OAuth Future with the authorization code.
+
+    Called by the dashboard callback endpoint when the OAuth provider
+    redirects back with code + state params.
+
+    Returns True if a pending Future was found and resolved.
+    """
+    future = _oauth_pending.get(state)
+    if future and not future.done():
+        future.set_result((code, state))
+        return True
+    logger.warning("No pending OAuth flow for state=%s", state[:16])
+    return False
 
 
 @dataclass
@@ -44,6 +74,46 @@ class _ServerState:
     tools: list[MCPToolInfo] = field(default_factory=list)
     error: str = ""
     connected: bool = False
+
+
+_UNHELPFUL_ERRORS = {
+    "Attempted to exit a cancel scope that isn't the current tasks's current cancel scope",
+}
+
+
+def _extract_root_error(exc: BaseException) -> str:
+    """Unwrap ExceptionGroup / BaseExceptionGroup to find the real error.
+
+    MCP stdio transport wraps subprocess crashes in anyio cancel-scope errors
+    that are uninformative (e.g. "Attempted to exit a cancel scope…").
+    Walk the exception tree to find a concrete root-cause message.
+    """
+    # Collect all leaf exceptions from exception groups
+    leaves: list[BaseException] = []
+
+    def _collect(e: BaseException) -> None:
+        if isinstance(e, (ExceptionGroup, BaseExceptionGroup)):
+            for sub in e.exceptions:
+                _collect(sub)
+        elif e.__cause__:
+            _collect(e.__cause__)
+        else:
+            leaves.append(e)
+
+    _collect(exc)
+
+    # Pick the most useful message (skip unhelpful anyio internals)
+    for leaf in leaves:
+        msg = str(leaf).strip()
+        if msg and msg not in _UNHELPFUL_ERRORS:
+            return msg
+
+    # Fallback: if everything is unhelpful, use the top-level message and
+    # hint that the server process crashed.
+    top = str(exc).strip()
+    if top in _UNHELPFUL_ERRORS:
+        return "Server process crashed during startup (check terminal for details)"
+    return top
 
 
 class MCPManager:
@@ -104,6 +174,88 @@ class MCPManager:
         env.update(config_env)
         return env
 
+    @staticmethod
+    def _make_oauth_auth(config: MCPServerConfig):
+        """Create an httpx.Auth for OAuth-based MCP servers.
+
+        Uses the MCP SDK's OAuthClientProvider which handles:
+        - OAuth 2.1 metadata discovery
+        - CIMD (Client ID Metadata Document) for servers that support it
+        - Dynamic client registration as fallback
+        - PKCE authorization code flow
+        - Token refresh
+        """
+        from mcp.client.auth import OAuthClientProvider
+        from mcp.shared.auth import OAuthClientMetadata
+
+        from pocketpaw.config import Settings
+        from pocketpaw.mcp.oauth_store import MCPTokenStorage
+
+        settings = Settings.load()
+        port = settings.web_port or 8888
+
+        storage = MCPTokenStorage(config.name)
+
+        client_metadata = OAuthClientMetadata(
+            client_name="PocketPaw",
+            redirect_uris=[f"http://localhost:{port}/api/mcp/oauth/callback"],
+            token_endpoint_auth_method="none",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+        )
+
+        # CIMD URL — servers that support client_id_metadata_document_supported
+        # will use this URL as the client_id instead of dynamic registration.
+        cimd_url = (settings.mcp_client_metadata_url or "").strip() or None
+
+        # Shared mutable state between the two closures
+        _flow_state: dict[str, str] = {}
+
+        async def redirect_handler(auth_url: str) -> None:
+            """Called by SDK with the authorization URL — broadcast to frontend."""
+            parsed = urlparse(auth_url)
+            params = parse_qs(parsed.query)
+            state_values = params.get("state", [])
+            state = state_values[0] if state_values else ""
+
+            if state:
+                loop = asyncio.get_running_loop()
+                future = loop.create_future()
+                _oauth_pending[state] = future
+                _flow_state["state"] = state
+
+            if _ws_broadcast:
+                await _ws_broadcast(
+                    {
+                        "type": "mcp_oauth_redirect",
+                        "url": auth_url,
+                        "server": config.name,
+                    }
+                )
+            logger.info("OAuth redirect for MCP server '%s' — waiting for callback", config.name)
+
+        async def callback_handler() -> tuple[str, str | None]:
+            """Called by SDK to wait for the OAuth callback result."""
+            state = _flow_state.get("state")
+            if not state or state not in _oauth_pending:
+                raise RuntimeError(f"No pending OAuth flow for server '{config.name}'")
+
+            future = _oauth_pending[state]
+            try:
+                code, returned_state = await asyncio.wait_for(future, timeout=300)
+                return (code, returned_state)
+            finally:
+                _oauth_pending.pop(state, None)
+
+        return OAuthClientProvider(
+            server_url=config.url,
+            client_metadata=client_metadata,
+            storage=storage,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+            client_metadata_url=cimd_url,
+        )
+
     async def start_server(self, config: MCPServerConfig) -> bool:
         """Start an MCP server and initialize its session.
 
@@ -117,23 +269,62 @@ class MCPManager:
             state = _ServerState(config=config)
             self._servers[config.name] = state
 
+            # Build OAuth auth if needed
+            auth = None
+            if config.oauth:
+                try:
+                    auth = self._make_oauth_auth(config)
+                except Exception as e:
+                    state.error = f"OAuth setup failed: {e}"
+                    logger.error("OAuth setup failed for '%s': %s", config.name, e)
+                    return False
+
             try:
                 timeout = config.timeout or 30
+                # OAuth flows need more time for user interaction
+                connect_timeout = 300 if config.oauth else timeout
+
                 if config.transport == "stdio":
                     await asyncio.wait_for(self._connect_stdio(state), timeout=timeout)
                 elif config.transport == "streamable-http":
-                    # Streamable HTTP uses a different MCP SDK client than SSE.
                     await self._connect_remote_with_timeout(
-                        state, timeout, self._connect_streamable_http
+                        state,
+                        connect_timeout,
+                        lambda s: self._connect_streamable_http(s, auth=auth),
+                    )
+                elif config.transport == "sse":
+                    await self._connect_remote_with_timeout(
+                        state,
+                        connect_timeout,
+                        lambda s: self._connect_sse(s, auth=auth),
                     )
                 elif config.transport == "http":
-                    # HTTP/SSE connections use anyio cancel scopes internally.
-                    # asyncio.wait_for cancels the task on timeout, which disrupts
-                    # anyio's cancel scope cleanup and causes TaskGroup errors.
-                    # Instead, run with a manual timeout that doesn't cancel the task.
-                    await self._connect_remote_with_timeout(
-                        state, timeout, self._connect_sse
-                    )
+                    # Auto-detect: try Streamable HTTP first, fall back to SSE.
+                    # Modern MCP servers use Streamable HTTP (POST-based);
+                    # older ones use SSE (GET-based).
+                    try:
+                        await self._connect_remote_with_timeout(
+                            state,
+                            connect_timeout,
+                            lambda s: self._connect_streamable_http(
+                                s, auth=auth
+                            ),
+                        )
+                    except TimeoutError:
+                        raise  # Don't waste time retrying on timeout
+                    except BaseException:
+                        await self._cleanup_state(state)
+                        state = _ServerState(config=config)
+                        self._servers[config.name] = state
+                        logger.debug(
+                            "Streamable HTTP failed for '%s', trying SSE",
+                            config.name,
+                        )
+                        await self._connect_remote_with_timeout(
+                            state,
+                            connect_timeout,
+                            lambda s: self._connect_sse(s, auth=auth),
+                        )
                 else:
                     state.error = f"Unknown transport: {config.transport}"
                     logger.error(state.error)
@@ -150,18 +341,31 @@ class MCPManager:
                 return True
 
             except TimeoutError:
-                state.error = f"Connection timed out after {timeout}s"
+                effective_timeout = 300 if config.oauth else (config.timeout or 30)
+                state.error = f"Connection timed out after {effective_timeout}s"
                 state.connected = False
                 await self._cleanup_state(state)
-                logger.error("MCP server '%s' timed out after %ds", config.name, timeout)
+                logger.error("MCP server '%s' timed out after %ds", config.name, effective_timeout)
                 return False
             except BaseException as e:
                 # Catch BaseException to handle ExceptionGroup / BaseExceptionGroup
                 # from anyio TaskGroup failures in the MCP library.
-                state.error = str(e)
+                root_msg = _extract_root_error(e)
+
+                # Provide actionable hint for OAuth registration failures
+                if config.oauth and "Registration failed" in root_msg:
+                    root_msg = (
+                        f"{root_msg}. "
+                        "This server doesn't support dynamic client registration. "
+                        "You can set mcp_client_metadata_url in Settings to a "
+                        "publicly-hosted CIMD JSON file, or configure the server "
+                        "with an API token instead of OAuth."
+                    )
+
+                state.error = root_msg
                 state.connected = False
                 await self._cleanup_state(state)
-                logger.error("Failed to start MCP server '%s': %s", config.name, e)
+                logger.error("Failed to start MCP server '%s': %s", config.name, root_msg)
                 return False
 
     async def _connect_stdio(self, state: _ServerState) -> None:
@@ -222,12 +426,15 @@ class MCPManager:
             await self._cleanup_state(state)
             raise
 
-    async def _connect_sse(self, state: _ServerState) -> None:
+    async def _connect_sse(self, state: _ServerState, auth=None) -> None:
         """Connect to an MCP server via SSE (Server-Sent Events)."""
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
-        ctx = sse_client(url=state.config.url)
+        kwargs: dict[str, Any] = {"url": state.config.url}
+        if auth is not None:
+            kwargs["auth"] = auth
+        ctx = sse_client(**kwargs)
         streams = await ctx.__aenter__()
         state.client = ctx
         state.read_stream = streams[0]
@@ -243,12 +450,15 @@ class MCPManager:
             state.client = None
             raise
 
-    async def _connect_streamable_http(self, state: _ServerState) -> None:
+    async def _connect_streamable_http(self, state: _ServerState, auth=None) -> None:
         """Connect to an MCP server via Streamable HTTP transport."""
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
 
-        ctx = streamablehttp_client(url=state.config.url)
+        kwargs: dict[str, Any] = {"url": state.config.url}
+        if auth is not None:
+            kwargs["auth"] = auth
+        ctx = streamablehttp_client(**kwargs)
         streams = await ctx.__aenter__()
         state.client = ctx
         # streamablehttp_client yields (read, write, get_session_id)
@@ -356,22 +566,28 @@ class MCPManager:
         result = {}
         # First, include all servers from the config file
         for cfg in load_mcp_config():
-            result[cfg.name] = {
+            info: dict = {
                 "connected": False,
                 "tool_count": 0,
                 "error": "",
                 "transport": cfg.transport,
                 "enabled": cfg.enabled,
             }
+            if cfg.registry_ref:
+                info["registry_ref"] = cfg.registry_ref
+            result[cfg.name] = info
         # Overlay runtime state for servers that have been started
         for name, state in self._servers.items():
-            result[name] = {
+            info = {
                 "connected": state.connected,
                 "tool_count": len(state.tools),
                 "error": state.error,
                 "transport": state.config.transport,
                 "enabled": state.config.enabled,
             }
+            if state.config.registry_ref:
+                info["registry_ref"] = state.config.registry_ref
+            result[name] = info
         return result
 
     async def start_enabled_servers(self) -> None:

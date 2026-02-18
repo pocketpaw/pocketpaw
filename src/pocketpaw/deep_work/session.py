@@ -1,5 +1,6 @@
 # Deep Work Session — project lifecycle orchestrator.
 # Created: 2026-02-12
+# Updated: 2026-02-17 — Record planning errors to health engine ErrorStore.
 # Updated: 2026-02-12 — Added executor integration for pause/stop, made
 #   planner/scheduler/human_router optional with sensible defaults,
 #   improved _assign_tasks_to_agents to use key_to_id mapping.
@@ -279,6 +280,21 @@ class DeepWorkSession:
 
         except Exception as e:
             logger.exception(f"Planning failed for project {project.id}: {e}")
+            # Record to persistent health error log
+            try:
+                import traceback
+
+                from pocketpaw.health import get_health_engine
+
+                get_health_engine().record_error(
+                    message=f"Planning failed: {e}",
+                    source="deep_work.session",
+                    severity="error",
+                    traceback=traceback.format_exc(),
+                    context={"project_id": project.id, "action": "planning"},
+                )
+            except Exception:
+                pass
             project.status = ProjectStatus.FAILED
             project.metadata["error"] = str(e)
             await self.manager.update_project(project)

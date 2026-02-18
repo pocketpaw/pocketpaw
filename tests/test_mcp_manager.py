@@ -402,6 +402,68 @@ class TestMCPManagerConfigMethods:
 # ======================================================================
 
 
+class TestHTTPAutoDetect:
+    """Tests for transport='http' auto-detect (Streamable HTTP → SSE fallback)."""
+
+    async def test_http_transport_tries_streamable_first(self):
+        """transport='http' should try Streamable HTTP and succeed."""
+        mgr = MCPManager()
+        cfg = MCPServerConfig(name="modern", transport="http", url="https://example.com/mcp")
+
+        with (
+            patch.object(mgr, "_connect_streamable_http", new_callable=AsyncMock),
+            patch.object(mgr, "_connect_sse", new_callable=AsyncMock) as mock_sse,
+            patch.object(
+                mgr,
+                "_discover_tools",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await mgr.start_server(cfg)
+            assert result is True
+            # SSE should NOT have been called
+            mock_sse.assert_not_called()
+
+    async def test_http_transport_falls_back_to_sse(self):
+        """transport='http' should fall back to SSE when Streamable HTTP fails."""
+        mgr = MCPManager()
+        cfg = MCPServerConfig(name="legacy", transport="http", url="https://example.com/mcp")
+
+        with (
+            patch.object(
+                mgr,
+                "_connect_streamable_http",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("405 Method Not Allowed"),
+            ),
+            patch.object(mgr, "_connect_sse", new_callable=AsyncMock),
+            patch.object(mgr, "_discover_tools", new_callable=AsyncMock),
+            patch.object(mgr, "_cleanup_state", new_callable=AsyncMock),
+        ):
+            result = await mgr.start_server(cfg)
+            assert result is True
+
+    async def test_http_transport_no_fallback_on_timeout(self):
+        """transport='http' should NOT fall back to SSE on timeout."""
+        mgr = MCPManager()
+        cfg = MCPServerConfig(
+            name="slow", transport="http", url="https://example.com/mcp", timeout=1
+        )
+
+        with (
+            patch.object(
+                mgr,
+                "_connect_remote_with_timeout",
+                new_callable=AsyncMock,
+                side_effect=TimeoutError("Connection timed out"),
+            ),
+        ):
+            result = await mgr.start_server(cfg)
+            assert result is False
+            status = mgr._servers["slow"]
+            assert "timed out" in status.error
+
+
 class TestGetMCPManager:
     def test_returns_same_instance(self):
         import pocketpaw.mcp.manager as mod

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Skill search paths in priority order (later overrides earlier)
 SKILL_PATHS = [
     Path.home() / ".agents" / "skills",  # From skills.sh (central)
+    Path.home() / ".claude" / "skills",  # Claude Code / SDK standard
     Path.home() / ".pocketpaw" / "skills",  # PocketPaw-specific
 ]
 

@@ -1,7 +1,11 @@
 <!--
   PocketPaw Dashboard - Sidebar Component
 
-  Updated: 2026-02-12
+  Updated: 2026-02-17
+  - Added health indicator dot next to Beta badge (green/yellow/red pulsing)
+  - Added Health button in Tools & Config grid
+
+  Previous: 2026-02-12
   - Replaced flat project cards with inline expandable file tree per project
   - Chevron toggle expands/collapses file tree; title click navigates to Crew view
   - Subdirectories expandable to 2 levels; deeper opens file browser modal
@@ -23,6 +27,18 @@
     <i data-lucide="paw-print" class="w-5 h-5 text-accent"></i>
     <span class="text-lg font-semibold tracking-tight">PocketPaw</span>
     <span class="px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full leading-none">Beta</span>
+    <!-- Health indicator dot -->
+    <button
+        class="w-2.5 h-2.5 rounded-full shrink-0 transition-colors"
+        :class="{
+            'bg-green-400': healthStatus === 'healthy',
+            'bg-yellow-400 animate-pulse': healthStatus === 'degraded',
+            'bg-red-400 animate-pulse': healthStatus === 'unhealthy',
+            'bg-white/20': !healthStatus || healthStatus === 'unknown'
+        }"
+        @click="openHealthPanel(); sidebarOpen = false"
+        :title="'System: ' + (healthStatus || 'unknown')"
+    ></button>
     <button class="ml-auto md:hidden" @click="sidebarOpen = false">
         <i data-lucide="x" class="w-5 h-5 text-white/50"></i>
     </button>
@@ -341,6 +357,17 @@
         <button class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/5 transition-colors" @click="openAudit(); sidebarOpen = false">
           <i data-lucide="shield-check" class="w-3.5 h-3.5"></i> Audit
         </button>
+        <button class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/5 transition-colors" @click="openHealthPanel(); sidebarOpen = false">
+          <i data-lucide="heart-pulse" class="w-3.5 h-3.5"></i> Health
+          <span
+              class="w-1.5 h-1.5 rounded-full ml-auto"
+              :class="{
+                  'bg-green-400': healthStatus === 'healthy',
+                  'bg-yellow-400': healthStatus === 'degraded',
+                  'bg-red-400': healthStatus === 'unhealthy'
+              }"
+          ></span>
+        </button>
         <button class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/5 transition-colors" @click="openChannels(); sidebarOpen = false">
           <i data-lucide="radio-tower" class="w-3.5 h-3.5"></i> Channels
           <span x-show="runningChannelCount() > 0" class="ml-auto text-[10px] bg-success/20 text-success px-1.5 rounded-full" x-text="runningChannelCount()"></span>
@@ -376,6 +403,23 @@
           <div class="text-[10px] text-white/30">Bat</div>
           <div class="text-[11px] font-mono text-white/70" x-text="typeof status.battery === 'number' ? status.battery + '%' : status.battery"></div>
         </div>
+      </div>
+
+      <!-- Version & Updates -->
+      <div class="mt-2 px-2 py-1.5 text-center space-y-0.5">
+        <div class="text-[10px] text-white/30 font-mono">
+          v<span x-text="appVersion || '...'"></span>
+          <template x-if="updateAvailable">
+            <span class="text-amber-400 ml-1">
+              &rarr; <span x-text="latestVersion"></span> available
+            </span>
+          </template>
+        </div>
+        <a href="https://github.com/pocketpaw/pocketpaw/releases"
+           target="_blank" rel="noopener"
+           class="text-[10px] text-white/20 hover:text-white/50 transition-colors">
+          Get release updates
+        </a>
       </div>
     </div>
   </div>
