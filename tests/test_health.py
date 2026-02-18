@@ -1,5 +1,6 @@
 # Tests for the Health Engine (health/store.py, checks.py, engine.py, playbooks.py, tools)
 # Created: 2026-02-17
+# Updated: 2026-02-18 — added TestCheckVersionUpdate, updated registry count for version check.
 # Updated: 2026-02-17 — Phase 2: added ContextHub health_status integration tests
 # Covers: ErrorStore, HealthCheckResult, individual checks, HealthEngine,
 #         playbook diagnostics, health agent tools, ContextHub health_status source.
@@ -25,6 +26,7 @@ from pocketpaw.health.checks import (
     check_llm_reachable,
     check_memory_dir_accessible,
     check_secrets_encrypted,
+    check_version_update,
 )
 from pocketpaw.health.engine import HealthEngine
 from pocketpaw.health.playbooks import PLAYBOOKS, diagnose_config
@@ -545,9 +547,53 @@ class TestCheckLlmReachable:
 # =============================================================================
 
 
+class TestCheckVersionUpdate:
+    """Tests for check_version_update health check."""
+
+    _P_GET_VERSION = "importlib.metadata.version"
+    _P_UPDATE_CHECK = "pocketpaw.update_check.check_for_updates"
+
+    def test_returns_ok_when_current(self, tmp_path):
+        """No update available returns ok status."""
+        update_info = {"current": "0.4.2", "latest": "0.4.2", "update_available": False}
+        with (
+            patch(self._P_GET_VERSION, return_value="0.4.2"),
+            patch(_P_CONFIG_DIR, return_value=tmp_path),
+            patch(self._P_UPDATE_CHECK, return_value=update_info),
+        ):
+            result = check_version_update()
+        assert result.status == "ok"
+        assert result.check_id == "version_update"
+        assert "latest" in result.message
+
+    def test_returns_warning_when_update_available(self, tmp_path):
+        """Update available returns warning status with upgrade hint."""
+        update_info = {"current": "0.4.1", "latest": "0.4.2", "update_available": True}
+        with (
+            patch(self._P_GET_VERSION, return_value="0.4.1"),
+            patch(_P_CONFIG_DIR, return_value=tmp_path),
+            patch(self._P_UPDATE_CHECK, return_value=update_info),
+        ):
+            result = check_version_update()
+        assert result.status == "warning"
+        assert "0.4.2" in result.message
+        assert "pip install --upgrade pocketpaw" in result.fix_hint
+
+    def test_returns_ok_on_check_failure(self, tmp_path):
+        """When update check fails (None), returns ok (no false alarm)."""
+        with (
+            patch(self._P_GET_VERSION, return_value="0.4.2"),
+            patch(_P_CONFIG_DIR, return_value=tmp_path),
+            patch(self._P_UPDATE_CHECK, return_value=None),
+        ):
+            result = check_version_update()
+        assert result.status == "ok"
+        assert "unavailable" in result.message
+
+
 class TestCheckRegistries:
     def test_startup_checks_count(self):
-        assert len(STARTUP_CHECKS) == 10
+        assert len(STARTUP_CHECKS) == 11  # 10 original + version_update
 
     def test_connectivity_checks_count(self):
         assert len(CONNECTIVITY_CHECKS) == 1
@@ -592,7 +638,7 @@ class TestHealthEngine:
             patch("importlib.util.find_spec", return_value=MagicMock()),
         ):
             results = engine.run_startup_checks()
-            assert len(results) == 10
+            assert len(results) == 11  # 10 original + version_update
             # All should be ok with valid config + key
             statuses = {r.status for r in results}
             assert "critical" not in statuses
@@ -764,6 +810,7 @@ class TestPlaybooks:
             "disk_space",
             "config_permissions",
             "secrets_encrypted",
+            "version_update",
         }
         assert set(PLAYBOOKS.keys()) == expected
 

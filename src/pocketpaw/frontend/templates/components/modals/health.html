@@ -1,6 +1,8 @@
 <!--
   Health Engine Modal — system diagnostics and error log.
   Created: 2026-02-17
+  Updated: 2026-02-18
+    - Show version number badge in header (next to status badge)
   Updated: 2026-02-17
     - Added "Fix Issues" button (sends issues to agent via chat)
     - Added "Clear Log" button to clear resolved errors
@@ -36,6 +38,9 @@
                 'bg-white/10 text-white/40 border border-white/10': !healthStatus || healthStatus === 'unknown'
             }"
             x-text="(healthStatus || 'unknown').toUpperCase()"
+        ></span>
+        <span class="px-2 py-0.5 text-[10px] font-mono text-white/30 bg-white/5 rounded-full"
+              x-text="'v' + (appVersion || '...')"
         ></span>
       </div>
       <div class="flex items-center gap-2">

@@ -1323,9 +1323,7 @@ async def install_extras(request: Request):
     # Clear cached adapter module so _start_channel_adapter can re-import fresh
     import sys
 
-    adapter_modules = [
-        k for k in sys.modules if k.startswith("pocketpaw.bus.adapters.")
-    ]
+    adapter_modules = [k for k in sys.modules if k.startswith("pocketpaw.bus.adapters.")]
     for mod in adapter_modules:
         del sys.modules[mod]
 

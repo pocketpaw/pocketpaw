@@ -1,6 +1,8 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-02-18: Added --doctor CLI flag (runs all health checks + version check, prints report).
+  - 2026-02-18: Styled update notice (ANSI box on stderr, suppressed in CI/non-TTY).
   - 2026-02-17: Run startup health checks after settings load (prints colored summary).
   - 2026-02-16: Add startup version check against PyPI (cached daily, silent on error).
   - 2026-02-14: Dashboard deps moved to core — `pip install pocketpaw` just works.
@@ -249,6 +251,85 @@ def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = Fal
     from pocketpaw.dashboard import run_dashboard
 
     run_dashboard(host=host, port=port, open_browser=not _is_headless() and not dev, dev=dev)
+
+
+async def run_doctor() -> int:
+    """Run all health checks and print a polished diagnostic report.
+
+    Returns 0 if healthy, 1 if degraded, 2 if unhealthy.
+    """
+    import sys
+
+    from pocketpaw.health import get_health_engine
+
+    w = sys.stderr.write
+
+    # ANSI colors
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+    current = get_version("pocketpaw")
+    w(f"\n  {BOLD}PocketPaw Doctor{RESET} v{current}\n")
+    w(f"  {'─' * 40}\n\n")
+
+    engine = get_health_engine()
+
+    # Run all checks (startup sync + connectivity async)
+    engine.run_startup_checks()
+    await engine.run_connectivity_checks()
+
+    results = engine.results
+
+    # Group by category
+    categories: dict[str, list] = {}
+    for r in results:
+        cat = r.category.title()
+        categories.setdefault(cat, []).append(r)
+
+    # Print results grouped by category
+    for cat_name, checks in categories.items():
+        w(f"  {DIM}{cat_name}{RESET}\n")
+        for r in checks:
+            if r.status == "ok":
+                icon = f"{GREEN}✓{RESET}"
+            elif r.status == "warning":
+                icon = f"{YELLOW}⚠{RESET}"
+            else:
+                icon = f"{RED}✗{RESET}"
+
+            # Pad name to align messages
+            padded_name = r.name.ljust(22)
+            w(f"    {icon} {padded_name} {DIM}{r.message}{RESET}\n")
+
+            if r.fix_hint and r.status != "ok":
+                # Split on | for multi-part hints (e.g. "Run: ... | Changelog: ...")
+                for hint in r.fix_hint.split("  |  "):
+                    w(f"      {DIM}→ {hint.strip()}{RESET}\n")
+        w("\n")
+
+    # Summary line
+    total = len(results)
+    ok_count = sum(1 for r in results if r.status == "ok")
+    warn_count = sum(1 for r in results if r.status == "warning")
+    crit_count = sum(1 for r in results if r.status == "critical")
+
+    w(f"  {'─' * 40}\n")
+    w(f"  {total} checks: {GREEN}{ok_count} passed{RESET}")
+    if warn_count:
+        w(f", {YELLOW}{warn_count} warning{'s' if warn_count > 1 else ''}{RESET}")
+    if crit_count:
+        w(f", {RED}{crit_count} critical{RESET}")
+    w("\n")
+
+    status = engine.overall_status
+    color = {"healthy": GREEN, "degraded": YELLOW, "unhealthy": RED}.get(status, RESET)
+    w(f"  Overall: {color}{BOLD}{status.upper()}{RESET}\n\n")
+
+    return {"healthy": 0, "degraded": 1, "unhealthy": 2}.get(status, 1)
 
 
 async def check_ollama(settings: Settings) -> int:
@@ -546,9 +627,7 @@ Examples:
     parser.add_argument(
         "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
     )
-    parser.add_argument(
-        "--dev", action="store_true", help="Development mode with auto-reload"
-    )
+    parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
         "--check-ollama",
         action="store_true",
@@ -558,6 +637,11 @@ Examples:
         "--check-openai-compatible",
         action="store_true",
         help="Check OpenAI-compatible endpoint connectivity and tool calling support",
+    )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Run diagnostics: check config, connectivity, updates, and print a health report",
     )
     parser.add_argument(
         "--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}"
@@ -599,11 +683,11 @@ Examples:
 
     # Check for updates (cached daily, silent on error)
     from pocketpaw.config import get_config_dir
-    from pocketpaw.update_check import check_for_updates, print_update_notice
+    from pocketpaw.update_check import check_for_updates, print_styled_update_notice
 
     update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
     if update_info and update_info.get("update_available"):
-        print_update_notice(update_info)
+        print_styled_update_notice(update_info)
 
     # Resolve host: explicit flag > config > auto-detect
     if args.host is not None:
@@ -632,6 +716,9 @@ Examples:
             raise SystemExit(exit_code)
         elif args.check_openai_compatible:
             exit_code = asyncio.run(check_openai_compatible(settings))
+            raise SystemExit(exit_code)
+        elif args.doctor:
+            exit_code = asyncio.run(run_doctor())
             raise SystemExit(exit_code)
         elif args.security_audit:
             from pocketpaw.security.audit_cli import run_security_audit

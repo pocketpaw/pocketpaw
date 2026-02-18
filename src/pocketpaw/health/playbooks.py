@@ -1,5 +1,6 @@
 # Repair playbooks — pure data mapping check_id to diagnostic info.
 # Created: 2026-02-17
+# Updated: 2026-02-18 — added version_update playbook.
 # Used by config_doctor tool and health modal UI.
 
 from __future__ import annotations
@@ -98,6 +99,19 @@ PLAYBOOKS: dict[str, dict] = {
         "fix_steps": [
             "Open Settings > API Keys in the dashboard and save",
             "This automatically encrypts all secret fields",
+        ],
+        "auto_fixable": False,
+    },
+    "version_update": {
+        "symptom": "Running an outdated version — may miss bug fixes and new features",
+        "causes": [
+            "PocketPaw was installed a while ago and not updated",
+            "Auto-update is not configured",
+        ],
+        "fix_steps": [
+            "Run: pip install --upgrade pocketpaw",
+            "Check release notes at github.com/pocketpaw/pocketpaw/releases",
+            "Restart PocketPaw after upgrading",
         ],
         "auto_fixable": False,
     },
