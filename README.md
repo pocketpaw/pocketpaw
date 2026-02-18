@@ -39,6 +39,18 @@
 ```bash
 curl -fsSL https://pocketpaw.xyz/install.sh | sh
 ```
+### Windows Users
+
+The above command works on macOS and Linux.
+
+On Windows PowerShell, use:
+
+```bash
+pip install pocketpaw
+pocketpaw
+```
+
+Alternatively, use Git Bash if you prefer the curl installation method.
 
 Or install directly:
 
