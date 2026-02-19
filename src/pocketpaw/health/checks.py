@@ -27,6 +27,8 @@ class HealthCheckResult:
     message: str  # e.g. "Anthropic API key is configured"
     fix_hint: str  # e.g. "Set your API key in Settings > API Keys"
     timestamp: str = ""
+    details: list[str] | None = None
+
 
     def __post_init__(self):
         if not self.timestamp:
@@ -41,6 +43,7 @@ class HealthCheckResult:
             "message": self.message,
             "fix_hint": self.fix_hint,
             "timestamp": self.timestamp,
+            "details": self.details,
         }
 
 
@@ -184,6 +187,12 @@ def check_api_key_primary() -> HealthCheckResult:
             status="critical",
             message="No Anthropic API key found for Claude Agent SDK backend",
             fix_hint="Set your API key in Settings > API Keys, or set ANTHROPIC_API_KEY env var.",
+            details=[
+       "Claude Agent SDK requires a valid Anthropic API key.",
+        "Get your API key from https://console.anthropic.com/",
+        "Then set it in PocketPaw Settings or as an environment variable.",
+        "Restart PocketPaw after setting the API key."
+    ]
         )
 
     elif backend == "pocketpaw_native":
