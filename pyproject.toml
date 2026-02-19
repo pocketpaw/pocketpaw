@@ -77,9 +77,13 @@ desktop = [
     "psutil>=5.9.0",
     "pyautogui>=0.9.54",
 ]
-native = [
-    "open-interpreter>=0.2.0,<0.5.0",
+openai-agents = [
+    "openai-agents>=0.2.0",
 ]
+google-adk = [
+    "google-adk>=1.0.0",
+]
+## copilot-sdk: pip install github-copilot-sdk + copilot CLI on PATH
 memory = [
     "mem0ai>=0.1.115",
     "ollama>=0.6.1",
@@ -141,7 +145,7 @@ all-tools = [
     "pocketpaw[browser,desktop,image,extract,voice,ocr,sarvam,mcp,memory]",
 ]
 all-backends = [
-    "pocketpaw[native]",
+    "pocketpaw[openai-agents,google-adk]",
 ]
 all = [
     "pocketpaw[recommended,all-channels,all-tools,all-backends]",
