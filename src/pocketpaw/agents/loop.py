@@ -1,18 +1,8 @@
 """Unified Agent Loop.
-Created: 2026-02-02
-Changes:
-  - 2026-02-17: Record errors to health engine ErrorStore on timeout and exception.
-  - Added BrowserTool registration
-  - 2026-02-05: Refactored to use AgentRouter for all backends.
-                Now properly emits system_event for tool_use/tool_result.
 
-This is the core "brain" of PocketPaw. It integrates:
-1. MessageBus (Input/Output)
-2. MemoryManager (Short-term & Long-term memory)
-3. AgentRouter (Backend selection: claude_agent_sdk, pocketpaw_native, open_interpreter)
-4. AgentContextBuilder (Identity & System Prompt)
-
-It replaces the old highly-coupled bot loops.
+Core event loop that consumes from the message bus, feeds messages
+through AgentRouter (which delegates to the configured backend),
+and streams AgentEvent responses back to channels.
 """
 
 import asyncio
@@ -51,22 +41,6 @@ def _extract_generated_paths(text: str) -> list[str]:
     return _GENERATED_PATH_RE.findall(text)
 
 
-async def _iter_with_timeout(aiter, first_timeout=30, timeout=120):
-    """Yield items from an async iterator with per-item timeouts.
-
-    Uses a shorter timeout for the first item (to detect dead/hung backends
-    quickly) and a longer timeout for subsequent items (to allow for tool
-    execution, file operations, etc.).
-    """
-    ait = aiter.__aiter__()
-    first = True
-    while True:
-        try:
-            t = first_timeout if first else timeout
-            yield await asyncio.wait_for(ait.__anext__(), timeout=t)
-            first = False
-        except StopAsyncIteration:
-            break
 
 
 class AgentLoop:
@@ -270,86 +244,35 @@ class AgentLoop:
             full_response = ""
             media_paths: list[str] = []
 
-            run_iter = router.run(content, system_prompt=system_prompt, history=history)
-            # External endpoints (OpenAI-compatible, Ollama) may need longer
-            # for the first response — especially thinking/reasoning models.
-            ft = 120 if self.settings.llm_provider == "openai_compatible" else 30
+            run_iter = router.run(
+                content, system_prompt=system_prompt, history=history, session_key=session_key
+            )
             try:
-                async for chunk in _iter_with_timeout(run_iter, first_timeout=ft):
-                    chunk_type = chunk.get("type", "")
-                    content = chunk.get("content", "")
-                    metadata = chunk.get("metadata") or {}
+                async for event in run_iter:
+                    etype = event.type
+                    econtent = event.content
+                    meta = event.metadata or {}
 
-                    if chunk_type == "message":
-                        # Stream text to user
-                        full_response += content
+                    if etype == "message":
+                        full_response += econtent
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=message.channel,
                                 chat_id=message.chat_id,
-                                content=content,
+                                content=econtent,
                                 is_stream_chunk=True,
                             )
                         )
 
-                    elif chunk_type == "code":
-                        # Code block from Open Interpreter - emit as tool_use
-                        language = metadata.get("language", "code")
-                        await self.bus.publish_system(
-                            SystemEvent(
-                                event_type="tool_start",
-                                data={
-                                    "name": f"run_{language}",
-                                    "params": {"code": content[:100]},
-                                },
-                            )
-                        )
-                        # Also stream to user
-                        code_block = f"\n```{language}\n{content}\n```\n"
-                        full_response += code_block
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=code_block,
-                                is_stream_chunk=True,
-                            )
-                        )
-
-                    elif chunk_type == "output":
-                        # Output from code execution - emit as tool_result
-                        await self.bus.publish_system(
-                            SystemEvent(
-                                event_type="tool_result",
-                                data={
-                                    "name": "code_execution",
-                                    "result": content[:200],
-                                    "status": "success",
-                                },
-                            )
-                        )
-                        # Also stream to user
-                        output_block = f"\n```output\n{content}\n```\n"
-                        full_response += output_block
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=output_block,
-                                is_stream_chunk=True,
-                            )
-                        )
-
-                    elif chunk_type == "thinking":
-                        # Thinking goes to Activity panel only
+                    elif etype == "thinking":
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="thinking",
-                                data={"content": content, "session_key": session_key},
+                                data={"content": econtent, "session_key": session_key},
                             )
                         )
 
-                    elif chunk_type == "thinking_done":
+                    elif etype == "thinking_done":
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="thinking_done",
@@ -357,15 +280,14 @@ class AgentLoop:
                             )
                         )
 
-                    elif chunk_type == "token_usage":
+                    elif etype == "token_usage":
                         await self.bus.publish_system(
-                            SystemEvent(event_type="token_usage", data=metadata)
+                            SystemEvent(event_type="token_usage", data=meta)
                         )
 
-                    elif chunk_type == "tool_use":
-                        # Emit tool_start system event for Activity panel
-                        tool_name = metadata.get("name") or metadata.get("tool", "unknown")
-                        tool_input = metadata.get("input") or metadata
+                    elif etype == "tool_use":
+                        tool_name = meta.get("name") or meta.get("tool", "unknown")
+                        tool_input = meta.get("input") or meta
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_start",
@@ -373,30 +295,27 @@ class AgentLoop:
                             )
                         )
 
-                    elif chunk_type == "tool_result":
-                        # Emit tool_result system event for Activity panel
-                        tool_name = metadata.get("name") or metadata.get("tool", "unknown")
+                    elif etype == "tool_result":
+                        tool_name = meta.get("name") or meta.get("tool", "unknown")
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_result",
                                 data={
                                     "name": tool_name,
-                                    "result": content[:200],
+                                    "result": econtent[:200],
                                     "status": "success",
                                 },
                             )
                         )
-                        # Extract media file paths from tool output
-                        media_paths.extend(_extract_media_paths(content))
+                        media_paths.extend(_extract_media_paths(econtent))
 
-                    elif chunk_type == "error":
-                        # Emit error and send to user
+                    elif etype == "error":
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_result",
                                 data={
                                     "name": "agent",
-                                    "result": content,
+                                    "result": econtent,
                                     "status": "error",
                                 },
                             )
@@ -405,16 +324,14 @@ class AgentLoop:
                             OutboundMessage(
                                 channel=message.channel,
                                 chat_id=message.chat_id,
-                                content=content,
+                                content=econtent,
                                 is_stream_chunk=True,
                             )
                         )
 
-                    elif chunk_type == "done":
-                        # Agent finished - will send stream_end below
+                    elif etype == "done":
                         pass
             finally:
-                # Always close the async generator to kill any subprocess
                 await run_iter.aclose()
 
             # 4. Send stream end marker (with any media files detected)
@@ -460,53 +377,6 @@ class AgentLoop:
                     self._background_tasks.add(t)
                     t.add_done_callback(self._background_tasks.discard)
 
-        except TimeoutError:
-            logger.error("Agent backend timed out")
-            # Record to persistent health error log
-            try:
-                from pocketpaw.health import get_health_engine
-
-                get_health_engine().record_error(
-                    message="Agent backend timed out",
-                    source="agents.loop",
-                    severity="error",
-                    context={"session_key": session_key},
-                )
-            except Exception:
-                pass
-            # Kill the hung backend so it releases resources
-            try:
-                await router.stop()
-            except Exception:
-                pass
-            # Force router re-init on next message
-            self._router = None
-
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=message.channel,
-                    chat_id=message.chat_id,
-                    content=(
-                        "Request timed out — the agent backend didn't respond.\n\n"
-                        "**Possible causes:**\n"
-                        "- Claude Code CLI is not installed "
-                        "(`npm install -g @anthropic-ai/claude-code`)\n"
-                        "- API key is missing or invalid "
-                        "(check Settings → API Keys)\n"
-                        "- Try switching to **PocketPaw Native** backend "
-                        "in Settings → General"
-                    ),
-                    is_stream_chunk=True,
-                )
-            )
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=message.channel,
-                    chat_id=message.chat_id,
-                    content="",
-                    is_stream_end=True,
-                )
-            )
         except Exception as e:
             logger.exception(f"❌ Error processing message: {e}")
             # Record to persistent health error log
