@@ -41,8 +41,6 @@ def _extract_generated_paths(text: str) -> list[str]:
     return _GENERATED_PATH_RE.findall(text)
 
 
-
-
 class AgentLoop:
     """
     Main agent execution loop.
@@ -158,6 +156,8 @@ class AgentLoop:
         # Command interception — handle /new, /sessions, /resume, /help
         # before any agent processing or memory storage
         cmd_handler = get_command_handler()
+        if cmd_handler._on_settings_changed is None:
+            cmd_handler.set_on_settings_changed(self.reset_router)
         if cmd_handler.is_command(message.content):
             response = await cmd_handler.handle(message)
             if response is not None:
