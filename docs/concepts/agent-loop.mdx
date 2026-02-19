@@ -49,17 +49,17 @@ async def handle_message(self, message: InboundMessage):
     )
 
     # 4. Delegate to backend
-    async for chunk in self.router.process(context, message.content):
-        if chunk["type"] == "message":
+    async for event in self.router.process(context, message.content):
+        if event.type == "message":
             await self.bus.publish(OutboundMessage(
-                content=chunk["content"],
+                content=event.content,
                 is_stream_chunk=True,
                 ...
             ))
-        elif chunk["type"] == "tool_use":
+        elif event.type == "tool_use":
             await self.bus.publish(SystemEvent(
                 event_type="tool_start",
-                data=chunk["metadata"],
+                data=event.metadata,
             ))
 
     # 5. Save to memory
@@ -72,32 +72,35 @@ async def handle_message(self, message: InboundMessage):
 
 ## Agent Router
 
-The `AgentRouter` selects and delegates to one of three backends:
+The `AgentRouter` uses a **backend registry** to select and delegate to one of six backends:
 
 | Backend | Setting Value | Best For |
 |---------|--------------|----------|
 | Claude Agent SDK | `claude_agent_sdk` | Coding, complex reasoning, built-in tools |
-| PocketPaw Native | `pocketpaw_native` | Balanced capability and control |
-| Open Interpreter | `open_interpreter` | Local models via Ollama |
+| OpenAI Agents SDK | `openai_agents` | GPT models, Ollama local inference |
+| Google ADK | `google_adk` | Gemini models, native MCP |
+| Codex CLI | `codex_cli` | Code-focused tasks |
+| OpenCode | `opencode` | External server architecture |
+| Copilot SDK | `copilot_sdk` | Multi-provider (Copilot, OpenAI, Azure, Anthropic) |
 
-The router lazily imports the selected backend to avoid loading unused dependencies.
+The router lazily imports the selected backend via `registry.get_backend_class()` to avoid loading unused dependencies. Legacy backend names (e.g., `pocketpaw_native`, `open_interpreter`) are automatically mapped to their replacements.
 
 ## Response Standardization
 
-All backends yield standardized dictionaries:
+All backends yield standardized `AgentEvent` objects:
 
 ```python
-{
-    "type": "message",      # message, tool_use, tool_result, error, done
-    "content": "...",       # Text content
-    "metadata": {           # Backend-specific metadata
+AgentEvent(
+    type="message",      # message, tool_use, tool_result, error, done
+    content="...",       # Text content
+    metadata={           # Backend-specific metadata
         "tool_name": "...",
         "tool_input": {...},
     }
-}
+)
 ```
 
-This ensures consistent behavior regardless of which backend is active.
+The `AgentEvent` dataclass is defined in `agents/backend.py` alongside the `AgentBackend` protocol and `Capability` flags. This ensures consistent behavior regardless of which backend is active.
 
 ## Concurrency
 

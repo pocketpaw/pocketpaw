@@ -1,9 +1,13 @@
 """
 ContextHub - Gathers system context for intention execution.
 
+Changes (2026-02-17):
+- Added health_status context source for health engine integration
+
 Provides context sources that can be included in intention prompts:
 - system_status: CPU, RAM, disk, battery info
 - datetime: Current date and time
+- health_status: Health engine status (overall status + issues)
 - active_window: (Phase 2) Currently focused application
 
 Template variables in prompts (e.g., {{system_status}}) are replaced
@@ -30,6 +34,7 @@ class ContextHub:
     AVAILABLE_SOURCES = [
         "system_status",
         "datetime",
+        "health_status",
         # Phase 2:
         # "active_window",
         # "recent_files",
@@ -81,6 +86,7 @@ class ContextHub:
         gatherers = {
             "system_status": self._gather_system_status,
             "datetime": self._gather_datetime,
+            "health_status": self._gather_health_status,
             # Phase 2:
             # "active_window": self._gather_active_window,
         }
@@ -147,6 +153,17 @@ class ContextHub:
             "timestamp": int(now.timestamp()),
         }
 
+    async def _gather_health_status(self) -> dict:
+        """Gather health engine status."""
+        try:
+            from pocketpaw.health import get_health_engine
+
+            engine = get_health_engine()
+            return engine.summary
+        except Exception as e:
+            logger.warning("Failed to gather health status: %s", e)
+            return {"status": "unknown", "error": str(e)}
+
     def format_context_string(self, context: dict[str, Any]) -> str:
         """
         Format context dict as a readable string for inclusion in prompts.
@@ -164,6 +181,8 @@ class ContextHub:
                 parts.append(self._format_system_status(data))
             elif source == "datetime" and isinstance(data, dict):
                 parts.append(self._format_datetime(data))
+            elif source == "health_status" and isinstance(data, dict):
+                parts.append(self._format_health_status(data))
             else:
                 parts.append(f"[{source}]\n{data}")
 
@@ -196,6 +215,26 @@ class ContextHub:
             f"{dt.get('day_of_week', '')}, {dt.get('date', '')} {dt.get('time', '')}"
         )
 
+    def _format_health_status(self, health: dict) -> str:
+        """Format health status as readable string."""
+        status = health.get("status", "unknown").upper()
+        lines = [f"[Health Status] {status}"]
+
+        issues = health.get("issues", [])
+        if issues:
+            for issue in issues:
+                severity = issue.get("status", "?").upper()
+                name = issue.get("name", "Unknown")
+                msg = issue.get("message", "")
+                lines.append(f"  - [{severity}] {name}: {msg}")
+        else:
+            lines.append("  All checks passing")
+
+        if health.get("last_check"):
+            lines.append(f"  Last checked: {health['last_check']}")
+
+        return "\n".join(lines)
+
     def apply_template(self, prompt: str, context: dict[str, Any]) -> str:
         """
         Apply context to a prompt template.
@@ -224,6 +263,8 @@ class ContextHub:
                     formatted = self._format_system_status(data)
                 elif source == "datetime":
                     formatted = self._format_datetime(data)
+                elif source == "health_status":
+                    formatted = self._format_health_status(data)
                 else:
                     formatted = str(data)
                 result = result.replace(placeholder, formatted)

@@ -131,6 +131,25 @@ class DiscordAdapter(BaseChannelAdapter):
         async def delete_command(interaction: discord.Interaction):
             await _slash_to_inbound(interaction, "/delete")
 
+        @tree.command(name="backend", description="Show or switch agent backend")
+        async def backend_command(interaction: discord.Interaction, name: str | None = None):
+            content = "/backend" if not name else f"/backend {name}"
+            await _slash_to_inbound(interaction, content)
+
+        @tree.command(name="backends", description="List available backends")
+        async def backends_command(interaction: discord.Interaction):
+            await _slash_to_inbound(interaction, "/backends")
+
+        @tree.command(name="model", description="Show or switch model")
+        async def model_command(interaction: discord.Interaction, name: str | None = None):
+            content = "/model" if not name else f"/model {name}"
+            await _slash_to_inbound(interaction, content)
+
+        @tree.command(name="tools", description="Show or switch tool profile")
+        async def tools_command(interaction: discord.Interaction, profile: str | None = None):
+            content = "/tools" if not profile else f"/tools {profile}"
+            await _slash_to_inbound(interaction, content)
+
         @tree.command(name="help", description="Show PocketPaw help")
         async def help_command(interaction: discord.Interaction):
             await _slash_to_inbound(interaction, "/help")

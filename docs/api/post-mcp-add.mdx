@@ -21,8 +21,8 @@ Adds a new MCP server to the configuration. The server can use either `stdio` tr
   <Param name="name" type="string" required>
     Unique identifier for the server. Used as the key in config and tool naming (`mcp_<name>__<tool>`).
   </Param>
-  <Param name="transport" type="string" required enum={["stdio", "http"]}>
-    Transport protocol. Use `stdio` for local processes or `http` for remote servers.
+  <Param name="transport" type="string" required enum={["stdio", "http", "streamable-http", "sse"]}>
+    Transport protocol. Use `stdio` for local processes, `http` for remote servers (auto-detects Streamable HTTP vs SSE), or explicitly `streamable-http` / `sse`.
   </Param>
   <Param name="command" type="string">
     Command to execute for `stdio` transport (e.g., `npx`, `python`).
@@ -38,6 +38,9 @@ Adds a new MCP server to the configuration. The server can use either `stdio` tr
   </Param>
   <Param name="enabled" type="boolean" default="true">
     Whether to enable the server immediately.
+  </Param>
+  <Param name="oauth" type="boolean" default="false">
+    Whether the server uses OAuth authentication. When `true`, the first connection triggers a browser-based OAuth flow.
   </Param>
 </ParamTable>
 

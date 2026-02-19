@@ -1,0 +1,75 @@
+---
+title: Google ADK
+description: "The Google ADK backend uses Google's Agent Development Kit with Gemini models. Features native MCP support via McpToolset and custom tool bridging."
+section: Agent Backends
+ogType: article
+keywords: ["google adk", "gemini", "agent development kit", "mcp", "google ai"]
+tags: ["backends", "google"]
+---
+
+# Google ADK
+
+The Google ADK backend uses Google's **Agent Development Kit** (`google-adk` package) with Gemini models. It provides native MCP support and custom tool bridging.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: Google (Gemini models)
+- **Built-in tools**: google_search, code_execution
+- **MCP support**: Yes (native via `McpToolset` — stdio, SSE, HTTP transports)
+- **Session management**: InMemoryRunner with per-session state
+
+## Configuration
+
+```bash
+export POCKETPAW_AGENT_BACKEND="google_adk"
+export POCKETPAW_GOOGLE_API_KEY="..."
+```
+
+The backend also reads `GOOGLE_API_KEY` from the environment.
+
+### Backend-Specific Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `google_adk_model` | `POCKETPAW_GOOGLE_ADK_MODEL` | `""` (auto) | Gemini model to use |
+| `google_adk_max_turns` | `POCKETPAW_GOOGLE_ADK_MAX_TURNS` | `0` (unlimited) | Max tool-use turns per query |
+
+## Built-in Tools
+
+| ADK Tool | Policy Mapping |
+|----------|---------------|
+| `google_search` | `browser` |
+| `code_execution` | `shell` |
+
+PocketPaw's custom tools are wrapped as ADK `FunctionTool` objects via the `build_adk_function_tools()` bridge in `tool_bridge.py`. This uses signature introspection to convert PocketPaw tool definitions into ADK-compatible functions.
+
+## MCP Integration
+
+Google ADK has native MCP support via `McpToolset`. PocketPaw loads configured MCP servers and passes them to the ADK agent:
+
+- **stdio** transport for local MCP servers
+- **SSE** transport for HTTP-based MCP servers
+- **HTTP** transport for REST-based MCP servers
+
+MCP tools are subject to the same tool policy system as other tools.
+
+## How It Works
+
+1. PocketPaw creates a `LlmAgent` with the system prompt, tools, and MCP servers
+2. An `InMemoryRunner` manages session state
+3. Messages are sent via the runner's async interface
+4. The ADK handles multi-turn tool calling with Gemini
+5. Responses stream back as `AgentEvent` objects
+
+## Installation
+
+```bash
+pip install pocketpaw[google-adk]
+```
+
+This installs `google-adk>=1.0.0` as an optional dependency.
+
+<Callout type="info">
+  **Replaces Gemini CLI:** This backend replaced the earlier `gemini_cli` backend. If your config still uses `gemini_cli`, PocketPaw will automatically redirect to `google_adk`.
+</Callout>

@@ -1,55 +1,90 @@
 ---
 title: Agent Backends
-description: "Choose between three agent backends: Claude Agent SDK (recommended) for production-grade tool use, PocketPaw Native for custom orchestration, or Open Interpreter for local models."
+description: "Choose between six agent backends: Claude Agent SDK (recommended), OpenAI Agents, Google ADK, Codex CLI, OpenCode, or Copilot SDK. Each provides different capabilities and trade-offs."
 section: Agent Backends
 ogType: article
-keywords: ["agent backend", "backend selection", "claude sdk", "pocketpaw native", "open interpreter"]
+keywords: ["agent backend", "backend selection", "claude sdk", "openai agents", "google adk", "codex cli", "opencode", "copilot sdk"]
 tags: ["backends", "configuration"]
 ---
 
 # Agent Backends
 
-PocketPaw supports three agent backends. Each provides different capabilities and trade-offs.
+PocketPaw supports **six agent backends** built on a unified `AgentBackend` protocol. Each backend provides different capabilities and trade-offs. All backends yield standardized `AgentEvent` objects, so switching is seamless.
 
 ## Backend Comparison
 
-| Feature | Claude Agent SDK | PocketPaw Native | Open Interpreter |
-|---------|-----------------|-------------------|------------------|
-| Provider | Anthropic or Ollama | Anthropic or Ollama | Ollama/OpenAI/Anthropic |
-| Built-in tools | Bash, Read, Write, Edit | Custom + OI execution | OI tools |
-| Local models | Yes (Ollama) | Yes (Ollama) | Yes (Ollama) |
-| Code execution | Claude tools | Open Interpreter | Open Interpreter |
-| Streaming | Yes | Yes | Yes |
-| MCP support | Native | Via tool registry | Via tool registry |
-| Recommended for | Coding, complex tasks | Balanced workflows | Local/offline use |
+| Feature | Claude SDK | OpenAI Agents | Google ADK | Codex CLI | OpenCode | Copilot SDK |
+|---------|-----------|---------------|------------|-----------|----------|-------------|
+| Status | Production | Beta | Beta | Beta | Beta | Beta |
+| Streaming | Yes | Yes | Yes | Yes | Yes | Yes |
+| Tools | Yes | Yes | Yes | Yes | Yes | Yes |
+| MCP | Yes | No | Yes | Yes | No | No |
+| Multi-turn | Yes | Yes | Yes | Yes | Yes | Yes |
+| Local models | Ollama | Ollama | No | No | No | No |
+| Required key | [Anthropic API key](https://console.anthropic.com/api-keys) | OpenAI | Google | OpenAI | None | None |
 
 ## Switching Backends
 
-Set the backend via environment variable or config:
+Set the backend via environment variable, config file, or the dashboard:
 
 ```bash
-export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # default
-# or
-export POCKETPAW_AGENT_BACKEND="pocketpaw_native"
-# or
-export POCKETPAW_AGENT_BACKEND="open_interpreter"
+export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"   # default
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_AGENT_BACKEND="google_adk"
+export POCKETPAW_AGENT_BACKEND="codex_cli"
+export POCKETPAW_AGENT_BACKEND="opencode"
+export POCKETPAW_AGENT_BACKEND="copilot_sdk"
 ```
 
-Or change it in the web dashboard's Settings panel.
+Or change it in the web dashboard's **Settings** panel — the backend dropdown shows available backends with capability badges.
+
+## Capability System
+
+Each backend declares its capabilities via a `Capability` flag enum:
+
+- **STREAMING** — Real-time token-by-token output
+- **TOOLS** — Can call tools (built-in or custom)
+- **MCP** — Native Model Context Protocol server support
+- **MULTI_TURN** — Maintains conversation context across turns
+- **CUSTOM_SYSTEM_PROMPT** — Accepts a custom system prompt from PocketPaw
+
+The dashboard shows capability badges for each backend so you can compare at a glance.
 
 ## Backend Details
 
 <CardGroup>
   <Card title="Claude Agent SDK" icon="lucide:sparkles" href="/backends/claude-sdk">
-    The recommended backend with native Claude tools and MCP support.
+    The recommended backend with native Claude tools, MCP support, and Ollama compatibility.
   </Card>
-  <Card title="PocketPaw Native" icon="lucide:bot" href="/backends/pocketpaw-native">
-    Custom orchestrator combining Anthropic SDK with Open Interpreter.
+  <Card title="OpenAI Agents SDK" icon="lucide:brain" href="/backends/openai-agents">
+    OpenAI's agent framework with GPT models. Supports Ollama for local inference.
   </Card>
-  <Card title="Open Interpreter" icon="lucide:terminal" href="/backends/open-interpreter">
-    Standalone engine with Ollama support for fully local operation.
+  <Card title="Google ADK" icon="lucide:hexagon" href="/backends/google-adk">
+    Google Agent Development Kit with Gemini models and native MCP support.
+  </Card>
+  <Card title="Codex CLI" icon="lucide:code" href="/backends/codex-cli">
+    OpenAI's Codex CLI for code-focused tasks with MCP support.
+  </Card>
+  <Card title="OpenCode" icon="lucide:server" href="/backends/opencode">
+    External server-based backend via REST API. Requires separate OpenCode server.
+  </Card>
+  <Card title="Copilot SDK" icon="lucide:github" href="/backends/copilot-sdk">
+    GitHub Copilot SDK with multi-provider support (Copilot, OpenAI, Azure, Anthropic).
   </Card>
   <Card title="Ollama (Local LLMs)" icon="lucide:hard-drive" href="/backends/ollama">
-    Run fully local with any backend — no API keys, no cloud, no costs.
+    Run fully local with supported backends — no API keys, no cloud, no costs.
   </Card>
 </CardGroup>
+
+## Legacy Backends
+
+The following backends have been removed but their config values are automatically mapped to active backends:
+
+| Legacy Value | Maps To | Removed |
+|-------------|---------|---------|
+| `pocketpaw_native` | `claude_agent_sdk` | Feb 2026 |
+| `open_interpreter` | `claude_agent_sdk` | Feb 2026 |
+| `claude_code` | `claude_agent_sdk` | Feb 2026 |
+| `gemini_cli` | `google_adk` | Feb 2026 |
+
+If your config still uses a legacy backend name, PocketPaw will silently redirect to the mapped backend.

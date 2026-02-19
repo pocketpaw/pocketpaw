@@ -1,0 +1,73 @@
+---
+title: OpenAI Agents SDK
+description: "The OpenAI Agents SDK backend uses OpenAI's agent framework with GPT models. Supports Ollama for local inference via OpenAI-compatible endpoints."
+section: Agent Backends
+ogType: article
+keywords: ["openai agents", "gpt", "openai sdk", "ollama", "agent framework"]
+tags: ["backends", "openai"]
+---
+
+# OpenAI Agents SDK
+
+The OpenAI Agents SDK backend uses OpenAI's native agent framework (`openai-agents` package) with GPT models. It also supports Ollama and OpenAI-compatible providers for local inference.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: OpenAI, Ollama, OpenAI-compatible endpoints
+- **Built-in tools**: code_interpreter, file_search, computer_use
+- **MCP support**: No
+- **Session persistence**: SQLite-based via the SDK
+
+## Configuration
+
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_OPENAI_API_KEY="sk-..."
+```
+
+### Backend-Specific Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `openai_agents_provider` | `POCKETPAW_OPENAI_AGENTS_PROVIDER` | `""` (auto) | Provider: `openai`, `ollama`, or `openai_compatible` |
+| `openai_agents_model` | `POCKETPAW_OPENAI_AGENTS_MODEL` | `""` (auto) | Model to use (e.g., `gpt-4o`, `gpt-4o-mini`) |
+| `openai_agents_max_turns` | `POCKETPAW_OPENAI_AGENTS_MAX_TURNS` | `0` (unlimited) | Max tool-use turns per query |
+
+### Using with Ollama
+
+For local inference via Ollama's OpenAI-compatible API:
+
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="ollama"
+export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
+```
+
+The backend wraps the Ollama model in `OpenAIChatCompletionsModel` from the SDK.
+
+## Built-in Tools
+
+| SDK Tool | Policy Mapping |
+|----------|---------------|
+| `code_interpreter` | `shell` |
+| `file_search` | `read_file` |
+| `computer_use` | `shell` |
+
+PocketPaw's custom tools (web_search, image_gen, etc.) are also registered via the `tool_bridge.py` wrapper.
+
+## How It Works
+
+1. PocketPaw creates an OpenAI `Agent` with the system prompt and tool definitions
+2. Messages are sent via `Runner.run_streamed()`
+3. The SDK handles multi-turn tool calling automatically
+4. Responses stream back as `AgentEvent` objects
+5. Session history is managed via `SQLiteSession` for multi-turn context
+
+## Installation
+
+```bash
+pip install pocketpaw[openai-agents]
+```
+
+This installs the `openai-agents` package as an optional dependency.

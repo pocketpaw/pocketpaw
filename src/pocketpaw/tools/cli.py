@@ -1,5 +1,7 @@
 # Tool CLI dispatcher — allows agent to call any builtin tool via Bash.
 #
+# Updated: 2026-02-17 — added health_check, error_log, config_doctor tools
+#
 # Usage:
 #   python -m pocketpaw.tools.cli <tool_name> '<json_args>'
 #   python -m pocketpaw.tools.cli --list
@@ -7,7 +9,7 @@
 # Examples:
 #   python -m pocketpaw.tools.cli gmail_search '{"query": "is:unread"}'
 #   python -m pocketpaw.tools.cli text_to_speech '{"text": "Hello world"}'
-#   python -m pocketpaw.tools.cli research '{"topic": "quantum computing"}'
+#   python -m pocketpaw.tools.cli health_check '{"include_connectivity": true}'
 
 from __future__ import annotations
 
@@ -20,9 +22,18 @@ from pocketpaw.tools.builtin import (
     CalendarListTool,
     CalendarPrepTool,
     ClearSessionTool,
+    ConfigDoctorTool,
     CreateSkillTool,
     DelegateToClaudeCodeTool,
     DeleteSessionTool,
+    DocsCreateTool,
+    DocsReadTool,
+    DocsSearchTool,
+    DriveDownloadTool,
+    DriveListTool,
+    DriveShareTool,
+    DriveUploadTool,
+    ErrorLogTool,
     ForgetTool,
     GmailBatchModifyTool,
     GmailCreateLabelTool,
@@ -32,15 +43,26 @@ from pocketpaw.tools.builtin import (
     GmailSearchTool,
     GmailSendTool,
     GmailTrashTool,
+    HealthCheckTool,
     ImageGenerateTool,
     ListSessionsTool,
     NewSessionTool,
+    OCRTool,
     RecallTool,
+    RedditReadTool,
+    RedditSearchTool,
+    RedditTrendingTool,
     RememberTool,
     RenameSessionTool,
     ResearchTool,
+    SpeechToTextTool,
+    SpotifyNowPlayingTool,
+    SpotifyPlaybackTool,
+    SpotifyPlaylistTool,
+    SpotifySearchTool,
     SwitchSessionTool,
     TextToSpeechTool,
+    TranslateTool,
     UrlExtractTool,
     WebSearchTool,
 )
@@ -76,6 +98,26 @@ _TOOLS = {
         ClearSessionTool(),
         RenameSessionTool(),
         DeleteSessionTool(),
+        SpeechToTextTool(),
+        DriveListTool(),
+        DriveDownloadTool(),
+        DriveUploadTool(),
+        DriveShareTool(),
+        DocsReadTool(),
+        DocsCreateTool(),
+        DocsSearchTool(),
+        SpotifySearchTool(),
+        SpotifyNowPlayingTool(),
+        SpotifyPlaybackTool(),
+        SpotifyPlaylistTool(),
+        OCRTool(),
+        TranslateTool(),
+        RedditSearchTool(),
+        RedditReadTool(),
+        RedditTrendingTool(),
+        HealthCheckTool(),
+        ErrorLogTool(),
+        ConfigDoctorTool(),
     ]
 }
 

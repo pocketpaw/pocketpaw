@@ -1,15 +1,68 @@
 # Deep Work planner prompt templates.
 # Created: 2026-02-12
+# Updated: 2026-02-18 — Added GOAL_PARSE_PROMPT for structured goal analysis
+#   (domain detection, complexity estimation, clarification questions).
 # Updated: 2026-02-12 — Added RESEARCH_PROMPT_QUICK and RESEARCH_PROMPT_DEEP
 #   for configurable research depth.
 #
-# Four-phase planning prompts:
+# Prompt templates:
+#   GOAL_PARSE_PROMPT — structured goal analysis (domain, complexity, roles)
 #   RESEARCH_PROMPT — domain research (standard depth)
 #   RESEARCH_PROMPT_QUICK — minimal research (skip web search)
 #   RESEARCH_PROMPT_DEEP — thorough research (extensive web search)
 #   PRD_PROMPT — PRD generation
 #   TASK_BREAKDOWN_PROMPT — task decomposition to JSON
 #   TEAM_ASSEMBLY_PROMPT — team recommendation to JSON
+
+GOAL_PARSE_PROMPT = """\
+You are an expert project analyst. Analyze the user's goal and produce a \
+structured JSON assessment. This is the first step before planning — you need \
+to understand WHAT the user wants, WHICH domain it falls into, HOW complex \
+it is, and WHAT needs clarification.
+
+USER INPUT:
+{user_input}
+
+Analyze the input and output ONLY a valid JSON object (no commentary). \
+You may wrap it in ```json fences. The JSON must have exactly these fields:
+
+{{
+  "goal": "A clear, one-sentence restatement of the user's goal",
+  "domain": "One of: code, business, creative, education, events, home, hybrid",
+  "sub_domains": ["Array of specific sub-domains, e.g. 'web-development', 'react', 'aws'"],
+  "complexity": "One of: S, M, L, XL",
+  "estimated_phases": 1-10,
+  "ai_capabilities": ["What AI can do for this project — be specific"],
+  "human_requirements": ["What the human MUST do — things AI cannot"],
+  "constraints_detected": ["Any budget, timeline, or technical constraints mentioned"],
+  "clarifications_needed": ["Questions to ask BEFORE planning — only if truly ambiguous"],
+  "suggested_research_depth": "One of: none, quick, standard, deep",
+  "confidence": 0.0 to 1.0
+}}
+
+DOMAIN DEFINITIONS:
+- code: Software development, APIs, apps, websites, scripts, data pipelines
+- business: Market research, business plans, accounting, legal, marketing strategy
+- creative: Writing, design, music, video, art, content creation
+- education: Learning plans, courses, study guides, skill development
+- events: Weddings, conferences, parties, travel planning, logistics
+- home: Renovation, moving, organization, DIY projects, gardening
+- hybrid: Projects spanning multiple domains (set sub_domains to clarify)
+
+COMPLEXITY RULES:
+- S: Single deliverable, < 1 hour, no dependencies
+- M: 2-5 tasks, 1-4 hours, minimal dependencies
+- L: 5-15 tasks, days to weeks, multiple phases and dependencies
+- XL: 15+ tasks, weeks to months, multiple phases, team needed
+
+CLARIFICATION RULES:
+- Only ask if the answer would CHANGE the plan significantly
+- Maximum 4 clarification questions
+- Skip clarifications for obvious or standard approaches
+- Never ask about things you can reasonably assume
+
+Keep confidence between 0.5 (very vague input) and 1.0 (crystal clear goal).
+"""
 
 RESEARCH_PROMPT_QUICK = """\
 You are a senior technical researcher. Based ONLY on your existing knowledge \

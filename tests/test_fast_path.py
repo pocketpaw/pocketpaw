@@ -280,7 +280,7 @@ async def test_chat_dispatches_fast_path_for_simple():
             MockRouter.return_value.classify.return_value = selection
 
             events = []
-            async for ev in sdk.chat("hi", system_prompt="identity"):
+            async for ev in sdk.run("hi", system_prompt="identity"):
                 events.append(ev)
 
     assert any(e.content == "fast!" for e in events)
@@ -325,7 +325,7 @@ async def test_chat_uses_persistent_client_for_moderate():
             MockRouter.return_value.classify.return_value = selection
             with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
                 events = []
-                async for ev in sdk.chat("analyze this code", system_prompt="identity"):
+                async for ev in sdk.run("analyze this code", system_prompt="identity"):
                     events.append(ev)
 
     assert fake_client.connected
@@ -363,7 +363,7 @@ async def test_chat_standard_path_when_routing_disabled():
 
         with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
             events = []
-            async for ev in sdk.chat("hi", system_prompt="identity"):
+            async for ev in sdk.run("hi", system_prompt="identity"):
                 events.append(ev)
 
     # "hi" would be SIMPLE, but routing is disabled -> standard path via persistent client
@@ -518,7 +518,7 @@ async def test_persistent_client_falls_back_to_query():
             MockRouter.return_value.classify.return_value = selection
             with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
                 events = []
-                async for ev in sdk.chat("test message", system_prompt="identity"):
+                async for ev in sdk.run("test message", system_prompt="identity"):
                     events.append(ev)
 
     assert fallback_called

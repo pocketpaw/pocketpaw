@@ -2,13 +2,17 @@
  * PocketPaw Main Application
  * Alpine.js component for the dashboard
  *
+ * Changes (2026-02-17):
+ * - Health reconnect hook: re-fetch health data on WS reconnect
+ * - Added health_update socket handler and get_health on connect
+ *
  * Changes (2026-02-12):
  * - Call initHashRouter() in init() for hash-based URL routing
  *
  * Changes (2026-02-05):
  * - MAJOR REFACTOR: Componentized into feature modules using mixin pattern
  * - Extracted features to js/features/: chat, file-browser, reminders, intentions,
- *   skills, transparency, remote-access, mission-control
+ *   skills, transparency, remote-access, mc-agents, mc-tasks, deep-work, mc-events
  * - This file now serves as the core assembler for feature modules
  * - Core functionality: init, WebSocket setup, settings, status, tools, logging
  *
@@ -22,6 +26,11 @@ function app() {
 
     return {
         // ==================== Core State ====================
+
+        // Version & updates
+        appVersion: '',
+        latestVersion: '',
+        updateAvailable: false,
 
         // View state
         view: 'chat',
@@ -39,6 +48,8 @@ function app() {
         // Settings panel state
         settingsSection: 'general',
         settingsMobileView: 'list',
+        settingsSearch: '',
+        settingsSearchResults: [],
         settingsSections: [
             { id: 'general', label: 'General', icon: 'settings' },
             { id: 'apikeys', label: 'API Keys', icon: 'key' },
@@ -62,15 +73,28 @@ function app() {
         // Settings
         settings: {
             agentBackend: 'claude_agent_sdk',
+            claudeSdkModel: '',
+            claudeSdkMaxTurns: 0,
+            openaiAgentsModel: '',
+            openaiAgentsMaxTurns: 0,
+            googleAdkModel: 'gemini-3-pro-preview',
+            googleAdkMaxTurns: 0,
+            codexCliModel: 'gpt-5.3-codex',
+            codexCliMaxTurns: 0,
+            opencodeBaseUrl: 'http://localhost:4096',
+            opencodeModel: '',
+            opencodeMaxTurns: 0,
+            claudeSdkProvider: 'anthropic',
+            openaiAgentsProvider: 'openai',
             llmProvider: 'auto',
             ollamaHost: 'http://localhost:11434',
             ollamaModel: 'llama3.2',
-            anthropicModel: 'claude-sonnet-4-5-20250929',
+            anthropicModel: 'claude-sonnet-4-6',
             openaiCompatibleBaseUrl: '',
             openaiCompatibleApiKey: '',
             openaiCompatibleModel: '',
             openaiCompatibleMaxTokens: 0,
-            geminiModel: 'gemini-2.5-flash',
+            geminiModel: 'gemini-3-pro-preview',
             bypassPermissions: false,
             webSearchProvider: 'tavily',
             urlExtractProvider: 'auto',
@@ -81,7 +105,7 @@ function app() {
             planModeTools: 'shell,write_file,edit_file',
             smartRoutingEnabled: false,
             modelTierSimple: 'claude-haiku-4-5-20251001',
-            modelTierModerate: 'claude-sonnet-4-5-20250929',
+            modelTierModerate: 'claude-sonnet-4-6',
             modelTierComplex: 'claude-opus-4-6',
             ttsProvider: 'openai',
             ttsVoice: 'alloy',
@@ -129,6 +153,10 @@ function app() {
         hasSpotifyClientId: false,
         hasSpotifyClientSecret: false,
         hasSarvamKey: false,
+
+        // Backend discovery data (fetched from /api/backends)
+        _backendsData: [],
+        backendInstallLoading: false,
 
         // Spread feature states
         ...featureStates,
@@ -252,6 +280,10 @@ function app() {
          * Connects WebSocket, loads sessions, sets up keyboard shortcuts.
          */
         _startApp() {
+            // Wire EventBus listeners (cross-module communication)
+            PocketPaw.EventBus.on('sidebar:files', (data) => this.handleSidebarFiles(data));
+            PocketPaw.EventBus.on('output:files', (data) => this.handleOutputFiles(data));
+
             // Register event handlers first
             this.setupSocketHandlers();
 
@@ -281,11 +313,24 @@ function app() {
                     const searchInput = document.querySelector('.session-search-input');
                     if (searchInput) searchInput.focus();
                 }
+                // Cmd/Ctrl+,: Open settings
+                if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+                    e.preventDefault();
+                    this.openSettings();
+                }
                 // Escape: Cancel rename
                 if (e.key === 'Escape' && this.editingSessionId) {
                     this.cancelRenameSession();
                 }
             });
+
+            // Fetch backends early (needed before wizard renders)
+            fetch('/api/backends').then(r => r.json()).then(b => {
+                this._backendsData = b;
+            }).catch(() => {});
+
+            // Check for version updates
+            this.checkForUpdates();
 
             // Initialize hash-based URL routing
             this.initHashRouter();
@@ -294,6 +339,20 @@ function app() {
             this.$nextTick(() => {
                 if (window.refreshIcons) window.refreshIcons();
             });
+        },
+
+        /**
+         * Check PyPI for newer version via /api/version endpoint.
+         */
+        async checkForUpdates() {
+            try {
+                const resp = await fetch('/api/version');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                this.appVersion = data.current || '';
+                this.latestVersion = data.latest || '';
+                this.updateAvailable = !!data.update_available;
+            } catch (e) { /* silent */ }
         },
 
         /**
@@ -313,6 +372,10 @@ function app() {
                 socket.send('get_reminders');
                 socket.send('get_intentions');
                 socket.send('get_skills');
+                socket.send('get_health');
+
+                // Re-fetch full health data if modal is open (handles server restart)
+                if (this.onHealthReconnect) this.onHealthReconnect();
 
                 // Resume last session if WS connect didn't handle it via query param
                 const lastSession = StateManager.load('lastSession');
@@ -374,6 +437,9 @@ function app() {
             socket.on('connection_info', (data) => this.handleConnectionInfo(data));
             socket.on('system_event', (data) => this.handleSystemEvent(data));
 
+            // Health
+            socket.on('health_update', (data) => this.handleHealthUpdate(data));
+
             // Session handlers
             socket.on('session_history', (data) => this.handleSessionHistory(data));
             socket.on('new_session', (data) => this.handleNewSession(data));
@@ -400,7 +466,9 @@ function app() {
 
             // Data-driven settings sync: map server keys to local settings
             const SETTINGS_MAP = [
-                'agentBackend', 'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
+                'agentBackend', 'claudeSdkProvider', 'claudeSdkModel', 'claudeSdkMaxTurns',
+                'openaiAgentsProvider',
+                'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
                 'geminiModel',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
@@ -440,8 +508,8 @@ function app() {
                 }
             }
 
-            // First-run welcome: show if no API key and not previously dismissed
-            if (!this.hasAnthropicKey && !localStorage.getItem('pocketpaw_setup_dismissed')) {
+            // First-run welcome: show if backend unconfigured and not previously dismissed
+            if (this.isBackendUnconfigured() && !localStorage.getItem('pocketpaw_setup_dismissed')) {
                 this.showWelcome = true;
             }
         },
@@ -493,6 +561,8 @@ function app() {
          */
         openSettings() {
             this.settingsMobileView = 'list';
+            this.settingsSearch = '';
+            this.settingsSearchResults = [];
             this.showSettings = true;
         },
 
@@ -501,8 +571,6 @@ function app() {
          */
         saveSettings() {
             socket.saveSettings(this.settings);
-            this.log('Settings updated', 'info');
-            this.showToast('Settings saved', 'success');
         },
 
         /**
@@ -591,8 +659,9 @@ function app() {
         getAgentModeLabel() {
             const labels = {
                 'claude_agent_sdk': '🚀 Claude SDK',
-                'pocketpaw_native': '🐾 PocketPaw',
-                'open_interpreter': '🤖 Open Interpreter (Experimental)'
+                'openai_agents': '🤖 OpenAI Agents',
+                'google_adk': '🔷 Google ADK',
+                'opencode': '⌨️ OpenCode'
             };
             return labels[this.settings.agentBackend] || this.settings.agentBackend;
         },
@@ -603,10 +672,180 @@ function app() {
         getBackendDescription(backend) {
             const descriptions = {
                 'claude_agent_sdk': 'Built-in tools: Bash, WebSearch, WebFetch, Read, Write, Edit, Glob, Grep. Works with Anthropic & Ollama.',
-                'pocketpaw_native': 'Custom orchestrator with shell, files, memory tools. Works with Anthropic & Ollama.',
-                'open_interpreter': 'Experimental — Standalone agent. Works with local LLMs (Ollama) or cloud APIs.'
+                'openai_agents': 'OpenAI Agents SDK with code interpreter and file search. Works with OpenAI, Ollama, and local LLMs.',
+                'google_adk': 'Google ADK — native Gemini agent with built-in tools: Google Search, code execution, MCP support.',
+                'opencode': 'OpenCode AI coding agent. Requires server at configured URL.'
             };
             return descriptions[backend] || '';
+        },
+
+        /**
+         * Check if the currently selected backend is available (installed).
+         */
+        isCurrentBackendAvailable() {
+            const b = this._backendsData.find(x => x.name === this.settings.agentBackend);
+            return b ? b.available : true;
+        },
+
+        /**
+         * Get install hint for the currently selected backend.
+         */
+        currentBackendInstallHint() {
+            const b = this._backendsData.find(x => x.name === this.settings.agentBackend);
+            return (b && b.installHint) || {};
+        },
+
+        /**
+         * Install the currently selected backend via POST /api/backends/install.
+         */
+        async installBackend() {
+            this.backendInstallLoading = true;
+            try {
+                const resp = await fetch('/api/backends/install', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ backend: this.settings.agentBackend }),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    this.showToast(data.error, 'error');
+                } else {
+                    this.showToast('Backend installed successfully!', 'success');
+                    // Re-fetch backends to update availability
+                    const r = await fetch('/api/backends');
+                    if (r.ok) {
+                        this._backendsData = await r.json();
+                        this.$nextTick(() => { if (window.refreshIcons) window.refreshIcons(); });
+                    }
+                }
+            } catch (e) {
+                this.showToast('Install failed: ' + e.message, 'error');
+            } finally {
+                this.backendInstallLoading = false;
+            }
+        },
+
+        /**
+         * Copy text to clipboard and show toast.
+         */
+        copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                this.showToast('Copied to clipboard', 'success');
+            }).catch(() => {});
+        },
+
+        /**
+         * Check if the current backend + sub-provider needs a specific API key.
+         * Used by the API Keys section to show/hide key fields dynamically.
+         */
+        backendNeedsKey(keyField) {
+            const backend = this.settings.agentBackend;
+            // Get sub-provider for backends that support it
+            let provider = '';
+            if (backend === 'claude_agent_sdk') provider = this.settings.claudeSdkProvider || 'anthropic';
+            else if (backend === 'openai_agents') provider = this.settings.openaiAgentsProvider || 'openai';
+            else if (backend === 'google_adk') provider = 'google';
+            else if (backend === 'codex_cli') provider = 'openai';
+            else if (backend === 'opencode') return false;
+            else if (backend === 'copilot_sdk') return false;
+
+            // Ollama and openai_compatible don't need top-level API keys
+            if (provider === 'ollama' || provider === 'openai_compatible') return false;
+
+            // Map backend+provider to required key
+            const keyMap = {
+                'claude_agent_sdk:anthropic': 'anthropic_api_key',
+                'openai_agents:openai': 'openai_api_key',
+                'google_adk:google': 'google_api_key',
+                'codex_cli:openai': 'openai_api_key',
+            };
+            return keyMap[backend + ':' + provider] === keyField;
+        },
+
+        /**
+         * Check if the current backend+provider needs an API key that isn't saved.
+         */
+        isBackendUnconfigured() {
+            const backend = this.settings.agentBackend;
+            let provider = '';
+            if (backend === 'claude_agent_sdk') provider = this.settings.claudeSdkProvider || 'anthropic';
+            else if (backend === 'openai_agents') provider = this.settings.openaiAgentsProvider || 'openai';
+            else if (backend === 'google_adk') provider = 'google';
+            else if (backend === 'codex_cli') provider = 'openai';
+            else return false; // opencode, copilot_sdk don't need keys
+
+            if (provider === 'ollama' || provider === 'openai_compatible') return false;
+
+            const needsMap = {
+                'claude_agent_sdk:anthropic': 'hasAnthropicKey',
+                'openai_agents:openai': 'hasOpenaiKey',
+                'google_adk:google': 'hasGoogleApiKey',
+                'codex_cli:openai': 'hasOpenaiKey',
+            };
+            const flag = needsMap[backend + ':' + provider];
+            return flag ? !this[flag] : false;
+        },
+
+        /**
+         * Return CSS dot class for settings nav items (red=needs attention, green=ok, empty=neutral).
+         */
+        getSettingsNavDot(sectionId) {
+            if (sectionId === 'general' || sectionId === 'apikeys') {
+                return this.isBackendUnconfigured() ? 'bg-[var(--danger-color)]' : 'bg-[var(--success-color)]';
+            }
+            return '';
+        },
+
+        // ---- Settings search ----
+        _SETTINGS_INDEX: [
+            { section: 'general', sectionLabel: 'General', label: 'Agent Backend', hint: 'claude openai gemini codex opencode copilot' },
+            { section: 'general', sectionLabel: 'General', label: 'Provider', hint: 'anthropic ollama openai-compatible' },
+            { section: 'general', sectionLabel: 'General', label: 'Model Override', hint: 'claude sdk model' },
+            { section: 'general', sectionLabel: 'General', label: 'Max Tool Turns', hint: 'turns loops' },
+            { section: 'general', sectionLabel: 'General', label: 'Bypass Permissions', hint: 'dangerous approve' },
+            { section: 'apikeys', sectionLabel: 'API Keys', label: 'Anthropic API Key', hint: 'claude key' },
+            { section: 'apikeys', sectionLabel: 'API Keys', label: 'OpenAI API Key', hint: 'gpt key' },
+            { section: 'apikeys', sectionLabel: 'API Keys', label: 'Google API Key', hint: 'gemini key' },
+            { section: 'apikeys', sectionLabel: 'API Keys', label: 'Tavily API Key', hint: 'search' },
+            { section: 'apikeys', sectionLabel: 'API Keys', label: 'ElevenLabs API Key', hint: 'voice tts' },
+            { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Tool Profile', hint: 'minimal coding full permissions' },
+            { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Plan Mode', hint: 'approval planning' },
+            { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Injection Scanner', hint: 'security prompt injection' },
+            { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Smart Routing', hint: 'model router simple complex' },
+            { section: 'memory', sectionLabel: 'Memory', label: 'Memory Backend', hint: 'file mem0' },
+            { section: 'memory', sectionLabel: 'Memory', label: 'Auto-Learn', hint: 'mem0 learn' },
+            { section: 'memory', sectionLabel: 'Memory', label: 'Embedding Provider', hint: 'mem0 embedder openai ollama' },
+            { section: 'memory', sectionLabel: 'Memory', label: 'Vector Store', hint: 'qdrant mem0' },
+            { section: 'services', sectionLabel: 'Search & Services', label: 'Web Search Provider', hint: 'tavily brave' },
+            { section: 'services', sectionLabel: 'Search & Services', label: 'TTS Provider', hint: 'voice openai elevenlabs sarvam' },
+            { section: 'services', sectionLabel: 'Search & Services', label: 'OCR Provider', hint: 'vision tesseract' },
+            { section: 'system', sectionLabel: 'System', label: 'Self-Audit Daemon', hint: 'audit schedule' },
+        ],
+
+        searchSettings() {
+            const q = this.settingsSearch.trim().toLowerCase();
+            if (!q) {
+                this.settingsSearchResults = [];
+                return;
+            }
+            this.settingsSearchResults = this._SETTINGS_INDEX.filter(item =>
+                item.label.toLowerCase().includes(q) ||
+                item.hint.toLowerCase().includes(q) ||
+                item.sectionLabel.toLowerCase().includes(q)
+            );
+            // Auto-navigate if all results are in one section
+            const sections = [...new Set(this.settingsSearchResults.map(r => r.section))];
+            if (sections.length === 1) {
+                this.settingsSection = sections[0];
+            }
+        },
+
+        jumpToSetting(sectionId) {
+            this.settingsSection = sectionId;
+            this.settingsSearch = '';
+            this.settingsSearchResults = [];
+            this.settingsMobileView = 'content';
+            this.$nextTick(() => { if (window.refreshIcons) window.refreshIcons(); });
         },
 
         /**
@@ -614,6 +853,30 @@ function app() {
          */
         currentTime() {
             return Tools.formatTime();
+        },
+
+        /**
+         * Dismiss the welcome wizard and set localStorage flag.
+         */
+        dismissWelcome() {
+            this.showWelcome = false;
+            localStorage.setItem('pocketpaw_setup_dismissed', '1');
+        },
+
+        /**
+         * Save an API key during wizard flow, mapping backend to the correct provider.
+         */
+        _wizardSaveKey(backend, keyValue) {
+            const backendToProvider = {
+                'claude_agent_sdk': 'anthropic',
+                'openai_agents': 'openai',
+                'google_adk': 'google',
+                'codex_cli': 'openai',
+            };
+            const provider = backendToProvider[backend];
+            if (!provider || !keyValue) return;
+            this.apiKeys[provider] = keyValue;
+            this.saveApiKey(provider);
         },
 
         /**

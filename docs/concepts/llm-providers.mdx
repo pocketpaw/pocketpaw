@@ -1,9 +1,9 @@
 ---
 title: LLM Providers & Models
-description: "Complete guide to LLM providers and agent backends in PocketPaw. Covers Anthropic, Gemini, Ollama, OpenAI, and OpenAI-compatible endpoints. Detailed breakdown of Claude Agent SDK, PocketPaw Native, and Open Interpreter — which models they support, how they connect, timeouts, security, and tool formats."
+description: "Complete guide to LLM providers and agent backends in PocketPaw. Covers Anthropic, Gemini, Ollama, OpenAI, and OpenAI-compatible endpoints across six agent backends."
 section: Core Concepts
 ogType: article
-keywords: ["llm provider", "model selection", "gemini", "anthropic", "ollama", "openai", "openai-compatible", "model router", "configuration", "claude agent sdk", "pocketpaw native", "open interpreter", "agent backend"]
+keywords: ["llm provider", "model selection", "gemini", "anthropic", "ollama", "openai", "openai-compatible", "model router", "configuration", "claude agent sdk", "openai agents", "google adk", "agent backend"]
 tags: ["concepts", "configuration", "models", "backends"]
 ---
 
@@ -15,11 +15,12 @@ PocketPaw supports six LLM providers, from free local models to cloud APIs. This
 
 | Goal | Provider | Cost | Recommended Backend |
 |------|----------|------|---------------------|
-| Best quality, zero config | **Anthropic** | Paid API | Claude Agent SDK or PocketPaw Native |
-| Free cloud API, great quality | **Gemini** | Free tier available | PocketPaw Native |
-| Fully local, no cloud | **Ollama** | Free | Claude Agent SDK or PocketPaw Native |
-| Use OpenAI models | **OpenAI** | Paid API | Open Interpreter |
-| Custom endpoint (OpenRouter, vLLM, etc.) | **OpenAI-Compatible** | Varies | PocketPaw Native |
+| Best quality, zero config | **Anthropic** | Paid API | Claude Agent SDK |
+| Free cloud API, great quality | **Gemini** | Free tier available | Google ADK |
+| Fully local, no cloud | **Ollama** | Free | Claude Agent SDK or OpenAI Agents |
+| Use OpenAI models | **OpenAI** | Paid API | OpenAI Agents or Codex CLI |
+| GitHub Copilot subscription | **Copilot** | Subscription | Copilot SDK |
+| Custom endpoint (OpenRouter, vLLM, etc.) | **OpenAI-Compatible** | Varies | OpenAI Agents |
 
 <Callout type="tip">
   **New to PocketPaw?** Start with **Gemini** (free) or **Anthropic** (best quality). You can switch providers at any time from Settings without losing data.
@@ -81,8 +82,8 @@ export POCKETPAW_GEMINI_MODEL="gemini-2.5-flash"
   Gemini 2.0 Flash and 2.0 Flash Lite are deprecated and will be retired on **March 31, 2026**. Use 2.5 Flash or newer.
 </Callout>
 
-<Callout type="warning">
-  Gemini requires the **PocketPaw Native** or **Open Interpreter** backend. It does not work with the Claude Agent SDK backend (the SDK uses Anthropic's message format, which Gemini doesn't support). Switch to PocketPaw Native in **Settings → General → Agent Backend**.
+<Callout type="tip">
+  For the best Gemini experience, use the **Google ADK** backend which has native Gemini support. You can also use Gemini via the **OpenAI Agents** backend through Google's OpenAI-compatible endpoint.
 </Callout>
 
 ### Ollama (Local)
@@ -137,8 +138,8 @@ export POCKETPAW_OPENAI_MODEL="gpt-4o"
 | o1 | `o1` | Complex reasoning |
 | o3-mini | `o3-mini` | Balanced reasoning |
 
-<Callout type="warning">
-  OpenAI provider works with **Open Interpreter** only. It does not work with Claude Agent SDK (different API format) or PocketPaw Native. To use OpenAI models with PocketPaw Native, use the **OpenAI-Compatible** provider with base URL `https://api.openai.com/v1`.
+<Callout type="tip">
+  For the best OpenAI experience, use the **OpenAI Agents** backend or **Codex CLI** backend, which are built for OpenAI models natively.
 </Callout>
 
 ### OpenAI-Compatible
@@ -175,8 +176,8 @@ This runs 2 checks: API connectivity and tool calling support.
   The `max_tokens` setting (0 by default) controls the maximum output tokens per request. Set to 0 for no limit, which is recommended for most models.
 </Callout>
 
-<Callout type="warning">
-  **Backend note:** OpenAI-Compatible endpoints work with **PocketPaw Native** (recommended) and **Open Interpreter**. They only work with the Claude Agent SDK if the endpoint implements the Anthropic Messages API format (e.g., LiteLLM proxy). Most endpoints (OpenRouter, Together AI, Fireworks, vLLM) speak OpenAI format only.
+<Callout type="tip">
+  OpenAI-Compatible endpoints work best with the **OpenAI Agents** backend. They also work with the Claude Agent SDK if the endpoint implements the Anthropic Messages API format (e.g., LiteLLM proxy).
 </Callout>
 
 ### Auto (Default)
@@ -193,150 +194,82 @@ This means PocketPaw works out of the box with Ollama if no API keys are configu
 
 ## Backend Compatibility Matrix
 
-Not every provider works with every agent backend. Here's the full compatibility matrix:
+Each backend has different provider support. Here's the full compatibility matrix:
 
-| Provider | Claude Agent SDK | PocketPaw Native | Open Interpreter |
-|----------|:---:|:---:|:---:|
-| Anthropic | Yes | Yes | Yes |
-| Gemini | **No** | Yes | Yes |
-| Ollama | Yes | Yes | Yes |
-| OpenAI | **No** | **No** | Yes |
-| OpenAI-Compatible | Partial | Yes | Yes |
+| Provider | Claude SDK | OpenAI Agents | Google ADK | Codex CLI | OpenCode | Copilot SDK |
+|----------|:---:|:---:|:---:|:---:|:---:|:---:|
+| Anthropic | Yes | No | No | No | N/A | Yes |
+| Gemini | No | No | **Yes** | No | N/A | No |
+| Ollama | Yes | Yes | No | No | N/A | No |
+| OpenAI | No | **Yes** | No | **Yes** | N/A | Yes |
+| OpenAI-Compatible | Partial | Yes | No | No | N/A | No |
 
-| Feature | Claude Agent SDK | PocketPaw Native | Open Interpreter |
-|---------|:---:|:---:|:---:|
-| Smart Model Routing | Yes | Yes (Anthropic only) | No |
-| Fast-Path (simple msgs) | Yes | No | No |
-| Built-in Tools | 8 SDK tools | 6 native tools | Code execution |
-| MCP Server Support | Yes | Yes | No |
-| Streaming | Yes | Yes | Yes |
-| Security Hooks | PreToolUse hooks | Regex + path jail | None |
-| Tool Call Format | Anthropic Messages API | Auto-converted | LiteLLM |
-
-<Callout type="warning">
-  **API format matters.** The Claude Agent SDK speaks the **Anthropic Messages API** format. It only works with endpoints that understand this format: Anthropic (native), Ollama v0.14+ (added Anthropic compat), and Anthropic-compatible proxies like LiteLLM. Endpoints that only speak OpenAI format (Gemini, OpenAI, OpenRouter, Together AI) will **not** work with Claude SDK — use **PocketPaw Native** instead.
-</Callout>
+| Feature | Claude SDK | OpenAI Agents | Google ADK | Codex CLI | OpenCode | Copilot SDK |
+|---------|:---:|:---:|:---:|:---:|:---:|:---:|
+| MCP Support | Yes | No | Yes | Yes | No | No |
+| Built-in Tools | 9 SDK tools | 3 tools | 2 tools | 4 tools | Server-managed | 4 tools |
+| Streaming | Yes | Yes | Yes | Yes | Yes | Yes |
+| Local Models | Ollama | Ollama | No | No | No | No |
 
 <Callout type="tip">
-  **PocketPaw Native** is the most versatile backend for non-Anthropic providers. It auto-converts between Anthropic and OpenAI API formats, so it works with **every** provider except plain OpenAI (use OpenAI-Compatible with `https://api.openai.com/v1` as a workaround).
+  **Not sure which backend to use?** Start with **Claude Agent SDK** (default) for Anthropic or Ollama. Use **Google ADK** for Gemini. Use **OpenAI Agents** for OpenAI models or Ollama with OpenAI-format APIs.
 </Callout>
 
 ### Claude Agent SDK (Recommended)
 
-The default and most capable backend. Uses the official Claude Agent SDK as a subprocess with built-in agentic tools.
+The default and most capable backend. Uses the official Claude Agent SDK with built-in agentic tools.
 
-**Important: API format requirement.** The Claude SDK uses the **Anthropic Messages API** format for all communication. This means it only works with endpoints that understand Anthropic's message format — not endpoints that only speak OpenAI's Chat Completions format.
-
-**How it connects to providers:**
-
-All providers are passed to the Claude CLI subprocess via environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`):
+**Important: API format requirement.** The Claude SDK uses the **Anthropic Messages API** format. It only works with endpoints that understand this format — not endpoints that only speak OpenAI's Chat Completions format.
 
 | Provider | Works? | How |
 |----------|:------:|-----|
 | Anthropic | Yes | Native — just set `ANTHROPIC_API_KEY` |
 | Ollama | Yes | Ollama v0.14+ implements the Anthropic Messages API natively |
-| Gemini | **No** | Gemini only speaks OpenAI format — use **PocketPaw Native** instead |
-| OpenAI | **No** | OpenAI only speaks OpenAI format |
+| Gemini | **No** | Use **Google ADK** backend instead |
+| OpenAI | **No** | Use **OpenAI Agents** backend instead |
 | OpenAI-Compatible | Partial | Only if the endpoint speaks Anthropic format (e.g., LiteLLM proxy) |
 
-<Callout type="info">
-  The Claude Agent SDK also supports enterprise cloud providers like **Amazon Bedrock**, **Google Vertex AI**, and **Azure AI Foundry** for Anthropic models.
-</Callout>
-
-<Callout type="warning">
-  **Using Gemini or OpenAI?** Switch to **PocketPaw Native** backend in **Settings → General → Agent Backend**. PocketPaw Native handles the API format conversion automatically.
-</Callout>
-
-**Built-in SDK tools:** Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch — these are provided by the Claude SDK itself and don't need configuration.
-
-**Fast-path optimization:** For messages classified as SIMPLE by the model router, PocketPaw bypasses the CLI subprocess entirely and calls the Anthropic API directly. This saves ~1.5–3 seconds of subprocess startup time per simple message. The fast-path requires an API key.
+**Built-in SDK tools:** Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch, Skill
 
 **Security:** Uses `PreToolUse` hooks to intercept and block dangerous Bash commands before execution.
 
-**Persistent client:** The subprocess is reused across messages. It only reconnects when the model or tool configuration changes, avoiding repeated startup overhead.
+**MCP servers:** Fully supported. Supports stdio, SSE, and HTTP transports.
 
-**MCP servers:** Fully supported. Loads enabled MCP server configs and passes them to the SDK subprocess. Supports stdio, SSE, and HTTP transports.
+**Best for:** Anthropic and Ollama users who want maximum capability, coding tasks, and tool-heavy workflows.
 
-**Best for:** Anthropic and Ollama users who want maximum capability, coding tasks, complex multi-step reasoning, and tool-heavy workflows.
+### OpenAI Agents SDK
 
-### PocketPaw Native
+OpenAI's native agent framework with GPT model support and Ollama compatibility.
 
-Custom orchestrator that uses the Anthropic SDK for reasoning and Open Interpreter for code execution. Provides a transparent, user-controlled agentic loop with integrated security layers. **This is the most versatile backend** — it supports every provider by auto-converting between API formats.
+| Provider | Works? | How |
+|----------|:------:|-----|
+| OpenAI | Yes | Native with `openai-agents` SDK |
+| Ollama | Yes | Via `OpenAIChatCompletionsModel` wrapper |
+| OpenAI-Compatible | Yes | Custom base URL support |
 
-**How it connects to providers:**
+**Built-in tools:** code_interpreter, file_search, computer_use
 
-PocketPaw Native creates different API clients depending on the provider, automatically handling format differences:
+**Best for:** OpenAI model users, Ollama users who prefer OpenAI-format APIs.
 
-| Provider | Client | SDK | Notes |
-|----------|--------|-----|-------|
-| Anthropic | `AsyncAnthropic` | Anthropic SDK | Direct API, no base URL needed |
-| Ollama | `AsyncAnthropic` | Anthropic SDK | `base_url=ollama_host`, `api_key="ollama"` |
-| Gemini | `AsyncOpenAI` | OpenAI SDK | Auto-converts tool format |
-| OpenAI-Compatible | `AsyncOpenAI` | OpenAI SDK | Auto-converts tool format |
-| OpenAI | ❌ Not supported | — | Use OpenAI-Compatible instead |
+### Google ADK
 
-**Automatic format conversion:** When using Gemini or OpenAI-Compatible providers, PocketPaw Native automatically:
-- Converts Anthropic-format tool definitions to OpenAI function-calling format
-- Converts message history between Anthropic and OpenAI formats
-- Maps OpenAI's `finish_reason` to Anthropic's `stop_reason`
-- Handles `tool_calls` response objects with `id`, `function.name`, `function.arguments`
+Google's Agent Development Kit with native Gemini support.
 
-This means you get the same tool-use experience regardless of provider — the conversion is invisible.
+| Provider | Works? | How |
+|----------|:------:|-----|
+| Gemini | Yes | Native via `google-adk` SDK |
 
-**API timeouts:**
+**Built-in tools:** google_search, code_execution
 
-| Provider | Timeout | Retries | Why |
-|----------|---------|---------|-----|
-| Anthropic | 90s | 2 | Reliable API, higher retries |
-| Ollama | 120s | 1 | Local, may be slow on first load |
-| Gemini | 180s | 1 | Longer for thinking models |
-| OpenAI-Compatible | 180s | 1 | Longer for thinking models |
+**MCP servers:** Native support via `McpToolset` (stdio, SSE, HTTP).
 
-**Built-in tools:** `shell`, `read_file`, `write_file`, `edit_file`, `list_dir`, `remember`, `recall`, `forget` — plus any MCP tools configured.
+**Best for:** Gemini users who want native Google AI integration with MCP support.
 
-**Security layers:**
-1. **Dangerous command regex** — blocks `rm -rf /`, `mkfs`, `dd`, etc.
-2. **Sensitive path protection** — SSH keys, AWS credentials, `.env` files
-3. **File jail** — restricts filesystem access to `~/.pocketpaw/` by default
-4. **Output redaction** — hides API keys and passwords from responses
+### Other Backends
 
-**Smart routing:** Supported for Anthropic provider only. Disabled for Ollama and Gemini.
-
-**MCP servers:** Supported. Tools are registered with `mcp_<server>__<tool>` naming convention.
-
-**Best for:** Users who want fine-grained control, transparency, and strong security guardrails. Works well with Gemini for a free, full-featured setup.
-
-### Open Interpreter
-
-Lightweight wrapper around Open Interpreter. Delegates model management entirely to Open Interpreter's own provider system, which uses LiteLLM under the hood.
-
-**How it connects to providers:**
-
-| Provider | Model Format | API Base | Notes |
-|----------|-------------|----------|-------|
-| Anthropic | `claude-sonnet-4-5-20250929` | *(auto)* | API key passed directly |
-| Gemini | `gemini-2.5-flash` | *(auto)* | Via LiteLLM |
-| Ollama | `ollama/llama3.2` | Ollama host URL | Auto-prefixed with `ollama/` |
-| OpenAI | `gpt-4o` | *(auto)* | API key passed directly |
-| OpenAI-Compatible | Model name | Your base URL | API key passed directly |
-
-<Callout type="info">
-  Open Interpreter uses [LiteLLM](https://github.com/BerriAI/litellm) internally, which supports 100+ LLM providers. Any model supported by LiteLLM can be used.
-</Callout>
-
-**Ollama prefix:** Ollama models are automatically prefixed with `ollama/` (e.g., `llama3.2` becomes `ollama/llama3.2`). This is required by LiteLLM to identify the provider.
-
-**Streaming:** Runs in a thread pool with queue-based chunk streaming. Filters verbose console output and emits only user-facing messages and tool results.
-
-**Tool execution:** Open Interpreter handles code execution directly — it generates and runs code in a sandboxed environment. PocketPaw wraps the output into standardized `tool_use`/`tool_result` events for the Activity panel.
-
-**Limitations:**
-- No MCP server support
-- No smart model routing
-- No `PreToolUse` security hooks
-- Less granular tool control compared to other backends
-
-**Best for:** Quick prototyping, users familiar with Open Interpreter, scenarios where code execution is the primary use case.
+- **Codex CLI** — OpenAI's Codex CLI for code-focused tasks. Requires `codex` binary. MCP support.
+- **OpenCode** — External server backend. Model managed by the OpenCode server.
+- **Copilot SDK** — GitHub Copilot with multi-provider support (Copilot, OpenAI, Azure, Anthropic).
 
 ---
 

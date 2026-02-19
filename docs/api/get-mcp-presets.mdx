@@ -26,6 +26,7 @@ Returns an array of preset objects:
 <ResponseField name="category" type="string">Category grouping (e.g., `filesystem`, `developer`, `data`)</ResponseField>
 <ResponseField name="installed" type="boolean">Whether this preset is already configured</ResponseField>
 <ResponseField name="env_keys" type="array">List of environment variable names the preset requires</ResponseField>
+<ResponseField name="oauth" type="boolean">Whether this preset uses OAuth authentication</ResponseField>
 
 <RequestExample>
 <Tabs items={["cURL", "JavaScript", "Python"]}>
@@ -70,16 +71,18 @@ Returns an array of preset objects:
         "icon": "lucide:folder",
         "category": "filesystem",
         "installed": true,
-        "env_keys": []
+        "env_keys": [],
+        "oauth": false
       },
       {
         "id": "github",
         "name": "GitHub",
-        "description": "Interact with GitHub repositories, issues, and pull requests",
+        "description": "Manage repos, issues, PRs, and files (OAuth)",
         "icon": "lucide:github",
-        "category": "developer",
+        "category": "dev",
         "installed": false,
-        "env_keys": ["GITHUB_TOKEN"]
+        "env_keys": [],
+        "oauth": true
       }
     ]
     ```

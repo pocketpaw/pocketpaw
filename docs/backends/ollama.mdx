@@ -1,6 +1,6 @@
 ---
 title: Ollama (Local LLMs)
-description: "Run PocketPaw with local models via Ollama — no API keys, no cloud, no costs. Works with Claude Agent SDK and PocketPaw Native backends using Ollama's Anthropic-compatible Messages API."
+description: "Run PocketPaw with local models via Ollama — no API keys, no cloud, no costs. Works with Claude Agent SDK and OpenAI Agents backends using Ollama's compatible API endpoints."
 section: Agent Backends
 ogType: article
 keywords: ["ollama", "local llm", "self-hosted", "no api key", "anthropic compatible", "local models"]
@@ -9,7 +9,7 @@ tags: ["backends", "ollama", "local"]
 
 # Ollama (Local LLMs)
 
-Run PocketPaw entirely on your machine with [Ollama](https://ollama.com) — no API keys, no cloud, no costs. Both the **Claude Agent SDK** and **PocketPaw Native** backends work with Ollama out of the box.
+Run PocketPaw entirely on your machine with [Ollama](https://ollama.com) — no API keys, no cloud, no costs. The **Claude Agent SDK** and **OpenAI Agents** backends work with Ollama out of the box.
 
 ## How It Works
 
@@ -110,8 +110,7 @@ This means if you install PocketPaw and Ollama without any API keys, **it just w
 | Backend | Ollama Support | How |
 |---------|---------------|-----|
 | **Claude Agent SDK** | Yes | Sets `ANTHROPIC_BASE_URL` env var for the SDK subprocess |
-| **PocketPaw Native** | Yes | Uses `AsyncAnthropic(base_url=ollama_host)` directly |
-| **Open Interpreter** | Yes (existing) | Has its own Ollama integration via `OI_MODEL` |
+| **OpenAI Agents** | Yes | Wraps model in `OpenAIChatCompletionsModel` via Ollama's OpenAI-compatible API |
 
 ### Claude Agent SDK + Ollama
 
@@ -122,9 +121,15 @@ The default backend. The SDK subprocess receives these environment variables:
 
 All SDK built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch) work as usual.
 
-### PocketPaw Native + Ollama
+### OpenAI Agents + Ollama
 
-The custom orchestrator creates `AsyncAnthropic(base_url=ollama_host)` and sends tool definitions in standard Anthropic format. The model receives tool schemas and returns `tool_use` blocks just like Claude.
+Set the provider to `ollama` and the model will be wrapped in `OpenAIChatCompletionsModel` from the OpenAI Agents SDK, communicating with Ollama's OpenAI-compatible endpoint:
+
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="ollama"
+export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
+```
 
 ## Recommended Models
 
@@ -204,8 +209,8 @@ Then set `ollama_model` to `qwen2.5:14b` in Settings or config.
 
 | File | Description |
 |------|-------------|
-| `agents/pocketpaw_native.py` | Ollama branch in `_initialize()`, model selection in `chat()` |
-| `agents/claude_sdk.py` | Ollama env vars passed to SDK subprocess in `chat()` |
+| `agents/claude_sdk.py` | Ollama env vars passed to SDK subprocess |
+| `agents/openai_agents.py` | Ollama via `OpenAIChatCompletionsModel` wrapper |
 | `agents/router.py` | Ollama detection logging in `_initialize_agent()` |
 | `__main__.py` | `--check-ollama` CLI command |
-| `tests/test_ollama_agent.py` | 18 tests covering both backends |
+| `tests/test_ollama_agent.py` | Tests covering Ollama backends |

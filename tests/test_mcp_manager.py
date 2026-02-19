@@ -194,10 +194,25 @@ class TestMCPManager:
         cfg_disabled = MCPServerConfig(name="b", enabled=False)
         mock_load.return_value = [cfg_enabled, cfg_disabled]
 
-        with patch.object(mgr, "start_server", new_callable=AsyncMock) as mock_start:
+        with patch.object(mgr, "_start_server_inner", new_callable=AsyncMock) as mock_start:
             await mgr.start_enabled_servers()
             # Only enabled server should be started
             mock_start.assert_called_once_with(cfg_enabled)
+
+    @patch("pocketpaw.mcp.manager.load_mcp_config")
+    async def test_start_enabled_servers_parallel(self, mock_load):
+        """Multiple enabled servers start in parallel via asyncio.gather."""
+        mgr = MCPManager()
+        cfg_a = MCPServerConfig(name="a", enabled=True)
+        cfg_b = MCPServerConfig(name="b", enabled=True)
+        cfg_c = MCPServerConfig(name="c", enabled=False)
+        mock_load.return_value = [cfg_a, cfg_b, cfg_c]
+
+        with patch.object(mgr, "_start_server_inner", new_callable=AsyncMock) as mock_start:
+            await mgr.start_enabled_servers()
+            assert mock_start.call_count == 2
+            mock_start.assert_any_call(cfg_a)
+            mock_start.assert_any_call(cfg_b)
 
     async def test_start_server_unknown_transport(self):
         mgr = MCPManager()
@@ -400,6 +415,68 @@ class TestMCPManagerConfigMethods:
 # ======================================================================
 # Singleton tests
 # ======================================================================
+
+
+class TestHTTPAutoDetect:
+    """Tests for transport='http' auto-detect (Streamable HTTP → SSE fallback)."""
+
+    async def test_http_transport_tries_streamable_first(self):
+        """transport='http' should try Streamable HTTP and succeed."""
+        mgr = MCPManager()
+        cfg = MCPServerConfig(name="modern", transport="http", url="https://example.com/mcp")
+
+        with (
+            patch.object(mgr, "_connect_streamable_http", new_callable=AsyncMock),
+            patch.object(mgr, "_connect_sse", new_callable=AsyncMock) as mock_sse,
+            patch.object(
+                mgr,
+                "_discover_tools",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await mgr.start_server(cfg)
+            assert result is True
+            # SSE should NOT have been called
+            mock_sse.assert_not_called()
+
+    async def test_http_transport_falls_back_to_sse(self):
+        """transport='http' should fall back to SSE when Streamable HTTP fails."""
+        mgr = MCPManager()
+        cfg = MCPServerConfig(name="legacy", transport="http", url="https://example.com/mcp")
+
+        with (
+            patch.object(
+                mgr,
+                "_connect_streamable_http",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("405 Method Not Allowed"),
+            ),
+            patch.object(mgr, "_connect_sse", new_callable=AsyncMock),
+            patch.object(mgr, "_discover_tools", new_callable=AsyncMock),
+            patch.object(mgr, "_cleanup_state", new_callable=AsyncMock),
+        ):
+            result = await mgr.start_server(cfg)
+            assert result is True
+
+    async def test_http_transport_no_fallback_on_timeout(self):
+        """transport='http' should NOT fall back to SSE on timeout."""
+        mgr = MCPManager()
+        cfg = MCPServerConfig(
+            name="slow", transport="http", url="https://example.com/mcp", timeout=1
+        )
+
+        with (
+            patch.object(
+                mgr,
+                "_connect_remote_with_timeout",
+                new_callable=AsyncMock,
+                side_effect=TimeoutError("Connection timed out"),
+            ),
+        ):
+            result = await mgr.start_server(cfg)
+            assert result is False
+            status = mgr._servers["slow"]
+            assert "timed out" in status.error
 
 
 class TestGetMCPManager:

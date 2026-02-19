@@ -2,6 +2,7 @@
  * PocketPaw - Transparency Feature Module
  *
  * Created: 2026-02-05
+ * Updated: 2026-02-17 — Route health_update events to Health feature module
  * Updated: 2026-02-12 — Added dw_ prefix routing for Deep Work events
  * Updated: 2026-02-17 — Fix identity sync on load
  *
@@ -43,6 +44,11 @@ window.PocketPaw.Transparency = {
                     key: 'style_file', label: 'Style', file: 'STYLE.md',
                     icon: 'palette',
                     hint: 'Communication style — tone, formatting, and interaction patterns.',
+                },
+                {
+                    key: 'instructions_file', label: 'Instructions', file: 'INSTRUCTIONS.md',
+                    icon: 'scroll-text',
+                    hint: 'Behavioral instructions and tool usage guides — shared across all agent backends.',
                 },
                 {
                     key: 'user_file', label: 'User Profile', file: 'USER.md',
@@ -399,6 +405,14 @@ window.PocketPaw.Transparency = {
                 // Handle Deep Work events
                 if (eventType.startsWith('dw_')) {
                     this.handleDWEvent(data);
+                    return;
+                }
+
+                // Handle health updates
+                if (eventType === 'health_update') {
+                    if (this.handleHealthUpdate) {
+                        this.handleHealthUpdate(data);
+                    }
                     return;
                 }
 

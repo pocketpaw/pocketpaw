@@ -13,7 +13,7 @@ PocketPaw is built on an **event-driven message bus** architecture. This design 
 
 ## High-Level Overview
 
-<img src="/pocketpaw-system-architecture.webp" alt="PocketPaw system architecture: event-driven MessageBus connecting 10+ channel adapters, agent processing pipeline with injection scanning, memory-augmented context building, three swappable LLM backends, and real-time streaming delivery." />
+<img src="/pocketpaw-system-architecture.webp" alt="PocketPaw system architecture: event-driven MessageBus connecting 10+ channel adapters, agent processing pipeline with injection scanning, memory-augmented context building, six swappable LLM backends, and real-time streaming delivery." />
 
 ## Processing Pipeline
 
@@ -27,7 +27,7 @@ When a user sends a message from any channel, it follows this path:
     The `AgentLoop` subscribes to `InboundMessage` events. It loads the session context, builds the system prompt with memory and identity, and prepares the request for the agent backend.
   </Step>
   <Step title="AgentRouter selects the backend">
-    Based on the `agent_backend` setting, the router delegates to one of three backends: Claude Agent SDK, PocketPaw Native, or Open Interpreter.
+    Based on the `agent_backend` setting, the router uses the backend registry to delegate to one of six backends: Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, or Copilot SDK.
   </Step>
   <Step title="Backend processes and streams">
     The selected backend processes the message, executes any tool calls, and yields a stream of response chunks back to the AgentLoop.

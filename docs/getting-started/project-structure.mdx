@@ -22,11 +22,16 @@ pocketpaw/
 │   ├── _compat.py           # Optional dependency helpers
 │   │
 │   ├── agents/              # Agent backends and orchestration
+│   │   ├── backend.py       # AgentBackend Protocol, AgentEvent, Capability flags
+│   │   ├── registry.py      # Backend registry (lazy imports)
 │   │   ├── loop.py          # Main AgentLoop (message bus consumer)
-│   │   ├── router.py        # AgentRouter (backend selector)
-│   │   ├── claude_sdk.py    # Claude Agent SDK backend
-│   │   ├── pocketpaw_native.py  # Native backend
-│   │   ├── open_interpreter.py  # Open Interpreter backend
+│   │   ├── router.py        # AgentRouter (registry-based backend selector)
+│   │   ├── claude_sdk.py    # Claude Agent SDK backend (default)
+│   │   ├── openai_agents.py # OpenAI Agents SDK backend
+│   │   ├── google_adk.py    # Google ADK backend
+│   │   ├── codex_cli.py     # Codex CLI backend
+│   │   ├── opencode.py      # OpenCode backend
+│   │   ├── copilot_sdk.py   # Copilot SDK backend
 │   │   ├── model_router.py  # Complexity-based model selection
 │   │   ├── plan_mode.py     # Plan approval workflow
 │   │   └── delegation.py    # Sub-agent delegation
@@ -122,7 +127,7 @@ pocketpaw/
 │       ├── dashboard.py     # FastAPI dashboard server
 │       └── web_server.py    # Static file serving
 │
-├── tests/                   # Test suite (1000+ tests)
+├── tests/                   # Test suite (2000+ tests)
 │   ├── test_bus.py
 │   ├── test_tool_policy.py
 │   ├── test_discord_adapter.py

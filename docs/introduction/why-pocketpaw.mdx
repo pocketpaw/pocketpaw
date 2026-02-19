@@ -39,25 +39,24 @@ Most AI tools work in a single interface. PocketPaw connects to **9+ messaging p
 
 You can run all of them at once. Send a message from Telegram, continue the conversation from Discord, and monitor everything from the web dashboard.
 
-## Three Agent Backends
+## Six Agent Backends
 
 PocketPaw doesn't lock you into a single AI provider or execution model:
 
-<Tabs>
-  <Tab title="Claude Agent SDK">
-    The recommended backend. Uses Anthropic's official Claude Agent SDK with built-in tools (Bash, Read, Write, Edit). Best for coding tasks and complex reasoning.
-  </Tab>
-  <Tab title="PocketPaw Native">
-    Custom orchestrator that combines Anthropic's SDK for reasoning with Open Interpreter for code execution. Good balance of capability and control.
-  </Tab>
-  <Tab title="Open Interpreter">
-    Standalone execution engine that supports Ollama, OpenAI, and Anthropic models. Best for fully local setups with Ollama.
-  </Tab>
-</Tabs>
+| Backend | Description |
+|---------|-------------|
+| **Claude Agent SDK** (default) | Anthropic's official SDK with built-in tools (Bash, Read, Write, Edit). Best for coding and complex reasoning. |
+| **OpenAI Agents SDK** | OpenAI's agent framework with GPT models. Supports Ollama for local inference. |
+| **Google ADK** | Google Agent Development Kit with Gemini models and native MCP support. |
+| **Codex CLI** | OpenAI's Codex CLI for code-focused tasks with MCP support. |
+| **OpenCode** | External server-based backend via REST API. |
+| **Copilot SDK** | GitHub Copilot SDK with multi-provider support (Copilot, OpenAI, Azure, Anthropic). |
+
+Switch backends anytime in Settings or via the `POCKETPAW_AGENT_BACKEND` environment variable.
 
 ## Extensible Tool System
 
-PocketPaw ships with 30+ built-in tools and supports custom tool creation:
+PocketPaw ships with 50+ built-in tools and supports custom tool creation:
 
 - **Web Search** — Tavily and Brave Search providers
 - **Image Generation** — Google Gemini models

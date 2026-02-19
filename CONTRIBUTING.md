@@ -43,6 +43,9 @@ We welcome contributions of all kinds: bug fixes, new tools, channel adapters, d
 # Run the app (web dashboard)
 uv run pocketpaw
 
+# Run with auto-reload (watches *.py, *.html, *.js, *.css)
+uv run pocketpaw --dev
+
 # Run tests (skip e2e, they need Playwright browsers)
 uv run pytest --ignore=tests/e2e
 
@@ -63,7 +66,7 @@ uv run mypy .
 
 ```
 src/pocketpaw/
-  agents/            # Agent backends (Claude SDK, Native, Open Interpreter) + router
+  agents/            # Agent backends (Claude SDK, OpenAI Agents, Google ADK, Codex, OpenCode, Copilot) + router + registry
   bus/               # Message bus + event types
     adapters/        # Channel adapters (Telegram, Discord, Slack, WhatsApp, etc.)
   tools/
@@ -82,7 +85,7 @@ src/pocketpaw/
   dashboard.py       # FastAPI server, WebSocket handler, REST APIs
   scheduler.py       # APScheduler-based reminders and cron jobs
 frontend/            # Vanilla JS/CSS/HTML dashboard (no build step)
-tests/               # pytest suite (130+ tests)
+tests/               # pytest suite (2000+ tests)
 ```
 
 ## Writing code

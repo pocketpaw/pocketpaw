@@ -19,15 +19,25 @@ Configuration is loaded from these sources (in order of precedence):
 2. **Config file** — `~/.pocketpaw/config.json`
 3. **Web dashboard** — Settings saved through the UI
 
+## API Key Requirement
+
+<Callout type="warning">
+  **Anthropic API key required for Claude SDK backend.** Anthropic's [authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) prohibits third-party applications from using OAuth tokens from Free/Pro/Max plans. PocketPaw requires an API key from [console.anthropic.com](https://console.anthropic.com/api-keys). This does not apply when using Ollama or other local providers.
+</Callout>
+
 ## Environment Variables
 
 All settings use the `POCKETPAW_` prefix:
 
 ```bash
 # Core
-export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
+export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."    # Required for Claude SDK backend
 export POCKETPAW_OPENAI_API_KEY="sk-..."
-export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or pocketpaw_native, open_interpreter
+export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, codex_cli, opencode, copilot_sdk
+
+# Claude SDK settings (only when agent_backend=claude_agent_sdk)
+export POCKETPAW_CLAUDE_SDK_MODEL=""               # empty = auto (recommended)
+export POCKETPAW_CLAUDE_SDK_MAX_TURNS=25           # max tool-use loops per query
 
 # Ollama (local models — no API key needed)
 export POCKETPAW_LLM_PROVIDER="ollama"             # auto, anthropic, openai, or ollama
@@ -35,8 +45,8 @@ export POCKETPAW_OLLAMA_HOST="http://localhost:11434"
 export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
 
 # Web Dashboard
-export POCKETPAW_DASHBOARD_PORT=8000
-export POCKETPAW_DASHBOARD_HOST="0.0.0.0"
+export POCKETPAW_WEB_PORT=8888
+export POCKETPAW_WEB_HOST="0.0.0.0"
 
 # Telegram
 export POCKETPAW_TELEGRAM_TOKEN="your-bot-token"
@@ -87,12 +97,15 @@ The JSON config file at `~/.pocketpaw/config.json` stores all settings:
 {
   "anthropic_api_key": "sk-ant-...",
   "agent_backend": "claude_agent_sdk",
+  "claude_sdk_model": "",
+  "claude_sdk_max_turns": 25,
   "llm_provider": "auto",
   "ollama_host": "http://localhost:11434",
   "ollama_model": "llama3.2",
   "tool_profile": "coding",
   "tools_allow": [],
   "tools_deny": [],
+  "smart_routing_enabled": false,
   "web_search_provider": "tavily",
   "tavily_api_key": "tvly-...",
   "mem0_auto_learn": true,
@@ -100,6 +113,10 @@ The JSON config file at `~/.pocketpaw/config.json` stores all settings:
   "mem0_llm_model": "llama3.2"
 }
 ```
+
+<Callout type="info">
+  **`claude_sdk_model`**: Leave empty (default) to let Claude Code auto-select the best model. Only set this if you want to force a specific model.
+</Callout>
 
 ## Tool Policy Configuration
 

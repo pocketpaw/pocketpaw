@@ -196,14 +196,13 @@ class PlannerAgent:
         output_parts: list[str] = []
         errors: list[str] = []
 
-        async for chunk in router.run(prompt):
-            chunk_type = chunk.get("type")
-            if chunk_type == "message":
-                content = chunk.get("content", "")
+        async for event in router.run(prompt):
+            if event.type == "message":
+                content = event.content or ""
                 if content:
                     output_parts.append(content)
-            elif chunk_type == "error":
-                error_content = chunk.get("content", "Unknown error")
+            elif event.type == "error":
+                error_content = event.content or "Unknown error"
                 errors.append(error_content)
                 logger.error("LLM error during planning: %s", error_content)
 

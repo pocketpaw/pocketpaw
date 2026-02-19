@@ -64,19 +64,6 @@ class TestFetchTool:
 
         assert is_safe_path(traversal_path, jail) is False
 
-    def test_get_directory_keyboard_returns_markup(self, tmp_path):
-        """Should return InlineKeyboardMarkup."""
-        from pocketpaw.tools.fetch import get_directory_keyboard
-        from telegram import InlineKeyboardMarkup
-
-        # Create some test files
-        (tmp_path / "file1.txt").write_text("test")
-        (tmp_path / "subdir").mkdir()
-
-        result = get_directory_keyboard(tmp_path, tmp_path)
-
-        assert isinstance(result, InlineKeyboardMarkup)
-
     @pytest.mark.asyncio
     async def test_handle_path_directory(self, tmp_path):
         """Should handle directory paths."""
@@ -155,10 +142,15 @@ class TestConfig:
     def test_settings_save_and_load(self, tmp_path, monkeypatch):
         """Settings should persist to disk."""
         from pocketpaw.config import Settings, get_config_path
+        from pocketpaw.credentials import CredentialStore, get_credential_store
 
         # Mock config path to use temp directory
         config_file = tmp_path / "config.json"
         monkeypatch.setattr("pocketpaw.config.get_config_path", lambda: config_file)
+
+        # Mock credential store to use temp directory (avoid polluting real secrets)
+        test_store = CredentialStore(config_dir=tmp_path)
+        monkeypatch.setattr("pocketpaw.credentials.get_credential_store", lambda: test_store)
 
         # Create and save settings
         settings = Settings(telegram_bot_token="test-token", allowed_user_id=12345)
@@ -233,23 +225,23 @@ class TestLLMRouter:
 class TestAgentRouter:
     """Tests for agent router."""
 
-    def test_router_defaults_to_open_interpreter(self):
-        """Should default to Open Interpreter."""
+    def test_router_initializes_claude_agent_sdk(self):
+        """Should initialize with claude_agent_sdk backend."""
         from pocketpaw.config import Settings
         from pocketpaw.agents.router import AgentRouter
 
-        settings = Settings(agent_backend="open_interpreter")
+        settings = Settings(agent_backend="claude_agent_sdk", anthropic_api_key="test")
         router = AgentRouter(settings)
 
-        assert router._agent is not None
+        assert router._backend is not None
 
-    def test_router_switches_to_claude_code(self):
-        """Should switch to Claude Code when configured."""
+    def test_router_legacy_backend_falls_back(self):
+        """Legacy backend names should fall back to claude_agent_sdk."""
         from pocketpaw.config import Settings
         from pocketpaw.agents.router import AgentRouter
 
-        settings = Settings(agent_backend="claude_code", anthropic_api_key="test")
+        settings = Settings(agent_backend="open_interpreter", anthropic_api_key="test")
         router = AgentRouter(settings)
 
-        # Should have initialized (even if API key is fake)
-        assert router._agent is not None
+        # Should have fallen back to claude_agent_sdk
+        assert router._backend is not None

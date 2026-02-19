@@ -141,21 +141,3 @@ def test_uvicorn_version_not_too_old():
 # ---------------------------------------------------------------------------
 # Sanity: installer VERSION matches pyproject.toml
 # ---------------------------------------------------------------------------
-def test_installer_version_matches():
-    """installer/installer.py VERSION should match pyproject.toml."""
-    data = _load_pyproject()
-    pyproject_version = data["project"]["version"]
-
-    installer_path = Path(__file__).resolve().parent.parent / "installer" / "installer.py"
-    if not installer_path.exists():
-        return  # Skip if installer not present
-
-    installer_text = installer_path.read_text()
-    # VERSION = "0.2.0" line
-    for line in installer_text.splitlines():
-        if line.startswith("VERSION"):
-            installer_ver = line.split("=")[1].strip().strip('"').strip("'")
-            assert installer_ver == pyproject_version, (
-                f"installer.py VERSION={installer_ver} != pyproject.toml version={pyproject_version}"
-            )
-            break

@@ -121,6 +121,6 @@ The `AgentContextBuilder` assembles the agent's context from multiple sources:
 3. **Session history** — Recent messages from the current session
 4. **Long-term facts** — Extracted facts from previous sessions
 5. **Semantic memories** — Relevant memories from Mem0 (based on the current query)
-6. **Skills** — Loaded skill definitions from `~/.pocketpaw/skills/`
+6. **Skills** — Loaded skill definitions from `~/.claude/skills/` (and legacy paths)
 
 The context builder ensures the total context fits within the model's context window by truncating older messages first.

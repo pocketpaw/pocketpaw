@@ -21,7 +21,7 @@ docs/
 ├── getting-started/           # 4 pages — install, quick-start, config, project structure
 ├── concepts/                  # 6 pages — architecture, message bus, agent loop, memory, tools, security
 ├── channels/                  # 10 pages — overview + 9 channel guides
-├── backends/                  # 4 pages — overview + 3 backend guides
+├── backends/                  # 8 pages — overview + 6 backend guides + Ollama
 ├── tools/                     # 14 pages — overview + 13 tool guides + custom tools
 ├── integrations/              # 9 pages — overview, OAuth, Gmail, Calendar, Drive, Docs, Spotify, Reddit, MCP
 ├── security/                  # 6 pages — overview, Guardian AI, injection scanner, audit log/CLI/daemon
@@ -101,7 +101,7 @@ auth: bearer
 - **Package name duality**: Internal Python package is `pocketpaw`, public-facing name in docs is `PocketPaw`. Import paths use `pocketpaw` (e.g., `from pocketpaw.tools.registry import ...`).
 - **Channel count**: "9+" channels (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, Web Dashboard).
 - **Tool count**: "50+" built-in tools across search, media, integrations, sessions, desktop, and coding categories.
-- **Backend count**: 3 backends (Claude Agent SDK, PocketPaw Native, Open Interpreter).
+- **Backend count**: 6 backends (Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK).
 - **`_images/` and `_assets/`**: Currently empty placeholder directories for future media.
 - **Landing page**: `_landing/` is standalone HTML/CSS/JS, not MDX. Separate from the docs content pipeline.
 - The legacy `../documentation/features/` directory has older markdown docs — the `docs/` MDX files are the canonical source.

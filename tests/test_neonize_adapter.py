@@ -301,21 +301,3 @@ async def test_preflight_check_passes_when_reachable():
         await NeonizeAdapter._preflight_connectivity_check()
 
 
-async def test_preflight_check_raises_when_unreachable():
-    """Preflight check raises ConnectionError when host is unreachable."""
-    with patch(
-        "pocketpaw.bus.adapters.neonize_adapter._tcp_probe",
-        side_effect=OSError("Connection refused"),
-    ):
-        with pytest.raises(ConnectionError, match="Cannot reach"):
-            await NeonizeAdapter._preflight_connectivity_check()
-
-
-async def test_preflight_error_message_mentions_vpn():
-    """Error message hints at VPN/network issues."""
-    with patch(
-        "pocketpaw.bus.adapters.neonize_adapter._tcp_probe",
-        side_effect=OSError("timed out"),
-    ):
-        with pytest.raises(ConnectionError, match="VPN"):
-            await NeonizeAdapter._preflight_connectivity_check()

@@ -1,0 +1,75 @@
+---
+title: Codex CLI
+description: "The Codex CLI backend wraps OpenAI's Codex CLI for code-focused tasks. Supports MCP servers and streams output via NDJSON."
+section: Agent Backends
+ogType: article
+keywords: ["codex cli", "openai codex", "code generation", "mcp", "cli wrapper"]
+tags: ["backends", "codex"]
+---
+
+# Codex CLI
+
+The Codex CLI backend wraps OpenAI's **Codex CLI** as a subprocess, providing code-focused agent capabilities with MCP support.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: OpenAI
+- **Built-in tools**: shell, file_edit, web_search, mcp
+- **MCP support**: Yes
+- **Architecture**: Subprocess wrapper — spawns the `codex` binary
+
+## Prerequisites
+
+Install the Codex CLI globally:
+
+```bash
+npm install -g @openai/codex
+```
+
+Verify it's on your PATH:
+
+```bash
+codex --version
+```
+
+## Configuration
+
+```bash
+export POCKETPAW_AGENT_BACKEND="codex_cli"
+export POCKETPAW_OPENAI_API_KEY="sk-..."
+```
+
+The backend also accepts `CODEX_API_KEY` as an alternative to `OPENAI_API_KEY`.
+
+### Backend-Specific Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `codex_cli_model` | `POCKETPAW_CODEX_CLI_MODEL` | `"gpt-5.3-codex"` | Model to use |
+| `codex_cli_max_turns` | `POCKETPAW_CODEX_CLI_MAX_TURNS` | `0` (unlimited) | Max tool-use turns per query |
+
+## Built-in Tools
+
+| Codex Tool | Policy Mapping |
+|-----------|---------------|
+| `shell` | `shell` |
+| `file_edit` | `write_file` |
+| `web_search` | `browser` |
+| `mcp` | `mcp` |
+
+## How It Works
+
+1. PocketPaw spawns the `codex` CLI binary as a subprocess
+2. Messages and history are injected via the CLI's input interface
+3. Output streams as NDJSON (newline-delimited JSON)
+4. PocketPaw parses NDJSON events into `AgentEvent` objects
+5. MCP servers are forwarded to the Codex CLI
+
+## When to Use
+
+Choose Codex CLI when:
+
+- You want a code-focused agent optimized for programming tasks
+- You're already using OpenAI's Codex CLI and want it integrated into PocketPaw
+- You need MCP support with an OpenAI-based backend

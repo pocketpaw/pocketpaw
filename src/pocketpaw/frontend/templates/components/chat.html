@@ -124,13 +124,25 @@
           :disabled="isStreaming"
           aria-label="Chat message input"
         />
+        <!-- Send button (hidden during streaming) -->
         <button
+          x-show="!isStreaming"
           type="submit"
           class="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 md:w-9 md:h-9 bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white rounded-full flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-[0_0_15px_rgba(10,132,255,0.4)] hover:scale-105 active:scale-95"
-          :disabled="!inputText.trim() || isStreaming"
+          :disabled="!inputText.trim()"
           aria-label="Send message"
         >
           <i data-lucide="arrow-up" class="w-4 h-4 md:w-5 md:h-5"></i>
+        </button>
+        <!-- Stop button (shown during streaming) -->
+        <button
+          x-show="isStreaming"
+          type="button"
+          @click="stopResponse()"
+          class="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 md:w-9 md:h-9 bg-red-600 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all shadow-lg hover:shadow-[0_0_15px_rgba(239,68,68,0.4)] hover:scale-105 active:scale-95"
+          aria-label="Stop response"
+        >
+          <i data-lucide="square" class="w-3.5 h-3.5 md:w-4 md:h-4"></i>
         </button>
       </form>
     </div>
