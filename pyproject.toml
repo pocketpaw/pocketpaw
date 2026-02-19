@@ -83,7 +83,9 @@ openai-agents = [
 google-adk = [
     "google-adk>=1.0.0",
 ]
-## copilot-sdk: pip install github-copilot-sdk + copilot CLI on PATH
+copilot-sdk = [
+    "github-copilot-sdk>=0.1.0",
+]
 memory = [
     "mem0ai>=0.1.115",
     "ollama>=0.6.1",
@@ -145,7 +147,7 @@ all-tools = [
     "pocketpaw[browser,desktop,image,extract,voice,ocr,sarvam,mcp,memory]",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk]",
+    "pocketpaw[openai-agents,google-adk,copilot-sdk]",
 ]
 all = [
     "pocketpaw[recommended,all-channels,all-tools,all-backends]",
