@@ -1,5 +1,7 @@
 # Tool CLI dispatcher — allows agent to call any builtin tool via Bash.
 #
+# Updated: 2026-02-17 — added health_check, error_log, config_doctor tools
+#
 # Usage:
 #   python -m pocketpaw.tools.cli <tool_name> '<json_args>'
 #   python -m pocketpaw.tools.cli --list
@@ -7,7 +9,7 @@
 # Examples:
 #   python -m pocketpaw.tools.cli gmail_search '{"query": "is:unread"}'
 #   python -m pocketpaw.tools.cli text_to_speech '{"text": "Hello world"}'
-#   python -m pocketpaw.tools.cli research '{"topic": "quantum computing"}'
+#   python -m pocketpaw.tools.cli health_check '{"include_connectivity": true}'
 
 from __future__ import annotations
 
@@ -20,9 +22,11 @@ from pocketpaw.tools.builtin import (
     CalendarListTool,
     CalendarPrepTool,
     ClearSessionTool,
+    ConfigDoctorTool,
     CreateSkillTool,
     DelegateToClaudeCodeTool,
     DeleteSessionTool,
+    ErrorLogTool,
     ForgetTool,
     GmailBatchModifyTool,
     GmailCreateLabelTool,
@@ -32,6 +36,7 @@ from pocketpaw.tools.builtin import (
     GmailSearchTool,
     GmailSendTool,
     GmailTrashTool,
+    HealthCheckTool,
     ImageGenerateTool,
     ListSessionsTool,
     NewSessionTool,
@@ -76,6 +81,9 @@ _TOOLS = {
         ClearSessionTool(),
         RenameSessionTool(),
         DeleteSessionTool(),
+        HealthCheckTool(),
+        ErrorLogTool(),
+        ConfigDoctorTool(),
     ]
 }
 

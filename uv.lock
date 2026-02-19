@@ -2811,7 +2811,7 @@ wheels = [
 
 [[package]]
 name = "pocketpaw"
-version = "0.3.0"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -2853,6 +2853,7 @@ all = [
     { name = "pyautogui" },
     { name = "pytesseract" },
     { name = "python-telegram-bot" },
+    { name = "sarvamai" },
     { name = "slack-bolt" },
 ]
 all-backends = [
@@ -2880,6 +2881,7 @@ all-tools = [
     { name = "psutil" },
     { name = "pyautogui" },
     { name = "pytesseract" },
+    { name = "sarvamai" },
 ]
 browser = [
     { name = "playwright" },
@@ -2918,6 +2920,7 @@ dev = [
     { name = "pytest-playwright" },
     { name = "python-telegram-bot" },
     { name = "ruff" },
+    { name = "sarvamai" },
     { name = "slack-bolt" },
 ]
 discord = [
@@ -2955,6 +2958,9 @@ recommended = [
     { name = "playwright" },
     { name = "psutil" },
     { name = "pyautogui" },
+]
+sarvam = [
+    { name = "sarvamai" },
 ]
 slack = [
     { name = "slack-bolt" },
@@ -3010,7 +3016,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.50.0" },
     { name = "pocketpaw", extras = ["all"], marker = "extra == 'dev'" },
-    { name = "pocketpaw", extras = ["browser", "desktop", "image", "extract", "voice", "ocr", "mcp", "memory"], marker = "extra == 'all-tools'" },
+    { name = "pocketpaw", extras = ["browser", "desktop", "image", "extract", "voice", "ocr", "sarvam", "mcp", "memory"], marker = "extra == 'all-tools'" },
     { name = "pocketpaw", extras = ["browser", "memory", "desktop"], marker = "extra == 'recommended'" },
     { name = "pocketpaw", extras = ["discord", "slack", "telegram"], marker = "extra == 'channels'" },
     { name = "pocketpaw", extras = ["native"], marker = "extra == 'all-backends'" },
@@ -3030,6 +3036,7 @@ requires-dist = [
     { name = "qrcode", extras = ["pil"], specifier = ">=7.4" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
+    { name = "sarvamai", marker = "extra == 'sarvam'", specifier = ">=0.1.25" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
@@ -4253,6 +4260,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/26/6d/b9aace390f62db5d7d2c77eafce3d42774f27f1829d24fa9b6f598b3ef71/runs-1.2.2.tar.gz", hash = "sha256:9dc1815e2895cfb3a48317b173b9f1eac9ba5549b36a847b5cc60c3bf82ecef1", size = 5474 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/86/d6/17caf2e4af1dec288477a0cbbe4a96fbc9b8a28457dce3f1f452630ce216/runs-1.2.2-py3-none-any.whl", hash = "sha256:0980dcbc25aba1505f307ac4f0e9e92cbd0be2a15a1e983ee86c24c87b839dfd", size = 7033 },
+]
+
+[[package]]
+name = "sarvamai"
+version = "0.1.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/91/f7/f24106109458b01ae9317a885f991a7d91b3c09f3707365cccda5b6f860b/sarvamai-0.1.25.tar.gz", hash = "sha256:590c1b5d4337852529c26a3ecbb08acfd4692ce27089fd4ace3bc55b5f5b60f2", size = 107235 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/78/f30a7cfab12fceeeaa7df0f40822c56e14544bb85a44c04f455aea792818/sarvamai-0.1.25-py3-none-any.whl", hash = "sha256:0daa7b8a48ad2696d323105e7f1fc06741068f4ad9c89688dfb81843b0892d17", size = 213774 },
 ]
 
 [[package]]

@@ -4,7 +4,9 @@
      Changes: Added UnoCSS CDN runtime (config + shortcuts + Tailwind reset + FOUC prevention).
      Existing <style> block preserved intact — UnoCSS is additive for utility classes.
      Previous: channel icons, humanized copy, pip extras fix, Command Center cycling,
-     GSAP ScrollTrigger reveals, mascot parallax. -->
+     GSAP ScrollTrigger reveals, mascot parallax.
+     2026-02-16: Fixed copy button (clipboard fallback + reads text from DOM),
+     fixed CTA button text color (white on btn--fill, specificity override). -->
 <!doctype html>
 <html lang="en" data-grad="prism">
   <head>
@@ -462,21 +464,26 @@
       .btn:active {
         transform: scale(0.98);
       }
-      .btn--fill {
+      .btn--fill,
+      a.btn--fill {
         background: var(--lp-blue);
         color: #fff;
         border: 2px solid var(--lp-blue);
       }
-      .btn--fill:hover {
+      .btn--fill:hover,
+      a.btn--fill:hover {
         background: var(--lp-blue-hover);
         border-color: var(--lp-blue-hover);
+        color: #fff;
       }
-      .btn--ghost {
+      .btn--ghost,
+      a.btn--ghost {
         background: transparent;
         color: var(--lp-text);
         border: 1.5px solid transparent;
       }
-      .btn--ghost:hover {
+      .btn--ghost:hover,
+      a.btn--ghost:hover {
         background: rgba(26, 26, 46, 0.04);
       }
 
@@ -3194,17 +3201,42 @@
 
       /* ── Copy ── */
       function copyCmd(btn) {
-        navigator.clipboard
-          .writeText("curl -fsSL https://pocketpaw.xyz/install.sh | sh")
-          .then(function () {
-            var label = btn.querySelector(".copy-label");
-            if (label) label.textContent = "Copied";
-            btn.classList.add("copied");
-            setTimeout(function () {
-              if (label) label.textContent = "Copy";
-              btn.classList.remove("copied");
-            }, 2000);
+        var codeEl = btn.parentElement && btn.parentElement.querySelector("code");
+        var text = codeEl
+          ? codeEl.textContent.replace(/^\$\s*/, "").trim()
+          : "curl -fsSL https://pocketpaw.xyz/install.sh | sh";
+
+        function onSuccess() {
+          var label = btn.querySelector(".copy-label");
+          if (label) label.textContent = "Copied";
+          btn.classList.add("copied");
+          setTimeout(function () {
+            if (label) label.textContent = "Copy";
+            btn.classList.remove("copied");
+          }, 2000);
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(onSuccess).catch(function () {
+            fallbackCopy(text, onSuccess);
           });
+        } else {
+          fallbackCopy(text, onSuccess);
+        }
+      }
+
+      function fallbackCopy(text, cb) {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+          if (cb) cb();
+        } catch (_) {}
+        document.body.removeChild(ta);
       }
 
       /* Load GSAP dynamically to bypass Vite/Astro strict-mode script processing */

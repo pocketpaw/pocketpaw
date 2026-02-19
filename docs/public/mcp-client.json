@@ -1,0 +1,13 @@
+{
+  "client_name": "PocketPaw",
+  "redirect_uris": [
+    "http://localhost:8888/api/mcp/oauth/callback",
+    "http://127.0.0.1:8888/api/mcp/oauth/callback"
+  ],
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "client_uri": "https://github.com/pocketpaw/pocketpaw",
+  "software_id": "pocketpaw",
+  "software_version": "0.4.1"
+}

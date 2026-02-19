@@ -129,7 +129,7 @@ Data persists in a named Docker volume across restarts. See [`.env.example`](.en
 | **Web Dashboard** | Browser-based control panel, the default mode. No setup needed. |
 | **Multi-Channel** | Discord, Slack, WhatsApp (Personal + Business), Signal, Matrix, Teams, Google Chat, Telegram |
 | **Claude Agent SDK** | Default backend. Official Claude SDK with built-in tools (Bash, Read, Write). |
-| **Smart Model Router** | Auto-selects Haiku / Sonnet / Opus based on task complexity |
+| **Smart Model Router** | Optional auto-selection of Haiku / Sonnet / Opus based on task complexity (off by default — Claude Code has its own routing) |
 | **Tool Policy** | Allow/deny control over which tools the agent can use |
 | **Plan Mode** | Require approval before the agent runs shell commands or edits files |
 | **Browser Control** | Browse the web, fill forms, click buttons via accessibility tree |
@@ -296,6 +296,8 @@ Config lives in `~/.pocketpaw/config.json`. API keys and tokens are automaticall
 ```json
 {
   "agent_backend": "claude_agent_sdk",
+  "claude_sdk_model": "",
+  "claude_sdk_max_turns": 25,
   "anthropic_api_key": "sk-ant-...",
   "anthropic_model": "claude-sonnet-4-5-20250929",
   "tool_profile": "full",
@@ -370,6 +372,9 @@ cd pocketpaw
 
 # Install with dev dependencies
 uv sync --dev
+
+# Run the dashboard with auto-reload (watches *.py, *.html, *.js, *.css)
+uv run pocketpaw --dev
 
 # Run tests
 uv run pytest

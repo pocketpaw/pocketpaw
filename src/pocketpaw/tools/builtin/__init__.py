@@ -6,6 +6,7 @@
 #   - 2026-02-07: Added Gmail, Calendar, Voice, Research, Delegate tools
 #   - 2026-02-09: Added STT, Drive, Docs, Spotify, OCR, Reddit tools
 #   - 2026-02-09: Converted to lazy __getattr__ to avoid ImportError when optional deps missing
+#   - 2026-02-17: Added HealthCheckTool, ErrorLogTool, ConfigDoctorTool for health engine
 
 import importlib as _importlib
 
@@ -50,6 +51,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SpotifyPlaybackTool": (".spotify", "SpotifyPlaybackTool"),
     "SpotifyPlaylistTool": (".spotify", "SpotifyPlaylistTool"),
     "OCRTool": (".ocr", "OCRTool"),
+    "TranslateTool": (".translate", "TranslateTool"),
     "RedditSearchTool": (".reddit", "RedditSearchTool"),
     "RedditReadTool": (".reddit", "RedditReadTool"),
     "RedditTrendingTool": (".reddit", "RedditTrendingTool"),
@@ -59,6 +61,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ClearSessionTool": (".sessions", "ClearSessionTool"),
     "RenameSessionTool": (".sessions", "RenameSessionTool"),
     "DeleteSessionTool": (".sessions", "DeleteSessionTool"),
+    "HealthCheckTool": (".health", "HealthCheckTool"),
+    "ErrorLogTool": (".health", "ErrorLogTool"),
+    "ConfigDoctorTool": (".health", "ConfigDoctorTool"),
 }
 
 

@@ -40,6 +40,7 @@ class TestOCRToolSchema:
 def _mock_settings():
     settings = MagicMock()
     settings.openai_api_key = "test-key"
+    settings.ocr_provider = "openai"
     with patch("pocketpaw.tools.builtin.ocr.get_settings", return_value=settings):
         yield settings
 
@@ -131,6 +132,7 @@ async def test_ocr_no_api_key_no_tesseract(tmp_path):
 
     settings = MagicMock()
     settings.openai_api_key = None
+    settings.ocr_provider = "openai"
     with patch("pocketpaw.tools.builtin.ocr.get_settings", return_value=settings):
         # Mock pytesseract as not installed
         with patch.dict("sys.modules", {"pytesseract": None}):

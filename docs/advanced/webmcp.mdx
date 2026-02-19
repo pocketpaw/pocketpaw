@@ -1,0 +1,91 @@
+---
+title: WebMCP integration
+description: "WebMCP is a browser API that lets websites expose structured tools to AI agents. PocketPaw will support it alongside its existing Playwright-based browser automation."
+section: Advanced
+ogType: article
+keywords: ["webmcp", "browser automation", "ai agent browser", "chrome webmcp", "structured browsing"]
+tags: ["advanced", "browser", "webmcp"]
+---
+
+# WebMCP integration
+
+<Callout type="info">
+WebMCP support is planned for a future release. PocketPaw's current browser automation (Playwright + accessibility tree) continues to work with any website.
+</Callout>
+
+## What is WebMCP?
+
+WebMCP (Web Model Context Protocol) is a browser API announced by Google in Chrome 146 that lets websites expose structured tools directly to AI agents. Instead of an agent parsing the DOM or reading accessibility trees to figure out what a page does, the website tells the agent exactly what actions are available.
+
+Google and Microsoft co-developed it. It's being standardized through the W3C's Web Machine Learning community group.
+
+Two APIs make up WebMCP:
+
+**Declarative API** - Websites add a `toolname` attribute to HTML forms. The agent reads the form schema and submits structured data. No JavaScript needed.
+
+**Imperative API** - Websites register tools via `navigator.modelContext.registerTool()` with a name, description, input schema, and execute function. This handles complex multi-step workflows.
+
+Early benchmarks show a 67% reduction in computational overhead compared to vision-based browsing, with task accuracy around 98%.
+
+## How this relates to MCP
+
+WebMCP and Anthropic's Model Context Protocol (MCP) are complementary, not competing:
+
+| | Anthropic MCP | WebMCP |
+|---|---|---|
+| Operates | Server-side (backend) | Client-side (browser) |
+| Protocol | JSON-RPC | Browser API |
+| Who builds it | Service providers | Website developers |
+| Purpose | Connect agents to APIs and databases | Connect agents to website UIs |
+
+PocketPaw already supports [MCP servers](/integrations/mcp-servers) for backend connectivity. WebMCP adds the frontend equivalent: structured interaction with websites through Chrome.
+
+Together, they give PocketPaw agents structured access to both backend services and website UIs.
+
+## How PocketPaw will use it
+
+PocketPaw currently browses the web using [Playwright with accessibility tree snapshots](/tools/browser). This works with any website but requires the agent to interpret page structure and figure out what to click.
+
+With WebMCP, when a website exposes structured tools, PocketPaw can call them directly:
+
+```
+Without WebMCP (current):
+  Navigate to page -> read accessibility tree -> interpret elements
+  -> guess which button to click -> execute action -> hope it worked
+
+With WebMCP (planned):
+  Navigate to page -> ask Chrome what tools the site exposes
+  -> call add_to_cart({product_id: "123", quantity: 2})
+  -> get structured response
+```
+
+The plan is a hybrid approach:
+
+1. Check if the website exposes WebMCP tools
+2. If yes, use them (faster, more reliable)
+3. If no, fall back to the existing accessibility tree approach
+
+This gives PocketPaw the widest compatibility: structured when available, smart fallback when not.
+
+## Privacy angle
+
+WebMCP runs client-side in the browser. PocketPaw runs locally on your machine. Your browsing data stays on your computer, same as it does today with Playwright.
+
+Google's own agent integration will likely route through Gemini (their cloud). PocketPaw keeps everything local.
+
+## Current status
+
+- WebMCP is in early preview in Chrome 146 Canary (behind a flag)
+- No general availability date announced
+- Websites need to implement WebMCP tools for it to work
+- Mass adoption is likely 12-24 months out
+- PocketPaw will add support once the API stabilizes
+
+Track progress on [GitHub issue #156](https://github.com/pocketpaw/pocketpaw/issues/156).
+
+## Further reading
+
+- [Chrome WebMCP early preview announcement](https://developer.chrome.com/blog/webmcp-epp)
+- [W3C Web Machine Learning community group](https://webmcp.link/)
+- [PocketPaw browser automation docs](/tools/browser)
+- [MCP server integration](/integrations/mcp-servers)

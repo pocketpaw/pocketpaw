@@ -178,6 +178,60 @@ class WhatsAppAdapter(BaseChannelAdapter):
             media_url, f"Bearer {self.access_token}", name=name, mime=mime
         )
 
+    async def _send_media_file(self, to: str, file_path: str) -> None:
+        """Upload and send a media file via WhatsApp Cloud API."""
+        import os
+
+        if not self._http or not os.path.isfile(file_path):
+            return
+
+        from pocketpaw.bus.adapters import guess_media_type
+
+        media_type = guess_media_type(file_path)
+        mime_type = "application/octet-stream"
+        ext = os.path.splitext(file_path)[1].lower()
+        _mime_map = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".m4a": "audio/mp4",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".pdf": "application/pdf",
+        }
+        mime_type = _mime_map.get(ext, mime_type)
+
+        try:
+            # Step 1: Upload media
+            upload_url = f"{WHATSAPP_API_BASE}/{self.phone_number_id}/media"
+            with open(file_path, "rb") as f:
+                resp = await self._http.post(
+                    upload_url,
+                    data={"messaging_product": "whatsapp", "type": mime_type},
+                    files={"file": (os.path.basename(file_path), f, mime_type)},
+                )
+            media_id = resp.json().get("id")
+            if not media_id:
+                logger.warning("WhatsApp media upload failed: %s", resp.text)
+                return
+
+            # Step 2: Send media message
+            send_url = f"{WHATSAPP_API_BASE}/{self.phone_number_id}/messages"
+            await self._http.post(
+                send_url,
+                json={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": media_type,
+                    media_type: {"id": media_id},
+                },
+            )
+        except Exception as e:
+            logger.warning("Failed to send WhatsApp media: %s", e)
+
     async def _mark_as_read(self, message_id: str) -> None:
         """Send read receipt for a message."""
         if not self._http:
@@ -218,6 +272,9 @@ class WhatsAppAdapter(BaseChannelAdapter):
                 text = self._buffers.pop(chat_id, "")
                 if text.strip():
                     await self._send_text(chat_id, text)
+                # Send any attached media files
+                for path in message.media or []:
+                    await self._send_media_file(chat_id, path)
                 return
 
             # Normal message

@@ -1,5 +1,8 @@
 # Tests for Deep Work Planner module.
 # Created: 2026-02-12
+# Updated: 2026-02-16 — Added TestRunPromptErrorHandling to reproduce silent
+#   error swallowing in _run_prompt(). When the LLM returns only error events,
+#   _run_prompt should raise instead of returning an empty string.
 #
 # Tests cover:
 #   - Prompt template placeholders
@@ -7,6 +10,7 @@
 #   - PlannerResult construction
 #   - ensure_profile (mocked manager)
 #   - _broadcast_phase resilience
+#   - _run_prompt error event handling (bug reproduction)
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -508,3 +512,107 @@ class TestStripCodeFences:
 
     def test_empty_string(self):
         assert PlannerAgent._strip_code_fences("") == ""
+
+
+# ============================================================================
+# _run_prompt error handling tests (bug reproduction)
+# ============================================================================
+
+
+class TestRunPromptErrorHandling:
+    """Bug reproduction: _run_prompt silently swallows LLM errors.
+
+    When the LLM API fails (bad key, timeout, no key), the agent router
+    yields type="error" events. _run_prompt() only collects type="message"
+    chunks, silently discarding errors. It returns an empty string, which
+    cascades into empty task lists and "Planner produced no tasks."
+
+    The user sees a generic failure message with no indication of the actual
+    API error that caused it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_prompt_raises_on_error_only_response(self):
+        """When router yields only error events, _run_prompt should raise."""
+        manager = MagicMock()
+        planner = PlannerAgent(manager)
+
+        # Simulate a router that yields only an error (e.g. bad API key)
+        async def mock_run(prompt):
+            yield {"type": "error", "content": "API key not configured"}
+
+        mock_router = MagicMock()
+        mock_router.run = mock_run
+
+        with pytest.raises(RuntimeError, match="API key not configured"):
+            await planner._run_prompt("test prompt", router=mock_router)
+
+    @pytest.mark.asyncio
+    async def test_run_prompt_raises_on_mixed_error_no_content(self):
+        """When router yields errors with no message content, should raise."""
+        manager = MagicMock()
+        planner = PlannerAgent(manager)
+
+        async def mock_run(prompt):
+            yield {"type": "tool_use", "content": "thinking..."}
+            yield {"type": "error", "content": "Connection refused"}
+            yield {"type": "done", "content": ""}
+
+        mock_router = MagicMock()
+        mock_router.run = mock_run
+
+        with pytest.raises(RuntimeError, match="Connection refused"):
+            await planner._run_prompt("test prompt", router=mock_router)
+
+    @pytest.mark.asyncio
+    async def test_run_prompt_succeeds_with_messages(self):
+        """Normal case: router yields message events, should return content."""
+        manager = MagicMock()
+        planner = PlannerAgent(manager)
+
+        async def mock_run(prompt):
+            yield {"type": "message", "content": "Hello "}
+            yield {"type": "message", "content": "world"}
+            yield {"type": "done", "content": ""}
+
+        mock_router = MagicMock()
+        mock_router.run = mock_run
+
+        result = await planner._run_prompt("test prompt", router=mock_router)
+        assert result == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_run_prompt_succeeds_with_mixed_events(self):
+        """Messages mixed with non-error events should still return content."""
+        manager = MagicMock()
+        planner = PlannerAgent(manager)
+
+        async def mock_run(prompt):
+            yield {"type": "tool_use", "content": "using search"}
+            yield {"type": "message", "content": "Found results"}
+            yield {"type": "tool_result", "content": "done"}
+            yield {"type": "done", "content": ""}
+
+        mock_router = MagicMock()
+        mock_router.run = mock_run
+
+        result = await planner._run_prompt("test prompt", router=mock_router)
+        assert result == "Found results"
+
+    @pytest.mark.asyncio
+    async def test_plan_raises_on_llm_error(self):
+        """Full plan() should propagate the error from _run_prompt."""
+        manager = AsyncMock()
+        planner = PlannerAgent(manager)
+
+        async def error_run_prompt(prompt: str, router=None) -> str:
+            raise RuntimeError(
+                "LLM error during planning: "
+                "API key not configured. "
+                "Add your key in Settings > API Keys."
+            )
+
+        planner._run_prompt = error_run_prompt
+
+        with pytest.raises(RuntimeError, match="API key not configured"):
+            await planner.plan("Build a TODO app", project_id="proj-1")

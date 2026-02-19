@@ -6,46 +6,12 @@ This module provides a secondary LLM check for dangerous actions.
 """
 
 import logging
-import re
 
 from pocketpaw.config import get_settings
 from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+from pocketpaw.security.rails import COMPILED_DANGEROUS_PATTERNS
 
 logger = logging.getLogger("guardian")
-
-# ---------------------------------------------------------------------------
-# Local dangerous-command patterns (regex, case-insensitive).
-#
-# Used as a fallback safety net when the LLM-based Guardian is unavailable
-# (no API key configured).  This is the union of patterns from shell.py,
-# pocketpaw_native.py, and claude_sdk.py so that the local check is at
-# least as strict as every other layer in the stack.
-# ---------------------------------------------------------------------------
-_LOCAL_DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in [
-        # Destructive file operations
-        r"rm\s+(-[rf]+\s+)*[/~]",
-        r"rm\s+(-[rf]+\s+)*\*",
-        r"sudo\s+rm\b",
-        r">\s*/dev/",
-        r">\s*/etc/",
-        r"mkfs\.",
-        r"dd\s+if=",
-        r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  # Fork bomb
-        r"chmod\s+(-R\s+)?777\s+/",
-        # Remote code execution
-        r"curl\s+.*\|\s*(ba)?sh",
-        r"wget\s+.*\|\s*(ba)?sh",
-        r"curl\s+.*-o\s*/",
-        r"wget\s+.*-O\s*/",
-        # System damage
-        r"systemctl\s+(stop|disable)\s+(ssh|sshd|firewall)",
-        r"iptables\s+-F",
-        r"\bshutdown\b",
-        r"\breboot\b",
-    ]
-]
 
 
 class GuardianAgent:
@@ -96,7 +62,7 @@ Respond with valid JSON only:
         for any command matching a known-dangerous pattern, and
         ``(True, reason)`` only for commands that do not match any pattern.
         """
-        for pattern in _LOCAL_DANGEROUS_PATTERNS:
+        for pattern in COMPILED_DANGEROUS_PATTERNS:
             if pattern.search(command):
                 return False, f"Blocked by local safety check (pattern: {pattern.pattern})"
         return True, "Allowed by local safety check (no dangerous pattern matched)"

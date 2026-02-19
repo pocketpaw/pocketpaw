@@ -2,6 +2,10 @@
 # Created: 2026-02-12
 # Updated: 2026-02-12 — Added research_depth parameter (none/quick/standard/deep).
 #   'none' skips research entirely (no LLM call), passing empty notes to PRD.
+# Updated: 2026-02-16 — Fixed silent error swallowing in _run_prompt(). Error
+#   events from the agent router are now captured and raised as RuntimeError
+#   when no message content is produced. Surfaces "API key not configured"
+#   instead of cryptic "Planner produced no tasks."
 #
 # PlannerAgent runs research, PRD generation, task breakdown, and team
 # assembly through AgentRouter, producing a PlannerResult that can be
@@ -175,6 +179,10 @@ class PlannerAgent:
     async def _run_prompt(self, prompt: str, router=None) -> str:
         """Run a prompt through AgentRouter and collect all message chunks.
 
+        Raises ``RuntimeError`` if the router yields error events and produces
+        no message content — this surfaces API failures (missing key, timeout,
+        connection refused) instead of silently returning an empty string.
+
         Args:
             prompt: The prompt to send to the LLM.
             router: Optional pre-created AgentRouter (avoids re-initialization).
@@ -186,12 +194,22 @@ class PlannerAgent:
             router = AgentRouter(get_settings())
 
         output_parts: list[str] = []
+        errors: list[str] = []
 
         async for chunk in router.run(prompt):
-            if chunk.get("type") == "message":
+            chunk_type = chunk.get("type")
+            if chunk_type == "message":
                 content = chunk.get("content", "")
                 if content:
                     output_parts.append(content)
+            elif chunk_type == "error":
+                error_content = chunk.get("content", "Unknown error")
+                errors.append(error_content)
+                logger.error("LLM error during planning: %s", error_content)
+
+        # If no message content was produced but errors occurred, raise
+        if not output_parts and errors:
+            raise RuntimeError(f"LLM error during planning: {errors[0]}")
 
         return "".join(output_parts)
 

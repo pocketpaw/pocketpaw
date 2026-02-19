@@ -7,6 +7,7 @@ import importlib
 import logging
 import shutil
 import subprocess
+import sys
 from abc import ABC, abstractmethod
 from typing import Protocol
 
@@ -15,19 +16,12 @@ from pocketpaw.bus.queue import MessageBus
 
 _log = logging.getLogger(__name__)
 
-# Maps a pip extra name → the pip package(s) it installs
-_EXTRA_PACKAGES: dict[str, str] = {
-    "discord": "pocketpaw[discord]",
-    "slack": "pocketpaw[slack]",
-    "whatsapp-personal": "pocketpaw[whatsapp-personal]",
-    "matrix": "pocketpaw[matrix]",
-    "teams": "pocketpaw[teams]",
-    "gchat": "pocketpaw[gchat]",
-}
-
 
 def auto_install(extra: str, verify_import: str) -> None:
     """Auto-install an optional dependency if it is missing.
+
+    Uses ``pocketpaw[<extra>]`` so version constraints stay in pyproject.toml
+    (single source of truth).
 
     Args:
         extra: The pocketpaw extra name (e.g. "discord").
@@ -36,12 +30,10 @@ def auto_install(extra: str, verify_import: str) -> None:
     Raises:
         RuntimeError: If the install fails or the module still can't be imported.
     """
-    pip_spec = _EXTRA_PACKAGES.get(extra, f"pocketpaw[{extra}]")
+    pip_spec = f"pocketpaw[{extra}]"
     _log.info("Auto-installing missing dependency: %s", pip_spec)
 
     # Prefer uv (fast), fall back to pip
-    import sys
-
     in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
     uv = shutil.which("uv")
     if uv:
@@ -68,6 +60,17 @@ def auto_install(extra: str, verify_import: str) -> None:
     # Clear cached import failures so Python retries the import
     importlib.invalidate_caches()
 
+    # Remove stale sys.modules entries for the target module and its parent
+    # so importlib.import_module() performs a fresh import.
+    for key in list(sys.modules):
+        if key == verify_import or key.startswith(verify_import + "."):
+            del sys.modules[key]
+    # Also clear the top-level package (e.g. "telegram" for "telegram.ext")
+    top_pkg = verify_import.split(".")[0]
+    for key in list(sys.modules):
+        if key == top_pkg or key.startswith(top_pkg + "."):
+            del sys.modules[key]
+
     # Verify the module is now importable
     try:
         importlib.import_module(verify_import)
@@ -76,6 +79,22 @@ def auto_install(extra: str, verify_import: str) -> None:
             f"Installed {pip_spec} but still cannot import '{verify_import}'. "
             "You may need to restart the application."
         )
+
+
+_AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus", ".wma"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
+
+
+def guess_media_type(path: str) -> str:
+    """Return ``'audio'``, ``'image'``, or ``'document'`` based on file extension."""
+    import os
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _AUDIO_EXTS:
+        return "audio"
+    if ext in _IMAGE_EXTS:
+        return "image"
+    return "document"
 
 
 class ChannelAdapter(Protocol):

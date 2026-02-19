@@ -37,6 +37,8 @@ Security & observability:
   other sensitive credential values.
 
 Changes:
+  - 2026-02-17: Health heartbeat — periodic checks every 5 min via APScheduler, broadcasts health_update on status transitions.
+  - 2026-02-17: Health Engine API (GET /api/health, POST /api/health/check, WS get_health/run_health_check).
   - 2026-02-06: WebSocket auth via first message instead of URL query param; accept wss://.
   - 2026-02-06: Channel config REST API (GET /api/channels/status, POST save/toggle).
   - 2026-02-06: Refactored adapter storage to _channel_adapters dict; auto-start all configured.
@@ -55,6 +57,7 @@ Changes:
 
 import asyncio
 import base64
+import importlib.util
 import io
 import json
 import logging
@@ -231,6 +234,17 @@ async def _broadcast_audit_entry(entry: dict) -> None:
     safety events into the live dashboard stream.
     """
     message = {"type": "system_event", "event_type": "audit_entry", "data": entry}
+    for ws in active_connections[:]:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            if ws in active_connections:
+                active_connections.remove(ws)
+
+
+async def _broadcast_health_update(summary: dict):
+    """Broadcast health status update to all connected WebSocket clients."""
+    message = {"type": "health_update", "data": summary}
     for ws in active_connections[:]:
         try:
             await ws.send_json(message)
@@ -459,14 +473,36 @@ async def startup_event():
     except Exception as e:
         logger.warning("Failed to recover interrupted projects: %s", e)
 
-    # Auto-start enabled MCP servers
+    # Wire MCP OAuth broadcast + auto-start enabled MCP servers
     try:
-        from pocketpaw.mcp.manager import get_mcp_manager
+        from pocketpaw.mcp.manager import get_mcp_manager, set_ws_broadcast
+
+        async def _mcp_ws_broadcast(message: dict) -> None:
+            """Broadcast an MCP message to all connected WebSocket clients."""
+            for ws in active_connections[:]:
+                try:
+                    await ws.send_json(message)
+                except Exception:
+                    pass
+
+        set_ws_broadcast(_mcp_ws_broadcast)
 
         mcp = get_mcp_manager()
         await mcp.start_enabled_servers()
     except Exception as e:
         logger.warning("Failed to start MCP servers: %s", e)
+
+    # Initialize health engine and run startup checks
+    try:
+        from pocketpaw.health import get_health_engine
+
+        health_engine = get_health_engine()
+        health_engine.run_startup_checks()
+        # Fire connectivity checks in background (non-blocking)
+        asyncio.create_task(health_engine.run_connectivity_checks())
+        logger.info("Health engine initialized: %s", health_engine.overall_status)
+    except Exception as e:
+        logger.warning("Failed to initialize health engine: %s", e)
 
     # Register audit log callback for live updates
     audit_logger = get_audit_logger()
@@ -479,6 +515,38 @@ async def startup_event():
     # Start proactive daemon
     daemon = get_daemon()
     daemon.start(stream_callback=broadcast_intention)
+
+    # Health heartbeat — periodic checks every 5 min, broadcast on status transitions
+    try:
+        from pocketpaw.health import get_health_engine
+
+        _health_engine = get_health_engine()
+        _prev_status = _health_engine.overall_status
+
+        async def _health_heartbeat():
+            nonlocal _prev_status
+            try:
+                _health_engine.run_startup_checks()
+                await _health_engine.run_connectivity_checks()
+                new_status = _health_engine.overall_status
+                if new_status != _prev_status:
+                    logger.info("Health status changed: %s -> %s", _prev_status, new_status)
+                    _prev_status = new_status
+                    await _broadcast_health_update(_health_engine.summary)
+            except Exception as e:
+                logger.warning("Health heartbeat error: %s", e)
+
+        # Reuse the daemon's APScheduler
+        daemon.trigger_engine.scheduler.add_job(
+            _health_heartbeat,
+            "interval",
+            minutes=5,
+            id="health_heartbeat",
+            replace_existing=True,
+        )
+        logger.info("Health heartbeat registered (every 5 min)")
+    except Exception as e:
+        logger.warning("Failed to register health heartbeat: %s", e)
 
     # Hourly rate-limiter cleanup
     async def _rate_limit_cleanup_loop():
@@ -676,6 +744,7 @@ async def list_mcp_presets():
             "url": p.url,
             "docs_url": p.docs_url,
             "needs_args": p.needs_args,
+            "oauth": p.oauth,
             "installed": p.id in installed_names,
             "env_keys": [
                 {
@@ -730,215 +799,35 @@ async def install_mcp_preset(request: Request):
     }
 
 
-# ==================== MCP Registry API ====================
+@app.get("/api/mcp/oauth/callback")
+async def mcp_oauth_callback(code: str = "", state: str = ""):
+    """OAuth callback endpoint — receives authorization code from OAuth provider.
 
-_MCP_REGISTRY_BASE = "https://registry.modelcontextprotocol.io"
-
-# Server name parts that are too generic to use alone as a config name.
-_GENERIC_SERVER_PARTS = {"mcp", "server", "mcp-server", "main", "app", "api"}
-
-
-def _derive_registry_short_name(raw_name: str, title: str | None = None) -> str:
-    """Derive a short, readable config name from a registry server name.
-
-    Examples:
-        "com.zomato/mcp"      -> "zomato-mcp"
-        "acme/weather-server"  -> "weather-server"
-        "@anthropic/claude"    -> "claude"
-        "simple-tool"          -> "simple-tool"
+    This is the redirect target after user authenticates with GitHub, Notion, etc.
+    Auth-exempt because the OAuth provider redirects the user's browser here.
     """
-    if not raw_name:
-        return ""
+    from fastapi.responses import HTMLResponse
 
-    if "/" not in raw_name:
-        return raw_name
+    from pocketpaw.mcp.manager import set_oauth_callback_result
 
-    parts = raw_name.split("/")
-    org = parts[0]
-    server_part = parts[-1]
-
-    # Clean up org: "com.zomato" -> "zomato", "@anthropic" -> "anthropic"
-    if "." in org:
-        org = org.rsplit(".", 1)[-1]
-    org = org.lstrip("@")
-
-    # If the server part is too generic, combine with org for disambiguation
-    if server_part.lower() in _GENERIC_SERVER_PARTS:
-        return f"{org}-{server_part}"
-
-    return server_part
-
-
-@app.get("/api/mcp/registry/search")
-async def search_mcp_registry(
-    q: str = "",
-    limit: int = 30,
-    cursor: str = "",
-):
-    """Proxy search to the official MCP Registry (avoids CORS)."""
-    import httpx
-
-    params: dict[str, str | int] = {"limit": min(limit, 100)}
-    if q:
-        params["search"] = q
-    if cursor:
-        params["cursor"] = cursor
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"{_MCP_REGISTRY_BASE}/v0/servers",
-                params=params,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            # Registry wraps each entry as {server: {...}, _meta: {...}}.
-            # Unwrap so the frontend gets flat server objects.
-            # Also: lift environmentVariables from packages[0] to server
-            # level, remove $schema ($ prefix can confuse Alpine.js proxies),
-            # and ensure expected fields have defaults.
-            servers = []
-            for entry in data.get("servers", []):
-                srv = entry.get("server", entry)
-                srv["_meta"] = entry.get("_meta", {})
-                # Remove $schema — $ prefix can interfere with Alpine.js
-                srv.pop("$schema", None)
-                # Ensure expected fields exist
-                srv.setdefault("name", "")
-                srv.setdefault("description", "")
-                srv.setdefault("packages", [])
-                srv.setdefault("remotes", [])
-                srv.setdefault("environmentVariables", [])
-                # Lift env vars from the first package to the server level
-                if not srv["environmentVariables"]:
-                    for pkg in srv.get("packages", []):
-                        pkg_env = pkg.get("environmentVariables")
-                        if pkg_env:
-                            srv["environmentVariables"] = pkg_env
-                            break
-                if srv["name"]:  # skip entries without a name
-                    servers.append(srv)
-
-            return {"servers": servers, "metadata": data.get("metadata", {})}
-    except Exception as exc:
-        logger.warning("MCP registry search failed: %s", exc)
-        return {"servers": [], "metadata": {"count": 0}, "error": str(exc)}
-
-
-@app.post("/api/mcp/registry/install")
-async def install_from_registry(request: Request):
-    """Install an MCP server from registry metadata.
-
-    Expects a JSON body with the server's registry data (name, packages/remotes,
-    environmentVariables) and user-supplied env values.
-    """
-    from fastapi.responses import JSONResponse
-
-    from pocketpaw.mcp.config import MCPServerConfig
-    from pocketpaw.mcp.manager import get_mcp_manager
-
-    data = await request.json()
-    server = data.get("server", {})
-    user_env = data.get("env", {})
-
-    # Derive a short, readable name from the registry name.
-    # e.g. "com.zomato/mcp" -> "zomato-mcp", "acme/weather-server" -> "weather-server"
-    raw_name = server.get("name", "")
-    short_name = _derive_registry_short_name(raw_name, server.get("title"))
-    if not short_name:
-        return JSONResponse({"error": "Missing server name"}, status_code=400)
-
-    # Try remotes first (HTTP transport — simplest, no npm needed)
-    remotes = server.get("remotes", [])
-    packages = server.get("packages", [])
-
-    config = None
-
-    if remotes:
-        remote = remotes[0]
-        # Registry API uses "type" (e.g. "streamable-http"), legacy uses "transportType"
-        transport = remote.get("type", remote.get("transportType", "http"))
-        # Normalize SSE to "http" but keep "streamable-http" distinct — they need
-        # different MCP SDK clients.
-        if transport == "sse":
-            transport = "http"
-        elif transport not in ("http", "streamable-http"):
-            transport = "http"  # safe fallback
-        config = MCPServerConfig(
-            name=short_name,
-            transport=transport,
-            url=remote.get("url", ""),
-            env=user_env,
-            enabled=True,
-        )
-    elif packages:
-        pkg = packages[0]
-        registry_type = pkg.get("registryType", "")
-        pkg_name = pkg.get("name", "") or pkg.get("identifier", "")
-        runtime = pkg.get("runtime", "node")
-
-        if registry_type == "docker":
-            args = ["run", "-i", "--rm"]
-            for ra in pkg.get("runtimeArguments", []):
-                if ra.get("isFixed"):
-                    args.append(ra.get("value", ""))
-            args.append(pkg_name)
-            config = MCPServerConfig(
-                name=short_name,
-                transport="stdio",
-                command="docker",
-                args=args,
-                env=user_env,
-                enabled=True,
-            )
-        elif registry_type == "pypi":
-            config = MCPServerConfig(
-                name=short_name,
-                transport="stdio",
-                command="uvx",
-                args=[pkg_name],
-                env=user_env,
-                enabled=True,
-            )
-        elif registry_type == "npm" or runtime == "node":
-            args = ["-y", pkg_name]
-            for pa in pkg.get("packageArguments", []):
-                if pa.get("isFixed"):
-                    args.append(pa.get("value", ""))
-            config = MCPServerConfig(
-                name=short_name,
-                transport="stdio",
-                command="npx",
-                args=args,
-                env=user_env,
-                enabled=True,
-            )
-
-    if config is None:
-        return JSONResponse(
-            {"error": "Could not determine install method from registry data"},
+    if not code or not state:
+        return HTMLResponse(
+            "<html><body><h3>Missing code or state parameter.</h3></body></html>",
             status_code=400,
         )
 
-    mgr = get_mcp_manager()
-    mgr.add_server_config(config)
-    connected = await mgr.start_server(config)
-    tools = mgr.discover_tools(config.name) if connected else []
-
-    result: dict = {
-        "status": "ok",
-        "name": config.name,
-        "connected": connected,
-        "tools": [{"name": t.name, "description": t.description} for t in tools],
-    }
-    # Surface connection error so the frontend can display it
-    if not connected:
-        status = mgr.get_server_status()
-        srv = status.get(config.name, {})
-        if srv.get("error"):
-            result["error"] = srv["error"]
-    return result
+    resolved = set_oauth_callback_result(state, code)
+    if resolved:
+        return HTMLResponse(
+            "<html><body>"
+            "<h3>Authenticated! You can close this tab.</h3>"
+            "<script>window.close()</script>"
+            "</body></html>"
+        )
+    return HTMLResponse(
+        "<html><body><h3>OAuth flow expired or not found.</h3></body></html>",
+        status_code=400,
+    )
 
 
 # ==================== Skills Library API ====================
@@ -1419,6 +1308,90 @@ def _channel_is_running(channel: str) -> bool:
     return getattr(adapter, "_running", False)
 
 
+# Maps channel name → (import_module, display_package, pip_spec)
+# import_module must be specific enough to avoid false positives from
+# unrelated packages (e.g. "telegram.ext" not just "telegram").
+# signal and whatsapp-business use httpx (core dep), so no extra check needed.
+_CHANNEL_DEPS: dict[str, tuple[str, str, str]] = {
+    "discord": ("discord.ext.commands", "discord.py", "pocketpaw[discord]"),
+    "slack": ("slack_bolt", "slack-bolt", "pocketpaw[slack]"),
+    "whatsapp": ("neonize", "neonize", "pocketpaw[whatsapp-personal]"),
+    "telegram": ("telegram.ext", "python-telegram-bot", "pocketpaw[telegram]"),
+    "matrix": ("nio", "matrix-nio", "pocketpaw[matrix]"),
+    "teams": ("botbuilder.core", "botbuilder-core", "pocketpaw[teams]"),
+    "google_chat": ("googleapiclient.discovery", "google-api-python-client", "pocketpaw[gchat]"),
+}
+
+
+def _is_module_importable(module_name: str) -> bool:
+    """Check if a module can actually be imported (not just found on disk).
+
+    ``find_spec`` only checks whether a module file exists — it doesn't verify
+    that the module loads without errors.  A real import is the only reliable
+    test, especially for packages with native extensions or heavy transitive
+    dependencies like ``python-telegram-bot``.
+    """
+    try:
+        importlib.import_module(module_name)
+        return True
+    except Exception:
+        return False
+
+
+@app.get("/api/extras/check")
+async def check_extras(channel: str = Query(...)):
+    """Check whether a channel's optional dependency is installed."""
+    dep = _CHANNEL_DEPS.get(channel)
+    if dep is None:
+        # Channel has no optional dep (e.g. signal) — always installed
+        return {"installed": True, "extra": channel, "package": "", "pip_spec": ""}
+    import_mod, package, pip_spec = dep
+    installed = _is_module_importable(import_mod)
+    return {
+        "installed": installed,
+        "extra": channel,
+        "package": package,
+        "pip_spec": pip_spec,
+    }
+
+
+@app.post("/api/extras/install")
+async def install_extras(request: Request):
+    """Install a channel's optional dependency."""
+    data = await request.json()
+    extra = data.get("extra", "")
+
+    dep = _CHANNEL_DEPS.get(extra)
+    if dep is None:
+        raise HTTPException(status_code=400, detail=f"Unknown extra: {extra}")
+
+    import_mod, _package, _pip_spec = dep
+
+    # Already installed?
+    if _is_module_importable(import_mod):
+        return {"status": "ok"}
+
+    from pocketpaw.bus.adapters import auto_install
+
+    # Map channel name → pip extra name (most match, except whatsapp → whatsapp-personal)
+    extra_name = "whatsapp-personal" if extra == "whatsapp" else extra
+    try:
+        await asyncio.to_thread(auto_install, extra_name, import_mod)
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+
+    # Clear cached adapter module so _start_channel_adapter can re-import fresh
+    import sys
+
+    adapter_modules = [
+        k for k in sys.modules if k.startswith("pocketpaw.bus.adapters.")
+    ]
+    for mod in adapter_modules:
+        del sys.modules[mod]
+
+    return {"status": "ok"}
+
+
 @app.get("/api/channels/status")
 async def get_channels_status():
     """Get status of all 4 channel adapters."""
@@ -1486,6 +1459,19 @@ async def toggle_channel(request: Request):
         try:
             await _start_channel_adapter(channel, settings)
             logger.info(f"{channel.title()} adapter started via dashboard")
+        except ImportError:
+            # Missing optional dependency — return structured response so the
+            # frontend can show the install modal instead of a generic error.
+            dep = _CHANNEL_DEPS.get(channel)
+            if dep:
+                _mod, package, pip_spec = dep
+                return {
+                    "missing_dep": True,
+                    "channel": channel,
+                    "package": package,
+                    "pip_spec": pip_spec,
+                }
+            return {"error": f"Failed to start {channel}: missing dependency"}
         except Exception as e:
             return {"error": f"Failed to start {channel}: {e}"}
     elif action == "stop":
@@ -1649,10 +1635,28 @@ def _static_version() -> str:
     return hashlib.md5("|".join(mtimes).encode()).hexdigest()[:8]
 
 
+@app.get("/api/version")
+async def get_version_info():
+    """Return current version and update availability."""
+    from importlib.metadata import version as get_version
+
+    from pocketpaw.config import get_config_dir
+    from pocketpaw.update_check import check_for_updates
+
+    current = get_version("pocketpaw")
+    info = check_for_updates(current, get_config_dir())
+    return info or {"current": current, "latest": current, "update_available": False}
+
+
 @app.get("/")
 async def index(request: Request):
     """Serve the main dashboard page."""
-    return templates.TemplateResponse("base.html", {"request": request, "v": _static_version()})
+    from importlib.metadata import version as get_version
+
+    return templates.TemplateResponse(
+        "base.html",
+        {"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
+    )
 
 
 # ==================== Auth Middleware ====================
@@ -1735,6 +1739,7 @@ async def auth_middleware(request: Request, call_next):
         "/webhook/inbound",
         "/api/whatsapp/qr",
         "/oauth/callback",
+        "/api/mcp/oauth/callback",
     ]
 
     for path in exempt_paths:
@@ -2289,6 +2294,12 @@ async def websocket_endpoint(
             elif action == "settings":
                 async with _settings_lock:
                     settings.agent_backend = data.get("agent_backend", settings.agent_backend)
+                    if "claude_sdk_model" in data:
+                        settings.claude_sdk_model = data["claude_sdk_model"]
+                    if "claude_sdk_max_turns" in data:
+                        val = data["claude_sdk_max_turns"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                            settings.claude_sdk_max_turns = int(val)
                     settings.llm_provider = data.get("llm_provider", settings.llm_provider)
                     if data.get("ollama_host"):
                         settings.ollama_host = data["ollama_host"]
@@ -2296,6 +2307,18 @@ async def websocket_endpoint(
                         settings.ollama_model = data["ollama_model"]
                     if data.get("anthropic_model"):
                         settings.anthropic_model = data.get("anthropic_model")
+                    if data.get("openai_compatible_base_url") is not None:
+                        settings.openai_compatible_base_url = data["openai_compatible_base_url"]
+                    if data.get("openai_compatible_api_key"):
+                        settings.openai_compatible_api_key = data["openai_compatible_api_key"]
+                    if data.get("openai_compatible_model") is not None:
+                        settings.openai_compatible_model = data["openai_compatible_model"]
+                    if "openai_compatible_max_tokens" in data:
+                        val = data["openai_compatible_max_tokens"]
+                        if isinstance(val, (int, float)) and 0 <= val <= 1000000:
+                            settings.openai_compatible_max_tokens = int(val)
+                    if data.get("gemini_model"):
+                        settings.gemini_model = data["gemini_model"]
                     if "bypass_permissions" in data:
                         settings.bypass_permissions = bool(data.get("bypass_permissions"))
                     if data.get("web_search_provider"):
@@ -2330,8 +2353,14 @@ async def websocket_endpoint(
                         settings.tts_provider = data["tts_provider"]
                     if "tts_voice" in data:
                         settings.tts_voice = data["tts_voice"]
+                    if data.get("stt_provider"):
+                        settings.stt_provider = data["stt_provider"]
                     if data.get("stt_model"):
                         settings.stt_model = data["stt_model"]
+                    if data.get("ocr_provider"):
+                        settings.ocr_provider = data["ocr_provider"]
+                    if data.get("sarvam_tts_language"):
+                        settings.sarvam_tts_language = data["sarvam_tts_language"]
                     if "self_audit_enabled" in data:
                         settings.self_audit_enabled = bool(data["self_audit_enabled"])
                     if data.get("self_audit_schedule"):
@@ -2393,6 +2422,14 @@ async def websocket_endpoint(
                         await websocket.send_json(
                             {"type": "message", "content": "✅ OpenAI API key saved!"}
                         )
+                    elif provider == "google" and key:
+                        settings.google_api_key = key
+                        settings.llm_provider = "gemini"
+                        settings.save()
+                        agent_loop.reset_router()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Google API key saved!"}
+                        )
                     elif provider == "tavily" and key:
                         settings.tavily_api_key = key
                         settings.save()
@@ -2447,6 +2484,12 @@ async def websocket_endpoint(
                                 "content": "✅ Spotify Client Secret saved!",
                             }
                         )
+                    elif provider == "sarvam" and key:
+                        settings.sarvam_api_key = key
+                        settings.save()
+                        await websocket.send_json(
+                            {"type": "message", "content": "✅ Sarvam AI API key saved!"}
+                        )
                     else:
                         await websocket.send_json(
                             {"type": "error", "content": "Invalid API key or provider"}
@@ -2467,10 +2510,18 @@ async def websocket_endpoint(
                         "type": "settings",
                         "content": {
                             "agentBackend": settings.agent_backend,
+                            "claudeSdkModel": settings.claude_sdk_model,
+                            "claudeSdkMaxTurns": settings.claude_sdk_max_turns,
                             "llmProvider": settings.llm_provider,
                             "ollamaHost": settings.ollama_host,
                             "ollamaModel": settings.ollama_model,
                             "anthropicModel": settings.anthropic_model,
+                            "openaiCompatibleBaseUrl": settings.openai_compatible_base_url,
+                            "openaiCompatibleModel": settings.openai_compatible_model,
+                            "openaiCompatibleMaxTokens": settings.openai_compatible_max_tokens,
+                            "hasOpenaiCompatibleKey": bool(settings.openai_compatible_api_key),
+                            "geminiModel": settings.gemini_model,
+                            "hasGoogleApiKey": bool(settings.google_api_key),
                             "bypassPermissions": settings.bypass_permissions,
                             "hasAnthropicKey": bool(settings.anthropic_api_key),
                             "hasOpenaiKey": bool(settings.openai_api_key),
@@ -2490,7 +2541,10 @@ async def websocket_endpoint(
                             "modelTierComplex": settings.model_tier_complex,
                             "ttsProvider": settings.tts_provider,
                             "ttsVoice": settings.tts_voice,
+                            "sttProvider": settings.stt_provider,
                             "sttModel": settings.stt_model,
+                            "ocrProvider": settings.ocr_provider,
+                            "sarvamTtsLanguage": settings.sarvam_tts_language,
                             "selfAuditEnabled": settings.self_audit_enabled,
                             "selfAuditSchedule": settings.self_audit_schedule,
                             "memoryBackend": settings.memory_backend,
@@ -2506,6 +2560,7 @@ async def websocket_endpoint(
                             "hasGoogleOAuthSecret": bool(settings.google_oauth_client_secret),
                             "hasSpotifyClientId": bool(settings.spotify_client_id),
                             "hasSpotifyClientSecret": bool(settings.spotify_client_secret),
+                            "hasSarvamKey": bool(settings.sarvam_api_key),
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },
@@ -2516,6 +2571,44 @@ async def websocket_endpoint(
             elif action == "navigate":
                 path = data.get("path", "")
                 await handle_file_navigation(websocket, path, settings)
+
+            # Health engine actions
+            elif action == "get_health":
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    await websocket.send_json({"type": "health_update", "data": engine.summary})
+                except Exception as e:
+                    await websocket.send_json(
+                        {"type": "health_update", "data": {"status": "unknown", "error": str(e)}}
+                    )
+
+            elif action == "run_health_check":
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    await engine.run_all_checks()
+                    await websocket.send_json({"type": "health_update", "data": engine.summary})
+                except Exception as e:
+                    await websocket.send_json(
+                        {"type": "health_update", "data": {"status": "unknown", "error": str(e)}}
+                    )
+
+            elif action == "get_health_errors":
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    limit = data.get("limit", 20)
+                    search = data.get("search", "")
+                    errors = engine.get_recent_errors(limit=limit, search=search)
+                    await websocket.send_json({"type": "health_errors", "errors": errors})
+                except Exception as e:
+                    await websocket.send_json(
+                        {"type": "health_errors", "errors": [], "error": str(e)}
+                    )
 
             # Handle file browser
             elif action == "browse":
@@ -3129,6 +3222,62 @@ async def run_self_audit_endpoint():
     return report
 
 
+# ==================== Health Engine API ====================
+
+
+@app.get("/api/health")
+async def get_health_status():
+    """Get current health engine summary."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        return engine.summary
+    except Exception as e:
+        return {"status": "unknown", "check_count": 0, "issues": [], "error": str(e)}
+
+
+@app.get("/api/health/errors")
+async def get_health_errors(limit: int = 20, search: str = ""):
+    """Get recent errors from the persistent error log."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        return engine.get_recent_errors(limit=limit, search=search)
+    except Exception:
+        return []
+
+
+@app.delete("/api/health/errors")
+async def clear_health_errors():
+    """Clear the persistent error log."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        engine.error_store.clear()
+        return {"cleared": True}
+    except Exception as e:
+        return {"cleared": False, "error": str(e)}
+
+
+@app.post("/api/health/check")
+async def trigger_health_check():
+    """Run all health checks (startup + connectivity) and return results."""
+    try:
+        from pocketpaw.health import get_health_engine
+
+        engine = get_health_engine()
+        await engine.run_all_checks()
+        summary = engine.summary
+        # Broadcast to all connected clients
+        await _broadcast_health_update(summary)
+        return summary
+    except Exception as e:
+        return {"status": "unknown", "error": str(e)}
+
+
 async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data: dict):
     """Handle tool execution."""
 
@@ -3341,13 +3490,20 @@ async def get_memory_stats():
     }
 
 
-def run_dashboard(host: str = "127.0.0.1", port: int = 8888, open_browser: bool = True):
+def run_dashboard(
+    host: str = "127.0.0.1",
+    port: int = 8888,
+    open_browser: bool = True,
+    dev: bool = False,
+):
     """Run the dashboard server."""
     global _open_browser_url
 
     print("\n" + "=" * 50)
     print("🐾 POCKETPAW WEB DASHBOARD")
     print("=" * 50)
+    if dev:
+        print("🔄 Development mode — auto-reload enabled")
     if host == "0.0.0.0":
         import socket
 
@@ -3366,7 +3522,21 @@ def run_dashboard(host: str = "127.0.0.1", port: int = 8888, open_browser: bool 
     if open_browser:
         _open_browser_url = f"http://localhost:{port}"
 
-    uvicorn.run(app, host=host, port=port)
+    if dev:
+        import pathlib
+
+        src_dir = str(pathlib.Path(__file__).resolve().parent)
+        uvicorn.run(
+            "pocketpaw.dashboard:app",
+            host=host,
+            port=port,
+            reload=True,
+            reload_dirs=[src_dir],
+            reload_includes=["*.py", "*.html", "*.js", "*.css"],
+            log_level="debug",
+        )
+    else:
+        uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

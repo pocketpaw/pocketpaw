@@ -30,6 +30,9 @@ uv run pocketpaw --whatsapp
 # Run multiple headless channels simultaneously
 uv run pocketpaw --discord --slack
 
+# Run in development mode (auto-reload on file changes)
+uv run pocketpaw --dev
+
 # Run all tests
 uv run pytest
 
@@ -68,7 +71,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 
 1. **AgentLoop** consumes from the message bus, manages memory context, and streams responses back
 2. **AgentRouter** selects and delegates to one of three backends based on `settings.agent_backend`:
-   - `claude_agent_sdk` (default/recommended) — Official Claude Agent SDK with built-in tools (Bash, Read, Write, etc.). Uses `PreToolUse` hooks for dangerous command blocking. Lives in `agents/claude_sdk.py`
+   - `claude_agent_sdk` (default/recommended) — Official Claude Agent SDK with built-in tools (Bash, Read, Write, etc.). Uses `PreToolUse` hooks for dangerous command blocking. Lives in `agents/claude_sdk.py`. SDK-specific settings: `claude_sdk_model` (empty = let Claude Code auto-select), `claude_sdk_max_turns` (default 25). Smart model routing is disabled by default to avoid conflicting with Claude Code's own routing.
    - `pocketpaw_native` — Custom orchestrator: Anthropic SDK for reasoning + Open Interpreter for execution. Lives in `agents/pocketpaw_native.py`
    - `open_interpreter` — Standalone Open Interpreter supporting Ollama/OpenAI/Anthropic. Lives in `agents/open_interpreter.py`
 3. All backends yield standardized dicts with `type` (message/tool_use/tool_result/error/done), `content`, and `metadata`

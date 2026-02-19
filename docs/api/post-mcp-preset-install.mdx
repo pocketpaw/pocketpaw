@@ -13,7 +13,7 @@ tags: ["api", "mcp"]
 
 ## Overview
 
-Installs an MCP server from a preset template. Automatically configures the server with the correct command, args, and transport. Optionally tests the connection after installation.
+Installs an MCP server from a preset template. Automatically configures the server with the correct command, args, and transport. For OAuth presets, the server is saved to config and the connection triggers a browser-based OAuth flow (the frontend receives an `mcp_oauth_redirect` WebSocket message).
 
 ## Request Body
 
@@ -43,8 +43,8 @@ Installs an MCP server from a preset template. Automatically configures the serv
       -H "Authorization: Bearer <token>" \
       -H "Content-Type: application/json" \
       -d '{
-        "preset_id": "github",
-        "env": {"GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"}
+        "preset_id": "filesystem",
+        "extra_args": ["/home/user/projects"]
       }'
     ```
   </Tab>
@@ -57,8 +57,8 @@ Installs an MCP server from a preset template. Automatically configures the serv
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        preset_id: "github",
-        env: { GITHUB_TOKEN: "ghp_xxxxxxxxxxxx" }
+        preset_id: "filesystem",
+        extra_args: ["/home/user/projects"]
       })
     });
     const data = await response.json();
@@ -73,8 +73,8 @@ Installs an MCP server from a preset template. Automatically configures the serv
         "http://localhost:8000/api/mcp/presets/install",
         headers={"Authorization": "Bearer <token>"},
         json={
-            "preset_id": "github",
-            "env": {"GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"}
+            "preset_id": "filesystem",
+            "extra_args": ["/home/user/projects"]
         }
     )
     print(response.json())

@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from pocketpaw.config import get_settings
+from pocketpaw.config import get_config_dir, get_settings
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,15 @@ _MIME_TYPES = {
     ".bmp": "image/bmp",
     ".tiff": "image/tiff",
     ".tif": "image/tiff",
+    ".pdf": "application/pdf",
 }
+
+
+def _get_ocr_output_dir() -> Path:
+    """Get/create the OCR output directory."""
+    d = get_config_dir() / "generated" / "ocr"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 class OCRTool(BaseTool):
@@ -37,9 +45,9 @@ class OCRTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Extract text from an image file using OCR (GPT-4o vision). "
-            "Supports PNG, JPG, GIF, WebP. Good for screenshots, photos of documents, "
-            "business cards, signs, etc."
+            "Extract text from images or PDFs using OCR. Supports OpenAI Vision (GPT-4o), "
+            "Sarvam Vision (23 Indian languages, PDF/image input), and Tesseract (offline). "
+            "Formats: PNG, JPG, GIF, WebP, PDF."
         )
 
     @property
@@ -79,25 +87,39 @@ class OCRTool(BaseTool):
 
         image_file = Path(image_path).expanduser()
         if not image_file.exists():
-            return self._error(f"Image file not found: {image_file}")
+            return self._error(f"File not found: {image_file}")
 
         suffix = image_file.suffix.lower()
         mime_type = _MIME_TYPES.get(suffix)
         if not mime_type:
             return self._error(
-                f"Unsupported image format '{suffix}'. Supported: {', '.join(_MIME_TYPES.keys())}"
+                f"Unsupported format '{suffix}'. Supported: {', '.join(_MIME_TYPES.keys())}"
             )
 
         max_size = 20 * 1024 * 1024  # 20 MB
         if image_file.stat().st_size > max_size:
-            return self._error("Image file too large (max 20 MB).")
+            return self._error("File too large (max 20 MB).")
 
-        # Primary: OpenAI Vision API
-        if settings.openai_api_key:
-            return await self._ocr_openai(image_file, mime_type, prompt, settings.openai_api_key)
+        provider = settings.ocr_provider
 
-        # Fallback: pytesseract
-        return await self._ocr_tesseract(image_file)
+        if provider == "sarvam":
+            return await self._ocr_sarvam(image_file)
+        elif provider == "tesseract":
+            return await self._ocr_tesseract(image_file)
+        elif provider == "openai":
+            if suffix == ".pdf":
+                return self._error(
+                    "OpenAI Vision does not support PDF. Use 'sarvam' OCR provider for PDFs."
+                )
+            if settings.openai_api_key:
+                return await self._ocr_openai(
+                    image_file, mime_type, prompt, settings.openai_api_key
+                )
+            return await self._ocr_tesseract(image_file)
+        else:
+            return self._error(
+                f"Unknown OCR provider: {provider}. Use 'openai', 'sarvam', or 'tesseract'."
+            )
 
     async def _ocr_openai(self, image_file: Path, mime_type: str, prompt: str, api_key: str) -> str:
         """OCR via OpenAI GPT-4o vision."""
@@ -168,3 +190,47 @@ class OCRTool(BaseTool):
 
         except Exception as e:
             return self._error(f"Tesseract OCR failed: {e}")
+
+    async def _ocr_sarvam(self, file_path: Path) -> str:
+        """OCR via Sarvam AI Vision (document OCR job pipeline)."""
+        settings = get_settings()
+        api_key = settings.sarvam_api_key
+        if not api_key:
+            return self._error("Sarvam API key not configured. Set POCKETPAW_SARVAM_API_KEY.")
+
+        try:
+            import asyncio
+
+            from sarvamai import SarvamAI
+
+            client = SarvamAI(api_subscription_key=api_key)
+
+            job = await asyncio.to_thread(
+                client.document_intelligence.create_job,
+                output_format="md",
+            )
+            await asyncio.to_thread(job.upload_file, file_path=str(file_path))
+            await asyncio.to_thread(job.start)
+            await asyncio.to_thread(job.wait_until_complete, poll_interval=2, timeout=120)
+
+            output_dir = str(_get_ocr_output_dir())
+            await asyncio.to_thread(job.download_output, output_path=output_dir)
+
+            # Read the output markdown files
+            ocr_dir = Path(output_dir)
+            texts = []
+            for md_file in sorted(ocr_dir.glob("*.md")):
+                content = md_file.read_text().strip()
+                if content:
+                    texts.append(content)
+
+            if not texts:
+                return "No text detected in the document."
+
+            text = "\n\n---\n\n".join(texts)
+            return f"OCR result ({file_path.name}):\n\n{text}"
+
+        except ImportError:
+            return self._error("Sarvam SDK not installed. Run: pip install 'pocketpaw[sarvam]'")
+        except Exception as e:
+            return self._error(f"Sarvam Vision OCR failed: {e}")

@@ -8,13 +8,15 @@ Changes:
                 - Executor with direct subprocess for shell commands
                 - Claude Agent SDK with proper SDK integration
                 - Router with claude_agent_sdk as default
+  - 2026-02-16: Added TestClaudeSDKCliAuth — reproduction tests for CLI OAuth bug.
+                Bug: PocketPaw requires API key even when Claude CLI is authenticated.
 """
 
-import asyncio
-import pytest
 from pathlib import Path
-from pocketpaw.config import Settings
 
+import pytest
+
+from pocketpaw.config import Settings
 
 # =============================================================================
 # PROTOCOL TESTS
@@ -145,8 +147,9 @@ class TestExecutor:
     @pytest.mark.asyncio
     async def test_read_file(self):
         """read_file should read file contents."""
-        from pocketpaw.agents.executor import OpenInterpreterExecutor
         import tempfile
+
+        from pocketpaw.agents.executor import OpenInterpreterExecutor
 
         settings = Settings()
         executor = OpenInterpreterExecutor(settings)
@@ -165,8 +168,9 @@ class TestExecutor:
     @pytest.mark.asyncio
     async def test_write_file(self):
         """write_file should write content to file."""
-        from pocketpaw.agents.executor import OpenInterpreterExecutor
         import tempfile
+
+        from pocketpaw.agents.executor import OpenInterpreterExecutor
 
         settings = Settings()
         executor = OpenInterpreterExecutor(settings)
@@ -271,7 +275,7 @@ class TestClaudeAgentSDK:
         assert len(_TOOL_INSTRUCTIONS) > 100
 
     def test_sdk_has_dangerous_patterns(self):
-        """SDK should have dangerous patterns defined."""
+        """SDK should have dangerous patterns defined (via shared rail)."""
         from pocketpaw.agents.claude_sdk import DANGEROUS_PATTERNS
 
         assert isinstance(DANGEROUS_PATTERNS, list)
@@ -380,7 +384,7 @@ class TestPocketPawNative:
         assert orchestrator is not None
 
     def test_dangerous_patterns_defined(self):
-        """Should have dangerous patterns defined."""
+        """Should have dangerous patterns defined (via shared rail)."""
         from pocketpaw.agents.pocketpaw_native import DANGEROUS_PATTERNS
 
         assert isinstance(DANGEROUS_PATTERNS, list)
@@ -491,8 +495,8 @@ class TestAgentRouter:
 
     def test_router_defaults_to_claude_agent_sdk(self):
         """Should default to Claude Agent SDK (new recommended backend)."""
-        from pocketpaw.agents.router import AgentRouter
         from pocketpaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketpaw.agents.router import AgentRouter
 
         settings = Settings()  # Default backend is now claude_agent_sdk
         router = AgentRouter(settings)
@@ -502,8 +506,8 @@ class TestAgentRouter:
 
     def test_router_selects_claude_agent_sdk(self):
         """Should select Claude Agent SDK when configured."""
-        from pocketpaw.agents.router import AgentRouter
         from pocketpaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketpaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="claude_agent_sdk")
         router = AgentRouter(settings)
@@ -513,8 +517,8 @@ class TestAgentRouter:
 
     def test_router_selects_pocketpaw_native(self):
         """Should select PocketPaw Native when configured."""
-        from pocketpaw.agents.router import AgentRouter
         from pocketpaw.agents.pocketpaw_native import PocketPawOrchestrator
+        from pocketpaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="pocketpaw_native", anthropic_api_key="test-key")
         router = AgentRouter(settings)
@@ -524,8 +528,8 @@ class TestAgentRouter:
 
     def test_router_selects_open_interpreter(self):
         """Should select Open Interpreter when configured."""
-        from pocketpaw.agents.router import AgentRouter
         from pocketpaw.agents.open_interpreter import OpenInterpreterAgent
+        from pocketpaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="open_interpreter")
         router = AgentRouter(settings)
@@ -535,8 +539,8 @@ class TestAgentRouter:
 
     def test_router_claude_code_disabled(self):
         """claude_code should fallback to claude_agent_sdk (disabled)."""
-        from pocketpaw.agents.router import AgentRouter, DISABLED_BACKENDS
         from pocketpaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketpaw.agents.router import DISABLED_BACKENDS, AgentRouter
 
         assert "claude_code" in DISABLED_BACKENDS
 
@@ -549,8 +553,8 @@ class TestAgentRouter:
 
     def test_router_falls_back_on_unknown(self):
         """Should fallback to Claude Agent SDK for unknown backends."""
-        from pocketpaw.agents.router import AgentRouter
         from pocketpaw.agents.claude_sdk import ClaudeAgentSDKWrapper
+        from pocketpaw.agents.router import AgentRouter
 
         settings = Settings(agent_backend="unknown_backend_xyz")
         router = AgentRouter(settings)
@@ -580,3 +584,146 @@ class TestAgentRouter:
 
         # Should not raise
         await router.stop()
+
+
+# =============================================================================
+# CLAUDE SDK CLI AUTH BUG — REPRODUCTION TESTS
+# =============================================================================
+
+
+class TestClaudeSDKCliAuth:
+    """Bug reproduction: PocketPaw requires API key even when Claude CLI is authenticated.
+
+    Reported: "Have active plan and Claude Code CLI installed and logged in,
+    but PocketPaw still wants API key."
+
+    Root cause: resolve_llm_client() with llm_provider='auto' and no API key
+    falls back to Ollama. The Claude SDK backend should force 'anthropic'
+    provider because the CLI has its own OAuth authentication.
+
+    Two-layer problem:
+    1. resolve_llm_client() auto-resolution: no key → Ollama (wrong for SDK backend)
+    2. claude_sdk.py chat() calls resolve_llm_client(self.settings) without
+       force_provider, so it gets Ollama instead of anthropic.
+
+    Fix: claude_sdk.py should pass force_provider='anthropic' (or equivalent)
+    so the CLI subprocess can use its own OAuth credentials.
+    """
+
+    def test_auto_resolve_no_key_gives_ollama(self):
+        """Document current behavior: auto + no key = Ollama."""
+        from pocketpaw.llm.client import resolve_llm_client
+
+        settings = Settings()  # no API key, default llm_provider="auto"
+        llm = resolve_llm_client(settings)
+        # This PASSES — documents the root cause of the bug
+        assert llm.provider == "ollama"
+
+    def test_force_anthropic_no_key_returns_anthropic(self):
+        """force_provider='anthropic' with no key should return anthropic client."""
+        from pocketpaw.llm.client import resolve_llm_client
+
+        settings = Settings()  # no API key
+        llm = resolve_llm_client(settings, force_provider="anthropic")
+        assert llm.provider == "anthropic"
+        assert llm.api_key is None
+
+    def test_no_key_anthropic_to_sdk_env_is_empty(self):
+        """No-key anthropic client returns empty env dict.
+
+        Empty dict = subprocess inherits parent env = CLI uses its own OAuth.
+        """
+        from pocketpaw.llm.client import LLMClient
+
+        llm = LLMClient(
+            provider="anthropic",
+            model="claude-sonnet-4-5-20250929",
+            api_key=None,
+            ollama_host="http://localhost:11434",
+        )
+        assert llm.to_sdk_env() == {}
+
+    def test_sdk_options_no_env_override_when_no_key(self):
+        """When no API key is set, SDK options should NOT include 'env' key.
+
+        This lets the CLI subprocess inherit the full parent environment,
+        including the Claude CLI's OAuth credentials.
+        """
+        import os
+
+        from pocketpaw.llm.client import LLMClient
+
+        llm = LLMClient(
+            provider="anthropic",
+            model="claude-sonnet-4-5-20250929",
+            api_key=None,
+            ollama_host="http://localhost:11434",
+        )
+
+        # Reproduce the options building logic from claude_sdk.py:742-750
+        options_kwargs: dict[str, object] = {}
+        sdk_env = llm.to_sdk_env()
+        if not sdk_env:
+            env_key = os.environ.get("ANTHROPIC_API_KEY")
+            if env_key:
+                sdk_env = {"ANTHROPIC_API_KEY": env_key}
+        if sdk_env:
+            options_kwargs["env"] = sdk_env
+
+        # When no ANTHROPIC_API_KEY env var exists, 'env' should not be set
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            assert "env" not in options_kwargs, (
+                "SDK options should not override env when no API key is available. "
+                "This lets the CLI subprocess use its own OAuth credentials."
+            )
+
+    @pytest.mark.asyncio
+    async def test_claude_sdk_chat_resolves_anthropic_not_ollama(self):
+        """KEY BUG TEST: chat() should resolve to anthropic, not fall to ollama.
+
+        When agent_backend='claude_agent_sdk' and no explicit API key,
+        the chat() method should resolve the LLM client to 'anthropic'
+        so the CLI subprocess can use its own OAuth credentials.
+        """
+        from unittest.mock import patch
+
+        from pocketpaw.agents.claude_sdk import ClaudeAgentSDK
+        from pocketpaw.llm.client import resolve_llm_client as real_resolve
+
+        settings = Settings(
+            agent_backend="claude_agent_sdk",
+            smart_routing_enabled=False,  # skip model routing for test
+        )
+        sdk = ClaudeAgentSDK(settings)
+
+        resolved_providers: list[str] = []
+
+        def spy_resolve(s, **kwargs):
+            """Spy on resolve_llm_client: capture result and return it."""
+            result = real_resolve(s, **kwargs)
+            resolved_providers.append(result.provider)
+            return result
+
+        # Prevent actual SDK execution — raise at ClaudeAgentOptions creation
+        # so we capture the resolve call without running a real query.
+        def stop_execution(**kwargs):
+            raise RuntimeError("test_stop_before_sdk_query")
+
+        with patch(
+            "pocketpaw.llm.client.resolve_llm_client",
+            side_effect=spy_resolve,
+        ):
+            sdk._ClaudeAgentOptions = stop_execution
+            events = []
+            async for event in sdk.chat("test"):
+                events.append(event)
+
+        # Verify resolve_llm_client was called
+        assert len(resolved_providers) > 0, "resolve_llm_client was never called"
+
+        # BUG: Currently resolves to 'ollama', should be 'anthropic'
+        assert resolved_providers[0] == "anthropic", (
+            f"Expected 'anthropic' but got '{resolved_providers[0]}'. "
+            "Claude SDK backend should resolve to anthropic provider "
+            "even without an explicit API key (CLI has its own OAuth)."
+        )
