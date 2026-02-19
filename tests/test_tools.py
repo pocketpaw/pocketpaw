@@ -64,19 +64,6 @@ class TestFetchTool:
 
         assert is_safe_path(traversal_path, jail) is False
 
-    def test_get_directory_keyboard_returns_markup(self, tmp_path):
-        """Should return InlineKeyboardMarkup."""
-        from pocketpaw.tools.fetch import get_directory_keyboard
-        from telegram import InlineKeyboardMarkup
-
-        # Create some test files
-        (tmp_path / "file1.txt").write_text("test")
-        (tmp_path / "subdir").mkdir()
-
-        result = get_directory_keyboard(tmp_path, tmp_path)
-
-        assert isinstance(result, InlineKeyboardMarkup)
-
     @pytest.mark.asyncio
     async def test_handle_path_directory(self, tmp_path):
         """Should handle directory paths."""

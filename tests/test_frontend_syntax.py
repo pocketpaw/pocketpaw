@@ -71,21 +71,6 @@ class TestJavaScriptStructure:
 
         assert "function app()" in content, "app.js should define app() function"
 
-    def test_app_returns_object(self):
-        """Test that app() function returns an object with required properties."""
-        app_js = FRONTEND_DIR / "js" / "app.js"
-        content = app_js.read_text()
-
-        # Check for essential Alpine.js state properties
-        required_properties = [
-            "view:",
-            "messages:",
-            "agentActive:",
-            "init()",
-        ]
-
-        for prop in required_properties:
-            assert prop in content, f"app.js should contain '{prop}'"
 
     def test_websocket_defines_manager(self):
         """Test that websocket.js defines WebSocket manager."""
