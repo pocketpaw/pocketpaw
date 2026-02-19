@@ -18,6 +18,12 @@ Complete reference of all configuration settings. All environment variables use 
 | `anthropic_api_key` | `POCKETPAW_ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `openai_api_key` | `POCKETPAW_OPENAI_API_KEY` | — | OpenAI API key |
 | `agent_backend` | `POCKETPAW_AGENT_BACKEND` | `claude_agent_sdk` | Agent backend |
+| `claude_sdk_model` | `POCKETPAW_CLAUDE_SDK_MODEL` | `""` (auto) | Model override for Claude SDK (empty = let Claude Code decide) |
+| `claude_sdk_max_turns` | `POCKETPAW_CLAUDE_SDK_MAX_TURNS` | `25` | Max tool-use turns per query in Claude SDK |
+| `smart_routing_enabled` | `POCKETPAW_SMART_ROUTING_ENABLED` | `false` | Smart model routing (disabled by default — conflicts with Claude Code) |
+| `model_tier_simple` | `POCKETPAW_MODEL_TIER_SIMPLE` | `claude-haiku-4-5-20251001` | Model for simple tasks (when smart routing is on) |
+| `model_tier_moderate` | `POCKETPAW_MODEL_TIER_MODERATE` | `claude-sonnet-4-5-20250929` | Model for moderate tasks (when smart routing is on) |
+| `model_tier_complex` | `POCKETPAW_MODEL_TIER_COMPLEX` | `claude-opus-4-6` | Model for complex tasks (when smart routing is on) |
 | `dashboard_host` | `POCKETPAW_DASHBOARD_HOST` | `0.0.0.0` | Dashboard bind address |
 | `dashboard_port` | `POCKETPAW_DASHBOARD_PORT` | `8000` | Dashboard port |
 
@@ -148,6 +154,12 @@ When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, ot
 |---------|-------------|---------|-------------|
 | `spotify_client_id` | `POCKETPAW_SPOTIFY_CLIENT_ID` | — | Spotify client ID |
 | `spotify_client_secret` | `POCKETPAW_SPOTIFY_CLIENT_SECRET` | — | Spotify secret |
+
+## MCP
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `mcp_client_metadata_url` | `POCKETPAW_MCP_CLIENT_METADATA_URL` | — | CIMD URL for MCP OAuth (for servers without dynamic client registration) |
 
 ## Memory (Mem0)
 

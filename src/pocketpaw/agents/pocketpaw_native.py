@@ -16,6 +16,7 @@ Changes:
   - 2026-02-02: SPEED FIX - Shell commands now use direct subprocess (10x faster).
                 'computer' tool uses OI for complex multi-step tasks only.
   - 2026-02-05: Added 'remember' and 'recall' tools for long-term memory.
+  - 2026-02-17: Added health_check, error_log, config_doctor tools for health engine.
 """
 
 import asyncio
@@ -276,6 +277,61 @@ ALWAYS instruct it to RETURN data as text, not open GUI apps.""",
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "health_check",
+        "description": (
+            "Run system health diagnostics. Returns check results for config, "
+            "connectivity, and storage with status (ok/warning/critical) and fix hints."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_connectivity": {
+                    "type": "boolean",
+                    "description": "Also run connectivity checks (slower). Default: false.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "error_log",
+        "description": (
+            "Read recent errors from the persistent error log. "
+            "Errors survive page refresh and server restart."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max errors to return (default: 10)",
+                },
+                "search": {
+                    "type": "string",
+                    "description": "Filter errors by text (searches message, source, traceback)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "config_doctor",
+        "description": (
+            "Validate configuration and return diagnostic report with fix suggestions. "
+            "Optionally focus on: 'api_keys', 'backend', or 'storage'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "description": "Focus area: 'api_keys', 'backend', 'storage', or '' for all",
+                },
+            },
+            "required": [],
         },
     },
 ]
@@ -816,6 +872,29 @@ class PocketPawOrchestrator:
                     if ok:
                         deleted += 1
                 return f"Forgot {deleted} memory(ies) matching: {query}"
+
+            elif tool_name == "health_check":
+                from pocketpaw.tools.builtin.health import HealthCheckTool
+
+                tool = HealthCheckTool()
+                return await tool.execute(
+                    include_connectivity=tool_input.get("include_connectivity", False)
+                )
+
+            elif tool_name == "error_log":
+                from pocketpaw.tools.builtin.health import ErrorLogTool
+
+                tool = ErrorLogTool()
+                return await tool.execute(
+                    limit=tool_input.get("limit", 10),
+                    search=tool_input.get("search", ""),
+                )
+
+            elif tool_name == "config_doctor":
+                from pocketpaw.tools.builtin.health import ConfigDoctorTool
+
+                tool = ConfigDoctorTool()
+                return await tool.execute(section=tool_input.get("section", ""))
 
             else:
                 # Check if it's an MCP tool

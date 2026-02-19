@@ -13,7 +13,7 @@ Skills are persistent markdown files that teach PocketPaw how to handle specific
 
 ## What is a Skill?
 
-A skill is a SKILL.md file stored in `~/.pocketpaw/skills/`. Each skill defines:
+A skill is a SKILL.md file stored in `~/.claude/skills/` (the standard Claude SDK location). Each skill defines:
 
 - **When to activate** — Trigger phrases or conditions
 - **How to execute** — Step-by-step instructions
@@ -33,7 +33,7 @@ Agent: [uses skill_gen] → Created skill: daily-standup.md
 
 ### Manually
 
-Create a markdown file in `~/.pocketpaw/skills/`:
+Create a markdown file in `~/.claude/skills/`:
 
 ```markdown
 # Code Review Skill
@@ -63,17 +63,22 @@ Brief overall assessment.
 
 ## Skill Loading
 
-Skills are loaded by the `AgentContextBuilder`:
+Skills are loaded by the `SkillLoader` and injected by the `AgentContextBuilder`:
 
-1. On startup, all `*.md` files in `~/.pocketpaw/skills/` are read
+1. On startup, all `*.md` files are scanned from three directories (in priority order):
+   - `~/.agents/skills/` — central skills (from skills.sh)
+   - `~/.claude/skills/` — Claude Code / SDK standard location
+   - `~/.pocketpaw/skills/` — PocketPaw-specific (legacy)
 2. Skill content is injected into the system prompt
 3. The agent uses skills as reference when handling matching requests
 4. After creating a new skill via `skill_gen`, the loader is reloaded
 
+When using the Claude Agent SDK backend, skills are also auto-discovered via `setting_sources` — the SDK natively reads SKILL.md files from `~/.claude/skills/` and `.claude/skills/` (project-level).
+
 ## Skill Directory
 
 ```
-~/.pocketpaw/skills/
+~/.claude/skills/
 ├── daily-standup.md
 ├── code-review.md
 ├── meeting-notes.md

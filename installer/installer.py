@@ -4,6 +4,9 @@ Single-file installer with InquirerPy prompts for guided setup.
 No local imports — designed to run standalone.
 
 Changes:
+  - 2026-02-17: Fix #184 — InquirerPy/prompt_toolkit raises OSError(22) on macOS
+                when running via curl|sh. All prompts now fall back to plain text
+                input on OSError. Disables InquirerPy globally after first failure.
   - 2026-02-13: Fix uv installing deps to wrong Python (--python sys.executable),
                 verify imports after each cascade instead of blindly setting _HAS_RICH.
 
@@ -294,8 +297,10 @@ def _plain_secret(message: str) -> str:
 
 def _plain_text(message: str, default: str = "") -> str:
     """Fallback text prompt."""
+    # Strip trailing colon — _safe_text callers include it for InquirerPy
+    msg = message.rstrip(": ").rstrip(":")
     suffix = f" [{default}]" if default else ""
-    val = input(f"{message}{suffix}: ").strip()
+    val = input(f"{msg}{suffix}: ").strip()
     return val or default
 
 
@@ -306,6 +311,84 @@ def _plain_confirm(message: str, default: bool = True) -> bool:
     if not val:
         return default
     return val in ("y", "yes")
+
+
+# ── Safe InquirerPy wrappers (Issue #184) ─────────────────────────────
+# On macOS, running via `curl | sh` with stdin redirected from /dev/tty
+# causes prompt_toolkit (InquirerPy's backend) to raise OSError(22).
+# EOFError can also occur if the terminal disconnects mid-prompt.
+# These wrappers catch both and fall back to plain text prompts.
+# After the first failure, _HAS_INQUIRER is set to False globally.
+
+
+def _disable_inquirer(context: str = "") -> None:
+    """Disable InquirerPy globally after a terminal error."""
+    global _HAS_INQUIRER
+    _HAS_INQUIRER = False
+    if context:
+        print(f"  Interactive prompts unavailable ({context}), using text input.\n")
+    else:
+        print("  Interactive prompts unavailable, using text input.\n")
+
+
+def _safe_select(message: str, choices: list[dict[str, str]]) -> str:
+    """Try InquirerPy select, fall back to plain text on failure."""
+    if _HAS_INQUIRER and inquirer:
+        try:
+            return inquirer.select(message=message, choices=choices).execute()
+        except (OSError, EOFError) as e:
+            _disable_inquirer(str(e))
+    return _plain_select(message, choices)
+
+
+def _safe_checkbox(message: str, choices: list) -> list[str]:
+    """Try InquirerPy checkbox, fall back to plain text on failure."""
+    if _HAS_INQUIRER and inquirer and Separator:
+        try:
+            return inquirer.checkbox(message=message, choices=choices).execute()
+        except (OSError, EOFError) as e:
+            _disable_inquirer(str(e))
+    return _plain_checkbox(message, choices)
+
+
+def _safe_secret(message: str, default: str = "") -> str:
+    """Try InquirerPy secret, fall back to plain text on failure."""
+    if _HAS_INQUIRER and inquirer:
+        try:
+            return inquirer.secret(message=message, default=default).execute()
+        except (OSError, EOFError) as e:
+            _disable_inquirer(str(e))
+    return _plain_secret(message)
+
+
+def _safe_text(
+    message: str,
+    default: str = "",
+    validate: object = None,
+    invalid_message: str = "",
+) -> str:
+    """Try InquirerPy text, fall back to plain text on failure."""
+    if _HAS_INQUIRER and inquirer:
+        try:
+            kwargs: dict = {"message": message, "default": default}
+            if validate is not None:
+                kwargs["validate"] = validate
+            if invalid_message:
+                kwargs["invalid_message"] = invalid_message
+            return inquirer.text(**kwargs).execute()
+        except (OSError, EOFError) as e:
+            _disable_inquirer(str(e))
+    return _plain_text(message, default)
+
+
+def _safe_confirm(message: str, default: bool = True) -> bool:
+    """Try InquirerPy confirm, fall back to plain text on failure."""
+    if _HAS_INQUIRER and inquirer:
+        try:
+            return inquirer.confirm(message=message, default=default).execute()
+        except (OSError, EOFError) as e:
+            _disable_inquirer(str(e))
+    return _plain_confirm(message, default)
 
 
 # ── System Check ───────────────────────────────────────────────────────
@@ -502,9 +585,7 @@ class InstallerUI:
             {"name": "Cancel", "value": "cancel"},
         ]
         msg = f"PocketPaw is already installed (v{current_version}). What would you like to do?"
-        if _HAS_INQUIRER:
-            return inquirer.select(message=msg, choices=choices).execute()
-        return _plain_select(msg, choices)
+        return _safe_select(msg, choices)
 
     def prompt_profile(self) -> str:
         """Select installation profile."""
@@ -517,12 +598,7 @@ class InstallerUI:
             {"name": "Minimal (core only, add extras later)", "value": "minimal"},
             {"name": "Custom (pick individual features)", "value": "custom"},
         ]
-        if _HAS_INQUIRER:
-            return inquirer.select(
-                message="Choose an installation profile:",
-                choices=choices,
-            ).execute()
-        return _plain_select("Choose an installation profile:", choices)
+        return _safe_select("Choose an installation profile:", choices)
 
     def prompt_custom_features(self) -> list[str]:
         """Pick individual features from grouped checkboxes."""
@@ -535,32 +611,17 @@ class InstallerUI:
             for extra, label in features:
                 choices.append({"name": label, "value": extra})
 
-        if _HAS_INQUIRER:
-            return inquirer.checkbox(
-                message="Select features to install:",
-                choices=choices,
-            ).execute()
-        return _plain_checkbox("Select features to install:", choices)
+        return _safe_checkbox("Select features to install:", choices)
 
     def prompt_backend(self) -> str:
         """Select agent backend."""
         choices = [{"name": label, "value": key} for key, label in BACKENDS.items()]
-        if _HAS_INQUIRER:
-            return inquirer.select(
-                message="Choose the agent backend:",
-                choices=choices,
-            ).execute()
-        return _plain_select("Choose the agent backend:", choices)
+        return _safe_select("Choose the agent backend:", choices)
 
     def prompt_llm_provider(self) -> str:
         """Select LLM provider."""
         choices = [{"name": label, "value": key} for key, label in LLM_PROVIDERS.items()]
-        if _HAS_INQUIRER:
-            return inquirer.select(
-                message="Choose your LLM provider:",
-                choices=choices,
-            ).execute()
-        return _plain_select("Choose your LLM provider:", choices)
+        return _safe_select("Choose your LLM provider:", choices)
 
     def prompt_api_keys(self, provider: str) -> dict[str, str]:
         """Prompt for API keys based on selected provider."""
@@ -579,22 +640,10 @@ class InstallerUI:
         for config_key, label in prompts.get(provider, []):
             is_secret = "api_key" in config_key.lower() or "password" in config_key.lower()
             if is_secret:
-                if _HAS_INQUIRER:
-                    val = inquirer.secret(
-                        message=f"{label} (Enter to skip):",
-                        default="",
-                    ).execute()
-                else:
-                    val = _plain_secret(f"{label} (Enter to skip)")
+                val = _safe_secret(f"{label} (Enter to skip)")
             else:
                 default = "http://localhost:11434" if "ollama_host" in config_key else ""
-                if _HAS_INQUIRER:
-                    val = inquirer.text(
-                        message=f"{label}:",
-                        default=default,
-                    ).execute()
-                else:
-                    val = _plain_text(label, default)
+                val = _safe_text(f"{label}:", default)
 
             if val:
                 keys[config_key] = val
@@ -636,21 +685,9 @@ class InstallerUI:
 
             for config_key, label, is_secret in fields:
                 if is_secret:
-                    if _HAS_INQUIRER:
-                        val = inquirer.secret(
-                            message=f"  {label} (Enter to skip):",
-                            default="",
-                        ).execute()
-                    else:
-                        val = _plain_secret(f"  {label} (Enter to skip)")
+                    val = _safe_secret(f"  {label} (Enter to skip)")
                 else:
-                    if _HAS_INQUIRER:
-                        val = inquirer.text(
-                            message=f"  {label} (Enter to skip):",
-                            default="",
-                        ).execute()
-                    else:
-                        val = _plain_text(f"  {label} (Enter to skip)")
+                    val = _safe_text(f"  {label} (Enter to skip):")
 
                 if val:
                     tokens[config_key] = val
@@ -659,15 +696,12 @@ class InstallerUI:
 
     def prompt_web_port(self) -> int:
         """Ask for web server port."""
-        if _HAS_INQUIRER:
-            val = inquirer.text(
-                message="Web dashboard port:",
-                default="8888",
-                validate=lambda v: v.isdigit() and 1024 <= int(v) <= 65535,
-                invalid_message="Enter a port number between 1024 and 65535",
-            ).execute()
-        else:
-            val = _plain_text("Web dashboard port", "8888")
+        val = _safe_text(
+            "Web dashboard port:",
+            default="8888",
+            validate=lambda v: v.isdigit() and 1024 <= int(v) <= 65535,
+            invalid_message="Enter a port number between 1024 and 65535",
+        )
         try:
             return int(val)
         except ValueError:
@@ -715,15 +749,11 @@ class InstallerUI:
             print(f"  Port:        {summary.get('web_port', 8888)}")
             print()
 
-        if _HAS_INQUIRER:
-            return inquirer.confirm(message="Proceed with installation?", default=True).execute()
-        return _plain_confirm("Proceed with installation?")
+        return _safe_confirm("Proceed with installation?")
 
     def prompt_launch(self) -> bool:
         """Ask whether to launch PocketPaw after install."""
-        if _HAS_INQUIRER:
-            return inquirer.confirm(message="Launch PocketPaw now?", default=True).execute()
-        return _plain_confirm("Launch PocketPaw now?")
+        return _safe_confirm("Launch PocketPaw now?")
 
     def _build_install_display(self, pip_cmd: str, extras: list[str]) -> str:
         if not extras:

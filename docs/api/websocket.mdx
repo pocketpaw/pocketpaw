@@ -145,6 +145,18 @@ All messages are JSON objects with a `type` or `action` field.
 }
 ```
 
+### MCP OAuth Redirect
+
+Sent when an MCP server requires OAuth authentication. The frontend should open the URL in a popup window.
+
+```json
+{
+  "type": "mcp_oauth_redirect",
+  "url": "https://github.com/login/oauth/authorize?...",
+  "server": "github"
+}
+```
+
 ### Inbox Update
 
 ```json

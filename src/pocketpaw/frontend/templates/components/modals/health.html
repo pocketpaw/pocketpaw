@@ -1,0 +1,138 @@
+<!--
+  Health Engine Modal — system diagnostics and error log.
+  Created: 2026-02-17
+  Updated: 2026-02-17
+    - Added "Fix Issues" button (sends issues to agent via chat)
+    - Added "Clear Log" button to clear resolved errors
+    - Use closeHealthPanel() for proper cleanup (stops auto-refresh timer)
+    - Show last check timestamp
+    - Better empty state when status is unknown
+-->
+<div
+    x-show="showHealthModal"
+    x-transition:enter="transition ease-out duration-200"
+    x-transition:enter-start="opacity-0"
+    x-transition:enter-end="opacity-100"
+    x-transition:leave="transition ease-in duration-150"
+    x-transition:leave-start="opacity-100"
+    x-transition:leave-end="opacity-0"
+    class="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+    @click.self="closeHealthPanel()"
+    @keydown.escape.window="closeHealthPanel()"
+>
+  <div class="w-full max-w-2xl max-h-[80vh] bg-[var(--glass-bg)] backdrop-blur-xl border border-[var(--glass-border)] rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+    <!-- Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-white/8">
+      <div class="flex items-center gap-3">
+        <i data-lucide="heart-pulse" class="w-5 h-5 text-accent"></i>
+        <h2 class="text-lg font-semibold">System Health</h2>
+        <!-- Status badge -->
+        <span
+            class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full"
+            :class="{
+                'bg-green-500/20 text-green-400 border border-green-500/30': healthStatus === 'healthy',
+                'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30': healthStatus === 'degraded',
+                'bg-red-500/20 text-red-400 border border-red-500/30': healthStatus === 'unhealthy',
+                'bg-white/10 text-white/40 border border-white/10': !healthStatus || healthStatus === 'unknown'
+            }"
+            x-text="(healthStatus || 'unknown').toUpperCase()"
+        ></span>
+      </div>
+      <div class="flex items-center gap-2">
+        <!-- Fix Issues button — only shown when there are issues -->
+        <button
+            x-show="healthIssues && healthIssues.length > 0"
+            class="px-3 py-1.5 text-xs font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded-lg transition-colors flex items-center gap-1.5"
+            @click="requestHealthFix()"
+            :disabled="healthFixing"
+        >
+          <i data-lucide="wrench" class="w-3.5 h-3.5"></i>
+          <span>Fix Issues</span>
+        </button>
+        <button
+            class="px-3 py-1.5 text-xs font-medium bg-accent/20 text-accent hover:bg-accent/30 rounded-lg transition-colors"
+            @click="triggerHealthCheck()"
+            :disabled="healthLoading"
+        >
+          <span x-show="!healthLoading">Run Check</span>
+          <span x-show="healthLoading" class="animate-pulse">Checking...</span>
+        </button>
+        <button @click="closeHealthPanel()" class="text-white/40 hover:text-white/70 transition-colors">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <div class="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+      <!-- Last check timestamp -->
+      <div x-show="healthLastCheck" class="text-[11px] text-white/30">
+        Last checked: <span x-text="healthLastCheck ? healthLastCheck.substring(0, 19).replace('T', ' ') + ' UTC' : 'never'"></span>
+        <span class="text-white/15 ml-2">(auto-refreshes every 15s while open)</span>
+      </div>
+
+      <!-- Check Results -->
+      <div>
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-white/40 mb-2">Diagnostics</h3>
+        <div class="space-y-1">
+          <template x-for="issue in healthIssues" :key="issue.check_id">
+            <div class="flex items-start gap-2 px-3 py-2 bg-white/3 rounded-lg">
+              <span
+                  class="shrink-0 mt-0.5 text-xs font-bold"
+                  :class="{
+                      'text-green-400': issue.status === 'ok',
+                      'text-yellow-400': issue.status === 'warning',
+                      'text-red-400': issue.status === 'critical'
+                  }"
+                  x-text="issue.status === 'ok' ? '[OK]' : issue.status === 'warning' ? '[WARN]' : '[FAIL]'"
+              ></span>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm text-white/80" x-text="issue.name + ': ' + issue.message"></div>
+                <div x-show="issue.fix_hint" class="text-xs text-accent/80 mt-0.5" x-text="'Fix: ' + issue.fix_hint"></div>
+              </div>
+            </div>
+          </template>
+          <div x-show="(!healthIssues || healthIssues.length === 0) && healthStatus !== 'unknown'" class="text-sm text-white/30 px-3 py-2">
+            No issues detected. All checks passed.
+          </div>
+          <div x-show="healthStatus === 'unknown' && !healthLoading" class="text-sm text-white/40 px-3 py-4 text-center">
+            <div class="text-white/20 mb-1">Health data not available</div>
+            <div class="text-xs text-white/15">Click "Run Check" to diagnose, or wait for the server to reconnect.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Errors -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-xs font-semibold uppercase tracking-wider text-white/40">Recent Errors</h3>
+          <button
+              x-show="healthErrors && healthErrors.length > 0"
+              class="px-2 py-1 text-[10px] font-medium text-white/40 hover:text-white/70 bg-white/5 hover:bg-white/10 rounded-md transition-colors flex items-center gap-1"
+              @click="clearHealthErrors()"
+              :disabled="healthClearing"
+          >
+            <i data-lucide="trash-2" class="w-3 h-3"></i>
+            <span x-show="!healthClearing">Clear Log</span>
+            <span x-show="healthClearing" class="animate-pulse">Clearing...</span>
+          </button>
+        </div>
+        <div class="space-y-1 max-h-60 overflow-y-auto">
+          <template x-for="err in healthErrors" :key="err.id">
+            <div class="px-3 py-2 bg-white/3 rounded-lg">
+              <div class="flex items-center gap-2 text-xs text-white/40">
+                <span x-text="err.timestamp ? err.timestamp.substring(0, 19).replace('T', ' ') : ''"></span>
+                <span class="px-1.5 py-0.5 bg-red-500/15 text-red-400 rounded text-[10px] uppercase" x-text="err.severity"></span>
+                <span class="text-white/30" x-text="err.source"></span>
+              </div>
+              <div class="text-sm text-white/70 mt-1" x-text="err.message"></div>
+            </div>
+          </template>
+          <div x-show="!healthErrors || healthErrors.length === 0" class="text-sm text-white/30 px-3 py-2">
+            No errors recorded.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

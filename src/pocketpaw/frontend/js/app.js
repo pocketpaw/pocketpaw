@@ -2,13 +2,17 @@
  * PocketPaw Main Application
  * Alpine.js component for the dashboard
  *
+ * Changes (2026-02-17):
+ * - Health reconnect hook: re-fetch health data on WS reconnect
+ * - Added health_update socket handler and get_health on connect
+ *
  * Changes (2026-02-12):
  * - Call initHashRouter() in init() for hash-based URL routing
  *
  * Changes (2026-02-05):
  * - MAJOR REFACTOR: Componentized into feature modules using mixin pattern
  * - Extracted features to js/features/: chat, file-browser, reminders, intentions,
- *   skills, transparency, remote-access, mission-control
+ *   skills, transparency, remote-access, mc-agents, mc-tasks, deep-work, mc-events
  * - This file now serves as the core assembler for feature modules
  * - Core functionality: init, WebSocket setup, settings, status, tools, logging
  *
@@ -22,6 +26,11 @@ function app() {
 
     return {
         // ==================== Core State ====================
+
+        // Version & updates
+        appVersion: '',
+        latestVersion: '',
+        updateAvailable: false,
 
         // View state
         view: 'chat',
@@ -62,6 +71,8 @@ function app() {
         // Settings
         settings: {
             agentBackend: 'claude_agent_sdk',
+            claudeSdkModel: '',
+            claudeSdkMaxTurns: 25,
             llmProvider: 'auto',
             ollamaHost: 'http://localhost:11434',
             ollamaModel: 'llama3.2',
@@ -252,6 +263,10 @@ function app() {
          * Connects WebSocket, loads sessions, sets up keyboard shortcuts.
          */
         _startApp() {
+            // Wire EventBus listeners (cross-module communication)
+            PocketPaw.EventBus.on('sidebar:files', (data) => this.handleSidebarFiles(data));
+            PocketPaw.EventBus.on('output:files', (data) => this.handleOutputFiles(data));
+
             // Register event handlers first
             this.setupSocketHandlers();
 
@@ -284,6 +299,9 @@ function app() {
                 }
             });
 
+            // Check for version updates
+            this.checkForUpdates();
+
             // Initialize hash-based URL routing
             this.initHashRouter();
 
@@ -291,6 +309,20 @@ function app() {
             this.$nextTick(() => {
                 if (window.refreshIcons) window.refreshIcons();
             });
+        },
+
+        /**
+         * Check PyPI for newer version via /api/version endpoint.
+         */
+        async checkForUpdates() {
+            try {
+                const resp = await fetch('/api/version');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                this.appVersion = data.current || '';
+                this.latestVersion = data.latest || '';
+                this.updateAvailable = !!data.update_available;
+            } catch (e) { /* silent */ }
         },
 
         /**
@@ -310,6 +342,10 @@ function app() {
                 socket.send('get_reminders');
                 socket.send('get_intentions');
                 socket.send('get_skills');
+                socket.send('get_health');
+
+                // Re-fetch full health data if modal is open (handles server restart)
+                if (this.onHealthReconnect) this.onHealthReconnect();
 
                 // Resume last session if WS connect didn't handle it via query param
                 const lastSession = StateManager.load('lastSession');
@@ -371,6 +407,9 @@ function app() {
             socket.on('connection_info', (data) => this.handleConnectionInfo(data));
             socket.on('system_event', (data) => this.handleSystemEvent(data));
 
+            // Health
+            socket.on('health_update', (data) => this.handleHealthUpdate(data));
+
             // Session handlers
             socket.on('session_history', (data) => this.handleSessionHistory(data));
             socket.on('new_session', (data) => this.handleNewSession(data));
@@ -397,7 +436,8 @@ function app() {
 
             // Data-driven settings sync: map server keys to local settings
             const SETTINGS_MAP = [
-                'agentBackend', 'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
+                'agentBackend', 'claudeSdkModel', 'claudeSdkMaxTurns',
+                'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
                 'geminiModel',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',

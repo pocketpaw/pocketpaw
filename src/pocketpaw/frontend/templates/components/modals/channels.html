@@ -473,5 +473,48 @@
 
     <!-- Refresh icons when modal opens -->
     <div x-effect="showChannels && $nextTick(() => { if (window.refreshIcons) window.refreshIcons(); })"></div>
+
+    <!-- Install Dependency Confirmation Overlay -->
+    <div
+        x-show="installPrompt"
+        x-transition.opacity
+        class="absolute inset-0 z-10 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-[20px]"
+        @click.self="cancelInstall()"
+    >
+        <div class="w-full max-w-[340px] mx-4 bg-[#2a2a2e] border border-[var(--glass-border)] rounded-[16px] shadow-2xl p-5 flex flex-col gap-4" @click.stop>
+            <!-- Icon + message -->
+            <div class="flex flex-col items-center gap-3 text-center">
+                <div class="flex items-center justify-center w-11 h-11 rounded-full bg-[var(--accent-color)]/15 border border-[var(--accent-color)]/25">
+                    <i data-lucide="download" class="w-5 h-5 text-[var(--accent-color)]"></i>
+                </div>
+                <p class="text-[14px] text-white leading-snug">
+                    <span x-text="channelDisplayName(installPrompt?.channel || '')" class="font-semibold"></span>
+                    requires
+                    <code class="text-[13px] bg-white/10 px-1.5 py-0.5 rounded" x-text="installPrompt?.package || ''"></code>.
+                    Install it?
+                </p>
+                <p class="text-[11px] text-white/40" x-text="installPrompt?.pipSpec || ''"></p>
+            </div>
+            <!-- Loading state -->
+            <div x-show="installLoading" class="flex items-center justify-center gap-2 py-2 text-white/60">
+                <i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
+                <span class="text-[13px]" x-text="'Installing ' + (installPrompt?.package || '') + '...'"></span>
+            </div>
+            <!-- Buttons -->
+            <div x-show="!installLoading" class="flex gap-2">
+                <button
+                    class="flex-1 py-2.5 rounded-[10px] text-[13px] font-medium border border-[var(--glass-border)] text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-95"
+                    @click="cancelInstall()"
+                >Cancel</button>
+                <button
+                    class="flex-1 py-2.5 rounded-[10px] text-[13px] font-semibold bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white transition-all active:scale-95 flex items-center justify-center gap-1.5"
+                    @click="confirmInstall()"
+                >
+                    <i data-lucide="download" class="w-4 h-4"></i>
+                    Install
+                </button>
+            </div>
+        </div>
+    </div>
 </div>
 </div>

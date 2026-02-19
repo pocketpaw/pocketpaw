@@ -1,6 +1,7 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-02-17: Added health_check_on_startup field for Health Engine.
   - 2026-02-14: Add migration warning for old ~/.pocketclaw/ config dir and POCKETCLAW_ env vars.
   - 2026-02-06: Secrets stored encrypted via CredentialStore; auto-migrate plaintext keys.
   - 2026-02-06: Harden file/directory permissions (700 dir, 600 files).
@@ -96,6 +97,16 @@ class Settings(BaseSettings):
     agent_backend: str = Field(
         default="claude_agent_sdk",
         description="Agent backend: 'claude_agent_sdk' (recommended), 'pocketpaw_native', or 'open_interpreter' (experimental)",
+    )
+
+    # Claude Agent SDK Settings
+    claude_sdk_model: str = Field(
+        default="",
+        description="Model for Claude SDK backend (empty = let Claude Code auto-select)",
+    )
+    claude_sdk_max_turns: int = Field(
+        default=25,
+        description="Max tool-use turns per query in Claude SDK (safety net against runaway loops)",
     )
 
     # LLM Configuration
@@ -283,7 +294,11 @@ class Settings(BaseSettings):
 
     # Smart Model Routing
     smart_routing_enabled: bool = Field(
-        default=True, description="Enable automatic model selection based on task complexity"
+        default=False,
+        description=(
+            "Enable automatic model selection based on task complexity"
+            " (may conflict with Claude Code's own routing)"
+        ),
     )
     model_tier_simple: str = Field(
         default="claude-haiku-4-5-20251001", description="Model for simple tasks (greetings, facts)"
@@ -307,6 +322,11 @@ class Settings(BaseSettings):
     self_audit_enabled: bool = Field(default=True, description="Enable daily self-audit daemon")
     self_audit_schedule: str = Field(
         default="0 3 * * *", description="Cron schedule for self-audit (default: 3 AM daily)"
+    )
+
+    # Health Engine
+    health_check_on_startup: bool = Field(
+        default=True, description="Run health checks when PocketPaw starts"
     )
 
     # OAuth
@@ -411,6 +431,12 @@ class Settings(BaseSettings):
     web_host: str = Field(default="127.0.0.1", description="Web server host")
     web_port: int = Field(default=8888, description="Web server port")
 
+    # MCP OAuth
+    mcp_client_metadata_url: str = Field(
+        default="",
+        description="CIMD URL for MCP OAuth (optional, for servers without dynamic registration)",
+    )
+
     # Identity / Multi-user
     owner_id: str = Field(
         default="",
@@ -463,6 +489,8 @@ class Settings(BaseSettings):
             "telegram_bot_token": self.telegram_bot_token or existing.get("telegram_bot_token"),
             "allowed_user_id": self.allowed_user_id or existing.get("allowed_user_id"),
             "agent_backend": self.agent_backend,
+            "claude_sdk_model": self.claude_sdk_model,
+            "claude_sdk_max_turns": self.claude_sdk_max_turns,
             "memory_backend": self.memory_backend,
             "memory_use_inference": self.memory_use_inference,
             "mem0_llm_provider": self.mem0_llm_provider,
@@ -553,6 +581,8 @@ class Settings(BaseSettings):
             "google_oauth_client_secret": (
                 self.google_oauth_client_secret or existing.get("google_oauth_client_secret")
             ),
+            # MCP OAuth
+            "mcp_client_metadata_url": self.mcp_client_metadata_url,
             # Voice/TTS
             "tts_provider": self.tts_provider,
             "elevenlabs_api_key": (self.elevenlabs_api_key or existing.get("elevenlabs_api_key")),

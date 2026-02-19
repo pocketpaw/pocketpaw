@@ -1,0 +1,140 @@
+---
+title: Get Health Errors
+description: "Query the persistent error log for recent errors. Supports pagination with limit and text search filtering."
+api: GET /api/health/errors
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: none
+section: API Reference
+ogType: article
+keywords: ["error log", "health errors", "persistent errors", "diagnostics"]
+tags: ["api", "health"]
+---
+
+## Overview
+
+Returns recent entries from the persistent error log at `~/.pocketpaw/health/errors.jsonl`. Errors are stored across sessions and survive page refresh and server restart.
+
+Results are returned newest-first. Use the `search` parameter to filter errors by text content across the `message`, `source`, and `traceback` fields.
+
+## Query Parameters
+
+<ResponseField name="limit" type="integer" default="20">
+  Maximum number of error entries to return.
+</ResponseField>
+
+<ResponseField name="search" type="string" default="">
+  Optional text filter. Searches across `message`, `source`, and `traceback` fields (case-insensitive).
+</ResponseField>
+
+## Response
+
+Returns an array of error entries. Each entry is an object with:
+
+<ResponseField name="id" type="string">
+  12-character hex error ID (e.g. `a1b2c3d4e5f6`).
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 UTC timestamp of when the error was recorded.
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  Where the error originated. Common values: `agent_loop`, `deep_work`, `tool_execution`, `unknown`.
+</ResponseField>
+
+<ResponseField name="severity" type="string">
+  Error severity: `error` or `warning`.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable error description.
+</ResponseField>
+
+<ResponseField name="traceback" type="string">
+  Python traceback string, if available. Empty string if no traceback was captured.
+</ResponseField>
+
+<ResponseField name="context" type="object">
+  Additional metadata. Contents vary by error source — may include `session_id`, `backend`, `tool_name`, etc.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    # Get last 10 errors
+    curl -X GET "http://localhost:8000/api/health/errors?limit=10"
+
+    # Search for API-related errors
+    curl -X GET "http://localhost:8000/api/health/errors?search=api&limit=5"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    // Get recent errors
+    const response = await fetch("http://localhost:8000/api/health/errors?limit=10");
+    const errors = await response.json();
+
+    // Search for specific errors
+    const filtered = await fetch(
+      "http://localhost:8000/api/health/errors?search=timeout&limit=5"
+    );
+    const results = await filtered.json();
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    # Get recent errors
+    response = requests.get(
+        "http://localhost:8000/api/health/errors",
+        params={"limit": 10}
+    )
+    errors = response.json()
+
+    # Search for specific errors
+    response = requests.get(
+        "http://localhost:8000/api/health/errors",
+        params={"search": "anthropic", "limit": 5}
+    )
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    [
+      {
+        "id": "a1b2c3d4e5f6",
+        "timestamp": "2025-03-15T10:30:00+00:00",
+        "source": "agent_loop",
+        "severity": "error",
+        "message": "Anthropic API returned 401: Invalid API key",
+        "traceback": "Traceback (most recent call last):\n  File \"agent/loop.py\", line 142\n    ...\nanthropic.AuthenticationError: Invalid API key",
+        "context": {
+          "session_id": "abc123",
+          "backend": "claude_agent_sdk"
+        }
+      },
+      {
+        "id": "f6e5d4c3b2a1",
+        "timestamp": "2025-03-15T10:25:00+00:00",
+        "source": "deep_work",
+        "severity": "error",
+        "message": "Task execution failed: connection timed out",
+        "traceback": "",
+        "context": {
+          "project_id": "proj_001",
+          "task_index": 3
+        }
+      }
+    ]
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

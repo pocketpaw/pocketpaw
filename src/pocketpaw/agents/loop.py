@@ -1,6 +1,7 @@
 """Unified Agent Loop.
 Created: 2026-02-02
 Changes:
+  - 2026-02-17: Record errors to health engine ErrorStore on timeout and exception.
   - Added BrowserTool registration
   - 2026-02-05: Refactored to use AgentRouter for all backends.
                 Now properly emits system_event for tool_use/tool_result.
@@ -461,6 +462,18 @@ class AgentLoop:
 
         except TimeoutError:
             logger.error("Agent backend timed out")
+            # Record to persistent health error log
+            try:
+                from pocketpaw.health import get_health_engine
+
+                get_health_engine().record_error(
+                    message="Agent backend timed out",
+                    source="agents.loop",
+                    severity="error",
+                    context={"session_key": session_key},
+                )
+            except Exception:
+                pass
             # Kill the hung backend so it releases resources
             try:
                 await router.stop()
@@ -496,6 +509,21 @@ class AgentLoop:
             )
         except Exception as e:
             logger.exception(f"❌ Error processing message: {e}")
+            # Record to persistent health error log
+            try:
+                import traceback
+
+                from pocketpaw.health import get_health_engine
+
+                get_health_engine().record_error(
+                    message=str(e),
+                    source="agents.loop",
+                    severity="error",
+                    traceback=traceback.format_exc(),
+                    context={"session_key": session_key},
+                )
+            except Exception:
+                pass
             # Kill the backend on error
             try:
                 await router.stop()

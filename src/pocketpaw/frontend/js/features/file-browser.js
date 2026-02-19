@@ -2,8 +2,8 @@
  * PocketPaw - File Browser Feature Module
  *
  * Created: 2026-02-05
- * Updated: 2026-02-12 — handleFiles routes sidebar_* context responses to
- *   ProjectBrowser.handleSidebarFiles() instead of updating modal state.
+ * Updated: 2026-02-17 — Replace context-string routing with EventBus.
+ * Previous: 2026-02-16 — output_* context routing for Output Files panel.
  *
  * Contains file browser modal functionality:
  * - Directory navigation
@@ -37,9 +37,14 @@ window.PocketPaw.FileBrowser = {
              * Handle file browser data
              */
             handleFiles(data) {
-                // Route sidebar file tree responses to ProjectBrowser
+                // Route sidebar file tree responses via EventBus
                 if (data.context && data.context.startsWith('sidebar_')) {
-                    this.handleSidebarFiles(data);
+                    PocketPaw.EventBus.emit('sidebar:files', data);
+                    return;
+                }
+                // Route output file responses via EventBus
+                if (data.context && data.context.startsWith('output_')) {
+                    PocketPaw.EventBus.emit('output:files', data);
                     return;
                 }
 

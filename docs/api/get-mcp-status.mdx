@@ -22,9 +22,9 @@ Returns an object keyed by server name:
 <ResponseField name="{server_name}" type="object">
   <ResponseField name="enabled" type="boolean">Whether the server is enabled in configuration</ResponseField>
   <ResponseField name="connected" type="boolean">Whether the server is currently connected</ResponseField>
-  <ResponseField name="transport" type="string">Transport type: `stdio` or `http`</ResponseField>
-  <ResponseField name="tools" type="array">List of tool names available from this server</ResponseField>
-  <ResponseField name="error" type="string" nullable>Error message if the server failed to connect</ResponseField>
+  <ResponseField name="transport" type="string">Transport type: `stdio`, `http`, `streamable-http`, or `sse`</ResponseField>
+  <ResponseField name="tool_count" type="number">Number of tools available from this server</ResponseField>
+  <ResponseField name="error" type="string">Error message if the server failed to connect (empty string if no error)</ResponseField>
 </ResponseField>
 
 <RequestExample>
@@ -67,15 +67,15 @@ Returns an object keyed by server name:
         "enabled": true,
         "connected": true,
         "transport": "stdio",
-        "tools": ["read_file", "write_file", "list_directory"],
-        "error": null
+        "tool_count": 3,
+        "error": ""
       },
       "github": {
-        "enabled": false,
-        "connected": false,
-        "transport": "stdio",
-        "tools": [],
-        "error": null
+        "enabled": true,
+        "connected": true,
+        "transport": "http",
+        "tool_count": 12,
+        "error": ""
       }
     }
     ```

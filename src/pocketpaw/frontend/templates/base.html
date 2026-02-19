@@ -214,6 +214,8 @@
     <script src="/static/js/state.js?v={{ v }}"></script>
     <script src="/static/js/websocket.js?v={{ v }}"></script>
     <script src="/static/js/tools.js?v={{ v }}"></script>
+    <!-- Event bus (must load before loader and feature modules) -->
+    <script src="/static/js/event-bus.js?v={{ v }}"></script>
     <!-- Loader (registers feature modules for app.js assembly) -->
     <script src="/static/js/loader.js?v={{ v }}"></script>
     <!-- Feature modules (loaded before app.js) -->
@@ -225,11 +227,15 @@
     <script src="/static/js/features/skills.js?v={{ v }}"></script>
     <script src="/static/js/features/transparency.js?v={{ v }}"></script>
     <script src="/static/js/features/remote-access.js?v={{ v }}"></script>
-    <script src="/static/js/features/mission-control.js?v={{ v }}"></script>
+    <script src="/static/js/features/mc-agents.js?v={{ v }}"></script>
+    <script src="/static/js/features/mc-tasks.js?v={{ v }}"></script>
+    <script src="/static/js/features/deep-work.js?v={{ v }}"></script>
+    <script src="/static/js/features/mc-events.js?v={{ v }}"></script>
     <script src="/static/js/features/channels.js?v={{ v }}"></script>
     <script src="/static/js/features/mcp.js?v={{ v }}"></script>
     <script src="/static/js/features/hash-router.js?v={{ v }}"></script>
     <script src="/static/js/features/project-browser.js?v={{ v }}"></script>
+    <script src="/static/js/features/health.js?v={{ v }}"></script>
     <!-- Main app (assembles features) -->
     <script src="/static/js/app.js?v={{ v }}"></script>
 

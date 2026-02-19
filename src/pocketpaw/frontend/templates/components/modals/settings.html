@@ -111,6 +111,52 @@
             ></small>
           </div>
 
+          <!-- Claude SDK Settings (shown when Claude Agent SDK selected) -->
+          <div
+            x-show="settings.agentBackend === 'claude_agent_sdk'"
+            x-transition
+            class="flex flex-col gap-3 pl-4 border-l-2 border-[var(--accent-color)]/30"
+          >
+            <small class="text-white/50 text-[11px]">
+              Claude Code handles model selection automatically. Only set a
+              model below if you want to override it.
+            </small>
+            <div class="flex flex-col gap-1">
+              <label
+                class="text-[12px] font-medium text-[var(--text-secondary)]"
+                >Model Override</label
+              >
+              <input
+                type="text"
+                x-model="settings.claudeSdkModel"
+                @change="saveSettings()"
+                placeholder="auto (recommended)"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+              <small class="text-white/50 text-[11px]"
+                >Leave empty to let Claude Code auto-select the best
+                model</small
+              >
+            </div>
+            <div class="flex flex-col gap-1">
+              <label
+                class="text-[12px] font-medium text-[var(--text-secondary)]"
+                >Max Tool Turns</label
+              >
+              <input
+                type="number"
+                x-model="settings.claudeSdkMaxTurns"
+                @change="saveSettings()"
+                min="1"
+                max="200"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+              />
+              <small class="text-white/50 text-[11px]"
+                >Max agent tool-use loops per query (default: 25)</small
+              >
+            </div>
+          </div>
+
           <!-- LLM Provider -->
           <div class="flex flex-col gap-1.5">
             <div class="flex justify-between items-center">
@@ -1045,7 +1091,8 @@
                   >Smart Model Routing</span
                 >
                 <span class="text-[11px] text-white/50 mt-0.5"
-                  >Automatically select model based on task complexity</span
+                  >Automatically select model based on task complexity (not
+                  recommended with Claude SDK — it has its own routing)</span
                 >
               </div>
             </label>
