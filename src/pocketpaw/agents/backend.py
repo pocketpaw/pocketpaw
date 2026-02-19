@@ -39,6 +39,7 @@ class BackendInfo:
     required_keys: list[str] = field(default_factory=list)
     supported_providers: list[str] = field(default_factory=list)
     install_hint: dict[str, str] = field(default_factory=dict)
+    beta: bool = False
 
 
 @runtime_checkable

@@ -51,6 +51,7 @@ class OpenAIAgentsBackend:
                 "pip_spec": "pocketpaw[openai-agents]",
                 "verify_import": "agents",
             },
+            beta=True,
         )
 
     def __init__(self, settings: Settings) -> None:

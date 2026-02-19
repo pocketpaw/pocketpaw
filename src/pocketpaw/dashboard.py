@@ -1408,6 +1408,7 @@ async def list_available_backends():
                     "requiredKeys": info.required_keys,
                     "supportedProviders": info.supported_providers,
                     "installHint": info.install_hint,
+                    "beta": info.beta,
                 }
             )
         else:
@@ -1421,6 +1422,7 @@ async def list_available_backends():
                     "requiredKeys": [],
                     "supportedProviders": [],
                     "installHint": {},
+                    "beta": False,
                 }
             )
     return results

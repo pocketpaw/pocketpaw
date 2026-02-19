@@ -45,7 +45,7 @@
                         <i data-lucide="cpu" class="w-4 h-4" :class="wizardBackend === b.name ? 'text-[var(--accent-color)]' : 'text-white/50'"></i>
                     </div>
                     <div class="flex-1 min-w-0">
-                        <p class="text-[13px] font-medium" x-text="b.displayName + (b.name === 'claude_agent_sdk' ? ' (Recommended)' : '')"></p>
+                        <p class="text-[13px] font-medium" x-text="b.displayName + (b.name === 'claude_agent_sdk' ? ' (Recommended)' : '') + (b.beta ? ' [Beta]' : '')"></p>
                     </div>
                     <div class="w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center"
                         :class="wizardBackend === b.name ? 'border-[var(--accent-color)]' : 'border-white/20'">

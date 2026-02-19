@@ -50,6 +50,7 @@ class CodexCLIBackend:
             install_hint={
                 "external_cmd": "npm install -g @openai/codex",
             },
+            beta=True,
         )
 
     def __init__(self, settings: Settings) -> None:

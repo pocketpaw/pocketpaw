@@ -46,6 +46,7 @@ class OpenCodeBackend:
                 "external_cmd": "go install github.com/opencode-ai/opencode@latest",
                 "docs_url": "https://github.com/opencode-ai/opencode",
             },
+            beta=True,
         )
 
     def __init__(self, settings: Settings) -> None:

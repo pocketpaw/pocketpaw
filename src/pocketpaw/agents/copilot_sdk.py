@@ -53,6 +53,7 @@ class CopilotSDKBackend:
                 "external_cmd": ("Install copilot CLI from https://github.com/github/copilot-sdk"),
                 "docs_url": "https://github.com/github/copilot-sdk",
             },
+            beta=True,
         )
 
     def __init__(self, settings: Settings) -> None:

@@ -52,6 +52,7 @@ class GoogleADKBackend:
                 "pip_spec": "pocketpaw[google-adk]",
                 "verify_import": "google.adk",
             },
+            beta=True,
         )
 
     def __init__(self, settings: Settings) -> None:

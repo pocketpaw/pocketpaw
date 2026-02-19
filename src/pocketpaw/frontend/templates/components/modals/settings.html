@@ -134,7 +134,7 @@
                 class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
               >
                 <template x-for="b in _backendsData" :key="b.name">
-                  <option :value="b.name" x-text="b.displayName + (b.name === 'claude_agent_sdk' ? ' (Recommended)' : '') + (!b.available ? ' — not installed' : '')"></option>
+                  <option :value="b.name" x-text="b.displayName + (b.name === 'claude_agent_sdk' ? ' (Recommended)' : '') + (b.beta ? ' [Beta]' : '') + (!b.available ? ' — not installed' : '')"></option>
                 </template>
                 <!-- Fallback if fetch hasn't resolved -->
                 <template x-if="_backendsData.length === 0">
