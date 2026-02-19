@@ -3040,6 +3040,7 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
+provides-extras = ["dashboard", "telegram", "browser", "desktop", "native", "memory", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

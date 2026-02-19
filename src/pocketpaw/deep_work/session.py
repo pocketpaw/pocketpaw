@@ -31,6 +31,8 @@ from pocketpaw.mission_control.models import (
     now_iso,
 )
 
+VALID_RESEARCH_DEPTHS = frozenset({"none", "quick", "standard", "deep"})
+
 logger = logging.getLogger(__name__)
 
 
@@ -198,6 +200,21 @@ class DeepWorkSession:
         Returns:
             The updated Project.
         """
+        # Validate input parameters before doing any work
+        if research_depth not in VALID_RESEARCH_DEPTHS:
+            raise ValueError(
+                f"Invalid research_depth '{research_depth}'. "
+                f"Must be one of: {', '.join(sorted(VALID_RESEARCH_DEPTHS))}"
+            )
+
+        if not user_input or not user_input.strip():
+            raise ValueError("user_input cannot be empty")
+
+        if len(user_input) > 5000:
+            raise ValueError(
+                f"user_input too long ({len(user_input)} chars). Maximum 5000 characters."
+            )
+
         project = await self.manager.get_project(project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
