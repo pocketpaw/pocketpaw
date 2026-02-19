@@ -1,6 +1,7 @@
 """
 Audit Logging System.
 Created: 2026-02-02
+Updated: 2026-02-16 — Added optional PII filtering on audit log entries.
 
 This module provides a secure, append-only audit log for all critical agent actions.
 It is designed to be immutable and persistent.
@@ -15,8 +16,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-
-from pocketpaw.config import get_settings
 
 logger = logging.getLogger("audit")
 
@@ -73,15 +72,38 @@ class AuditLogger:
         if log_path:
             self.log_path = log_path
         else:
-            settings = get_settings()
-            # Default to adjacent to config file, or explicit audit path
-            # Since settings might not have audit_path, we derive it.
-            # Assuming settings.config_path is ~/.pocketpaw/config.json
+            # Default to adjacent to config file
             base_dir = Path.home() / ".pocketpaw"
             base_dir.mkdir(parents=True, exist_ok=True)
             self.log_path = base_dir / "audit.jsonl"
 
         self._callbacks: list[Callable[[dict], None]] = []
+        self._pii_filter_enabled = False
+        self._pii_scanner: Any = None
+
+    def enable_pii_filter(self) -> None:
+        """Enable PII filtering on audit log entries."""
+        from pocketpaw.security.pii import PIIAction, PIIScanner
+
+        self._pii_scanner = PIIScanner(default_action=PIIAction.MASK)
+        self._pii_filter_enabled = True
+
+    def _filter_pii(self, event_dict: dict) -> dict:
+        """Recursively scan string values in the event dict for PII."""
+        if not self._pii_scanner:
+            return event_dict
+
+        def _scan_value(v: Any) -> Any:
+            if isinstance(v, str):
+                result = self._pii_scanner.scan(v)
+                return result.sanitized_text if result.has_pii else v
+            elif isinstance(v, dict):
+                return {k: _scan_value(val) for k, val in v.items()}
+            elif isinstance(v, list):
+                return [_scan_value(item) for item in v]
+            return v
+
+        return _scan_value(event_dict)
 
     def on_log(self, callback: Callable[[dict], None]) -> None:
         """Register a callback to be called after each audit log write."""
@@ -91,6 +113,8 @@ class AuditLogger:
         """Write an event to the audit log."""
         try:
             event_dict = asdict(event)
+            if self._pii_filter_enabled:
+                event_dict = self._filter_pii(event_dict)
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event_dict) + "\n")
             for cb in self._callbacks:

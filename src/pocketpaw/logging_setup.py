@@ -4,6 +4,7 @@ Beautiful logging setup using Rich.
 Created: 2026-02-02
 Changes:
   - 2026-02-06: Added SecretFilter to scrub API key patterns from log output.
+  - 2026-02-16: Added PIILogFilter for opt-in PII scrubbing in log output.
   - Initial setup with Rich console handler for beautiful logs.
 """
 
@@ -88,3 +89,37 @@ def setup_logging(level: str = "INFO") -> None:
 
     # Attach secret scrubbing filter to root logger
     logging.getLogger().addFilter(SecretFilter())
+
+    # Attach PII scrubbing filter if enabled
+    try:
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        if settings.pii_scan_enabled and settings.pii_scan_logs:
+            from pocketpaw.security.pii import PIIAction, PIIScanner
+
+            _pii_scanner = PIIScanner(default_action=PIIAction.MASK)
+
+            class PIILogFilter(logging.Filter):
+                """Scrub PII patterns from log output."""
+
+                def filter(self, record: logging.LogRecord) -> bool:
+                    if isinstance(record.msg, str):
+                        result = _pii_scanner.scan(record.msg)
+                        if result.has_pii:
+                            record.msg = result.sanitized_text
+                    if record.args:
+                        args = record.args if isinstance(record.args, tuple) else (record.args,)
+                        new_args = []
+                        for arg in args:
+                            if isinstance(arg, str):
+                                r = _pii_scanner.scan(arg)
+                                if r.has_pii:
+                                    arg = r.sanitized_text
+                            new_args.append(arg)
+                        record.args = tuple(new_args)
+                    return True
+
+            logging.getLogger().addFilter(PIILogFilter())
+    except Exception:
+        pass  # Config not available during early bootstrap
