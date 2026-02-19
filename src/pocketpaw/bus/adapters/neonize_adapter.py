@@ -227,88 +227,42 @@ class NeonizeAdapter(BaseChannelAdapter):
                 f"Check your network or VPN settings."
             ) from exc
 
-    async def _on_stop(self) -> None:
-        """Stop neonize client."""
-        if self._client:
-            try:
-                if self._neonize_loop and self._neonize_loop.is_running():
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._client.disconnect(), self._neonize_loop
-                    )
-                    future.result(timeout=5)
-                else:
-                    await self._client.disconnect()
-            except Exception as e:
-                logger.debug(f"Neonize disconnect: {e}")
-
-        if self._connect_future:
-            self._connect_future.cancel()
-
-        if self._client_task and not self._client_task.done():
-            self._client_task.cancel()
-            try:
-                await self._client_task
-            except asyncio.CancelledError:
-                pass
-
-        self._connected = False
-        self._qr_data = None
-        logger.info("WhatsApp (neonize) Adapter stopped")
-
-    async def send(self, message: OutboundMessage) -> None:
-        """Send message to WhatsApp via neonize.
-
-        WhatsApp doesn't support streaming — accumulate chunks, send on stream_end.
-        """
-        if not self._client or not self._connected:
-            return
-
+async def _on_stop(self) -> None:
+    logger.info("[Satwik fix] Starting neonize_adapter _on_stop()")
+    
+    if self._client:
         try:
-            if message.is_stream_chunk:
-                chat_id = message.chat_id
-                if chat_id not in self._buffers:
-                    self._buffers[chat_id] = ""
-                self._buffers[chat_id] += message.content
-                return
-
-            if message.is_stream_end:
-                chat_id = message.chat_id
-                text = self._buffers.pop(chat_id, "")
-                if text.strip():
-                    await self._send_text(chat_id, text)
-                return
-
-            # Normal message
-            if message.content.strip():
-                await self._send_text(message.chat_id, message.content)
-
-        except Exception as e:
-            logger.error(f"Failed to send neonize message: {e}")
-
-    async def _send_text(self, to: str, text: str) -> None:
-        """Send a text message via neonize."""
-        if not self._client:
-            return
-        text = convert_markdown(text, self.channel)
-        try:
-            # Look up the cached JID protobuf; fall back to building from string
-            jid = self._jid_cache.get(to)
-            if jid is None:
-                from neonize.utils.jid import build_jid
-
-                # Parse "user@server" format if present
-                if "@" in to:
-                    user, server = to.split("@", 1)
-                    jid = build_jid(user, server)
-                else:
-                    jid = build_jid(to)
-
+            logger.info("[Satwik fix] Attempting disconnect")
             if self._neonize_loop and self._neonize_loop.is_running():
+                if self._connect_future and not self._connect_future.done():
+                    self._connect_future.cancel()
+                    logger.info("[Satwik fix] Cancelled connect future")
+
                 future = asyncio.run_coroutine_threadsafe(
-                    self._client.send_message(jid, text), self._neonize_loop
+                    self._client.disconnect(), self._neonize_loop
                 )
-                future.result(timeout=30)
+                try:
+                    future.result(timeout=5)
+                    logger.info("[Satwik fix] Disconnect succeeded")
+                except Exception as e:
+                    logger.warning("[Satwik fix] Disconnect failed: %s", e)
+
+                # Stop the loop
+                from neonize.aioze.events import event_global_loop
+                if event_global_loop.is_running():
+                    event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+                    logger.info("[Satwik fix] Called event_global_loop.stop()")
+                else:
+                    logger.info("[Satwik fix] neonize loop was already stopped")
+
             else:
-                await self._client.send_message(jid, text)
+                await self._client.disconnect()
+                logger.info("[Satwik fix] Direct disconnect called")
+
         except Exception as e:
-            logger.error(f"Neonize send error: {e}")
+            logger.warning("[Satwik fix] Shutdown exception: %s", e)
+
+    logger.info("[Satwik fix] _on_stop completed")
+    self._connected = False
+    self._qr_data = None
+    logger.info("WhatsApp (neonize) Adapter stopped")
