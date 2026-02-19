@@ -597,7 +597,7 @@ class TestStatusCommand:
     @patch("pocketpaw.bus.commands.get_memory_manager")
     async def test_status_no_sessions(self, mock_get_mm, mock_settings):
         settings = MagicMock()
-        settings.agent_backend = "pocketpaw_native"
+        settings.agent_backend = "claude_agent_sdk"
         mock_settings.return_value = settings
 
         mm = MagicMock()
@@ -609,7 +609,7 @@ class TestStatusCommand:
         response = await self.handler.handle(msg)
 
         assert "Default" in response.content
-        assert "pocketpaw_native" in response.content
+        assert "claude_agent_sdk" in response.content
 
     @patch("pocketpaw.config.get_settings")
     @patch("pocketpaw.bus.commands.get_memory_manager")

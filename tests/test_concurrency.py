@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from pocketpaw.bus import Channel, InboundMessage
@@ -26,7 +25,7 @@ def _make_slow_router(delay: float = 0.1):
     """Return a mock router whose run() sleeps for *delay* seconds."""
     router = MagicMock()
 
-    async def mock_run(message, *, system_prompt=None, history=None):
+    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
         await asyncio.sleep(delay)
         yield {"type": "message", "content": "ok", "metadata": {}}
         yield {"type": "done", "content": ""}
@@ -91,7 +90,7 @@ async def test_session_lock_serialises_same_session(
     order = []
     delay = 0.05
 
-    async def slow_run(message, *, system_prompt=None, history=None):
+    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
         order.append(f"start:{message}")
         await asyncio.sleep(delay)
         order.append(f"end:{message}")
@@ -170,7 +169,7 @@ async def test_cross_session_runs_in_parallel(
 
     order = []
 
-    async def slow_run(message, *, system_prompt=None, history=None):
+    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)
         order.append(f"end:{message}")
@@ -253,7 +252,7 @@ async def test_global_semaphore_caps_concurrency(
 
     order = []
 
-    async def slow_run(message, *, system_prompt=None, history=None):
+    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)
         order.append(f"end:{message}")
@@ -279,79 +278,7 @@ async def test_global_semaphore_caps_concurrency(
 
 
 # ---------------------------------------------------------------------------
-# 4. PocketPaw Native — messages.create is awaited (AsyncAnthropic)
-# ---------------------------------------------------------------------------
-
-
-async def test_pocketpaw_native_uses_async_anthropic():
-    """Verify PocketPawOrchestrator imports and uses AsyncAnthropic."""
-    settings = MagicMock()
-    settings.anthropic_api_key = "sk-test"
-    settings.anthropic_model = "claude-sonnet-4-5-20250929"
-    settings.llm_provider = "anthropic"
-    settings.ollama_host = "http://localhost:11434"
-    settings.ollama_model = "llama3.2"
-    settings.openai_api_key = None
-    settings.openai_model = "gpt-4o"
-    settings.tool_profile = "full"
-    settings.tools_allow = []
-    settings.tools_deny = []
-    settings.file_jail_path = Path.home()
-    settings.smart_routing_enabled = False
-
-    with patch("anthropic.AsyncAnthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
-
-        # Mock the messages.create to return an async-compatible response
-        mock_response = MagicMock()
-        mock_response.stop_reason = "end_turn"
-        text_block = MagicMock()
-        text_block.type = "text"
-        text_block.text = "Hello!"
-        mock_response.content = [text_block]
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        from pocketpaw.agents.pocketpaw_native import PocketPawOrchestrator
-
-        orch = PocketPawOrchestrator(settings)
-
-        # Confirm AsyncAnthropic was used with Anthropic provider
-        mock_cls.assert_called_once_with(api_key="sk-test", timeout=60.0, max_retries=2)
-
-        # Run a chat and confirm messages.create was awaited
-        events = []
-        async for event in orch.chat("hello"):
-            events.append(event)
-
-        mock_client.messages.create.assert_awaited_once()
-        assert any(e.type == "message" for e in events)
-
-
-# ---------------------------------------------------------------------------
-# 5. Open Interpreter — semaphore prevents concurrent access
-# ---------------------------------------------------------------------------
-
-
-async def test_oi_semaphore_prevents_concurrent_access():
-    """OpenInterpreterAgent._semaphore should prevent overlapping run() calls."""
-    settings = MagicMock()
-    settings.llm_provider = "anthropic"
-    settings.anthropic_api_key = "sk-test"
-    settings.anthropic_model = "claude-sonnet-4-5-20250929"
-
-    with patch("pocketpaw.agents.open_interpreter.interpreter", create=True):
-        from pocketpaw.agents.open_interpreter import OpenInterpreterAgent
-
-        agent = OpenInterpreterAgent(settings)
-
-        # Verify semaphore exists and has value 1
-        assert isinstance(agent._semaphore, asyncio.Semaphore)
-        assert agent._semaphore._value == 1
-
-
-# ---------------------------------------------------------------------------
-# 6. FileMemoryStore — session write lock prevents corruption
+# 4. FileMemoryStore — session write lock prevents corruption
 # ---------------------------------------------------------------------------
 
 
