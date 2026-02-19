@@ -86,6 +86,21 @@
                         </span>
                     </div>
 
+                    <!-- Auto-start toggle (when configured) -->
+                    <div x-show="channelStatus[channelsTab]?.configured" class="flex items-center justify-between">
+                        <span class="text-[13px] text-white/60">Auto-start on launch</span>
+                        <button
+                            class="relative w-10 h-[22px] rounded-full transition-colors duration-200 focus:outline-none"
+                            :class="channelStatus[channelsTab]?.autostart !== false ? 'bg-[var(--success-color)]' : 'bg-white/20'"
+                            @click="toggleAutostart(channelsTab)"
+                        >
+                            <span
+                                class="absolute top-[3px] left-[3px] w-4 h-4 bg-white rounded-full shadow transition-transform duration-200"
+                                :class="channelStatus[channelsTab]?.autostart !== false ? 'translate-x-[18px]' : ''"
+                            ></span>
+                        </button>
+                    </div>
+
                     <!-- Setup Guide Link (when not configured) -->
                     <div x-show="!channelStatus[channelsTab]?.configured && channelGuideUrl(channelsTab)" class="flex items-center gap-2 py-2 px-3 bg-white/5 rounded-[10px] border border-white/10">
                         <i data-lucide="book-open" class="w-4 h-4 text-white/60 shrink-0"></i>

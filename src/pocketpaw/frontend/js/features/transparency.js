@@ -45,6 +45,11 @@ window.PocketPaw.Transparency = {
                     hint: 'Communication style — tone, formatting, and interaction patterns.',
                 },
                 {
+                    key: 'instructions_file', label: 'Instructions', file: 'INSTRUCTIONS.md',
+                    icon: 'scroll-text',
+                    hint: 'Behavioral instructions and tool usage guides — shared across all agent backends.',
+                },
+                {
                     key: 'user_file', label: 'User Profile', file: 'USER.md',
                     icon: 'user',
                     hint: 'Your profile — injected into every prompt so the agent knows you.',

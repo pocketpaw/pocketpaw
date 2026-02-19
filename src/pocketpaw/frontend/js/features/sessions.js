@@ -61,10 +61,6 @@ window.PocketPaw.Sessions = {
 
                 // Clear streaming state from previous session
                 if (this.isStreaming) {
-                    if (this._streamTimeout) {
-                        clearTimeout(this._streamTimeout);
-                        this._streamTimeout = null;
-                    }
                     this.isStreaming = false;
                     this.isThinking = false;
                     this.streamingContent = '';

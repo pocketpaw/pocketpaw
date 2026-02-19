@@ -159,7 +159,7 @@
             </div>
         </div>
 
-        <!-- Right: Export + Remote -->
+        <!-- Right: Export + Remote + Settings Gear -->
         <div class="flex items-center gap-2 pointer-events-auto">
             <!-- Export dropdown — only shown in chat view with active session -->
             <div x-show="view === 'chat' && currentSessionId" class="relative" x-data="{ exportOpen: false }">
@@ -187,6 +187,19 @@
                 </div>
             </div>
             
+            <!-- Settings Gear Icon -->
+            <button
+                class="relative flex items-center justify-center w-8 h-8 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full transition-all hover:scale-105 active:scale-95"
+                @click="openSettings()"
+                title="Settings (Ctrl+,)"
+            >
+                <i data-lucide="settings" class="w-4 h-4 text-white/80"></i>
+                <span
+                    x-show="isBackendUnconfigured()"
+                    class="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-[var(--danger-color)] rounded-full border-2 border-black"
+                ></span>
+            </button>
+
             <!-- Take Your Paw With You button -->
             <button
                 class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
