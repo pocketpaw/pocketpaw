@@ -37,7 +37,7 @@
 
 ## Quick Start
 
-### Desktop App (recommended)
+### Desktop App
 
 Download the native app — includes auto-updates, system tray, and launches on startup.
 
