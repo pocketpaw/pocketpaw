@@ -31,6 +31,8 @@ powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
 export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-your-key-here"
 ```
 
+Get your key at [console.anthropic.com/api-keys](https://console.anthropic.com/api-keys). An API key is **required** for the Claude SDK backend — OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use [Ollama](/backends/ollama) instead.
+
 ## Step 3: Launch
 
 ```bash
@@ -134,7 +136,7 @@ The web dashboard is the default mode and provides:
     Set up additional messaging platforms.
   </Card>
   <Card title="Tools" icon="lucide:wrench" href="/tools">
-    Discover all 30+ built-in tools.
+    Discover all 50+ built-in tools.
   </Card>
   <Card title="Security" icon="lucide:shield" href="/security">
     Learn about PocketPaw's security model.

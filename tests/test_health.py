@@ -323,39 +323,50 @@ class TestCheckApiKeyPrimary:
             r = check_api_key_primary()
             assert r.status == "ok"
 
-    def test_native_ollama_no_key_needed(self):
+    def test_legacy_native_warns_removed(self):
+        """Legacy pocketpaw_native backend warns it has been removed."""
         settings = self._mock_settings(agent_backend="pocketpaw_native", llm_provider="ollama")
         with patch(_P_SETTINGS, return_value=settings):
             r = check_api_key_primary()
-            assert r.status == "ok"
-            assert "Ollama" in r.message
+            assert r.status == "warning"
+            assert "removed" in r.message
 
-    def test_native_anthropic_with_key(self):
-        settings = self._mock_settings(
-            agent_backend="pocketpaw_native",
-            llm_provider="anthropic",
-            anthropic_api_key="sk-ant-key",
-        )
-        with patch(_P_SETTINGS, return_value=settings):
-            r = check_api_key_primary()
-            assert r.status == "ok"
-
-    def test_native_anthropic_no_key(self):
-        settings = self._mock_settings(
-            agent_backend="pocketpaw_native",
-            llm_provider="anthropic",
-            anthropic_api_key="",
-        )
-        with patch(_P_SETTINGS, return_value=settings):
-            r = check_api_key_primary()
-            assert r.status == "critical"
-
-    def test_open_interpreter(self):
+    def test_legacy_open_interpreter_warns_removed(self):
+        """Legacy open_interpreter backend warns it has been removed."""
         settings = self._mock_settings(agent_backend="open_interpreter")
         with patch(_P_SETTINGS, return_value=settings):
             r = check_api_key_primary()
+            assert r.status == "warning"
+            assert "removed" in r.message
+
+    def test_google_adk_with_key(self):
+        settings = self._mock_settings(agent_backend="google_adk", google_api_key="gk-test")
+        with patch(_P_SETTINGS, return_value=settings):
+            r = check_api_key_primary()
             assert r.status == "ok"
-            assert "Open Interpreter" in r.message
+
+    def test_google_adk_no_key(self):
+        settings = self._mock_settings(agent_backend="google_adk", google_api_key="")
+        with (
+            patch(_P_SETTINGS, return_value=settings),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            r = check_api_key_primary()
+            assert r.status == "critical"
+
+    def test_openai_agents_with_key(self):
+        settings = self._mock_settings(agent_backend="openai_agents", openai_api_key="sk-test")
+        with patch(_P_SETTINGS, return_value=settings):
+            r = check_api_key_primary()
+            assert r.status == "ok"
+
+    def test_subprocess_backend_ok(self):
+        """Subprocess backends (codex_cli, opencode, copilot_sdk) manage own creds."""
+        for backend in ("codex_cli", "opencode", "copilot_sdk"):
+            settings = self._mock_settings(agent_backend=backend)
+            with patch(_P_SETTINGS, return_value=settings):
+                r = check_api_key_primary()
+                assert r.status == "ok"
 
     def test_unknown_backend(self):
         settings = self._mock_settings(agent_backend="unknown_thing")
@@ -531,9 +542,10 @@ class TestCheckLlmReachable:
             assert "No API key" in r.message
 
     @pytest.mark.asyncio
-    async def test_open_interpreter_fallback(self):
+    async def test_unknown_backend_fallback(self):
+        """Unknown/legacy backends hit the fallback 'not implemented' path."""
         settings = MagicMock()
-        settings.agent_backend = "open_interpreter"
+        settings.agent_backend = "some_unknown_backend"
         with patch(_P_SETTINGS, return_value=settings):
             r = await check_llm_reachable()
             assert r.status == "ok"
@@ -693,7 +705,8 @@ class TestHealthEngine:
             HealthCheckResult("a", "A", "config", "ok", "fine", ""),
         ]
         settings = MagicMock()
-        settings.agent_backend = "open_interpreter"
+        settings.agent_backend = "claude_agent_sdk"
+        settings.anthropic_api_key = "sk-ant-test"
         with patch(_P_SETTINGS, return_value=settings):
             await engine.run_connectivity_checks()
         # Should have both startup + connectivity results
@@ -707,8 +720,8 @@ class TestHealthEngine:
         config_path.write_text("{}")
 
         settings = MagicMock()
-        settings.agent_backend = "open_interpreter"
-        settings.anthropic_api_key = ""
+        settings.agent_backend = "claude_agent_sdk"
+        settings.anthropic_api_key = "sk-ant-test"
         settings.openai_api_key = ""
         settings.google_api_key = ""
         settings.llm_provider = "auto"

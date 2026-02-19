@@ -16,7 +16,7 @@ tags: ["tools", "architecture"]
 
 # Tool System
 
-PocketPaw's tool system provides 30+ built-in tools and supports custom tool creation. Tools are governed by a policy system that controls which tools are available.
+PocketPaw's tool system provides 50+ built-in tools and supports custom tool creation. Tools are governed by a policy system that controls which tools are available.
 
 <img
   src="/Tool-system-architecture-and-policy-system.webp"
@@ -148,7 +148,7 @@ Tools can export their definitions in both Anthropic and OpenAI formats:
     }
 }
 
-# OpenAI format (used by Open Interpreter)
+# OpenAI format (used by OpenAI Agents and other backends)
 {
     "type": "function",
     "function": {

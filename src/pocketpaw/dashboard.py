@@ -200,6 +200,14 @@ async def _broadcast_health_update(summary: dict):
                 active_connections.remove(ws)
 
 
+def _channel_autostart_enabled(channel: str, settings: Settings) -> bool:
+    """Check if a channel should auto-start on dashboard launch.
+
+    Missing keys default to True for backward compatibility.
+    """
+    return settings.channel_autostart.get(channel, True)
+
+
 async def _start_channel_adapter(channel: str, settings: Settings | None = None) -> bool:
     """Start a single channel adapter. Returns True on success."""
     if settings is None:
@@ -237,6 +245,9 @@ async def _start_channel_adapter(channel: str, settings: Settings | None = None)
     if channel == "whatsapp":
         mode = settings.whatsapp_mode
 
+        if not mode:
+            # No WhatsApp mode selected — skip
+            return False
         if mode == "personal":
             from pocketpaw.bus.adapters.neonize_adapter import NeonizeAdapter
 
@@ -367,7 +378,7 @@ async def startup_event():
     asyncio.create_task(agent_loop.start())
     logger.info("Agent Loop started")
 
-    # Auto-start all configured channel adapters
+    # Auto-start configured channel adapters (respects per-channel autostart setting)
     settings = Settings.load()
     for ch in (
         "discord",
@@ -379,6 +390,9 @@ async def startup_event():
         "teams",
         "google_chat",
     ):
+        if not _channel_autostart_enabled(ch, settings):
+            logger.debug("Skipping %s auto-start (disabled in settings)", ch)
+            continue
         try:
             if await _start_channel_adapter(ch, settings):
                 logger.info(f"{ch.title()} adapter auto-started alongside dashboard")
@@ -413,7 +427,7 @@ async def startup_event():
     except Exception as e:
         logger.warning("Failed to recover interrupted projects: %s", e)
 
-    # Wire MCP OAuth broadcast + auto-start enabled MCP servers
+    # Wire MCP OAuth broadcast + auto-start enabled MCP servers (non-blocking)
     try:
         from pocketpaw.mcp.manager import get_mcp_manager, set_ws_broadcast
 
@@ -428,9 +442,17 @@ async def startup_event():
         set_ws_broadcast(_mcp_ws_broadcast)
 
         mcp = get_mcp_manager()
-        await mcp.start_enabled_servers()
+
+        async def _start_mcp_background() -> None:
+            """Start MCP servers in background so dashboard isn't blocked."""
+            try:
+                await mcp.start_enabled_servers()
+            except Exception as exc:
+                logger.warning("Failed to start MCP servers: %s", exc)
+
+        asyncio.create_task(_start_mcp_background())
     except Exception as e:
-        logger.warning("Failed to start MCP servers: %s", e)
+        logger.warning("Failed to initialize MCP manager: %s", e)
 
     # Initialize health engine and run startup checks
     try:
@@ -1323,11 +1345,149 @@ async def install_extras(request: Request):
     # Clear cached adapter module so _start_channel_adapter can re-import fresh
     import sys
 
-    adapter_modules = [
-        k for k in sys.modules if k.startswith("pocketpaw.bus.adapters.")
-    ]
+    adapter_modules = [k for k in sys.modules if k.startswith("pocketpaw.bus.adapters.")]
     for mod in adapter_modules:
         del sys.modules[mod]
+
+    return {"status": "ok"}
+
+
+# ─── Backend Discovery ───────────────────────────────────────────
+@app.get("/api/backends")
+async def list_available_backends():
+    """List all registered agent backends with availability and capabilities."""
+    import importlib
+    import shutil
+
+    from pocketpaw.agents.backend import Capability
+    from pocketpaw.agents.registry import get_backend_class, get_backend_info, list_backends
+
+    # Map backend names to their CLI binary for availability checks
+    _CLI_BINARY: dict[str, str] = {
+        "codex_cli": "codex",
+        "opencode": "opencode",
+        "copilot_sdk": "copilot",
+    }
+
+    def _check_available(info) -> bool:
+        """Check if a backend's external dependencies are actually installed."""
+        hint = info.install_hint
+        if not hint:
+            return True
+        # Check pip dependency via verify_import (+ optional verify_attr)
+        verify = hint.get("verify_import")
+        if verify:
+            try:
+                mod = importlib.import_module(verify)
+                # Optionally check for a specific attribute to avoid
+                # false positives from unrelated packages with same name
+                attr = hint.get("verify_attr")
+                if attr and not hasattr(mod, attr):
+                    return False
+            except ImportError:
+                return False
+        # Check CLI binary if this backend needs one
+        binary = _CLI_BINARY.get(info.name)
+        if binary and not shutil.which(binary):
+            return False
+        return True
+
+    results = []
+    for name in list_backends():
+        info = get_backend_info(name)
+        available = get_backend_class(name) is not None
+        if info:
+            available = available and _check_available(info)
+            results.append(
+                {
+                    "name": info.name,
+                    "displayName": info.display_name,
+                    "available": available,
+                    "capabilities": [c.name.lower() for c in Capability if c in info.capabilities],
+                    "builtinTools": info.builtin_tools,
+                    "requiredKeys": info.required_keys,
+                    "supportedProviders": info.supported_providers,
+                    "installHint": info.install_hint,
+                    "beta": info.beta,
+                }
+            )
+        else:
+            results.append(
+                {
+                    "name": name,
+                    "displayName": name,
+                    "available": False,
+                    "capabilities": [],
+                    "builtinTools": [],
+                    "requiredKeys": [],
+                    "supportedProviders": [],
+                    "installHint": {},
+                    "beta": False,
+                }
+            )
+    return results
+
+
+@app.post("/api/backends/install")
+async def install_backend(request: Request):
+    """Auto-install a pip-installable backend SDK."""
+    import asyncio
+    import importlib
+    import shutil
+    import subprocess
+    import sys
+
+    from pocketpaw.agents.registry import get_backend_info
+
+    data = await request.json()
+    backend_name = data.get("backend", "")
+    info = get_backend_info(backend_name)
+    if not info:
+        return {"error": f"Unknown backend: {backend_name}"}
+
+    hint = info.install_hint
+    pip_spec = hint.get("pip_spec")
+    verify_import = hint.get("verify_import")
+    if not pip_spec or not verify_import:
+        return {"error": f"Backend '{backend_name}' is not pip-installable"}
+
+    def _install() -> None:
+        in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
+        uv = shutil.which("uv")
+        if uv:
+            cmd = [uv, "pip", "install"]
+            if not in_venv:
+                cmd.append("--system")
+            cmd.append(pip_spec)
+        else:
+            cmd = ["pip", "install"]
+            if not in_venv:
+                cmd.append("--user")
+            cmd.append(pip_spec)
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to install {pip_spec}:\n{result.stderr.strip()}")
+
+        importlib.invalidate_caches()
+        # Clear stale module entries so Python retries imports
+        for key in list(sys.modules):
+            if key == verify_import or key.startswith(verify_import + "."):
+                del sys.modules[key]
+        importlib.import_module(verify_import)
+
+    try:
+        await asyncio.to_thread(_install)
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return {"error": f"Install failed: {exc}"}
+
+    # Clear cached backend modules so the registry re-discovers them
+    for key in list(sys.modules):
+        if key.startswith("pocketpaw.agents."):
+            del sys.modules[key]
+    importlib.invalidate_caches()
 
     return {"status": "ok"}
 
@@ -1351,6 +1511,7 @@ async def get_channels_status():
         result[ch] = {
             "configured": _channel_is_configured(ch, settings),
             "running": _channel_is_running(ch),
+            "autostart": _channel_autostart_enabled(ch, settings),
         }
     # Add WhatsApp mode info
     result["whatsapp"]["mode"] = settings.whatsapp_mode
@@ -1371,6 +1532,9 @@ async def save_channel_config(request: Request):
     settings = Settings.load()
 
     for frontend_key, value in config.items():
+        if frontend_key == "autostart":
+            settings.channel_autostart[channel] = bool(value)
+            continue
         settings_field = key_map.get(frontend_key)
         if settings_field:
             setattr(settings, settings_field, value)
@@ -2173,6 +2337,13 @@ async def websocket_endpoint(
                 # Actually, let's treat 'chat' as input to the Bus.
                 await ws_adapter.handle_message(chat_id, data)
 
+            # Stop in-flight response
+            elif action == "stop":
+                session_key = f"websocket:{chat_id}"
+                cancelled = await agent_loop.cancel_session(session_key)
+                if not cancelled:
+                    await websocket.send_json({"type": "stream_end"})
+
             # Session switching
             elif action == "switch_session":
                 session_id = data.get("session_id", "")
@@ -2234,12 +2405,55 @@ async def websocket_endpoint(
             elif action == "settings":
                 async with _settings_lock:
                     settings.agent_backend = data.get("agent_backend", settings.agent_backend)
+                    if data.get("claude_sdk_provider"):
+                        settings.claude_sdk_provider = data["claude_sdk_provider"]
                     if "claude_sdk_model" in data:
                         settings.claude_sdk_model = data["claude_sdk_model"]
                     if "claude_sdk_max_turns" in data:
                         val = data["claude_sdk_max_turns"]
                         if isinstance(val, (int, float)) and 1 <= val <= 200:
                             settings.claude_sdk_max_turns = int(val)
+                    # OpenAI Agents
+                    if data.get("openai_agents_provider"):
+                        settings.openai_agents_provider = data["openai_agents_provider"]
+                    if "openai_agents_model" in data:
+                        settings.openai_agents_model = data["openai_agents_model"]
+                    if "openai_agents_max_turns" in data:
+                        val = data["openai_agents_max_turns"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                            settings.openai_agents_max_turns = int(val)
+                    # Google ADK
+                    if "google_adk_model" in data:
+                        settings.google_adk_model = data["google_adk_model"]
+                    if "google_adk_max_turns" in data:
+                        val = data["google_adk_max_turns"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                            settings.google_adk_max_turns = int(val)
+                    # Codex CLI
+                    if "codex_cli_model" in data:
+                        settings.codex_cli_model = data["codex_cli_model"]
+                    if "codex_cli_max_turns" in data:
+                        val = data["codex_cli_max_turns"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                            settings.codex_cli_max_turns = int(val)
+                    # Copilot SDK
+                    if data.get("copilot_sdk_provider"):
+                        settings.copilot_sdk_provider = data["copilot_sdk_provider"]
+                    if "copilot_sdk_model" in data:
+                        settings.copilot_sdk_model = data["copilot_sdk_model"]
+                    if "copilot_sdk_max_turns" in data:
+                        val = data["copilot_sdk_max_turns"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                            settings.copilot_sdk_max_turns = int(val)
+                    # OpenCode
+                    if "opencode_base_url" in data:
+                        settings.opencode_base_url = data["opencode_base_url"]
+                    if "opencode_model" in data:
+                        settings.opencode_model = data["opencode_model"]
+                    if "opencode_max_turns" in data:
+                        val = data["opencode_max_turns"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                            settings.opencode_max_turns = int(val)
                     settings.llm_provider = data.get("llm_provider", settings.llm_provider)
                     if data.get("ollama_host"):
                         settings.ollama_host = data["ollama_host"]
@@ -2348,7 +2562,6 @@ async def websocket_endpoint(
                 async with _settings_lock:
                     if provider == "anthropic" and key:
                         settings.anthropic_api_key = key
-                        settings.llm_provider = "anthropic"
                         settings.save()
                         agent_loop.reset_router()
                         await websocket.send_json(
@@ -2356,7 +2569,6 @@ async def websocket_endpoint(
                         )
                     elif provider == "openai" and key:
                         settings.openai_api_key = key
-                        settings.llm_provider = "openai"
                         settings.save()
                         agent_loop.reset_router()
                         await websocket.send_json(
@@ -2364,7 +2576,6 @@ async def websocket_endpoint(
                         )
                     elif provider == "google" and key:
                         settings.google_api_key = key
-                        settings.llm_provider = "gemini"
                         settings.save()
                         agent_loop.reset_router()
                         await websocket.send_json(
@@ -2450,8 +2661,22 @@ async def websocket_endpoint(
                         "type": "settings",
                         "content": {
                             "agentBackend": settings.agent_backend,
+                            "claudeSdkProvider": settings.claude_sdk_provider,
                             "claudeSdkModel": settings.claude_sdk_model,
                             "claudeSdkMaxTurns": settings.claude_sdk_max_turns,
+                            "openaiAgentsProvider": settings.openai_agents_provider,
+                            "openaiAgentsModel": settings.openai_agents_model,
+                            "openaiAgentsMaxTurns": settings.openai_agents_max_turns,
+                            "googleAdkModel": settings.google_adk_model,
+                            "googleAdkMaxTurns": settings.google_adk_max_turns,
+                            "codexCliModel": settings.codex_cli_model,
+                            "codexCliMaxTurns": settings.codex_cli_max_turns,
+                            "copilotSdkProvider": settings.copilot_sdk_provider,
+                            "copilotSdkModel": settings.copilot_sdk_model,
+                            "copilotSdkMaxTurns": settings.copilot_sdk_max_turns,
+                            "opencodeBaseUrl": settings.opencode_base_url,
+                            "opencodeModel": settings.opencode_model,
+                            "opencodeMaxTurns": settings.opencode_max_turns,
                             "llmProvider": settings.llm_provider,
                             "ollamaHost": settings.ollama_host,
                             "ollamaModel": settings.ollama_model,
@@ -2706,18 +2931,13 @@ async def websocket_endpoint(
                 skill = loader.get(skill_name)
 
                 if not skill:
-                    available = [s.name for s in loader.get_invocable()]
-                    hint = (
-                        f"Available commands: /{', /'.join(available)}"
-                        if available
-                        else "No skills installed yet."
-                    )
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "content": f"Unknown command: /{skill_name}\n\n{hint}",
-                        }
-                    )
+                    # Not a skill — forward as a normal chat message so
+                    # CommandHandler can pick up /backend, /model, etc.
+                    full_text = f"/{skill_name}"
+                    if skill_args:
+                        full_text += f" {skill_args}"
+                    data["content"] = full_text
+                    await ws_adapter.handle_message(chat_id, data)
                 else:
                     await websocket.send_json(
                         {"type": "notification", "content": f"🎯 Running skill: {skill_name}"}
@@ -2747,13 +2967,14 @@ async def websocket_endpoint(
 
 @app.get("/api/identity")
 async def get_identity():
-    """Get agent identity context (all 4 identity files)."""
+    """Get agent identity context (all 5 identity files)."""
     provider = DefaultBootstrapProvider(get_config_path().parent)
     context = await provider.get_context()
     return {
         "identity_file": context.identity,
         "soul_file": context.soul,
         "style_file": context.style,
+        "instructions_file": context.instructions,
         "user_file": context.user_profile,
     }
 
@@ -2769,6 +2990,7 @@ async def save_identity(request: Request):
         "identity_file": "IDENTITY.md",
         "soul_file": "SOUL.md",
         "style_file": "STYLE.md",
+        "instructions_file": "INSTRUCTIONS.md",
         "user_file": "USER.md",
     }
     updated = []

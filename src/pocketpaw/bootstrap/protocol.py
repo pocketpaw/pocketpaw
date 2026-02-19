@@ -15,6 +15,7 @@ class BootstrapContext:
     identity: str  # The main system prompt / personality
     soul: str  # Deeper philosophical core
     style: str  # Communication style guidelines
+    instructions: str = ""  # Behavioral instructions & tool usage guides
     knowledge: list[str] = field(default_factory=list)  # Key background info
     user_profile: str = ""  # USER.md content
 
@@ -28,6 +29,10 @@ class BootstrapContext:
             "\n# Communication Style",
             self.style,
         ]
+
+        if self.instructions:
+            parts.append("\n# Instructions")
+            parts.append(self.instructions)
 
         if self.knowledge:
             parts.append("\n# Key Knowledge")

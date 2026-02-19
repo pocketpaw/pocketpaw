@@ -75,7 +75,7 @@ def _make_sdk(settings=None):
 async def _collect(sdk, message="hi"):
     """Collect all AgentEvents from chat()."""
     events = []
-    async for ev in sdk.chat(message):
+    async for ev in sdk.run(message):
         events.append(ev)
     return events
 
@@ -268,10 +268,12 @@ class TestLoopThinkingIntegration:
             # Mock router to yield thinking + done
             router = MagicMock()
 
-            async def fake_run(msg, *, system_prompt=None, history=None):
-                yield {"type": "thinking", "content": "Deep thought", "metadata": {}}
-                yield {"type": "thinking_done", "content": "", "metadata": {}}
-                yield {"type": "done", "content": "", "metadata": {}}
+            async def fake_run(msg, *, system_prompt=None, history=None, session_key=None):
+                from pocketpaw.agents.protocol import AgentEvent
+
+                yield AgentEvent(type="thinking", content="Deep thought")
+                yield AgentEvent(type="thinking_done", content="")
+                yield AgentEvent(type="done", content="")
 
             router.run = fake_run
             loop._router = router
@@ -330,10 +332,12 @@ class TestLoopThinkingIntegration:
 
             router = MagicMock()
 
-            async def fake_run(msg, *, system_prompt=None, history=None):
-                yield {"type": "thinking", "content": "secret reasoning", "metadata": {}}
-                yield {"type": "message", "content": "Hello!", "metadata": {}}
-                yield {"type": "done", "content": "", "metadata": {}}
+            async def fake_run(msg, *, system_prompt=None, history=None, session_key=None):
+                from pocketpaw.agents.protocol import AgentEvent
+
+                yield AgentEvent(type="thinking", content="secret reasoning")
+                yield AgentEvent(type="message", content="Hello!")
+                yield AgentEvent(type="done", content="")
 
             router.run = fake_run
             loop._router = router

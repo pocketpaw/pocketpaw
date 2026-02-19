@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.deep_work.models import AgentSpec, PlannerResult, TaskSpec
 from pocketpaw.deep_work.planner import PlannerAgent
 from pocketpaw.deep_work.prompts import (
@@ -539,7 +540,7 @@ class TestRunPromptErrorHandling:
 
         # Simulate a router that yields only an error (e.g. bad API key)
         async def mock_run(prompt):
-            yield {"type": "error", "content": "API key not configured"}
+            yield AgentEvent(type="error", content="API key not configured")
 
         mock_router = MagicMock()
         mock_router.run = mock_run
@@ -554,9 +555,9 @@ class TestRunPromptErrorHandling:
         planner = PlannerAgent(manager)
 
         async def mock_run(prompt):
-            yield {"type": "tool_use", "content": "thinking..."}
-            yield {"type": "error", "content": "Connection refused"}
-            yield {"type": "done", "content": ""}
+            yield AgentEvent(type="tool_use", content="thinking...")
+            yield AgentEvent(type="error", content="Connection refused")
+            yield AgentEvent(type="done", content="")
 
         mock_router = MagicMock()
         mock_router.run = mock_run
@@ -571,9 +572,9 @@ class TestRunPromptErrorHandling:
         planner = PlannerAgent(manager)
 
         async def mock_run(prompt):
-            yield {"type": "message", "content": "Hello "}
-            yield {"type": "message", "content": "world"}
-            yield {"type": "done", "content": ""}
+            yield AgentEvent(type="message", content="Hello ")
+            yield AgentEvent(type="message", content="world")
+            yield AgentEvent(type="done", content="")
 
         mock_router = MagicMock()
         mock_router.run = mock_run
@@ -588,10 +589,10 @@ class TestRunPromptErrorHandling:
         planner = PlannerAgent(manager)
 
         async def mock_run(prompt):
-            yield {"type": "tool_use", "content": "using search"}
-            yield {"type": "message", "content": "Found results"}
-            yield {"type": "tool_result", "content": "done"}
-            yield {"type": "done", "content": ""}
+            yield AgentEvent(type="tool_use", content="using search")
+            yield AgentEvent(type="message", content="Found results")
+            yield AgentEvent(type="tool_result", content="done")
+            yield AgentEvent(type="done", content="")
 
         mock_router = MagicMock()
         mock_router.run = mock_run

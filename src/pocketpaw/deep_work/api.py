@@ -1,9 +1,13 @@
 # Deep Work API endpoints.
 # Created: 2026-02-12
+# Updated: 2026-02-18 — Added POST /parse-goal endpoint for structured goal
+#   analysis. Updated /start to accept goal_analysis and pass to session.
+#   Plan response now includes goal_analysis from project metadata.
 # Updated: 2026-02-16 — Enrich project dict with folder_path and file_count
 #   in get_plan() so the frontend Output Files panel can browse project output.
 #
 # FastAPI router for Deep Work orchestration:
+#   POST /parse-goal                          — analyze goal (domain, complexity)
 #   POST /start                               — submit project (natural language)
 #   GET  /projects/{id}/plan                  — get plan with execution_levels
 #   POST /projects/{id}/approve               — approve plan, start execution
@@ -25,6 +29,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Deep Work"])
 
 
+class ParseGoalRequest(BaseModel):
+    """Request body for goal analysis."""
+
+    description: str = Field(
+        ..., min_length=10, max_length=5000, description="Natural language goal description"
+    )
+
+
 class StartDeepWorkRequest(BaseModel):
     """Request body for starting a Deep Work project."""
 
@@ -32,8 +44,15 @@ class StartDeepWorkRequest(BaseModel):
         ..., min_length=10, max_length=5000, description="Natural language project description"
     )
     research_depth: str = Field(
-        default="standard",
-        description="Research thoroughness: 'none' (skip entirely), 'quick', 'standard', or 'deep'",
+        default="auto",
+        description=(
+            "Research thoroughness: 'auto' (use goal parser suggestion), "
+            "'none', 'quick', 'standard', or 'deep'"
+        ),
+    )
+    goal_analysis: dict | None = Field(
+        default=None,
+        description="Pre-parsed goal analysis dict (from /parse-goal). Skips re-parsing.",
     )
 
 
@@ -53,6 +72,27 @@ def _enrich_project_dict(project_dict: dict) -> dict:
         else 0
     )
     return project_dict
+
+
+@router.post("/parse-goal")
+async def parse_goal(request: ParseGoalRequest) -> dict[str, Any]:
+    """Analyze a user's goal and return structured analysis.
+
+    Returns domain detection, complexity estimation, AI/human roles,
+    and clarification questions. This is a preview step — the user
+    can review the analysis before starting planning.
+    """
+    from pocketpaw.deep_work.goal_parser import GoalParser
+
+    try:
+        parser = GoalParser()
+        analysis = await parser.parse(request.description)
+        return {"success": True, "goal_analysis": analysis.to_dict()}
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Goal parsing failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/start")
@@ -86,6 +126,7 @@ async def start_deep_work(request: StartDeepWorkRequest) -> dict[str, Any]:
                 project.id,
                 request.description,
                 research_depth=request.research_depth,
+                goal_analysis=request.goal_analysis,
             )
         except Exception as e:
             logger.exception(f"Background planning failed for {project.id}: {e}")
@@ -129,6 +170,9 @@ async def get_plan(project_id: str) -> dict[str, Any]:
 
     project_dict = _enrich_project_dict(project.to_dict())
 
+    # Include goal analysis from project metadata (if available)
+    goal_analysis = project.metadata.get("goal_analysis")
+
     return {
         "project": project_dict,
         "tasks": [t.to_dict() for t in tasks],
@@ -136,6 +180,7 @@ async def get_plan(project_id: str) -> dict[str, Any]:
         "prd": prd,
         "execution_levels": execution_levels,
         "task_level_map": task_level_map,
+        "goal_analysis": goal_analysis,
     }
 
 

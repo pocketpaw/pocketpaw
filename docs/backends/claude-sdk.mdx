@@ -20,6 +20,28 @@ This backend leverages the `claude-agent-sdk` package, which provides:
 - **MCP integration**: Native Model Context Protocol server support
 - **Streaming**: Real-time token-by-token response streaming
 
+## Authentication
+
+An **Anthropic API key** is required when using this backend with the Anthropic provider. This is a hard requirement — PocketPaw will not process messages without one.
+
+<Callout type="warning">
+  **OAuth tokens are not permitted.** Anthropic's [authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) prohibits third-party applications from using OAuth tokens obtained through Claude Free, Pro, or Max plans. PocketPaw must authenticate using an API key from [Claude Console](https://console.anthropic.com/api-keys).
+</Callout>
+
+<Steps>
+  <Step title="Get an API key">
+    Go to [console.anthropic.com/api-keys](https://console.anthropic.com/api-keys) and create a new key.
+  </Step>
+  <Step title="Set the key">
+    Add it as an environment variable, in the dashboard Settings, or in `~/.pocketpaw/config.json`:
+    ```bash
+    export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
+    ```
+  </Step>
+</Steps>
+
+This requirement only applies to the **Anthropic provider**. If you use Ollama (local models), no API key is needed.
+
 ## Configuration
 
 ```bash
@@ -91,7 +113,7 @@ The SDK uses capitalized tool names internally. PocketPaw maps these to the poli
 | `Edit` | `edit_file` |
 | `Skill` | `skill` |
 
-This mapping is handled by `_SDK_TO_POLICY` in `claude_sdk.py`.
+This mapping is handled by `_TOOL_POLICY_MAP` in the backend's `info()` method.
 
 ## Safety Hooks
 
@@ -141,11 +163,13 @@ This means skills created by the `skill_gen` tool (which writes to `~/.claude/sk
 
 ## Response Format
 
-The backend yields standardized response chunks:
+The backend yields standardized `AgentEvent` objects (not raw dicts):
 
 ```python
-{"type": "message", "content": "Here's the result..."}
-{"type": "tool_use", "content": "", "metadata": {"tool": "Bash", "input": {"command": "ls"}}}
-{"type": "tool_result", "content": "file1.txt\nfile2.txt", "metadata": {"tool": "Bash"}}
-{"type": "done", "content": ""}
+AgentEvent(type="message", content="Here's the result...")
+AgentEvent(type="tool_use", content="", metadata={"tool": "Bash", "input": {"command": "ls"}})
+AgentEvent(type="tool_result", content="file1.txt\nfile2.txt", metadata={"tool": "Bash"})
+AgentEvent(type="done", content="")
 ```
+
+All backends use the same `AgentEvent` format, defined in `agents/backend.py`.

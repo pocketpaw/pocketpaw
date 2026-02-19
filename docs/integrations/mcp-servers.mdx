@@ -183,9 +183,13 @@ Presets that use OAuth are marked with an `oauth` flag and handle authentication
 
 The Claude Agent SDK has native MCP support. PocketPaw translates `mcp.json` configurations into the SDK's expected format and passes them during initialization.
 
-### PocketPaw Native
+### Google ADK
 
-The native backend loads MCP tools via `_get_mcp_tools()` and registers them with the tool registry using the naming convention `mcp_<server>__<tool>`.
+The Google ADK backend has native MCP support via `McpToolset`, supporting stdio, SSE, and HTTP transports.
+
+### Codex CLI
+
+The Codex CLI backend forwards MCP server configurations to the Codex CLI process.
 
 ## Dashboard Management
 

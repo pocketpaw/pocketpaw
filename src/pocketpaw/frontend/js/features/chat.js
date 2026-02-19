@@ -109,29 +109,15 @@ window.PocketPaw.Chat = {
              * Start streaming mode
              */
             startStreaming() {
-                if (this._streamTimeout) {
-                    clearTimeout(this._streamTimeout);
-                }
                 this.isStreaming = true;
                 this.isThinking = true;
                 this.streamingContent = '';
-                // Safety timeout — prevent infinite spinner if backend hangs
-                this._streamTimeout = setTimeout(() => {
-                    if (this.isStreaming) {
-                        this.addMessage('assistant', 'Response timed out. The agent may not be configured — check Settings.');
-                        this.endStreaming();
-                    }
-                }, 90000);
             },
 
             /**
              * End streaming mode
              */
             endStreaming() {
-                if (this._streamTimeout) {
-                    clearTimeout(this._streamTimeout);
-                    this._streamTimeout = null;
-                }
                 if (this.isStreaming && this.streamingContent) {
                     this.addMessage('assistant', this.streamingContent);
                 }
@@ -181,19 +167,25 @@ window.PocketPaw.Chat = {
                 if (!text) return;
 
                 // Check for skill command (starts with /)
+                // Only intercept if the name matches a registered skill;
+                // otherwise fall through to chat so CommandHandler picks it up
+                // (e.g. /backend, /backends, /model, /tools, /help, etc.)
                 if (text.startsWith('/')) {
                     const parts = text.slice(1).split(' ');
                     const skillName = parts[0];
-                    const args = parts.slice(1).join(' ');
+                    const isSkill = (this.skills || []).some(
+                        s => s.name.toLowerCase() === skillName.toLowerCase()
+                    );
 
-                    // Add user message
-                    this.addMessage('user', text);
-                    this.inputText = '';
-
-                    // Run the skill
-                    socket.send('run_skill', { name: skillName, args });
-                    this.log(`Running skill: /${skillName} ${args}`, 'info');
-                    return;
+                    if (isSkill) {
+                        const args = parts.slice(1).join(' ');
+                        this.addMessage('user', text);
+                        this.inputText = '';
+                        socket.send('run_skill', { name: skillName, args });
+                        this.log(`Running skill: /${skillName} ${args}`, 'info');
+                        return;
+                    }
+                    // Not a skill — fall through to send as normal message
                 }
 
                 // Add user message
@@ -212,6 +204,15 @@ window.PocketPaw.Chat = {
             /**
              * Toggle agent mode
              */
+            /**
+             * Stop in-flight response
+             */
+            stopResponse() {
+                if (!this.isStreaming) return;
+                socket.stopResponse();
+                this.log('Stop requested', 'info');
+            },
+
             toggleAgent() {
                 socket.toggleAgent(this.agentActive);
                 this.log(`Switched Agent Mode: ${this.agentActive ? 'ON' : 'OFF'}`, 'info');

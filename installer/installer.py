@@ -770,6 +770,7 @@ class PackageInstaller:
     def __init__(self, pip_cmd: str, from_git: bool = False) -> None:
         self.pip_cmd = pip_cmd
         self.from_git = from_git
+        self.used_uv_tool = False  # Track if uv tool install was used
 
     def _build_pkg_spec(self, extras: list[str]) -> str:
         """Build the package specifier, optionally pointing at git."""
@@ -786,6 +787,7 @@ class PackageInstaller:
         if shutil.which("uv"):
             ok = self._install_with_uv_tool(pkg, extras, upgrade)
             if ok:
+                self.used_uv_tool = True  # Track that uv tool was used
                 return True
 
         # Fallback: pip-style install
@@ -800,11 +802,11 @@ class PackageInstaller:
         cmd_parts.append(pkg)
 
         if _HAS_RICH and console:
-            with console.status(f"[bold cyan]Installing {pkg}...[/bold cyan]"):
-                ok, stderr_text = self._run_cmd_capture(cmd_parts)
+            console.print(f"[bold cyan]Installing {pkg}...[/bold cyan]")
         else:
             print(f"  Installing {pkg}...")
-            ok, stderr_text = self._run_cmd_capture(cmd_parts)
+
+        ok, stderr_text = self._run_cmd_capture(cmd_parts)
 
         if ok:
             return True
@@ -831,20 +833,25 @@ class PackageInstaller:
             cmd.append(pkg)
 
         if _HAS_RICH and console:
-            with console.status(f"[bold cyan]Installing {pkg} (uv tool)...[/bold cyan]"):
-                return self._run_cmd(cmd)
+            console.print(f"[bold cyan]Installing {pkg} (uv tool)...[/bold cyan]")
         else:
             print(f"  Installing {pkg} (uv tool)...")
-            return self._run_cmd(cmd)
+        return self._run_cmd(cmd)
 
     def install_playwright(self) -> bool:
         """Install Playwright browsers."""
+        # When using uv tool install, the package is in an isolated environment.
+        # Use 'uv run' to execute playwright in that environment.
+        if self.used_uv_tool and shutil.which("uv"):
+            cmd = ["uv", "run", "--with", f"{PACKAGE}[browser]", "playwright", "install", "chromium"]
+        else:
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+
         if _HAS_RICH and console:
-            with console.status("[bold cyan]Installing Playwright browsers...[/bold cyan]"):
-                return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+            console.print("[bold cyan]Installing Playwright browsers...[/bold cyan]")
         else:
             print("  Installing Playwright browsers...")
-            return self._run_cmd([sys.executable, "-m", "playwright", "install", "chromium"])
+        return self._run_cmd(cmd)
 
     def _run_cmd(self, cmd: list[str]) -> bool:
         """Run a command, return True on success."""
@@ -852,28 +859,38 @@ class PackageInstaller:
         return ok
 
     def _run_cmd_capture(self, cmd: list[str]) -> tuple[bool, str]:
-        """Run a command, return (success, stderr_text)."""
+        """Run a command, streaming stdout to console, return (success, stderr_text)."""
         try:
-            result = subprocess.run(
+            # We use Popen to stream stdout (by inheriting it) while capturing stderr
+            # so we can check for specific error messages (PEP 668).
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=sys.stdout,  # Stream to console
+                stderr=subprocess.PIPE,  # Capture stderr
                 text=True,
-                timeout=600,
             )
-            if result.returncode != 0:
-                stderr_text = result.stderr or ""
+
+            # Wait for completion
+            _, stderr = process.communicate(timeout=600)
+
+            # Since output is streamed, we must print any captured stderr so the user sees errors
+            if stderr:
+                print(stderr, file=sys.stderr)
+
+            if process.returncode != 0:
+                stderr_text = stderr or ""
                 # Silently return for PEP 668 — caller will handle retry
                 if "externally-managed-environment" in stderr_text:
                     return False, stderr_text
+                
                 print(f"\n  Command failed: {' '.join(cmd)}")
-                if stderr_text:
-                    lines = stderr_text.strip().splitlines()[-20:]
-                    for line in lines:
-                        print(f"    {line}")
+                # Stderr is already printed above
                 print()
                 return False, stderr_text
+                
             return True, ""
         except subprocess.TimeoutExpired:
+            process.kill()
             print("\n  Installation timed out (10 minutes). Try again with a better connection.\n")
             return False, ""
         except FileNotFoundError:
@@ -893,10 +910,11 @@ class PackageInstaller:
         retry_cmd.insert(idx, "--break-system-packages")
 
         if _HAS_RICH and console:
-            with console.status(f"[bold cyan]Retrying {pkg}...[/bold cyan]"):
-                ok, _ = self._run_cmd_capture(retry_cmd)
+            console.print(f"[bold cyan]Retrying {pkg}...[/bold cyan]")
         else:
-            ok, _ = self._run_cmd_capture(retry_cmd)
+            print(f"  Retrying {pkg}...")
+        
+        ok, _ = self._run_cmd_capture(retry_cmd)
         return ok
 
 

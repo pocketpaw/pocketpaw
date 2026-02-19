@@ -260,113 +260,122 @@ class MCPManager:
         """Start an MCP server and initialize its session.
 
         Returns True on success, False on failure.
+        Uses a global lock to prevent races from interactive API calls.
         """
         async with self._lock:
-            if config.name in self._servers and self._servers[config.name].connected:
-                logger.info("MCP server '%s' already connected", config.name)
-                return True
+            return await self._start_server_inner(config)
 
-            state = _ServerState(config=config)
-            self._servers[config.name] = state
+    async def _start_server_inner(self, config: MCPServerConfig) -> bool:
+        """Start an MCP server (no lock — caller must handle synchronization).
 
-            # Build OAuth auth if needed
-            auth = None
-            if config.oauth:
-                try:
-                    auth = self._make_oauth_auth(config)
-                except Exception as e:
-                    state.error = f"OAuth setup failed: {e}"
-                    logger.error("OAuth setup failed for '%s': %s", config.name, e)
-                    return False
+        Used directly by start_enabled_servers() for parallel startup,
+        and indirectly by start_server() which wraps it with a lock.
+        """
+        if config.name in self._servers and self._servers[config.name].connected:
+            logger.info("MCP server '%s' already connected", config.name)
+            return True
 
+        state = _ServerState(config=config)
+        self._servers[config.name] = state
+
+        # Build OAuth auth if needed
+        auth = None
+        if config.oauth:
             try:
-                timeout = config.timeout or 30
-                # OAuth flows need more time for user interaction
-                connect_timeout = 300 if config.oauth else timeout
+                auth = self._make_oauth_auth(config)
+            except Exception as e:
+                state.error = f"OAuth setup failed: {e}"
+                logger.error("OAuth setup failed for '%s': %s", config.name, e)
+                return False
 
-                if config.transport == "stdio":
-                    await asyncio.wait_for(self._connect_stdio(state), timeout=timeout)
-                elif config.transport == "streamable-http":
+        try:
+            timeout = config.timeout or 30
+            # OAuth flows need more time for user interaction
+            connect_timeout = 300 if config.oauth else timeout
+
+            if config.transport == "stdio":
+                await asyncio.wait_for(self._connect_stdio(state), timeout=timeout)
+            elif config.transport == "streamable-http":
+                await self._connect_remote_with_timeout(
+                    state,
+                    connect_timeout,
+                    lambda s: self._connect_streamable_http(s, auth=auth),
+                )
+            elif config.transport == "sse":
+                await self._connect_remote_with_timeout(
+                    state,
+                    connect_timeout,
+                    lambda s: self._connect_sse(s, auth=auth),
+                )
+            elif config.transport == "http":
+                # Auto-detect: try Streamable HTTP first, fall back to SSE.
+                # Modern MCP servers use Streamable HTTP (POST-based);
+                # older ones use SSE (GET-based).
+                try:
                     await self._connect_remote_with_timeout(
                         state,
                         connect_timeout,
-                        lambda s: self._connect_streamable_http(s, auth=auth),
+                        lambda s: self._connect_streamable_http(
+                            s, auth=auth
+                        ),
                     )
-                elif config.transport == "sse":
+                except TimeoutError:
+                    raise  # Don't waste time retrying on timeout
+                except BaseException:
+                    await self._cleanup_state(state)
+                    state = _ServerState(config=config)
+                    self._servers[config.name] = state
+                    logger.debug(
+                        "Streamable HTTP failed for '%s', trying SSE",
+                        config.name,
+                    )
                     await self._connect_remote_with_timeout(
                         state,
                         connect_timeout,
                         lambda s: self._connect_sse(s, auth=auth),
                     )
-                elif config.transport == "http":
-                    # Auto-detect: try Streamable HTTP first, fall back to SSE.
-                    # Modern MCP servers use Streamable HTTP (POST-based);
-                    # older ones use SSE (GET-based).
-                    try:
-                        await self._connect_remote_with_timeout(
-                            state,
-                            connect_timeout,
-                            lambda s: self._connect_streamable_http(
-                                s, auth=auth
-                            ),
-                        )
-                    except TimeoutError:
-                        raise  # Don't waste time retrying on timeout
-                    except BaseException:
-                        await self._cleanup_state(state)
-                        state = _ServerState(config=config)
-                        self._servers[config.name] = state
-                        logger.debug(
-                            "Streamable HTTP failed for '%s', trying SSE",
-                            config.name,
-                        )
-                        await self._connect_remote_with_timeout(
-                            state,
-                            connect_timeout,
-                            lambda s: self._connect_sse(s, auth=auth),
-                        )
-                else:
-                    state.error = f"Unknown transport: {config.transport}"
-                    logger.error(state.error)
-                    return False
+            else:
+                state.error = f"Unknown transport: {config.transport}"
+                logger.error(state.error)
+                return False
 
-                # Discover tools (also bounded by timeout)
-                await asyncio.wait_for(self._discover_tools(state), timeout=timeout)
-                state.connected = True
-                logger.info(
-                    "MCP server '%s' started — %d tools",
-                    config.name,
-                    len(state.tools),
+            # Discover tools (also bounded by timeout)
+            await asyncio.wait_for(self._discover_tools(state), timeout=timeout)
+            state.connected = True
+            logger.info(
+                "MCP server '%s' started — %d tools",
+                config.name,
+                len(state.tools),
+            )
+            return True
+
+        except TimeoutError:
+            effective_timeout = 300 if config.oauth else (config.timeout or 30)
+            state.error = f"Connection timed out after {effective_timeout}s"
+            state.connected = False
+            await self._cleanup_state(state)
+            logger.error("MCP server '%s' timed out after %ds", config.name, effective_timeout)
+            return False
+        except BaseException as e:
+            # Catch BaseException to handle ExceptionGroup / BaseExceptionGroup
+            # from anyio TaskGroup failures in the MCP library.
+            root_msg = _extract_root_error(e)
+
+            # Provide actionable hint for OAuth registration failures
+            if config.oauth and "Registration failed" in root_msg:
+                root_msg = (
+                    f"{root_msg}. "
+                    "This server doesn't support dynamic client registration. "
+                    "You can set mcp_client_metadata_url in Settings to a "
+                    "publicly-hosted CIMD JSON file, or configure the server "
+                    "with an API token instead of OAuth."
                 )
-                return True
 
-            except TimeoutError:
-                effective_timeout = 300 if config.oauth else (config.timeout or 30)
-                state.error = f"Connection timed out after {effective_timeout}s"
-                state.connected = False
-                await self._cleanup_state(state)
-                logger.error("MCP server '%s' timed out after %ds", config.name, effective_timeout)
-                return False
-            except BaseException as e:
-                # Catch BaseException to handle ExceptionGroup / BaseExceptionGroup
-                # from anyio TaskGroup failures in the MCP library.
-                root_msg = _extract_root_error(e)
-
-                # Provide actionable hint for OAuth registration failures
-                if config.oauth and "Registration failed" in root_msg:
-                    root_msg = (
-                        f"{root_msg}. "
-                        "This server doesn't support dynamic client registration. "
-                        "You can set mcp_client_metadata_url in Settings to a "
-                        "publicly-hosted CIMD JSON file, or configure the server "
-                        "with an API token instead of OAuth."
-                    )
-
-                state.error = root_msg
-                state.connected = False
-                await self._cleanup_state(state)
-                logger.error("Failed to start MCP server '%s': %s", config.name, root_msg)
-                return False
+            state.error = root_msg
+            state.connected = False
+            await self._cleanup_state(state)
+            logger.error("Failed to start MCP server '%s': %s", config.name, root_msg)
+            return False
 
     async def _connect_stdio(self, state: _ServerState) -> None:
         """Connect to an MCP server via stdio subprocess."""
@@ -578,8 +587,11 @@ class MCPManager:
             result[cfg.name] = info
         # Overlay runtime state for servers that have been started
         for name, state in self._servers.items():
+            # A server in _servers that isn't connected and has no error is still starting
+            connecting = not state.connected and not state.error
             info = {
                 "connected": state.connected,
+                "connecting": connecting,
                 "tool_count": len(state.tools),
                 "error": state.error,
                 "transport": state.config.transport,
@@ -591,11 +603,32 @@ class MCPManager:
         return result
 
     async def start_enabled_servers(self) -> None:
-        """Start all enabled servers from config."""
+        """Start all enabled servers from config (in parallel).
+
+        Each server connects independently so a slow/failing server
+        doesn't block the others. Safe to call without the global lock
+        because each server writes to its own key in ``_servers``.
+        """
         configs = load_mcp_config()
-        for config in configs:
-            if config.enabled:
-                await self.start_server(config)
+        enabled = [c for c in configs if c.enabled]
+        if not enabled:
+            return
+
+        if len(enabled) == 1:
+            await self._start_server_inner(enabled[0])
+            return
+
+        results = await asyncio.gather(
+            *(self._start_server_inner(c) for c in enabled),
+            return_exceptions=True,
+        )
+        for config, result in zip(enabled, results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "MCP server '%s' raised during startup: %s",
+                    config.name,
+                    result,
+                )
 
     def add_server_config(self, config: MCPServerConfig) -> None:
         """Add a server config and persist it."""

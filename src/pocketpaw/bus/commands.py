@@ -9,6 +9,7 @@ responses without invoking the agent backend.
 import logging
 import re
 import uuid
+from collections.abc import Callable
 
 from pocketpaw.bus.events import InboundMessage, OutboundMessage
 from pocketpaw.memory import get_memory_manager
@@ -16,8 +17,31 @@ from pocketpaw.memory import get_memory_manager
 logger = logging.getLogger(__name__)
 
 _COMMANDS = frozenset(
-    {"/new", "/sessions", "/resume", "/help", "/clear", "/rename", "/status", "/delete"}
+    {
+        "/new",
+        "/sessions",
+        "/resume",
+        "/help",
+        "/clear",
+        "/rename",
+        "/status",
+        "/delete",
+        "/backend",
+        "/backends",
+        "/model",
+        "/tools",
+    }
 )
+
+# Maps backend name → Settings field that holds its model override.
+_BACKEND_MODEL_FIELDS: dict[str, str] = {
+    "claude_agent_sdk": "claude_sdk_model",
+    "openai_agents": "openai_agents_model",
+    "google_adk": "google_adk_model",
+    "codex_cli": "codex_cli_model",
+    "opencode": "opencode_model",
+    "copilot_sdk": "copilot_sdk_model",
+}
 
 # Matches "/cmd" or "!cmd" (with optional @BotName suffix) and trailing args.
 # The "!" prefix is a fallback for channels where "/" is intercepted client-side
@@ -39,6 +63,16 @@ class CommandHandler:
         # Per-session-key cache of the last shown session list
         # so /resume <n> can reference by number
         self._last_shown: dict[str, list[dict]] = {}
+        self._on_settings_changed: Callable[[], None] | None = None
+
+    def set_on_settings_changed(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked after any command mutates settings."""
+        self._on_settings_changed = callback
+
+    def _notify_settings_changed(self) -> None:
+        """Fire the settings-changed callback (if registered)."""
+        if self._on_settings_changed is not None:
+            self._on_settings_changed()
 
     def is_command(self, content: str) -> bool:
         """Check if the message content is a recognised command."""
@@ -79,6 +113,14 @@ class CommandHandler:
             return await self._cmd_status(message, session_key)
         elif cmd == "/delete":
             return await self._cmd_delete(message, session_key)
+        elif cmd == "/backends":
+            return self._cmd_backends(message)
+        elif cmd == "/backend":
+            return self._cmd_backend(message, args)
+        elif cmd == "/model":
+            return self._cmd_model(message, args)
+        elif cmd == "/tools":
+            return self._cmd_tools(message, args)
         elif cmd == "/help":
             return self._cmd_help(message)
         return None
@@ -337,6 +379,196 @@ class CommandHandler:
         )
 
     # ------------------------------------------------------------------
+    # /backends
+    # ------------------------------------------------------------------
+
+    def _cmd_backends(self, message: InboundMessage) -> OutboundMessage:
+        """List all registered backends with install status and capabilities."""
+        from pocketpaw.agents.registry import get_backend_class, get_backend_info, list_backends
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        active = settings.agent_backend
+        names = list_backends()
+
+        lines = ["**Available Backends:**\n"]
+        for name in names:
+            marker = " (active)" if name == active else ""
+            info = get_backend_info(name)
+            if info is not None:
+                try:
+                    caps = ", ".join(
+                        f.name.lower().replace("_", " ")
+                        for f in type(info.capabilities)
+                        if f in info.capabilities
+                    )
+                except TypeError:
+                    caps = str(info.capabilities)
+                lines.append(f"- **{info.display_name}** (`{name}`){marker} — {caps}")
+            else:
+                # Backend registered but not installed
+                cls = get_backend_class(name)
+                status = "not installed" if cls is None else "available"
+                lines.append(f"- `{name}`{marker} — {status}")
+
+        lines.append("\nUse /backend <name> to switch.")
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content="\n".join(lines),
+        )
+
+    # ------------------------------------------------------------------
+    # /backend
+    # ------------------------------------------------------------------
+
+    def _cmd_backend(self, message: InboundMessage, args: str) -> OutboundMessage:
+        """Show or switch the active backend."""
+        from pocketpaw.agents.registry import get_backend_class, list_backends
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+
+        if not args:
+            model_field = _BACKEND_MODEL_FIELDS.get(settings.agent_backend, "")
+            model = getattr(settings, model_field, "") if model_field else ""
+            model_info = f" (model: `{model}`)" if model else " (default model)"
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=f"Current backend: **{settings.agent_backend}**{model_info}",
+            )
+
+        name = args.strip().lower()
+        available = list_backends()
+
+        if name not in available:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=(
+                    f"Unknown backend `{name}`. Available: {', '.join(f'`{b}`' for b in available)}"
+                ),
+            )
+
+        if name == settings.agent_backend:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=f"Already using `{name}`.",
+            )
+
+        cls = get_backend_class(name)
+        if cls is None:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=f"Backend `{name}` is not installed. Check dependencies.",
+            )
+
+        settings.agent_backend = name
+        settings.save()
+        get_settings.cache_clear()
+        self._notify_settings_changed()
+
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content=f"Switched backend to **{name}**.",
+        )
+
+    # ------------------------------------------------------------------
+    # /model
+    # ------------------------------------------------------------------
+
+    def _cmd_model(self, message: InboundMessage, args: str) -> OutboundMessage:
+        """Show or switch the model for the active backend."""
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        backend = settings.agent_backend
+        model_field = _BACKEND_MODEL_FIELDS.get(backend)
+
+        if model_field is None:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=f"Backend `{backend}` does not support model selection.",
+            )
+
+        current = getattr(settings, model_field, "") or ""
+
+        if not args:
+            display = f"`{current}`" if current else "default"
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=f"Current model for `{backend}`: {display}",
+            )
+
+        new_model = args.strip()
+        setattr(settings, model_field, new_model)
+        settings.save()
+        get_settings.cache_clear()
+        self._notify_settings_changed()
+
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content=f"Model for `{backend}` set to **{new_model}**.",
+        )
+
+    # ------------------------------------------------------------------
+    # /tools
+    # ------------------------------------------------------------------
+
+    def _cmd_tools(self, message: InboundMessage, args: str) -> OutboundMessage:
+        """Show or switch the tool profile."""
+        from pocketpaw.config import get_settings
+        from pocketpaw.tools.policy import TOOL_PROFILES
+
+        settings = get_settings()
+        profiles = list(TOOL_PROFILES)
+
+        if not args:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=(
+                    f"Current tool profile: **{settings.tool_profile}**\n"
+                    f"Available: {', '.join(f'`{p}`' for p in profiles)}"
+                ),
+            )
+
+        name = args.strip().lower()
+        if name not in TOOL_PROFILES:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=(
+                    f"Unknown profile `{name}`. Available: {', '.join(f'`{p}`' for p in profiles)}"
+                ),
+            )
+
+        if name == settings.tool_profile:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content=f"Already using `{name}` profile.",
+            )
+
+        settings.tool_profile = name
+        settings.save()
+        get_settings.cache_clear()
+        self._notify_settings_changed()
+
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content=f"Tool profile switched to **{name}**.",
+        )
+
+    # ------------------------------------------------------------------
     # /help
     # ------------------------------------------------------------------
 
@@ -352,6 +584,10 @@ class CommandHandler:
             "/rename <title> — Rename the current session\n"
             "/status — Show current session info\n"
             "/delete — Delete the current session\n"
+            "/backend — Show or switch agent backend\n"
+            "/backends — List all available backends\n"
+            "/model — Show or switch model for current backend\n"
+            "/tools — Show or switch tool profile\n"
             "/help — Show this help message\n\n"
             "_Tip: Use !command instead of /command on channels"
             " where / is intercepted (e.g. Matrix)._"

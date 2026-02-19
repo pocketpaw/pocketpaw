@@ -96,17 +96,84 @@ class Settings(BaseSettings):
     # Agent Backend
     agent_backend: str = Field(
         default="claude_agent_sdk",
-        description="Agent backend: 'claude_agent_sdk' (recommended), 'pocketpaw_native', or 'open_interpreter' (experimental)",
+        description=(
+            "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', or 'opencode'"
+        ),
     )
 
     # Claude Agent SDK Settings
+    claude_sdk_provider: str = Field(
+        default="anthropic",
+        description="Provider for Claude SDK: 'anthropic', 'ollama', or 'openai_compatible'",
+    )
     claude_sdk_model: str = Field(
         default="",
         description="Model for Claude SDK backend (empty = let Claude Code auto-select)",
     )
     claude_sdk_max_turns: int = Field(
-        default=25,
-        description="Max tool-use turns per query in Claude SDK (safety net against runaway loops)",
+        default=100,
+        description="Max tool-use turns per query in Claude SDK (0 = unlimited)",
+    )
+
+    # OpenAI Agents SDK Settings
+    openai_agents_provider: str = Field(
+        default="openai",
+        description="Provider for OpenAI Agents: 'openai', 'ollama', or 'openai_compatible'",
+    )
+    openai_agents_model: str = Field(
+        default="", description="Model for OpenAI Agents backend (empty = gpt-5.2)"
+    )
+    openai_agents_max_turns: int = Field(
+        default=100, description="Max turns per query in OpenAI Agents backend (0 = unlimited)"
+    )
+
+    # Gemini CLI Settings (legacy, kept for config compat)
+    gemini_cli_model: str = Field(
+        default="gemini-3-pro-preview", description="Model for Gemini CLI backend (legacy)"
+    )
+    gemini_cli_max_turns: int = Field(
+        default=100, description="Max turns per query in Gemini CLI backend (legacy, 0 = unlimited)"
+    )
+
+    # Google ADK Settings
+    google_adk_model: str = Field(
+        default="gemini-3-pro-preview", description="Model for Google ADK backend"
+    )
+    google_adk_max_turns: int = Field(
+        default=100, description="Max turns per query in Google ADK backend (0 = unlimited)"
+    )
+
+    # Codex CLI Settings
+    codex_cli_model: str = Field(
+        default="gpt-5.3-codex", description="Model for Codex CLI backend"
+    )
+    codex_cli_max_turns: int = Field(
+        default=100, description="Max turns per query in Codex CLI backend (0 = unlimited)"
+    )
+
+    # Copilot SDK Settings
+    copilot_sdk_provider: str = Field(
+        default="copilot",
+        description="Provider for Copilot SDK: 'copilot', 'openai', 'azure', or 'anthropic'",
+    )
+    copilot_sdk_model: str = Field(
+        default="", description="Model for Copilot SDK backend (empty = gpt-5.2)"
+    )
+    copilot_sdk_max_turns: int = Field(
+        default=100, description="Max turns per query in Copilot SDK backend (0 = unlimited)"
+    )
+
+    # OpenCode Settings
+    opencode_base_url: str = Field(
+        default="http://localhost:4096",
+        description="OpenCode server URL",
+    )
+    opencode_model: str = Field(
+        default="",
+        description="Model for OpenCode (provider/model format, e.g. anthropic/claude-sonnet-4-6)",
+    )
+    opencode_max_turns: int = Field(
+        default=100, description="Max turns per query in OpenCode backend (0 = unlimited)"
     )
 
     # LLM Configuration
@@ -132,12 +199,12 @@ class Settings(BaseSettings):
         default=0,
         description="Max output tokens for OpenAI-compatible endpoint (0 = no limit)",
     )
-    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model to use")
+    gemini_model: str = Field(default="gemini-3-pro-preview", description="Gemini model to use")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
-    openai_model: str = Field(default="gpt-4o", description="OpenAI model to use")
+    openai_model: str = Field(default="gpt-5.2", description="OpenAI model to use")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
     anthropic_model: str = Field(
-        default="claude-sonnet-4-5-20250929", description="Anthropic model to use"
+        default="claude-sonnet-4-6", description="Anthropic model to use"
     )
 
     # Memory Backend
@@ -230,7 +297,7 @@ class Settings(BaseSettings):
 
     # WhatsApp
     whatsapp_mode: str = Field(
-        default="personal",
+        default="",
         description="WhatsApp mode: 'personal' (QR scan via neonize) or 'business' (Cloud API)",
     )
     whatsapp_neonize_db: str = Field(
@@ -304,7 +371,7 @@ class Settings(BaseSettings):
         default="claude-haiku-4-5-20251001", description="Model for simple tasks (greetings, facts)"
     )
     model_tier_moderate: str = Field(
-        default="claude-sonnet-4-5-20250929",
+        default="claude-sonnet-4-6",
         description="Model for moderate tasks (coding, analysis)",
     )
     model_tier_complex: str = Field(
@@ -461,6 +528,12 @@ class Settings(BaseSettings):
         description="Send a one-time welcome hint on first interaction in non-web channels",
     )
 
+    # Channel Autostart
+    channel_autostart: dict[str, bool] = Field(
+        default_factory=dict,
+        description="Per-channel autostart on dashboard launch (missing keys default to True)",
+    )
+
     # Concurrency
     max_concurrent_conversations: int = Field(
         default=5, description="Max parallel conversations processed simultaneously"
@@ -489,8 +562,30 @@ class Settings(BaseSettings):
             "telegram_bot_token": self.telegram_bot_token or existing.get("telegram_bot_token"),
             "allowed_user_id": self.allowed_user_id or existing.get("allowed_user_id"),
             "agent_backend": self.agent_backend,
+            "claude_sdk_provider": self.claude_sdk_provider,
             "claude_sdk_model": self.claude_sdk_model,
             "claude_sdk_max_turns": self.claude_sdk_max_turns,
+            # OpenAI Agents
+            "openai_agents_provider": self.openai_agents_provider,
+            "openai_agents_model": self.openai_agents_model,
+            "openai_agents_max_turns": self.openai_agents_max_turns,
+            # Gemini CLI (legacy)
+            "gemini_cli_model": self.gemini_cli_model,
+            "gemini_cli_max_turns": self.gemini_cli_max_turns,
+            # Google ADK
+            "google_adk_model": self.google_adk_model,
+            "google_adk_max_turns": self.google_adk_max_turns,
+            # Codex CLI
+            "codex_cli_model": self.codex_cli_model,
+            "codex_cli_max_turns": self.codex_cli_max_turns,
+            # Copilot SDK
+            "copilot_sdk_provider": self.copilot_sdk_provider,
+            "copilot_sdk_model": self.copilot_sdk_model,
+            "copilot_sdk_max_turns": self.copilot_sdk_max_turns,
+            # OpenCode
+            "opencode_base_url": self.opencode_base_url,
+            "opencode_model": self.opencode_model,
+            "opencode_max_turns": self.opencode_max_turns,
             "memory_backend": self.memory_backend,
             "memory_use_inference": self.memory_use_inference,
             "mem0_llm_provider": self.mem0_llm_provider,
@@ -639,6 +734,8 @@ class Settings(BaseSettings):
             "media_max_file_size_mb": self.media_max_file_size_mb,
             # UX
             "welcome_hint_enabled": self.welcome_hint_enabled,
+            # Channel Autostart
+            "channel_autostart": self.channel_autostart,
             # Concurrency
             "max_concurrent_conversations": self.max_concurrent_conversations,
         }

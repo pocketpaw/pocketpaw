@@ -244,14 +244,29 @@
             "icon": "lucide:sparkles"
           },
           {
-            "label": "PocketPaw Native",
-            "href": "/backends/pocketpaw-native",
-            "icon": "lucide:bot"
+            "label": "OpenAI Agents SDK",
+            "href": "/backends/openai-agents",
+            "icon": "lucide:brain"
           },
           {
-            "label": "Open Interpreter",
-            "href": "/backends/open-interpreter",
-            "icon": "lucide:terminal"
+            "label": "Google ADK",
+            "href": "/backends/google-adk",
+            "icon": "lucide:hexagon"
+          },
+          {
+            "label": "Codex CLI",
+            "href": "/backends/codex-cli",
+            "icon": "lucide:code"
+          },
+          {
+            "label": "OpenCode",
+            "href": "/backends/opencode",
+            "icon": "lucide:server"
+          },
+          {
+            "label": "Copilot SDK",
+            "href": "/backends/copilot-sdk",
+            "icon": "lucide:github"
           },
           {
             "label": "Ollama (Local LLMs)",
@@ -668,7 +683,8 @@
       "slack ai bot",
       "whatsapp ai bot",
       "claude agent sdk",
-      "open interpreter",
+      "openai agents",
+      "google adk",
       "mcp servers",
       "ai automation",
       "pocketpaw",

@@ -1,0 +1,72 @@
+---
+title: OpenCode
+description: "The OpenCode backend connects to an external OpenCode server via REST API. A lightweight option for teams already running OpenCode."
+section: Agent Backends
+ogType: article
+keywords: ["opencode", "rest api", "external server", "code agent"]
+tags: ["backends", "opencode"]
+---
+
+# OpenCode
+
+The OpenCode backend connects to an external **OpenCode server** via REST API. It's a lightweight option for teams that already run OpenCode as a separate service.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: External server (model managed by OpenCode)
+- **Built-in tools**: Server-managed (no PocketPaw-side tool definitions)
+- **MCP support**: No
+- **Architecture**: HTTP client — communicates with a running OpenCode server
+
+## Prerequisites
+
+Install and start the OpenCode server:
+
+```bash
+# Install the OpenCode Go binary
+go install github.com/opencode-ai/opencode@latest
+
+# Start in server mode
+opencode --server
+```
+
+The server runs on `http://localhost:4096` by default.
+
+## Configuration
+
+```bash
+export POCKETPAW_AGENT_BACKEND="opencode"
+```
+
+### Backend-Specific Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `opencode_base_url` | `POCKETPAW_OPENCODE_BASE_URL` | `"http://localhost:4096"` | OpenCode server URL |
+| `opencode_model` | `POCKETPAW_OPENCODE_MODEL` | `""` (server default) | Model override |
+| `opencode_max_turns` | `POCKETPAW_OPENCODE_MAX_TURNS` | `0` (unlimited) | Max turns per query |
+
+## How It Works
+
+1. PocketPaw creates a session via `POST /session` → receives a session ID
+2. Messages are sent via `POST /session/{id}/message`
+3. Responses stream as NDJSON (newline-delimited JSON)
+4. PocketPaw parses the NDJSON stream into `AgentEvent` objects
+5. A health check (`GET /`) verifies the server is reachable before each request
+
+## API Endpoints Used
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `POST` | `/session` | Create a new session |
+| `POST` | `/session/{id}/message` | Send a message and stream response |
+| `GET` | `/` | Health check |
+
+## When to Use
+
+Choose OpenCode when:
+
+- You already run OpenCode as a separate service
+- You want a backend where the model and tools are managed externally
+- You prefer a thin client architecture with PocketPaw as the frontend

@@ -12,7 +12,7 @@ tags: ["advanced", "optimization"]
 The Model Router automatically selects the appropriate model size based on message complexity, optimizing cost and latency.
 
 <Callout type="warning">
-  **Disabled by default.** Smart model routing is off by default because it conflicts with Claude Code CLI's built-in model routing. When using the Claude Agent SDK backend (recommended), Claude Code already picks the best model for each task. Enable the model router only if you want explicit control over model tiers or are using the PocketPaw Native backend.
+  **Disabled by default.** Smart model routing is off by default because it conflicts with Claude Code CLI's built-in model routing. When using the Claude Agent SDK backend (recommended), Claude Code already picks the best model for each task. Enable the model router only if you want explicit control over model tiers.
 </Callout>
 
 ## How It Works
@@ -54,7 +54,7 @@ export POCKETPAW_MODEL_TIER_MODERATE="claude-sonnet-4-5-20250929"
 export POCKETPAW_MODEL_TIER_COMPLEX="claude-opus-4-6"
 ```
 
-The router works with the Claude Agent SDK and PocketPaw Native backends.
+The router works with the Claude Agent SDK backend (and any backend that supports model overrides).
 
 ## Example Classifications
 

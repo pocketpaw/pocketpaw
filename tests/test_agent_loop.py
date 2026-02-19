@@ -1,12 +1,12 @@
 # Tests for Unified Agent Loop
-# Created: 2026-02-02
-# Updated: 2026-02-05 - Refactored to test router-based architecture
+# Updated for AgentEvent-based architecture (no more dict chunks)
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pocketpaw.agents.loop import AgentLoop
+from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.bus import Channel, InboundMessage
 
 
@@ -31,23 +31,23 @@ def mock_memory():
 
 @pytest.fixture
 def mock_router():
-    """Mock AgentRouter that yields test responses."""
+    """Mock AgentRouter that yields AgentEvent objects."""
     router = MagicMock()
 
-    async def mock_run(message, *, system_prompt=None, history=None):
-        yield {"type": "message", "content": "Hello ", "metadata": {}}
-        yield {"type": "message", "content": "world!", "metadata": {}}
-        yield {
-            "type": "tool_use",
-            "content": "Using test_tool...",
-            "metadata": {"name": "test_tool", "input": {}},
-        }
-        yield {
-            "type": "tool_result",
-            "content": "Tool completed",
-            "metadata": {"name": "test_tool"},
-        }
-        yield {"type": "done", "content": ""}
+    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+        yield AgentEvent(type="message", content="Hello ")
+        yield AgentEvent(type="message", content="world!")
+        yield AgentEvent(
+            type="tool_use",
+            content="Using test_tool...",
+            metadata={"name": "test_tool", "input": {}},
+        )
+        yield AgentEvent(
+            type="tool_result",
+            content="Tool completed",
+            metadata={"name": "test_tool"},
+        )
+        yield AgentEvent(type="done", content="")
 
     router.run = mock_run
     router.stop = AsyncMock()
@@ -69,16 +69,13 @@ async def test_agent_loop_process_message(
     mock_router,
 ):
     """Test that AgentLoop processes messages through the router."""
-    # Setup mocks
     mock_get_bus.return_value = mock_bus
     mock_get_memory.return_value = mock_memory
     mock_router_cls.return_value = mock_router
 
-    # Configure builder mock
     mock_builder_instance = mock_builder_cls.return_value
     mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
 
-    # Mock settings
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
@@ -88,10 +85,8 @@ async def test_agent_loop_process_message(
         with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
             mock_settings_cls.load.return_value = settings
 
-            # Init loop
             loop = AgentLoop()
 
-            # Create test message
             msg = InboundMessage(
                 channel=Channel.CLI,
                 sender_id="user1",
@@ -99,17 +94,11 @@ async def test_agent_loop_process_message(
                 content="Hello",
             )
 
-            # Test processing
             await loop._process_message(msg)
 
-            # Verify memory was updated (user message saved)
             mock_memory.add_to_session.assert_called()
-
-            # Verify outbound messages were published (streaming chunks)
-            assert mock_bus.publish_outbound.call_count >= 2  # At least message chunks + stream_end
-
-            # Verify system events were emitted (thinking, tool_start, tool_result)
-            assert mock_bus.publish_system.call_count >= 1  # At least thinking event
+            assert mock_bus.publish_outbound.call_count >= 2
+            assert mock_bus.publish_system.call_count >= 1
 
 
 @patch("pocketpaw.agents.loop.get_message_bus")
@@ -130,11 +119,7 @@ async def test_agent_loop_reset_router(
         mock_settings.return_value = settings
 
         loop = AgentLoop()
-
-        # Initially no router
         assert loop._router is None
-
-        # After reset, still None (lazy init)
         loop.reset_router()
         assert loop._router is None
 
@@ -151,12 +136,11 @@ async def test_agent_loop_handles_error(
     mock_get_bus.return_value = mock_bus
     mock_get_memory.return_value = mock_memory
 
-    # Router that raises an error
     error_router = MagicMock()
 
-    async def mock_run_error(message, *, system_prompt=None, history=None):
-        yield {"type": "error", "content": "Something went wrong", "metadata": {}}
-        yield {"type": "done", "content": ""}
+    async def mock_run_error(message, *, system_prompt=None, history=None, session_key=None):
+        yield AgentEvent(type="error", content="Something went wrong")
+        yield AgentEvent(type="done", content="")
 
     error_router.run = mock_run_error
     mock_router_cls.return_value = error_router
@@ -182,10 +166,7 @@ async def test_agent_loop_handles_error(
                 content="Hello",
             )
 
-            # Should not raise
             await loop._process_message(msg)
-
-            # Verify error was published via system event
             mock_bus.publish_system.assert_called()
 
 
@@ -231,7 +212,6 @@ async def test_agent_loop_emits_tool_events(
 
             await loop._process_message(msg)
 
-            # Check that system events include tool_start and tool_result
             system_calls = mock_bus.publish_system.call_args_list
             event_types = [call[0][0].event_type for call in system_calls]
 
@@ -253,31 +233,28 @@ async def test_agent_loop_builds_context_and_passes_to_router(
     mock_bus,
     mock_memory,
 ):
-    """Test that AgentLoop builds system prompt, retrieves history, and passes both to router."""
+    """Test that AgentLoop builds system prompt and passes it to router."""
     mock_get_bus.return_value = mock_bus
     mock_get_memory.return_value = mock_memory
 
-    # Track what router.run receives
     captured_kwargs = {}
 
-    async def capturing_run(message, *, system_prompt=None, history=None):
+    async def capturing_run(message, *, system_prompt=None, history=None, session_key=None):
         captured_kwargs["system_prompt"] = system_prompt
         captured_kwargs["history"] = history
-        yield {"type": "message", "content": "OK", "metadata": {}}
-        yield {"type": "done", "content": ""}
+        yield AgentEvent(type="message", content="OK")
+        yield AgentEvent(type="done", content="")
 
     router = MagicMock()
     router.run = capturing_run
     router.stop = AsyncMock()
     mock_router_cls.return_value = router
 
-    # Configure builder to return a specific prompt
     mock_builder_instance = mock_builder_cls.return_value
     mock_builder_instance.build_system_prompt = AsyncMock(
         return_value="You are PocketPaw with identity and memory."
     )
 
-    # Configure memory to return session history
     session_history = [
         {"role": "user", "content": "previous question"},
         {"role": "assistant", "content": "previous answer"},
@@ -304,12 +281,7 @@ async def test_agent_loop_builds_context_and_passes_to_router(
 
             await loop._process_message(msg)
 
-            # Verify build_system_prompt was called
             mock_builder_instance.build_system_prompt.assert_called_once()
-
-            # Verify get_compacted_history was called with the session key
             mock_memory.get_compacted_history.assert_called_once()
-
-            # Verify router.run received the context
             assert captured_kwargs["system_prompt"] == "You are PocketPaw with identity and memory."
             assert captured_kwargs["history"] == session_history

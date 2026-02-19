@@ -13,6 +13,7 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
   <a href="https://pypi.org/project/pocketpaw/"><img src="https://img.shields.io/pypi/dm/pocketpaw.svg" alt="Downloads"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/stargazers"><img src="https://img.shields.io/github/stars/pocketpaw/pocketpaw?style=social" alt="GitHub Stars"></a>
 </p>
 
 <p align="center">
@@ -26,7 +27,7 @@
   No subscription. No cloud lock-in. Just you and your Paw.
 </p>
 
-> **🚧 Beta:** This project is under active development. Expect breaking changes between versions.
+> **Beta:** This project is under active development. Expect breaking changes between versions.
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/a15bb8c7-6897-40d2-8111-aa905fe3fdfe" width="700" controls></video>
@@ -36,200 +37,111 @@
 
 ## Quick Start
 
-```bash
-curl -fsSL https://pocketpaw.xyz/install.sh | sh
-```
+### Desktop App
 
-Or install directly:
+Download the native app — includes auto-updates, system tray, and launches on startup.
+
+| Platform | Download |
+| --- | --- |
+| **macOS** (Apple Silicon) | [PocketPaw-macOS-arm64.dmg](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-macOS-arm64.dmg) |
+| **Windows** | [PocketPaw-Setup.exe](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe) |
+
+### Install via Terminal
+
+<details open>
+<summary>macOS / Linux</summary>
 
 ```bash
 pip install pocketpaw && pocketpaw
 ```
 
-**That's it.** One command. 30 seconds. Your own AI agent.
-
-I'm your self-hosted, cross-platform personal AI agent. The web dashboard opens automatically. Talk to me right in your browser, or connect me to Discord, Slack, WhatsApp, or Telegram and control me from anywhere. I run on _your_ machine, respect _your_ privacy, and I'm always here.
-
-**No subscription. No cloud lock-in. Just you and me.**
-
-<details>
-<summary>More install options</summary>
+Or use the install script:
 
 ```bash
-# Isolated install
-pipx install pocketpaw && pocketpaw
-
-# Run without installing
-uvx pocketpaw
-
-# From source
-git clone https://github.com/pocketpaw/pocketpaw.git
-cd pocketpaw
-uv run pocketpaw
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
 ```
 
 </details>
 
-PocketPaw will open the web dashboard in your browser and be ready to go.
-No config files. No YAML. No dependency hell.
+<details>
+<summary>Windows (PowerShell)</summary>
 
-**Talk to your agent from anywhere:**
-Telegram · Discord · Slack · WhatsApp · Web Dashboard
+```powershell
+powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
+```
 
----
+Or install manually with pip:
 
-## Docker
+```powershell
+pip install pocketpaw
+pocketpaw
+```
 
-Run PocketPaw in a container — great for servers, VPS, or always-on setups.
+> **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
+
+</details>
+
+<details>
+<summary>Other methods</summary>
 
 ```bash
-# Clone the repo
+pipx install pocketpaw && pocketpaw    # Isolated install
+uvx pocketpaw                           # Run without installing
+
+# From source
 git clone https://github.com/pocketpaw/pocketpaw.git
-cd pocketpaw
+cd pocketpaw && uv run pocketpaw
+```
 
-# Copy and fill in your env vars
+</details>
+
+<details>
+<summary>Docker</summary>
+
+```bash
+git clone https://github.com/pocketpaw/pocketpaw.git && cd pocketpaw
 cp .env.example .env
-
-# Start the dashboard
 docker compose up -d
 ```
 
-Dashboard is at `http://localhost:8888`. Log in with the access token:
+Dashboard at `http://localhost:8888`. Get the access token:
 
 ```bash
 docker exec pocketpaw cat /home/pocketpaw/.pocketpaw/access_token
 ```
 
-<details>
-<summary>Optional services (Ollama, Qdrant)</summary>
-
-```bash
-# With Ollama for local LLM inference
-docker compose --profile ollama up -d
-
-# With Qdrant for mem0 vector memory
-docker compose --profile qdrant up -d
-
-# Both
-docker compose --profile ollama --profile qdrant up -d
-```
-
-When using Ollama inside Docker, set `POCKETPAW_OLLAMA_HOST=http://ollama:11434` in your `.env` so PocketPaw reaches the Ollama container by service name.
+Optional profiles: `--profile ollama` (local LLMs), `--profile qdrant` (vector memory).
 
 </details>
 
-Data persists in a named Docker volume across restarts. See [`.env.example`](.env.example) for all available configuration options.
+**That's it.** The web dashboard opens automatically at `http://localhost:8888`. Connect Discord, Slack, WhatsApp, or Telegram and control your agent from anywhere.
 
 ---
 
-## What Can PocketPaw Do?
+## Features
 
-| Feature | Description |
+| | |
 | --- | --- |
-| **Web Dashboard** | Browser-based control panel, the default mode. No setup needed. |
-| **Multi-Channel** | Discord, Slack, WhatsApp (Personal + Business), Signal, Matrix, Teams, Google Chat, Telegram |
-| **Claude Agent SDK** | Default backend. Official Claude SDK with built-in tools (Bash, Read, Write). |
-| **Smart Model Router** | Optional auto-selection of Haiku / Sonnet / Opus based on task complexity (off by default — Claude Code has its own routing) |
-| **Tool Policy** | Allow/deny control over which tools the agent can use |
-| **Plan Mode** | Require approval before the agent runs shell commands or edits files |
-| **Browser Control** | Browse the web, fill forms, click buttons via accessibility tree |
-| **Gmail Integration** | Search, read, and send emails via OAuth (no app passwords) |
-| **Calendar Integration** | List events, create meetings, meeting prep briefings |
-| **Google Drive & Docs** | List, download, upload, share files; read and create documents |
-| **Web Search & Research** | Tavily/Brave search + multi-step research with source synthesis |
-| **Image Generation** | Google Gemini image generation, saved locally |
-| **Voice / TTS / STT** | Text-to-speech via OpenAI or ElevenLabs, speech-to-text via Whisper |
-| **Spotify** | Search tracks, playback control, playlist management |
-| **Reddit** | Search posts, read threads, browse trending topics |
-| **OCR** | Extract text from images via GPT-4o vision or pytesseract |
-| **Memory & Compaction** | Long-term facts + session history with smart compaction + Mem0 semantic search |
-| **MCP Support** | Connect Model Context Protocol servers (stdio + HTTP) |
-| **Cron Scheduler** | Recurring reminders with natural language time parsing |
-| **Security Suite** | Injection scanner, audit CLI, Guardian AI, self-audit daemon |
-| **Local-First** | Runs on YOUR machine. Your data never leaves your computer. |
-| **Cross-Platform** | macOS, Windows, Linux |
-| **Skill System** | Create reusable agent skills at runtime |
-| **Task Delegation** | Delegate complex sub-tasks to Claude Code CLI |
+| **9+ Channels** | Web Dashboard, Discord, Slack, WhatsApp, Telegram, Signal, Matrix, Teams, Google Chat |
+| **6 Agent Backends** | Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK |
+| **50+ Tools** | Browser, web search, image gen, voice/TTS/STT, OCR, research, delegation, skills |
+| **Integrations** | Gmail, Calendar, Google Drive & Docs, Spotify, Reddit, MCP servers |
+| **Memory** | Long-term facts, session history, smart compaction, Mem0 semantic search |
+| **Security** | Guardian AI, injection scanner, tool policy, plan mode, audit log, self-audit daemon |
+| **Local-First** | Runs on your machine. Ollama for fully offline operation. macOS / Windows / Linux. |
 
 ### Examples
 
 ```
 You:  "Every Sunday evening, remind me which recycling bins to put out"
-Paw:  *creates a recurring schedule*
-Paw:  "Done. I'll check the recycling calendar and message you every Sunday at 6pm."
+Paw:  Done. I'll check the recycling calendar and message you every Sunday at 6pm.
 
-You:  "Organize my Downloads folder. PDFs by date, images by type, delete duplicates"
-Paw:  *scans filesystem, moves 47 files, removes 12 duplicates*
-Paw:  "All clean. Here's what I did: [summary]"
-```
-
-### Research & Browsing
-
-```
-You:  *drops a link*
-Paw:  *opens browser, reads the page, researches related topics*
-Paw:  "Here's a summary with 3 key takeaways. Want me to save this to memory?"
-```
-
-### Coding & DevOps
-
-```
 You:  "Find that memory leak, the app crashes after 2 hours"
-Paw:  *reads logs, profiles code, identifies the issue*
-Paw:  "Found it. The WebSocket handler never closes connections. Here's the fix."
-```
+Paw:  Found it. The WebSocket handler never closes connections. Here's the fix.
 
-### Multi-Agent Workflows (Mission Control)
-
-```
 You:  "I need a competitor analysis report for our product launch"
-Paw:  *spins up Agent A: web researcher, Agent B: data analyst, Agent C: writer*
-Paw:  "3 agents working on it. Agent A is scraping competitor sites,
-       Agent B is analyzing pricing data, Agent C is waiting to write the report.
-       I'll ping you when it's ready."
+Paw:  3 agents working on it. I'll ping you when it's ready.
 ```
-
----
-
-## Web Dashboard
-
-The browser-based dashboard is the default mode. Run `pocketpaw` and it opens at `http://localhost:8888`.
-
-What you get:
-
-- Real-time streaming chat via WebSocket
-- Session management: create, switch, search, and resume conversations
-- Activity panel showing tool calls, thinking, and system events
-- Settings panel for LLM, backend, and tool policy configuration
-- Channel management: configure, start, and stop adapters from the sidebar
-- MCP server management: add, configure, and monitor MCP servers
-- Plan Mode approval modal for reviewing tool calls before execution
-
-### Channel Management
-
-All configured channel adapters auto-start on launch. Use the sidebar "Channels" button to:
-
-- Configure tokens and credentials per channel
-- Start/stop adapters dynamically
-- See running status at a glance
-
-Headless mode is also available for running without the dashboard:
-
-```bash
-pocketpaw --discord              # Discord only
-pocketpaw --slack                # Slack only
-pocketpaw --whatsapp             # WhatsApp only
-pocketpaw --discord --slack      # Multiple channels
-pocketpaw --telegram             # Legacy Telegram mode
-```
-
-See [Channel Adapters documentation](documentation/features/channels.md) for full setup guides.
-
----
-
-## Browser
-
-Uses your existing Chrome if you have it. No extra downloads. If you don't have Chrome, a small browser is downloaded automatically on first use.
 
 ---
 
@@ -239,117 +151,26 @@ Uses your existing Chrome if you have it. No extra downloads. If you don't have 
   <img src="assets/diagrams/pocket-paw-system-architecture.png" alt="PocketPaw System Architecture" width="800">
 </p>
 
+**Event-driven message bus** — all channels publish to a unified bus, consumed by the AgentLoop, which routes to one of 6 backends via a registry-based router. All backends implement the `AgentBackend` protocol and yield standardized `AgentEvent` objects.
+
 ### Agent Backends
 
-- **Claude Agent SDK (Default, Recommended).** Anthropic's official SDK with built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebSearch). Supports `PreToolUse` hooks for dangerous command blocking.
-- **PocketPaw Native.** Custom orchestrator: Anthropic SDK for reasoning + Open Interpreter for code execution.
-- **Open Interpreter.** Standalone, supports Ollama, OpenAI, or Anthropic. Good for fully local setups with Ollama.
+| Backend | Key | Providers | MCP |
+| --- | --- | --- | :---: |
+| **Claude Agent SDK** (Default) | `claude_agent_sdk` | Anthropic, Ollama | Yes |
+| **OpenAI Agents SDK** | `openai_agents` | OpenAI, Ollama | No |
+| **Google ADK** | `google_adk` | Google (Gemini) | Yes |
+| **Codex CLI** | `codex_cli` | OpenAI | Yes |
+| **OpenCode** | `opencode` | External server | No |
+| **Copilot SDK** | `copilot_sdk` | Copilot, OpenAI, Azure, Anthropic | No |
 
-Switch anytime in settings or config.
-
-<details>
-<summary>Tool System Architecture</summary>
-<br>
-<p align="center">
-  <img src="assets/diagrams/tool-system-architecture.png" alt="Tool System Architecture and Policy Engine" width="800">
-</p>
-</details>
-
----
-
-## Memory System
-
-### File-based Memory (Default)
-
-Stores memories as readable markdown in `~/.pocketpaw/memory/`:
-
-- `MEMORY.md`: Long-term facts about you
-- `sessions/`: Conversation history with smart compaction
-
-### Session Compaction
-
-Long conversations are automatically compacted to stay within budget:
-
-- **Recent messages** kept verbatim (configurable window)
-- **Older messages** compressed to one-liner extracts (Tier 1) or LLM summaries (Tier 2, opt-in)
-
-### USER.md Profile
-
-PocketPaw creates identity files at `~/.pocketpaw/identity/` including `USER.md`, a profile loaded into every conversation so the agent knows your preferences.
-
-### Optional: Mem0 (Semantic Memory)
-
-For smarter memory with vector search and automatic fact extraction:
-
-```bash
-pip install pocketpaw[memory]
-```
-
-See [Memory documentation](documentation/features/memory.md) for details.
-
----
-
-## Configuration
-
-Config lives in `~/.pocketpaw/config.json`. API keys and tokens are automatically encrypted in `secrets.enc`, never stored as plain text.
-
-```json
-{
-  "agent_backend": "claude_agent_sdk",
-  "claude_sdk_model": "",
-  "claude_sdk_max_turns": 25,
-  "anthropic_api_key": "sk-ant-...",
-  "anthropic_model": "claude-sonnet-4-5-20250929",
-  "tool_profile": "full",
-  "memory_backend": "file",
-  "smart_routing_enabled": false,
-  "plan_mode": false,
-  "injection_scan_enabled": true,
-  "self_audit_enabled": true,
-  "web_search_provider": "tavily",
-  "tts_provider": "openai"
-}
-```
-
-Or use environment variables (all prefixed with `POCKETPAW_`):
-
-```bash
-# Core
-export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
-export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"
-
-# Channels
-export POCKETPAW_DISCORD_BOT_TOKEN="..."
-export POCKETPAW_SLACK_BOT_TOKEN="xoxb-..."
-export POCKETPAW_SLACK_APP_TOKEN="xapp-..."
-
-# Integrations
-export POCKETPAW_GOOGLE_OAUTH_CLIENT_ID="..."
-export POCKETPAW_GOOGLE_OAUTH_CLIENT_SECRET="..."
-export POCKETPAW_TAVILY_API_KEY="..."
-export POCKETPAW_GOOGLE_API_KEY="..."
-```
-
-See the [full configuration reference](documentation/features/) for all available settings.
-
----
-
-## Security
+### Security
 
 <p align="center">
   <img src="assets/diagrams/7-layer-security-stack.png" alt="PocketPaw 7-Layer Security Stack" width="500">
 </p>
 
-- **Guardian AI.** A secondary LLM reviews every shell command before execution and decides if it's safe.
-- **Injection Scanner.** Two-tier detection (regex heuristics + optional LLM deep scan) blocks prompt injection attacks.
-- **Tool Policy.** Restrict agent tool access with profiles (`minimal`, `coding`, `full`) and allow/deny lists.
-- **Plan Mode.** Require human approval before executing shell commands or file edits.
-- **Security Audit CLI.** Run `pocketpaw --security-audit` to check 7 aspects (config permissions, API key exposure, audit log, etc.).
-- **Self-Audit Daemon.** Daily automated health checks (12 checks) with JSON reports at `~/.pocketpaw/audit_reports/`.
-- **Audit Logging.** Append-only log at `~/.pocketpaw/audit.jsonl`.
-- **Single User Lock.** Only authorized users can control the agent.
-- **File Jail.** Operations restricted to allowed directories.
-- **Local LLM Option.** Use Ollama and nothing phones home.
+Guardian AI safety checks, injection scanner, tool policy engine (profiles + allow/deny), plan mode approval, audit CLI (`--security-audit`), self-audit daemon, and append-only audit log. [Learn more](https://docs.pocketpaw.xyz/security).
 
 <details>
 <summary>Detailed security architecture</summary>
@@ -359,79 +180,80 @@ See the [full configuration reference](documentation/features/) for all availabl
 </p>
 </details>
 
-See [Security documentation](documentation/features/security.md) for details.
+---
+
+## Configuration
+
+Config at `~/.pocketpaw/config.json`, or use `POCKETPAW_`-prefixed env vars, or the dashboard Settings panel. API keys are encrypted at rest.
+
+```bash
+export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK backend
+export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
+```
+
+> **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
+
+See the [full configuration reference](https://docs.pocketpaw.xyz/getting-started/configuration) for all settings.
 
 ---
 
 ## Development
 
 ```bash
-# Clone
-git clone https://github.com/pocketpaw/pocketpaw.git
-cd pocketpaw
-
-# Install with dev dependencies
-uv sync --dev
-
-# Run the dashboard with auto-reload (watches *.py, *.html, *.js, *.css)
-uv run pocketpaw --dev
-
-# Run tests
-uv run pytest
-
-# Lint
-uv run ruff check .
-
-# Format
-uv run ruff format .
+git clone https://github.com/pocketpaw/pocketpaw.git && cd pocketpaw
+uv sync --dev               # Install with dev deps
+uv run pocketpaw --dev      # Dashboard with auto-reload
+uv run pytest               # Run tests (2000+)
+uv run ruff check . && uv run ruff format .  # Lint & format
 ```
 
-### Optional Extras
+<details>
+<summary>Optional extras</summary>
 
 ```bash
-pip install pocketpaw[discord]             # Discord support
-pip install pocketpaw[slack]               # Slack support
-pip install pocketpaw[whatsapp-personal]   # WhatsApp Personal (QR scan)
-pip install pocketpaw[image]               # Image generation (Google Gemini)
-pip install pocketpaw[memory]             # Mem0 semantic memory
-pip install pocketpaw[matrix]              # Matrix support
-pip install pocketpaw[teams]               # Microsoft Teams support
-pip install pocketpaw[gchat]               # Google Chat support
-pip install pocketpaw[mcp]                 # MCP server support
+pip install pocketpaw[openai-agents]       # OpenAI Agents backend
+pip install pocketpaw[google-adk]          # Google ADK backend
+pip install pocketpaw[discord]             # Discord
+pip install pocketpaw[slack]               # Slack
+pip install pocketpaw[memory]              # Mem0 semantic memory
 pip install pocketpaw[all]                 # Everything
 ```
+
+</details>
 
 ---
 
 ## Documentation
 
-Full documentation lives in [`documentation/`](documentation/README.md):
+Full docs at **[docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)** — getting started, backends, channels, tools, integrations, security, memory, API reference (50+ endpoints).
 
-- [Channel Adapters](documentation/features/channels.md): Discord, Slack, WhatsApp, Telegram setup
-- [Tool Policy](documentation/features/tool-policy.md): Profiles, groups, allow/deny
-- [Web Dashboard](documentation/features/web-dashboard.md): Browser UI overview
-- [Security](documentation/features/security.md): Injection scanner, audit CLI, audit logging
-- [Model Router](documentation/features/model-router.md): Smart complexity-based model selection
-- [Plan Mode](documentation/features/plan-mode.md): Approval workflow for tool execution
-- [Integrations](documentation/features/integrations.md): OAuth, Gmail, Calendar, Drive, Docs, Spotify
-- [Tools](documentation/features/tools.md): Web search, research, image gen, voice, delegation, skills
-- [Memory](documentation/features/memory.md): Session compaction, USER.md profile, Mem0
-- [Scheduler](documentation/features/scheduler.md): Cron scheduler, self-audit daemon
+---
+
+## Star History
+
+<a href="https://star-history.com/#pocketpaw/pocketpaw&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=pocketpaw/pocketpaw&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=pocketpaw/pocketpaw&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=pocketpaw/pocketpaw&type=Date" />
+ </picture>
+</a>
+
+## Contributors
+
+<a href="https://github.com/pocketpaw/pocketpaw/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=pocketpaw/pocketpaw" alt="Contributors" />
+</a>
 
 ---
 
 ## Join the Pack
-
-<!-- TODO: Add Product Hunt badge once page is live -->
-<!-- [![Product Hunt](https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=XXXXX)](https://www.producthunt.com/posts/pocketpaw) -->
 
 - Twitter: [@PocketPawAI](https://twitter.com/PocketPaw89242)
 - Discord: Coming Soon
 - Email: pocketpawai@gmail.com
 
 PRs welcome. Come build with us.
-
----
 
 ## License
 

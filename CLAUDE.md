@@ -70,11 +70,15 @@ The core architecture is an event-driven message bus (`src/pocketpaw/bus/`). All
 The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 
 1. **AgentLoop** consumes from the message bus, manages memory context, and streams responses back
-2. **AgentRouter** selects and delegates to one of three backends based on `settings.agent_backend`:
-   - `claude_agent_sdk` (default/recommended) — Official Claude Agent SDK with built-in tools (Bash, Read, Write, etc.). Uses `PreToolUse` hooks for dangerous command blocking. Lives in `agents/claude_sdk.py`. SDK-specific settings: `claude_sdk_model` (empty = let Claude Code auto-select), `claude_sdk_max_turns` (default 25). Smart model routing is disabled by default to avoid conflicting with Claude Code's own routing.
-   - `pocketpaw_native` — Custom orchestrator: Anthropic SDK for reasoning + Open Interpreter for execution. Lives in `agents/pocketpaw_native.py`
-   - `open_interpreter` — Standalone Open Interpreter supporting Ollama/OpenAI/Anthropic. Lives in `agents/open_interpreter.py`
-3. All backends yield standardized dicts with `type` (message/tool_use/tool_result/error/done), `content`, and `metadata`
+2. **AgentRouter** uses a registry-based system (`agents/registry.py`) to select and delegate to one of six backends based on `settings.agent_backend`:
+   - `claude_agent_sdk` (default/recommended) — Official Claude Agent SDK with built-in tools (Bash, Read, Write, etc.). Uses `PreToolUse` hooks for dangerous command blocking. Lives in `agents/claude_sdk.py`.
+   - `openai_agents` — OpenAI Agents SDK with GPT models and Ollama support. Lives in `agents/openai_agents.py`.
+   - `google_adk` — Google Agent Development Kit with Gemini models and native MCP support. Lives in `agents/google_adk.py`.
+   - `codex_cli` — OpenAI Codex CLI subprocess wrapper with MCP support. Lives in `agents/codex_cli.py`.
+   - `opencode` — External server-based backend via REST API. Lives in `agents/opencode.py`.
+   - `copilot_sdk` — GitHub Copilot SDK with multi-provider support. Lives in `agents/copilot_sdk.py`.
+3. All backends implement the `AgentBackend` protocol (`agents/backend.py`) and yield standardized `AgentEvent` objects with `type`, `content`, and `metadata`
+4. Legacy backend names (`pocketpaw_native`, `open_interpreter`, `claude_code`, `gemini_cli`) are mapped to active backends via `_LEGACY_BACKENDS` in the registry
 
 ### Channel Adapters
 
@@ -106,6 +110,7 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Async everywhere**: All agent, bus, memory, and tool interfaces are async. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`
 - **Protocol-oriented**: Core interfaces (`AgentProtocol`, `ToolProtocol`, `MemoryStoreProtocol`, `BaseChannelAdapter`) are Python `Protocol` classes for swappable implementations
 - **Env vars**: All settings use `POCKETPAW_` prefix (e.g., `POCKETPAW_ANTHROPIC_API_KEY`)
+- **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP
 - **Entry point**: `pocketpaw.__main__:main`
 - **Lazy imports**: Agent backends are imported inside `AgentRouter._initialize_agent()` to avoid loading unused dependencies

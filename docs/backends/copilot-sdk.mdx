@@ -1,0 +1,98 @@
+---
+title: Copilot SDK
+description: "The Copilot SDK backend uses GitHub's Copilot SDK with support for Copilot, OpenAI, Azure, and Anthropic providers. JSON-RPC event-driven agent execution."
+section: Agent Backends
+ogType: article
+keywords: ["copilot sdk", "github copilot", "copilot cli", "multi-provider", "json-rpc"]
+tags: ["backends", "copilot"]
+---
+
+# Copilot SDK
+
+The Copilot SDK backend wraps GitHub's **Copilot SDK** (`github-copilot-sdk`), providing multi-provider agent capabilities with JSON-RPC event-driven execution.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: Copilot, OpenAI, Azure, Anthropic
+- **Built-in tools**: shell, file_ops, git, web_search
+- **MCP support**: No
+- **Architecture**: Python SDK wrapper with CopilotClient singleton
+
+## Prerequisites
+
+Install the Copilot CLI:
+
+```bash
+pip install github-copilot-sdk
+```
+
+Ensure the `copilot` CLI is on your PATH. For the default Copilot provider, you need an active GitHub Copilot subscription.
+
+## Configuration
+
+```bash
+export POCKETPAW_AGENT_BACKEND="copilot_sdk"
+```
+
+### Backend-Specific Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `copilot_sdk_provider` | `POCKETPAW_COPILOT_SDK_PROVIDER` | `"copilot"` | Provider: `copilot`, `openai`, `azure`, `anthropic` |
+| `copilot_sdk_model` | `POCKETPAW_COPILOT_SDK_MODEL` | `""` (auto) | Model to use |
+| `copilot_sdk_max_turns` | `POCKETPAW_COPILOT_SDK_MAX_TURNS` | `0` (unlimited) | Max turns per query |
+
+### Provider Configuration
+
+<Tabs items={["Copilot (default)", "OpenAI", "Azure", "Anthropic"]}>
+  <Tab title="Copilot (default)">
+    ```bash
+    export POCKETPAW_COPILOT_SDK_PROVIDER="copilot"
+    # Uses your GitHub Copilot subscription — no separate API key needed
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    ```bash
+    export POCKETPAW_COPILOT_SDK_PROVIDER="openai"
+    export POCKETPAW_OPENAI_API_KEY="sk-..."
+    ```
+  </Tab>
+  <Tab title="Azure">
+    ```bash
+    export POCKETPAW_COPILOT_SDK_PROVIDER="azure"
+    # Configure Azure OpenAI credentials
+    ```
+  </Tab>
+  <Tab title="Anthropic">
+    ```bash
+    export POCKETPAW_COPILOT_SDK_PROVIDER="anthropic"
+    export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
+    ```
+  </Tab>
+</Tabs>
+
+## Built-in Tools
+
+| Copilot Tool | Policy Mapping |
+|-------------|---------------|
+| `shell` | `shell` |
+| `file_ops` | `write_file` |
+| `git` | `shell` |
+| `web_search` | `browser` |
+
+## How It Works
+
+1. PocketPaw creates a `CopilotClient` singleton for the session
+2. Messages are sent via the JSON-RPC event-driven interface
+3. The Copilot CLI handles tool execution and multi-turn reasoning
+4. History is injected for multi-turn context
+5. Responses stream back as `AgentEvent` objects
+
+## When to Use
+
+Choose Copilot SDK when:
+
+- You have a GitHub Copilot subscription and want to use it as your agent backbone
+- You want multi-provider flexibility (switch between Copilot, OpenAI, Azure, and Anthropic)
+- You want git-aware coding assistance integrated into PocketPaw

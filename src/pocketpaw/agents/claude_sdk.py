@@ -1,5 +1,5 @@
 """
-Claude Agent SDK wrapper for PocketPaw.
+Claude Agent SDK backend for PocketPaw.
 
 Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides:
 - Built-in tools: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch
@@ -7,21 +7,6 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 - PreToolUse hooks for security
 - Permission management
 - MCP server support for custom tools
-
-Created: 2026-02-02
-Changes:
-  - 2026-02-17: Added health/diagnostics tools to system prompt (health_check, error_log, config_doctor).
-  - 2026-02-02: Initial implementation with streaming support.
-  - 2026-02-02: Added set_executor() for 2-layer architecture wiring.
-  - 2026-02-02: Fixed streaming - properly handle all SDK message types.
-  - 2026-02-02: REWRITE - Use official claude-agent-sdk properly with all features.
-                Now uses real SDK imports (AssistantMessage, TextBlock, etc.)
-  - 2026-02-12: Hardened _block_dangerous_hook — wrapped in try/except to prevent
-                unhandled exceptions from tearing down the CLI stream. Updated hook
-                signature to match SDK 0.1.31 types (PreToolUseHookInput, HookContext).
-  - 2026-02-16: Fixed CLI OAuth auth bug — chat() now passes force_provider="anthropic"
-                to resolve_llm_client() so the CLI subprocess uses its own OAuth
-                credentials instead of falling back to Ollama when no API key is set.
 """
 
 import logging
@@ -29,7 +14,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.protocol import AgentEvent, ExecutorProtocol
+from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.security.rails import DANGEROUS_SUBSTRINGS as DANGEROUS_PATTERNS
 from pocketpaw.tools.policy import ToolPolicy
@@ -41,156 +27,58 @@ _DEFAULT_IDENTITY = (
     "You are PocketPaw, a helpful AI assistant running locally on the user's computer."
 )
 
-# Tool-specific instructions — appended to every system prompt regardless of source
-_TOOL_INSTRUCTIONS = """
-## Built-in SDK Tools
-- Bash: Run shell commands
-- Read/Write/Edit: File operations
-- Glob/Grep: Search files and content
-- WebSearch/WebFetch: Search the web and fetch URLs
 
-## PocketPaw Tools (call via Bash)
+class ClaudeSDKBackend:
+    """Claude Agent SDK backend — the recommended default.
 
-You have extra tools installed. Call them with:
-```bash
-python -m pocketpaw.tools.cli <tool_name> '<json_args>'
-```
-
-### Memory
-- `remember '{"content": "User name is Alice", "tags": ["personal"]}'` — save to long-term memory
-- `forget '{"query": "old preference"}'` — remove outdated memories
-
-**When to use remember:**
-- User tells you their name, preferences, or personal details
-- User explicitly asks "remember this"
-- You learn something important about the user's projects or workflow
-
-**Always remember proactively** — don't wait to be asked.
-If someone shares personal info, immediately call remember.
-
-**Reading memories:** Your system prompt already contains a "Memory
-Context" section with ALL saved memories pre-loaded. Just read it
-directly — never use a tool to look up what you already know.
-
-### Email (Gmail — requires OAuth)
-- `gmail_search '{"query": "is:unread", "max_results": 10}'` — search emails
-- `gmail_read '{"message_id": "MSG_ID"}'` — read full email
-- `gmail_send '{"to": "x@y.com", "subject": "Hi", "body": "..."}'` — send email
-- `gmail_list_labels '{}'` — list all labels
-- `gmail_create_label '{"name": "MyLabel"}'` — create label (use / for nesting)
-- `gmail_modify '{"message_id": "ID", "add_labels": ["LABEL"], "remove_labels": ["INBOX"]}'`
-- `gmail_trash '{"message_id": "ID"}'` — trash a message
-- `gmail_batch_modify '{"message_ids": ["ID1","ID2"], "add_labels": ["L1"]}'`
-  Built-in label IDs: INBOX, SPAM, TRASH, UNREAD, STARRED, IMPORTANT
-
-### Calendar (Google Calendar — requires OAuth)
-- `calendar_list '{"max_results": 10}'` — list upcoming events
-- `calendar_create '{"summary": "Meeting", "start": "2026-02-08T10:00:00", "end": "2026-02-08T11:00:00"}'`
-- `calendar_prep '{"hours_ahead": 24}'` — prep summary for upcoming meetings
-
-### Voice / TTS
-- `text_to_speech '{"text": "Hello world", "voice": "alloy"}'` — generate speech audio
-  Voices (OpenAI): alloy, echo, fable, onyx, nova, shimmer
-- `speech_to_text '{"audio_file": "/path/to/audio.mp3"}'` — transcribe audio to text
-  Optional: `"language": "en"` (auto-detected if omitted). Supports mp3/wav/m4a/webm.
-
-### Research
-- `research '{"topic": "quantum computing", "depth": "standard"}'` — multi-source research
-  Depths: quick (3 sources), standard (5), deep (10)
-
-### Image Generation
-- `image_generate '{"prompt": "a sunset over mountains", "aspect_ratio": "16:9"}'`
-
-### Web Content
-- `web_search '{"query": "latest news on AI"}'` — web search (Tavily/Brave)
-- `url_extract '{"urls": ["https://example.com"]}'` — extract clean text from URLs
-
-### Skills
-- `create_skill '{"skill_name": "my-skill", "description": "...", "prompt_template": "..."}'`
-
-### Google Drive (requires OAuth)
-- `drive_list '{"query": "name contains \\'report\\'"}'` — list/search files
-- `drive_download '{"file_id": "FILE_ID"}'` — download a file
-- `drive_upload '{"file_path": "/path/to/file.pdf", "folder_id": "FOLDER_ID"}'` — upload file
-- `drive_share '{"file_id": "FILE_ID", "email": "user@example.com", "role": "reader"}'` — share
-
-### Google Docs (requires OAuth)
-- `docs_read '{"document_id": "DOC_ID"}'` — read document as plain text
-- `docs_create '{"title": "My Doc", "content": "Hello world"}'` — create a new document
-- `docs_search '{"query": "meeting notes"}'` — search Google Docs by name
-
-### Spotify (requires OAuth)
-- `spotify_search '{"query": "bohemian rhapsody", "type": "track"}'` — search tracks/albums/artists
-- `spotify_now_playing '{}'` — what's currently playing
-- `spotify_playback '{"action": "play"}'` — play/pause/next/prev/volume (actions: play, pause, next, prev, volume)
-- `spotify_playlist '{"action": "list"}'` — list playlists or add track
-
-### OCR
-- `ocr '{"image_path": "/path/to/image.png"}'` — extract text from image (uses GPT-4o vision)
-
-### Reddit
-- `reddit_search '{"query": "best python frameworks", "subreddit": "python"}'` — search Reddit
-- `reddit_read '{"url": "https://reddit.com/r/python/comments/..."}'` — read post + comments
-- `reddit_trending '{"subreddit": "all", "limit": 10}'` — trending posts
-
-### Delegation
-- `delegate_claude_code '{"task": "refactor the auth module", "timeout": 300}'` — delegate to Claude Code CLI
-
-### Health & Diagnostics
-- `health_check '{}'` — run all system health checks (config, API keys, dependencies, storage)
-- `health_check '{"include_connectivity": true}'` — include LLM reachability test
-- `error_log '{}'` — read recent errors from the persistent error log
-- `error_log '{"limit": 5, "search": "deep_work"}'` — search errors by keyword
-- `config_doctor '{}'` — full config diagnosis with fix hints
-- `config_doctor '{"section": "api_keys"}'` — diagnose a specific section (api_keys, storage)
-
-**When the user reports something isn't working**, use these tools to diagnose:
-1. Run `health_check` to see what's broken
-2. Check `error_log` for recent errors with tracebacks
-3. Use `config_doctor` for step-by-step fix instructions
-4. Fix the issue, then run `health_check` again to verify
-
-## Guidelines
-
-1. **Be AGENTIC** — execute tasks using tools, don't just describe how.
-2. **Use PocketPaw tools** — always prefer `python -m pocketpaw.tools.cli` over platform-specific commands (AppleScript, PowerShell, etc.). These tools work on all operating systems.
-3. **Be concise** — give clear, helpful responses.
-4. **Be safe** — don't run destructive commands. Ask for confirmation if unsure.
-5. If Gmail/Calendar/Drive/Docs returns "not authenticated", tell the user to visit:
-   http://localhost:8888/api/oauth/authorize?service=google_gmail (or google_calendar, google_drive, google_docs)
-6. If Spotify returns "not authenticated", tell the user to visit:
-   http://localhost:8888/api/oauth/authorize?service=spotify
-"""
-
-
-class ClaudeAgentSDK:
-    """Wraps Claude Agent SDK for autonomous task execution.
-
-    This is the RECOMMENDED backend for PocketPaw - it provides:
-    - All built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch)
-    - Streaming responses for real-time feedback
-    - PreToolUse hooks for security (block dangerous commands)
-    - Permission management (can bypass for automation)
+    Provides all built-in tools (Bash, Read, Write, Edit, Glob, Grep,
+    WebSearch, WebFetch), streaming responses, PreToolUse hooks for
+    security, and MCP server support.
 
     Requires: pip install claude-agent-sdk
     """
 
-    # Map SDK tool names to policy tool names for filtering
-    _SDK_TO_POLICY: dict[str, str] = {
+    _TOOL_POLICY_MAP: dict[str, str] = {
         "Bash": "shell",
         "Read": "read_file",
         "Write": "write_file",
         "Edit": "edit_file",
         "Glob": "list_dir",
-        "Grep": "shell",  # search is shell-adjacent
+        "Grep": "shell",
         "WebSearch": "browser",
         "WebFetch": "browser",
         "Skill": "skill",
     }
 
-    def __init__(self, settings: Settings, executor: ExecutorProtocol | None = None):
+    @staticmethod
+    def info() -> BackendInfo:
+        return BackendInfo(
+            name="claude_agent_sdk",
+            display_name="Claude Agent SDK",
+            capabilities=(
+                Capability.STREAMING
+                | Capability.TOOLS
+                | Capability.MCP
+                | Capability.MULTI_TURN
+                | Capability.CUSTOM_SYSTEM_PROMPT
+            ),
+            builtin_tools=[
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "WebSearch",
+                "WebFetch",
+            ],
+            tool_policy_map=ClaudeSDKBackend._TOOL_POLICY_MAP,
+            required_keys=["anthropic_api_key"],
+            supported_providers=["anthropic", "ollama", "openai_compatible"],
+        )
+
+    def __init__(self, settings: Settings):
         self.settings = settings
-        self._executor = executor  # Optional - SDK has built-in execution
         self._stop_flag = False
         self._sdk_available = False
         self._cli_available = False  # Whether the `claude` CLI binary is installed
@@ -287,15 +175,6 @@ class ClaudeAgentSDK:
         except Exception as e:
             logger.error(f"❌ Failed to initialize Claude Agent SDK: {e}")
             self._sdk_available = False
-
-    def set_executor(self, executor: ExecutorProtocol) -> None:
-        """Inject an optional executor for custom tool execution.
-
-        Note: Claude Agent SDK has built-in execution, so this is optional.
-        Can be used for custom tools or fallback execution.
-        """
-        self._executor = executor
-        logger.info("🔗 Optional executor connected to Claude Agent SDK")
 
     def set_working_directory(self, path: Path) -> None:
         """Set the working directory for file operations."""
@@ -613,26 +492,17 @@ class ClaudeAgentSDK:
             self._client_in_use = False
             logger.info("Persistent client disconnected")
 
-    async def chat(
+    async def run(
         self,
         message: str,
         *,
         system_prompt: str | None = None,
         history: list[dict] | None = None,
+        session_key: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
-        Uses the SDK's built-in tools and streaming capabilities.
-
-        Args:
-            message: User message to process.
-            system_prompt: Dynamic system prompt from AgentContextBuilder.
-                Falls back to _DEFAULT_IDENTITY if not provided.
-            history: Recent session history as {"role", "content"} dicts.
-                Injected into the system prompt (SDK query() takes a single prompt string).
-
-        Yields:
-            AgentEvent objects as the agent responds
+        Yields AgentEvent objects as the agent responds.
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -664,30 +534,41 @@ class ClaudeAgentSDK:
 
         try:
             # Resolve LLM provider early — needed for routing + env.
-            # Force anthropic: the Claude SDK backend runs the CLI as a subprocess,
-            # which has its own OAuth credentials. Without force_provider, auto-
-            # resolution with no API key falls back to Ollama (wrong for SDK).
+            # Use per-backend provider setting (defaults to "anthropic").
+            # An API key is REQUIRED for Anthropic provider — OAuth tokens from
+            # Claude Free/Pro/Max plans are not permitted for third-party use.
+            # See: https://code.claude.com/docs/en/legal-and-compliance
             from pocketpaw.llm.client import resolve_llm_client
 
-            llm = resolve_llm_client(self.settings, force_provider="anthropic")
+            provider = self.settings.claude_sdk_provider or "anthropic"
+            llm = resolve_llm_client(self.settings, force_provider=provider)
 
-            # Gemini & plain OpenAI are not compatible with Claude SDK —
-            # the SDK speaks Anthropic Messages API, but Gemini/OpenAI
-            # endpoints speak the OpenAI Chat Completions API format.
-            if llm.is_gemini:
-                yield AgentEvent(
-                    type="error",
-                    content=(
-                        "❌ Gemini is not compatible with the **Claude Agent SDK** "
-                        "backend.\n\n"
-                        "The Claude SDK uses the Anthropic Messages API format, "
-                        "but Gemini's endpoint speaks OpenAI format.\n\n"
-                        "**Fix:** Switch to **PocketPaw Native** backend in "
-                        "**Settings → General → Agent Backend**. "
-                        "PocketPaw Native fully supports Gemini."
-                    ),
+            # ── API key enforcement for Anthropic provider ──────────────
+            # Anthropic's policy prohibits using OAuth tokens from Free/Pro/Max
+            # plans in third-party products. PocketPaw must use API key auth.
+            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
+                has_api_key = bool(
+                    llm.api_key or os.environ.get("ANTHROPIC_API_KEY")
                 )
-                return
+                if not has_api_key:
+                    yield AgentEvent(
+                        type="error",
+                        content=(
+                            "**API key required** — The Claude SDK backend requires "
+                            "an Anthropic API key.\n\n"
+                            "Anthropic's policy prohibits third-party applications from "
+                            "using OAuth tokens (Free/Pro/Max plan credentials). "
+                            "PocketPaw must authenticate with an API key.\n\n"
+                            "**How to fix:**\n"
+                            "1. Get an API key at "
+                            "[console.anthropic.com](https://console.anthropic.com/api-keys)\n"
+                            "2. Add it in **Settings → API Keys → Anthropic API Key**\n"
+                            "3. Or set the `ANTHROPIC_API_KEY` environment variable\n\n"
+                            "*Alternatively, switch to **Ollama (Local)** in Settings "
+                            "→ General for free local inference.*"
+                        ),
+                    )
+                    return
 
             # Smart model routing — classify BEFORE prompt composition so we
             # can skip tool instructions for SIMPLE messages and dispatch to
@@ -713,8 +594,7 @@ class ClaudeAgentSDK:
                 )
 
             # Fast path: bypass CLI subprocess entirely for simple messages.
-            # Requires an API key — the Claude CLI uses OAuth which we can't
-            # reuse here. Fall back to standard path if no key is available.
+            # Uses the Anthropic API directly (requires API key, already enforced above).
             has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
             if is_simple and selection is not None and has_api_key:
                 identity = system_prompt or _DEFAULT_IDENTITY
@@ -727,11 +607,10 @@ class ClaudeAgentSDK:
                     yield event
                 return
 
-            # Compose final system prompt: identity/memory + tool docs
-            # Always include tool instructions — even SIMPLE messages may need tools
-            # (e.g., "remind me to call mom" is short but requires scheduler access)
+            # System prompt — instructions are now part of identity
+            # (injected by BootstrapContext.to_system_prompt() via INSTRUCTIONS.md)
             identity = system_prompt or _DEFAULT_IDENTITY
-            final_prompt = identity + "\n" + _TOOL_INSTRUCTIONS
+            final_prompt = identity
 
             # Inject session history into system prompt (SDK query() takes a single string)
             if history:
@@ -760,7 +639,7 @@ class ClaudeAgentSDK:
             allowed_tools = [
                 t
                 for t in all_sdk_tools
-                if self._policy.is_tool_allowed(self._SDK_TO_POLICY.get(t, t))
+                if self._policy.is_tool_allowed(self._TOOL_POLICY_MAP.get(t, t))
             ]
             if len(allowed_tools) < len(all_sdk_tools):
                 blocked = set(all_sdk_tools) - set(allowed_tools)
@@ -783,13 +662,14 @@ class ClaudeAgentSDK:
                 "setting_sources": ["user", "project"],
                 "hooks": hooks,
                 "cwd": str(self._cwd),
-                "max_turns": self.settings.claude_sdk_max_turns,
+                "max_turns": self.settings.claude_sdk_max_turns or None,
             }
 
             # Configure LLM provider for the Claude CLI subprocess.
+            # API key is enforced above for Anthropic; Ollama/OpenAI-compat
+            # providers set their own env vars via to_sdk_env().
             sdk_env = llm.to_sdk_env()
             if not sdk_env:
-                # Fall back to env var if settings has no key
                 env_key = os.environ.get("ANTHROPIC_API_KEY")
                 if env_key:
                     sdk_env = {"ANTHROPIC_API_KEY": env_key}
@@ -1041,24 +921,6 @@ class ClaudeAgentSDK:
         }
 
 
-# Backwards-compatible wrapper for router
-class ClaudeAgentSDKWrapper(ClaudeAgentSDK):
-    """Wrapper to match existing agent interface expected by router.
-
-    Provides the `run()` method that yields dicts instead of AgentEvents.
-    """
-
-    async def run(
-        self,
-        message: str,
-        *,
-        system_prompt: str | None = None,
-        history: list[dict] | None = None,
-    ) -> AsyncIterator[dict]:
-        """Run the agent, yielding dict chunks for compatibility."""
-        async for event in self.chat(message, system_prompt=system_prompt, history=history):
-            yield {
-                "type": event.type,
-                "content": event.content,
-                "metadata": getattr(event, "metadata", None),
-            }
+# Backward-compat aliases
+ClaudeAgentSDK = ClaudeSDKBackend
+ClaudeAgentSDKWrapper = ClaudeSDKBackend

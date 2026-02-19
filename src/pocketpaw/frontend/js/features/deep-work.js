@@ -2,8 +2,11 @@
  * PocketPaw - Mission Control: Deep Work Module
  *
  * Created: 2026-02-17 — Split from mission-control.js (1,699-line monolith).
+ * Updated: 2026-02-18 — Added Goal Parser integration: analyzeGoal(), two-step
+ *   start flow (analyze → review → plan), goal analysis state and display helpers.
  *
  * Contains Deep Work project orchestration state and methods:
+ * - Goal analysis (analyzeGoal, domain/complexity display)
  * - Project CRUD (load, start, approve, pause, resume, delete)
  * - Project selection and detail loading
  * - Project status helpers (color, label, icon)
@@ -29,11 +32,15 @@ window.PocketPaw.DeepWork = {
                 showStartProject: false,       // Start project modal
                 showProjectDetail: false,      // Full project detail sheet
                 projectInput: '',              // Natural language project input
-                researchDepth: 'standard',     // 'none' | 'quick' | 'standard' | 'deep'
+                researchDepth: 'auto',         // 'auto' | 'none' | 'quick' | 'standard' | 'deep'
                 projectStarting: false,        // Loading state while planner runs
-                planningPhase: '',             // Current phase: research, prd, tasks, team
+                planningPhase: '',             // Current phase: goal_analysis, research, prd, tasks, team
                 planningMessage: '',           // Phase progress message
                 planningProjectId: null,       // Project being planned
+                // Goal analysis state
+                goalAnalysis: null,            // Parsed goal analysis from /parse-goal
+                goalAnalyzing: false,          // Loading state while goal parser runs
+                goalAnalysisStep: 'input',     // 'input' | 'review' — modal step
                 // Output Files panel state
                 projectOutputFiles: [],        // files in project output directory
                 projectOutputLoading: false,   // loading state for output files
@@ -63,7 +70,59 @@ window.PocketPaw.DeepWork = {
             },
 
             /**
-             * Start a new Deep Work project from natural language input
+             * Analyze a goal before starting planning (Step 1 of 2-step flow)
+             */
+            async analyzeGoal() {
+                const input = this.missionControl.projectInput.trim();
+                if (!input || input.length < 10) {
+                    this.showToast('Please describe your project (at least 10 characters)', 'error');
+                    return;
+                }
+
+                this.missionControl.goalAnalyzing = true;
+                this.missionControl.goalAnalysis = null;
+
+                try {
+                    const res = await fetch('/api/deep-work/parse-goal', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ description: input })
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        this.missionControl.goalAnalysis = data.goal_analysis;
+                        this.missionControl.researchDepth = data.goal_analysis.suggested_research_depth || 'standard';
+                        this.missionControl.goalAnalysisStep = 'review';
+                    } else {
+                        const err = await res.json();
+                        this.showToast(err.detail || 'Goal analysis failed', 'error');
+                    }
+                } catch (e) {
+                    console.error('Failed to analyze goal:', e);
+                    this.showToast('Goal analysis failed — you can still start planning', 'error');
+                } finally {
+                    this.missionControl.goalAnalyzing = false;
+                    this.$nextTick(() => { if (window.refreshIcons) window.refreshIcons(); });
+                }
+            },
+
+            /**
+             * Reset goal analysis and go back to input step.
+             * If soft=true (modal close), cache the analysis so reopening restores it.
+             */
+            resetGoalAnalysis(soft = false) {
+                if (soft && this.missionControl.goalAnalysis) {
+                    // Cache: keep analysis so reopening the modal restores the review step
+                    return;
+                }
+                this.missionControl.goalAnalysis = null;
+                this.missionControl.goalAnalysisStep = 'input';
+                this.missionControl.researchDepth = 'auto';
+            },
+
+            /**
+             * Start a new Deep Work project from natural language input (Step 2)
              */
             async startDeepWork() {
                 const input = this.missionControl.projectInput.trim();
@@ -77,13 +136,19 @@ window.PocketPaw.DeepWork = {
                 this.missionControl.planningMessage = 'Initializing project...';
 
                 try {
+                    const body = {
+                        description: input,
+                        research_depth: this.missionControl.researchDepth
+                    };
+                    // Pass pre-parsed goal analysis to skip re-parsing
+                    if (this.missionControl.goalAnalysis) {
+                        body.goal_analysis = this.missionControl.goalAnalysis;
+                    }
+
                     const res = await fetch('/api/deep-work/start', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            description: input,
-                            research_depth: this.missionControl.researchDepth
-                        })
+                        body: JSON.stringify(body)
                     });
 
                     if (res.ok) {
@@ -92,6 +157,8 @@ window.PocketPaw.DeepWork = {
                         this.missionControl.projects.unshift(project);
                         this.missionControl.projectInput = '';
                         this.missionControl.showStartProject = false;
+                        this.missionControl.goalAnalysis = null;
+                        this.missionControl.goalAnalysisStep = 'input';
 
                         // Set planningProjectId IMMEDIATELY so WebSocket phase
                         // events can be tracked (planning runs in background)
@@ -393,12 +460,42 @@ window.PocketPaw.DeepWork = {
             getPlanningPhaseInfo() {
                 const phases = {
                     'starting': { label: 'Initializing', icon: 'loader', step: 0 },
-                    'research': { label: 'Researching', icon: 'search', step: 1 },
-                    'prd': { label: 'Writing PRD', icon: 'file-text', step: 2 },
-                    'tasks': { label: 'Breaking Down Tasks', icon: 'list-checks', step: 3 },
-                    'team': { label: 'Assembling Team', icon: 'users', step: 4 }
+                    'goal_analysis': { label: 'Analyzing Goal', icon: 'target', step: 1 },
+                    'research': { label: 'Researching', icon: 'search', step: 2 },
+                    'prd': { label: 'Writing PRD', icon: 'file-text', step: 3 },
+                    'tasks': { label: 'Breaking Down Tasks', icon: 'list-checks', step: 4 },
+                    'team': { label: 'Assembling Team', icon: 'users', step: 5 }
                 };
                 return phases[this.missionControl.planningPhase] || { label: 'Working', icon: 'loader', step: 0 };
+            },
+
+            /**
+             * Get domain display info (icon + color)
+             */
+            getDomainInfo(domain) {
+                const domains = {
+                    'code': { label: 'Software & Code', icon: 'code-2', color: 'text-blue-400 bg-blue-500/10' },
+                    'business': { label: 'Business & Strategy', icon: 'briefcase', color: 'text-amber-400 bg-amber-500/10' },
+                    'creative': { label: 'Creative & Content', icon: 'palette', color: 'text-purple-400 bg-purple-500/10' },
+                    'education': { label: 'Learning & Education', icon: 'graduation-cap', color: 'text-green-400 bg-green-500/10' },
+                    'events': { label: 'Events & Logistics', icon: 'calendar', color: 'text-pink-400 bg-pink-500/10' },
+                    'home': { label: 'Home & Physical', icon: 'home', color: 'text-orange-400 bg-orange-500/10' },
+                    'hybrid': { label: 'Multi-Domain', icon: 'layers', color: 'text-cyan-400 bg-cyan-500/10' }
+                };
+                return domains[domain] || { label: domain, icon: 'circle', color: 'text-white/40 bg-white/5' };
+            },
+
+            /**
+             * Get complexity display info (color + label)
+             */
+            getComplexityInfo(complexity) {
+                const levels = {
+                    'S': { label: 'Small', color: 'text-green-400 bg-green-500/10 border-green-500/20' },
+                    'M': { label: 'Medium', color: 'text-blue-400 bg-blue-500/10 border-blue-500/20' },
+                    'L': { label: 'Large', color: 'text-amber-400 bg-amber-500/10 border-amber-500/20' },
+                    'XL': { label: 'Extra Large', color: 'text-red-400 bg-red-500/10 border-red-500/20' }
+                };
+                return levels[complexity] || { label: complexity, color: 'text-white/40 bg-white/5 border-white/10' };
             },
 
             /**

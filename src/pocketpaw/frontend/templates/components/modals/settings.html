@@ -22,26 +22,46 @@
     @click.stop
   >
     <!-- Header -->
-    <div
-      class="flex items-center justify-between px-5 py-3.5 border-b border-[var(--glass-border)] shrink-0"
-    >
-      <div class="flex items-center gap-2.5">
-        <!-- Mobile: back button -->
+    <div class="flex flex-col shrink-0 border-b border-[var(--glass-border)]">
+      <div class="flex items-center justify-between px-5 py-3.5">
+        <div class="flex items-center gap-2.5">
+          <!-- Mobile: back button -->
+          <button
+            x-show="settingsMobileView === 'content'"
+            class="md:hidden p-1.5 -ml-1 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+            @click="settingsMobileView = 'list'"
+          >
+            <i data-lucide="arrow-left" class="w-4.5 h-4.5"></i>
+          </button>
+          <h2 class="text-[16px] font-semibold">Settings</h2>
+        </div>
         <button
-          x-show="settingsMobileView === 'content'"
-          class="md:hidden p-1.5 -ml-1 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
-          @click="settingsMobileView = 'list'"
+          class="p-1.5 -mr-1.5 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+          @click="showSettings = false"
         >
-          <i data-lucide="arrow-left" class="w-4.5 h-4.5"></i>
+          <i data-lucide="x" class="w-4.5 h-4.5"></i>
         </button>
-        <h2 class="text-[16px] font-semibold">Settings</h2>
       </div>
-      <button
-        class="p-1.5 -mr-1.5 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-        @click="showSettings = false"
-      >
-        <i data-lucide="x" class="w-4.5 h-4.5"></i>
-      </button>
+      <!-- Search bar (desktop only) -->
+      <div class="hidden md:block px-5 pb-3">
+        <div class="relative">
+          <i data-lucide="search" class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30 pointer-events-none"></i>
+          <input
+            type="text"
+            x-model="settingsSearch"
+            @input="searchSettings()"
+            placeholder="Search settings..."
+            class="settings-search-input w-full bg-white/5 border border-[var(--glass-border)] rounded-lg py-1.5 pl-8 pr-7 text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-colors"
+          />
+          <button
+            x-show="settingsSearch"
+            @click="settingsSearch = ''; settingsSearchResults = []"
+            class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-white/40 hover:text-white/70 transition-colors"
+          >
+            <i data-lucide="x" class="w-3 h-3"></i>
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Body: sidebar + content -->
@@ -64,6 +84,11 @@
               class="w-4 h-4 shrink-0 opacity-70"
             ></i>
             <span x-text="section.label"></span>
+            <span
+              x-show="getSettingsNavDot(section.id)"
+              class="w-1.5 h-1.5 rounded-full ml-auto shrink-0"
+              :class="getSettingsNavDot(section.id)"
+            ></span>
           </button>
         </template>
       </nav>
@@ -73,12 +98,31 @@
         class="settings-content flex-1 overflow-y-auto px-5 py-4"
         :class="settingsMobileView === 'content' ? 'is-visible' : 'is-hidden'"
       >
+        <!-- Search Results Overlay -->
+        <div x-show="settingsSearchResults.length > 0" x-transition class="space-y-2 mb-4">
+          <p class="text-[11px] text-white/40 uppercase tracking-wide font-medium" x-text="settingsSearchResults.length + ' result' + (settingsSearchResults.length !== 1 ? 's' : '')"></p>
+          <template x-for="result in settingsSearchResults" :key="result.label">
+            <button
+              @click="jumpToSetting(result.section)"
+              class="w-full flex items-center gap-3 bg-white/5 hover:bg-white/10 border border-[var(--glass-border)] rounded-xl px-3.5 py-2.5 text-left transition-colors"
+            >
+              <div class="flex-1 min-w-0">
+                <p class="text-[13px] text-white font-medium" x-text="result.label"></p>
+                <p class="text-[11px] text-white/40" x-text="result.sectionLabel"></p>
+              </div>
+              <i data-lucide="arrow-right" class="w-3.5 h-3.5 text-white/30 shrink-0"></i>
+            </button>
+          </template>
+        </div>
+
         <!-- ===================== General ===================== -->
-        <div x-show="settingsSection === 'general'" class="space-y-4">
+        <div x-show="settingsSection === 'general' && settingsSearchResults.length === 0" class="space-y-4">
           <h3 class="text-[14px] font-semibold text-white/80 mb-3">General</h3>
 
-          <!-- Agent Backend -->
-          <div class="flex flex-col gap-1.5">
+          <!-- Agent Backend (dynamic) -->
+          <div class="flex flex-col gap-1.5" x-init="
+            fetch('/api/backends').then(r => r.json()).then(b => _backendsData = b).catch(() => {})
+          ">
             <label
               class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
               >Agent Backend</label
@@ -89,15 +133,13 @@
                 @change="saveSettings()"
                 class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
               >
-                <option value="claude_agent_sdk">
-                  Claude Agent SDK (Recommended)
-                </option>
-                <option value="pocketpaw_native">
-                  PocketPaw Native (Custom models)
-                </option>
-                <option value="open_interpreter">
-                  Open Interpreter (Experimental)
-                </option>
+                <template x-for="b in _backendsData" :key="b.name">
+                  <option :value="b.name" x-text="b.displayName + (b.name === 'claude_agent_sdk' ? ' (Recommended)' : '') + (b.beta ? ' [Beta]' : '') + (!b.available ? ' — not installed' : '')"></option>
+                </template>
+                <!-- Fallback if fetch hasn't resolved -->
+                <template x-if="_backendsData.length === 0">
+                  <option value="claude_agent_sdk">Claude Agent SDK (Recommended)</option>
+                </template>
               </select>
               <div
                 class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50"
@@ -105,23 +147,255 @@
                 <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
               </div>
             </div>
+            <!-- Capability badges -->
+            <div class="flex flex-wrap gap-1 mt-0.5">
+              <template x-for="b in _backendsData.filter(x => x.name === settings.agentBackend)" :key="b.name">
+                <template x-for="cap in b.capabilities" :key="cap">
+                  <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-white/10 text-white/60" x-text="cap"></span>
+                </template>
+              </template>
+            </div>
             <small
               class="text-white/50 text-[11px]"
               x-text="getBackendDescription(settings.agentBackend)"
             ></small>
           </div>
 
-          <!-- Claude SDK Settings (shown when Claude Agent SDK selected) -->
+          <!-- Backend Install Banner (shown when selected backend is not installed) -->
           <div
-            x-show="settings.agentBackend === 'claude_agent_sdk'"
+            x-show="_backendsData.length > 0 && !isCurrentBackendAvailable()"
+            x-transition
+            class="rounded-xl overflow-hidden"
+          >
+            <!-- Pip-installable backend: accent banner with Install button -->
+            <div
+              x-show="currentBackendInstallHint().pip_spec"
+              class="flex items-center gap-3 bg-[var(--accent-color)]/15 border border-[var(--accent-color)]/30 rounded-xl px-4 py-3"
+            >
+              <i data-lucide="download" class="w-4 h-4 text-[var(--accent-color)] shrink-0"></i>
+              <div class="flex-1 min-w-0">
+                <p class="text-[12px] text-white/80">
+                  <span class="font-medium" x-text="currentBackendInstallHint().pip_package || currentBackendInstallHint().pip_spec"></span>
+                  is not installed.
+                </p>
+              </div>
+              <button
+                @click="installBackend()"
+                :disabled="backendInstallLoading"
+                class="shrink-0 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-[var(--accent-color)] text-black hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center gap-1.5"
+              >
+                <template x-if="backendInstallLoading">
+                  <svg class="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-linecap="round" class="opacity-25"></circle>
+                    <path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path>
+                  </svg>
+                </template>
+                <template x-if="!backendInstallLoading">
+                  <span>Install</span>
+                </template>
+                <template x-if="backendInstallLoading">
+                  <span>Installing…</span>
+                </template>
+              </button>
+            </div>
+            <!-- External-only backend: info banner with command + copy -->
+            <div
+              x-show="!currentBackendInstallHint().pip_spec && currentBackendInstallHint().external_cmd"
+              class="flex flex-col gap-2 bg-white/5 border border-[var(--glass-border)] rounded-xl px-4 py-3"
+            >
+              <div class="flex items-center gap-2">
+                <i data-lucide="terminal" class="w-4 h-4 text-[var(--text-secondary)] shrink-0"></i>
+                <p class="text-[12px] text-white/70">This backend requires an external tool:</p>
+              </div>
+              <div class="flex items-center gap-2 bg-black/30 rounded-lg px-3 py-2">
+                <code class="flex-1 text-[12px] text-[var(--accent-color)] break-all" x-text="currentBackendInstallHint().external_cmd"></code>
+                <button
+                  @click="copyToClipboard(currentBackendInstallHint().external_cmd)"
+                  class="shrink-0 p-1 rounded hover:bg-white/10 text-white/40 hover:text-white/70 transition-colors"
+                  title="Copy command"
+                >
+                  <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                </button>
+              </div>
+              <a
+                x-show="currentBackendInstallHint().docs_url"
+                :href="currentBackendInstallHint().docs_url"
+                target="_blank"
+                rel="noopener"
+                class="text-[11px] text-[var(--accent-color)] hover:underline inline-flex items-center gap-1"
+              >
+                <i data-lucide="external-link" class="w-3 h-3"></i>
+                <span>Documentation</span>
+              </a>
+            </div>
+            <!-- Mixed: pip-installable + external CLI needed (e.g. copilot_sdk) -->
+            <div
+              x-show="currentBackendInstallHint().pip_spec && currentBackendInstallHint().external_cmd"
+              class="mt-2 flex flex-col gap-2 bg-white/5 border border-[var(--glass-border)] rounded-xl px-4 py-3"
+            >
+              <div class="flex items-center gap-2">
+                <i data-lucide="info" class="w-4 h-4 text-[var(--text-secondary)] shrink-0"></i>
+                <p class="text-[12px] text-white/70">Also requires an external CLI:</p>
+              </div>
+              <div class="flex items-center gap-2 bg-black/30 rounded-lg px-3 py-2">
+                <code class="flex-1 text-[12px] text-[var(--accent-color)] break-all" x-text="currentBackendInstallHint().external_cmd"></code>
+                <button
+                  @click="copyToClipboard(currentBackendInstallHint().external_cmd)"
+                  class="shrink-0 p-1 rounded hover:bg-white/10 text-white/40 hover:text-white/70 transition-colors"
+                  title="Copy command"
+                >
+                  <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Inline API Key Banner (shown when backend needs a key that isn't configured) -->
+          <div
+            x-show="isBackendUnconfigured()"
+            x-transition
+            class="flex flex-col gap-2.5 bg-[var(--danger-color)]/10 border border-[var(--danger-color)]/30 rounded-xl px-4 py-3"
+          >
+            <div class="flex items-center gap-2">
+              <i data-lucide="alert-triangle" class="w-4 h-4 text-[var(--danger-color)] shrink-0"></i>
+              <p class="text-[12px] font-medium text-white/90">API Key Required</p>
+            </div>
+            <!-- Anthropic key input -->
+            <template x-if="backendNeedsKey('anthropic_api_key')">
+              <div class="flex flex-col gap-1.5">
+                <div class="flex justify-between items-center">
+                  <label class="text-[11px] text-white/60">Anthropic API Key</label>
+                  <a href="https://console.anthropic.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
+                    <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                  </a>
+                </div>
+                <div class="flex gap-2">
+                  <input type="password" x-model="apiKeys.anthropic"
+                    placeholder="sk-ant-..."
+                    class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-lg py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/40"
+                  />
+                  <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-lg text-[12px] font-semibold transition-all active:scale-95"
+                    @click="saveApiKey('anthropic')">Save</button>
+                </div>
+              </div>
+            </template>
+            <!-- OpenAI key input -->
+            <template x-if="backendNeedsKey('openai_api_key')">
+              <div class="flex flex-col gap-1.5">
+                <div class="flex justify-between items-center">
+                  <label class="text-[11px] text-white/60">OpenAI API Key</label>
+                  <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
+                    <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                  </a>
+                </div>
+                <div class="flex gap-2">
+                  <input type="password" x-model="apiKeys.openai"
+                    placeholder="sk-..."
+                    class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-lg py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/40"
+                  />
+                  <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-lg text-[12px] font-semibold transition-all active:scale-95"
+                    @click="saveApiKey('openai')">Save</button>
+                </div>
+              </div>
+            </template>
+            <!-- Google key input -->
+            <template x-if="backendNeedsKey('google_api_key')">
+              <div class="flex flex-col gap-1.5">
+                <div class="flex justify-between items-center">
+                  <label class="text-[11px] text-white/60">Google API Key</label>
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="api-key-help">
+                    <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
+                  </a>
+                </div>
+                <div class="flex gap-2">
+                  <input type="password" x-model="apiKeys.google"
+                    placeholder="AIza..."
+                    class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-lg py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/40"
+                  />
+                  <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-lg text-[12px] font-semibold transition-all active:scale-95"
+                    @click="saveApiKey('google')">Save</button>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Claude SDK Settings (shown when Claude Agent SDK selected and available) -->
+          <div
+            x-show="settings.agentBackend === 'claude_agent_sdk' && isCurrentBackendAvailable()"
             x-transition
             class="flex flex-col gap-3 pl-4 border-l-2 border-[var(--accent-color)]/30"
           >
-            <small class="text-white/50 text-[11px]">
-              Claude Code handles model selection automatically. Only set a
-              model below if you want to override it.
-            </small>
+            <!-- Provider sub-selector -->
             <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Provider</label>
+              <div class="relative">
+                <select
+                  x-model="settings.claudeSdkProvider"
+                  @change="saveSettings()"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+                  <option value="anthropic">Anthropic (Recommended)</option>
+                  <option value="ollama">Ollama (Local)</option>
+                  <option value="openai_compatible">OpenAI-Compatible</option>
+                </select>
+                <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'anthropic'">
+                Uses Claude Code CLI with Anthropic API. No API key needed if logged into Claude Code.
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'ollama'">
+                Runs via Ollama's Anthropic Messages API compatibility (Claude Code v0.14.0+).
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openai_compatible'">
+                Connect to any Anthropic-compatible endpoint (LiteLLM, vLLM, OpenRouter, etc.).
+              </small>
+            </div>
+            <!-- Ollama config (inline, shown when provider=ollama) -->
+            <div x-show="settings.claudeSdkProvider === 'ollama'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Ollama Host</label>
+                <input type="text" x-model="settings.ollamaHost" @change="saveSettings()"
+                  placeholder="http://localhost:11434"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Ollama Model</label>
+                <input type="text" x-model="settings.ollamaModel" @change="saveSettings()"
+                  placeholder="llama3.2"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Run <code>ollama list</code> to see available models.</small>
+              </div>
+            </div>
+            <!-- OpenAI-compatible config (inline, shown when provider=openai_compatible) -->
+            <div x-show="settings.claudeSdkProvider === 'openai_compatible'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Base URL</label>
+                <input type="text" x-model="settings.openaiCompatibleBaseUrl" @change="saveSettings()"
+                  placeholder="http://localhost:4000/v1"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">API Key</label>
+                <input type="password" x-model="settings.openaiCompatibleApiKey" @change="saveSettings()"
+                  :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'Optional'"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.openaiCompatibleModel" @change="saveSettings()"
+                  placeholder="claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+            </div>
+            <!-- Model override (Anthropic) -->
+            <div class="flex flex-col gap-1" x-show="settings.claudeSdkProvider === 'anthropic'">
               <label
                 class="text-[12px] font-medium text-[var(--text-secondary)]"
                 >Model Override</label
@@ -157,275 +431,234 @@
             </div>
           </div>
 
-          <!-- LLM Provider -->
-          <div class="flex flex-col gap-1.5">
-            <div class="flex justify-between items-center">
-              <label
-                class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-                >LLM Provider</label
-              >
-              <a
-                href="https://pocketpaw.xyz/concepts/llm-providers"
-                target="_blank"
-                rel="noopener"
-                class="text-[11px] text-[var(--accent-color)] hover:underline flex items-center gap-1"
-              >
-                <i data-lucide="book-open" class="w-3 h-3"></i> Provider guide
-              </a>
+          <!-- OpenAI Agents Settings -->
+          <div
+            x-show="settings.agentBackend === 'openai_agents' && isCurrentBackendAvailable()"
+            x-transition
+            class="flex flex-col gap-3 pl-4 border-l-2 border-[var(--accent-color)]/30"
+          >
+            <!-- Provider sub-selector -->
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Provider</label>
+              <div class="relative">
+                <select
+                  x-model="settings.openaiAgentsProvider"
+                  @change="saveSettings()"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+                  <option value="openai">OpenAI (Recommended)</option>
+                  <option value="ollama">Ollama (Local)</option>
+                  <option value="openai_compatible">OpenAI-Compatible</option>
+                </select>
+                <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'ollama'">
+                Uses Ollama's OpenAI-compatible API. No API key needed.
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openai_compatible'">
+                Connect to any OpenAI-compatible endpoint (NVIDIA NIM, OpenRouter, vLLM, etc.).
+              </small>
             </div>
-            <div class="relative">
-              <select
-                x-model="settings.llmProvider"
+            <!-- Ollama config (inline) -->
+            <div x-show="settings.openaiAgentsProvider === 'ollama'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Ollama Host</label>
+                <input type="text" x-model="settings.ollamaHost" @change="saveSettings()"
+                  placeholder="http://localhost:11434"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Ollama Model</label>
+                <input type="text" x-model="settings.ollamaModel" @change="saveSettings()"
+                  placeholder="llama3.2"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+            </div>
+            <!-- OpenAI-compatible config (inline) -->
+            <div x-show="settings.openaiAgentsProvider === 'openai_compatible'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Base URL</label>
+                <input type="text" x-model="settings.openaiCompatibleBaseUrl" @change="saveSettings()"
+                  placeholder="http://localhost:4000/v1"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">API Key</label>
+                <input type="password" x-model="settings.openaiCompatibleApiKey" @change="saveSettings()"
+                  :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'Optional'"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.openaiCompatibleModel" @change="saveSettings()"
+                  placeholder="gpt-5.2"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+            </div>
+            <!-- Model (for OpenAI provider) -->
+            <div class="flex flex-col gap-1" x-show="settings.openaiAgentsProvider === 'openai'">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+              <input
+                type="text"
+                x-model="settings.openaiAgentsModel"
                 @change="saveSettings()"
-                class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                placeholder="gpt-5.2"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Turns</label>
+              <input
+                type="number"
+                x-model="settings.openaiAgentsMaxTurns"
+                @change="saveSettings()"
+                min="1" max="200"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+              />
+            </div>
+          </div>
+
+          <!-- Google ADK Settings -->
+          <div
+            x-show="settings.agentBackend === 'google_adk' && isCurrentBackendAvailable()"
+            x-transition
+            class="flex flex-col gap-3 pl-4 border-l-2 border-[var(--accent-color)]/30"
+          >
+            <p class="text-[11px] text-[var(--text-secondary)]/70">
+              Requires Google ADK. Install with: <code class="text-[var(--accent-color)]">pip install 'pocketpaw[google-adk]'</code>
+            </p>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+              <input
+                type="text"
+                x-model="settings.googleAdkModel"
+                @change="saveSettings()"
+                placeholder="gemini-3-pro-preview"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Turns</label>
+              <input
+                type="number"
+                x-model="settings.googleAdkMaxTurns"
+                @change="saveSettings()"
+                min="1" max="200"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+              />
+            </div>
+          </div>
+
+          <!-- Codex CLI Settings -->
+          <div
+            x-show="settings.agentBackend === 'codex_cli' && isCurrentBackendAvailable()"
+            x-transition
+            class="flex flex-col gap-3 pl-4 border-l-2 border-[var(--accent-color)]/30"
+          >
+            <p class="text-[11px] text-[var(--text-secondary)]/70">
+              Requires Codex CLI installed. Install with: <code class="text-[var(--accent-color)]">npm install -g @openai/codex</code>
+            </p>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+              <input
+                type="text"
+                x-model="settings.codexCliModel"
+                @change="saveSettings()"
+                placeholder="gpt-5.3-codex"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Turns</label>
+              <input
+                type="number"
+                x-model="settings.codexCliMaxTurns"
+                @change="saveSettings()"
+                min="1" max="200"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+              />
+            </div>
+          </div>
+
+          <!-- Copilot SDK Settings -->
+          <div
+            x-show="settings.agentBackend === 'copilot_sdk' && isCurrentBackendAvailable()"
+            x-transition
+            class="flex flex-col gap-3 pl-4 border-l-2 border-[var(--accent-color)]/30"
+          >
+            <p class="text-[11px] text-[var(--text-secondary)]/70">
+              Requires <code class="text-[var(--accent-color)]">copilot</code> CLI + <code class="text-[var(--accent-color)]">pip install github-copilot-sdk</code>
+            </p>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Provider</label>
+              <select
+                x-model="settings.copilotSdkProvider"
+                @change="saveSettings()"
+                class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
               >
-                <option value="auto">Auto</option>
+                <option value="copilot">Copilot (GitHub OAuth)</option>
+                <option value="openai">OpenAI-compatible</option>
+                <option value="azure">Azure OpenAI</option>
                 <option value="anthropic">Anthropic</option>
-                <option value="openai">OpenAI</option>
-                <option value="ollama">Ollama</option>
-                <option value="gemini">Gemini</option>
-                <option value="openai_compatible">OpenAI-Compatible</option>
               </select>
-              <div
-                class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50"
-              >
-                <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
-              </div>
             </div>
-            <small
-              class="text-white/50 text-[11px]"
-              x-show="settings.llmProvider === 'ollama'"
-            >
-              Works with Claude SDK and PocketPaw Native backends. Run
-              <code>pocketpaw --check-ollama</code> to verify.
-            </small>
-            <small
-              class="text-white/50 text-[11px]"
-              x-show="settings.llmProvider === 'gemini'"
-            >
-              Google Gemini via OpenAI-compatible API. Only needs a Google API
-              key. Get one free at
-              <a
-                href="https://aistudio.google.com/apikey"
-                target="_blank"
-                rel="noopener"
-                class="text-[var(--accent-color)] hover:underline"
-                >AI Studio</a
-              >.
-            </small>
-            <small
-              class="text-white/50 text-[11px]"
-              x-show="settings.llmProvider === 'openai_compatible'"
-            >
-              Connect to any OpenAI-compatible endpoint (NVIDIA NIM, OpenRouter,
-              LiteLLM, vLLM, etc.). Works best with
-              <b>PocketPaw Native</b> backend. Run
-              <code>pocketpaw --check-openai-compatible</code> to verify.
-            </small>
-          </div>
-
-          <!-- Gemini Model -->
-          <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'gemini'"
-          >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >Gemini Model</label
-            >
-            <div class="relative">
-              <select
-                x-model="settings.geminiModel"
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+              <input
+                type="text"
+                x-model="settings.copilotSdkModel"
                 @change="saveSettings()"
-                class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-              >
-                <optgroup label="Gemini 3 (Preview)">
-                  <option value="gemini-3-pro-preview">
-                    Gemini 3 Pro (Preview)
-                  </option>
-                  <option value="gemini-3-flash-preview">
-                    Gemini 3 Flash (Preview)
-                  </option>
-                </optgroup>
-                <optgroup label="Gemini 2.5">
-                  <option value="gemini-2.5-flash">
-                    Gemini 2.5 Flash (Recommended)
-                  </option>
-                  <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                  <option value="gemini-2.5-flash-lite">
-                    Gemini 2.5 Flash Lite
-                  </option>
-                </optgroup>
-              </select>
-              <div
-                class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50"
-              >
-                <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
-              </div>
+                placeholder="gpt-5.2"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Turns</label>
+              <input
+                type="number"
+                x-model="settings.copilotSdkMaxTurns"
+                @change="saveSettings()"
+                min="1" max="200"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+              />
             </div>
           </div>
 
-          <!-- OpenAI-Compatible Base URL -->
+          <!-- OpenCode Settings -->
           <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'openai_compatible'"
+            x-show="settings.agentBackend === 'opencode' && isCurrentBackendAvailable()"
+            x-transition
+            class="flex flex-col gap-3 pl-4 border-l-2 border-[var(--accent-color)]/30"
           >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >Base URL</label
-            >
-            <input
-              type="text"
-              x-model="settings.openaiCompatibleBaseUrl"
-              @change="saveSettings()"
-              placeholder="http://localhost:4000/v1"
-              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-            />
-            <small class="text-white/50 text-[11px]">
-              The base URL of your Anthropic-compatible endpoint (e.g. LiteLLM,
-              vLLM, OpenRouter).
-            </small>
-          </div>
-
-          <!-- OpenAI-Compatible API Key -->
-          <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'openai_compatible'"
-          >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >API Key</label
-            >
-            <input
-              type="password"
-              x-model="settings.openaiCompatibleApiKey"
-              @change="saveSettings()"
-              :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'Optional — leave empty if not needed'"
-              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-            />
-          </div>
-
-          <!-- OpenAI-Compatible Model -->
-          <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'openai_compatible'"
-          >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >Model</label
-            >
-            <input
-              type="text"
-              x-model="settings.openaiCompatibleModel"
-              @change="saveSettings()"
-              placeholder="gpt-4o / claude-sonnet-4-5-20250929 / etc."
-              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-            />
-            <small class="text-white/50 text-[11px]">
-              Model name as expected by the endpoint.
-            </small>
-          </div>
-
-          <!-- OpenAI-Compatible Max Tokens -->
-          <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'openai_compatible'"
-          >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >Max Tokens</label
-            >
-            <input
-              type="number"
-              x-model.number="settings.openaiCompatibleMaxTokens"
-              @change="saveSettings()"
-              min="0"
-              max="1000000"
-              placeholder="0"
-              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-            />
-            <small class="text-white/50 text-[11px]">
-              Max output tokens per request. 0 = no limit (recommended).
-            </small>
-          </div>
-
-          <!-- Ollama Host -->
-          <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'ollama'"
-          >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >Ollama Host</label
-            >
-            <input
-              type="text"
-              x-model="settings.ollamaHost"
-              @change="saveSettings()"
-              placeholder="http://localhost:11434"
-              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-            />
-          </div>
-
-          <!-- Ollama Model -->
-          <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'ollama'"
-          >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >Ollama Model</label
-            >
-            <input
-              type="text"
-              x-model="settings.ollamaModel"
-              @change="saveSettings()"
-              placeholder="llama3.2"
-              class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-            />
-            <small class="text-white/50 text-[11px]">
-              Run <code>ollama list</code> to see available models.
-            </small>
-          </div>
-
-          <!-- Anthropic Model -->
-          <div
-            class="flex flex-col gap-1.5"
-            x-show="settings.llmProvider === 'anthropic' || settings.llmProvider === 'auto'"
-          >
-            <label
-              class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-              >Anthropic Model</label
-            >
-            <div class="relative">
-              <select
-                x-model="settings.anthropicModel"
+            <p class="text-[11px] text-[var(--text-secondary)]/70">
+              Requires OpenCode server running. Start with: <code class="text-[var(--accent-color)]">opencode --server</code>
+            </p>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Server URL</label>
+              <input
+                type="text"
+                x-model="settings.opencodeBaseUrl"
                 @change="saveSettings()"
-                class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
-              >
-                <optgroup label="Claude 4.5 (Latest)">
-                  <option value="claude-sonnet-4-5-20250929">
-                    Claude Sonnet 4.5 (Recommended)
-                  </option>
-                  <option value="claude-opus-4-5-20250929">
-                    Claude Opus 4.5
-                  </option>
-                  <option value="claude-haiku-4-5-20250929">
-                    Claude Haiku 4.5
-                  </option>
-                </optgroup>
-                <optgroup label="Claude 4">
-                  <option value="claude-sonnet-4-20250514">
-                    Claude Sonnet 4
-                  </option>
-                  <option value="claude-opus-4-20250514">Claude Opus 4</option>
-                </optgroup>
-              </select>
-              <div
-                class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50"
-              >
-                <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
-              </div>
+                placeholder="http://localhost:4096"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+              <input
+                type="text"
+                x-model="settings.opencodeModel"
+                @change="saveSettings()"
+                placeholder="anthropic/claude-sonnet-4-6"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
             </div>
           </div>
 
@@ -452,143 +685,117 @@
           </div>
         </div>
 
-        <!-- ===================== API Keys (Consolidated) ===================== -->
-        <div x-show="settingsSection === 'apikeys'" class="space-y-4">
+        <!-- ===================== API Keys (Backend-Aware) ===================== -->
+        <div x-show="settingsSection === 'apikeys' && settingsSearchResults.length === 0" class="space-y-4">
           <h3 class="text-[14px] font-semibold text-white/80 mb-3">API Keys</h3>
           <p class="text-[12px] text-white/50 -mt-1 mb-2">
-            Manage all your API keys in one place. Keys are encrypted at rest.
+            Keys are encrypted at rest. Only keys needed for your current backend and provider are shown.
           </p>
 
-          <!-- Anthropic API Key -->
-          <div class="flex flex-col gap-1.5">
+          <!-- Required for current backend -->
+          <h4 class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">
+            Required for Current Backend
+          </h4>
+
+          <!-- Anthropic key: Claude SDK + Anthropic provider -->
+          <div class="flex flex-col gap-1.5"
+            x-show="backendNeedsKey('anthropic_api_key')"
+          >
             <div class="flex justify-between items-center">
-              <label
-                class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-                >Anthropic API Key</label
-              >
+              <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Anthropic API Key</label>
               <div class="flex items-center gap-2">
-                <a
-                  href="https://console.anthropic.com/api-keys"
-                  target="_blank"
-                  rel="noopener"
-                  class="api-key-help"
-                >
+                <a href="https://console.anthropic.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
                   <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
                 </a>
-                <span
-                  x-show="hasAnthropicKey"
-                  class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1"
-                >
+                <span x-show="hasAnthropicKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
                   <i data-lucide="check" class="w-3 h-3"></i> Saved
                 </span>
               </div>
             </div>
             <div class="flex gap-2">
-              <input
-                type="password"
-                x-model="apiKeys.anthropic"
+              <input type="password" x-model="apiKeys.anthropic"
                 :placeholder="hasAnthropicKey ? '••••••••••••••••' : 'sk-ant-...'"
                 class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
               />
-              <button
-                class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
-                @click="saveApiKey('anthropic')"
-              >
-                Save
-              </button>
+              <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
+                @click="saveApiKey('anthropic')">Save</button>
             </div>
+            <small class="text-white/50 text-[11px]">Required for Claude SDK backend — get a key at <a href="https://console.anthropic.com/api-keys" target="_blank" rel="noopener" class="underline hover:text-white/70">console.anthropic.com</a></small>
           </div>
 
-          <!-- OpenAI API Key -->
-          <div class="flex flex-col gap-1.5">
+          <!-- OpenAI key: OpenAI Agents + OpenAI provider -->
+          <div class="flex flex-col gap-1.5"
+            x-show="backendNeedsKey('openai_api_key')"
+          >
             <div class="flex justify-between items-center">
-              <label
-                class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-                >OpenAI API Key</label
-              >
+              <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">OpenAI API Key</label>
               <div class="flex items-center gap-2">
-                <a
-                  href="https://platform.openai.com/api-keys"
-                  target="_blank"
-                  rel="noopener"
-                  class="api-key-help"
-                >
+                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
                   <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
                 </a>
-                <span
-                  x-show="hasOpenaiKey"
-                  class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1"
-                >
+                <span x-show="hasOpenaiKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
                   <i data-lucide="check" class="w-3 h-3"></i> Saved
                 </span>
               </div>
             </div>
             <div class="flex gap-2">
-              <input
-                type="password"
-                x-model="apiKeys.openai"
+              <input type="password" x-model="apiKeys.openai"
                 :placeholder="hasOpenaiKey ? '••••••••••••••••' : 'sk-...'"
                 class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
               />
-              <button
-                class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
-                @click="saveApiKey('openai')"
-              >
-                Save
-              </button>
+              <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
+                @click="saveApiKey('openai')">Save</button>
             </div>
           </div>
 
-          <!-- Google API Key (Gemini) -->
-          <div class="flex flex-col gap-1.5">
+          <!-- Google API key: Google ADK -->
+          <div class="flex flex-col gap-1.5"
+            x-show="backendNeedsKey('google_api_key')"
+          >
             <div class="flex justify-between items-center">
-              <label
-                class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide"
-                >Google API Key</label
-              >
+              <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Google API Key</label>
               <div class="flex items-center gap-2">
-                <a
-                  href="https://aistudio.google.com/apikey"
-                  target="_blank"
-                  rel="noopener"
-                  class="api-key-help"
-                >
+                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="api-key-help">
                   <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
                 </a>
-                <span
-                  x-show="hasGoogleApiKey"
-                  class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1"
-                >
+                <span x-show="hasGoogleApiKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
                   <i data-lucide="check" class="w-3 h-3"></i> Saved
                 </span>
               </div>
             </div>
             <div class="flex gap-2">
-              <input
-                type="password"
-                x-model="apiKeys.google"
+              <input type="password" x-model="apiKeys.google"
                 :placeholder="hasGoogleApiKey ? '••••••••••••••••' : 'AIza...'"
                 class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
               />
-              <button
-                class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
-                @click="saveApiKey('google')"
-              >
-                Save
-              </button>
+              <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
+                @click="saveApiKey('google')">Save</button>
             </div>
-            <small class="text-white/50 text-[11px]"
-              >Used for Gemini LLM and image generation. Free at AI
-              Studio.</small
-            >
+            <small class="text-white/50 text-[11px]">Used for Gemini LLM and image generation. Free at AI Studio.</small>
+          </div>
+
+          <!-- No key needed message -->
+          <div x-show="!backendNeedsKey('anthropic_api_key') && !backendNeedsKey('openai_api_key') && !backendNeedsKey('google_api_key')"
+            class="bg-white/5 border border-[var(--glass-border)] rounded-[10px] p-3"
+          >
+            <p class="text-[12px] text-white/60">
+              <template x-if="settings.agentBackend === 'opencode'">
+                <span>OpenCode manages its own API keys server-side. No key needed here.</span>
+              </template>
+              <template x-if="settings.agentBackend !== 'opencode'">
+                <span>Your current provider (Ollama / OpenAI-Compatible) doesn't require an API key at the PocketPaw level. Configuration is in Settings &rarr; General.</span>
+              </template>
+            </p>
           </div>
 
           <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
           <h4
             class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide"
           >
-            Search Providers
+            Tools & Services
           </h4>
+
+          <h4 class="text-[11px] font-medium text-white/40 uppercase tracking-wide">Search</h4>
 
           <!-- Tavily API Key -->
           <div class="flex flex-col gap-1.5">
@@ -1002,7 +1209,7 @@
         </div>
 
         <!-- ===================== Behavior & Safety ===================== -->
-        <div x-show="settingsSection === 'behavior'" class="space-y-4">
+        <div x-show="settingsSection === 'behavior' && settingsSearchResults.length === 0" class="space-y-4">
           <h3 class="text-[14px] font-semibold text-white/80 mb-3">
             Behavior & Safety
           </h3>
@@ -1194,7 +1401,7 @@
         </div>
 
         <!-- ===================== Memory ===================== -->
-        <div x-show="settingsSection === 'memory'" class="space-y-4">
+        <div x-show="settingsSection === 'memory' && settingsSearchResults.length === 0" class="space-y-4">
           <h3 class="text-[14px] font-semibold text-white/80 mb-3">Memory</h3>
 
           <!-- Memory Backend -->
@@ -1377,7 +1584,7 @@
         </div>
 
         <!-- ===================== Search & Services ===================== -->
-        <div x-show="settingsSection === 'services'" class="space-y-4">
+        <div x-show="settingsSection === 'services' && settingsSearchResults.length === 0" class="space-y-4">
           <h3 class="text-[14px] font-semibold text-white/80 mb-3">
             Search & Services
           </h3>
@@ -1585,7 +1792,7 @@
         </div>
 
         <!-- ===================== System ===================== -->
-        <div x-show="settingsSection === 'system'" class="space-y-4">
+        <div x-show="settingsSection === 'system' && settingsSearchResults.length === 0" class="space-y-4">
           <h3 class="text-[14px] font-semibold text-white/80 mb-3">System</h3>
 
           <!-- Self-Audit Daemon -->

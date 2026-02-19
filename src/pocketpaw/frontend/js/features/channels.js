@@ -23,14 +23,14 @@ window.PocketPaw.Channels = {
             channelsTab: 'discord',
             channelsMobileView: 'list',
             channelStatus: {
-                discord: { configured: false, running: false },
-                slack: { configured: false, running: false },
-                whatsapp: { configured: false, running: false, mode: 'personal' },
-                telegram: { configured: false, running: false },
-                signal: { configured: false, running: false },
-                matrix: { configured: false, running: false },
-                teams: { configured: false, running: false },
-                google_chat: { configured: false, running: false }
+                discord: { configured: false, running: false, autostart: true },
+                slack: { configured: false, running: false, autostart: true },
+                whatsapp: { configured: false, running: false, mode: '', autostart: true },
+                telegram: { configured: false, running: false, autostart: true },
+                signal: { configured: false, running: false, autostart: true },
+                matrix: { configured: false, running: false, autostart: true },
+                teams: { configured: false, running: false, autostart: true },
+                google_chat: { configured: false, running: false, autostart: true }
             },
             channelForms: {
                 discord: { bot_token: '' },
@@ -131,6 +131,31 @@ window.PocketPaw.Channels = {
                     google_chat: 'Google Chat API'
                 };
                 return labels[tab] || 'Setup Guide';
+            },
+
+            /**
+             * Toggle auto-start on launch for a channel
+             */
+            async toggleAutostart(channel) {
+                const current = this.channelStatus[channel]?.autostart !== false;
+                const newVal = !current;
+                try {
+                    const res = await fetch('/api/channels/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ channel, config: { autostart: newVal } })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'ok') {
+                        this.channelStatus[channel].autostart = newVal;
+                        this.showToast(
+                            `${this.channelDisplayName(channel)} auto-start ${newVal ? 'enabled' : 'disabled'}`,
+                            newVal ? 'success' : 'info'
+                        );
+                    }
+                } catch (e) {
+                    this.showToast('Failed to update auto-start: ' + e.message, 'error');
+                }
             },
 
             /**

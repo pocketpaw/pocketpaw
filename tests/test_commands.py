@@ -440,6 +440,10 @@ class TestHelpCommand:
         assert "/rename" in response.content
         assert "/status" in response.content
         assert "/delete" in response.content
+        assert "/backend" in response.content
+        assert "/backends" in response.content
+        assert "/model" in response.content
+        assert "/tools" in response.content
         assert "/help" in response.content
 
 
@@ -597,7 +601,7 @@ class TestStatusCommand:
     @patch("pocketpaw.bus.commands.get_memory_manager")
     async def test_status_no_sessions(self, mock_get_mm, mock_settings):
         settings = MagicMock()
-        settings.agent_backend = "pocketpaw_native"
+        settings.agent_backend = "claude_agent_sdk"
         mock_settings.return_value = settings
 
         mm = MagicMock()
@@ -609,7 +613,7 @@ class TestStatusCommand:
         response = await self.handler.handle(msg)
 
         assert "Default" in response.content
-        assert "pocketpaw_native" in response.content
+        assert "claude_agent_sdk" in response.content
 
     @patch("pocketpaw.config.get_settings")
     @patch("pocketpaw.bus.commands.get_memory_manager")
@@ -866,7 +870,7 @@ class TestSlackSlashCommands:
         assert meta["thread_ts"] == "1234567890.123456"
 
     async def test_all_commands_registered(self):
-        """All 8 commands should be in the registration loop."""
+        """All 12 commands should be in the registration loop."""
         import ast
 
         from pocketpaw.bus.adapters import slack_adapter
@@ -882,6 +886,10 @@ class TestSlackSlashCommands:
             "/rename",
             "/status",
             "/delete",
+            "/backend",
+            "/backends",
+            "/model",
+            "/tools",
             "/help",
         }
         found = set()
@@ -1389,3 +1397,412 @@ class TestWelcomeHint:
         for call in mm.add_to_session.call_args_list:
             content = call.kwargs.get("content") or call[1].get("content", "")
             assert "Welcome to PocketPaw" not in content
+
+
+# =========================================================================
+# is_command for settings commands
+# =========================================================================
+
+
+class TestIsCommandSettingsCommands:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    def test_recognises_backend(self):
+        assert self.handler.is_command("/backend")
+
+    def test_recognises_backend_with_arg(self):
+        assert self.handler.is_command("/backend openai_agents")
+
+    def test_recognises_backends(self):
+        assert self.handler.is_command("/backends")
+
+    def test_recognises_model(self):
+        assert self.handler.is_command("/model")
+
+    def test_recognises_model_with_arg(self):
+        assert self.handler.is_command("/model gpt-4o")
+
+    def test_recognises_tools(self):
+        assert self.handler.is_command("/tools")
+
+    def test_recognises_tools_with_arg(self):
+        assert self.handler.is_command("/tools minimal")
+
+    def test_bang_backend(self):
+        assert self.handler.is_command("!backend")
+
+    def test_bang_backends(self):
+        assert self.handler.is_command("!backends")
+
+    def test_bang_model(self):
+        assert self.handler.is_command("!model gpt-4o")
+
+    def test_bang_tools(self):
+        assert self.handler.is_command("!tools full")
+
+
+# =========================================================================
+# /backends command
+# =========================================================================
+
+
+class TestBackendsCommand:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.agents.registry.get_backend_info")
+    @patch("pocketpaw.agents.registry.get_backend_class")
+    @patch("pocketpaw.agents.registry.list_backends")
+    async def test_lists_backends(self, mock_list, mock_cls, mock_info, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        mock_settings.return_value = settings
+
+        mock_list.return_value = ["claude_agent_sdk", "openai_agents"]
+
+        from pocketpaw.agents.backend import Capability
+
+        info1 = MagicMock()
+        info1.display_name = "Claude Agent SDK"
+        info1.capabilities = Capability.STREAMING | Capability.TOOLS
+        info2 = MagicMock()
+        info2.display_name = "OpenAI Agents"
+        info2.capabilities = Capability.STREAMING
+        mock_info.side_effect = lambda n: info1 if n == "claude_agent_sdk" else info2
+
+        msg = _make_msg("/backends")
+        response = await self.handler.handle(msg)
+
+        assert "Claude Agent SDK" in response.content
+        assert "OpenAI Agents" in response.content
+        assert "(active)" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.agents.registry.get_backend_info")
+    @patch("pocketpaw.agents.registry.get_backend_class")
+    @patch("pocketpaw.agents.registry.list_backends")
+    async def test_shows_not_installed(self, mock_list, mock_cls, mock_info, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        mock_settings.return_value = settings
+
+        mock_list.return_value = ["claude_agent_sdk", "missing_backend"]
+        mock_info.side_effect = (
+            lambda n: None
+            if n == "missing_backend"
+            else MagicMock(
+                display_name="Claude", capabilities=MagicMock(__iter__=lambda s: iter([]))
+            )
+        )
+        mock_cls.side_effect = lambda n: None if n == "missing_backend" else MagicMock()
+
+        msg = _make_msg("/backends")
+        response = await self.handler.handle(msg)
+
+        assert "not installed" in response.content
+
+
+# =========================================================================
+# /backend command
+# =========================================================================
+
+
+class TestBackendCommand:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_show_current(self, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.claude_sdk_model = "claude-sonnet-4-20250514"
+        mock_settings.return_value = settings
+
+        msg = _make_msg("/backend")
+        response = await self.handler.handle(msg)
+
+        assert "claude_agent_sdk" in response.content
+        assert "claude-sonnet-4-20250514" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_show_current_default_model(self, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.claude_sdk_model = ""
+        mock_settings.return_value = settings
+
+        msg = _make_msg("/backend")
+        response = await self.handler.handle(msg)
+
+        assert "default model" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.agents.registry.get_backend_class")
+    @patch("pocketpaw.agents.registry.list_backends")
+    async def test_switch_valid(self, mock_list, mock_cls, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.save = MagicMock()
+        mock_settings.return_value = settings
+        mock_list.return_value = ["claude_agent_sdk", "openai_agents"]
+        mock_cls.return_value = MagicMock()  # installed
+
+        callback = MagicMock()
+        self.handler.set_on_settings_changed(callback)
+
+        msg = _make_msg("/backend openai_agents")
+        response = await self.handler.handle(msg)
+
+        assert "openai_agents" in response.content
+        assert "Switched" in response.content
+        settings.save.assert_called_once()
+        callback.assert_called_once()
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.agents.registry.list_backends")
+    async def test_reject_unknown(self, mock_list, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        mock_settings.return_value = settings
+        mock_list.return_value = ["claude_agent_sdk", "openai_agents"]
+
+        msg = _make_msg("/backend fake_backend")
+        response = await self.handler.handle(msg)
+
+        assert "Unknown backend" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.agents.registry.get_backend_class")
+    @patch("pocketpaw.agents.registry.list_backends")
+    async def test_reject_not_installed(self, mock_list, mock_cls, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        mock_settings.return_value = settings
+        mock_list.return_value = ["claude_agent_sdk", "openai_agents"]
+        mock_cls.return_value = None  # not installed
+
+        msg = _make_msg("/backend openai_agents")
+        response = await self.handler.handle(msg)
+
+        assert "not installed" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.agents.registry.list_backends")
+    async def test_already_active(self, mock_list, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        mock_settings.return_value = settings
+        mock_list.return_value = ["claude_agent_sdk"]
+
+        msg = _make_msg("/backend claude_agent_sdk")
+        response = await self.handler.handle(msg)
+
+        assert "Already using" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.agents.registry.get_backend_class")
+    @patch("pocketpaw.agents.registry.list_backends")
+    async def test_fires_callback(self, mock_list, mock_cls, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.save = MagicMock()
+        mock_settings.return_value = settings
+        mock_list.return_value = ["claude_agent_sdk", "openai_agents"]
+        mock_cls.return_value = MagicMock()
+
+        callback = MagicMock()
+        self.handler.set_on_settings_changed(callback)
+
+        msg = _make_msg("/backend openai_agents")
+        await self.handler.handle(msg)
+
+        callback.assert_called_once()
+
+
+# =========================================================================
+# /model command
+# =========================================================================
+
+
+class TestModelCommand:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_show_current(self, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "openai_agents"
+        settings.openai_agents_model = "gpt-4o"
+        mock_settings.return_value = settings
+
+        msg = _make_msg("/model")
+        response = await self.handler.handle(msg)
+
+        assert "gpt-4o" in response.content
+        assert "openai_agents" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_show_default_when_empty(self, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "openai_agents"
+        settings.openai_agents_model = ""
+        mock_settings.return_value = settings
+
+        msg = _make_msg("/model")
+        response = await self.handler.handle(msg)
+
+        assert "default" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_set_new_model(self, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "openai_agents"
+        settings.openai_agents_model = "gpt-4o"
+        settings.save = MagicMock()
+        mock_settings.return_value = settings
+
+        callback = MagicMock()
+        self.handler.set_on_settings_changed(callback)
+
+        msg = _make_msg("/model gpt-4-turbo")
+        response = await self.handler.handle(msg)
+
+        assert "gpt-4-turbo" in response.content
+        settings.save.assert_called_once()
+        callback.assert_called_once()
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_fires_callback(self, mock_settings):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.claude_sdk_model = ""
+        settings.save = MagicMock()
+        mock_settings.return_value = settings
+
+        callback = MagicMock()
+        self.handler.set_on_settings_changed(callback)
+
+        msg = _make_msg("/model claude-opus-4-20250514")
+        await self.handler.handle(msg)
+
+        callback.assert_called_once()
+
+
+# =========================================================================
+# /tools command
+# =========================================================================
+
+
+class TestToolsCommand:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_show_current(self, mock_settings):
+        settings = MagicMock()
+        settings.tool_profile = "coding"
+        mock_settings.return_value = settings
+
+        msg = _make_msg("/tools")
+        response = await self.handler.handle(msg)
+
+        assert "coding" in response.content
+        assert "minimal" in response.content
+        assert "full" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_switch_valid(self, mock_settings):
+        settings = MagicMock()
+        settings.tool_profile = "coding"
+        settings.save = MagicMock()
+        mock_settings.return_value = settings
+
+        callback = MagicMock()
+        self.handler.set_on_settings_changed(callback)
+
+        msg = _make_msg("/tools minimal")
+        response = await self.handler.handle(msg)
+
+        assert "minimal" in response.content
+        assert "switched" in response.content.lower()
+        settings.save.assert_called_once()
+        callback.assert_called_once()
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_reject_invalid(self, mock_settings):
+        settings = MagicMock()
+        settings.tool_profile = "coding"
+        mock_settings.return_value = settings
+
+        msg = _make_msg("/tools nonexistent")
+        response = await self.handler.handle(msg)
+
+        assert "Unknown profile" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_already_active(self, mock_settings):
+        settings = MagicMock()
+        settings.tool_profile = "coding"
+        mock_settings.return_value = settings
+
+        msg = _make_msg("/tools coding")
+        response = await self.handler.handle(msg)
+
+        assert "Already using" in response.content
+
+    @patch("pocketpaw.config.get_settings")
+    async def test_fires_callback(self, mock_settings):
+        settings = MagicMock()
+        settings.tool_profile = "coding"
+        settings.save = MagicMock()
+        mock_settings.return_value = settings
+
+        callback = MagicMock()
+        self.handler.set_on_settings_changed(callback)
+
+        msg = _make_msg("/tools full")
+        await self.handler.handle(msg)
+
+        callback.assert_called_once()
+
+
+# =========================================================================
+# Settings-changed callback mechanism
+# =========================================================================
+
+
+class TestSettingsChangedCallback:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    def test_callback_initially_none(self):
+        assert self.handler._on_settings_changed is None
+
+    def test_set_callback(self):
+        cb = MagicMock()
+        self.handler.set_on_settings_changed(cb)
+        assert self.handler._on_settings_changed is cb
+
+    def test_notify_with_no_callback(self):
+        # Should not raise
+        self.handler._notify_settings_changed()
+
+    def test_notify_fires_callback(self):
+        cb = MagicMock()
+        self.handler.set_on_settings_changed(cb)
+        self.handler._notify_settings_changed()
+        cb.assert_called_once()

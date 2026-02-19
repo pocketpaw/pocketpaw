@@ -80,6 +80,10 @@ class SlackAdapter(BaseChannelAdapter):
             "/rename",
             "/status",
             "/delete",
+            "/backend",
+            "/backends",
+            "/model",
+            "/tools",
             "/help",
         ):
 

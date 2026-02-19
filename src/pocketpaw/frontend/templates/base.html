@@ -71,8 +71,63 @@
       defer
       src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.3/dist/cdn.min.js"
     ></script>
+    <!-- Inline preloader styles (renders before external CSS to prevent FOUC) -->
+    <style>
+      body.loading > *:not(#preloader) { display: none !important; }
+      #preloader {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      }
+      #preloader .logo {
+        width: 48px; height: 48px;
+        margin-bottom: 20px;
+        animation: preloader-pulse 1.8s ease-in-out infinite;
+      }
+      #preloader .bar-track {
+        width: 160px; height: 3px;
+        background: rgba(255,255,255,0.08);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      #preloader .bar-fill {
+        height: 100%;
+        width: 40%;
+        background: #0A84FF;
+        border-radius: 3px;
+        animation: preloader-slide 1.2s ease-in-out infinite;
+      }
+      @keyframes preloader-pulse {
+        0%, 100% { opacity: 0.6; transform: scale(1); }
+        50%      { opacity: 1;   transform: scale(1.05); }
+      }
+      @keyframes preloader-slide {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(400%); }
+      }
+      #preloader.fade-out {
+        opacity: 0;
+        transition: opacity 0.3s ease;
+        pointer-events: none;
+      }
+    </style>
   </head>
-  <body x-data="{ ...app(), sidebarOpen: false }" x-init="init()" class="flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]">
+  <body class="loading flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]" x-data="{ ...app(), sidebarOpen: false }" x-init="init()">
+
+    <!-- Preloader (visible immediately, hidden once app is ready) -->
+    <div id="preloader">
+      <svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#0A84FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="4" r="2"/><circle cx="18" cy="8" r="2"/><circle cx="20" cy="16" r="2"/>
+        <path d="M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 16.84A3.5 3.5 0 0 1 5.5 10Z"/>
+      </svg>
+      <div class="bar-track"><div class="bar-fill"></div></div>
+    </div>
 
     <!-- Login Overlay (shown when no auth token is available) -->
     <div x-show="showLogin" x-transition.opacity
@@ -159,7 +214,7 @@
             </div>
         </div>
 
-        <!-- Right: Export + Remote -->
+        <!-- Right: Export + Remote + Settings Gear -->
         <div class="flex items-center gap-2 pointer-events-auto">
             <!-- Export dropdown — only shown in chat view with active session -->
             <div x-show="view === 'chat' && currentSessionId" class="relative" x-data="{ exportOpen: false }">
@@ -187,6 +242,19 @@
                 </div>
             </div>
             
+            <!-- Settings Gear Icon -->
+            <button
+                class="relative flex items-center justify-center w-8 h-8 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full transition-all hover:scale-105 active:scale-95"
+                @click="openSettings()"
+                title="Settings (Ctrl+,)"
+            >
+                <i data-lucide="settings" class="w-4 h-4 text-white/80"></i>
+                <span
+                    x-show="isBackendUnconfigured()"
+                    class="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-[var(--danger-color)] rounded-full border-2 border-black"
+                ></span>
+            </button>
+
             <!-- Take Your Paw With You button -->
             <button
                 class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95"
@@ -239,7 +307,7 @@
     <!-- Main app (assembles features) -->
     <script src="/static/js/app.js?v={{ v }}"></script>
 
-    <!-- Initialize Lucide icons -->
+    <!-- Initialize Lucide icons + dismiss preloader -->
     <script>
       // Initial render
       document.addEventListener('DOMContentLoaded', () => {
@@ -252,6 +320,15 @@
         clearTimeout(iconTimeout);
         iconTimeout = setTimeout(() => lucide.createIcons(), 50);
       };
+
+      // Dismiss preloader once CSS + fonts + scripts are ready
+      window.addEventListener('load', () => {
+        const pre = document.getElementById('preloader');
+        if (!pre) return;
+        document.body.classList.remove('loading');
+        pre.classList.add('fade-out');
+        pre.addEventListener('transitionend', () => pre.remove());
+      });
     </script>
   </body>
 </html>

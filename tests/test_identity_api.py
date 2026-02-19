@@ -1,12 +1,13 @@
 """Tests for Identity API — GET + PUT /api/identity.
 
 Covers:
-  - GET /api/identity returns all 4 identity files
+  - GET /api/identity returns all 5 identity files (including instructions)
   - PUT /api/identity saves edits to disk
   - PUT /api/identity partial update (only some files)
   - Agent picks up file changes on next prompt build
 
 Created: 2026-02-12
+Updated: 2026-02-18 — Added instructions_file coverage
 """
 
 import tempfile
@@ -19,8 +20,8 @@ from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
 class TestGetIdentity:
     """Tests for GET /api/identity."""
 
-    async def test_returns_all_four_files(self):
-        """GET /api/identity returns identity, soul, style, and user_file."""
+    async def test_returns_all_five_files(self):
+        """GET /api/identity returns identity, soul, style, instructions, and user_file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             provider = DefaultBootstrapProvider(base_path=base)
@@ -28,6 +29,7 @@ class TestGetIdentity:
             (base / "IDENTITY.md").write_text("I am PocketPaw")
             (base / "SOUL.md").write_text("I value privacy")
             (base / "STYLE.md").write_text("Be concise")
+            (base / "INSTRUCTIONS.md").write_text("Be agentic")
             (base / "USER.md").write_text("Name: Alice")
 
             with (
@@ -45,6 +47,7 @@ class TestGetIdentity:
             assert result["identity_file"] == "I am PocketPaw"
             assert result["soul_file"] == "I value privacy"
             assert result["style_file"] == "Be concise"
+            assert result["instructions_file"] == "Be agentic"
             assert result["user_file"] == "Name: Alice"
 
     async def test_returns_default_user_profile(self):
@@ -68,12 +71,34 @@ class TestGetIdentity:
             assert "user_file" in result
             assert "# User Profile" in result["user_file"]
 
+    async def test_returns_default_instructions(self):
+        """GET /api/identity returns default INSTRUCTIONS.md when not customized."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            provider = DefaultBootstrapProvider(base_path=base)
+
+            with (
+                patch("pocketpaw.dashboard.get_config_path") as mock_path,
+                patch(
+                    "pocketpaw.dashboard.DefaultBootstrapProvider",
+                    return_value=provider,
+                ),
+            ):
+                mock_path.return_value = base / "config.json"
+                from pocketpaw.dashboard import get_identity
+
+                result = await get_identity()
+
+            assert "instructions_file" in result
+            assert "PocketPaw Tools" in result["instructions_file"]
+            assert "Guidelines" in result["instructions_file"]
+
 
 class TestSaveIdentity:
     """Tests for PUT /api/identity."""
 
     async def test_saves_all_files(self):
-        """PUT /api/identity writes all 4 files to disk."""
+        """PUT /api/identity writes all 5 files to disk."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             identity_dir = base / "identity"
@@ -85,6 +110,7 @@ class TestSaveIdentity:
                     "identity_file": "New identity",
                     "soul_file": "New soul",
                     "style_file": "New style",
+                    "instructions_file": "New instructions",
                     "user_file": "Name: Bob\nTimezone: EST",
                 }
             )
@@ -100,11 +126,13 @@ class TestSaveIdentity:
                 "IDENTITY.md",
                 "SOUL.md",
                 "STYLE.md",
+                "INSTRUCTIONS.md",
                 "USER.md",
             }
             assert (identity_dir / "IDENTITY.md").read_text() == "New identity"
             assert (identity_dir / "SOUL.md").read_text() == "New soul"
             assert (identity_dir / "STYLE.md").read_text() == "New style"
+            assert (identity_dir / "INSTRUCTIONS.md").read_text() == "New instructions"
             assert (identity_dir / "USER.md").read_text() == "Name: Bob\nTimezone: EST"
 
     async def test_partial_update(self):
@@ -166,9 +194,7 @@ class TestSaveIdentity:
             base = Path(tmpdir)
 
             request = MagicMock()
-            request.json = AsyncMock(
-                return_value={"user_file": "Name: New User"}
-            )
+            request.json = AsyncMock(return_value={"user_file": "Name: New User"})
 
             with patch("pocketpaw.dashboard.get_config_path") as mock_path:
                 mock_path.return_value = base / "config.json"
@@ -238,7 +264,7 @@ class TestIdentityAgentIntegration:
             assert "Luna" in ctx.to_system_prompt()
 
     async def test_all_files_in_system_prompt(self):
-        """All 4 identity files appear in the system prompt."""
+        """All 5 identity files appear in the system prompt."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             provider = DefaultBootstrapProvider(base_path=base)
@@ -246,6 +272,7 @@ class TestIdentityAgentIntegration:
             (base / "IDENTITY.md").write_text("CUSTOM_IDENTITY")
             (base / "SOUL.md").write_text("CUSTOM_SOUL")
             (base / "STYLE.md").write_text("CUSTOM_STYLE")
+            (base / "INSTRUCTIONS.md").write_text("CUSTOM_INSTRUCTIONS")
             (base / "USER.md").write_text("CUSTOM_USER")
 
             ctx = await provider.get_context()
@@ -253,4 +280,40 @@ class TestIdentityAgentIntegration:
             assert "CUSTOM_IDENTITY" in prompt
             assert "CUSTOM_SOUL" in prompt
             assert "CUSTOM_STYLE" in prompt
+            assert "CUSTOM_INSTRUCTIONS" in prompt
             assert "CUSTOM_USER" in prompt
+
+    async def test_instructions_between_style_and_knowledge(self):
+        """Instructions section appears after style but before user profile."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            provider = DefaultBootstrapProvider(base_path=base)
+
+            (base / "INSTRUCTIONS.md").write_text("INSTR_MARKER")
+            (base / "STYLE.md").write_text("STYLE_MARKER")
+            (base / "USER.md").write_text("USER_MARKER")
+
+            ctx = await provider.get_context()
+            prompt = ctx.to_system_prompt()
+            style_pos = prompt.index("STYLE_MARKER")
+            instr_pos = prompt.index("INSTR_MARKER")
+            user_pos = prompt.index("USER_MARKER")
+            assert style_pos < instr_pos < user_pos
+
+    async def test_saved_instructions_in_system_prompt(self):
+        """After saving INSTRUCTIONS.md, the next get_context() picks it up."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            provider = DefaultBootstrapProvider(base_path=base)
+
+            # Initially has default content
+            ctx = await provider.get_context()
+            assert "PocketPaw Tools" in ctx.instructions
+
+            # Simulate saving via API (write directly)
+            (base / "INSTRUCTIONS.md").write_text("Custom tool instructions here")
+
+            # Next call picks up the change
+            ctx2 = await provider.get_context()
+            assert ctx2.instructions == "Custom tool instructions here"
+            assert "Custom tool instructions here" in ctx2.to_system_prompt()

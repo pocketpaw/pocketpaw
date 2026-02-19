@@ -19,7 +19,7 @@ docs/
 ├── getting-started/           # Install, quick-start, config, project structure
 ├── concepts/                  # Architecture, message bus, agent loop, memory, tools, security
 ├── channels/                  # 9+ channel guides (Telegram, Discord, Slack, WhatsApp, etc.)
-├── backends/                  # Claude Agent SDK, PocketPaw Native, Open Interpreter
+├── backends/                  # Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK
 ├── tools/                     # 50+ built-in tools
 ├── integrations/              # OAuth, Gmail, Calendar, Drive, Docs, Spotify, Reddit, MCP
 ├── security/                  # Guardian AI, injection scanner, audit log/CLI/daemon

@@ -194,10 +194,25 @@ class TestMCPManager:
         cfg_disabled = MCPServerConfig(name="b", enabled=False)
         mock_load.return_value = [cfg_enabled, cfg_disabled]
 
-        with patch.object(mgr, "start_server", new_callable=AsyncMock) as mock_start:
+        with patch.object(mgr, "_start_server_inner", new_callable=AsyncMock) as mock_start:
             await mgr.start_enabled_servers()
             # Only enabled server should be started
             mock_start.assert_called_once_with(cfg_enabled)
+
+    @patch("pocketpaw.mcp.manager.load_mcp_config")
+    async def test_start_enabled_servers_parallel(self, mock_load):
+        """Multiple enabled servers start in parallel via asyncio.gather."""
+        mgr = MCPManager()
+        cfg_a = MCPServerConfig(name="a", enabled=True)
+        cfg_b = MCPServerConfig(name="b", enabled=True)
+        cfg_c = MCPServerConfig(name="c", enabled=False)
+        mock_load.return_value = [cfg_a, cfg_b, cfg_c]
+
+        with patch.object(mgr, "_start_server_inner", new_callable=AsyncMock) as mock_start:
+            await mgr.start_enabled_servers()
+            assert mock_start.call_count == 2
+            mock_start.assert_any_call(cfg_a)
+            mock_start.assert_any_call(cfg_b)
 
     async def test_start_server_unknown_transport(self):
         mgr = MCPManager()

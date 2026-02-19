@@ -4,6 +4,7 @@
  * Created: 2026-02-05
  * Updated: 2026-02-17 — Route health_update events to Health feature module
  * Updated: 2026-02-12 — Added dw_ prefix routing for Deep Work events
+ * Updated: 2026-02-17 — Fix identity sync on load
  *
  * Contains transparency panel features:
  * - Identity panel
@@ -43,6 +44,11 @@ window.PocketPaw.Transparency = {
                     key: 'style_file', label: 'Style', file: 'STYLE.md',
                     icon: 'palette',
                     hint: 'Communication style — tone, formatting, and interaction patterns.',
+                },
+                {
+                    key: 'instructions_file', label: 'Instructions', file: 'INSTRUCTIONS.md',
+                    icon: 'scroll-text',
+                    hint: 'Behavioral instructions and tool usage guides — shared across all agent backends.',
                 },
                 {
                     key: 'user_file', label: 'User Profile', file: 'USER.md',
@@ -85,124 +91,15 @@ window.PocketPaw.Transparency = {
      */
     getMethods() {
         return {
-            // ==================== Connection Info ====================
-
-            /**
-             * Handle connection info (capture session ID)
-             */
-            handleConnectionInfo(data) {
-                this.handleNotification(data);
-                if (data.id) {
-                    this.sessionId = data.id;
-                    this.log(`Session ID: ${data.id}`, 'info');
-                }
-            },
-
-            /**
-             * Handle system event (Activity Log + Mission Control events)
-             */
-            handleSystemEvent(data) {
-                const time = Tools.formatTime();
-                const eventType = data.event_type || '';
-
-                // Handle Mission Control events
-                if (eventType.startsWith('mc_')) {
-                    this.handleMCEvent(data);
-                    return;
-                }
-
-                // Handle Deep Work events
-                if (eventType.startsWith('dw_')) {
-                    this.handleDWEvent(data);
-                    return;
-                }
-
-                // Handle health updates
-                if (eventType === 'health_update') {
-                    if (this.handleHealthUpdate) {
-                        this.handleHealthUpdate(data);
-                    }
-                    return;
-                }
-
-                // Handle live audit entries
-                if (eventType === 'audit_entry') {
-                    if (this.showAudit && data.data) {
-                        this.auditLogs.unshift(data.data);
-                    }
-                    return;
-                }
-
-                // Handle standard system events
-                let message = '';
-                let level = 'info';
-
-                if (eventType === 'thinking') {
-                    if (data.data && data.data.content) {
-                        const rawSnippet = data.data.content.substring(0, 120);
-                        const ellipsis = data.data.content.length > 120 ? '...' : '';
-                        const snippet = rawSnippet.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                        message = `<span class="text-white/40 italic">${snippet}${ellipsis}</span>`;
-                    } else {
-                        message = `<span class="text-accent animate-pulse">Thinking...</span>`;
-                    }
-                } else if (eventType === 'thinking_done') {
-                    message = `<span class="text-white/40">Thinking complete</span>`;
-                } else if (eventType === 'tool_start') {
-                    const toolName = (data.data.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-                    const toolParams = JSON.stringify(data.data.params || {}).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-                    message = `🔧 <b>${toolName}</b> <span class="text-white/50">${toolParams}</span>`;
-                    level = 'warning';
-                } else if (eventType === 'tool_result') {
-                    const isError = data.data.status === 'error';
-                    level = isError ? 'error' : 'success';
-                    const rName = (data.data.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-                    const rStr = String(data.data.result || '').substring(0, 50).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-                    const rMore = String(data.data.result || '').length > 50 ? '...' : '';
-                    message = `${isError ? '❌' : '✅'} <b>${rName}</b> result: <span class="text-white/50">${rStr}${rMore}</span>`;
-                } else if (eventType === 'token_usage') {
-                    const d = data.data || {};
-                    const inp = d.input_tokens || 0;
-                    const out = d.output_tokens || 0;
-                    const total = d.total_tokens || (inp + out);
-                    message = `<span class="text-white/40">Tokens: <b>${inp.toLocaleString()}</b> in · <b>${out.toLocaleString()}</b> out · <b>${total.toLocaleString()}</b> total</span>`;
-                    level = 'info';
-                } else {
-                    message = `Unknown event: ${eventType}`;
-                }
-
-                this.activityLog.push({ time, message, level });
-
-                // Also feed plain-text version into Terminal logs
-                if (eventType === 'thinking') {
-                    this.log('Thinking...', 'info');
-                } else if (eventType === 'token_usage') {
-                    const d = data.data || {};
-                    this.log(`[TOKENS] ${d.input_tokens || 0} in / ${d.output_tokens || 0} out`, 'info');
-                } else if (eventType === 'tool_start') {
-                    const name = data.data?.name || 'unknown';
-                    const params = JSON.stringify(data.data?.params || {}).substring(0, 80);
-                    this.log(`[TOOL] ${name} ${params}`, 'warning');
-                } else if (eventType === 'tool_result') {
-                    const name = data.data?.name || 'unknown';
-                    const isErr = data.data?.status === 'error';
-                    const result = String(data.data?.result || '').substring(0, 80);
-                    this.log(`[${isErr ? 'ERR' : 'OK'}] ${name}: ${result}`, isErr ? 'error' : 'success');
-                }
-
-                // Auto-scroll activity log
-                this.$nextTick(() => {
-                    const term = this.$refs.activityLog;
-                    if (term) term.scrollTop = term.scrollHeight;
-                });
-            },
-
             // ==================== Identity Panel ====================
 
-            openIdentity() {
-                this.showIdentity = true;
-                this.identityLoading = true;
-                this.identityEditing = false;
+            /**
+             * Fetch identity data from backend
+             */
+            loadIdentityData() {
+                // Don't show full loading spinner on background load, only if modal is open
+                if (this.showIdentity) this.identityLoading = true;
+
                 fetch('/api/identity')
                     .then(r => r.json())
                     .then(data => {
@@ -211,9 +108,15 @@ window.PocketPaw.Transparency = {
                         this.$nextTick(() => { if (window.refreshIcons) window.refreshIcons(); });
                     })
                     .catch(e => {
-                        this.showToast('Failed to load identity', 'error');
+                        console.error('Failed to load identity:', e);
                         this.identityLoading = false;
                     });
+            },
+
+            openIdentity() {
+                this.showIdentity = true;
+                this.identityEditing = false;
+                this.loadIdentityData();
             },
 
             startIdentityEdit() {
@@ -471,7 +374,119 @@ window.PocketPaw.Transparency = {
                         this.showToast('Self-audit failed', 'error');
                         this.selfAuditRunning = false;
                     });
-            }
+            },
+
+            // ==================== Connection Info ====================
+
+            /**
+             * Handle connection info (capture session ID)
+             */
+            handleConnectionInfo(data) {
+                this.handleNotification(data);
+                if (data.id) {
+                    this.sessionId = data.id;
+                    this.log(`Session ID: ${data.id}`, 'info');
+                }
+            },
+
+            /**
+             * Handle system event (Activity Log + Mission Control events)
+             */
+            handleSystemEvent(data) {
+                const time = Tools.formatTime();
+                const eventType = data.event_type || '';
+
+                // Handle Mission Control events
+                if (eventType.startsWith('mc_')) {
+                    this.handleMCEvent(data);
+                    return;
+                }
+
+                // Handle Deep Work events
+                if (eventType.startsWith('dw_')) {
+                    this.handleDWEvent(data);
+                    return;
+                }
+
+                // Handle health updates
+                if (eventType === 'health_update') {
+                    if (this.handleHealthUpdate) {
+                        this.handleHealthUpdate(data);
+                    }
+                    return;
+                }
+
+                // Handle live audit entries
+                if (eventType === 'audit_entry') {
+                    if (this.showAudit && data.data) {
+                        this.auditLogs.unshift(data.data);
+                    }
+                    return;
+                }
+
+                // Handle standard system events
+                let message = '';
+                let level = 'info';
+
+                if (eventType === 'thinking') {
+                    if (data.data && data.data.content) {
+                        const rawSnippet = data.data.content.substring(0, 120);
+                        const ellipsis = data.data.content.length > 120 ? '...' : '';
+                        const snippet = rawSnippet.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        message = `<span class="text-white/40 italic">${snippet}${ellipsis}</span>`;
+                    } else {
+                        message = `<span class="text-accent animate-pulse">Thinking...</span>`;
+                    }
+                } else if (eventType === 'thinking_done') {
+                    message = `<span class="text-white/40">Thinking complete</span>`;
+                } else if (eventType === 'tool_start') {
+                    const toolName = (data.data.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    const toolParams = JSON.stringify(data.data.params || {}).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    message = `🔧 <b>${toolName}</b> <span class="text-white/50">${toolParams}</span>`;
+                    level = 'warning';
+                } else if (eventType === 'tool_result') {
+                    const isError = data.data.status === 'error';
+                    level = isError ? 'error' : 'success';
+                    const rName = (data.data.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    const rStr = String(data.data.result || '').substring(0, 50).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    const rMore = String(data.data.result || '').length > 50 ? '...' : '';
+                    message = `${isError ? '❌' : '✅'} <b>${rName}</b> result: <span class="text-white/50">${rStr}${rMore}</span>`;
+                } else if (eventType === 'token_usage') {
+                    const d = data.data || {};
+                    const inp = d.input_tokens || 0;
+                    const out = d.output_tokens || 0;
+                    const total = d.total_tokens || (inp + out);
+                    message = `<span class="text-white/40">Tokens: <b>${inp.toLocaleString()}</b> in · <b>${out.toLocaleString()}</b> out · <b>${total.toLocaleString()}</b> total</span>`;
+                    level = 'info';
+                } else {
+                    message = `Unknown event: ${eventType}`;
+                }
+
+                this.activityLog.push({ time, message, level });
+
+                // Also feed plain-text version into Terminal logs
+                if (eventType === 'thinking') {
+                    this.log('Thinking...', 'info');
+                } else if (eventType === 'token_usage') {
+                    const d = data.data || {};
+                    this.log(`[TOKENS] ${d.input_tokens || 0} in / ${d.output_tokens || 0} out`, 'info');
+                } else if (eventType === 'tool_start') {
+                    const name = data.data?.name || 'unknown';
+                    const params = JSON.stringify(data.data?.params || {}).substring(0, 80);
+                    this.log(`[TOOL] ${name} ${params}`, 'warning');
+                } else if (eventType === 'tool_result') {
+                    const name = data.data?.name || 'unknown';
+                    const isErr = data.data?.status === 'error';
+                    const result = String(data.data?.result || '').substring(0, 80);
+                    this.log(`[${isErr ? 'ERR' : 'OK'}] ${name}: ${result}`, isErr ? 'error' : 'success');
+                }
+
+                // Auto-scroll activity log
+                this.$nextTick(() => {
+                    const term = this.$refs.activityLog;
+                    if (term) term.scrollTop = term.scrollHeight;
+                });
+            },
         };
     }
 };

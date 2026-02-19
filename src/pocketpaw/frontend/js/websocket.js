@@ -185,11 +185,26 @@ class PocketPawSocket {
         this.send('chat', { message });
     }
 
+    stopResponse() {
+        this.send('stop');
+    }
+
     saveSettings(settings) {
         this.send('settings', {
             agent_backend: settings.agentBackend,
+            claude_sdk_provider: settings.claudeSdkProvider || 'anthropic',
             claude_sdk_model: settings.claudeSdkModel,
-            claude_sdk_max_turns: parseInt(settings.claudeSdkMaxTurns) || 25,
+            claude_sdk_max_turns: parseInt(settings.claudeSdkMaxTurns) || 0,
+            openai_agents_provider: settings.openaiAgentsProvider || 'openai',
+            openai_agents_model: settings.openaiAgentsModel || '',
+            openai_agents_max_turns: parseInt(settings.openaiAgentsMaxTurns) || 0,
+            google_adk_model: settings.googleAdkModel || 'gemini-3-pro-preview',
+            google_adk_max_turns: parseInt(settings.googleAdkMaxTurns) || 0,
+            codex_cli_model: settings.codexCliModel || 'gpt-5.3-codex',
+            codex_cli_max_turns: parseInt(settings.codexCliMaxTurns) || 0,
+            opencode_base_url: settings.opencodeBaseUrl || 'http://localhost:4096',
+            opencode_model: settings.opencodeModel || '',
+            opencode_max_turns: parseInt(settings.opencodeMaxTurns) || 0,
             llm_provider: settings.llmProvider,
             ollama_host: settings.ollamaHost,
             ollama_model: settings.ollamaModel,

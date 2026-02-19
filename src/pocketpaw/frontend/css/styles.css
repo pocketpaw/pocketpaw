@@ -173,6 +173,11 @@ body {
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 
+/* Search input */
+.settings-search-input {
+  font-size: 13px;
+}
+
 /* Mobile: larger tap targets + chevron hint */
 @media (max-width: 767px) {
   .settings-nav-item {

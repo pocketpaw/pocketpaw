@@ -2,16 +2,15 @@
 # Created: 2026-02-05
 # Tests for RememberTool, RecallTool, and session list API
 
-import pytest
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import patch
 
-from pocketpaw.tools.builtin.memory import RememberTool, RecallTool
-from pocketpaw.memory.manager import MemoryManager, get_memory_manager
-from pocketpaw.memory.protocol import MemoryType, MemoryEntry
-from pocketpaw.memory.file_store import FileMemoryStore
+import pytest
+
+from pocketpaw.memory.manager import MemoryManager
+from pocketpaw.tools.builtin.memory import RecallTool, RememberTool
 
 
 @pytest.fixture
@@ -226,88 +225,6 @@ class TestMemoryToolsIntegration:
         assert "Found" in result
         # Should find at least one of the memories
         assert "development" in result.lower() or "MacOS" in result or "VSCode" in result
-
-
-# =============================================================================
-# PocketPaw Native Memory Tool Execution Tests
-# =============================================================================
-
-
-class TestPocketPawNativeMemoryExecution:
-    """Test memory tool execution in PocketPaw Native orchestrator."""
-
-    @pytest.fixture
-    def mock_settings(self, temp_memory_path):
-        """Create mock settings."""
-        from pocketpaw.config import Settings
-
-        return Settings(
-            anthropic_api_key="test-key",
-            file_jail_path=temp_memory_path.parent,
-        )
-
-    @pytest.mark.asyncio
-    async def test_remember_tool_execution(self, mock_settings, temp_memory_path):
-        """Test remember tool execution through orchestrator._execute_tool."""
-        from pocketpaw.agents.pocketpaw_native import PocketPawOrchestrator
-
-        # Patch memory manager at the import location (local import in _execute_tool)
-        manager = MemoryManager(base_path=temp_memory_path)
-        with patch("pocketpaw.memory.manager.get_memory_manager", return_value=manager):
-            orchestrator = PocketPawOrchestrator(mock_settings)
-
-            # Execute remember tool
-            result = await orchestrator._execute_tool(
-                "remember",
-                {"content": "User prefers vim keybindings", "tags": ["preferences", "editor"]},
-            )
-
-            assert "Remembered" in result
-            assert "vim" in result
-
-    @pytest.mark.asyncio
-    async def test_recall_tool_execution(self, mock_settings, temp_memory_path):
-        """Test recall tool execution through orchestrator._execute_tool."""
-        from pocketpaw.agents.pocketpaw_native import PocketPawOrchestrator
-
-        # Patch memory manager at the import location
-        manager = MemoryManager(base_path=temp_memory_path)
-        with patch("pocketpaw.memory.manager.get_memory_manager", return_value=manager):
-            orchestrator = PocketPawOrchestrator(mock_settings)
-
-            # First remember something
-            await orchestrator._execute_tool("remember", {"content": "User likes coffee"})
-
-            # Then recall it
-            result = await orchestrator._execute_tool("recall", {"query": "coffee"})
-
-            assert "Found" in result or "coffee" in result
-
-    @pytest.mark.asyncio
-    async def test_remember_empty_content_error(self, mock_settings, temp_memory_path):
-        """Test error when remembering empty content."""
-        from pocketpaw.agents.pocketpaw_native import PocketPawOrchestrator
-
-        manager = MemoryManager(base_path=temp_memory_path)
-        with patch("pocketpaw.memory.manager.get_memory_manager", return_value=manager):
-            orchestrator = PocketPawOrchestrator(mock_settings)
-
-            result = await orchestrator._execute_tool("remember", {"content": ""})
-
-            assert "Error" in result
-
-    @pytest.mark.asyncio
-    async def test_recall_empty_query_error(self, mock_settings, temp_memory_path):
-        """Test error when recalling with empty query."""
-        from pocketpaw.agents.pocketpaw_native import PocketPawOrchestrator
-
-        manager = MemoryManager(base_path=temp_memory_path)
-        with patch("pocketpaw.memory.manager.get_memory_manager", return_value=manager):
-            orchestrator = PocketPawOrchestrator(mock_settings)
-
-            result = await orchestrator._execute_tool("recall", {"query": ""})
-
-            assert "Error" in result
 
 
 # =============================================================================

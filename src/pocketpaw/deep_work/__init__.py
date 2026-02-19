@@ -1,5 +1,7 @@
 # Deep Work — AI project orchestration layer for PocketPaw.
 # Created: 2026-02-12
+# Updated: 2026-02-18 — Added GoalParser and GoalAnalysis exports,
+#   parse_goal() convenience function.
 # Updated: 2026-02-12 — Added executor integration, public API functions.
 #   Added research_depth parameter to start_deep_work().
 #
@@ -9,6 +11,7 @@
 # Public API:
 #   get_deep_work_session() -> DeepWorkSession
 #   reset_deep_work_session() -> None
+#   parse_goal(user_input) -> GoalAnalysis
 #   start_deep_work(user_input) -> Project
 #   approve_project(project_id) -> Project
 #   pause_project(project_id) -> Project
@@ -16,6 +19,7 @@
 
 import logging
 
+from pocketpaw.deep_work.goal_parser import GoalAnalysis, GoalParser
 from pocketpaw.deep_work.models import (
     AgentSpec,
     PlannerResult,
@@ -28,12 +32,15 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "AgentSpec",
+    "GoalAnalysis",
+    "GoalParser",
     "PlannerResult",
     "Project",
     "ProjectStatus",
     "TaskSpec",
     "get_deep_work_session",
     "reset_deep_work_session",
+    "parse_goal",
     "start_deep_work",
     "approve_project",
     "pause_project",
@@ -73,6 +80,19 @@ def reset_deep_work_session() -> None:
     """Reset the singleton session (for testing)."""
     global _session_instance
     _session_instance = None
+
+
+async def parse_goal(user_input: str) -> GoalAnalysis:
+    """Parse a user's goal into structured analysis.
+
+    Args:
+        user_input: Natural language goal description.
+
+    Returns:
+        GoalAnalysis with domain, complexity, roles, and clarifications.
+    """
+    parser = GoalParser()
+    return await parser.parse(user_input)
 
 
 async def start_deep_work(user_input: str, research_depth: str = "standard") -> Project:

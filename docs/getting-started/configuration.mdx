@@ -19,15 +19,21 @@ Configuration is loaded from these sources (in order of precedence):
 2. **Config file** — `~/.pocketpaw/config.json`
 3. **Web dashboard** — Settings saved through the UI
 
+## API Key Requirement
+
+<Callout type="warning">
+  **Anthropic API key required for Claude SDK backend.** Anthropic's [authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) prohibits third-party applications from using OAuth tokens from Free/Pro/Max plans. PocketPaw requires an API key from [console.anthropic.com](https://console.anthropic.com/api-keys). This does not apply when using Ollama or other local providers.
+</Callout>
+
 ## Environment Variables
 
 All settings use the `POCKETPAW_` prefix:
 
 ```bash
 # Core
-export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
+export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."    # Required for Claude SDK backend
 export POCKETPAW_OPENAI_API_KEY="sk-..."
-export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or pocketpaw_native, open_interpreter
+export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, codex_cli, opencode, copilot_sdk
 
 # Claude SDK settings (only when agent_backend=claude_agent_sdk)
 export POCKETPAW_CLAUDE_SDK_MODEL=""               # empty = auto (recommended)
