@@ -1,6 +1,7 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-02-17 - Inject health state into system prompt when degraded/unhealthy
 Updated: 2026-02-07 - Semantic context injection for mem0 backend
 Updated: 2026-02-10 - Channel-aware format hints
 """
@@ -108,5 +109,15 @@ class AgentContextBuilder:
                 f"Pass this value to any session tool (new_session, list_sessions, "
                 f"switch_session, clear_session, rename_session, delete_session)."
             )
+
+        # 6. Inject health state (only when degraded/unhealthy — saves context window)
+        try:
+            from pocketpaw.health import get_health_engine
+
+            health_block = get_health_engine().get_health_prompt_section()
+            if health_block:
+                parts.append(health_block)
+        except Exception:
+            pass  # Health engine failure never breaks prompt building
 
         return "\n\n".join(parts)

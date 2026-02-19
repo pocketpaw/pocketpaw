@@ -1,0 +1,117 @@
+# Bug report issue template — requires proof of local testing
+name: Bug Report
+description: Report a bug you found while using PocketPaw
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill out all required fields below.
+        Issues missing required information will be closed.
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: What OS are you running PocketPaw on?
+      placeholder: "e.g., macOS 15.2, Ubuntu 24.04, Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python Version
+      description: Output of `python --version`
+      placeholder: "e.g., Python 3.12.1"
+    validations:
+      required: true
+
+  - type: input
+    id: pocketpaw-version
+    attributes:
+      label: PocketPaw Version
+      description: Output of `pocketpaw --version` or the version in pyproject.toml
+      placeholder: "e.g., 0.4.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Installation Method
+      options:
+        - pip install pocketpaw
+        - uv sync (from source)
+        - Docker
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: What happened? Be specific.
+      placeholder: "Describe what went wrong..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps someone else can follow to hit this bug.
+      placeholder: |
+        1. Run `uv run pocketpaw`
+        2. Open the dashboard
+        3. Click on...
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages or stack traces.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Terminal Output or Screenshot
+      description: Paste your terminal output, error log, or attach a screenshot. This proves you actually ran the project.
+      placeholder: "Paste terminal output here..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Relevant Files
+      description: Which source files did you look at while investigating this?
+      placeholder: "e.g., src/pocketpaw/dashboard.py, src/pocketpaw/config.py"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have installed and run PocketPaw locally
+          required: true
+        - label: I have searched existing issues and this is not a duplicate
+          required: true
+        - label: I have included terminal output or a screenshot as evidence
+          required: true

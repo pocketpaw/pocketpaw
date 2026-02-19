@@ -1,9 +1,7 @@
 # Deep Work API endpoints.
 # Created: 2026-02-12
-# Updated: 2026-02-12 — Added 'none' option to research_depth (skip research entirely).
-#   Added execution_levels + task_level_map to get_plan().
-#   Added POST /projects/{id}/tasks/{task_id}/skip endpoint for skipping tasks.
-#   Added research_depth parameter to start endpoint.
+# Updated: 2026-02-16 — Enrich project dict with folder_path and file_count
+#   in get_plan() so the frontend Output Files panel can browse project output.
 #
 # FastAPI router for Deep Work orchestration:
 #   POST /start                               — submit project (natural language)
@@ -37,6 +35,24 @@ class StartDeepWorkRequest(BaseModel):
         default="standard",
         description="Research thoroughness: 'none' (skip entirely), 'quick', 'standard', or 'deep'",
     )
+
+
+def _enrich_project_dict(project_dict: dict) -> dict:
+    """Add folder_path and file_count to a project dict for frontend output panel."""
+    from pathlib import Path
+
+    from pocketpaw.mission_control.manager import get_project_dir
+
+    project_id = project_dict.get("id", "")
+    project_dir = get_project_dir(project_id)
+    project_dict["folder_path"] = str(project_dir)
+    d = Path(project_dir)
+    project_dict["file_count"] = (
+        sum(1 for f in d.iterdir() if not f.name.startswith("."))
+        if d.exists() and d.is_dir()
+        else 0
+    )
+    return project_dict
 
 
 @router.post("/start")
@@ -111,8 +127,10 @@ async def get_plan(project_id: str) -> dict[str, Any]:
         if prd_doc:
             prd = prd_doc.to_dict()
 
+    project_dict = _enrich_project_dict(project.to_dict())
+
     return {
-        "project": project.to_dict(),
+        "project": project_dict,
         "tasks": [t.to_dict() for t in tasks],
         "progress": progress,
         "prd": prd,

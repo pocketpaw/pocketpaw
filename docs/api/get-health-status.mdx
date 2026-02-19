@@ -1,0 +1,109 @@
+---
+title: Get Health Status
+description: "Retrieve the current health status summary including overall status, check count, active issues, and last check timestamp."
+api: GET /api/health
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: none
+section: API Reference
+ogType: article
+keywords: ["health status", "diagnostics", "system health"]
+tags: ["api", "health"]
+---
+
+## Overview
+
+Returns the current health engine summary. The response includes the computed `overall_status`, the number of checks that have been run, any active issues, and the timestamp of the last check.
+
+This endpoint does **not** trigger a new check run — it returns cached results from the most recent startup check or heartbeat. To force a fresh check, use [`POST /api/health/check`](/api/run-health-check).
+
+<Callout type="info">
+This endpoint requires no authentication. Health status is considered non-sensitive system metadata.
+</Callout>
+
+## Response
+
+<ResponseField name="status" type="string">
+  Overall system health: `healthy`, `degraded`, or `unhealthy`. Computed from individual check results — any critical failure makes the system unhealthy, any warning makes it degraded.
+</ResponseField>
+
+<ResponseField name="check_count" type="integer">
+  Total number of health checks that have been run.
+</ResponseField>
+
+<ResponseField name="issues" type="array">
+  List of check results that are **not** `ok`. Each issue is an object with:
+
+  <ResponseField name="check_id" type="string">Unique identifier for the check (e.g. `api_key_primary`, `llm_reachable`)</ResponseField>
+  <ResponseField name="name" type="string">Human-readable check name (e.g. "Primary API Key")</ResponseField>
+  <ResponseField name="category" type="string">Check category: `config`, `connectivity`, or `storage`</ResponseField>
+  <ResponseField name="status" type="string">Check status: `warning` or `critical`</ResponseField>
+  <ResponseField name="message" type="string">Description of the issue</ResponseField>
+  <ResponseField name="fix_hint" type="string">Suggested fix action</ResponseField>
+  <ResponseField name="timestamp" type="string">ISO 8601 timestamp of when the check ran</ResponseField>
+</ResponseField>
+
+<ResponseField name="last_check" type="string">
+  ISO 8601 timestamp of the most recent check run. Empty string if no checks have been run yet.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/health"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/health");
+    const data = await response.json();
+    console.log(data.status); // "healthy", "degraded", or "unhealthy"
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get("http://localhost:8000/api/health")
+    data = response.json()
+    print(data["status"])
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200 (Healthy)", "200 (Degraded)"]}>
+  <Tab title="200 (Healthy)">
+    ```json
+    {
+      "status": "healthy",
+      "check_count": 11,
+      "issues": [],
+      "last_check": "2025-03-15T10:30:00+00:00"
+    }
+    ```
+  </Tab>
+  <Tab title="200 (Degraded)">
+    ```json
+    {
+      "status": "degraded",
+      "check_count": 11,
+      "issues": [
+        {
+          "check_id": "config_permissions",
+          "name": "Config Permissions",
+          "category": "config",
+          "status": "warning",
+          "message": "Config file permissions too open: 0o644 (should be 600)",
+          "fix_hint": "Run: chmod 600 ~/.pocketpaw/config.json",
+          "timestamp": "2025-03-15T10:30:00+00:00"
+        }
+      ],
+      "last_check": "2025-03-15T10:30:00+00:00"
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

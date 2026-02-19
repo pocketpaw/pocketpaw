@@ -11,6 +11,10 @@ tags: ["advanced", "optimization"]
 
 The Model Router automatically selects the appropriate model size based on message complexity, optimizing cost and latency.
 
+<Callout type="warning">
+  **Disabled by default.** Smart model routing is off by default because it conflicts with Claude Code CLI's built-in model routing. When using the Claude Agent SDK backend (recommended), Claude Code already picks the best model for each task. Enable the model router only if you want explicit control over model tiers or are using the PocketPaw Native backend.
+</Callout>
+
 ## How It Works
 
 The router classifies each message into one of three complexity levels:
@@ -39,7 +43,18 @@ A message is classified as COMPLEX if it has at least 1 complex signal AND is lo
 
 ## Configuration
 
-The model router is used automatically when enabled. It works with the Claude Agent SDK and PocketPaw Native backends.
+The model router is **disabled by default** (`smart_routing_enabled: false`). Enable it in the dashboard under Settings → Behavior & Safety, or via environment variable:
+
+```bash
+export POCKETPAW_SMART_ROUTING_ENABLED=true
+
+# Customize model tiers
+export POCKETPAW_MODEL_TIER_SIMPLE="claude-haiku-4-5-20251001"
+export POCKETPAW_MODEL_TIER_MODERATE="claude-sonnet-4-5-20250929"
+export POCKETPAW_MODEL_TIER_COMPLEX="claude-opus-4-6"
+```
+
+The router works with the Claude Agent SDK and PocketPaw Native backends.
 
 ## Example Classifications
 
@@ -52,7 +67,7 @@ The model router is used automatically when enabled. It works with the Claude Ag
 | "Search for news about AI" | MODERATE |
 
 <Callout type="info">
-  The model router is a heuristic system. For most users, the default model selection works well without the router. Enable it if you want to optimize API costs.
+  The model router is a heuristic system. For most users, leaving it disabled and letting Claude Code handle model selection produces the best results. Enable it only if you want to optimize API costs or need explicit control over which models are used for different task types.
 </Callout>
 
 <Callout type="warning">

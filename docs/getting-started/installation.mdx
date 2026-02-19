@@ -69,6 +69,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/pocketpaw/pocketpaw.git
 cd pocketpaw
 uv sync --dev
+
+# Run with auto-reload for development
+uv run pocketpaw --dev
 ```
 
 ## Package Extras
@@ -164,7 +167,7 @@ pocketpaw
 uv run pocketpaw
 ```
 
-The web dashboard will start at `http://localhost:8000`. Open it in your browser to verify everything is working.
+The web dashboard will start at `http://localhost:8888`. Open it in your browser to verify everything is working.
 
 ## Next Steps
 

@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "installer/**"
   pull_request:
     branches: [main]
     paths:
       - "docs/**"
+      - "installer/**"
   workflow_dispatch:
 
 permissions:

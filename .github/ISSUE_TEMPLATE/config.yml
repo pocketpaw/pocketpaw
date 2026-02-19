@@ -1,0 +1,6 @@
+# Issue template config — disable blank issues to force structured templates
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/pocketpaw/pocketpaw/discussions
+    about: Ask questions or start a discussion here. Do not open issues for questions.

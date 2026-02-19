@@ -47,6 +47,9 @@ window.PocketPaw.Channels = {
             whatsappQr: null,
             whatsappConnected: false,
             whatsappQrPolling: null,
+            // Auto-install prompt state
+            installPrompt: null,   // { channel, package, pipSpec } or null
+            installLoading: false,
             // Generic webhooks
             webhookSlots: [],
             showAddWebhook: false,
@@ -231,13 +234,42 @@ window.PocketPaw.Channels = {
             },
 
             /**
-             * Toggle (start/stop) a channel adapter
+             * Toggle (start/stop) a channel adapter.
+             * On "start", checks if the optional dep is installed first.
              */
-            async toggleChannel(channel) {
-                this.channelLoading = true;
+            async toggleChannel(channel, skipDepCheck) {
                 const isRunning = this.channelStatus[channel]?.running;
                 const action = isRunning ? 'stop' : 'start';
 
+                // WhatsApp business mode uses httpx (core dep) — skip dep check
+                const needsDepCheck = action === 'start'
+                    && !skipDepCheck
+                    && !(channel === 'whatsapp' && this.channelStatus.whatsapp?.mode === 'business')
+                    && !(channel === 'signal');
+
+                if (needsDepCheck) {
+                    try {
+                        const res = await fetch(`/api/extras/check?channel=${encodeURIComponent(channel)}`);
+                        if (res.ok) {
+                            const info = await res.json();
+                            if (!info.installed) {
+                                this.installPrompt = {
+                                    channel,
+                                    package: info.package,
+                                    pipSpec: info.pip_spec,
+                                };
+                                this.$nextTick(() => {
+                                    if (window.refreshIcons) window.refreshIcons();
+                                });
+                                return;
+                            }
+                        }
+                    } catch (e) {
+                        // If check fails, proceed with toggle — backend will surface errors
+                    }
+                }
+
+                this.channelLoading = true;
                 try {
                     const res = await fetch('/api/channels/toggle', {
                         method: 'POST',
@@ -246,7 +278,17 @@ window.PocketPaw.Channels = {
                     });
                     const data = await res.json();
 
-                    if (data.error) {
+                    if (data.missing_dep) {
+                        // Backend detected a missing dependency — show install modal
+                        this.installPrompt = {
+                            channel: data.channel,
+                            package: data.package,
+                            pipSpec: data.pip_spec,
+                        };
+                        this.$nextTick(() => {
+                            if (window.refreshIcons) window.refreshIcons();
+                        });
+                    } else if (data.error) {
                         this.showToast(data.error, 'error');
                     } else {
                         const label = channel.charAt(0).toUpperCase() + channel.slice(1);
@@ -275,6 +317,43 @@ window.PocketPaw.Channels = {
                         if (window.refreshIcons) window.refreshIcons();
                     });
                 }
+            },
+
+            /**
+             * User confirmed installation of a missing dependency
+             */
+            async confirmInstall() {
+                if (!this.installPrompt) return;
+                const { channel } = this.installPrompt;
+                this.installLoading = true;
+                try {
+                    const res = await fetch('/api/extras/install', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ extra: channel })
+                    });
+                    const data = await res.json();
+                    if (data.error) {
+                        this.showToast('Install failed: ' + data.error, 'error');
+                    } else {
+                        this.showToast(`${this.installPrompt.package} installed!`, 'success');
+                        this.installPrompt = null;
+                        // Retry starting the channel
+                        await this.toggleChannel(channel, true);
+                    }
+                } catch (e) {
+                    this.showToast('Install failed: ' + e.message, 'error');
+                } finally {
+                    this.installLoading = false;
+                }
+            },
+
+            /**
+             * User cancelled the install prompt
+             */
+            cancelInstall() {
+                this.installPrompt = null;
+                this.installLoading = false;
             },
 
             /**

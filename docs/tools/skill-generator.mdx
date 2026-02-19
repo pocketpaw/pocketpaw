@@ -1,6 +1,6 @@
 ---
 title: Skill Generator
-description: "Create persistent skill definitions that teach PocketPaw new capabilities. The skill generator writes SKILL.md files to ~/.pocketpaw/skills/ and hot-reloads them into the agent context."
+description: "Create persistent skill definitions that teach PocketPaw new capabilities. The skill generator writes SKILL.md files to ~/.claude/skills/ (the SDK standard location) and hot-reloads them into the agent context."
 section: Tools
 ogType: article
 keywords: ["skill generator", "custom skills", "skill.md", "agent training", "persistent skills"]
@@ -14,7 +14,7 @@ The skill generator tool creates persistent skill definitions (SKILL.md files) t
 ## How It Works
 
 1. The agent uses `skill_gen` to create a new skill
-2. A SKILL.md file is written to `~/.pocketpaw/skills/`
+2. A SKILL.md file is written to `~/.claude/skills/` (the standard Claude SDK location)
 3. The skill loader is reloaded to pick up the new skill
 4. The skill is available in all future sessions
 
@@ -33,7 +33,7 @@ A skill is a markdown file that provides instructions for the agent on how to ha
 User: Create a skill for writing daily standup summaries
 
 Agent: [uses skill_gen tool]
-  → Creates ~/.pocketpaw/skills/daily-standup.md
+  → Creates ~/.claude/skills/daily-standup.md
 ```
 
 The generated skill file might contain:
@@ -57,15 +57,17 @@ When the user asks for a standup summary or daily update.
 
 ## Skill Storage
 
-Skills are stored in `~/.pocketpaw/skills/`:
+Skills are written to `~/.claude/skills/`, the standard location used by the Claude Agent SDK for auto-discovery. PocketPaw's `SkillLoader` also scans this directory, so skills are available in both systems.
 
 ```
-~/.pocketpaw/skills/
+~/.claude/skills/
 ├── daily-standup.md
 ├── code-review.md
 └── meeting-notes.md
 ```
 
+The loader also checks `~/.agents/skills/` and `~/.pocketpaw/skills/` for backwards compatibility.
+
 ## Policy Group
 
-Belongs to `group:skills`.
+Belongs to `group:skills` (includes both `skill_gen` and the SDK `Skill` tool).

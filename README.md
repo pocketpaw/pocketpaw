@@ -36,27 +36,23 @@
 
 ## Quick Start
 
-```bash
-curl -fsSL https://pocketpaw.xyz/install.sh | sh
-```
-
-Or install directly:
-
-```bash
+### 🐧 Linux / macOS
+```sh
 pip install pocketpaw && pocketpaw
 ```
 
-**That's it.** One command. 30 seconds. Your own AI agent.
+### 🪟 Windows (PowerShell)
+```powershell
+pip install pocketpaw
+pocketpaw
+```
 
-I'm your self-hosted, cross-platform personal AI agent. The web dashboard opens automatically. Talk to me right in your browser, or connect me to Discord, Slack, WhatsApp, or Telegram and control me from anywhere. I run on _your_ machine, respect _your_ privacy, and I'm always here.
+> **Note for Windows users:** Some features (browser automation, shell tools) work best
+> under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
 
-**No subscription. No cloud lock-in. Just you and me.**
-
-<details>
-<summary>More install options</summary>
-
-```bash
-# Isolated install
+### Other install options
+```sh
+# Isolated install (recommended — no global pip pollution)
 pipx install pocketpaw && pocketpaw
 
 # Run without installing
@@ -68,7 +64,8 @@ cd pocketpaw
 uv run pocketpaw
 ```
 
-</details>
+> ⚠️ **Note:** The `curl -fsSL https://pocketpaw.xyz/install.sh | sh` one-liner is
+> temporarily unavailable. Use the pip install above — it's equally fast.
 
 PocketPaw will open the web dashboard in your browser and be ready to go.
 No config files. No YAML. No dependency hell.
@@ -129,7 +126,7 @@ Data persists in a named Docker volume across restarts. See [`.env.example`](.en
 | **Web Dashboard** | Browser-based control panel, the default mode. No setup needed. |
 | **Multi-Channel** | Discord, Slack, WhatsApp (Personal + Business), Signal, Matrix, Teams, Google Chat, Telegram |
 | **Claude Agent SDK** | Default backend. Official Claude SDK with built-in tools (Bash, Read, Write). |
-| **Smart Model Router** | Auto-selects Haiku / Sonnet / Opus based on task complexity |
+| **Smart Model Router** | Optional auto-selection of Haiku / Sonnet / Opus based on task complexity (off by default — Claude Code has its own routing) |
 | **Tool Policy** | Allow/deny control over which tools the agent can use |
 | **Plan Mode** | Require approval before the agent runs shell commands or edits files |
 | **Browser Control** | Browse the web, fill forms, click buttons via accessibility tree |
@@ -296,6 +293,8 @@ Config lives in `~/.pocketpaw/config.json`. API keys and tokens are automaticall
 ```json
 {
   "agent_backend": "claude_agent_sdk",
+  "claude_sdk_model": "",
+  "claude_sdk_max_turns": 25,
   "anthropic_api_key": "sk-ant-...",
   "anthropic_model": "claude-sonnet-4-5-20250929",
   "tool_profile": "full",
@@ -370,6 +369,9 @@ cd pocketpaw
 
 # Install with dev dependencies
 uv sync --dev
+
+# Run the dashboard with auto-reload (watches *.py, *.html, *.js, *.css)
+uv run pocketpaw --dev
 
 # Run tests
 uv run pytest
