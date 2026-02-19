@@ -398,7 +398,9 @@ class CommandHandler:
             if info is not None:
                 try:
                     caps = ", ".join(
-                        f.name.lower() for f in type(info.capabilities) if f in info.capabilities
+                        f.name.lower().replace("_", " ")
+                        for f in type(info.capabilities)
+                        if f in info.capabilities
                     )
                 except TypeError:
                     caps = str(info.capabilities)

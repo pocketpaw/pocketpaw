@@ -215,7 +215,13 @@ class TelegramAdapter(BaseChannelAdapter):
             }
             if topic_id is not None:
                 send_kwargs["message_thread_id"] = topic_id
-            await self.app.bot.send_message(**send_kwargs)
+            try:
+                await self.app.bot.send_message(**send_kwargs)
+            except Exception:
+                # Markdown parse failed — retry without formatting
+                send_kwargs["parse_mode"] = None
+                send_kwargs["text"] = message.content
+                await self.app.bot.send_message(**send_kwargs)
 
         except Exception as e:
             logger.error(f"Failed to send telegram message: {e}")

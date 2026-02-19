@@ -167,19 +167,25 @@ window.PocketPaw.Chat = {
                 if (!text) return;
 
                 // Check for skill command (starts with /)
+                // Only intercept if the name matches a registered skill;
+                // otherwise fall through to chat so CommandHandler picks it up
+                // (e.g. /backend, /backends, /model, /tools, /help, etc.)
                 if (text.startsWith('/')) {
                     const parts = text.slice(1).split(' ');
                     const skillName = parts[0];
-                    const args = parts.slice(1).join(' ');
+                    const isSkill = (this.skills || []).some(
+                        s => s.name.toLowerCase() === skillName.toLowerCase()
+                    );
 
-                    // Add user message
-                    this.addMessage('user', text);
-                    this.inputText = '';
-
-                    // Run the skill
-                    socket.send('run_skill', { name: skillName, args });
-                    this.log(`Running skill: /${skillName} ${args}`, 'info');
-                    return;
+                    if (isSkill) {
+                        const args = parts.slice(1).join(' ');
+                        this.addMessage('user', text);
+                        this.inputText = '';
+                        socket.send('run_skill', { name: skillName, args });
+                        this.log(`Running skill: /${skillName} ${args}`, 'info');
+                        return;
+                    }
+                    // Not a skill — fall through to send as normal message
                 }
 
                 // Add user message

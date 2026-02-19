@@ -2922,18 +2922,13 @@ async def websocket_endpoint(
                 skill = loader.get(skill_name)
 
                 if not skill:
-                    available = [s.name for s in loader.get_invocable()]
-                    hint = (
-                        f"Available commands: /{', /'.join(available)}"
-                        if available
-                        else "No skills installed yet."
-                    )
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "content": f"Unknown command: /{skill_name}\n\n{hint}",
-                        }
-                    )
+                    # Not a skill — forward as a normal chat message so
+                    # CommandHandler can pick up /backend, /model, etc.
+                    full_text = f"/{skill_name}"
+                    if skill_args:
+                        full_text += f" {skill_args}"
+                    data["content"] = full_text
+                    await ws_adapter.handle_message(chat_id, data)
                 else:
                     await websocket.send_json(
                         {"type": "notification", "content": f"🎯 Running skill: {skill_name}"}

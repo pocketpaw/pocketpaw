@@ -13,34 +13,78 @@ import re
 from pocketpaw.bus.events import Channel
 
 # ---------------------------------------------------------------------------
-# LLM system-prompt hints (one sentence each)
+# LLM system-prompt hints — injected into the system prompt per channel.
+# These tell the LLM how to format its output natively for each channel,
+# avoiding post-hoc regex conversion and entity-parse errors.
 # Empty string → channel supports standard Markdown, no hint needed.
 # ---------------------------------------------------------------------------
 CHANNEL_FORMAT_HINTS: dict[Channel, str] = {
     Channel.WEBSOCKET: "",
-    Channel.DISCORD: "",
+    Channel.DISCORD: (
+        "Format: Discord Markdown.\n"
+        "- Bold: **text**, Italic: *text* or _text_, Strikethrough: ~~text~~\n"
+        "- Code: `inline` or ```language\\nblock```. Headings: # ## ###\n"
+        "- Links auto-embed; use <url> to suppress preview.\n"
+        "- Lists: - or 1. work. Use \\n between paragraphs.\n"
+        "- Max message length: 2000 chars. Split long responses into multiple paragraphs.\n"
+        "- Avoid bare underscores in non-italic text (e.g. write `variable_name` in backticks)."
+    ),
     Channel.MATRIX: "",
     Channel.WHATSAPP: (
-        "Format: WhatsApp. Use *bold*, _italic_, ~strikethrough~, ```code```. "
-        "No headings, no links, no numbered lists. Keep it simple."
+        "Format: WhatsApp.\n"
+        "- Bold: *text*, Italic: _text_, Strikethrough: ~text~, Code: ```code```\n"
+        "- NO headings, NO [links](url), NO numbered lists, NO inline `code`.\n"
+        "- Use blank lines between paragraphs for readability.\n"
+        "- Use - for bullet lists (no nested lists).\n"
+        "- Keep responses concise — mobile screens are small.\n"
+        "- Escape formatting chars with \\ if they appear in normal text."
     ),
     Channel.SLACK: (
-        "Format: Slack mrkdwn. Use *bold*, _italic_, ~strike~, `code`, ```code```. "
-        "Links: <url|text>. No headings — use *bold* on its own line."
+        "Format: Slack mrkdwn.\n"
+        "- Bold: *text*, Italic: _text_, Strike: ~text~, Code: `inline` or ```block```\n"
+        "- Links: <url|display text>. Do NOT use [text](url).\n"
+        "- NO headings (#). Use *bold on its own line* as a section header.\n"
+        "- Lists: use - or * (bullet) or 1. (numbered). Indent with spaces for nesting.\n"
+        "- Blank lines between sections for readability.\n"
+        "- Blockquotes: > text\n"
+        "- Avoid bare underscores outside _italic_ — they break mrkdwn parsing."
     ),
     Channel.SIGNAL: (
-        "Format: plain text. No formatting marks. Use line breaks and spacing for structure."
+        "Format: Plain text only.\n"
+        "- NO formatting marks of any kind — no *, _, `, ~, #, []().\n"
+        "- Use line breaks and blank lines to create visual structure.\n"
+        "- Use CAPS or dashes for emphasis instead of bold/italic.\n"
+        "- Use indentation (spaces) for lists and hierarchy.\n"
+        "- Keep responses concise and scannable."
     ),
     Channel.TELEGRAM: (
-        "Format: Telegram Markdown. Use *bold*, _italic_, `code`, ```code```. Links: [text](url)."
+        "Format: Telegram Markdown.\n"
+        "- Bold: *text*, Italic: _text_, Code: `inline` or ```block```\n"
+        "- Links: [display text](url)\n"
+        "- NO headings (#) — use *bold* on its own line as a header.\n"
+        "- Lists: use - for bullets. Numbered lists work as plain text (1. 2. 3.).\n"
+        "- Use \\n between paragraphs for readability.\n"
+        "- IMPORTANT: Escape _ inside words with \\_ (e.g. variable\\_name) or wrap in "
+        "`backticks` — unmatched underscores cause parse errors.\n"
+        "- Avoid nested or adjacent formatting (e.g. *_bold italic_* breaks).\n"
+        "- Keep messages under 4096 chars. Split longer responses."
     ),
     Channel.TEAMS: (
-        "Format: Microsoft Teams. Use **bold**, _italic_, `code`, ```code```. "
-        "Links: [text](url). Headings work as standard Markdown."
+        "Format: Microsoft Teams Markdown.\n"
+        "- Bold: **text**, Italic: _text_, Code: `inline` or ```block```\n"
+        "- Links: [text](url). Headings: # ## ### work.\n"
+        "- Lists: - or 1. with blank line before the list.\n"
+        "- Tables: | col | col | with header separator.\n"
+        "- Use \\n between paragraphs. Blank lines matter for block elements.\n"
+        "- Avoid bare underscores outside italic context."
     ),
     Channel.GOOGLE_CHAT: (
-        "Format: Google Chat. Use *bold*, _italic_, ~strikethrough~, `code`. "
-        "No headings, no links. Keep it simple."
+        "Format: Google Chat.\n"
+        "- Bold: *text*, Italic: _text_, Strikethrough: ~text~, Code: `inline`\n"
+        "- NO headings, NO [links](url) — URLs auto-link. NO code blocks.\n"
+        "- Use blank lines between paragraphs.\n"
+        "- Use - for bullet lists. Keep it simple and flat.\n"
+        "- Avoid bare underscores in non-italic text."
     ),
     Channel.CLI: "",
     Channel.WEBHOOK: "",
