@@ -227,42 +227,58 @@ class NeonizeAdapter(BaseChannelAdapter):
                 f"Check your network or VPN settings."
             ) from exc
 
-async def _on_stop(self) -> None:
-    logger.info("[Satwik fix] Starting neonize_adapter _on_stop()")
-    
-    if self._client:
-        try:
-            logger.info("[Satwik fix] Attempting disconnect")
-            if self._neonize_loop and self._neonize_loop.is_running():
+    async def _on_stop(self) -> None:
+        """Stop neonize client and its internal loop/thread to prevent QR spam after shutdown."""
+        logger.info("Stopping Neonize adapter")
+
+        if self._client:
+            try:
+                # Cancel pending connect future if any
                 if self._connect_future and not self._connect_future.done():
                     self._connect_future.cancel()
-                    logger.info("[Satwik fix] Cancelled connect future")
+                    logger.debug("Cancelled pending connect future")
 
-                future = asyncio.run_coroutine_threadsafe(
-                    self._client.disconnect(), self._neonize_loop
-                )
-                try:
-                    future.result(timeout=5)
-                    logger.info("[Satwik fix] Disconnect succeeded")
-                except Exception as e:
-                    logger.warning("[Satwik fix] Disconnect failed: %s", e)
+                # Disconnect the client
+                if self._neonize_loop and self._neonize_loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._client.disconnect(), self._neonize_loop
+                    )
+                    try:
+                        future.result(timeout=5)
+                        logger.debug("Neonize client disconnected")
+                    except Exception as e:
+                        logger.warning("Neonize disconnect timed out or failed: %s", e)
 
-                # Stop the loop
-                from neonize.aioze.events import event_global_loop
-                if event_global_loop.is_running():
-                    event_global_loop.call_soon_threadsafe(event_global_loop.stop)
-                    logger.info("[Satwik fix] Called event_global_loop.stop()")
+                    # Stop neonize's internal event loop
+                    from neonize.aioze.events import event_global_loop
+                    if event_global_loop.is_running():
+                        event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+                        logger.debug("Stopped neonize event_global_loop")
+
                 else:
-                    logger.info("[Satwik fix] neonize loop was already stopped")
+                    await self._client.disconnect()
+                    logger.debug("Direct disconnect completed")
 
+            except Exception as e:
+                logger.warning("Error during Neonize shutdown: %s", e)
+
+        # Restore original client task cancellation
+        if self._client_task and not self._client_task.done():
+            self._client_task.cancel()
+            try:
+                await self._client_task
+            except asyncio.CancelledError:
+                pass
+
+        self._connected = False
+        self._qr_data = None
+
+        # Wait for neonize thread to finish (non-daemon now)
+        if hasattr(self, '_neonize_thread') and self._neonize_thread.is_alive():
+            self._neonize_thread.join(timeout=5.0)
+            if self._neonize_thread.is_alive():
+                logger.warning("Neonize event loop thread did not finish in time")
             else:
-                await self._client.disconnect()
-                logger.info("[Satwik fix] Direct disconnect called")
+                logger.debug("Neonize event loop thread joined successfully")
 
-        except Exception as e:
-            logger.warning("[Satwik fix] Shutdown exception: %s", e)
-
-    logger.info("[Satwik fix] _on_stop completed")
-    self._connected = False
-    self._qr_data = None
-    logger.info("WhatsApp (neonize) Adapter stopped")
+        logger.info("NeonizeAdapter stopped")
