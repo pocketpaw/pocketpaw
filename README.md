@@ -27,7 +27,7 @@
   No subscription. No cloud lock-in. Just you and your Paw.
 </p>
 
-> **Beta:** This project is under active development. Expect breaking changes between versions.
+> ⚠️ **Beta:** This project is under active development. Expect breaking changes between versions.
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/a15bb8c7-6897-40d2-8111-aa905fe3fdfe" width="700" controls></video>
@@ -35,9 +35,9 @@
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
-### Desktop App
+### 🖥️ Desktop App
 
 Download the native app — includes auto-updates, system tray, and launches on startup.
 
@@ -46,7 +46,7 @@ Download the native app — includes auto-updates, system tray, and launches on 
 | **macOS** (Apple Silicon) | [PocketPaw-macOS-arm64.dmg](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-macOS-arm64.dmg) |
 | **Windows** | [PocketPaw-Setup.exe](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe) |
 
-### Install via Terminal
+### 💻 Install via Terminal
 
 <details open>
 <summary>macOS / Linux</summary>
@@ -77,7 +77,7 @@ pip install pocketpaw
 pocketpaw
 ```
 
-> **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
+> 💡 **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
 
 </details>
 
@@ -118,19 +118,19 @@ Optional profiles: `--profile ollama` (local LLMs), `--profile qdrant` (vector m
 
 ---
 
-## Features
+## ✨ Features
 
 | | |
 | --- | --- |
-| **9+ Channels** | Web Dashboard, Discord, Slack, WhatsApp, Telegram, Signal, Matrix, Teams, Google Chat |
-| **6 Agent Backends** | Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK |
-| **50+ Tools** | Browser, web search, image gen, voice/TTS/STT, OCR, research, delegation, skills |
-| **Integrations** | Gmail, Calendar, Google Drive & Docs, Spotify, Reddit, MCP servers |
-| **Memory** | Long-term facts, session history, smart compaction, Mem0 semantic search |
-| **Security** | Guardian AI, injection scanner, tool policy, plan mode, audit log, self-audit daemon |
-| **Local-First** | Runs on your machine. Ollama for fully offline operation. macOS / Windows / Linux. |
+| 📡 **9+ Channels** | Web Dashboard, Discord, Slack, WhatsApp, Telegram, Signal, Matrix, Teams, Google Chat |
+| 🧠 **6 Agent Backends** | Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK |
+| 🛠️ **50+ Tools** | Browser, web search, image gen, voice/TTS/STT, OCR, research, delegation, skills |
+| 🔌 **Integrations** | Gmail, Calendar, Google Drive & Docs, Spotify, Reddit, MCP servers |
+| 💾 **Memory** | Long-term facts, session history, smart compaction, Mem0 semantic search |
+| 🔒 **Security** | Guardian AI, injection scanner, tool policy, plan mode, audit log, self-audit daemon |
+| 🏠 **Local-First** | Runs on your machine. Ollama for fully offline operation. macOS / Windows / Linux. |
 
-### Examples
+### 💬 Examples
 
 ```
 You:  "Every Sunday evening, remind me which recycling bins to put out"
@@ -145,7 +145,7 @@ Paw:  3 agents working on it. I'll ping you when it's ready.
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 <p align="center">
   <img src="docs/public/pocketpaw-system-architecture.webp" alt="PocketPaw System Architecture" width="800">
@@ -153,7 +153,7 @@ Paw:  3 agents working on it. I'll ping you when it's ready.
 
 **Event-driven message bus** — all channels publish to a unified bus, consumed by the AgentLoop, which routes to one of 6 backends via a registry-based router. All backends implement the `AgentBackend` protocol and yield standardized `AgentEvent` objects.
 
-### Agent Backends
+### 🤖 Agent Backends
 
 | Backend | Key | Providers | MCP |
 | --- | --- | --- | :---: |
@@ -164,7 +164,7 @@ Paw:  3 agents working on it. I'll ping you when it's ready.
 | **OpenCode** | `opencode` | External server | No |
 | **Copilot SDK** | `copilot_sdk` | Copilot, OpenAI, Azure, Anthropic | No |
 
-### Security
+### 🛡️ Security
 
 <p align="center">
   <img src="docs/public/pocketpaw-security-stack.webp" alt="PocketPaw 7-Layer Security Stack" width="500">
@@ -182,7 +182,7 @@ Guardian AI safety checks, injection scanner, tool policy engine (profiles + all
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 Config at `~/.pocketpaw/config.json`, or use `POCKETPAW_`-prefixed env vars, or the dashboard Settings panel. API keys are encrypted at rest.
 
@@ -191,13 +191,13 @@ export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK back
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
 ```
 
-> **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
+> 🔑 **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
 
 See the [full configuration reference](https://docs.pocketpaw.xyz/getting-started/configuration) for all settings.
 
 ---
 
-## Development
+## 🧑‍💻 Development
 
 ```bash
 git clone https://github.com/pocketpaw/pocketpaw.git && cd pocketpaw
@@ -223,13 +223,13 @@ pip install pocketpaw[all]                 # Everything
 
 ---
 
-## Documentation
+## 📖 Documentation
 
 Full docs at **[docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)** — getting started, backends, channels, tools, integrations, security, memory, API reference (50+ endpoints).
 
 ---
 
-## Star History
+## ⭐ Star History
 
 <a href="https://star-history.com/#pocketpaw/pocketpaw&Date">
  <picture>
@@ -239,7 +239,7 @@ Full docs at **[docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)** — getting st
  </picture>
 </a>
 
-## Contributors
+## 🤝 Contributors
 
 <a href="https://github.com/pocketpaw/pocketpaw/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=pocketpaw/pocketpaw" alt="Contributors" />
@@ -247,7 +247,7 @@ Full docs at **[docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)** — getting st
 
 ---
 
-## Join the Pack
+## 🐺 Join the Pack
 
 - Twitter: [@PocketPawAI](https://twitter.com/PocketPaw89242)
 - Discord: Coming Soon
@@ -255,12 +255,12 @@ Full docs at **[docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)** — getting st
 
 PRs welcome. Come build with us.
 
-## License
+## 📄 License
 
 MIT &copy; PocketPaw Team
 
 <p align="center">
   <img src="paw.png" alt="PocketPaw" width="40">
   <br>
-  <strong>Made with love for humans who want AI on their own terms</strong>
+  <strong>Made with ❤️ for humans who want AI on their own terms</strong>
 </p>
