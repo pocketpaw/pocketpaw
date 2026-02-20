@@ -46,10 +46,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js + Claude Code CLI (required by claude_agent_sdk backend)
+# Install Node.js + CLI-based agent backends
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g @anthropic-ai/claude-code && \
+    npm install -g @anthropic-ai/claude-code @openai/codex && \
     npm cache clean --force && \
     rm -rf /var/lib/apt/lists/*
 
