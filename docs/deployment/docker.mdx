@@ -9,7 +9,7 @@ tags: ["deployment", "docker"]
 
 # Docker Deployment
 
-PocketPaw ships with a production-ready `Dockerfile` and `docker-compose.yml` in the repository root. The Docker image includes all extras (`[all]`), Playwright Chromium, and tesseract OCR — everything works out of the box.
+PocketPaw ships with a production-ready `Dockerfile` and `docker-compose.yml` in the repository root. The Docker image includes all extras (`[all]`), Playwright Chromium, tesseract OCR, Node.js with the Claude Code CLI and Codex CLI — everything works out of the box.
 
 ## Quick Start
 
@@ -48,7 +48,9 @@ The `Dockerfile` uses a multi-stage build for a lean runtime image:
 
 **Runtime stage** (`python:3.12-slim`):
 - Installs only runtime system deps (tesseract, Chromium shared libs, curl)
+- Installs Node.js 22 + Claude Code CLI (`@anthropic-ai/claude-code`) and Codex CLI (`@openai/codex`)
 - Copies the venv and Playwright browsers from the builder
+- Creates a `/home/pocketpaw/workspace` directory for agent-created files
 - Runs as a non-root `pocketpaw` user
 - Exposes port `8888` with a healthcheck
 
@@ -67,6 +69,8 @@ docker compose up -d
 ```
 
 ### With Ollama (local LLM)
+
+**Option A: Ollama in Docker** (via Compose profile)
 
 ```bash
 docker compose --profile ollama up -d
@@ -87,6 +91,18 @@ docker compose exec ollama ollama pull nomic-embed-text
 
 <Callout type="tip">
   For GPU passthrough with NVIDIA, uncomment the `deploy.resources.reservations` block in `docker-compose.yml`.
+</Callout>
+
+**Option B: Ollama on the host**
+
+If Ollama is already running on your host machine (outside Docker), the container can reach it via `host.docker.internal` — this is configured automatically in `docker-compose.yml` via `extra_hosts`. Set in your `.env`:
+
+```bash
+POCKETPAW_OLLAMA_HOST=http://host.docker.internal:11434
+```
+
+<Callout type="warning">
+  The default `http://localhost:11434` won't work from inside a container — `localhost` inside the container refers to the container itself, not your host machine.
 </Callout>
 
 ### With Qdrant (vector memory)
@@ -121,8 +137,9 @@ POCKETPAW_PORT=9000 docker compose up -d
 
 ## Persistent Data
 
-A named Docker volume (`pocketpaw-data`) is mounted at `/home/pocketpaw/.pocketpaw` to persist:
+Two volumes are mounted:
 
+**Config & memory** — named volume `pocketpaw-data` at `/home/pocketpaw/.pocketpaw`:
 - Configuration (`config.json`, `secrets.enc`)
 - Session history
 - Memory data (file-based and Mem0)
@@ -131,10 +148,22 @@ A named Docker volume (`pocketpaw-data`) is mounted at `/home/pocketpaw/.pocketp
 - MCP server configs
 - Skills
 
-Data survives `docker compose down` and `docker compose up` cycles. To fully reset, remove the volume:
+**Workspace** — bind mount `./workspace` at `/home/pocketpaw/workspace`:
+- Files created by the agent via Write, Bash, or other tools
+- Directly accessible on the host at `./workspace/` next to your `docker-compose.yml`
+- The `POCKETPAW_FILE_JAIL_PATH` env var is set automatically in the image
+
+Data survives `docker compose down` and `docker compose up` cycles. To fully reset, remove the named volume:
 
 ```bash
 docker compose down -v
+```
+
+To customize the workspace path on the host, edit the bind mount in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - /your/preferred/path:/home/pocketpaw/workspace
 ```
 
 ## Managing the Container
@@ -161,6 +190,7 @@ Playwright Chromium is included in the Docker image along with all required shar
 
 - **Desktop tools** (`pyautogui`) require a display server and won't work in a headless container. They fail gracefully at invocation time.
 - **WhatsApp Personal mode** (neonize QR pairing) requires a persistent session. The named volume handles this, but the QR code must be scanned via the web dashboard on first setup.
+- **Copilot SDK backend** requires the `copilot` Go binary which is not bundled in the image. Install it manually if needed.
 
 ## Next Steps
 
