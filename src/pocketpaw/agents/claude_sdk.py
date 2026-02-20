@@ -22,6 +22,42 @@ from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
+# ── Claude model aliases ─────────────────────────────────────────────
+# Friendly short names shown in the dashboard dropdown.
+_CLAUDE_MODEL_IDS: dict[str, str] = {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet[1m]": "claude-sonnet-4-6",
+    "opusplan": "claude-opus-4-6",  # resolved dynamically in resolve_claude_model
+}
+
+_LONG_CONTEXT_ALIASES: frozenset[str] = frozenset({"sonnet[1m]"})
+
+
+def resolve_claude_model(alias: str, *, plan_mode: bool = False) -> tuple[str, bool]:
+    """Resolve a friendly alias to a (model_id, needs_extended_context) pair.
+
+    Unknown aliases are passed through unchanged (raw model IDs still work).
+    Empty / whitespace input returns ("", False).
+    """
+    normalized = alias.strip().lower()
+    if not normalized:
+        return ("", False)
+
+    # Special case: opusplan switches between opus and sonnet
+    if normalized == "opusplan":
+        model = "claude-opus-4-6" if plan_mode else "claude-sonnet-4-6"
+        return (model, False)
+
+    model_id = _CLAUDE_MODEL_IDS.get(normalized)
+    if model_id is not None:
+        return (model_id, normalized in _LONG_CONTEXT_ALIASES)
+
+    # Not a known alias — treat as a raw model ID
+    return (alias.strip(), False)
+
+
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
     "You are PocketPaw, a helpful AI assistant running locally on the user's computer."
@@ -547,9 +583,7 @@ class ClaudeSDKBackend:
             # Anthropic's policy prohibits using OAuth tokens from Free/Pro/Max
             # plans in third-party products. PocketPaw must use API key auth.
             if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
-                has_api_key = bool(
-                    llm.api_key or os.environ.get("ANTHROPIC_API_KEY")
-                )
+                has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
                 if not has_api_key:
                     yield AgentEvent(
                         type="error",
@@ -697,8 +731,10 @@ class ClaudeSDKBackend:
 
             # Model selection for Anthropic providers:
             # 1. Smart routing (opt-in) — overrides with complexity-based model
-            # 2. Explicit claude_sdk_model — user-chosen fixed model
-            # 3. Neither set — let Claude Code CLI auto-select (recommended)
+            # 2. Explicit claude_sdk_model — resolved via alias table
+            # 3. Resolved to empty — let Claude Code CLI auto-select
+            # Note: ModelRouter already restricts to Claude models via
+            # force_provider + is_ollama guards, so no extra guard needed.
             if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
                 if self.settings.smart_routing_enabled:
                     from pocketpaw.agents.model_router import ModelRouter
@@ -706,8 +742,13 @@ class ClaudeSDKBackend:
                     model_router = ModelRouter(self.settings)
                     selection = model_router.classify(message)
                     options_kwargs["model"] = selection.model
-                elif self.settings.claude_sdk_model:
-                    options_kwargs["model"] = self.settings.claude_sdk_model
+                else:
+                    model_id, _extended = resolve_claude_model(
+                        self.settings.claude_sdk_model,
+                        plan_mode=self.settings.plan_mode,
+                    )
+                    if model_id:
+                        options_kwargs["model"] = model_id
 
             # Capture stderr for better error diagnostics
             _stderr_lines: list[str] = []

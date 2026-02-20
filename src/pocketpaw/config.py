@@ -107,8 +107,11 @@ class Settings(BaseSettings):
         description="Provider for Claude SDK: 'anthropic', 'ollama', or 'openai_compatible'",
     )
     claude_sdk_model: str = Field(
-        default="",
-        description="Model for Claude SDK backend (empty = let Claude Code auto-select)",
+        default="sonnet",
+        description=(
+            "Model alias for Claude SDK backend: "
+            "sonnet, opus, haiku, sonnet[1m], opusplan, or a raw model ID"
+        ),
     )
     claude_sdk_max_turns: int = Field(
         default=100,
@@ -144,9 +147,7 @@ class Settings(BaseSettings):
     )
 
     # Codex CLI Settings
-    codex_cli_model: str = Field(
-        default="gpt-5.3-codex", description="Model for Codex CLI backend"
-    )
+    codex_cli_model: str = Field(default="gpt-5.3-codex", description="Model for Codex CLI backend")
     codex_cli_max_turns: int = Field(
         default=100, description="Max turns per query in Codex CLI backend (0 = unlimited)"
     )
@@ -203,9 +204,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-5.2", description="OpenAI model to use")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
-    anthropic_model: str = Field(
-        default="claude-sonnet-4-6", description="Anthropic model to use"
-    )
+    anthropic_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model to use")
 
     # Memory Backend
     memory_backend: str = Field(
