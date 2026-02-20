@@ -17,6 +17,7 @@ from pocketpaw.bus.events import Channel
 from pocketpaw.config import Settings, get_settings
 from pocketpaw.memory import get_memory_manager
 from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
+from pocketpaw.security.redact import redact_output
 
 logger = logging.getLogger(__name__)
 
@@ -281,11 +282,13 @@ class AgentLoop:
 
                     if etype == "message":
                         full_response += econtent
+                        # Apply output redaction before sending to user
+                        redacted_content = redact_output(econtent)
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=message.channel,
                                 chat_id=message.chat_id,
-                                content=econtent,
+                                content=redacted_content,
                                 is_stream_chunk=True,
                             )
                         )
@@ -346,11 +349,13 @@ class AgentLoop:
                                 },
                             )
                         )
+                        # Apply output redaction to error messages too
+                        redacted_content = redact_output(econtent)
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=message.channel,
                                 chat_id=message.chat_id,
-                                content=econtent,
+                                content=redacted_content,
                                 is_stream_chunk=True,
                             )
                         )
@@ -433,11 +438,13 @@ class AgentLoop:
             except Exception:
                 pass
 
+            # Apply output redaction to exception messages
+            error_msg = redact_output(f"An error occurred: {str(e)}")
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
                     chat_id=message.chat_id,
-                    content=f"An error occurred: {str(e)}",
+                    content=error_msg,
                 )
             )
             await self.bus.publish_outbound(
