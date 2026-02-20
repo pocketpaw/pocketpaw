@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from pocketpaw.config import Settings, get_access_token, regenerate_token
 from pocketpaw.dashboard_state import _LOCALHOST_ADDRS, _PROXY_HEADERS
-from pocketpaw.security.rate_limiter import api_key_limiter, api_limiter, auth_limiter
+from pocketpaw.security.rate_limiter import api_limiter, auth_limiter
 from pocketpaw.security.session_tokens import create_session_token, verify_session_token
 from pocketpaw.tunnel import get_tunnel_manager
 
@@ -108,18 +108,12 @@ async def auth_middleware(request: Request, call_next):
         "/static",
         "/favicon.ico",
         "/api/qr",
-        "/api/v1/qr",
         "/api/auth/login",
-        "/api/v1/auth/login",
         "/webhook/whatsapp",
         "/webhook/inbound",
         "/api/whatsapp/qr",
-        "/api/v1/whatsapp/qr",
         "/oauth/callback",
         "/api/mcp/oauth/callback",
-        "/api/v1/mcp/oauth/callback",
-        "/api/v1/oauth/authorize",
-        "/api/v1/oauth/token",
     ]
 
     for path in exempt_paths:
@@ -130,15 +124,8 @@ async def auth_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
     is_auth_path = request.url.path in ("/api/auth/session", "/api/qr")
     limiter = auth_limiter if is_auth_path else api_limiter
-    rl_info = limiter.check(client_ip)
-    if not rl_info.allowed:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Too many requests"},
-            headers=rl_info.headers(),
-        )
-    # Stash rate limit info to add response headers later
-    request.state.rate_limit_headers = rl_info.headers()
+    if not limiter.allow(client_ip):
+        return JSONResponse(status_code=429, content={"detail": "Too many requests"})
 
     # Check for token in query or header
     token = request.query_params.get("token")
@@ -173,64 +160,7 @@ async def auth_middleware(request: Request, call_next):
             elif ":" in cookie_token and verify_session_token(cookie_token, current_token):
                 is_valid = True
 
-    # 4. Check API key (pp_* prefix)
-    if not is_valid:
-        api_key_value = None
-        if token and token.startswith("pp_"):
-            api_key_value = token
-        elif auth_header and "pp_" in auth_header:
-            api_key_value = (
-                auth_header.removeprefix("Bearer ").strip()
-                if auth_header.startswith("Bearer ")
-                else ""
-            )
-        if api_key_value and api_key_value.startswith("pp_"):
-            try:
-                from pocketpaw.api.api_keys import get_api_key_manager
-
-                mgr = get_api_key_manager()
-                record = mgr.verify(api_key_value)
-                if record:
-                    # Per-API-key rate limit
-                    key_rl = api_key_limiter.check(f"apikey:{record.id}")
-                    if not key_rl.allowed:
-                        return JSONResponse(
-                            status_code=429,
-                            content={"detail": "API key rate limit exceeded"},
-                            headers=key_rl.headers(),
-                        )
-                    request.state.rate_limit_headers = key_rl.headers()
-                    is_valid = True
-                    request.state.api_key = record
-            except Exception:
-                pass
-
-    # 5. Check OAuth2 access token (ppat_* prefix)
-    if not is_valid:
-        oauth_value = None
-        if token and token.startswith("ppat_"):
-            oauth_value = token
-        elif auth_header:
-            bearer = (
-                auth_header.removeprefix("Bearer ").strip()
-                if auth_header.startswith("Bearer ")
-                else ""
-            )
-            if bearer.startswith("ppat_"):
-                oauth_value = bearer
-        if oauth_value:
-            try:
-                from pocketpaw.api.oauth2.server import get_oauth_server
-
-                server = get_oauth_server()
-                oauth_token = server.verify_access_token(oauth_value)
-                if oauth_token:
-                    is_valid = True
-                    request.state.oauth_token = oauth_token
-            except Exception:
-                pass
-
-    # 6. Allow genuine localhost (not tunneled proxies)
+    # 4. Allow genuine localhost (not tunneled proxies)
     if not is_valid and _is_genuine_localhost(request):
         is_valid = True
 
@@ -246,13 +176,6 @@ async def auth_middleware(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
     response = await call_next(request)
-
-    # Attach rate limit headers to every response
-    rl_headers = getattr(request.state, "rate_limit_headers", None)
-    if rl_headers:
-        for k, v in rl_headers.items():
-            response.headers[k] = v
-
     return response
 
 
