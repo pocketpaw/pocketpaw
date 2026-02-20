@@ -349,7 +349,7 @@ def check_backend_deps() -> HealthCheckResult:
     missing = []
 
     _BACKEND_DEPS: dict[str, tuple[str, str]] = {
-        "claude_agent_sdk": ("claude_code_sdk", "claude-code-sdk"),
+        "claude_agent_sdk": ("claude_agent_sdk", "claude-agent-sdk"),
         "google_adk": ("google.adk", "pocketpaw[google-adk]"),
         "openai_agents": ("agents", "pocketpaw[openai-agents]"),
     }

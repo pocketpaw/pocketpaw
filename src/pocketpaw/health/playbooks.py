@@ -57,7 +57,7 @@ PLAYBOOKS: dict[str, dict] = {
             "Virtual environment changed or recreated without dependencies",
         ],
         "fix_steps": [
-            "For Claude Agent SDK: pip install claude-code-sdk",
+            "For Claude Agent SDK: pip install claude-agent-sdk",
             "For PocketPaw Native: pip install anthropic",
             "For Open Interpreter: pip install open-interpreter",
             "Or reinstall PocketPaw: pip install pocketpaw",

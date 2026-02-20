@@ -293,8 +293,11 @@ _TEST_TOKEN = "test-session-token-12345"
 
 @pytest.fixture
 def _mock_auth():
-    """Mock auth for dashboard API requests."""
-    with patch("pocketpaw.dashboard.get_access_token", return_value=_TEST_TOKEN):
+    """Mock auth for dashboard API requests and WS handler."""
+    with (
+        patch("pocketpaw.dashboard_auth.get_access_token", return_value=_TEST_TOKEN),
+        patch("pocketpaw.dashboard.get_access_token", return_value=_TEST_TOKEN),
+    ):
         yield
 
 
@@ -429,3 +432,153 @@ class TestWebSocketSessionSwitching:
         finally:
             if session_file.exists():
                 session_file.unlink()
+
+
+# =========================================================================
+# F1: FileMemoryStore.search_sessions
+# =========================================================================
+
+
+class TestSearchSessions:
+    """Tests for FileMemoryStore.search_sessions (non-blocking search)."""
+
+    @pytest.fixture
+    def search_store(self, tmp_path):
+        """Create a store with several sessions pre-populated."""
+        store = FileMemoryStore(base_path=tmp_path)
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(exist_ok=True)
+
+        # Session 1: contains "hello world"
+        (sessions / "sess_one.json").write_text(
+            json.dumps([{"role": "user", "content": "hello world"}])
+        )
+        # Session 2: contains "goodbye mars"
+        (sessions / "sess_two.json").write_text(
+            json.dumps([{"role": "assistant", "content": "goodbye mars"}])
+        )
+        # Session 3: contains "Hello Again" (case variant)
+        (sessions / "sess_three.json").write_text(
+            json.dumps([{"role": "user", "content": "Hello Again"}])
+        )
+        # Index metadata
+        index = {
+            "sess_one": {
+                "title": "First Session",
+                "channel": "web",
+                "last_activity": "2026-02-20T10:00:00",
+            },
+            "sess_two": {
+                "title": "Second Session",
+                "channel": "telegram",
+                "last_activity": "2026-02-20T11:00:00",
+            },
+            "sess_three": {
+                "title": "Third Session",
+                "channel": "discord",
+                "last_activity": "2026-02-20T12:00:00",
+            },
+        }
+        (sessions / "_index.json").write_text(json.dumps(index))
+        return store
+
+    async def test_empty_query_returns_empty(self, search_store):
+        assert await search_store.search_sessions("") == []
+
+    async def test_whitespace_query_returns_empty(self, search_store):
+        assert await search_store.search_sessions("   ") == []
+
+    async def test_no_match_returns_empty(self, search_store):
+        assert await search_store.search_sessions("zzz_nomatch") == []
+
+    async def test_finds_matching_session(self, search_store):
+        results = await search_store.search_sessions("hello")
+        ids = {r["id"] for r in results}
+        assert "sess_one" in ids
+
+    async def test_case_insensitive(self, search_store):
+        results = await search_store.search_sessions("hello")
+        ids = {r["id"] for r in results}
+        # Both "hello world" and "Hello Again" should match
+        assert "sess_one" in ids
+        assert "sess_three" in ids
+
+    async def test_respects_limit(self, search_store):
+        results = await search_store.search_sessions("o", limit=1)
+        assert len(results) <= 1
+
+    async def test_returns_metadata(self, search_store):
+        results = await search_store.search_sessions("goodbye")
+        assert len(results) == 1
+        r = results[0]
+        assert r["id"] == "sess_two"
+        assert r["title"] == "Second Session"
+        assert r["channel"] == "telegram"
+        assert r["match_role"] == "assistant"
+        assert r["last_activity"] == "2026-02-20T11:00:00"
+
+    async def test_skips_index_and_compaction_files(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(exist_ok=True)
+        # These should be ignored
+        (sessions / "_index.json").write_text("{}")
+        (sessions / "sess_a_compaction.json").write_text(
+            json.dumps([{"role": "user", "content": "secret"}])
+        )
+        # This is the only real session
+        (sessions / "sess_a.json").write_text(
+            json.dumps([{"role": "user", "content": "secret"}])
+        )
+        results = await store.search_sessions("secret")
+        assert len(results) == 1
+        assert results[0]["id"] == "sess_a"
+
+    async def test_truncates_match_to_200_chars(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(exist_ok=True)
+        long_content = "x" * 500
+        (sessions / "sess_long.json").write_text(
+            json.dumps([{"role": "user", "content": long_content}])
+        )
+        results = await store.search_sessions("xxx")
+        assert len(results) == 1
+        assert len(results[0]["match"]) == 200
+
+
+# =========================================================================
+# F2: MemoryManager.search_sessions
+# =========================================================================
+
+
+class TestMemoryManagerSearchSessions:
+    """Tests for MemoryManager.search_sessions delegation."""
+
+    async def test_delegates_to_store(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(exist_ok=True)
+        (sessions / "s1.json").write_text(
+            json.dumps([{"role": "user", "content": "delegate test"}])
+        )
+
+        from pocketpaw.memory.manager import MemoryManager
+
+        mgr = MemoryManager.__new__(MemoryManager)
+        mgr._store = store
+        mgr._session_key = "test"
+
+        results = await mgr.search_sessions("delegate")
+        assert len(results) == 1
+        assert results[0]["id"] == "s1"
+
+    async def test_fallback_for_unsupported_store(self):
+        from pocketpaw.memory.manager import MemoryManager
+
+        mgr = MemoryManager.__new__(MemoryManager)
+        mgr._store = MagicMock(spec=[])  # No search_sessions attr
+        mgr._session_key = "test"
+
+        results = await mgr.search_sessions("anything")
+        assert results == []

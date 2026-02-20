@@ -844,6 +844,24 @@ wheels = [
 ]
 
 [[package]]
+name = "github-copilot-sdk"
+version = "0.1.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/06/1dec504b54c724d69283969d4ed004225ec8bbb1c0a5e9e0c3b6b048099a/github_copilot_sdk-0.1.25-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:d32c3fc2c393f70923a645a133607da2e562d078b87437f499100d5bb8c1902f", size = 58097936, upload-time = "2026-02-18T00:07:20.672Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/a3/a6ad1ca47af561069d6d8d0a4b074b000b0be1dfa9e66215b264ee31650c/github_copilot_sdk-0.1.25-py3-none-macosx_11_0_arm64.whl", hash = "sha256:7af33d3afbe09a78dfc9d65a843526e47aba15631e90926c42a21a200fab12da", size = 54867128, upload-time = "2026-02-18T00:07:25.228Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/08/74fd9be0ed292d524a15fa4db950f43f4afefb77514f856e36fd1203bf13/github_copilot_sdk-0.1.25-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:bc74a3d08ee45313ac02a3f7159c583ec41fc16090ec5f27f88c4b737f03139e", size = 60999905, upload-time = "2026-02-18T00:07:29.462Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/01/daae53c8586c0cadae9a2a146d1da9bd6dbd7e89b7dcd72643b453267345/github_copilot_sdk-0.1.25-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:13ef99fa8c709c5f80d820672bf36ee9176bc33f0efce6a2b5cbf6d1bb2369e8", size = 59183062, upload-time = "2026-02-18T00:07:34.059Z" },
+    { url = "https://files.pythonhosted.org/packages/81/a8/2ec7d47a18b042cca2c140cabb5fe6621697c1b43b8721637061122c51ed/github_copilot_sdk-0.1.25-py3-none-win_amd64.whl", hash = "sha256:1a90ee583309ff308fea42f9edec61203645a33ca1d3dc42953628fb8c3eda07", size = 53624148, upload-time = "2026-02-18T00:07:38.558Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/2e/4cffd33552ede91de7517641835a3365571abd3f436c9d76a4f50793033c/github_copilot_sdk-0.1.25-py3-none-win_arm64.whl", hash = "sha256:5249a63d1ac1e4d325c70c9902e81327b0baca53afa46010f52ac3fd3b5a111b", size = 51623455, upload-time = "2026-02-18T00:07:42.156Z" },
+]
+
+[[package]]
 name = "google-adk"
 version = "1.25.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2880,6 +2898,7 @@ all = [
     { name = "botbuilder-integration-aiohttp" },
     { name = "discord-py" },
     { name = "elevenlabs" },
+    { name = "github-copilot-sdk" },
     { name = "google-adk" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
@@ -2900,6 +2919,7 @@ all = [
     { name = "slack-bolt" },
 ]
 all-backends = [
+    { name = "github-copilot-sdk" },
     { name = "google-adk" },
     { name = "openai-agents" },
 ]
@@ -2935,6 +2955,9 @@ channels = [
     { name = "python-telegram-bot" },
     { name = "slack-bolt" },
 ]
+copilot-sdk = [
+    { name = "github-copilot-sdk" },
+]
 desktop = [
     { name = "psutil" },
     { name = "pyautogui" },
@@ -2944,6 +2967,7 @@ dev = [
     { name = "botbuilder-integration-aiohttp" },
     { name = "discord-py" },
     { name = "elevenlabs" },
+    { name = "github-copilot-sdk" },
     { name = "google-adk" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
@@ -3047,6 +3071,7 @@ requires-dist = [
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3.0" },
     { name = "elevenlabs", marker = "extra == 'voice'", specifier = ">=1.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "github-copilot-sdk", marker = "extra == 'copilot-sdk'", specifier = ">=0.1.0" },
     { name = "google-adk", marker = "extra == 'google-adk'", specifier = ">=1.0.0" },
     { name = "google-api-python-client", marker = "extra == 'gchat'", specifier = ">=2.100.0" },
     { name = "google-auth", marker = "extra == 'gchat'", specifier = ">=2.25.0" },
@@ -3068,7 +3093,7 @@ requires-dist = [
     { name = "pocketpaw", extras = ["browser", "desktop", "image", "extract", "voice", "ocr", "sarvam", "mcp", "memory"], marker = "extra == 'all-tools'" },
     { name = "pocketpaw", extras = ["browser", "memory", "desktop"], marker = "extra == 'recommended'" },
     { name = "pocketpaw", extras = ["discord", "slack", "telegram"], marker = "extra == 'channels'" },
-    { name = "pocketpaw", extras = ["openai-agents", "google-adk"], marker = "extra == 'all-backends'" },
+    { name = "pocketpaw", extras = ["openai-agents", "google-adk", "copilot-sdk"], marker = "extra == 'all-backends'" },
     { name = "pocketpaw", extras = ["recommended", "all-channels", "all-tools", "all-backends"], marker = "extra == 'all'" },
     { name = "pocketpaw", extras = ["telegram", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat"], marker = "extra == 'all-channels'" },
     { name = "psutil", marker = "extra == 'desktop'", specifier = ">=5.9.0" },
@@ -3089,7 +3114,7 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
-provides-extras = ["dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "memory", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
+provides-extras = ["dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "memory", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -403,6 +403,57 @@ class FileMemoryStore:
             self._save_session_index(index)
         return True
 
+    async def search_sessions(self, query: str, limit: int = 20) -> list[dict]:
+        """Search session files for messages matching *query*.
+
+        All blocking I/O (glob, read_text, json.loads) runs inside
+        ``asyncio.to_thread`` so the event loop is never blocked.
+        """
+        if not query or not query.strip():
+            return []
+
+        query_lower = query.lower()
+        sessions_path = self.sessions_path
+        index_path = self._index_path
+
+        def _search_sync() -> list[dict]:
+            # Load index inside the thread so its file I/O doesn't block
+            # the event loop either.
+            try:
+                index_snapshot = json.loads(index_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, FileNotFoundError):
+                index_snapshot = {}
+            results: list[dict] = []
+            for session_file in sessions_path.glob("*.json"):
+                if session_file.name.startswith("_") or session_file.name.endswith(
+                    "_compaction.json"
+                ):
+                    continue
+                try:
+                    data = json.loads(session_file.read_text())
+                    for msg in data:
+                        if query_lower in msg.get("content", "").lower():
+                            safe_key = session_file.stem
+                            meta = index_snapshot.get(safe_key, {})
+                            results.append(
+                                {
+                                    "id": safe_key,
+                                    "title": meta.get("title", "Untitled"),
+                                    "channel": meta.get("channel", "unknown"),
+                                    "match": msg["content"][:200],
+                                    "match_role": msg.get("role", ""),
+                                    "last_activity": meta.get("last_activity", ""),
+                                }
+                            )
+                            break
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if len(results) >= limit:
+                    break
+            return results
+
+        return await asyncio.to_thread(_search_sync)
+
     def _load_index(self) -> None:
         """Load existing memories into index."""
         # Load long-term memories (root = owner/default)

@@ -1,6 +1,7 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-02-20: Extracted diagnostics to diagnostics.py, headless runners to headless.py.
   - 2026-02-18: Added --doctor CLI flag (runs all health checks + version check, prints report).
   - 2026-02-18: Styled update notice (ANSI box on stderr, suppressed in CI/non-TTY).
   - 2026-02-17: Run startup health checks after settings load (prints colored summary).
@@ -16,13 +17,17 @@ Changes:
 
 import argparse
 import asyncio
-import importlib.util
 import logging
-import sys
-import webbrowser
 from importlib.metadata import version as get_version
 
 from pocketpaw.config import Settings, get_settings
+from pocketpaw.diagnostics import check_ollama, check_openai_compatible, run_doctor
+from pocketpaw.headless import (
+    _check_extras_installed,
+    _is_headless,
+    run_multi_channel_mode,
+    run_telegram_mode,
+)
 from pocketpaw.logging_setup import setup_logging
 
 # Setup beautiful logging with Rich
@@ -30,545 +35,18 @@ setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
 
-async def run_telegram_mode(settings: Settings) -> None:
-    """Run in Telegram bot mode."""
-    from pocketpaw.bot_gateway import run_bot
-    from pocketpaw.web_server import find_available_port, run_pairing_server
-
-    # Check if we need to run pairing flow
-    if not settings.telegram_bot_token or not settings.allowed_user_id:
-        logger.info("🔧 First-time setup: Starting pairing server...")
-
-        # Find available port before showing instructions
-        try:
-            port = find_available_port(settings.web_port)
-        except OSError:
-            logger.error(
-                "❌ Could not find an available port. Please close other applications and try again."
-            )
-            return
-
-        print("\n" + "=" * 50)
-        print("🐾 POCKETPAW SETUP")
-        print("=" * 50)
-        print("\n1. Create a Telegram bot via @BotFather")
-        print("2. Copy the bot token")
-        print(f"3. Open http://localhost:{port} in your browser")
-        print("4. Paste the token and scan the QR code\n")
-
-        # Open browser automatically with correct port
-        webbrowser.open(f"http://localhost:{port}")
-
-        # Run pairing server (blocks until pairing complete)
-        await run_pairing_server(settings)
-
-        # Reload settings after pairing
-        settings = get_settings(force_reload=True)
-
-    # Start the bot
-    logger.info("🚀 Starting PocketPaw (Beta)...")
-    await run_bot(settings)
-
-
-async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -> None:
-    """Run one or more channel adapters sharing a single bus and AgentLoop."""
-    from pocketpaw.agents.loop import AgentLoop
-    from pocketpaw.bus import get_message_bus
-
-    bus = get_message_bus()
-    adapters = []
-
-    if args.discord:
-        if not settings.discord_bot_token:
-            logger.error("Discord bot token not configured. Set POCKETPAW_DISCORD_BOT_TOKEN.")
-        else:
-            from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
-
-            adapters.append(
-                DiscordAdapter(
-                    token=settings.discord_bot_token,
-                    allowed_guild_ids=settings.discord_allowed_guild_ids,
-                    allowed_user_ids=settings.discord_allowed_user_ids,
-                )
-            )
-
-    if args.slack:
-        if not settings.slack_bot_token or not settings.slack_app_token:
-            logger.error(
-                "Slack tokens not configured. Set POCKETPAW_SLACK_BOT_TOKEN "
-                "and POCKETPAW_SLACK_APP_TOKEN."
-            )
-        else:
-            from pocketpaw.bus.adapters.slack_adapter import SlackAdapter
-
-            adapters.append(
-                SlackAdapter(
-                    bot_token=settings.slack_bot_token,
-                    app_token=settings.slack_app_token,
-                    allowed_channel_ids=settings.slack_allowed_channel_ids,
-                )
-            )
-
-    if args.whatsapp:
-        if not settings.whatsapp_access_token or not settings.whatsapp_phone_number_id:
-            logger.error(
-                "WhatsApp not configured. Set POCKETPAW_WHATSAPP_ACCESS_TOKEN "
-                "and POCKETPAW_WHATSAPP_PHONE_NUMBER_ID."
-            )
-        else:
-            from pocketpaw.bus.adapters.whatsapp_adapter import WhatsAppAdapter
-
-            adapters.append(
-                WhatsAppAdapter(
-                    access_token=settings.whatsapp_access_token,
-                    phone_number_id=settings.whatsapp_phone_number_id,
-                    verify_token=settings.whatsapp_verify_token or "",
-                    allowed_phone_numbers=settings.whatsapp_allowed_phone_numbers,
-                )
-            )
-
-    if getattr(args, "signal", False):
-        if not settings.signal_phone_number:
-            logger.error("Signal not configured. Set POCKETPAW_SIGNAL_PHONE_NUMBER.")
-        else:
-            from pocketpaw.bus.adapters.signal_adapter import SignalAdapter
-
-            adapters.append(
-                SignalAdapter(
-                    api_url=settings.signal_api_url,
-                    phone_number=settings.signal_phone_number,
-                    allowed_phone_numbers=settings.signal_allowed_phone_numbers,
-                )
-            )
-
-    if getattr(args, "matrix", False):
-        if not settings.matrix_homeserver or not settings.matrix_user_id:
-            logger.error(
-                "Matrix not configured. Set POCKETPAW_MATRIX_HOMESERVER "
-                "and POCKETPAW_MATRIX_USER_ID."
-            )
-        else:
-            from pocketpaw.bus.adapters.matrix_adapter import MatrixAdapter
-
-            adapters.append(
-                MatrixAdapter(
-                    homeserver=settings.matrix_homeserver,
-                    user_id=settings.matrix_user_id,
-                    access_token=settings.matrix_access_token,
-                    password=settings.matrix_password,
-                    allowed_room_ids=settings.matrix_allowed_room_ids,
-                    device_id=settings.matrix_device_id,
-                )
-            )
-
-    if getattr(args, "teams", False):
-        if not settings.teams_app_id or not settings.teams_app_password:
-            logger.error(
-                "Teams not configured. Set POCKETPAW_TEAMS_APP_ID and POCKETPAW_TEAMS_APP_PASSWORD."
-            )
-        else:
-            from pocketpaw.bus.adapters.teams_adapter import TeamsAdapter
-
-            adapters.append(
-                TeamsAdapter(
-                    app_id=settings.teams_app_id,
-                    app_password=settings.teams_app_password,
-                    allowed_tenant_ids=settings.teams_allowed_tenant_ids,
-                    webhook_port=settings.teams_webhook_port,
-                )
-            )
-
-    if getattr(args, "gchat", False):
-        if not settings.gchat_service_account_key:
-            logger.error("Google Chat not configured. Set POCKETPAW_GCHAT_SERVICE_ACCOUNT_KEY.")
-        else:
-            from pocketpaw.bus.adapters.gchat_adapter import GoogleChatAdapter
-
-            adapters.append(
-                GoogleChatAdapter(
-                    mode=settings.gchat_mode,
-                    service_account_key=settings.gchat_service_account_key,
-                    project_id=settings.gchat_project_id,
-                    subscription_id=settings.gchat_subscription_id,
-                    allowed_space_ids=settings.gchat_allowed_space_ids,
-                )
-            )
-
-    if not adapters:
-        logger.error("No channel adapters could be started. Check your configuration.")
-        return
-
-    agent_loop = AgentLoop()
-
-    for adapter in adapters:
-        await adapter.start(bus)
-        logger.info(f"Started {adapter.channel.value} adapter")
-
-    loop_task = asyncio.create_task(agent_loop.start())
-
-    # If WhatsApp is one of the adapters, start a minimal webhook server
-    whatsapp_server = None
-    if args.whatsapp:
-        import uvicorn
-
-        import pocketpaw.whatsapp_gateway as wa_gw
-        from pocketpaw.whatsapp_gateway import create_whatsapp_app
-
-        # Point the gateway module at our adapter
-        for a in adapters:
-            if a.channel.value == "whatsapp":
-                wa_gw._whatsapp_adapter = a
-                break
-
-        wa_app = create_whatsapp_app(settings)
-        config = uvicorn.Config(
-            wa_app, host=settings.web_host, port=settings.web_port, log_level="info"
-        )
-        whatsapp_server = uvicorn.Server(config)
-        asyncio.create_task(whatsapp_server.serve())
-
-    try:
-        await loop_task
-    except asyncio.CancelledError:
-        logger.info("Stopping channels...")
-    finally:
-        await agent_loop.stop()
-        for adapter in adapters:
-            await adapter.stop()
-
-
-def _is_headless() -> bool:
-    """Detect headless server (no display)."""
-    import os
-
-    if sys.platform == "darwin":
-        return False  # macOS always has a display
-    return not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
-
-
-def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
+def run_dashboard_mode(
+    settings: Settings, host: str, port: int, dev: bool = False
+) -> None:
     """Run in web dashboard mode."""
     from pocketpaw.dashboard import run_dashboard
 
-    run_dashboard(host=host, port=port, open_browser=not _is_headless() and not dev, dev=dev)
-
-
-async def run_doctor() -> int:
-    """Run all health checks and print a polished diagnostic report.
-
-    Returns 0 if healthy, 1 if degraded, 2 if unhealthy.
-    """
-    import sys
-
-    from pocketpaw.health import get_health_engine
-
-    w = sys.stderr.write
-
-    # ANSI colors
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    RED = "\033[31m"
-    DIM = "\033[2m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-
-    current = get_version("pocketpaw")
-    w(f"\n  {BOLD}PocketPaw Doctor{RESET} v{current}\n")
-    w(f"  {'─' * 40}\n\n")
-
-    engine = get_health_engine()
-
-    # Run all checks (startup sync + connectivity async)
-    engine.run_startup_checks()
-    await engine.run_connectivity_checks()
-
-    results = engine.results
-
-    # Group by category
-    categories: dict[str, list] = {}
-    for r in results:
-        cat = r.category.title()
-        categories.setdefault(cat, []).append(r)
-
-    # Print results grouped by category
-    for cat_name, checks in categories.items():
-        w(f"  {DIM}{cat_name}{RESET}\n")
-        for r in checks:
-            if r.status == "ok":
-                icon = f"{GREEN}✓{RESET}"
-            elif r.status == "warning":
-                icon = f"{YELLOW}⚠{RESET}"
-            else:
-                icon = f"{RED}✗{RESET}"
-
-            # Pad name to align messages
-            padded_name = r.name.ljust(22)
-            w(f"    {icon} {padded_name} {DIM}{r.message}{RESET}\n")
-
-            if r.fix_hint and r.status != "ok":
-                # Split on | for multi-part hints (e.g. "Run: ... | Changelog: ...")
-                for hint in r.fix_hint.split("  |  "):
-                    w(f"      {DIM}→ {hint.strip()}{RESET}\n")
-        w("\n")
-
-    # Summary line
-    total = len(results)
-    ok_count = sum(1 for r in results if r.status == "ok")
-    warn_count = sum(1 for r in results if r.status == "warning")
-    crit_count = sum(1 for r in results if r.status == "critical")
-
-    w(f"  {'─' * 40}\n")
-    w(f"  {total} checks: {GREEN}{ok_count} passed{RESET}")
-    if warn_count:
-        w(f", {YELLOW}{warn_count} warning{'s' if warn_count > 1 else ''}{RESET}")
-    if crit_count:
-        w(f", {RED}{crit_count} critical{RESET}")
-    w("\n")
-
-    status = engine.overall_status
-    color = {"healthy": GREEN, "degraded": YELLOW, "unhealthy": RED}.get(status, RESET)
-    w(f"  Overall: {color}{BOLD}{status.upper()}{RESET}\n\n")
-
-    return {"healthy": 0, "degraded": 1, "unhealthy": 2}.get(status, 1)
-
-
-async def check_ollama(settings: Settings) -> int:
-    """Check Ollama connectivity, model availability, and tool calling support.
-
-    Returns 0 on success, 1 on failure.
-    """
-    import httpx
-    from rich.console import Console
-
-    from pocketpaw.llm.client import resolve_llm_client
-
-    console = Console()
-    llm = resolve_llm_client(settings, force_provider="ollama")
-    ollama_host = llm.ollama_host
-    ollama_model = llm.model
-    failures = 0
-
-    # 1. Check server connectivity
-    console.print(f"\n  Checking Ollama at [bold]{ollama_host}[/] ...")
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{ollama_host}/api/tags")
-            resp.raise_for_status()
-            tags_data = resp.json()
-        models = [m.get("name", "") for m in tags_data.get("models", [])]
-        console.print(f"  [green]\\[OK][/]  Server reachable — {len(models)} model(s) available")
-    except Exception as e:
-        console.print(f"  [red]\\[FAIL][/] Cannot reach Ollama server: {e}")
-        console.print("         Make sure Ollama is running: [bold]ollama serve[/]")
-        return 1
-
-    # 2. Check configured model is available
-    # Ollama model names may or may not include ":latest" tag
-    model_found = any(m == ollama_model or m.startswith(f"{ollama_model}:") for m in models)
-    if model_found:
-        console.print(f"  [green]\\[OK][/]  Model '{ollama_model}' is available")
-    else:
-        console.print(f"  [yellow]\\[WARN][/] Model '{ollama_model}' not found locally")
-        if models:
-            console.print(f"         Available: {', '.join(models[:10])}")
-        console.print(f"         Pull it with: [bold]ollama pull {ollama_model}[/]")
-        failures += 1
-
-    # 3. Test Anthropic-compatible endpoint (basic completion)
-    console.print("  Testing Anthropic Messages API compatibility ...")
-    try:
-        ac = llm.create_anthropic_client(timeout=60.0, max_retries=1)
-        response = await ac.messages.create(
-            model=ollama_model,
-            max_tokens=32,
-            messages=[{"role": "user", "content": "Say hi"}],
-        )
-        text = response.content[0].text if response.content else ""
-        console.print(f"  [green]\\[OK][/]  Messages API works — response: {text[:60]}")
-    except Exception as e:
-        console.print(f"  [red]\\[FAIL][/] Messages API failed: {e}")
-        console.print("         Ollama v0.14.0+ is required for Anthropic API compatibility")
-        failures += 1
-        # Skip tool test if basic API fails
-        console.print(f"\n  Result: {2 - (1 if model_found else 0)}/3 checks passed")
-        return 1
-
-    # 4. Test tool calling
-    console.print("  Testing tool calling support ...")
-    try:
-        tool_response = await ac.messages.create(
-            model=ollama_model,
-            max_tokens=256,
-            messages=[{"role": "user", "content": "What is 2 + 2?"}],
-            tools=[
-                {
-                    "name": "calculator",
-                    "description": "Performs arithmetic calculations",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "expression": {
-                                "type": "string",
-                                "description": "Math expression to evaluate",
-                            }
-                        },
-                        "required": ["expression"],
-                    },
-                }
-            ],
-        )
-        has_tool_use = any(b.type == "tool_use" for b in tool_response.content)
-        if has_tool_use:
-            console.print("  [green]\\[OK][/]  Tool calling works")
-        else:
-            console.print("  [yellow]\\[WARN][/] Model responded but did not use the tool")
-            console.print("         Tool calling quality varies by model. Try a larger model.")
-            failures += 1
-    except Exception as e:
-        console.print(f"  [yellow]\\[WARN][/] Tool calling test failed: {e}")
-        console.print("         Some models may not support tool calling reliably.")
-        failures += 1
-
-    passed = 4 - failures
-    console.print(f"\n  Result: [bold]{passed}/4[/] checks passed")
-    if failures == 0:
-        console.print("  [green]Ollama is ready to use with PocketPaw![/]")
-        console.print(
-            "  Set [bold]llm_provider=ollama[/] in settings"
-            " or [bold]POCKETPAW_LLM_PROVIDER=ollama[/]\n"
-        )
-    return 1 if failures > 1 else 0
-
-
-async def check_openai_compatible(settings: Settings) -> int:
-    """Check OpenAI-compatible endpoint connectivity and tool calling support.
-
-    Returns 0 on success, 1 on failure.
-    """
-    from rich.console import Console
-
-    from pocketpaw.llm.client import resolve_llm_client
-
-    console = Console()
-    llm = resolve_llm_client(settings, force_provider="openai_compatible")
-    base_url = llm.openai_compatible_base_url
-    model = llm.model
-
-    if not base_url:
-        console.print("\n  [red]\\[FAIL][/] No base URL configured.")
-        console.print(
-            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_BASE_URL[/] or configure in Settings.\n"
-        )
-        return 1
-
-    if not model:
-        console.print("\n  [red]\\[FAIL][/] No model configured.")
-        console.print(
-            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_MODEL[/] or configure in Settings.\n"
-        )
-        return 1
-
-    failures = 0
-
-    # 1. Test OpenAI Chat Completions API
-    console.print(f"\n  Checking endpoint at [bold]{base_url}[/] ...")
-    console.print(f"  Model: [bold]{model}[/]")
-    console.print("  Testing Chat Completions API ...")
-    try:
-        oc = llm.create_openai_client(timeout=60.0, max_retries=1)
-        response = await oc.chat.completions.create(
-            model=model,
-            max_tokens=32,
-            messages=[{"role": "user", "content": "Say hi"}],
-        )
-        text = response.choices[0].message.content or ""
-        console.print(f"  [green]\\[OK][/]  Chat Completions API works — response: {text[:60]}")
-    except Exception as e:
-        console.print(f"  [red]\\[FAIL][/] Chat Completions API failed: {e}")
-        console.print("\n  Result: 0/2 checks passed")
-        return 1
-
-    # 2. Test tool calling
-    console.print("  Testing tool calling support ...")
-    try:
-        tool_response = await oc.chat.completions.create(
-            model=model,
-            max_tokens=256,
-            messages=[{"role": "user", "content": "What is 2 + 2?"}],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "calculator",
-                        "description": "Performs arithmetic calculations",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "expression": {
-                                    "type": "string",
-                                    "description": "Math expression to evaluate",
-                                }
-                            },
-                            "required": ["expression"],
-                        },
-                    },
-                }
-            ],
-        )
-        has_tool_use = bool(response.choices[0].message.tool_calls)
-        if has_tool_use:
-            console.print("  [green]\\[OK][/]  Tool calling works")
-        else:
-            console.print("  [yellow]\\[WARN][/] Model responded but did not use the tool")
-            console.print("         Tool calling quality varies by model.")
-            failures += 1
-    except Exception as e:
-        console.print(f"  [yellow]\\[WARN][/] Tool calling test failed: {e}")
-        failures += 1
-
-    passed = 2 - failures
-    console.print(f"\n  Result: [bold]{passed}/2[/] checks passed")
-    if failures == 0:
-        console.print("  [green]Endpoint is ready to use with PocketPaw![/]")
-        console.print(
-            "  Set [bold]llm_provider=openai_compatible[/] in settings"
-            " or [bold]POCKETPAW_LLM_PROVIDER=openai_compatible[/]\n"
-        )
-    return 1 if failures > 1 else 0
-
-
-def _check_extras_installed(args: argparse.Namespace) -> None:
-    """Check that required optional dependencies are installed for the chosen mode.
-
-    Exits with a helpful message if something is missing.
-    """
-    missing: list[tuple[str, str, str]] = []  # (package, import_name, extra)
-
-    # Dashboard deps are now in core — no need to check for them.
-
-    if args.telegram:
-        if importlib.util.find_spec("telegram") is None:
-            missing.append(("python-telegram-bot", "telegram", "telegram"))
-
-    channel_checks = {
-        "discord": ("discord.py", "discord", "discord"),
-        "slack": ("slack-bolt", "slack_bolt", "slack"),
-    }
-    for flag, (pkg, mod, extra) in channel_checks.items():
-        if getattr(args, flag, False) and importlib.util.find_spec(mod) is None:
-            missing.append((pkg, mod, extra))
-
-    if not missing:
-        return
-
-    print("\n  Missing dependencies detected:\n")
-    extras = set()
-    for pkg, _mod, extra in missing:
-        print(f"    - {pkg}  (extra: {extra})")
-        extras.add(extra)
-    extras_str = ",".join(sorted(extras))
-    print(f"\n  Install with:  pip install 'pocketpaw[{extras_str}]'\n")
-    sys.exit(1)
+    run_dashboard(
+        host=host,
+        port=port,
+        open_browser=not _is_headless() and not dev,
+        dev=dev,
+    )
 
 
 def main() -> None:
@@ -579,6 +57,7 @@ def main() -> None:
         epilog="""
 Examples:
   pocketpaw                          Start web dashboard (default)
+  pocketpaw serve                    Start API-only server (no dashboard)
   pocketpaw --telegram               Start in Telegram-only mode
   pocketpaw --discord                Start headless Discord bot
   pocketpaw --slack                  Start headless Slack bot (Socket Mode)
@@ -599,15 +78,31 @@ Examples:
         action="store_true",
         help="Run Telegram-only mode (legacy pairing flow)",
     )
-    parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
-    parser.add_argument("--slack", action="store_true", help="Run headless Slack bot (Socket Mode)")
     parser.add_argument(
-        "--whatsapp", action="store_true", help="Run headless WhatsApp webhook server"
+        "--discord", action="store_true", help="Run headless Discord bot"
     )
-    parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
-    parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
-    parser.add_argument("--teams", action="store_true", help="Run headless Teams bot")
-    parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
+    parser.add_argument(
+        "--slack",
+        action="store_true",
+        help="Run headless Slack bot (Socket Mode)",
+    )
+    parser.add_argument(
+        "--whatsapp",
+        action="store_true",
+        help="Run headless WhatsApp webhook server",
+    )
+    parser.add_argument(
+        "--signal", action="store_true", help="Run headless Signal bot"
+    )
+    parser.add_argument(
+        "--matrix", action="store_true", help="Run headless Matrix bot"
+    )
+    parser.add_argument(
+        "--teams", action="store_true", help="Run headless Teams bot"
+    )
+    parser.add_argument(
+        "--gchat", action="store_true", help="Run headless Google Chat bot"
+    )
     parser.add_argument(
         "--security-audit",
         action="store_true",
@@ -625,9 +120,15 @@ Examples:
         help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
     )
     parser.add_argument(
-        "--port", "-p", type=int, default=8888, help="Port for web server (default: 8888)"
+        "--port",
+        "-p",
+        type=int,
+        default=8888,
+        help="Port for web server (default: 8888)",
     )
-    parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
+    parser.add_argument(
+        "--dev", action="store_true", help="Development mode with auto-reload"
+    )
     parser.add_argument(
         "--check-ollama",
         action="store_true",
@@ -644,7 +145,16 @@ Examples:
         help="Run diagnostics: check config, connectivity, updates, and print a health report",
     )
     parser.add_argument(
-        "--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}"
+        "--version",
+        "-v",
+        action="version",
+        version=f"%(prog)s {get_version('pocketpaw')}",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default=None,
+        help="Subcommand: 'serve' starts an API-only server (no dashboard UI)",
     )
 
     args = parser.parse_args()
@@ -676,7 +186,9 @@ Examples:
                         if r.fix_hint:
                             print(f"         {r.fix_hint}")
                 status = engine.overall_status
-                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(status, "0")
+                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(
+                    status, "0"
+                )
                 print(f"\n  System: \033[{color}m{status.upper()}\033[0m\n")
         except Exception:
             pass  # Health engine failure never blocks startup
@@ -711,7 +223,11 @@ Examples:
     )
 
     try:
-        if args.check_ollama:
+        if args.command == "serve":
+            from pocketpaw.api.serve import run_api_server
+
+            run_api_server(host=host, port=args.port, dev=args.dev)
+        elif args.check_ollama:
             exit_code = asyncio.run(check_ollama(settings))
             raise SystemExit(exit_code)
         elif args.check_openai_compatible:

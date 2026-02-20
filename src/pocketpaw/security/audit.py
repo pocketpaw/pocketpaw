@@ -121,6 +121,27 @@ class AuditLogger:
         self.log(event)
         return event.id
 
+    def log_api_event(
+        self,
+        action: str,
+        actor: str = "api_client",
+        target: str = "",
+        status: str = "success",
+        severity: AuditSeverity = AuditSeverity.INFO,
+        **context: Any,
+    ) -> str:
+        """Log an API-related event (key creation, OAuth, etc.)."""
+        event = AuditEvent.create(
+            severity=severity,
+            actor=actor,
+            action=action,
+            target=target,
+            status=status,
+            **context,
+        )
+        self.log(event)
+        return event.id
+
 
 # Singleton
 _audit_logger: AuditLogger | None = None

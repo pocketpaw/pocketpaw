@@ -192,7 +192,7 @@ def _auth(**extra):
 class TestPresetRoutes:
     @pytest.fixture(autouse=True)
     def _mock_token(self):
-        with patch("pocketpaw.dashboard.get_access_token", return_value=_TEST_TOKEN):
+        with patch("pocketpaw.dashboard_auth.get_access_token", return_value=_TEST_TOKEN):
             yield
 
     @pytest.fixture

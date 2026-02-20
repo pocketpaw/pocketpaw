@@ -6,12 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pocketpaw.config import Settings
-from pocketpaw.dashboard import (
-    _channel_autostart_enabled,
-    get_channels_status,
-    save_channel_config,
-    startup_event,
-)
+from pocketpaw.dashboard import _channel_autostart_enabled, startup_event
+from pocketpaw.dashboard_channels import get_channels_status, save_channel_config
 
 # ---------------------------------------------------------------------------
 # Helper — default function under test
@@ -65,18 +61,16 @@ async def test_startup_skips_disabled_channels():
     mock_ws.start = AsyncMock()
 
     with (
-        patch("pocketpaw.dashboard.Settings.load", return_value=settings),
+        patch("pocketpaw.dashboard_lifecycle.Settings.load", return_value=settings),
         patch(
             "pocketpaw.dashboard._start_channel_adapter", new_callable=AsyncMock
         ) as mock_start,
-        patch("pocketpaw.dashboard.agent_loop") as mock_loop,
-        patch("pocketpaw.dashboard.ws_adapter", mock_ws),
-        patch("pocketpaw.dashboard.get_message_bus"),
-        patch("pocketpaw.dashboard.get_scheduler"),
-        patch("pocketpaw.dashboard.get_daemon"),
-        patch("pocketpaw.dashboard.get_tunnel_manager"),
-        patch("pocketpaw.dashboard.get_audit_logger"),
-        patch("pocketpaw.dashboard.get_skill_loader"),
+        patch("pocketpaw.dashboard_lifecycle.agent_loop") as mock_loop,
+        patch("pocketpaw.dashboard_lifecycle.ws_adapter", mock_ws),
+        patch("pocketpaw.dashboard_lifecycle.get_message_bus"),
+        patch("pocketpaw.dashboard_lifecycle.get_scheduler"),
+        patch("pocketpaw.dashboard_lifecycle.get_daemon"),
+        patch("pocketpaw.dashboard_lifecycle.get_audit_logger"),
     ):
         mock_loop.start = AsyncMock()
 
@@ -107,18 +101,16 @@ async def test_startup_starts_enabled_channels():
     mock_ws.start = AsyncMock()
 
     with (
-        patch("pocketpaw.dashboard.Settings.load", return_value=settings),
+        patch("pocketpaw.dashboard_lifecycle.Settings.load", return_value=settings),
         patch(
             "pocketpaw.dashboard._start_channel_adapter", new_callable=AsyncMock
         ) as mock_start,
-        patch("pocketpaw.dashboard.agent_loop") as mock_loop,
-        patch("pocketpaw.dashboard.ws_adapter", mock_ws),
-        patch("pocketpaw.dashboard.get_message_bus"),
-        patch("pocketpaw.dashboard.get_scheduler"),
-        patch("pocketpaw.dashboard.get_daemon"),
-        patch("pocketpaw.dashboard.get_tunnel_manager"),
-        patch("pocketpaw.dashboard.get_audit_logger"),
-        patch("pocketpaw.dashboard.get_skill_loader"),
+        patch("pocketpaw.dashboard_lifecycle.agent_loop") as mock_loop,
+        patch("pocketpaw.dashboard_lifecycle.ws_adapter", mock_ws),
+        patch("pocketpaw.dashboard_lifecycle.get_message_bus"),
+        patch("pocketpaw.dashboard_lifecycle.get_scheduler"),
+        patch("pocketpaw.dashboard_lifecycle.get_daemon"),
+        patch("pocketpaw.dashboard_lifecycle.get_audit_logger"),
     ):
         mock_loop.start = AsyncMock()
 
@@ -137,9 +129,9 @@ async def test_api_status_includes_autostart():
     settings = Settings(channel_autostart={"discord": False})
 
     with (
-        patch("pocketpaw.dashboard.Settings.load", return_value=settings),
-        patch("pocketpaw.dashboard._channel_is_configured", return_value=False),
-        patch("pocketpaw.dashboard._channel_is_running", return_value=False),
+        patch("pocketpaw.dashboard_channels.Settings.load", return_value=settings),
+        patch("pocketpaw.dashboard_channels._channel_is_configured", return_value=False),
+        patch("pocketpaw.dashboard_channels._channel_is_running", return_value=False),
     ):
         result = await get_channels_status()
         assert result["discord"]["autostart"] is False
@@ -161,7 +153,7 @@ async def test_api_save_persists_autostart():
     )
 
     with (
-        patch("pocketpaw.dashboard.Settings.load", return_value=settings),
+        patch("pocketpaw.dashboard_channels.Settings.load", return_value=settings),
         patch("pocketpaw.config.Settings.save") as mock_save,
     ):
         result = await save_channel_config(mock_request)

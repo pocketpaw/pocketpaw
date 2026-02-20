@@ -28,7 +28,7 @@ _TEST_TOKEN = "test-dashboard-token-12345"
 @pytest.fixture(autouse=True)
 def _mock_settings():
     """Patch Settings.load() to return a Settings with one webhook config."""
-    with patch("pocketpaw.dashboard.Settings") as MockSettings:
+    with patch("pocketpaw.dashboard_channels.Settings") as MockSettings:
         mock_instance = MagicMock()
         mock_instance.webhook_configs = [_TEST_SLOT.copy()]
         mock_instance.webhook_sync_timeout = 30
@@ -41,7 +41,7 @@ def _mock_settings():
 @pytest.fixture(autouse=True)
 def _mock_token():
     """Mock get_access_token so dashboard auth middleware allows /api/* calls."""
-    with patch("pocketpaw.dashboard.get_access_token", return_value=_TEST_TOKEN):
+    with patch("pocketpaw.dashboard_auth.get_access_token", return_value=_TEST_TOKEN):
         yield
 
 

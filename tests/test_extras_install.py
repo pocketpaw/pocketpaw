@@ -17,17 +17,17 @@ def test_client():
 
 def _auth_bypass():
     """Context manager to bypass dashboard auth middleware."""
-    return patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+    return patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
 
 
 def _dep_installed():
     """Mock _is_module_importable to return True (dep present)."""
-    return patch("pocketpaw.dashboard._is_module_importable", return_value=True)
+    return patch("pocketpaw.dashboard_channels._is_module_importable", return_value=True)
 
 
 def _dep_missing():
     """Mock _is_module_importable to return False (dep absent)."""
-    return patch("pocketpaw.dashboard._is_module_importable", return_value=False)
+    return patch("pocketpaw.dashboard_channels._is_module_importable", return_value=False)
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +179,11 @@ class TestToggleMissingDep:
         """When _start_channel_adapter raises ImportError, return missing_dep."""
         with (
             _auth_bypass(),
-            patch("pocketpaw.dashboard.Settings") as mock_settings_cls,
-            patch("pocketpaw.dashboard._channel_is_running", return_value=False),
-            patch("pocketpaw.dashboard._channel_is_configured", return_value=True),
+            patch("pocketpaw.dashboard_channels.Settings") as mock_settings_cls,
+            patch("pocketpaw.dashboard_channels._channel_is_running", return_value=False),
+            patch("pocketpaw.dashboard_channels._channel_is_configured", return_value=True),
             patch(
-                "pocketpaw.dashboard._start_channel_adapter",
+                "pocketpaw.dashboard_channels._start_channel_adapter",
                 side_effect=ImportError("module not found"),
             ),
         ):
@@ -204,11 +204,11 @@ class TestToggleMissingDep:
         """Non-ImportError exceptions return a plain error string."""
         with (
             _auth_bypass(),
-            patch("pocketpaw.dashboard.Settings") as mock_settings_cls,
-            patch("pocketpaw.dashboard._channel_is_running", return_value=False),
-            patch("pocketpaw.dashboard._channel_is_configured", return_value=True),
+            patch("pocketpaw.dashboard_channels.Settings") as mock_settings_cls,
+            patch("pocketpaw.dashboard_channels._channel_is_running", return_value=False),
+            patch("pocketpaw.dashboard_channels._channel_is_configured", return_value=True),
             patch(
-                "pocketpaw.dashboard._start_channel_adapter",
+                "pocketpaw.dashboard_channels._start_channel_adapter",
                 side_effect=RuntimeError("connection refused"),
             ),
         ):

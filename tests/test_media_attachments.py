@@ -385,7 +385,7 @@ class TestServeMediaSecurity:
 
     @pytest.fixture(autouse=True)
     def _mock_auth(self):
-        with patch("pocketpaw.dashboard.get_access_token", return_value=_TEST_TOKEN):
+        with patch("pocketpaw.dashboard_auth.get_access_token", return_value=_TEST_TOKEN):
             yield
 
     def _headers(self):

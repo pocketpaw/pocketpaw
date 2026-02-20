@@ -425,7 +425,7 @@ class TestCheckBackendDeps:
         ):
             r = check_backend_deps()
             assert r.status == "critical"
-            assert "claude-code-sdk" in r.message
+            assert "claude-agent-sdk" in r.message
 
 
 class TestCheckSecretsEncrypted:

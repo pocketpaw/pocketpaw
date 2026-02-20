@@ -626,6 +626,16 @@ class MemoryManager:
             return await self._store.update_session_title(session_key, title)
         return False
 
+    async def search_sessions(self, query: str, limit: int = 20) -> list[dict]:
+        """Search sessions by message content.
+
+        Delegates to the underlying store if it supports search_sessions,
+        otherwise returns an empty list.
+        """
+        if hasattr(self._store, "search_sessions"):
+            return await self._store.search_sessions(query, limit=limit)
+        return []
+
     # =========================================================================
     # Session Aliases (pass-through for file store)
     # =========================================================================
