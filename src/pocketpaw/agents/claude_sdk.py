@@ -82,7 +82,7 @@ class ClaudeSDKBackend:
         self._stop_flag = False
         self._sdk_available = False
         self._cli_available = False  # Whether the `claude` CLI binary is installed
-        self._cwd = Path.home()  # Default working directory
+        self._cwd = settings.file_jail_path  # Default working directory
         self._policy = ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,

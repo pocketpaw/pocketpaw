@@ -110,7 +110,7 @@ Dashboard at `http://localhost:8888`. Get the access token:
 docker exec pocketpaw cat /home/pocketpaw/.pocketpaw/access_token
 ```
 
-Optional profiles: `--profile ollama` (local LLMs), `--profile qdrant` (vector memory).
+Agent-created files appear in `./workspace/` on the host. Optional profiles: `--profile ollama` (local LLMs), `--profile qdrant` (vector memory). Using Ollama on the host? Set `POCKETPAW_OLLAMA_HOST=http://host.docker.internal:11434` in `.env`.
 
 </details>
 

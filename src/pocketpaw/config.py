@@ -732,6 +732,9 @@ class Settings(BaseSettings):
             # Media Downloads
             "media_download_dir": self.media_download_dir,
             "media_max_file_size_mb": self.media_max_file_size_mb,
+            # Web Server
+            "web_host": self.web_host,
+            "web_port": self.web_port,
             # UX
             "welcome_hint_enabled": self.welcome_hint_enabled,
             # Channel Autostart

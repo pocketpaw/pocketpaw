@@ -1795,6 +1795,55 @@
         <div x-show="settingsSection === 'system' && settingsSearchResults.length === 0" class="space-y-4">
           <h3 class="text-[14px] font-semibold text-white/80 mb-3">System</h3>
 
+          <!-- Web Server -->
+          <div class="space-y-3">
+            <p class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Web Server</p>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="flex flex-col gap-1.5">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Host</label>
+                <input
+                  type="text"
+                  x-model="settings.webHost"
+                  @change="saveSettings()"
+                  placeholder="127.0.0.1"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                />
+              </div>
+              <div class="flex flex-col gap-1.5">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Port</label>
+                <input
+                  type="number"
+                  x-model="settings.webPort"
+                  @change="saveSettings()"
+                  placeholder="8888"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                />
+              </div>
+            </div>
+            <p class="text-[11px] text-white/50">Set host to <code class="text-white/70 bg-white/10 px-1 rounded">0.0.0.0</code> to allow access from other devices on your network</p>
+            <div class="flex items-center gap-3">
+              <button
+                @click="restartServer()"
+                :disabled="serverRestarting"
+                class="px-3 py-1.5 rounded-lg text-[12px] font-medium bg-orange-500/20 text-orange-400 border border-orange-500/30 hover:bg-orange-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+              >
+                <template x-if="serverRestarting">
+                  <svg class="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-linecap="round" class="opacity-25"></circle>
+                    <path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path>
+                  </svg>
+                </template>
+                <template x-if="!serverRestarting">
+                  <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                </template>
+                <span x-text="serverRestarting ? 'Restarting…' : 'Restart Server'"></span>
+              </button>
+              <span class="text-[11px] text-white/40">Changing host or port requires a server restart to take effect</span>
+            </div>
+          </div>
+
+          <div class="border-t border-[var(--glass-border)]"></div>
+
           <!-- Self-Audit Daemon -->
           <div>
             <label class="flex items-start gap-2.5 cursor-pointer group">

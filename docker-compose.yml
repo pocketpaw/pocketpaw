@@ -6,6 +6,12 @@ services:
       - "${POCKETPAW_PORT:-8888}:8888"
     volumes:
       - pocketpaw-data:/home/pocketpaw/.pocketpaw
+      # Agent-created files (via Write/Bash tools) — accessible at ./workspace/ on host
+      - ./workspace:/home/pocketpaw/workspace
+    # Allows the container to reach services on the host via host.docker.internal
+    # (e.g. Ollama running on the host: POCKETPAW_OLLAMA_HOST=http://host.docker.internal:11434)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false

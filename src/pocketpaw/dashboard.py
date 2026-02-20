@@ -77,6 +77,9 @@ _settings_lock = asyncio.Lock()
 # Set by run_dashboard() so the startup event can open the browser once the server is ready
 _open_browser_url: str | None = None
 
+# Uvicorn server instance — set by run_dashboard() for graceful shutdown
+_server: uvicorn.Server | None = None
+
 # Get frontend directory
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 TEMPLATES_DIR = FRONTEND_DIR / "templates"
@@ -2536,6 +2539,24 @@ async def websocket_endpoint(
                         settings.mem0_vector_store = data["mem0_vector_store"]
                     if data.get("mem0_ollama_base_url"):
                         settings.mem0_ollama_base_url = data["mem0_ollama_base_url"]
+                    # Web server settings
+                    if data.get("web_host"):
+                        import re
+
+                        _host = str(data["web_host"]).strip()
+                        # Allow valid IPv4, "0.0.0.0", "localhost", or hostname
+                        _host_re = re.compile(
+                            r"^(?:localhost|0\.0\.0\.0"
+                            r"|(?:\d{1,3}\.){3}\d{1,3}"
+                            r"|[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z]{2,})*"
+                            r")$"
+                        )
+                        if _host_re.match(_host):
+                            settings.web_host = _host
+                    if "web_port" in data:
+                        val = data["web_port"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 65535:
+                            settings.web_port = int(val)
                     settings.save()
 
                 # Reset the agent loop's router to pick up new settings
@@ -2726,6 +2747,8 @@ async def websocket_endpoint(
                             "hasSpotifyClientId": bool(settings.spotify_client_id),
                             "hasSpotifyClientSecret": bool(settings.spotify_client_secret),
                             "hasSarvamKey": bool(settings.sarvam_api_key),
+                            "webHost": settings.web_host,
+                            "webPort": settings.web_port,
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },
@@ -3386,6 +3409,36 @@ async def clear_health_errors():
         return {"cleared": False, "error": str(e)}
 
 
+@app.post("/api/system/restart")
+async def restart_server(request: Request):
+    """Restart the server process so host/port changes take effect.
+
+    Requires ``{"confirm": true}`` in the JSON body to prevent accidental restarts.
+    Triggers uvicorn's graceful shutdown so FastAPI's ``shutdown`` event runs all cleanup.
+    """
+    from fastapi.responses import JSONResponse
+
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+
+    if not body.get("confirm"):
+        return JSONResponse(
+            {"error": 'Missing confirm flag. Send {"confirm": true} to restart.'},
+            status_code=400,
+        )
+
+    settings = Settings.load()
+    settings.save()
+
+    if _server:
+        _server.should_exit = True
+    return {"restarting": True}
+
+
 @app.post("/api/health/check")
 async def trigger_health_check():
     """Run all health checks (startup + connectivity) and return results."""
@@ -3621,7 +3674,7 @@ def run_dashboard(
     dev: bool = False,
 ):
     """Run the dashboard server."""
-    global _open_browser_url
+    global _open_browser_url, _server
 
     print("\n" + "=" * 50)
     print("🐾 POCKETPAW WEB DASHBOARD")
@@ -3660,7 +3713,9 @@ def run_dashboard(
             log_level="debug",
         )
     else:
-        uvicorn.run(app, host=host, port=port)
+        config = uvicorn.Config(app, host=host, port=port)
+        _server = uvicorn.Server(config)
+        _server.run()
 
 
 if __name__ == "__main__":
