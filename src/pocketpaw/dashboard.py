@@ -3069,47 +3069,9 @@ async def update_session_title(session_id: str, request: Request):
 
 @app.get("/api/sessions/search")
 async def search_sessions(q: str = Query(""), limit: int = 20):
-    """Search sessions by content."""
-    import json
-
-    if not q.strip():
-        return {"sessions": []}
-
-    query_lower = q.lower()
+    """Search sessions by content (non-blocking)."""
     manager = get_memory_manager()
-    store = manager._store
-
-    if not hasattr(store, "sessions_path"):
-        return {"sessions": []}
-
-    results = []
-    index = store._load_session_index() if hasattr(store, "_load_session_index") else {}
-
-    for session_file in store.sessions_path.glob("*.json"):
-        if session_file.name.startswith("_") or session_file.name.endswith("_compaction.json"):
-            continue
-        try:
-            data = json.loads(session_file.read_text())
-            for msg in data:
-                if query_lower in msg.get("content", "").lower():
-                    safe_key = session_file.stem
-                    meta = index.get(safe_key, {})
-                    results.append(
-                        {
-                            "id": safe_key,
-                            "title": meta.get("title", "Untitled"),
-                            "channel": meta.get("channel", "unknown"),
-                            "match": msg["content"][:200],
-                            "match_role": msg.get("role", ""),
-                            "last_activity": meta.get("last_activity", ""),
-                        }
-                    )
-                    break
-        except (json.JSONDecodeError, OSError):
-            continue
-        if len(results) >= limit:
-            break
-
+    results = await manager.search_sessions(q, limit=limit)
     return {"sessions": results}
 
 
