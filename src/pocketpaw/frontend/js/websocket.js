@@ -241,7 +241,9 @@ class PocketPawSocket {
             mem0_embedder_provider: settings.mem0EmbedderProvider,
             mem0_embedder_model: settings.mem0EmbedderModel,
             mem0_vector_store: settings.mem0VectorStore,
-            mem0_ollama_base_url: settings.mem0OllamaBaseUrl
+            mem0_ollama_base_url: settings.mem0OllamaBaseUrl,
+            web_host: settings.webHost,
+            web_port: parseInt(settings.webPort) || 8888
         });
     }
 

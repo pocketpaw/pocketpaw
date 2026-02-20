@@ -2536,6 +2536,13 @@ async def websocket_endpoint(
                         settings.mem0_vector_store = data["mem0_vector_store"]
                     if data.get("mem0_ollama_base_url"):
                         settings.mem0_ollama_base_url = data["mem0_ollama_base_url"]
+                    # Web server settings
+                    if data.get("web_host"):
+                        settings.web_host = data["web_host"]
+                    if "web_port" in data:
+                        val = data["web_port"]
+                        if isinstance(val, (int, float)) and 1 <= val <= 65535:
+                            settings.web_port = int(val)
                     settings.save()
 
                 # Reset the agent loop's router to pick up new settings
@@ -2726,6 +2733,8 @@ async def websocket_endpoint(
                             "hasSpotifyClientId": bool(settings.spotify_client_id),
                             "hasSpotifyClientSecret": bool(settings.spotify_client_secret),
                             "hasSarvamKey": bool(settings.sarvam_api_key),
+                            "webHost": settings.web_host,
+                            "webPort": settings.web_port,
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },
@@ -3422,6 +3431,23 @@ async def clear_health_errors():
         return {"cleared": True}
     except Exception as e:
         return {"cleared": False, "error": str(e)}
+
+
+@app.post("/api/system/restart")
+async def restart_server():
+    """Restart the server process so host/port changes take effect."""
+    import asyncio
+    import os
+
+    settings = Settings.load()
+    settings.save()
+
+    async def _delayed_exit():
+        await asyncio.sleep(0.5)
+        os._exit(0)
+
+    asyncio.get_event_loop().create_task(_delayed_exit())
+    return {"restarting": True}
 
 
 @app.post("/api/health/check")
