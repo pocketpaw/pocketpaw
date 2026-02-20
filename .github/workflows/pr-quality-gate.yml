@@ -3,7 +3,7 @@ name: PR Quality Gate
 
 on:
   pull_request:
-    types: [opened]
+    types: [opened, edited, synchronize]
 
 permissions:
   pull-requests: write
@@ -12,6 +12,11 @@ permissions:
 jobs:
   check-quality:
     runs-on: ubuntu-latest
+    # Skip bot PRs (Dependabot, Renovate, etc.)
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'renovate[bot]' &&
+      github.actor != 'github-actions[bot]'
     steps:
       - name: Check PR quality
         uses: actions/github-script@v7
@@ -20,11 +25,15 @@ jobs:
             const pr = context.payload.pull_request;
             const body = pr.body || '';
             const title = pr.title || '';
-            const additions = pr.additions || 0;
-            const deletions = pr.deletions || 0;
-            const totalChanges = additions + deletions;
 
             const issues = [];
+            const MARKER = '<!-- pr-quality-gate -->';
+
+            // Check for conventional commit title (feat:, fix:, docs:, etc.)
+            const conventionalRe = /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?:\s.+/;
+            if (!conventionalRe.test(title)) {
+              issues.push('- PR title does not follow [Conventional Commits](https://www.conventionalcommits.org/) format (e.g. `feat: add login page`, `fix(auth): handle expired tokens`).');
+            }
 
             // Check for linked issue
             const hasIssueRef = /(?:fixes|closes|resolves)\s*#\d+/i.test(body) ||
@@ -43,17 +52,22 @@ jobs:
               issues.push('- PR description is too short. Please describe what this PR does and how to test it.');
             }
 
-            // Check for very small changes (likely typo/whitespace only)
-            if (totalChanges < 3) {
-              issues.push('- This PR has very few changes (' + totalChanges + ' lines). If this is a typo or whitespace fix, it may not be accepted.');
-            }
-
             // Check for evidence of testing
             const hasTestEvidence = /terminal|output|screenshot|tested|test result/i.test(body) ||
                                     /```[\s\S]*```/.test(body);
             if (!hasTestEvidence) {
               issues.push('- No evidence of local testing found. Please include terminal output or screenshots.');
             }
+
+            // Find existing bot comment (for idempotent updates)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+            });
+            const botComment = comments.find(
+              c => c.user.type === 'Bot' && c.body.includes(MARKER)
+            );
 
             if (issues.length > 0) {
               // Add label
@@ -64,13 +78,43 @@ jobs:
                 labels: ['needs-work']
               });
 
-              // Post comment
-              const message = `Thanks for the PR. A few things need attention before we can review:\n\n${issues.join('\n')}\n\nPlease update your PR to address these points. Check the [PR template](../blob/main/.github/PULL_REQUEST_TEMPLATE.md) for guidance.\n\nPRs that don't meet minimum quality standards will be closed after 7 days.`;
+              // Post or update comment
+              const message = `${MARKER}\nThanks for the PR. A few things need attention before we can review:\n\n${issues.join('\n')}\n\nPlease update your PR to address these points. Check the [PR template](../blob/main/.github/PULL_REQUEST_TEMPLATE.md) for guidance.\n\nPRs that don't meet minimum quality standards will be closed after 7 days.`;
 
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: pr.number,
-                body: message
-              });
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body: message
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: message
+                });
+              }
+            } else {
+              // All checks pass — remove label and update/delete bot comment
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: 'needs-work'
+                });
+              } catch (e) {
+                // Label wasn't present — that's fine
+              }
+
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body: `${MARKER}\nAll quality checks passed. Thanks for the clean PR!`
+                });
+              }
             }

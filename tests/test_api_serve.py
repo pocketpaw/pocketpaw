@@ -5,7 +5,6 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -29,7 +28,7 @@ def client(api_app):
 # ---------------------------------------------------------------------------
 
 
-@patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+@patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
 class TestAPIAppStructure:
     def test_openapi_json(self, _mock, client):
         resp = client.get("/api/v1/openapi.json")
@@ -68,7 +67,7 @@ class TestAPIAppStructure:
 # ---------------------------------------------------------------------------
 
 
-@patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+@patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
 class TestNoDashboardUI:
     """The serve app should NOT serve the web dashboard."""
 

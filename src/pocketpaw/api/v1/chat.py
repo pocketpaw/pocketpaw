@@ -35,12 +35,13 @@ class _APISessionBridge:
     def __init__(self, chat_id: str):
         self.chat_id = chat_id
         self.queue: asyncio.Queue = asyncio.Queue()
-        self._subscriptions: list = []
+        self._outbound_cb = None
+        self._system_cb = None
 
     async def start(self) -> None:
         """Subscribe to the message bus for this session."""
         from pocketpaw.bus import get_message_bus
-        from pocketpaw.bus.events import OutboundMessage, SystemEvent
+        from pocketpaw.bus.events import Channel, OutboundMessage, SystemEvent
 
         bus = get_message_bus()
 
@@ -51,13 +52,15 @@ class _APISessionBridge:
                 chunk = {"event": "chunk", "data": {"content": msg.content, "type": "text"}}
                 await self.queue.put(chunk)
             elif msg.is_stream_end:
-                await self.queue.put({
-                    "event": "stream_end",
-                    "data": {
-                        "session_id": self.chat_id,
-                        "usage": msg.metadata.get("usage", {}),
-                    },
-                })
+                await self.queue.put(
+                    {
+                        "event": "stream_end",
+                        "data": {
+                            "session_id": self.chat_id,
+                            "usage": msg.metadata.get("usage", {}),
+                        },
+                    }
+                )
             else:
                 chunk = {"event": "chunk", "data": {"content": msg.content, "type": "text"}}
                 await self.queue.put(chunk)
@@ -67,31 +70,39 @@ class _APISessionBridge:
             if meta.get("chat_id") and meta["chat_id"] != self.chat_id:
                 return
             if evt.event_type == "tool_start":
-                await self.queue.put({
-                    "event": "tool_start",
-                    "data": {"tool": meta.get("tool", ""), "input": meta.get("input", {})},
-                })
+                await self.queue.put(
+                    {
+                        "event": "tool_start",
+                        "data": {"tool": meta.get("tool", ""), "input": meta.get("input", {})},
+                    }
+                )
             elif evt.event_type == "tool_result":
-                await self.queue.put({
-                    "event": "tool_result",
-                    "data": {"tool": meta.get("tool", ""), "output": evt.content},
-                })
+                await self.queue.put(
+                    {
+                        "event": "tool_result",
+                        "data": {"tool": meta.get("tool", ""), "output": evt.content},
+                    }
+                )
             elif evt.event_type == "thinking":
                 await self.queue.put({"event": "thinking", "data": {"content": evt.content}})
             elif evt.event_type == "error":
                 await self.queue.put({"event": "error", "data": {"detail": evt.content}})
 
-        self._subscriptions.append(bus.subscribe(OutboundMessage, _on_outbound))
-        self._subscriptions.append(bus.subscribe(SystemEvent, _on_system))
+        self._outbound_cb = _on_outbound
+        self._system_cb = _on_system
+        bus.subscribe_outbound(Channel.WEBSOCKET, _on_outbound)
+        bus.subscribe_system(_on_system)
 
     async def stop(self) -> None:
         """Unsubscribe from the message bus."""
         from pocketpaw.bus import get_message_bus
+        from pocketpaw.bus.events import Channel
 
         bus = get_message_bus()
-        for sub in self._subscriptions:
-            bus.unsubscribe(sub)
-        self._subscriptions.clear()
+        if self._outbound_cb:
+            bus.unsubscribe_outbound(Channel.WEBSOCKET, self._outbound_cb)
+        if self._system_cb:
+            bus._system_subscribers.remove(self._system_cb)
 
 
 async def _send_message(chat_request: ChatRequest) -> str:
@@ -110,7 +121,7 @@ async def _send_message(chat_request: ChatRequest) -> str:
         metadata={"source": "rest_api"},
     )
     bus = get_message_bus()
-    await bus.publish(msg)
+    await bus.publish_inbound(msg)
     return chat_id
 
 

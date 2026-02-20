@@ -18,7 +18,7 @@ def client():
     return TestClient(app)
 
 
-@patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+@patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
 class TestBackwardCompatEndpoints:
     """Verify /api/ backward-compat endpoints still respond."""
 
@@ -77,7 +77,7 @@ class TestBackwardCompatEndpoints:
         assert resp.status_code == 200
 
 
-@patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+@patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
 class TestV1Endpoints:
     """Verify /api/v1/ versioned endpoints respond."""
 
@@ -114,7 +114,7 @@ class TestV1Endpoints:
         assert resp.status_code == 200
 
 
-@patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+@patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
 class TestOpenAPIDocs:
     """Verify OpenAPI documentation endpoints."""
 

@@ -25,7 +25,7 @@ class TestEventsRouter:
         modules = [r[0] for r in _V1_ROUTERS]
         assert "pocketpaw.api.v1.events" in modules
 
-    @patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
     def test_stream_endpoint_exists_on_dashboard(self, _mock):
         """The /api/v1/events/stream endpoint should be reachable on the dashboard app."""
         from pocketpaw.dashboard import app
@@ -33,7 +33,7 @@ class TestEventsRouter:
         route_paths = [r.path for r in app.routes if hasattr(r, "path")]
         assert any("/api/v1/events/stream" in p for p in route_paths)
 
-    @patch("pocketpaw.dashboard._is_genuine_localhost", return_value=True)
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
     def test_openapi_includes_events(self, _mock):
         """OpenAPI spec should include the events endpoint."""
         from fastapi.testclient import TestClient
