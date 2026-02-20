@@ -6,11 +6,10 @@ It operates at the message bus level, making it backend-agnostic.
 """
 
 import re
-from typing import Pattern
 
 
 # Regex patterns for common secret formats
-REDACT_PATTERNS: list[tuple[str, Pattern[str]]] = [
+REDACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # OpenAI API keys (sk-...)
     (
         "OpenAI API Key",
@@ -26,10 +25,13 @@ REDACT_PATTERNS: list[tuple[str, Pattern[str]]] = [
         "AWS Access Key",
         re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"),
     ),
-    # AWS Secret Access Keys (40 base64 characters)
+    # AWS Secret Access Keys (scoped to env var format to avoid false positives)
     (
         "AWS Secret Key",
-        re.compile(r"\b[A-Za-z0-9/+=]{40}\b"),
+        re.compile(
+            r"AWS_SECRET_ACCESS_KEY\s*[=:]\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?",
+            re.IGNORECASE,
+        ),
     ),
     # Generic API keys (api_key=..., apikey=..., api-key=...)
     (
