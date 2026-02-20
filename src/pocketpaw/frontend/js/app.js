@@ -581,9 +581,16 @@ function app() {
          * Restart the server (for host/port changes)
          */
         async restartServer() {
+            if (!confirm(
+                'Restart the server? Active connections will be interrupted.'
+            )) return;
             this.serverRestarting = true;
             try {
-                await fetch('/api/system/restart', { method: 'POST' });
+                await fetch('/api/system/restart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ confirm: true }),
+                });
                 this.showToast(
                     'Server is restarting. If you changed the host or port, ' +
                     'reconnect at the new address.',
