@@ -2,7 +2,7 @@
 # Created: 2026-02-20
 
 
-from pocketpaw.security.rate_limiter import RateLimiter, RateLimitInfo, api_key_limiter
+from pocketpaw.security.rate_limiter import RateLimiter, RateLimitInfo, get_api_key_limiter
 
 
 class TestRateLimiter:
@@ -51,9 +51,10 @@ class TestRateLimiter:
         assert limiter.allow("client") is True
 
     def test_api_key_limiter_exists(self):
-        """api_key_limiter is pre-configured."""
-        assert api_key_limiter.capacity == 60
-        assert api_key_limiter.rate == 1.0
+        """get_api_key_limiter() returns a config-aware limiter."""
+        limiter = get_api_key_limiter()
+        assert limiter.capacity == 60
+        assert limiter.rate == 60 / 60.0  # capacity / 60s
 
 
 class TestRateLimitInfo:

@@ -7,11 +7,13 @@ import importlib
 import logging
 import shutil
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+
+from pocketpaw.api.deps import require_scope
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Backends"])
+router = APIRouter(tags=["Backends"], dependencies=[Depends(require_scope("admin"))])
 
 _CLI_BINARY: dict[str, str] = {
     "codex_cli": "codex",

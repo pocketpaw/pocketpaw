@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.common import StatusResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Channels"])
+router = APIRouter(tags=["Channels"], dependencies=[Depends(require_scope("channels"))])
 
 
 @router.get("/channels/status")

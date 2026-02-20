@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.common import StatusResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["MCP"])
+router = APIRouter(tags=["MCP"], dependencies=[Depends(require_scope("admin"))])
 
 
 @router.get("/mcp/status")

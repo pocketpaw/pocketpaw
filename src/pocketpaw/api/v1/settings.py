@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+
+from pocketpaw.api.deps import require_scope
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +18,7 @@ router = APIRouter(tags=["Settings"])
 _settings_lock = asyncio.Lock()
 
 
-@router.get("/settings")
+@router.get("/settings", dependencies=[Depends(require_scope("settings:read", "settings:write"))])
 async def get_settings():
     """Get current settings (non-secret fields)."""
     from pocketpaw.config import Settings
@@ -38,7 +40,7 @@ async def get_settings():
     return data
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=[Depends(require_scope("settings:write"))])
 async def update_settings(request: Request):
     """Update settings fields. Only provided fields are changed."""
     from pocketpaw.config import Settings, get_settings

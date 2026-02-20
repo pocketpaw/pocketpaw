@@ -1,10 +1,12 @@
 # OAuth2 token and code storage.
 # Created: 2026-02-20
 #
-# In-memory storage with optional file persistence for tokens.
+# File-backed token persistence — tokens survive server restarts.
+# Auth codes remain in-memory (short-lived, 10 min TTL).
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,8 +24,18 @@ DEFAULT_DESKTOP_CLIENT = OAuthClient(
 )
 
 
+def _default_persist_path() -> Path:
+    from pocketpaw.config import get_config_dir
+
+    return get_config_dir() / "oauth_tokens.json"
+
+
 class OAuthStorage:
-    """In-memory + file-backed OAuth2 storage."""
+    """File-backed OAuth2 storage.
+
+    Auth codes are in-memory only (ephemeral, 10 min TTL).
+    Tokens are persisted to disk so refresh tokens survive restarts.
+    """
 
     def __init__(self, persist_path: Path | None = None):
         self._clients: dict[str, OAuthClient] = {
@@ -33,6 +45,65 @@ class OAuthStorage:
         self._tokens: dict[str, OAuthToken] = {}  # keyed by access_token
         self._refresh_index: dict[str, str] = {}  # refresh_token → access_token
         self._persist_path = persist_path
+        self._load_tokens()
+
+    def _get_path(self) -> Path:
+        if self._persist_path is not None:
+            return self._persist_path
+        return _default_persist_path()
+
+    def _load_tokens(self) -> None:
+        """Load tokens from disk on startup."""
+        path = self._get_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            now = datetime.now(UTC)
+            for entry in data:
+                token = OAuthToken(
+                    access_token=entry["access_token"],
+                    refresh_token=entry["refresh_token"],
+                    client_id=entry["client_id"],
+                    scope=entry["scope"],
+                    token_type=entry.get("token_type", "Bearer"),
+                    expires_at=datetime.fromisoformat(entry["expires_at"])
+                    if entry.get("expires_at")
+                    else None,
+                    created_at=datetime.fromisoformat(entry["created_at"])
+                    if entry.get("created_at")
+                    else now,
+                    revoked=entry.get("revoked", False),
+                )
+                self._tokens[token.access_token] = token
+                self._refresh_index[token.refresh_token] = token.access_token
+            logger.debug("Loaded %d OAuth tokens from %s", len(self._tokens), path)
+        except (json.JSONDecodeError, OSError, KeyError) as exc:
+            logger.warning("Failed to load OAuth tokens from %s: %s", path, exc)
+
+    def _save_tokens(self) -> None:
+        """Persist tokens to disk."""
+        path = self._get_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = []
+        for token in self._tokens.values():
+            data.append(
+                {
+                    "access_token": token.access_token,
+                    "refresh_token": token.refresh_token,
+                    "client_id": token.client_id,
+                    "scope": token.scope,
+                    "token_type": token.token_type,
+                    "expires_at": token.expires_at.isoformat() if token.expires_at else None,
+                    "created_at": token.created_at.isoformat(),
+                    "revoked": token.revoked,
+                }
+            )
+        path.write_text(json.dumps(data, indent=2))
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
 
     def get_client(self, client_id: str) -> OAuthClient | None:
         return self._clients.get(client_id)
@@ -50,6 +121,7 @@ class OAuthStorage:
     def store_token(self, token: OAuthToken) -> None:
         self._tokens[token.access_token] = token
         self._refresh_index[token.refresh_token] = token.access_token
+        self._save_tokens()
 
     def get_token(self, access_token: str) -> OAuthToken | None:
         return self._tokens.get(access_token)
@@ -64,6 +136,7 @@ class OAuthStorage:
         token = self._tokens.get(access_token)
         if token and not token.revoked:
             token.revoked = True
+            self._save_tokens()
             return True
         return False
 
@@ -89,6 +162,10 @@ class OAuthStorage:
         expired_tokens = [
             k for k, v in self._tokens.items() if v.expires_at and now > v.expires_at
         ]
+        changed = bool(expired_tokens)
         for k in expired_tokens:
             token = self._tokens.pop(k)
             self._refresh_index.pop(token.refresh_token, None)
+
+        if changed:
+            self._save_tokens()

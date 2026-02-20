@@ -7,13 +7,14 @@ import logging
 import re
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.common import StatusResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Webhooks"])
+router = APIRouter(tags=["Webhooks"], dependencies=[Depends(require_scope("admin"))])
 
 
 @router.get("/webhooks")

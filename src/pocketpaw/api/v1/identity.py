@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.identity import (
     IdentityResponse,
     IdentitySaveRequest,
@@ -17,7 +18,7 @@ from pocketpaw.api.v1.schemas.identity import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Identity"])
+router = APIRouter(tags=["Identity"], dependencies=[Depends(require_scope("admin"))])
 
 
 @router.get("/identity", response_model=IdentityResponse)

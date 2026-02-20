@@ -20,7 +20,7 @@ __all__ = [
     "api_limiter",
     "auth_limiter",
     "ws_limiter",
-    "api_key_limiter",
+    "get_api_key_limiter",
     "cleanup_all",
 ]
 
@@ -115,14 +115,26 @@ class RateLimiter:
 api_limiter = RateLimiter(rate=10.0, capacity=30)
 auth_limiter = RateLimiter(rate=1.0, capacity=5)
 ws_limiter = RateLimiter(rate=2.0, capacity=5)
-api_key_limiter = RateLimiter(rate=1.0, capacity=60)  # 60 req/min default
+_api_key_limiter: RateLimiter | None = None
+
+
+def get_api_key_limiter() -> RateLimiter:
+    """Return the per-API-key limiter, initialized from config on first call."""
+    global _api_key_limiter
+    if _api_key_limiter is None:
+        try:
+            from pocketpaw.config import Settings
+
+            capacity = Settings.load().api_rate_limit_per_key
+        except Exception:
+            capacity = 60
+        _api_key_limiter = RateLimiter(rate=capacity / 60.0, capacity=capacity)
+    return _api_key_limiter
 
 
 def cleanup_all() -> int:
     """Run cleanup on all global limiters. Returns total entries removed."""
-    return (
-        api_limiter.cleanup()
-        + auth_limiter.cleanup()
-        + ws_limiter.cleanup()
-        + api_key_limiter.cleanup()
-    )
+    total = api_limiter.cleanup() + auth_limiter.cleanup() + ws_limiter.cleanup()
+    if _api_key_limiter is not None:
+        total += _api_key_limiter.cleanup()
+    return total

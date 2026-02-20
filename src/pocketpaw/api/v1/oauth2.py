@@ -7,7 +7,7 @@ import logging
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from pocketpaw.api.v1.schemas.oauth2 import RevokeRequest, TokenRequest
 
@@ -44,6 +44,7 @@ h2 {{ margin-bottom: 8px; }}
 
 @router.get("/oauth/authorize")
 async def authorize(
+    request: Request,
     client_id: str = Query(...),
     redirect_uri: str = Query(...),
     scope: str = Query("chat sessions"),
@@ -52,6 +53,12 @@ async def authorize(
     state: str = Query(""),
 ):
     """Show OAuth2 consent screen for PKCE flow."""
+    from pocketpaw.security.rate_limiter import auth_limiter
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not auth_limiter.allow(client_ip):
+        return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+
     from pocketpaw.api.oauth2.server import get_oauth_server
 
     server = get_oauth_server()
@@ -80,6 +87,12 @@ async def authorize(
 @router.post("/oauth/authorize/consent")
 async def authorize_consent(request: Request):
     """Process consent form submission."""
+    from pocketpaw.security.rate_limiter import auth_limiter
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not auth_limiter.allow(client_ip):
+        return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+
     from pocketpaw.api.oauth2.server import get_oauth_server
 
     form = await request.form()

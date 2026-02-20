@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.common import OkResponse, StatusResponse
 from pocketpaw.api.v1.schemas.memory import MemoryEntry
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Memory"])
+router = APIRouter(tags=["Memory"], dependencies=[Depends(require_scope("memory"))])
 
 _MEMORY_CONFIG_KEYS = {
     "memory_backend": "memory_backend",

@@ -11,14 +11,15 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.chat import ChatRequest, ChatResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Chat"])
+router = APIRouter(tags=["Chat"], dependencies=[Depends(require_scope("chat"))])
 
 # Active SSE sessions — maps session_id → asyncio.Event for cancellation
 _active_streams: dict[str, asyncio.Event] = {}

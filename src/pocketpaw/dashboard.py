@@ -57,10 +57,10 @@ from pocketpaw.mission_control.api import router as mission_control_router
 from pocketpaw.scheduler import get_scheduler
 from pocketpaw.security import get_audit_logger
 from pocketpaw.security.rate_limiter import (
-    api_key_limiter,
     api_limiter,
     auth_limiter,
     cleanup_all,
+    get_api_key_limiter,
     ws_limiter,
 )
 from pocketpaw.security.session_tokens import create_session_token, verify_session_token
@@ -115,10 +115,7 @@ _EXTRA_ORIGINS = list(set(_BUILTIN_ORIGINS + _custom_origins))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_EXTRA_ORIGINS,
-    allow_origin_regex=(
-        r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
-        r"|^https://[a-zA-Z0-9-]+\.trycloudflare\.com$"
-    ),
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
@@ -1950,7 +1947,7 @@ async def auth_middleware(request: Request, call_next):
                 record = mgr.verify(api_key_value)
                 if record:
                     # Per-API-key rate limit
-                    key_rl = api_key_limiter.check(f"apikey:{record.id}")
+                    key_rl = get_api_key_limiter().check(f"apikey:{record.id}")
                     if not key_rl.allowed:
                         return JSONResponse(
                             status_code=429,

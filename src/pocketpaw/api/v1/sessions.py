@@ -8,8 +8,9 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.common import StatusResponse
 from pocketpaw.api.v1.schemas.sessions import (
     SessionListResponse,
@@ -20,7 +21,7 @@ from pocketpaw.api.v1.schemas.sessions import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Sessions"])
+router = APIRouter(tags=["Sessions"], dependencies=[Depends(require_scope("sessions"))])
 
 
 @router.get("/sessions", response_model=SessionListResponse)

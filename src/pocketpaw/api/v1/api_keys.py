@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.api_keys import (
     APIKeyCreatedResponse,
     APIKeyInfo,
@@ -15,7 +16,7 @@ from pocketpaw.api.v1.schemas.api_keys import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["API Keys"])
+router = APIRouter(tags=["API Keys"], dependencies=[Depends(require_scope("admin"))])
 
 
 @router.post("/auth/api-keys", response_model=APIKeyCreatedResponse)
