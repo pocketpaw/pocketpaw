@@ -211,7 +211,6 @@ FEATURE_GROUPS: dict[str, list[tuple[str, str]]] = {
 
 BACKENDS = {
     "claude_agent_sdk": "Claude Agent SDK (recommended)",
-    "pocketpaw_native": "PocketPaw Native (Anthropic + Open Interpreter)",
     "open_interpreter": "Open Interpreter (Experimental — Ollama/OpenAI/Anthropic)",
 }
 
@@ -1207,7 +1206,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=["claude_agent_sdk", "pocketpaw_native", "open_interpreter"],
+        choices=["claude_agent_sdk", "open_interpreter"],
         default=None,
         help="Agent backend (non-interactive)",
     )
