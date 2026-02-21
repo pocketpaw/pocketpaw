@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    # Pre-existing lint issues in test files — report but don't block.
+    # Remove continue-on-error once existing violations are cleaned up.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+  test:
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          # Spot-check on macOS and Windows with one Python version
+          # to catch platform-specific bugs without burning CI minutes.
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --dev
+        env:
+          UV_HTTP_TIMEOUT: "300"
+
+      - name: Run tests
+        run: uv run pytest --ignore=tests/e2e --tb=short -q
+        env:
+          # Prevent tests from reaching external APIs
+          POCKETPAW_ANTHROPIC_API_KEY: ""
+          POCKETPAW_OPENAI_API_KEY: ""
+          POCKETPAW_GOOGLE_API_KEY: ""
