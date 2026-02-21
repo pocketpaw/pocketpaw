@@ -20,21 +20,34 @@ def require_scope(*scopes: str):
     """
 
     async def _check(request: Request) -> None:
+        # Check API key scopes
         api_key = getattr(request.state, "api_key", None)
-        if api_key is None:
-            # Not an API key auth — master/session/cookie/localhost have full access
+        if api_key is not None:
+            key_scopes = set(api_key.scopes)
+            if "admin" in key_scopes:
+                return
+            required = set(scopes)
+            if not key_scopes & required:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"API key missing required scope: {' or '.join(sorted(required))}",
+                )
             return
 
-        key_scopes = set(api_key.scopes)
-        # "admin" scope grants access to everything
-        if "admin" in key_scopes:
+        # Check OAuth2 token scopes
+        oauth_token = getattr(request.state, "oauth_token", None)
+        if oauth_token is not None:
+            token_scopes = set(oauth_token.scope.split()) if oauth_token.scope else set()
+            if "admin" in token_scopes:
+                return
+            required = set(scopes)
+            if not token_scopes & required:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"OAuth token missing required scope: {' or '.join(sorted(required))}",
+                )
             return
 
-        required = set(scopes)
-        if not key_scopes & required:
-            raise HTTPException(
-                status_code=403,
-                detail=f"API key missing required scope: {' or '.join(sorted(required))}",
-            )
+        # Not an API key or OAuth auth — master/session/cookie/localhost have full access
 
     return _check
