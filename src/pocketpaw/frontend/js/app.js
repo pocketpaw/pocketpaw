@@ -73,7 +73,8 @@ function app() {
         // Settings
         settings: {
             agentBackend: 'claude_agent_sdk',
-            claudeSdkModel: '',
+            claudeSdkModel: 'sonnet',
+            claudeSdkCustomModel: '',
             claudeSdkMaxTurns: 0,
             openaiAgentsModel: '',
             openaiAgentsMaxTurns: 0,

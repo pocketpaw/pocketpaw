@@ -394,23 +394,70 @@
                 />
               </div>
             </div>
-            <!-- Model override (Anthropic) -->
-            <div class="flex flex-col gap-1" x-show="settings.claudeSdkProvider === 'anthropic'">
-              <label
-                class="text-[12px] font-medium text-[var(--text-secondary)]"
-                >Model Override</label
-              >
-              <input
-                type="text"
-                x-model="settings.claudeSdkModel"
-                @change="saveSettings()"
-                placeholder="auto (recommended)"
-                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
-              />
-              <small class="text-white/50 text-[11px]"
-                >Leave empty to let Claude Code auto-select the best
-                model</small
-              >
+            <!-- Model selection (Anthropic) -->
+            <div
+              class="flex flex-col gap-1"
+              x-show="settings.claudeSdkProvider === 'anthropic'"
+              x-init="
+                const known = ['sonnet','opus','haiku','sonnet[1m]','opusplan',''];
+                if (settings.claudeSdkModel && !known.includes(settings.claudeSdkModel)) {
+                  claudeSdkCustomModel = settings.claudeSdkModel;
+                  settings.claudeSdkModel = '__custom__';
+                }
+              "
+            >
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+              <div class="relative">
+                <select
+                  x-model="settings.claudeSdkModel"
+                  @change="
+                    if (settings.claudeSdkModel === '__custom__') {
+                      if (claudeSdkCustomModel) saveSettings();
+                    } else {
+                      claudeSdkCustomModel = '';
+                      saveSettings();
+                    }
+                  "
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+                  <option value="sonnet">Sonnet (Default)</option>
+                  <option value="opus">Opus</option>
+                  <option value="haiku">Haiku</option>
+                  <option value="sonnet[1m]">Sonnet 1M</option>
+                  <option value="opusplan">OpusPlan</option>
+                  <option value="__custom__">Other...</option>
+                </select>
+                <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+              <!-- Custom model text input (shown only when "Other" is selected) -->
+              <template x-if="settings.claudeSdkModel === '__custom__'">
+                <input
+                  type="text"
+                  x-model="claudeSdkCustomModel"
+                  @change="
+                    if (claudeSdkCustomModel.trim()) {
+                      settings.claudeSdkModel = claudeSdkCustomModel.trim();
+                      saveSettings();
+                      $nextTick(() => { settings.claudeSdkModel = '__custom__'; });
+                    }
+                  "
+                  placeholder="e.g. claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40 mt-1"
+                />
+              </template>
+              <small class="text-white/50 text-[11px]">
+                <template x-if="settings.claudeSdkModel === 'opusplan'">
+                  <span>Uses Opus for plan-mode, Sonnet otherwise</span>
+                </template>
+                <template x-if="settings.claudeSdkModel === 'sonnet[1m]'">
+                  <span>Sonnet with 1M token extended context</span>
+                </template>
+                <template x-if="settings.claudeSdkModel !== 'opusplan' && settings.claudeSdkModel !== 'sonnet[1m]' && settings.claudeSdkModel !== '__custom__'">
+                  <span>Select a Claude model or choose "Other" for a custom model ID</span>
+                </template>
+              </small>
             </div>
             <div class="flex flex-col gap-1">
               <label
