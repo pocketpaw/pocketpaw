@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -143,7 +144,7 @@ class APIKeyManager:
 
         for rec_dict in records:
             rec = APIKeyRecord(**rec_dict)
-            if rec.key_hash == key_hash and not rec.revoked:
+            if hmac.compare_digest(rec.key_hash, key_hash) and not rec.revoked:
                 # Check expiry
                 if rec.expires_at:
                     exp = datetime.fromisoformat(rec.expires_at)

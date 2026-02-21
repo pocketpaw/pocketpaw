@@ -22,6 +22,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Health"])
 
 
+@router.get("/version")
+async def get_version():
+    """Return PocketPaw version and basic server info."""
+    import sys
+
+    from pocketpaw import __version__
+    from pocketpaw.config import Settings
+
+    settings = Settings.load()
+    return {
+        "version": __version__,
+        "python": sys.version,
+        "agent_backend": settings.agent_backend,
+    }
+
+
 @router.get("/health", response_model=HealthSummary)
 async def get_health_status():
     """Get current health engine summary."""

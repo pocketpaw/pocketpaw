@@ -130,6 +130,13 @@ class MessageBus:
         """Subscribe to system events."""
         self._system_subscribers.append(callback)
 
+    def unsubscribe_system(self, callback: Callable[[SystemEvent], Awaitable[None]]) -> None:
+        """Unsubscribe from system events."""
+        try:
+            self._system_subscribers.remove(callback)
+        except ValueError:
+            pass
+
     async def publish_system(self, event: SystemEvent) -> None:
         """Publish a system event."""
         tasks = [sub(event) for sub in self._system_subscribers]

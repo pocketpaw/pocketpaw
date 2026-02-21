@@ -51,6 +51,8 @@ def mount_v1_routers(app: FastAPI) -> None:
 
     from fastapi import APIRouter
 
+    _CRITICAL_ROUTERS = {"Auth", "Chat", "Health", "Sessions"}
+
     for module_path, attr_name, tag in _V1_ROUTERS:
         try:
             mod = importlib.import_module(module_path)
@@ -61,4 +63,9 @@ def mount_v1_routers(app: FastAPI) -> None:
 
             logger.debug("Mounted v1 router: %s (%s)", module_path, tag)
         except Exception:
+            if tag in _CRITICAL_ROUTERS:
+                logger.error(
+                    "CRITICAL: Failed to mount required v1 router %s", module_path, exc_info=True
+                )
+                raise
             logger.warning("Failed to mount v1 router %s", module_path, exc_info=True)

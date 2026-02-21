@@ -61,6 +61,14 @@ class TestAPIAppStructure:
         resp = client.get("/api/v1/skills")
         assert resp.status_code == 200
 
+    def test_version_endpoint(self, _mock, client):
+        resp = client.get("/api/v1/version")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "version" in data
+        assert "python" in data
+        assert "agent_backend" in data
+
 
 # ---------------------------------------------------------------------------
 # No dashboard UI
@@ -76,10 +84,12 @@ class TestNoDashboardUI:
         # Should 404 or redirect — not serve the dashboard HTML
         assert resp.status_code in (404, 307, 405)
 
-    def test_no_websocket_endpoint(self, _mock, api_app):
-        """The /ws endpoint should not exist on the API-only app."""
+    def test_websocket_endpoint_exists(self, _mock, api_app):
+        """WebSocket endpoints at /ws, /v1/ws, and /api/v1/ws must exist."""
         route_paths = [r.path for r in api_app.routes if hasattr(r, "path")]
-        assert "/ws" not in route_paths
+        assert "/ws" in route_paths
+        assert "/v1/ws" in route_paths
+        assert "/api/v1/ws" in route_paths
 
 
 # ---------------------------------------------------------------------------
@@ -90,9 +100,43 @@ class TestNoDashboardUI:
 class TestAuthMiddleware:
     def test_unauthenticated_request_blocked(self, client):
         """Non-localhost requests without a token should be rejected."""
-        with patch("pocketpaw.dashboard._is_genuine_localhost", return_value=False):
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False):
             resp = client.get("/api/v1/health")
             assert resp.status_code == 401
+
+    def test_options_preflight_passes_without_auth(self, client):
+        """OPTIONS preflight requests must pass through auth middleware."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False):
+            resp = client.options(
+                "/api/v1/health",
+                headers={"Origin": "http://localhost:1420", "Access-Control-Request-Method": "GET"},
+            )
+            # Should get 200 from CORSMiddleware, not 401 from auth
+            assert resp.status_code == 200
+            assert "access-control-allow-origin" in resp.headers
+
+    def test_cors_headers_on_allowed_origin(self, client):
+        """Responses should include CORS headers for allowed origins."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True):
+            resp = client.get(
+                "/api/v1/health",
+                headers={"Origin": "http://localhost:1420"},
+            )
+            assert resp.status_code == 200
+            assert resp.headers.get("access-control-allow-origin") == "http://localhost:1420"
+            assert resp.headers.get("access-control-allow-credentials") == "true"
+
+    def test_docs_exempt_from_auth(self, client):
+        """OpenAPI docs should be accessible without auth."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False):
+            resp = client.get("/api/v1/docs")
+            assert resp.status_code == 200
+
+    def test_openapi_json_exempt_from_auth(self, client):
+        """OpenAPI JSON schema should be accessible without auth."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False):
+            resp = client.get("/api/v1/openapi.json")
+            assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------

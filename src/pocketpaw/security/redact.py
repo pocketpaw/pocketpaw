@@ -7,7 +7,6 @@ It operates at the message bus level, making it backend-agnostic.
 
 import re
 
-
 # Regex patterns for common secret formats
 REDACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # OpenAI API keys (sk-...)
@@ -101,6 +100,21 @@ REDACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "Stripe API Key",
         re.compile(r"\b[rs]k_live_[0-9a-zA-Z]{24,}\b"),
+    ),
+    # PocketPaw API keys (pp_...)
+    (
+        "PocketPaw API Key",
+        re.compile(r"\bpp_[a-zA-Z0-9_\-]{20,}\b"),
+    ),
+    # PocketPaw OAuth access tokens (ppat_...)
+    (
+        "PocketPaw OAuth Access Token",
+        re.compile(r"\bppat_[a-zA-Z0-9_\-]{20,}\b"),
+    ),
+    # PocketPaw OAuth refresh tokens (pprt_...)
+    (
+        "PocketPaw OAuth Refresh Token",
+        re.compile(r"\bpprt_[a-zA-Z0-9_\-]{20,}\b"),
     ),
 ]
 

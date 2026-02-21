@@ -18,6 +18,9 @@ _SECRET_PATTERNS = [
     re.compile(r"xoxb-[a-zA-Z0-9_-]+"),  # Slack bot
     re.compile(r"xapp-[a-zA-Z0-9_-]+"),  # Slack app
     re.compile(r"\b\d+:AA[a-zA-Z0-9_-]{30,}"),  # Telegram bot token
+    re.compile(r"pp_[a-zA-Z0-9_-]{20,}"),  # PocketPaw API key
+    re.compile(r"ppat_[a-zA-Z0-9_-]{20,}"),  # PocketPaw OAuth access token
+    re.compile(r"pprt_[a-zA-Z0-9_-]{20,}"),  # PocketPaw OAuth refresh token
 ]
 
 

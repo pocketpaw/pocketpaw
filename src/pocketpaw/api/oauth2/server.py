@@ -154,8 +154,9 @@ class AuthorizationServer:
         if old_token is None or old_token.revoked:
             return None, "invalid_refresh_token"
 
-        # Revoke old token
+        # Revoke old token and remove old refresh token from index
         self.storage.revoke_token(old_token.access_token)
+        self.storage.remove_refresh_token(refresh_token)
 
         # Generate new token pair
         now = datetime.now(UTC)

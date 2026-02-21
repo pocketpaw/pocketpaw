@@ -47,8 +47,8 @@ from pocketpaw.api.v1 import mount_v1_routers
 from pocketpaw.bootstrap import DefaultBootstrapProvider
 from pocketpaw.config import Settings, get_access_token, get_config_path
 from pocketpaw.dashboard_auth import (
+    AuthMiddleware,
     _is_genuine_localhost,  # noqa: F401 — re-export for backward compat
-    auth_middleware,
     auth_router,
     verify_token,  # noqa: F401 — re-export for backward compat
 )
@@ -101,6 +101,9 @@ from pocketpaw.tunnel import get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
+# Module-level uvicorn server reference (set by run_dashboard, read by restart_server)
+_uvicorn_server = None
+
 # Get frontend directory
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 TEMPLATES_DIR = FRONTEND_DIR / "templates"
@@ -121,6 +124,7 @@ app = FastAPI(
 # CORS — localhost + Cloudflare tunnel + Tauri desktop + custom origins from config
 _BUILTIN_ORIGINS = [
     "tauri://localhost",
+    "https://tauri.localhost",  # Tauri v2
     "http://localhost:1420",  # Tauri dev server
 ]
 try:
@@ -129,14 +133,9 @@ except Exception:
     _custom_origins = []
 _EXTRA_ORIGINS = list(set(_BUILTIN_ORIGINS + _custom_origins))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_EXTRA_ORIGINS,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
+# NOTE: CORSMiddleware is registered AFTER AuthMiddleware below so that CORS
+# is outermost (Starlette processes last-added first) and handles OPTIONS
+# preflight before auth can reject them.  See line ~193.
 
 
 @app.middleware("http")
@@ -183,8 +182,18 @@ app.include_router(channels_router)
 # Mount auth router (session tokens, cookie login/logout, QR code, token regeneration)
 app.include_router(auth_router)
 
-# Register auth middleware (comprehensive version from dashboard_auth.py)
-app.middleware("http")(auth_middleware)
+# Middleware order matters: last added = outermost = runs first.
+# Auth must be registered BEFORE CORS so CORS is outermost and handles
+# OPTIONS preflight requests before auth can reject them.
+app.add_middleware(AuthMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_EXTRA_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -1520,8 +1529,8 @@ async def restart_server(request: Request):
     settings = Settings.load()
     settings.save()
 
-    if _server:
-        _server.should_exit = True
+    if _uvicorn_server:
+        _uvicorn_server.should_exit = True
     return {"restarting": True}
 
 
@@ -1652,9 +1661,10 @@ def run_dashboard(
             log_level="debug",
         )
     else:
+        global _uvicorn_server
         config = uvicorn.Config(app, host=host, port=port)
-        _server = uvicorn.Server(config)
-        _server.run()
+        _uvicorn_server = uvicorn.Server(config)
+        _uvicorn_server.run()
 
 
 if __name__ == "__main__":

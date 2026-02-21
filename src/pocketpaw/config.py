@@ -567,13 +567,8 @@ class Settings(BaseSettings):
             except (json.JSONDecodeError, Exception):
                 pass
 
-        # Dump all fields from the model
-        all_fields = self.model_dump()
-
-        # Convert Path objects to strings for JSON serialization
-        for key, value in all_fields.items():
-            if isinstance(value, Path):
-                all_fields[key] = str(value)
+        # Dump all fields with JSON-mode serialization (converts Path→str, etc.)
+        all_fields = self.model_dump(mode="json")
 
         # For secret fields, preserve existing value if current is empty/None
         for key in SECRET_FIELDS:

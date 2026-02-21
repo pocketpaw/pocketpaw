@@ -41,8 +41,8 @@ async def events_stream():
                 "metadata": evt.metadata or {},
             })
 
-        sub = bus.subscribe(SystemEvent, _on_event)
-        return sub
+        bus.subscribe_system(_on_event)
+        return _on_event
 
     sub = await _subscribe()
 
@@ -65,7 +65,7 @@ async def events_stream():
             from pocketpaw.bus import get_message_bus
 
             bus = get_message_bus()
-            bus.unsubscribe(sub)
+            bus.unsubscribe_system(sub)
 
     return StreamingResponse(
         _event_generator(),

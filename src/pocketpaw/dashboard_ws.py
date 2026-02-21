@@ -49,9 +49,18 @@ async def websocket_handler(
     """
     from pocketpaw.daemon import get_daemon
 
+    logger.info(
+        "WS handler called: client=%s, has_token=%s, has_cookie=%s, localhost_fn=%s",
+        websocket.client,
+        token is not None,
+        "pocketpaw_session" in (websocket.headers.get("cookie") or ""),
+        _is_genuine_localhost_fn is not None,
+    )
+
     # Rate limit WebSocket connections
     client_ip = websocket.client.host if websocket.client else "unknown"
     if not ws_limiter.allow(client_ip):
+        logger.warning("WS rate limited: %s", client_ip)
         await websocket.close(code=4029, reason="Too many connections")
         return
 
@@ -66,36 +75,73 @@ async def websocket_handler(
         # Accept session tokens (format: "expires:hmac")
         if ":" in t and verify_session_token(t, expected_token):
             return True
+        # Accept API keys (pp_* prefix)
+        if t.startswith("pp_") and not t.startswith("ppat_"):
+            try:
+                from pocketpaw.api.api_keys import get_api_key_manager
+
+                if get_api_key_manager().verify(t) is not None:
+                    return True
+            except Exception:
+                pass
+        # Accept OAuth2 access tokens (ppat_* prefix)
+        if t.startswith("ppat_"):
+            try:
+                from pocketpaw.api.oauth2.server import get_oauth_server
+
+                if get_oauth_server().verify_access_token(t) is not None:
+                    return True
+            except Exception:
+                pass
         return False
 
     # Check HTTP-only session cookie
     cookie_token = websocket.cookies.get("pocketpaw_session")
+    logger.info(
+        "WS auth: cookie=%s, token_valid=%s, cookie_valid=%s",
+        cookie_token[:20] + "..." if cookie_token else "none",
+        _token_valid(token),
+        _token_valid(cookie_token),
+    )
     if not _token_valid(token) and _token_valid(cookie_token):
         token = cookie_token  # Use cookie token for subsequent checks
 
+    # Check Authorization header (non-browser clients may send it)
+    if not _token_valid(token):
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            bearer = auth_header.removeprefix("Bearer ").strip()
+            if _token_valid(bearer):
+                token = bearer
+
+    # Check Sec-WebSocket-Protocol for token (common pattern for browser clients)
+    if not _token_valid(token):
+        protocols = websocket.headers.get("sec-websocket-protocol", "")
+        for proto in protocols.split(","):
+            candidate = proto.strip()
+            if candidate.startswith(("ppat_", "pp_")) and _token_valid(candidate):
+                token = candidate
+                break
+
     # Allow genuine localhost bypass for WebSocket (not tunneled proxies)
     is_localhost = _is_genuine_localhost_fn(websocket) if _is_genuine_localhost_fn else False
+    logger.info(
+        "WS auth final: token_valid=%s, is_localhost=%s",
+        _token_valid(token),
+        is_localhost,
+    )
 
     if not _token_valid(token) and not is_localhost:
+        logger.warning(
+            "WebSocket auth failed: token=%s, cookie=%s, localhost=%s",
+            "present" if token else "missing",
+            "present" if cookie_token else "missing",
+            is_localhost,
+        )
         await websocket.close(code=4003, reason="Unauthorized")
         return
 
-    # Accept connection first — token can arrive via first message
-    if _token_valid(token) or is_localhost:
-        await websocket.accept()
-    else:
-        # Accept temporarily, wait for auth message
-        await websocket.accept()
-        try:
-            first_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-            if first_msg.get("action") == "authenticate" and _token_valid(first_msg.get("token")):
-                pass  # Authenticated
-            else:
-                await websocket.close(code=4003, reason="Unauthorized")
-                return
-        except (TimeoutError, Exception):
-            await websocket.close(code=4003, reason="Unauthorized")
-            return
+    await websocket.accept()
 
     # Track connection
     active_connections.append(websocket)

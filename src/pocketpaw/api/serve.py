@@ -1,12 +1,13 @@
-"""Lightweight API-only server for ``pocketpaw serve``.
+"""API server for ``pocketpaw serve``.
 
-Starts only the versioned ``/api/v1/`` routers with auth middleware and CORS —
-no web dashboard, no WebSocket handler, no frontend assets.  Ideal for headless
-deployments, CI runners, or when an external client (Tauri, scripts) only needs
-the REST API.
+Starts the versioned ``/api/v1/`` routers **and** a ``/ws`` WebSocket endpoint
+with auth middleware and CORS — no web dashboard frontend assets.  Ideal for
+external clients (Tauri desktop app, scripts) that provide their own UI.
+
+The server initialises the full backend infrastructure (message bus, agent loop,
+scheduler, etc.) so that both REST chat and WebSocket chat work identically to
+the dashboard mode.
 """
-
-from __future__ import annotations
 
 import logging
 
@@ -14,25 +15,32 @@ logger = logging.getLogger(__name__)
 
 
 def create_api_app():
-    """Build a minimal FastAPI application with only v1 API routers."""
-    from fastapi import FastAPI
+    """Build a FastAPI application with v1 API routers and WebSocket."""
+    from fastapi import FastAPI, Query, WebSocket
     from fastapi.middleware.cors import CORSMiddleware
 
     from pocketpaw.api.v1 import mount_v1_routers
-    from pocketpaw.config import Settings
+    from pocketpaw.config import Settings, get_access_token
 
     app = FastAPI(
         title="PocketPaw API",
-        description="Self-hosted AI agent — REST-only server (no dashboard).",
+        description="Self-hosted AI agent — REST + WebSocket server for external clients.",
         version="1.0.0",
         docs_url="/api/v1/docs",
         redoc_url="/api/v1/redoc",
         openapi_url="/api/v1/openapi.json",
     )
 
-    # --- CORS -----------------------------------------------------------
+    # --- Middleware (order matters: last added = outermost = runs first) --
+    # Auth must be added BEFORE CORS so that CORS is outermost and handles
+    # OPTIONS preflight requests before auth can reject them.
+    from pocketpaw.dashboard_auth import AuthMiddleware
+
+    app.add_middleware(AuthMiddleware)
+
     _BUILTIN_ORIGINS = [
         "tauri://localhost",
+        "https://tauri.localhost",
         "http://localhost:1420",
     ]
     try:
@@ -44,22 +52,73 @@ def create_api_app():
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_ORIGINS,
-        allow_origin_regex=(
-            r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
-            r"|^https://[a-zA-Z0-9-]+\.trycloudflare\.com$"
-        ),
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
-
-    # --- Auth middleware -------------------------------------------------
-    from pocketpaw.dashboard import auth_middleware
-
-    app.middleware("http")(auth_middleware)
 
     # --- Mount all /api/v1/ routers -------------------------------------
     mount_v1_routers(app)
+
+    # --- WebSocket handler helper ----------------------------------------
+    async def _handle_ws(
+        websocket: WebSocket,
+        token: str | None,
+        resume_session: str | None,
+    ):
+        """Shared WebSocket handler for /ws and /api/v1/ws."""
+        from pocketpaw.dashboard_auth import _is_genuine_localhost
+        from pocketpaw.dashboard_ws import websocket_handler
+
+        await websocket_handler(
+            websocket,
+            token,
+            resume_session,
+            _is_genuine_localhost_fn=_is_genuine_localhost,
+            _get_access_token_fn=get_access_token,
+        )
+
+    # --- WebSocket endpoints (both /ws and /api/v1/ws) -------------------
+    @app.websocket("/ws")
+    async def websocket_endpoint(
+        websocket: WebSocket,
+        token: str | None = Query(None),
+        resume_session: str | None = Query(None),
+    ):
+        """WebSocket endpoint — delegates to dashboard_ws.websocket_handler()."""
+        await _handle_ws(websocket, token, resume_session)
+
+    @app.websocket("/api/v1/ws")
+    async def websocket_v1_endpoint(
+        websocket: WebSocket,
+        token: str | None = Query(None),
+        resume_session: str | None = Query(None),
+    ):
+        """WebSocket v1 endpoint — same handler, v1-prefixed path."""
+        await _handle_ws(websocket, token, resume_session)
+
+    @app.websocket("/v1/ws")
+    async def websocket_v1_short_endpoint(
+        websocket: WebSocket,
+        token: str | None = Query(None),
+        resume_session: str | None = Query(None),
+    ):
+        """WebSocket v1 short path — for clients using /v1/ws."""
+        await _handle_ws(websocket, token, resume_session)
+
+    # --- Lifecycle events -----------------------------------------------
+    @app.on_event("startup")
+    async def startup():
+        from pocketpaw.dashboard_lifecycle import startup_event
+
+        await startup_event()
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        from pocketpaw.dashboard_lifecycle import shutdown_event
+
+        await shutdown_event()
 
     return app
 

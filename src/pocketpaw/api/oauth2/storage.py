@@ -20,7 +20,7 @@ DEFAULT_DESKTOP_CLIENT = OAuthClient(
     client_id="pocketpaw-desktop",
     client_name="PocketPaw Desktop",
     redirect_uris=["tauri://oauth-callback", "http://localhost:1420/oauth-callback"],
-    allowed_scopes=["chat", "sessions", "settings:read", "settings:write", "channels", "memory"],
+    allowed_scopes=["chat", "sessions", "settings:read", "settings:write", "channels", "memory", "admin"],
 )
 
 
@@ -139,6 +139,10 @@ class OAuthStorage:
             self._save_tokens()
             return True
         return False
+
+    def remove_refresh_token(self, refresh_token: str) -> None:
+        """Remove a refresh token from the index so it cannot be reused."""
+        self._refresh_index.pop(refresh_token, None)
 
     def revoke_by_refresh(self, refresh_token: str) -> bool:
         access_token = self._refresh_index.get(refresh_token)

@@ -45,7 +45,10 @@ async def exchange_session_token(request: Request):
 
 @router.post("/auth/login")
 async def cookie_login(request: Request):
-    """Validate access token and set an HTTP-only session cookie."""
+    """Validate access token and set an HTTP-only session cookie.
+
+    Accepts master access token, OAuth2 token (ppat_*), or API key (pp_*).
+    """
     from pocketpaw.config import Settings, get_access_token
     from pocketpaw.security.session_tokens import create_session_token
 
@@ -57,7 +60,27 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
-    if submitted != master:
+    is_valid = submitted == master
+    # Accept OAuth2 access tokens (ppat_*)
+    if not is_valid and submitted.startswith("ppat_"):
+        try:
+            from pocketpaw.api.oauth2.server import get_oauth_server
+
+            if get_oauth_server().verify_access_token(submitted) is not None:
+                is_valid = True
+        except Exception:
+            pass
+    # Accept API keys (pp_*)
+    if not is_valid and submitted.startswith("pp_") and not submitted.startswith("ppat_"):
+        try:
+            from pocketpaw.api.api_keys import get_api_key_manager
+
+            if get_api_key_manager().verify(submitted) is not None:
+                is_valid = True
+        except Exception:
+            pass
+
+    if not is_valid:
         raise HTTPException(status_code=401, detail="Invalid access token")
 
     settings = Settings.load()
@@ -69,7 +92,7 @@ async def cookie_login(request: Request):
         key="pocketpaw_session",
         value=session_token,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         path="/",
         max_age=max_age,
     )

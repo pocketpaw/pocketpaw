@@ -13,7 +13,7 @@ from pocketpaw.api.deps import require_scope
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Backends"], dependencies=[Depends(require_scope("admin"))])
+router = APIRouter(tags=["Backends"])
 
 _CLI_BINARY: dict[str, str] = {
     "codex_cli": "codex",
@@ -84,7 +84,7 @@ async def list_available_backends():
     return results
 
 
-@router.post("/backends/install")
+@router.post("/backends/install", dependencies=[Depends(require_scope("admin"))])
 async def install_backend(request: Request):
     """Auto-install a pip-installable backend SDK."""
     import asyncio

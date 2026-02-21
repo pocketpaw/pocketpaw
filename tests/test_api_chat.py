@@ -132,3 +132,54 @@ class TestChatSend:
     def test_send_empty_content(self, client):
         resp = client.post("/api/v1/chat", json={"content": ""})
         assert resp.status_code == 422  # Pydantic validation
+
+
+class TestSSEFormat:
+    """Validate that SSE events follow the spec (event: <type>\\ndata: <json>\\n\\n)."""
+
+    @patch("pocketpaw.api.v1.chat._send_message")
+    @patch("pocketpaw.api.v1.chat._APISessionBridge")
+    def test_sse_events_are_valid_format(self, mock_bridge_cls, mock_send, client):
+        """Each SSE event must have 'event:' and 'data:' lines with valid JSON data."""
+        import json as _json
+
+        bridge = MagicMock()
+        q = asyncio.Queue()
+        bridge.queue = q
+        bridge.start = AsyncMock()
+        bridge.stop = AsyncMock()
+        mock_bridge_cls.return_value = bridge
+        mock_send.return_value = "api:sse-test"
+
+        async def _load():
+            await q.put({"event": "chunk", "data": {"content": "hi"}})
+            await q.put(
+                {"event": "stream_end", "data": {"session_id": "api:sse-test", "usage": {}}}
+            )
+
+        asyncio.get_event_loop().run_until_complete(_load())
+
+        with client.stream(
+            "POST", "/api/v1/chat/stream", json={"content": "test"}
+        ) as resp:
+            assert resp.status_code == 200
+            raw = resp.read().decode()
+
+        # Split SSE events by double newlines
+        events = [e.strip() for e in raw.split("\n\n") if e.strip()]
+        assert len(events) >= 2, f"Expected at least 2 SSE events, got {len(events)}: {raw!r}"
+
+        for event_block in events:
+            lines = event_block.split("\n")
+            event_line = next((l for l in lines if l.startswith("event:")), None)
+            data_line = next((l for l in lines if l.startswith("data:")), None)
+
+            assert event_line is not None, f"Missing 'event:' line in SSE block: {event_block!r}"
+            assert data_line is not None, f"Missing 'data:' line in SSE block: {event_block!r}"
+
+            event_type = event_line.split(":", 1)[1].strip()
+            assert event_type, f"Empty event type in: {event_block!r}"
+
+            data_str = data_line.split(":", 1)[1].strip()
+            parsed = _json.loads(data_str)
+            assert isinstance(parsed, dict), f"SSE data must be a JSON object, got: {type(parsed)}"

@@ -102,7 +102,7 @@ class _APISessionBridge:
         if self._outbound_cb:
             bus.unsubscribe_outbound(Channel.WEBSOCKET, self._outbound_cb)
         if self._system_cb:
-            bus._system_subscribers.remove(self._system_cb)
+            bus.unsubscribe_system(self._system_cb)
 
 
 async def _send_message(chat_request: ChatRequest) -> str:
