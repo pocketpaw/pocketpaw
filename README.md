@@ -198,8 +198,16 @@ See the [full configuration reference](https://docs.pocketpaw.xyz/getting-starte
 
 ```bash
 git clone https://github.com/pocketpaw/pocketpaw.git && cd pocketpaw
-uv sync --dev               # Install with dev deps
-uv run pocketpaw --dev      # Dashboard with auto-reload
+
+# Install uv if not already installed
+pip install uv
+
+# On Windows, if uv is not recognized, use:
+# python -m uv sync --dev
+# python -m uv run pocketpaw --dev
+
+uv sync --dev
+uv run pocketpaw --dev
 uv run pytest               # Run tests (2000+)
 uv run ruff check . && uv run ruff format .  # Lint & format
 ```
