@@ -731,7 +731,17 @@ Examples:
             asyncio.run(run_multi_channel_mode(settings, args))
         else:
             # Default: web dashboard (also handles --web flag)
-            run_dashboard_mode(settings, host, args.port, dev=args.dev)
+            from pocketpaw.web_server import find_available_port
+            try:
+                # Automatically find a free port if the default 8888 is taken
+                final_port = find_available_port(args.port)
+                if final_port != args.port:
+                    logger.warning(f"⚠️ Port {args.port} was busy. Using {final_port} instead.")
+                
+                run_dashboard_mode(settings, host, final_port, dev=args.dev)
+            except OSError:
+                logger.error(f"❌ Could not find any available ports starting from {args.port}.")
+                sys.exit(1)
     except KeyboardInterrupt:
         logger.info("👋 PocketPaw stopped.")
     finally:
