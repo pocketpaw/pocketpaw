@@ -211,14 +211,19 @@ FEATURE_GROUPS: dict[str, list[tuple[str, str]]] = {
 
 BACKENDS = {
     "claude_agent_sdk": "Claude Agent SDK (recommended)",
-    "pocketpaw_native": "PocketPaw Native (Anthropic + Open Interpreter)",
-    "open_interpreter": "Open Interpreter (Experimental — Ollama/OpenAI/Anthropic)",
+    "openai_agents": "OpenAI Agents SDK",
+    "google_adk": "Google ADK (Gemini)",
+    "codex_cli": "Codex CLI (OpenAI)",
+    "opencode": "OpenCode (External Server)",
+    "copilot_sdk": "Copilot SDK",
 }
 
 LLM_PROVIDERS = {
     "anthropic": "Anthropic (Claude)",
-    "openai": "OpenAI (GPT-4o)",
+    "openai": "OpenAI (GPT-5)",
+    "gemini": "Google Gemini",
     "ollama": "Ollama (local, free)",
+    "openai_compatible": "OpenAI-Compatible (LiteLLM, OpenRouter, vLLM, etc.)",
     "auto": "Auto-detect (tries Anthropic > OpenAI > Ollama)",
 }
 
