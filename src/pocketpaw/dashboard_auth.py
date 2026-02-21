@@ -107,6 +107,7 @@ async def auth_middleware(request: Request, call_next):
     exempt_paths = [
         "/static",
         "/favicon.ico",
+        "/ws",  # WebSocket handles its own auth in dashboard_ws.py
         "/api/qr",
         "/api/v1/qr",
         "/api/auth/login",
@@ -291,7 +292,8 @@ async def exchange_session_token(request: Request):
 async def cookie_login(request: Request):
     """Validate access token and set an HTTP-only session cookie.
 
-    Expects JSON body ``{"token": "..."}`` with the master access token.
+    Expects JSON body ``{"token": "..."}`` with the master access token,
+    an OAuth2 access token (``ppat_*``), or an API key (``pp_*``).
     Returns an HMAC session token in an HTTP-only cookie so the browser
     sends it automatically on all subsequent requests (including WebSocket
     handshakes). This is more secure than localStorage because JavaScript
@@ -305,7 +307,27 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
-    if submitted != master:
+    is_valid = submitted == master
+    # Accept OAuth2 access tokens (ppat_*)
+    if not is_valid and submitted.startswith("ppat_"):
+        try:
+            from pocketpaw.api.oauth2.server import get_oauth_server
+
+            if get_oauth_server().verify_access_token(submitted) is not None:
+                is_valid = True
+        except Exception:
+            pass
+    # Accept API keys (pp_*)
+    if not is_valid and submitted.startswith("pp_") and not submitted.startswith("ppat_"):
+        try:
+            from pocketpaw.api.api_keys import get_api_key_manager
+
+            if get_api_key_manager().verify(submitted) is not None:
+                is_valid = True
+        except Exception:
+            pass
+
+    if not is_valid:
         return JSONResponse(status_code=401, content={"detail": "Invalid access token"})
 
     settings = Settings.load()
@@ -317,7 +339,7 @@ async def cookie_login(request: Request):
         key="pocketpaw_session",
         value=session_token,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         path="/",
         max_age=max_age,
     )
