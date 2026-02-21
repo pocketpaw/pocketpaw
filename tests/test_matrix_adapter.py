@@ -48,6 +48,7 @@ class TestMatrixAdapterMessage:
         )
         adapter._bus = MagicMock()
         adapter._bus.publish_inbound = AsyncMock()
+        adapter._initial_sync_done = True
 
         room = SimpleNamespace(room_id="!room:matrix.org", display_name="TestRoom")
         event = SimpleNamespace(
@@ -72,6 +73,7 @@ class TestMatrixAdapterMessage:
         )
         adapter._bus = MagicMock()
         adapter._bus.publish_inbound = AsyncMock()
+        adapter._initial_sync_done = True
 
         room = SimpleNamespace(room_id="!room:matrix.org")
         event = SimpleNamespace(
@@ -91,6 +93,7 @@ class TestMatrixAdapterMessage:
         )
         adapter._bus = MagicMock()
         adapter._bus.publish_inbound = AsyncMock()
+        adapter._initial_sync_done = True
 
         room = SimpleNamespace(room_id="!other:matrix.org")
         event = SimpleNamespace(
@@ -109,12 +112,75 @@ class TestMatrixAdapterMessage:
         )
         adapter._bus = MagicMock()
         adapter._bus.publish_inbound = AsyncMock()
+        adapter._initial_sync_done = True
 
         room = SimpleNamespace(room_id="!room:matrix.org")
         event = SimpleNamespace(sender="@user:matrix.org", body="", event_id="$evt")
 
         await adapter._on_message(room, event)
         adapter._bus.publish_inbound.assert_not_called()
+
+    async def test_initial_sync_messages_skipped(self):
+        """Messages during initial sync (historical) are ignored."""
+        adapter = MatrixAdapter(
+            homeserver="https://matrix.org",
+            user_id="@bot:matrix.org",
+        )
+        adapter._bus = MagicMock()
+        adapter._bus.publish_inbound = AsyncMock()
+        adapter._initial_sync_done = False  # still syncing
+
+        room = SimpleNamespace(room_id="!room:matrix.org", display_name="TestRoom")
+        event = SimpleNamespace(
+            sender="@user:matrix.org",
+            body="old message from history",
+            event_id="$old",
+        )
+
+        await adapter._on_message(room, event)
+        adapter._bus.publish_inbound.assert_not_called()
+
+    async def test_initial_sync_media_messages_skipped(self):
+        """Media messages during initial sync are ignored."""
+        adapter = MatrixAdapter(
+            homeserver="https://matrix.org",
+            user_id="@bot:matrix.org",
+        )
+        adapter._bus = MagicMock()
+        adapter._bus.publish_inbound = AsyncMock()
+        adapter._initial_sync_done = False
+
+        room = SimpleNamespace(room_id="!room:matrix.org", display_name="TestRoom")
+        event = SimpleNamespace(
+            sender="@user:matrix.org",
+            body="photo.jpg",
+            event_id="$old_media",
+            url="mxc://matrix.org/abc123",
+            source={},
+        )
+
+        await adapter._on_media_message(room, event)
+        adapter._bus.publish_inbound.assert_not_called()
+
+    async def test_callback_exception_does_not_propagate(self):
+        """Errors in _on_message are caught, not propagated to sync loop."""
+        adapter = MatrixAdapter(
+            homeserver="https://matrix.org",
+            user_id="@bot:matrix.org",
+        )
+        adapter._bus = MagicMock()
+        adapter._bus.publish_inbound = AsyncMock(side_effect=RuntimeError("bus down"))
+        adapter._initial_sync_done = True
+
+        room = SimpleNamespace(room_id="!room:matrix.org", display_name="TestRoom")
+        event = SimpleNamespace(
+            sender="@user:matrix.org",
+            body="trigger error",
+            event_id="$err",
+        )
+
+        # Should not raise — error is caught internally
+        await adapter._on_message(room, event)
 
 
 class TestMatrixAdapterSend:
