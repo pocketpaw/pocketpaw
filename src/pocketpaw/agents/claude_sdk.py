@@ -730,7 +730,47 @@ class ClaudeAgentSDK:
                     ),
                 )
             else:
-                yield AgentEvent(type="error", content=llm.format_api_error(e))
+                error_text = error_msg.lower()
+
+                if (
+                    "authentication" in error_text
+                    or "api key" in error_text
+                    or "not configured" in error_text
+                ):
+                    friendly = (
+                        "❌ Authentication failed.\n\n"
+                        "Please check your API key in Settings → API Keys."
+                    )
+
+                elif "connection" in error_text or "unreachable" in error_text:
+                    friendly = (
+                        "🌐 Cannot connect to the LLM backend.\n\n"
+                        "Please check:\n"
+                        "- Your internet connection\n"
+                        "- If Ollama is running (ollama serve)\n"
+                        "- If the backend service is reachable"
+                    )
+
+                elif "timeout" in error_text:
+                    friendly = (
+                        "⏳ The request timed out.\n\n"
+                        "Please try again."
+                    )
+
+                elif "rate limit" in error_text:
+                    friendly = (
+                        "🚦 Rate limit exceeded.\n\n"
+                        "Please wait a moment and try again."
+                    )
+
+                else:
+                    friendly = (
+                        "⚠️ The LLM backend is currently unavailable.\n\n"
+                        "Please check your configuration in Settings."
+                    )
+
+                yield AgentEvent(type="error", content=friendly)
+
 
     async def stop(self) -> None:
         """Stop the agent execution."""

@@ -25,11 +25,56 @@ from pocketpaw.bus.events import Channel
 from pocketpaw.config import Settings, get_settings
 from pocketpaw.memory import get_memory_manager
 from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
+from asyncio import TimeoutError as AsyncTimeoutError
+try:
+    from openai import AuthenticationError, RateLimitError
+except ImportError:
+    AuthenticationError = RateLimitError = None
 
 logger = logging.getLogger(__name__)
+def _format_friendly_error(e: Exception) -> str:
+    """Convert backend exceptions into user-friendly messages."""
+
+    # Timeout
+    if isinstance(e, AsyncTimeoutError):
+        return (
+            "⏳ The request timed out.\n\n"
+            "Please try again."
+        )
+
+    # Authentication
+    if AuthenticationError and isinstance(e, AuthenticationError):
+        return (
+            "❌ Authentication failed.\n\n"
+            "Please check your API key in Settings → API Keys."
+        )
+
+    # Rate limit
+    if RateLimitError and isinstance(e, RateLimitError):
+        return (
+            "🚦 Rate limit exceeded.\n\n"
+            "Please wait a moment and try again."
+        )
+
+    # Connection errors
+    if isinstance(e, (ConnectionError, ConnectionRefusedError)):
+        return (
+            "🌐 Cannot connect to the LLM backend.\n\n"
+            "Please check:\n"
+            "- Your internet connection\n"
+            "- If Ollama is running (`ollama serve`)\n"
+            "- If the backend service is accessible"
+        )
+
+    # Fallback
+    return (
+        "⚠️ The LLM backend is currently unavailable.\n\n"
+        "Please check your configuration in Settings."
+    )
 
 
-async def _iter_with_timeout(aiter, first_timeout=30, timeout=120):
+
+async def _iter_with_timeout(aiter, first_timeout=10, timeout=120):
     """Yield items from an async iterator with per-item timeouts.
 
     Uses a shorter timeout for the first item (to detect dead/hung backends
@@ -241,7 +286,7 @@ class AgentLoop:
             # 3. Run through AgentRouter (handles all backends)
             router = self._get_router()
             full_response = ""
-
+            
             run_iter = router.run(content, system_prompt=system_prompt, history=history)
             try:
                 async for chunk in _iter_with_timeout(run_iter):
@@ -400,7 +445,7 @@ class AgentLoop:
                     self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn
                 ) or (self.settings.memory_backend == "file" and self.settings.file_auto_learn)
                 if should_auto_learn:
-                    asyncio.create_task(
+                    t = asyncio.create_task(
                         self._auto_learn(
                             message.content,
                             full_response,
@@ -411,7 +456,8 @@ class AgentLoop:
                     self._background_tasks.add(t)
                     t.add_done_callback(self._background_tasks.discard)
 
-        except TimeoutError:
+
+        except asyncio.TimeoutError:
             logger.error("Agent backend timed out")
             # Kill the hung backend so it releases resources
             try:
@@ -447,20 +493,23 @@ class AgentLoop:
                 )
             )
         except Exception as e:
-            logger.exception(f"❌ Error processing message: {e}")
-            # Kill the backend on error
+            logger.exception("❌ Error processing message")
+
             try:
                 await router.stop()
             except Exception:
                 pass
 
+            friendly_message = _format_friendly_error(e)
+
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
                     chat_id=message.chat_id,
-                    content=f"An error occurred: {str(e)}",
+                    content=friendly_message,
                 )
             )
+
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
@@ -469,6 +518,9 @@ class AgentLoop:
                     is_stream_end=True,
                 )
             )
+
+
+
 
     async def _send_response(self, original: InboundMessage, content: str) -> None:
         """Helper to send a simple text response."""
