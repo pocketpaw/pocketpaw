@@ -204,6 +204,26 @@ uv run pytest               # Run tests (2000+)
 uv run ruff check . && uv run ruff format .  # Lint & format
 ```
 
+
+### windows (uv setup fix)
+
+If `uv` commands fails on Windows, ensure uv is installed and verify uv first, means it was available in PATH:
+
+```powershell
+pip install uv
+uv --version
+
+If PowerShell blocks execution run this command:
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+Then run PocketPaw:
+git clone https://github.com/pocketpaw/pocketpaw.git
+cd pocketpaw
+uv sync --dev
+uv run pocketpaw --dev
+
+If uv is not recognized, restart the terminal or ensure Python Scripts directory is in PATH.
+```
 <details>
 <summary>Optional extras</summary>
 
