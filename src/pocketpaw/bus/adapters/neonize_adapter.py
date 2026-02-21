@@ -228,22 +228,41 @@ class NeonizeAdapter(BaseChannelAdapter):
             ) from exc
 
     async def _on_stop(self) -> None:
-        """Stop neonize client."""
+        """Stop neonize client and its internal loop/thread to prevent QR spam after shutdown."""
+        logger.info("Stopping Neonize adapter")
+
         if self._client:
             try:
+                # Cancel pending connect future if any
+                if self._connect_future and not self._connect_future.done():
+                    self._connect_future.cancel()
+                    logger.debug("Cancelled pending connect future")
+
+                # Disconnect the client
                 if self._neonize_loop and self._neonize_loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(
                         self._client.disconnect(), self._neonize_loop
                     )
-                    future.result(timeout=5)
+                    try:
+                        future.result(timeout=5)
+                        logger.debug("Neonize client disconnected")
+                    except Exception as e:
+                        logger.warning("Neonize disconnect timed out or failed: %s", e)
+
+                    # Stop neonize's internal event loop
+                    from neonize.aioze.events import event_global_loop
+                    if event_global_loop.is_running():
+                        event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+                        logger.debug("Stopped neonize event_global_loop")
+
                 else:
                     await self._client.disconnect()
+                    logger.debug("Direct disconnect completed")
+
             except Exception as e:
-                logger.debug(f"Neonize disconnect: {e}")
+                logger.warning("Error during Neonize shutdown: %s", e)
 
-        if self._connect_future:
-            self._connect_future.cancel()
-
+        # Restore original client task cancellation
         if self._client_task and not self._client_task.done():
             self._client_task.cancel()
             try:
@@ -253,62 +272,13 @@ class NeonizeAdapter(BaseChannelAdapter):
 
         self._connected = False
         self._qr_data = None
-        logger.info("WhatsApp (neonize) Adapter stopped")
 
-    async def send(self, message: OutboundMessage) -> None:
-        """Send message to WhatsApp via neonize.
-
-        WhatsApp doesn't support streaming — accumulate chunks, send on stream_end.
-        """
-        if not self._client or not self._connected:
-            return
-
-        try:
-            if message.is_stream_chunk:
-                chat_id = message.chat_id
-                if chat_id not in self._buffers:
-                    self._buffers[chat_id] = ""
-                self._buffers[chat_id] += message.content
-                return
-
-            if message.is_stream_end:
-                chat_id = message.chat_id
-                text = self._buffers.pop(chat_id, "")
-                if text.strip():
-                    await self._send_text(chat_id, text)
-                return
-
-            # Normal message
-            if message.content.strip():
-                await self._send_text(message.chat_id, message.content)
-
-        except Exception as e:
-            logger.error(f"Failed to send neonize message: {e}")
-
-    async def _send_text(self, to: str, text: str) -> None:
-        """Send a text message via neonize."""
-        if not self._client:
-            return
-        text = convert_markdown(text, self.channel)
-        try:
-            # Look up the cached JID protobuf; fall back to building from string
-            jid = self._jid_cache.get(to)
-            if jid is None:
-                from neonize.utils.jid import build_jid
-
-                # Parse "user@server" format if present
-                if "@" in to:
-                    user, server = to.split("@", 1)
-                    jid = build_jid(user, server)
-                else:
-                    jid = build_jid(to)
-
-            if self._neonize_loop and self._neonize_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    self._client.send_message(jid, text), self._neonize_loop
-                )
-                future.result(timeout=30)
+        # Wait for neonize thread to finish (non-daemon now)
+        if hasattr(self, '_neonize_thread') and self._neonize_thread.is_alive():
+            self._neonize_thread.join(timeout=5.0)
+            if self._neonize_thread.is_alive():
+                logger.warning("Neonize event loop thread did not finish in time")
             else:
-                await self._client.send_message(jid, text)
-        except Exception as e:
-            logger.error(f"Neonize send error: {e}")
+                logger.debug("Neonize event loop thread joined successfully")
+
+        logger.info("NeonizeAdapter stopped")
