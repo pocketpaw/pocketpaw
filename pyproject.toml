@@ -99,7 +99,7 @@ slack = [
     "slack-bolt>=1.20.0",
 ]
 whatsapp-personal = [
-    "neonize>=0.3.0",
+    "neonize>=0.3.14",
 ]
 matrix = [
     "matrix-nio>=0.24.0",

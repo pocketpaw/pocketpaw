@@ -66,27 +66,35 @@ class _APISessionBridge:
                 await self.queue.put(chunk)
 
         async def _on_system(evt: SystemEvent) -> None:
-            meta = evt.metadata or {}
-            if meta.get("chat_id") and meta["chat_id"] != self.chat_id:
-                return
+            data = evt.data or {}
             if evt.event_type == "tool_start":
                 await self.queue.put(
                     {
                         "event": "tool_start",
-                        "data": {"tool": meta.get("tool", ""), "input": meta.get("input", {})},
+                        "data": {
+                            "tool": data.get("name", ""),
+                            "input": data.get("params", {}),
+                        },
                     }
                 )
             elif evt.event_type == "tool_result":
                 await self.queue.put(
                     {
                         "event": "tool_result",
-                        "data": {"tool": meta.get("tool", ""), "output": evt.content},
+                        "data": {
+                            "tool": data.get("name", ""),
+                            "output": data.get("result", ""),
+                        },
                     }
                 )
             elif evt.event_type == "thinking":
-                await self.queue.put({"event": "thinking", "data": {"content": evt.content}})
+                await self.queue.put(
+                    {"event": "thinking", "data": {"content": data.get("content", "")}}
+                )
             elif evt.event_type == "error":
-                await self.queue.put({"event": "error", "data": {"detail": evt.content}})
+                await self.queue.put(
+                    {"event": "error", "data": {"detail": data.get("message", "")}}
+                )
 
         self._outbound_cb = _on_outbound
         self._system_cb = _on_system

@@ -37,8 +37,7 @@ async def events_stream():
         async def _on_event(evt: SystemEvent) -> None:
             await queue.put({
                 "event_type": evt.event_type,
-                "content": evt.content or "",
-                "metadata": evt.metadata or {},
+                "data": evt.data or {},
             })
 
         bus.subscribe_system(_on_event)
