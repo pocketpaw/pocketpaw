@@ -48,7 +48,18 @@ Sets up Python and PocketPaw in one click, then opens the dashboard.
 <details open>
 <summary>macOS / Linux</summary>
 
-```bash
+## Windows Installation Guide
+
+Step 1: Install Python 3.10 or higher
+
+Step 2: Verify Python
+python --version
+
+Step 3: Install PocketPaw
+pip install pocketpaw
+
+Step 4: Run
+pocketpaw
 pip install pocketpaw && pocketpaw
 ```
 
