@@ -1,5 +1,6 @@
 # Tool registry for managing available tools.
 # Created: 2026-02-02
+# Updated: 2026-02-23 - Added parameter schema validation before execution
 
 
 from __future__ import annotations
@@ -12,6 +13,44 @@ from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_params(schema: dict[str, Any], params: dict[str, Any]) -> str | None:
+    """Validate params against JSON schema. Returns error message or None."""
+    if not schema or schema.get("type") != "object":
+        return None  # No schema to validate against
+
+    props = schema.get("properties", {})
+    required = set(schema.get("required", []))
+
+    # Check required fields
+    missing = required - set(params.keys())
+    if missing:
+        return f"Missing required parameter(s): {', '.join(sorted(missing))}"
+
+    # Check types for provided params
+    type_map = {
+        "string": str,
+        "integer": int,
+        "number": (int, float),
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+    }
+    errors = []
+    for key, value in params.items():
+        if key not in props:
+            continue  # Extra params are ignored, not rejected
+        prop_def = props[key]
+        expected_type = prop_def.get("type")
+        if expected_type and expected_type in type_map:
+            if not isinstance(value, type_map[expected_type]):
+                errors.append(f"'{key}' must be {expected_type}, got {type(value).__name__}")
+
+    if errors:
+        return "; ".join(errors)
+
+    return None
 
 
 class ToolRegistry:
@@ -97,6 +136,13 @@ class ToolRegistry:
         if self._policy and not self._policy.is_tool_allowed(name):
             logger.warning("Tool '%s' blocked by policy at execution time", name)
             return f"Error: Tool '{name}' is not allowed by the current tool policy."
+
+        # Schema validation
+        schema = tool.definition.parameters
+        validation_error = _validate_params(schema, params)
+        if validation_error:
+            logger.warning("Tool '%s' parameter validation failed: %s", name, validation_error)
+            return f"Error: Tool '{name}' parameter validation failed: {validation_error}"
 
         # Audit Log: Attempt
         audit = get_audit_logger()
