@@ -128,8 +128,16 @@ if (-not $Python) {
                 Write-Ok "uv installed"
             }
         } catch {
-            Write-Warn "Could not install uv automatically."
-        }
+    Write-Warn "Could not install uv automatically."
+
+    Write-Host ""
+    Write-Host "Manual installation instructions for Windows:" -ForegroundColor Yellow
+    Write-Host "1. Run this command in PowerShell:" -ForegroundColor Yellow
+    Write-Host '   irm https://astral.sh/uv/install.ps1 | iex'
+    Write-Host ""
+    Write-Host "2. Restart your PowerShell after installation." -ForegroundColor Yellow
+    Write-Host "3. Then re-run this installer." -ForegroundColor Yellow
+}
     }
 
     if ($uvAvailable) {
