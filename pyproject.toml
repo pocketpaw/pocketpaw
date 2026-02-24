@@ -169,7 +169,7 @@ Homepage = "https://github.com/pocketpaw/pocketpaw"
 Repository = "https://github.com/pocketpaw/pocketpaw"
 Issues = "https://github.com/pocketpaw/pocketpaw/issues"
 Documentation = "https://github.com/pocketpaw/pocketpaw#readme"
-Twitter = "https://twitter.com/prakashd88"
+Twitter = "https://twitter.com/PocketPawAI"
 
 [build-system]
 requires = ["hatchling"]
