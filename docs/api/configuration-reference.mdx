@@ -41,7 +41,7 @@ When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, ot
 
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
-| `tool_profile` | `POCKETPAW_TOOL_PROFILE` | enum | `coding` | Tool profile (`minimal`, `coding`, `full`) |
+| `tool_profile` | `POCKETPAW_TOOL_PROFILE` | enum | `full` | Tool profile (`minimal`, `coding`, `full`) |
 | `tools_allow` | `POCKETPAW_TOOLS_ALLOW` | string[] | `[]` | Allowed tools (comma-separated list) |
 | `tools_deny` | `POCKETPAW_TOOLS_DENY` | string[] | `[]` | Denied tools (comma-separated list) |
 
@@ -72,7 +72,7 @@ When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, ot
 
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
-| `whatsapp_mode` | `POCKETPAW_WHATSAPP_MODE` | enum | `business` | Mode (`personal`, `business`) |
+| `whatsapp_mode` | `POCKETPAW_WHATSAPP_MODE` | enum | `""` (unset) | Mode (`personal`, `business`) |
 | `whatsapp_access_token` | `POCKETPAW_WHATSAPP_ACCESS_TOKEN` | string | — | Business API token |
 | `whatsapp_phone_number_id` | `POCKETPAW_WHATSAPP_PHONE_NUMBER_ID` | string | — | Phone number ID |
 | `whatsapp_verify_token` | `POCKETPAW_WHATSAPP_VERIFY_TOKEN` | string | — | Webhook verify token |
@@ -166,8 +166,8 @@ When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, ot
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
 | `mem0_auto_learn` | `POCKETPAW_MEM0_AUTO_LEARN` | boolean | `false` | Enable auto-learn |
-| `mem0_llm_provider` | `POCKETPAW_MEM0_LLM_PROVIDER` | enum | `ollama` | LLM provider (`anthropic`, `openai`, `ollama`) |
-| `mem0_llm_model` | `POCKETPAW_MEM0_LLM_MODEL` | string | `llama3.2` | LLM model |
-| `mem0_embedder_provider` | `POCKETPAW_MEM0_EMBEDDER_PROVIDER` | enum | `ollama` | Embedder provider (`openai`, `ollama`, `huggingface`) |
-| `mem0_embedder_model` | `POCKETPAW_MEM0_EMBEDDER_MODEL` | string | `nomic-embed-text` | Embedder model |
+| `mem0_llm_provider` | `POCKETPAW_MEM0_LLM_PROVIDER` | enum | `anthropic` | LLM provider (`anthropic`, `openai`, `ollama`) |
+| `mem0_llm_model` | `POCKETPAW_MEM0_LLM_MODEL` | string | `claude-haiku-4-5-20251001` | LLM model |
+| `mem0_embedder_provider` | `POCKETPAW_MEM0_EMBEDDER_PROVIDER` | enum | `openai` | Embedder provider (`openai`, `ollama`, `huggingface`) |
+| `mem0_embedder_model` | `POCKETPAW_MEM0_EMBEDDER_MODEL` | string | `text-embedding-3-small` | Embedder model |
 | `mem0_vector_store` | `POCKETPAW_MEM0_VECTOR_STORE` | enum | `qdrant` | Vector store (`qdrant`, `chroma`) |
