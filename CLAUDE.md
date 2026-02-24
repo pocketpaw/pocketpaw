@@ -33,8 +33,12 @@ uv run pocketpaw --discord --slack
 # Run in development mode (auto-reload on file changes)
 uv run pocketpaw --dev
 
-# Run all tests
-uv run pytest
+# Run all tests (unit)
+uv run pytest tests/ --ignore=tests/e2e
+
+# Run e2e tests (requires Playwright browsers to be installed first)
+uv run playwright install
+uv run pytest tests/e2e/ -v
 
 # Run a single test file
 uv run pytest tests/test_bus.py

@@ -6,6 +6,9 @@
 # - Browser configuration
 # - Test isolation
 #
+# Prerequisites:
+#   uv run playwright install   # download browser binaries (one-time)
+#
 # Run with: pytest tests/e2e/ -v
 # Run headed (see browser): pytest tests/e2e/ -v --headed
 
