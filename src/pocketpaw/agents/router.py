@@ -22,6 +22,7 @@ class AgentRouter:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._backend = None
+        self._active_backend_name: str | None = None
         self._initialize_backend()
 
     def _initialize_backend(self) -> None:
@@ -39,14 +40,17 @@ class AgentRouter:
 
         if cls is None:
             logger.error("No agent backend could be loaded")
+            self._active_backend_name = None
             return
 
         try:
             self._backend = cls(self.settings)
+            self._active_backend_name = backend_name
             info = cls.info()
             logger.info("🚀 Backend: %s", info.display_name)
         except Exception as exc:
             logger.error("Failed to initialize '%s' backend: %s", backend_name, exc)
+            self._active_backend_name = None
 
     async def run(
         self,
@@ -76,4 +80,8 @@ class AgentRouter:
         """Return metadata about the active backend."""
         if self._backend is None:
             return None
-        return get_backend_info(self.settings.agent_backend)
+        
+        # Use resolved backend (important when we fall back from unknown/legacy)
+        if self._active_backend_name:
+            return get_backend_info(self._active_backend_name)
+        return None
