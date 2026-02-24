@@ -7,6 +7,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import jsonschema
+from jsonschema import ValidationError
+
 from pocketpaw.security import AuditSeverity, get_audit_logger
 from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
@@ -97,6 +100,24 @@ class ToolRegistry:
         if self._policy and not self._policy.is_tool_allowed(name):
             logger.warning("Tool '%s' blocked by policy at execution time", name)
             return f"Error: Tool '{name}' is not allowed by the current tool policy."
+
+        # Parameter validation against JSON schema
+        schema = tool.definition.parameters
+        try:
+            jsonschema.validate(instance=params, schema=schema)
+        except ValidationError as e:
+            # Format validation error with path to the problematic field
+            error_path = ".".join(str(p) for p in e.path) if e.path else "root"
+            error_msg = f"Tool '{name}' parameter validation failed"
+            if error_path != "root":
+                error_msg += f" at '{error_path}'"
+            error_msg += f": {e.message}"
+            logger.warning(f"Parameter validation failed for {name}: {error_msg}")
+            return f"Error: {error_msg}"
+        except jsonschema.SchemaError as e:
+            # Schema itself is invalid (shouldn't happen in production)
+            logger.error(f"Invalid schema for tool '{name}': {e}")
+            return f"Error: Tool '{name}' has an invalid parameter schema"
 
         # Audit Log: Attempt
         audit = get_audit_logger()
