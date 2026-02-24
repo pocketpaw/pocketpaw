@@ -17,7 +17,9 @@ Changes:
 
 import argparse
 import asyncio
+import io
 import logging
+import sys
 from importlib.metadata import version as get_version
 
 from pocketpaw.config import Settings, get_settings
@@ -29,6 +31,11 @@ from pocketpaw.headless import (
     run_telegram_mode,
 )
 from pocketpaw.logging_setup import setup_logging
+
+# Force UTF-8 encoding on Windows to support Unicode emojis
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")
