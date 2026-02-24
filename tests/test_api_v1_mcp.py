@@ -28,9 +28,7 @@ class TestMCPStatus:
     @patch("pocketpaw.mcp.manager.get_mcp_manager")
     def test_get_status(self, mock_get_mgr, client):
         mgr = MagicMock()
-        mgr.get_server_status.return_value = {
-            "test-server": {"connected": True, "tools": 3}
-        }
+        mgr.get_server_status.return_value = {"test-server": {"connected": True, "tools": 3}}
         mock_get_mgr.return_value = mgr
         resp = client.get("/api/v1/mcp/status")
         assert resp.status_code == 200

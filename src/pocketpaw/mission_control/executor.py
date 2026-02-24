@@ -35,16 +35,6 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-# UUID validation pattern
-UUID_PATTERN = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    re.IGNORECASE,
-)
-
-# Security constants
-MAX_CONCURRENT_TASKS = 5  # Prevent resource exhaustion
-MAX_ERROR_MESSAGE_LENGTH = 200  # Truncate error messages
-
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bus.events import SystemEvent
 from pocketpaw.bus.queue import get_message_bus
@@ -57,6 +47,16 @@ from pocketpaw.mission_control.models import (
     TaskStatus,
     now_iso,
 )
+
+# UUID validation pattern
+UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+# Security constants
+MAX_CONCURRENT_TASKS = 5  # Prevent resource exhaustion
+MAX_ERROR_MESSAGE_LENGTH = 200  # Truncate error messages
 
 logger = logging.getLogger(__name__)
 

@@ -35,9 +35,7 @@ setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
 
-def run_dashboard_mode(
-    settings: Settings, host: str, port: int, dev: bool = False
-) -> None:
+def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
     """Run in web dashboard mode."""
     from pocketpaw.dashboard import run_dashboard
 
@@ -78,9 +76,7 @@ Examples:
         action="store_true",
         help="Run Telegram-only mode (legacy pairing flow)",
     )
-    parser.add_argument(
-        "--discord", action="store_true", help="Run headless Discord bot"
-    )
+    parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
     parser.add_argument(
         "--slack",
         action="store_true",
@@ -91,18 +87,10 @@ Examples:
         action="store_true",
         help="Run headless WhatsApp webhook server",
     )
-    parser.add_argument(
-        "--signal", action="store_true", help="Run headless Signal bot"
-    )
-    parser.add_argument(
-        "--matrix", action="store_true", help="Run headless Matrix bot"
-    )
-    parser.add_argument(
-        "--teams", action="store_true", help="Run headless Teams bot"
-    )
-    parser.add_argument(
-        "--gchat", action="store_true", help="Run headless Google Chat bot"
-    )
+    parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
+    parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
+    parser.add_argument("--teams", action="store_true", help="Run headless Teams bot")
+    parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
     parser.add_argument(
         "--security-audit",
         action="store_true",
@@ -126,9 +114,7 @@ Examples:
         default=8888,
         help="Port for web server (default: 8888)",
     )
-    parser.add_argument(
-        "--dev", action="store_true", help="Development mode with auto-reload"
-    )
+    parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
         "--check-ollama",
         action="store_true",
@@ -186,9 +172,7 @@ Examples:
                         if r.fix_hint:
                             print(f"         {r.fix_hint}")
                 status = engine.overall_status
-                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(
-                    status, "0"
-                )
+                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(status, "0")
                 print(f"\n  System: \033[{color}m{status.upper()}\033[0m\n")
         except Exception:
             pass  # Health engine failure never blocks startup

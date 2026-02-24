@@ -245,14 +245,16 @@ class TestClaudeSDKCliAuth:
     def test_auto_resolve_no_key_gives_ollama(self):
         from pocketpaw.llm.client import resolve_llm_client
 
-        settings = Settings()
+        settings = Settings(
+            llm_provider="auto", anthropic_api_key=None, openai_api_key=None
+        )
         llm = resolve_llm_client(settings)
         assert llm.provider == "ollama"
 
     def test_force_anthropic_no_key_returns_anthropic(self):
         from pocketpaw.llm.client import resolve_llm_client
 
-        settings = Settings()
+        settings = Settings(anthropic_api_key=None)
         llm = resolve_llm_client(settings, force_provider="anthropic")
         assert llm.provider == "anthropic"
         assert llm.api_key is None
@@ -291,6 +293,7 @@ class TestClaudeSDKCliAuth:
 
         with patch("pocketpaw.llm.client.resolve_llm_client", side_effect=spy_resolve):
             sdk._ClaudeAgentOptions = stop_execution
+            sdk._cli_available = True  # Mock CLI availability
             events = []
             async for event in sdk.run("test"):
                 events.append(event)

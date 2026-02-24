@@ -1,12 +1,12 @@
 """Telegram bot gateway."""
 
-import logging
 import asyncio
+import logging
 
-from pocketpaw.config import Settings
+from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.bus import get_message_bus
 from pocketpaw.bus.adapters.telegram_adapter import TelegramAdapter
-from pocketpaw.agents.loop import AgentLoop
+from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)
 

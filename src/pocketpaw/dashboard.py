@@ -3,9 +3,12 @@
 Lightweight FastAPI server that serves the frontend and handles WebSocket communication.
 
 Changes:
-  - 2026-02-17: Health heartbeat — periodic checks every 5 min via APScheduler, broadcasts health_update on status transitions.
-  - 2026-02-17: Health Engine API (GET /api/health, POST /api/health/check, WS get_health/run_health_check).
-  - 2026-02-06: WebSocket auth via first message instead of URL query param; accept wss://.
+  - 2026-02-17: Health heartbeat — periodic checks every 5 min via APScheduler,
+                 broadcasts health_update on status transitions.
+  - 2026-02-17: Health Engine API (GET /api/health, POST /api/health/check,
+                 WS get_health/run_health_check).
+  - 2026-02-06: WebSocket auth via first message instead of URL query param;
+                 accept wss://.
   - 2026-02-06: Channel config REST API (GET /api/channels/status, POST save/toggle).
   - 2026-02-06: Refactored adapter storage to _channel_adapters dict; auto-start all configured.
   - 2026-02-06: Auto-start Discord/WhatsApp adapters alongside dashboard; WhatsApp webhook routes.
@@ -15,7 +18,8 @@ Changes:
   - 2026-02-12: Fixed handle_file_browse bug: filter hidden files BEFORE applying 50-item limit.
   - 2026-02-12: Added Deep Work API router at /api/deep-work/*.
   - 2026-02-05: Added Mission Control API router at /api/mission-control/*.
-  - 2026-02-04: Added Telegram setup API endpoints (/api/telegram/status, /api/telegram/setup, /api/telegram/pairing-status).
+  - 2026-02-04: Added Telegram setup API endpoints (/api/telegram/status,
+                 /api/telegram/setup, /api/telegram/pairing-status).
   - 2026-02-03: Cleaned up duplicate imports, fixed duplicate save() calls.
   - 2026-02-02: Added agent status to get_settings response.
   - 2026-02-02: Enhanced logging to show which backend is processing requests.
@@ -1016,7 +1020,8 @@ async def setup_telegram(request: Request):
             settings.save()
 
             await update.message.reply_text(
-                "🎉 **Connected!**\n\nPocketPaw is now paired with this device.\nYou can close the browser window now.",
+                "🎉 **Connected!**\n\nPocketPaw is now paired with this device.\n"
+                "You can close the browser window now.",
                 parse_mode="Markdown",
             )
 
@@ -1296,7 +1301,8 @@ async def get_long_term_memory(limit: int = 50):
     """Get long-term memories."""
     manager = get_memory_manager()
     # Access store directly for filtered query, or use get_by_type if exposed
-    # Manager doesn't expose get_by_type publically in facade (it used _store.get_by_type in get_context_for_agent)
+    # Manager doesn't expose get_by_type publically in facade
+    # (it used _store.get_by_type in get_context_for_agent)
     # So we use filtered search or we should expose it.
     # For now, let's use _store hack or add method to manager?
     # I'll rely on a new Manager method or _store for now to keep it simple.

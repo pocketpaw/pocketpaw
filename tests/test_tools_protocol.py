@@ -2,17 +2,17 @@
 # Created: 2026-02-02
 
 
-import pytest
 import tempfile
-import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from pocketpaw.tools.protocol import ToolProtocol, BaseTool, ToolDefinition
-from pocketpaw.tools.registry import ToolRegistry
-from pocketpaw.tools.builtin.shell import ShellTool
-from pocketpaw.tools.builtin.filesystem import ReadFileTool, WriteFileTool, ListDirTool
+import pytest
+
 from pocketpaw.config import Settings
+from pocketpaw.tools.builtin.filesystem import ListDirTool, ReadFileTool, WriteFileTool
+from pocketpaw.tools.builtin.shell import ShellTool
+from pocketpaw.tools.protocol import BaseTool
+from pocketpaw.tools.registry import ToolRegistry
 
 
 class MockTool(BaseTool):

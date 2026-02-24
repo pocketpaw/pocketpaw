@@ -507,9 +507,7 @@ class Bootstrap:
         is_embedded = (
             python is not None
             and platform.system() == "Windows"
-            and str(Path(python).resolve()).startswith(
-                str(EMBEDDED_PYTHON_DIR.resolve())
-            )
+            and str(Path(python).resolve()).startswith(str(EMBEDDED_PYTHON_DIR.resolve()))
         )
         errors: list[str] = []
 
@@ -614,8 +612,12 @@ class Bootstrap:
 
         # Copy interpreter + essential runtime files
         for pattern in (
-            "python*.exe", "python*.dll", "vcruntime*.dll",
-            "*.pyd", "libffi*.dll", "sqlite3.dll",
+            "python*.exe",
+            "python*.dll",
+            "vcruntime*.dll",
+            "*.pyd",
+            "libffi*.dll",
+            "sqlite3.dll",
         ):
             for src in python_dir.glob(pattern):
                 shutil.copy2(src, scripts_dir / src.name)
@@ -632,9 +634,7 @@ class Bootstrap:
         # pyvenv.cfg
         version = self._get_python_version(python) or PYTHON_EMBED_VERSION
         (VENV_DIR / "pyvenv.cfg").write_text(
-            f"home = {python_dir}\n"
-            f"include-system-site-packages = false\n"
-            f"version = {version}\n",
+            f"home = {python_dir}\ninclude-system-site-packages = false\nversion = {version}\n",
             encoding="utf-8",
         )
 
@@ -652,7 +652,8 @@ class Bootstrap:
             try:
                 get_pip = scripts_dir / "get-pip.py"
                 urllib.request.urlretrieve(
-                    "https://bootstrap.pypa.io/get-pip.py", str(get_pip),
+                    "https://bootstrap.pypa.io/get-pip.py",
+                    str(get_pip),
                 )
                 subprocess.run(
                     [str(venv_py), str(get_pip), "--no-warn-script-location"],

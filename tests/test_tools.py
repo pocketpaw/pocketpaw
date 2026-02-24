@@ -1,8 +1,9 @@
 """Unit tests for PocketPaw tools."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
+import pytest
 
 
 class TestStatusTool:
@@ -141,8 +142,8 @@ class TestConfig:
 
     def test_settings_save_and_load(self, tmp_path, monkeypatch):
         """Settings should persist to disk."""
-        from pocketpaw.config import Settings, get_config_path
-        from pocketpaw.credentials import CredentialStore, get_credential_store
+        from pocketpaw.config import Settings
+        from pocketpaw.credentials import CredentialStore
 
         # Mock config path to use temp directory
         config_file = tmp_path / "config.json"
@@ -227,8 +228,8 @@ class TestAgentRouter:
 
     def test_router_initializes_claude_agent_sdk(self):
         """Should initialize with claude_agent_sdk backend."""
-        from pocketpaw.config import Settings
         from pocketpaw.agents.router import AgentRouter
+        from pocketpaw.config import Settings
 
         settings = Settings(agent_backend="claude_agent_sdk", anthropic_api_key="test")
         router = AgentRouter(settings)
@@ -237,8 +238,8 @@ class TestAgentRouter:
 
     def test_router_legacy_backend_falls_back(self):
         """Legacy backend names should fall back to claude_agent_sdk."""
-        from pocketpaw.config import Settings
         from pocketpaw.agents.router import AgentRouter
+        from pocketpaw.config import Settings
 
         settings = Settings(agent_backend="open_interpreter", anthropic_api_key="test")
         router = AgentRouter(settings)

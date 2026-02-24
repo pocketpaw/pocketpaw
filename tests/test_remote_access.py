@@ -1,12 +1,12 @@
-import pytest
-from pathlib import Path
-from fastapi.testclient import TestClient
-import os
 import shutil
+
+import pytest
+from fastapi.testclient import TestClient
+
+from pocketpaw.config import get_access_token, get_config_dir
 
 # Import app and config logic
 from pocketpaw.dashboard import app
-from pocketpaw.config import get_config_dir, get_access_token, regenerate_token, Settings
 
 
 # Mock config dir specifically for tests to avoid messing with real token

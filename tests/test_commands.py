@@ -1493,8 +1493,8 @@ class TestBackendsCommand:
         mock_settings.return_value = settings
 
         mock_list.return_value = ["claude_agent_sdk", "missing_backend"]
-        mock_info.side_effect = (
-            lambda n: None
+        mock_info.side_effect = lambda n: (
+            None
             if n == "missing_backend"
             else MagicMock(
                 display_name="Claude", capabilities=MagicMock(__iter__=lambda s: iter([]))

@@ -15,6 +15,8 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from installer.launcher.common import POCKETPAW_HOME
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -31,8 +33,6 @@ try:
 except ImportError:
     HAS_TRAY = False
     logger.warning("pystray or Pillow not available — tray icon disabled")
-
-from installer.launcher.common import POCKETPAW_HOME
 
 LOG_FILE = POCKETPAW_HOME / "logs" / "launcher.log"
 

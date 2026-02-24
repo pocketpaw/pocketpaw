@@ -527,9 +527,7 @@ class TestSearchSessions:
             json.dumps([{"role": "user", "content": "secret"}])
         )
         # This is the only real session
-        (sessions / "sess_a.json").write_text(
-            json.dumps([{"role": "user", "content": "secret"}])
-        )
+        (sessions / "sess_a.json").write_text(json.dumps([{"role": "user", "content": "secret"}]))
         results = await store.search_sessions("secret")
         assert len(results) == 1
         assert results[0]["id"] == "sess_a"

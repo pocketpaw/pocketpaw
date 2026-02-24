@@ -355,7 +355,7 @@ class TestPlaintextMigration:
         (env["tmp_path"] / "config.json").write_text(json.dumps(old_config))
 
         # Load triggers migration
-        loaded = Settings.load()
+        _loaded = Settings.load()
 
         # Verify secrets are now in encrypted store
         store = env["store"]

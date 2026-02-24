@@ -5,8 +5,8 @@ Integrates with the AgentSkills ecosystem (skills.sh).
 Loads skills from ~/.agents/skills/ and ~/.pocketpaw/skills/
 """
 
-from .loader import SkillLoader, get_skill_loader, load_all_skills
 from .executor import SkillExecutor
+from .loader import SkillLoader, get_skill_loader, load_all_skills
 
 __all__ = [
     "SkillLoader",
