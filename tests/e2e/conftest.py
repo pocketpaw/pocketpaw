@@ -6,8 +6,13 @@
 # - Browser configuration
 # - Test isolation
 #
-# Run with: pytest tests/e2e/ -v
-# Run headed (see browser): pytest tests/e2e/ -v --headed
+# Prerequisites (one-time setup):
+#   uv sync --dev
+#   uv run playwright install
+#
+# Run with: uv run python -m pytest tests/e2e/ -v
+# Run headed (see browser): uv run python -m pytest tests/e2e/ -v --headed
+# Run unit tests only (no browser needed): uv run python -m pytest --ignore=tests/e2e
 
 import os
 import socket

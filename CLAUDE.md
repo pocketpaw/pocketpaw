@@ -12,6 +12,11 @@ PocketPaw is a self-hosted AI agent that runs locally and is controlled via Tele
 # Install dev dependencies
 uv sync --dev
 
+# Install Playwright browsers (required for e2e tests in tests/e2e/)
+uv run playwright install
+# On Windows if the above fails (uv trampoline error), use:
+# .venv\Scripts\python -m playwright install
+
 # Run the app (web dashboard is the default — auto-starts all configured adapters)
 uv run pocketpaw
 
@@ -34,13 +39,19 @@ uv run pocketpaw --discord --slack
 uv run pocketpaw --dev
 
 # Run all tests
-uv run pytest
+uv run python -m pytest
+
+# Run unit tests only (excludes e2e — no browser required)
+uv run python -m pytest --ignore=tests/e2e
+
+# Run e2e tests only (requires: uv run playwright install first)
+uv run python -m pytest tests/e2e/ -v
 
 # Run a single test file
-uv run pytest tests/test_bus.py
+uv run python -m pytest tests/test_bus.py
 
 # Run a specific test
-uv run pytest tests/test_bus.py::test_publish_subscribe -v
+uv run python -m pytest tests/test_bus.py::test_publish_subscribe -v
 
 # Lint
 uv run ruff check .
