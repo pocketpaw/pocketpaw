@@ -4,6 +4,7 @@
 import json
 import os
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -39,6 +40,7 @@ class TestConfigPermissions:
             ok, msg, fixable = _check_config_permissions()
             assert ok is True
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix permissions not supported on Windows")
     def test_secure_permissions(self, temp_config_dir):
         config = temp_config_dir / "config.json"
         config.write_text("{}")
@@ -58,6 +60,7 @@ class TestConfigPermissions:
             assert ok is False
             assert fixable is True
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix permissions not supported on Windows")
     def test_fix_permissions(self, temp_config_dir):
         config = temp_config_dir / "config.json"
         config.write_text("{}")

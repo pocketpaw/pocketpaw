@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from installer.launcher.updater import Updater
 
@@ -79,6 +82,7 @@ class TestPyPICheck:
 class TestInstalledVersion:
     """Tests for Updater._get_installed_version()."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix venv structure not supported")
     def test_installed(self, tmp_path: Path):
         """Should return version when installed."""
         venv_dir = tmp_path / "venv"
@@ -159,6 +163,7 @@ class TestCheckFlow:
 class TestApplyUpdate:
     """Tests for Updater.apply()."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix venv structure not supported")
     def test_successful_upgrade(self, tmp_path: Path):
         """Should run pip upgrade and report new version."""
         venv_dir = tmp_path / "venv"

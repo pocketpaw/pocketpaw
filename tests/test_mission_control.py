@@ -225,9 +225,12 @@ class TestFileMissionControlStore:
     @pytest.mark.asyncio
     async def test_activity_feed(self, store):
         """Test activity feed ordering."""
+        import asyncio
+
         a1 = Activity(message="First")
         a2 = Activity(message="Second")
         await store.save_activity(a1)
+        await asyncio.sleep(0.001)  # Ensure distinct timestamps
         await store.save_activity(a2)
 
         feed = await store.get_activity_feed()

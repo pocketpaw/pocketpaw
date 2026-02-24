@@ -3,6 +3,7 @@
 # Fixed mocking for async_playwright().start() pattern
 """Tests for browser driver module."""
 
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -318,6 +319,7 @@ class TestBrowserDriverScreenshot:
     """Tests for screenshot functionality."""
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-style paths not supported on Windows")
     async def test_screenshot_saves_file(self):
         """Should save screenshot to file."""
         driver = BrowserDriver()
