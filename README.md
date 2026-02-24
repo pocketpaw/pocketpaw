@@ -257,7 +257,7 @@ Everything goes through an event-driven message bus. Channels publish messages, 
   <img src="docs/public/pocketpaw-security-stack.webp" alt="PocketPaw 7-Layer Security Stack" width="500">
 </p>
 
-A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of that: injection scanning, configurable tool policies, plan mode for human approval, `--security-audit` CLI, a self-audit daemon, and an append-only audit log. [Details in the docs](https://docs.pocketpaw.xyz/security).
+A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of that: injection scanning, configurable tool policies, plan mode for human approval, `--security-audit` CLI, a self-audit daemon, and an append-only audit log. [Details in the docs](https://pocketpaw.xyz/security).
 
 <details>
 <summary>Detailed security architecture</summary>
@@ -280,7 +280,7 @@ export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_ad
 
 > **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
 
-See the [full configuration reference](https://docs.pocketpaw.xyz/getting-started/configuration) for all settings.
+See the [full configuration reference](https://pocketpaw.xyz/getting-started/configuration) for all settings.
 
 ---
 
@@ -343,7 +343,7 @@ pip install pocketpaw[all]                 # Everything
 
 ## Documentation
 
-**[docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)** covers getting started, backends, channels, tools, integrations, security, memory, and the full API reference.
+**[pocketpaw.xyz](https://pocketpaw.xyz)** covers getting started, backends, channels, tools, integrations, security, memory, and the full API reference.
 
 ---
 
