@@ -109,6 +109,43 @@ class OpenAIAgentsBackend:
             lines.append(f"**{role}**: {content}")
         return instructions + "\n\n" + "\n".join(lines)
 
+    @staticmethod
+    def _extract_tool_name(item: Any) -> str:
+        """Extract tool name from a ToolCallItem.
+
+        ToolCallItem has a raw_item attribute containing the actual tool call.
+        Different tool types have different structures for accessing the name.
+        """
+        try:
+            # Try to access raw_item.function.name (for ResponseFunctionToolCall)
+            if hasattr(item, "raw_item") and hasattr(item.raw_item, "function"):
+                return item.raw_item.function.name
+
+            # Try to access raw_item.type for other tool types (computer_use, file_search, etc.)
+            if hasattr(item, "raw_item") and hasattr(item.raw_item, "type"):
+                tool_type = item.raw_item.type
+                # Return a human-readable name based on type
+                type_names = {
+                    "computer_use": "Computer",
+                    "file_search": "File Search",
+                    "code_interpreter": "Code Interpreter",
+                }
+                return type_names.get(tool_type, tool_type.replace("_", " ").title())
+
+            # Fallback: try direct name attribute (shouldn't exist but check anyway)
+            if hasattr(item, "name"):
+                return item.name
+
+            # Last resort: use description if available
+            if hasattr(item, "description") and item.description:
+                return item.description
+
+        except (AttributeError, TypeError) as e:
+            logger.debug("Could not extract tool name from item: %s", e)
+
+        # Final fallback
+        return "Tool"
+
     def _build_custom_tools(self) -> list:
         """Lazily build and cache PocketPaw custom tools as FunctionTool wrappers."""
         if self._custom_tools is not None:
@@ -228,10 +265,11 @@ class OpenAIAgentsBackend:
                 elif event.type == "run_item_stream_event":
                     item = event.item
                     if item.type == "tool_call_item":
+                        tool_name = self._extract_tool_name(item)
                         yield AgentEvent(
                             type="tool_use",
-                            content=f"Using {item.name}...",
-                            metadata={"name": item.name, "input": {}},
+                            content=f"Using {tool_name}...",
+                            metadata={"name": tool_name, "input": {}},
                         )
                     elif item.type == "tool_call_output_item":
                         yield AgentEvent(

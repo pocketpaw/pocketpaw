@@ -187,7 +187,7 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
     Write-Step "Installing uv (fast Python package manager)..."
     try {
         Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression 2>$null
-        $env:PATH = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+        $env:PATH = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.uv\bin;$env:PATH"
         if (Get-Command uv -ErrorAction SilentlyContinue) {
             $uvAvailable = $true
             Write-Ok "uv installed"

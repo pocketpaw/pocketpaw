@@ -83,10 +83,16 @@ const Tools = {
             warning: '⚠️'
         };
         
-        toast.innerHTML = `
-            <span class="toast-icon">${icons[type] || icons.info}</span>
-            <span class="toast-msg">${message}</span>
-        `;
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'toast-icon';
+        iconSpan.textContent = icons[type] || icons.info;
+
+        const msgSpan = document.createElement('span');
+        msgSpan.className = 'toast-msg';
+        msgSpan.textContent = message;
+
+        toast.appendChild(iconSpan);
+        toast.appendChild(msgSpan);
         
         container.appendChild(toast);
         
