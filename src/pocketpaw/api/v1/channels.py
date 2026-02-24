@@ -178,8 +178,7 @@ async def install_extras(request: Request):
 
     dep = _CHANNEL_DEPS.get(extra)
     if dep is None:
-        # No optional dep for this channel (e.g. signal) — nothing to install.
-        return {"status": "ok"}
+        return {"status": "noop", "reason": f"No optional dependency for '{extra}'"}
 
     import_mod, _package, _pip_spec = dep
     if _is_module_importable(import_mod):

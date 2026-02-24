@@ -67,6 +67,11 @@ class _APISessionBridge:
 
         async def _on_system(evt: SystemEvent) -> None:
             data = evt.data or {}
+            # Filter out events belonging to other sessions.
+            # session_key format is "channel:chat_id" (see InboundMessage.session_key).
+            sk = data.get("session_key", "")
+            if sk and not sk.endswith(f":{self.chat_id}"):
+                return
             if evt.event_type == "tool_start":
                 await self.queue.put(
                     {
