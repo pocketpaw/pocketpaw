@@ -64,7 +64,8 @@ function Test-PythonVersion {
         $major = [int]$parts[0]
         $minor = [int]$parts[1]
         return ($major -ge 3 -and $minor -ge 11)
-    } catch {
+    }
+    catch {
         return $false
     }
 }
@@ -74,7 +75,8 @@ function Get-PythonFullVersion {
     try {
         $ver = & $Cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2>$null
         return $ver.Trim()
-    } catch {
+    }
+    catch {
         return "unknown"
     }
 }
@@ -95,8 +97,10 @@ foreach ($cmd in @("python", "python3", "py")) {
                     break
                 }
             }
-        } catch {}
-    } else {
+        }
+        catch {}
+    }
+    else {
         $found = Get-Command $cmd -ErrorAction SilentlyContinue
         if ($found -and (Test-PythonVersion $cmd)) {
             $Python = $cmd
@@ -113,7 +117,8 @@ if (-not $Python) {
     $uvAvailable = $false
     if (Get-Command uv -ErrorAction SilentlyContinue) {
         $uvAvailable = $true
-    } else {
+    }
+    else {
         Write-Step "Installing uv (fast Python package manager)..."
         try {
             $uvScript = Join-Path $env:TEMP "uv-install.ps1"
@@ -127,7 +132,8 @@ if (-not $Python) {
                 $uvAvailable = $true
                 Write-Ok "uv installed"
             }
-        } catch {
+        }
+        catch {
             Write-Warn "Could not install uv automatically."
         }
     }
@@ -161,7 +167,8 @@ if (-not $Python) {
                     break
                 }
             }
-        } catch {
+        }
+        catch {
             Write-Warn "winget install failed."
         }
     }
@@ -183,16 +190,18 @@ Write-Step "Python:  $pyVer ($pyPath)"
 $uvAvailable = $false
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     $uvAvailable = $true
-} else {
+}
+else {
     Write-Step "Installing uv (fast Python package manager)..."
     try {
         Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression 2>$null
-        $env:PATH = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+        $env:PATH = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.uv\bin;$env:PATH"
         if (Get-Command uv -ErrorAction SilentlyContinue) {
             $uvAvailable = $true
             Write-Ok "uv installed"
         }
-    } catch {
+    }
+    catch {
         Write-Warn "Could not install uv."
     }
 }
@@ -202,17 +211,20 @@ $PipCmd = $null
 if ($uvAvailable) {
     $PipCmd = "uv pip"
     Write-Step "Installer: uv pip"
-} else {
+}
+else {
     # Try python -m pip
     if ($Python -eq "py -3") {
         & py -3 -m pip --version 2>$null | Out-Null
-    } else {
+    }
+    else {
         & $Python -m pip --version 2>$null | Out-Null
     }
     if ($LASTEXITCODE -eq 0) {
         $PipCmd = "$Python -m pip"
         Write-Step "Installer: pip"
-    } else {
+    }
+    else {
         Write-Err "No package installer found. Install uv or pip first."
         exit 1
     }
@@ -234,12 +246,14 @@ if ($env:HTTP_PROXY) {
 Write-Step "Downloading installer..."
 try {
     Invoke-WebRequest @webParams -ErrorAction Stop
-} catch {
+}
+catch {
     Write-Warn "Primary download failed, trying fallback..."
     $webParams.Uri = $FallbackUrl
     try {
         Invoke-WebRequest @webParams -ErrorAction Stop
-    } catch {
+    }
+    catch {
         Write-Err "Could not download installer."
         Write-Host "       Try manually: $InstallerUrl"
         exit 1
@@ -266,9 +280,11 @@ if ($Profile -ne "recommended") { $extraFlags += "--profile"; $extraFlags += $Pr
 try {
     if ($Python -eq "py -3") {
         & py -3 $TempInstaller --pip-cmd $PipCmd @extraFlags
-    } else {
+    }
+    else {
         & $Python $TempInstaller --pip-cmd $PipCmd @extraFlags
     }
-} finally {
+}
+finally {
     Remove-Item $TempInstaller -ErrorAction SilentlyContinue
 }
