@@ -76,6 +76,10 @@ pocketpaw
 
 > **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
 
+### Windows Users Note
+If the dashboard opens and asks for an access token, ensure you are following the correct installation method (Docker or pip). 
+For full access token generation, refer to Docker setup instructions.
+
 </details>
 
 <details>
