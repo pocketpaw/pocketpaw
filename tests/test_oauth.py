@@ -57,9 +57,7 @@ class TestTokenStore:
         assert "svc1" in services
         assert "svc2" in services
 
-    @pytest.mark.skipif(
-        sys.platform == "win32", reason="Unix permissions not supported on Windows"
-    )
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix permissions not supported on Windows")
     def test_file_permissions(self, store, tmp_path):
         tokens = OAuthTokens(service="perms_test", access_token="secret")
         store.save(tokens)
