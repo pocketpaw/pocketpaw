@@ -59,8 +59,6 @@ dependencies = [
     "cryptography>=42.0",
     # Image basics
     "pillow>=10.0.0",
-    # JSON Schema validation (for tool parameter validation)
-    "jsonschema>=4.17.0",
 ]
 
 [project.optional-dependencies]

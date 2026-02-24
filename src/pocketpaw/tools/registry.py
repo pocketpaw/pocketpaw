@@ -7,9 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import jsonschema
-from jsonschema import ValidationError
-
 from pocketpaw.security import AuditSeverity, get_audit_logger
 from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
@@ -101,24 +98,6 @@ class ToolRegistry:
             logger.warning("Tool '%s' blocked by policy at execution time", name)
             return f"Error: Tool '{name}' is not allowed by the current tool policy."
 
-        # Parameter validation against JSON schema
-        schema = tool.definition.parameters
-        try:
-            jsonschema.validate(instance=params, schema=schema)
-        except ValidationError as e:
-            # Format validation error with path to the problematic field
-            error_path = ".".join(str(p) for p in e.path) if e.path else "root"
-            error_msg = f"Tool '{name}' parameter validation failed"
-            if error_path != "root":
-                error_msg += f" at '{error_path}'"
-            error_msg += f": {e.message}"
-            logger.warning(f"Parameter validation failed for {name}: {error_msg}")
-            return f"Error: {error_msg}"
-        except jsonschema.SchemaError as e:
-            # Schema itself is invalid (shouldn't happen in production)
-            logger.error(f"Invalid schema for tool '{name}': {e}")
-            return f"Error: Tool '{name}' has an invalid parameter schema"
-
         # Audit Log: Attempt
         audit = get_audit_logger()
 
@@ -130,6 +109,18 @@ class ToolRegistry:
             severity = AuditSeverity.WARNING
         else:
             severity = AuditSeverity.INFO
+
+        # Basic parameter validation using stdlib
+        schema = tool.definition.parameters
+        if schema and "required" in schema:
+            required_params = schema.get("required", [])
+            missing_params = [p for p in required_params if p not in params]
+            if missing_params:
+                error_msg = f"Missing required parameter(s): {', '.join(missing_params)}"
+                logger.warning("Parameter validation failed for %s: %s", name, error_msg)
+                # Log the failed validation attempt to audit
+                audit.log_tool_use(name, params, severity=severity, status="validation_failed")
+                return f"Error: Tool '{name}' {error_msg}"
 
         audit.log_tool_use(name, params, severity=severity, status="attempt")
 
