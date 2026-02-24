@@ -76,7 +76,9 @@ class TestMCPTokenStorage:
         assert loaded_tok.access_token == "tok"
         assert loaded_info.client_id == "cid"
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="Unix file permissions not supported on Windows")
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="Unix permissions not supported on Windows"
+    )
     async def test_file_permissions(self, storage, tmp_path):
         """Token file should be chmod 0600."""
         import os

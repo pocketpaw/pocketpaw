@@ -4,7 +4,6 @@ Downloads incoming media (images, documents, audio, video) to local disk
 and returns file paths for populating InboundMessage.media.
 """
 
-import hashlib
 import logging
 import mimetypes
 import re
