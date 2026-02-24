@@ -245,9 +245,7 @@ class TestClaudeSDKCliAuth:
     def test_auto_resolve_no_key_gives_ollama(self):
         from pocketpaw.llm.client import resolve_llm_client
 
-        settings = Settings(
-            llm_provider="auto", anthropic_api_key=None, openai_api_key=None
-        )
+        settings = Settings(llm_provider="auto", anthropic_api_key=None, openai_api_key=None)
         llm = resolve_llm_client(settings)
         assert llm.provider == "ollama"
 
