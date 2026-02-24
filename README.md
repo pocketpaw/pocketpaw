@@ -69,7 +69,7 @@ python3 -m pip install --upgrade pip
 
 # 3. Create and activate virtual environment (optional but recommended)
 python3 -m venv pocketpaw-env
-source pocketpaw-env/bin/activate  # On macOS/Linux
+source pocketpaw-env/bin/activate
 
 # 4. Install PocketPaw
 pip install pocketpaw
@@ -111,7 +111,7 @@ python -m pip install --upgrade pip
 
 # 3. Create and activate virtual environment (optional but recommended)
 python -m venv pocketpaw-env
-.\pocketpaw-env\Scripts\Activate.ps1  # On Windows PowerShell
+.\pocketpaw-env\Scripts\Activate.ps1
 
 # 4. Install PocketPaw
 pip install pocketpaw
@@ -263,7 +263,7 @@ pip install uv
 
 ```bash
 # 1. Verify Python version
-python3 --version  # or python --version on Windows
+python3 --version
 
 # 2. Clone and enter the repository
 git clone https://github.com/pocketpaw/pocketpaw.git && cd pocketpaw
