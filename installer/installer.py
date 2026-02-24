@@ -635,6 +635,12 @@ class InstallerUI:
         prompts: dict[str, list[tuple[str, str]]] = {
             "anthropic": [("anthropic_api_key", "Anthropic API Key (sk-ant-...)")],
             "openai": [("openai_api_key", "OpenAI API Key (sk-...)")],
+            "gemini": [("google_api_key", "Google API Key (from AI Studio)")],
+            "openai_compatible": [
+                ("openai_compatible_base_url", "Endpoint Base URL"),
+                ("openai_compatible_api_key", "API Key (if required)"),
+                ("openai_compatible_model", "Model Name"),
+            ],
             "ollama": [("ollama_host", "Ollama Host URL")],
             "auto": [
                 ("anthropic_api_key", "Anthropic API Key (sk-ant-..., optional)"),
