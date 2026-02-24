@@ -110,6 +110,18 @@ class ToolRegistry:
         else:
             severity = AuditSeverity.INFO
 
+        # Basic parameter validation using stdlib
+        schema = tool.definition.parameters
+        if schema and "required" in schema:
+            required_params = schema.get("required", [])
+            missing_params = [p for p in required_params if p not in params]
+            if missing_params:
+                error_msg = f"Missing required parameter(s): {', '.join(missing_params)}"
+                logger.warning("Parameter validation failed for %s: %s", name, error_msg)
+                # Log the failed validation attempt to audit
+                audit.log_tool_use(name, params, severity=severity, status="validation_failed")
+                return f"Error: Tool '{name}' {error_msg}"
+
         audit.log_tool_use(name, params, severity=severity, status="attempt")
 
         try:

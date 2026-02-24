@@ -48,11 +48,37 @@ Sets up Python and PocketPaw in one click, then opens the dashboard.
 <details open>
 <summary>macOS / Linux</summary>
 
+**Prerequisites:**
+- Python 3.11 or higher ([download here](https://www.python.org/downloads/))
+- pip package manager (included with Python)
+
+**Quick install:**
+
 ```bash
 pip install pocketpaw && pocketpaw
 ```
 
-Or use the install script:
+**Recommended install (with virtual environment):**
+
+```bash
+# 1. Verify Python version (must be 3.11+)
+python3 --version
+
+# 2. Upgrade pip to latest version
+python3 -m pip install --upgrade pip
+
+# 3. Create and activate virtual environment (optional but recommended)
+python3 -m venv pocketpaw-env
+source pocketpaw-env/bin/activate
+
+# 4. Install PocketPaw
+pip install pocketpaw
+
+# 5. Run PocketPaw
+pocketpaw
+```
+
+**Or use the automated install script:**
 
 ```bash
 curl -fsSL https://pocketpaw.xyz/install.sh | sh
@@ -63,14 +89,34 @@ curl -fsSL https://pocketpaw.xyz/install.sh | sh
 <details>
 <summary>Windows (PowerShell)</summary>
 
+**Prerequisites:**
+- Python 3.11 or higher ([download here](https://www.python.org/downloads/))
+- pip package manager (included with Python)
+- Ensure Python is added to PATH during installation
+
+**Automated installer:**
+
 ```powershell
 powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
 ```
 
-Or install manually with pip:
+**Manual install with pip:**
 
 ```powershell
+# 1. Verify Python version (must be 3.11+)
+python --version
+
+# 2. Upgrade pip to latest version
+python -m pip install --upgrade pip
+
+# 3. Create and activate virtual environment (optional but recommended)
+python -m venv pocketpaw-env
+.\pocketpaw-env\Scripts\Activate.ps1
+
+# 4. Install PocketPaw
 pip install pocketpaw
+
+# 5. Run PocketPaw
 pocketpaw
 ```
 
@@ -196,12 +242,43 @@ See the [full configuration reference](https://docs.pocketpaw.xyz/getting-starte
 
 ## Development
 
+**Prerequisites:**
+- Python 3.11 or higher ([download here](https://www.python.org/downloads/))
+- [uv](https://docs.astral.sh/uv/) package manager
+
+**Install uv:**
+
 ```bash
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Or via pip
+pip install uv
+```
+
+**Setup and run:**
+
+```bash
+# 1. Verify Python version
+python3 --version
+
+# 2. Clone and enter the repository
 git clone https://github.com/pocketpaw/pocketpaw.git && cd pocketpaw
-uv sync --dev               # Install with dev deps
-uv run pocketpaw --dev      # Dashboard with auto-reload
+
+# 3. Install with dev dependencies
+uv sync --dev
+
+# 4. Run PocketPaw in development mode (auto-reload)
+uv run pocketpaw --dev
+
+# 5. Run tests
 uv run pytest               # Run tests (2000+)
-uv run ruff check . && uv run ruff format .  # Lint & format
+
+# 6. Lint & format
+uv run ruff check . && uv run ruff format .
 ```
 
 <details>
