@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import re
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -39,9 +40,10 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _unique_filename(name: str, mime: str | None = None) -> str:
-    """Generate a collision-free filename: {timestamp_hex}_{hash8}_{sanitized_name}."""
+    """Generate a collision-free filename: {timestamp_hex}_{uuid6}_{sanitized_name}."""
     ts_hex = format(int(time.time() * 1000), "x")
-    hash8 = hashlib.sha256(f"{time.time_ns()}{name}".encode()).hexdigest()[:8]
+    # Use uuid for true uniqueness across rapid successive calls
+    uuid6 = uuid.uuid4().hex[:6]
 
     sanitized = _sanitize_filename(name)
 
@@ -50,7 +52,7 @@ def _unique_filename(name: str, mime: str | None = None) -> str:
         ext = mimetypes.guess_extension(mime) or ""
         sanitized += ext
 
-    return f"{ts_hex}_{hash8}_{sanitized}"
+    return f"{ts_hex}_{uuid6}_{sanitized}"
 
 
 def build_media_hint(filenames: list[str]) -> str:

@@ -371,7 +371,9 @@ class FileMissionControlStore:
     async def get_activity_feed(self, limit: int = 50) -> list[Activity]:
         """Get the activity feed (most recent first)."""
         activities = list(self._activities.values())
-        activities.sort(key=lambda a: a.created_at, reverse=True)
+        # Sort by created_at timestamp (reverse=True for most recent first)
+        # Use (created_at, id) as key to ensure stable sort when timestamps equal
+        activities.sort(key=lambda a: (a.created_at, a.id), reverse=True)
         return activities[:limit]
 
     # =========================================================================
