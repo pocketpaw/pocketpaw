@@ -32,6 +32,27 @@
 </p>
 
 ---
+## Troubleshooting
+
+### Python not recognized
+Make sure Python 3.11+ is installed and added to PATH.
+
+Check:
+python --version
+
+### pip not recognized
+Run:
+python -m ensurepip --upgrade
+
+### Virtual environment recommended
+python -m venv venv
+venv\Scripts\activate
+
+Then install:
+pip install pocketpaw
+
+
+
 
 ## Quick Start
 
