@@ -285,3 +285,67 @@ async def test_agent_loop_builds_context_and_passes_to_router(
             mock_memory.get_compacted_history.assert_called_once()
             assert captured_kwargs["system_prompt"] == "You are PocketPaw with identity and memory."
             assert captured_kwargs["history"] == session_history
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@pytest.mark.asyncio
+async def test_agent_loop_handles_error_before_router_init(
+    mock_builder_cls, mock_get_memory, mock_get_bus, mock_bus, mock_memory
+):
+    """Test that AgentLoop handles errors before router initialization without UnboundLocalError.
+
+    Regression test for issue #333: If an exception occurs before router is initialized,
+    the error handler should not raise UnboundLocalError when trying to call router.stop().
+    """
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    # Make memory.add_to_session raise an exception (before router is initialized)
+    mock_memory.add_to_session = AsyncMock(
+        side_effect=RuntimeError("Simulated memory failure before router init")
+    )
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.injection_scan_enabled = False
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            # Patch health engine to avoid import errors
+            with patch("pocketpaw.health.get_health_engine"):
+                loop = AgentLoop()
+
+                msg = InboundMessage(
+                    channel=Channel.CLI,
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="This should fail",
+                )
+
+                # Patch the redact_output function to avoid import/dependency issues
+                with patch("pocketpaw.agents.loop.redact_output", side_effect=lambda x: x):
+                    # This should not raise UnboundLocalError (the bug we're testing)
+                    await loop._process_message(msg)
+
+                    # Verify error was published to outbound channel
+                    assert mock_bus.publish_outbound.call_count >= 1
+
+                    # Find the error message among all outbound messages
+                    error_found = False
+                    for call in mock_bus.publish_outbound.call_args_list:
+                        content = call[0][0].content
+                        if content and "an error occurred" in content.lower():
+                            assert "simulated memory failure" in content.lower()
+                            error_found = True
+                            break
+
+                    assert error_found, "Error message should be published to outbound channel"
