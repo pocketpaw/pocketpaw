@@ -115,6 +115,26 @@ The web dashboard opens at `http://localhost:8888`. From there you can connect D
 
 ---
 
+
+## 🛠️ Troubleshooting
+
+If you encounter issues during installation, check these common solutions:
+
+- **Python/pip not found:** Ensure Python 3.11+ is installed and added to your system **PATH**. On Windows, try using `python -m pip` if `pip` isn't recognized.
+- **Virtual Environments:** We recommend using a venv to avoid conflicts:
+  ```bash
+  python -m venv .venv
+  source .venv/bin/activate  # macOS/Linux
+  .venv\Scripts\activate     # Windows
+  ```
+- **Upgrade pip:** `python -m pip install --upgrade pip`
+- **Clean Reinstall:** `pip uninstall pocketpaw && pip install pocketpaw[all]`
+- **PATH Issues:** If the `pocketpaw` command isn't found after install, you can always run it via `python -m pocketpaw`.
+
+For more detailed guidance, see the [Full Installation Guide](https://docs.pocketpaw.xyz/getting-started/installation#troubleshooting).
+
+---
+
 ## Features
 
 | | |

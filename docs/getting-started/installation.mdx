@@ -158,6 +158,61 @@ docker compose up -d
 
 The image includes all extras, Playwright Chromium, and OCR support. See the [Docker deployment guide](/deployment/docker) for optional Ollama/Qdrant services and configuration details.
 
+## Troubleshooting
+
+### Common Installation Issues
+
+#### 1. Python or pip not found
+PocketPaw requires **Python 3.11** or higher.
+- Verify your version: `python --version` or `python3 --version`
+- If you see `command not found`, ensure Python is installed and added to your system's **PATH**.
+- On **Windows**, if `pip` is not recognized, try using `python -m pip` instead.
+
+#### 2. Virtual Environment Setup
+To avoid dependency conflicts, we recommend using a virtual environment:
+```bash
+# Create a virtual environment
+python -m venv .venv
+
+# Activate it
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
+```
+
+#### 3. Upgrading pip
+Old versions of `pip` can cause installation failures with modern packages. Update it using:
+```bash
+python -m pip install --upgrade pip
+```
+
+#### 4. Dependency Errors
+If you encounter errors during installation:
+- Ensure you have a stable internet connection.
+- Try a clean reinstall:
+  ```bash
+  pip uninstall pocketpaw
+  pip install pocketpaw[all]
+  ```
+- If using the `[browser]` extra, ensure Playwright dependencies are installed:
+  ```bash
+  playwright install chromium
+  ```
+
+#### 5. PATH Configuration (Windows)
+If you've installed PocketPaw but the `pocketpaw` command still isn't found:
+- Python's `Scripts` folder might not be in your PATH.
+- You can always run it via Python: `python -m pocketpaw`
+
+### Verification Commands
+Use these commands to confirm your environment is ready:
+```bash
+python --version      # Should be 3.11.x or higher
+pip --version         # Verifies pip is working
+pocketpaw --version   # Verifies PocketPaw installation
+```
+
 ## Verify Installation
 
 ```bash
