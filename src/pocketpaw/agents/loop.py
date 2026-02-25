@@ -187,6 +187,7 @@ class AgentLoop:
                     )
                 )
 
+        router = None
         try:
             # 0. Injection scan for non-owner sources
             content = message.content
@@ -432,11 +433,12 @@ class AgentLoop:
                 )
             except Exception:
                 pass
-            # Kill the backend on error
-            try:
-                await router.stop()
-            except Exception:
-                pass
+            # Kill the backend on error (guard against router never being initialized)
+            if router is not None:
+                try:
+                    await router.stop()
+                except Exception:
+                    pass
 
             # Apply output redaction to exception messages
             error_msg = redact_output(f"An error occurred: {str(e)}")
