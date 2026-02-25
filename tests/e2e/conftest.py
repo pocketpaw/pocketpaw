@@ -6,8 +6,14 @@
 # - Browser configuration
 # - Test isolation
 #
+# IMPORTANT: Before running E2E tests, install Playwright browsers (one-time setup):
+#   Linux/Mac: uv run playwright install
+#   Windows:   .venv\Scripts\python -m playwright install
+#
 # Run with: pytest tests/e2e/ -v
 # Run headed (see browser): pytest tests/e2e/ -v --headed
+#
+# If you see "fixture 'page' not found", it means Playwright browsers are not installed.
 
 import os
 import socket

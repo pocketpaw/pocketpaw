@@ -49,6 +49,10 @@ uv run pocketpaw --dev
 # Run tests (skip e2e, they need Playwright browsers)
 uv run pytest --ignore=tests/e2e
 
+# Run E2E tests (requires one-time Playwright browser installation first)
+# Install browsers: uv run playwright install (or .venv\Scripts\python -m playwright install on Windows)
+uv run pytest tests/e2e/ -v
+
 # Run a specific test file
 uv run pytest tests/test_bus.py -v
 
