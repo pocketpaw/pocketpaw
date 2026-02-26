@@ -284,6 +284,23 @@ See the [full configuration reference](https://pocketpaw.xyz/getting-started/con
 
 ---
 
+## installation
+## First Run Note (API Key Required)
+
+After starting PocketPaw for the first time, the system health may show **UNHEALTHY** if no API key is configured.
+
+This does not mean installation failed.
+
+The dashboard and backend run successfully, but AI features require an API key.
+
+To enable full functionality:
+
+1. Open the dashboard at http://localhost:8888
+2. Navigate to **Settings → API Keys**
+3. Add your Anthropic API key
+
+You can still explore the interface without configuring an API key.
+
 ## Development
 
 **Prerequisites:**
