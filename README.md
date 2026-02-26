@@ -68,8 +68,8 @@ python3 --version
 python3 -m pip install --upgrade pip
 
 # 3. Create and activate virtual environment (optional but recommended)
-python3 -m venv pocketpaw-env
-source pocketpaw-env/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 
 # 4. Install PocketPaw
 pip install pocketpaw
@@ -110,8 +110,8 @@ python --version
 python -m pip install --upgrade pip
 
 # 3. Create and activate virtual environment (optional but recommended)
-python -m venv pocketpaw-env
-.\pocketpaw-env\Scripts\Activate.ps1
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
 # 4. Install PocketPaw
 pip install pocketpaw
