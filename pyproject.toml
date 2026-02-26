@@ -169,6 +169,7 @@ Homepage = "https://github.com/pocketpaw/pocketpaw"
 Repository = "https://github.com/pocketpaw/pocketpaw"
 Issues = "https://github.com/pocketpaw/pocketpaw/issues"
 Documentation = "https://github.com/pocketpaw/pocketpaw#readme"
+Discord = "https://dsc.gg/pocketpaw"
 Twitter = "https://twitter.com/prakashd88"
 
 [build-system]

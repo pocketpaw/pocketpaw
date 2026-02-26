@@ -67,6 +67,9 @@
         "github": {
           "href": "https://github.com/pocketpaw/pocketpaw",
           "showStars": true
+        },
+        "discord": {
+          "href": "https://dsc.gg/pocketpaw"
         }
       },
       "cta": {
@@ -739,7 +742,8 @@
     "showBranding": true,
     "showVersion": true,
     "socials": {
-      "github": "https://github.com/pocketpaw/pocketpaw"
+      "github": "https://github.com/pocketpaw/pocketpaw",
+      "discord": "https://dsc.gg/pocketpaw"
     },
     "links": [
       {
@@ -764,6 +768,7 @@
         "title": "Community",
         "items": [
           { "label": "GitHub", "href": "https://github.com/pocketpaw/pocketpaw", "external": true },
+          { "label": "Discord", "href": "https://dsc.gg/pocketpaw", "external": true },
           { "label": "Issues", "href": "https://github.com/pocketpaw/pocketpaw/issues", "external": true }
         ]
       }
