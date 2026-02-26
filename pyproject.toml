@@ -1,6 +1,6 @@
 [project]
 name = "pocketpaw"
-version = "0.4.5"
+version = "0.4.4"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -44,7 +44,6 @@ dependencies = [
     "anthropic>=0.45.0",
     # Agent Backend (recommended default)
     "claude-agent-sdk>=0.1.30",
-    "claude-code-sdk>=0.0.25",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.31.1",
