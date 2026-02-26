@@ -2,7 +2,7 @@
 
 The official documentation for [PocketPaw](https://github.com/pocketpaw/pocketpaw) — a self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, or a web dashboard.
 
-**Live site:** [docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)
+**Live site:** [pocketpaw.xyz](https://pocketpaw.xyz)
 
 ## Stack
 

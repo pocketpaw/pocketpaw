@@ -5,6 +5,7 @@
 import logging
 import os
 import stat
+import sys
 
 from pocketpaw.config import get_config_dir, get_config_path, get_settings
 
@@ -16,6 +17,13 @@ def _check_config_permissions() -> tuple[bool, str, bool]:
     config_path = get_config_path()
     if not config_path.exists():
         return True, "Config file does not exist yet (OK)", False
+
+    # On Windows, Python's stat() simulates Unix mode bits from the read-only
+    # attribute — S_IROTH/S_IRGRP are always non-zero (0o666), which would
+    # incorrectly flag every config file as world-readable.
+    # NTFS ACLs handle real permissions; skip the Unix-style check.
+    if sys.platform == "win32":
+        return True, "File permissions check skipped on Windows (use NTFS ACLs)", False
 
     mode = config_path.stat().st_mode
     world_read = mode & stat.S_IROTH
@@ -33,7 +41,10 @@ def _fix_config_permissions() -> None:
     """Set config file to owner-only read/write."""
     config_path = get_config_path()
     if config_path.exists():
-        os.chmod(config_path, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            os.chmod(config_path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass  # Windows NTFS doesn't support Unix permissions
 
 
 def _check_plaintext_api_keys() -> tuple[bool, str, bool]:
@@ -94,7 +105,10 @@ def _fix_audit_log() -> None:
     audit_path = get_config_dir() / "audit.jsonl"
     if not audit_path.exists():
         audit_path.touch()
-    os.chmod(audit_path, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        os.chmod(audit_path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass  # Windows NTFS doesn't support Unix permissions
 
 
 def _check_guardian_reachable() -> tuple[bool, str, bool]:

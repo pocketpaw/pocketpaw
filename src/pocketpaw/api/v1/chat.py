@@ -1,5 +1,7 @@
 # Chat router — send, stream (SSE), stop.
 # Created: 2026-02-20
+# Updated: 2026-02-25 — Tighten SSE session filter: block events without session_key
+#   instead of silently passing them through to all clients.
 #
 # Enables external clients to send messages and receive responses via HTTP.
 # SSE streaming reuses the entire AgentLoop pipeline via _APISessionBridge.
@@ -66,27 +68,42 @@ class _APISessionBridge:
                 await self.queue.put(chunk)
 
         async def _on_system(evt: SystemEvent) -> None:
-            meta = evt.metadata or {}
-            if meta.get("chat_id") and meta["chat_id"] != self.chat_id:
+            data = evt.data or {}
+            # Filter out events belonging to other sessions.
+            # session_key format is "channel:chat_id" (see InboundMessage.session_key).
+            # Events without a session_key are dropped — they are global events
+            # (health, daemon) that don't belong in a chat SSE stream.
+            sk = data.get("session_key", "")
+            if not sk or not sk.endswith(f":{self.chat_id}"):
                 return
             if evt.event_type == "tool_start":
                 await self.queue.put(
                     {
                         "event": "tool_start",
-                        "data": {"tool": meta.get("tool", ""), "input": meta.get("input", {})},
+                        "data": {
+                            "tool": data.get("name", ""),
+                            "input": data.get("params", {}),
+                        },
                     }
                 )
             elif evt.event_type == "tool_result":
                 await self.queue.put(
                     {
                         "event": "tool_result",
-                        "data": {"tool": meta.get("tool", ""), "output": evt.content},
+                        "data": {
+                            "tool": data.get("name", ""),
+                            "output": data.get("result", ""),
+                        },
                     }
                 )
             elif evt.event_type == "thinking":
-                await self.queue.put({"event": "thinking", "data": {"content": evt.content}})
+                await self.queue.put(
+                    {"event": "thinking", "data": {"content": data.get("content", "")}}
+                )
             elif evt.event_type == "error":
-                await self.queue.put({"event": "error", "data": {"detail": evt.content}})
+                await self.queue.put(
+                    {"event": "error", "data": {"detail": data.get("message", "")}}
+                )
 
         self._outbound_cb = _on_outbound
         self._system_cb = _on_system
