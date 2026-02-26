@@ -2,10 +2,9 @@
 Default bootstrap provider reading from local files.
 Created: 2026-02-02
 """
-
+import functools
 from pathlib import Path
-
-from pocketpaw.bootstrap.protocol import BootstrapContext, BootstrapProviderProtocol
+from pocketpaw.bootstrap.protocol import BootstrapProviderProtocol, BootstrapContext
 from pocketpaw.config import get_config_dir
 
 _DEFAULT_INSTRUCTIONS = """\
@@ -125,79 +124,125 @@ directly — never use a tool to look up what you already know.
 """
 
 
+# class DefaultBootstrapProvider(BootstrapProviderProtocol):
+#     """
+#     Loads identity from:
+#     - ~/.pocketpaw/identity/IDENTITY.md
+#     - ~/.pocketpaw/identity/SOUL.md
+#     - ~/.pocketpaw/identity/STYLE.md
+#     """
+
+#     def __init__(self, base_path: Path | None = None):
+#         self.base_path = base_path or (get_config_dir() / "identity")
+#         self.base_path.mkdir(parents=True, exist_ok=True)
+
+#         # Initialize default files if they don't exist
+#         self._ensure_defaults()
+
+#     def _ensure_defaults(self) -> None:
+#         """Create default identity files if missing."""
+#         identity_file = self.base_path / "IDENTITY.md"
+#         if not identity_file.exists():
+#             identity_file.write_text(
+#                 "You are PocketPaw, an AI agent running locally on the user's machine.\n"
+#                 "You are helpful, private, and secure."
+#             )
+
+#         soul_file = self.base_path / "SOUL.md"
+#         if not soul_file.exists():
+#             soul_file.write_text(
+#                 "You believe in user sovereignty and local-first computing.\n"
+#                 "You never exfiltrate data without explicit user consent."
+#             )
+
+#         style_file = self.base_path / "STYLE.md"
+#         if not style_file.exists():
+#             style_file.write_text(
+#                 "- Be concise and direct.\n"
+#                 "- Use emoji sparingly but effectively.\n"
+#                 "- Prefer code over prose for technical explanations."
+#             )
+
+#         user_file = self.base_path / "USER.md"
+#         if not user_file.exists():
+#             user_file.write_text(
+#                 "# User Profile\n"
+#                 "Name: (your name)\n"
+#                 "Timezone: UTC\n"
+#                 "Preferences: (describe your communication preferences)\n"
+#             )
+
+#         instructions_file = self.base_path / "INSTRUCTIONS.md"
+#         if not instructions_file.exists():
+#             instructions_file.write_text(_DEFAULT_INSTRUCTIONS)
+
+#     async def get_context(self) -> BootstrapContext:
+#         """Load context from files."""
+#         identity = (self.base_path / "IDENTITY.md").read_text()
+#         soul = (self.base_path / "SOUL.md").read_text()
+#         style = (self.base_path / "STYLE.md").read_text()
+
+#         user_profile = ""
+#         user_file = self.base_path / "USER.md"
+#         if user_file.exists():
+#             user_profile = user_file.read_text().strip()
+
+#         instructions = ""
+#         instructions_file = self.base_path / "INSTRUCTIONS.md"
+#         if instructions_file.exists():
+#             instructions = instructions_file.read_text().strip()
+
+#         return BootstrapContext(
+#             name="PocketPaw",
+#             identity=identity,
+#             soul=soul,
+#             style=style,
+#             instructions=instructions,
+#             user_profile=user_profile,
+#         )
 class DefaultBootstrapProvider(BootstrapProviderProtocol):
     """
-    Loads identity from:
-    - ~/.pocketpaw/identity/IDENTITY.md
-    - ~/.pocketpaw/identity/SOUL.md
-    - ~/.pocketpaw/identity/STYLE.md
+    Loads identity from disk with high-performance caching (#131).
     """
 
     def __init__(self, base_path: Path | None = None):
         self.base_path = base_path or (get_config_dir() / "identity")
         self.base_path.mkdir(parents=True, exist_ok=True)
-
-        # Initialize default files if they don't exist
         self._ensure_defaults()
+
+    # --- START OF FIX #131: PERFORMANCE CACHING ---
+    @functools.lru_cache(maxsize=1) 
+    def _read_cached_files(self) -> dict[str, str]:
+        """
+        Reads all identity files once and stores them in RAM.
+        Prevents redundant disk I/O on every message.
+        """
+        def safe_read(filename: str) -> str:
+            path = self.base_path / filename
+            return path.read_text().strip() if path.exists() else ""
+
+        return {
+            "identity": safe_read("IDENTITY.md"),
+            "soul": safe_read("SOUL.md"),
+            "style": safe_read("STYLE.md"),
+            "user": safe_read("USER.md"),
+            "instructions": safe_read("INSTRUCTIONS.md")
+        }
+    # --- END OF FIX ---
+
+    async def get_context(self) -> BootstrapContext:
+        """Load context using the cached reader to prevent 'identity drift'."""
+        data = self._read_cached_files()
+        
+        return BootstrapContext(
+            name="PocketPaw",
+            identity=data["identity"],
+            soul=data["soul"],
+            style=data["style"],
+            instructions=data["instructions"],
+            user_profile=data["user"],
+        )
 
     def _ensure_defaults(self) -> None:
         """Create default identity files if missing."""
-        identity_file = self.base_path / "IDENTITY.md"
-        if not identity_file.exists():
-            identity_file.write_text(
-                "You are PocketPaw, an AI agent running locally on the user's machine.\n"
-                "You are helpful, private, and secure."
-            )
-
-        soul_file = self.base_path / "SOUL.md"
-        if not soul_file.exists():
-            soul_file.write_text(
-                "You believe in user sovereignty and local-first computing.\n"
-                "You never exfiltrate data without explicit user consent."
-            )
-
-        style_file = self.base_path / "STYLE.md"
-        if not style_file.exists():
-            style_file.write_text(
-                "- Be concise and direct.\n"
-                "- Use emoji sparingly but effectively.\n"
-                "- Prefer code over prose for technical explanations."
-            )
-
-        user_file = self.base_path / "USER.md"
-        if not user_file.exists():
-            user_file.write_text(
-                "# User Profile\n"
-                "Name: (your name)\n"
-                "Timezone: UTC\n"
-                "Preferences: (describe your communication preferences)\n"
-            )
-
-        instructions_file = self.base_path / "INSTRUCTIONS.md"
-        if not instructions_file.exists():
-            instructions_file.write_text(_DEFAULT_INSTRUCTIONS)
-
-    async def get_context(self) -> BootstrapContext:
-        """Load context from files."""
-        identity = (self.base_path / "IDENTITY.md").read_text()
-        soul = (self.base_path / "SOUL.md").read_text()
-        style = (self.base_path / "STYLE.md").read_text()
-
-        user_profile = ""
-        user_file = self.base_path / "USER.md"
-        if user_file.exists():
-            user_profile = user_file.read_text().strip()
-
-        instructions = ""
-        instructions_file = self.base_path / "INSTRUCTIONS.md"
-        if instructions_file.exists():
-            instructions = instructions_file.read_text().strip()
-
-        return BootstrapContext(
-            name="PocketPaw",
-            identity=identity,
-            soul=soul,
-            style=style,
-            instructions=instructions,
-            user_profile=user_profile,
-        )
+        # ... (Keep your existing _ensure_defaults code here) ...

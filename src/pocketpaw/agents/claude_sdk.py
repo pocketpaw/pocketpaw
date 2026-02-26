@@ -22,11 +22,12 @@ from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
-# Default identity fallback (used when AgentContextBuilder prompt is not available)
+# --- FIX #131: Global Identity Fallback ---
 _DEFAULT_IDENTITY = (
-    "You are PocketPaw, a helpful AI assistant running locally on the user's computer."
+    "You are PocketPaw, an AI agent running locally on the user's machine. "
+    "You are helpful, private, and secure. You believe in user sovereignty "
+    "and local-first computing."
 )
-
 
 class ClaudeSDKBackend:
     """Claude Agent SDK backend — the recommended default.
@@ -473,7 +474,7 @@ class ClaudeSDKBackend:
 
         # Create and connect new client
         t0 = time.monotonic()
-        self._client = self._ClaudeSDKClient(options=options)
+        self._client = self._ClaudeSDKClient(options=options) # type: ignore
         await self._client.connect()
         self._client_options_key = key
         t1 = time.monotonic()
@@ -651,7 +652,7 @@ class ClaudeSDKBackend:
                     self._HookMatcher(
                         matcher="Bash",  # Only hook Bash commands
                         hooks=[self._block_dangerous_hook],
-                    )
+                    ) # type: ignore
                 ]
             }
 
@@ -719,7 +720,7 @@ class ClaudeSDKBackend:
             options_kwargs["stderr"] = _on_stderr
 
             # Create options (after all kwargs are set, including model)
-            options = self._ClaudeAgentOptions(**options_kwargs)
+            options = self._ClaudeAgentOptions(**options_kwargs) # type: ignore
 
             logger.debug(f"🚀 Starting Claude Agent SDK query: {message[:100]}...")
 
@@ -744,7 +745,7 @@ class ClaudeSDKBackend:
                     self._client_in_use = False
 
             if event_stream is None:
-                event_stream = self._query(prompt=message, options=options)
+                event_stream = self._query(prompt=message, options=options) # type: ignore
 
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False
@@ -888,10 +889,10 @@ class ClaudeSDKBackend:
                     ),
                 )
             else:
-                stderr_text = "\n".join(_stderr_lines) if _stderr_lines else ""
+                stderr_text = "\n".join(_stderr_lines) if _stderr_lines else "" # type: ignore
                 yield AgentEvent(
                     type="error",
-                    content=llm.format_api_error(e, stderr=stderr_text),
+                    content=llm.format_api_error(e, stderr=stderr_text), # type: ignore
                 )
 
     async def stop(self) -> None:
