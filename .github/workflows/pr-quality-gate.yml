@@ -1,9 +1,10 @@
-# PR quality gate — auto-labels shallow PRs for maintainer review
+# PR quality gate — enforces contribution standards automatically.
+# Updated: 2026-02-26 — Added branch enforcement, cosmetic PR detection, size labels, reopen guard.
 name: PR Quality Gate
 
 on:
   pull_request:
-    types: [opened, edited, synchronize]
+    types: [opened, edited, synchronize, reopened]
 
 permissions:
   pull-requests: write
@@ -25,24 +26,201 @@ jobs:
             const pr = context.payload.pull_request;
             const body = pr.body || '';
             const title = pr.title || '';
+            const base = pr.base.ref;
+            const additions = pr.additions || 0;
+            const deletions = pr.deletions || 0;
+            const changedFiles = pr.changed_files || 0;
 
             const issues = [];
+            const warnings = [];
             const MARKER = '<!-- pr-quality-gate -->';
 
-            // Check for conventional commit title (feat:, fix:, docs:, etc.)
+            // ── Hard block: PRs targeting main ──────────────────────────
+            if (base === 'main') {
+              const message = `${MARKER}\n` +
+                `## PR targets \`main\` — closing automatically\n\n` +
+                `All PRs must target the \`dev\` branch. The \`main\` branch is updated only via release merges.\n\n` +
+                `Please reopen this PR against \`dev\`:\n` +
+                `\`\`\`bash\n` +
+                `gh pr edit ${pr.number} --base dev\n` +
+                `\`\`\`\n\n` +
+                `See [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md#branch-strategy) for details.`;
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: message
+              });
+
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                state: 'closed'
+              });
+
+              return; // Stop here — no point checking anything else
+            }
+
+            // ── Reopen guard: block reopening of previously closed PRs ──
+            if (context.payload.action === 'reopened') {
+              // Check if the bot previously closed this PR
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+              });
+
+              const wasBotClosed = comments.some(
+                c => c.user.type === 'Bot' && c.body.includes(MARKER) && c.body.includes('closing')
+              );
+
+              // Check if a maintainer closed it
+              const { data: events } = await github.rest.issues.listEventsForTimeline({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                per_page: 100
+              });
+
+              const maintainerClosed = events.some(e =>
+                e.event === 'closed' &&
+                e.actor &&
+                e.actor.login !== pr.user.login &&
+                e.actor.type !== 'Bot'
+              );
+
+              if (wasBotClosed || maintainerClosed) {
+                const reason = wasBotClosed
+                  ? 'This PR was previously closed by the quality gate bot.'
+                  : 'This PR was previously closed by a maintainer.';
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: `${MARKER}\n## Reopened PR closed automatically\n\n${reason} Please don't reopen closed PRs — if you've addressed the feedback, open a new PR instead.\n\nSee [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md) for guidelines.`
+                });
+
+                await github.rest.pulls.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  state: 'closed'
+                });
+
+                return;
+              }
+            }
+
+            // ── Size labels ─────────────────────────────────────────────
+            const totalChanged = additions + deletions;
+            let sizeLabel = 'size/M';
+            if (totalChanged <= 10 && changedFiles <= 1) sizeLabel = 'size/XS';
+            else if (totalChanged <= 50 && changedFiles <= 3) sizeLabel = 'size/S';
+            else if (totalChanged <= 200) sizeLabel = 'size/M';
+            else if (totalChanged <= 500) sizeLabel = 'size/L';
+            else sizeLabel = 'size/XL';
+
+            // Remove old size labels and apply new one
+            const sizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
+            for (const label of sizeLabels) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: label
+                });
+              } catch (e) { /* label wasn't present */ }
+            }
+
+            // Ensure size labels exist before applying
+            for (const label of sizeLabels) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label
+                });
+              } catch (e) {
+                const colors = { 'size/XS': 'e6e6e6', 'size/S': 'c2e0c6', 'size/M': 'fbca04', 'size/L': 'f9a825', 'size/XL': 'e53935' };
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label,
+                  color: colors[label] || 'cccccc'
+                });
+              }
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels: [sizeLabel]
+            });
+
+            // ── Cosmetic / doc-only PR detection ────────────────────────
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100
+            });
+
+            const fileNames = files.map(f => f.filename);
+            const docOnlyFiles = fileNames.every(f =>
+              f.endsWith('.md') ||
+              f.endsWith('.txt') ||
+              f.endsWith('.rst') ||
+              f === 'LICENSE' ||
+              f === '.gitignore'
+            );
+
+            // Check if changes are purely cosmetic (whitespace, comments, formatting)
+            const cosmeticPatterns = files.every(f => {
+              const patch = f.patch || '';
+              const meaningfulLines = patch.split('\n').filter(line => {
+                if (!line.startsWith('+') && !line.startsWith('-')) return false;
+                if (line.startsWith('+++') || line.startsWith('---')) return false;
+                const content = line.slice(1).trim();
+                // Empty lines, comments, whitespace-only
+                return content.length > 0 &&
+                  !content.startsWith('#') &&
+                  !content.startsWith('//') &&
+                  !content.startsWith('/*') &&
+                  !content.startsWith('*') &&
+                  !content.startsWith('"""') &&
+                  !content.startsWith("'''");
+              });
+              return meaningfulLines.length === 0;
+            });
+
+            if (cosmeticPatterns && changedFiles > 0) {
+              issues.push('- This PR appears to contain only cosmetic changes (whitespace, comments, formatting). We don\'t accept PRs that only change comments or formatting — see [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md#what-we-dont-accept).');
+            }
+
+            // Doc-only PRs with tiny diffs get flagged
+            if (docOnlyFiles && totalChanged <= 10 && changedFiles <= 2) {
+              warnings.push('- This is a small documentation-only change. For minor doc fixes (typos, renamed variables), consider opening an issue or commenting instead of a full PR.');
+            }
+
+            // ── Conventional commit title ───────────────────────────────
             const conventionalRe = /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?:\s.+/;
             if (!conventionalRe.test(title)) {
               issues.push('- PR title does not follow [Conventional Commits](https://www.conventionalcommits.org/) format (e.g. `feat: add login page`, `fix(auth): handle expired tokens`).');
             }
 
-            // Check for linked issue
+            // ── Linked issue ────────────────────────────────────────────
             const hasIssueRef = /(?:fixes|closes|resolves)\s*#\d+/i.test(body) ||
                                 /#\d+/.test(body);
             if (!hasIssueRef) {
-              issues.push('- No linked issue found. PRs should reference an issue (`Fixes #123`).');
+              issues.push('- No linked issue found. PRs should reference an issue (`Fixes #123`). Open an issue first if one doesn\'t exist.');
             }
 
-            // Check for empty or template-only body
+            // ── Description quality ─────────────────────────────────────
             const strippedBody = body
               .replace(/<!--[\s\S]*?-->/g, '')
               .replace(/#+\s*.*/g, '')
@@ -52,14 +230,24 @@ jobs:
               issues.push('- PR description is too short. Please describe what this PR does and how to test it.');
             }
 
-            // Check for evidence of testing
+            // ── Testing evidence ────────────────────────────────────────
             const hasTestEvidence = /terminal|output|screenshot|tested|test result/i.test(body) ||
                                     /```[\s\S]*```/.test(body);
             if (!hasTestEvidence) {
               issues.push('- No evidence of local testing found. Please include terminal output or screenshots.');
             }
 
-            // Find existing bot comment (for idempotent updates)
+            // ── Unrelated changes detection ─────────────────────────────
+            // Flag PRs that touch files outside the likely scope
+            const hasReadmeChange = fileNames.includes('README.md');
+            const hasSourceChange = fileNames.some(f => f.startsWith('src/'));
+            const hasTestChange = fileNames.some(f => f.startsWith('tests/'));
+
+            if (hasReadmeChange && hasSourceChange && !title.toLowerCase().includes('docs')) {
+              warnings.push('- This PR modifies both source code and README.md. If the README change is unrelated to the code change, please split it into a separate PR.');
+            }
+
+            // ── Find existing bot comment ───────────────────────────────
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -69,17 +257,26 @@ jobs:
               c => c.user.type === 'Bot' && c.body.includes(MARKER)
             );
 
-            if (issues.length > 0) {
-              // Add label
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: pr.number,
-                labels: ['needs-work']
-              });
+            if (issues.length > 0 || warnings.length > 0) {
+              let message = `${MARKER}\n`;
 
-              // Post or update comment
-              const message = `${MARKER}\nThanks for the PR. A few things need attention before we can review:\n\n${issues.join('\n')}\n\nPlease update your PR to address these points. Check the [PR template](../blob/main/.github/PULL_REQUEST_TEMPLATE.md) for guidance.\n\nPRs that don't meet minimum quality standards will be closed after 7 days.`;
+              if (issues.length > 0) {
+                // Add needs-work label
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: ['needs-work']
+                });
+
+                message += `### Issues (must fix)\n\n${issues.join('\n')}\n\n`;
+              }
+
+              if (warnings.length > 0) {
+                message += `### Heads up\n\n${warnings.join('\n')}\n\n`;
+              }
+
+              message += `Please update your PR to address these points. PRs that don't meet contribution standards will be closed after 7 days.`;
 
               if (botComment) {
                 await github.rest.issues.updateComment({
@@ -97,7 +294,7 @@ jobs:
                 });
               }
             } else {
-              // All checks pass — remove label and update/delete bot comment
+              // All checks pass
               try {
                 await github.rest.issues.removeLabel({
                   owner: context.repo.owner,
@@ -105,9 +302,7 @@ jobs:
                   issue_number: pr.number,
                   name: 'needs-work'
                 });
-              } catch (e) {
-                // Label wasn't present — that's fine
-              }
+              } catch (e) { /* label wasn't present */ }
 
               if (botComment) {
                 await github.rest.issues.updateComment({

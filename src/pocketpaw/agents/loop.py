@@ -48,7 +48,7 @@ class AgentLoop:
 
     Orchestrates the flow of data between Bus, Memory, and AgentRouter.
     Uses AgentRouter to delegate to the selected backend (claude_agent_sdk,
-    pocketpaw_native, or open_interpreter).
+    openai_agents, google_adk, codex_cli, opencode, or copilot_sdk).
     """
 
     def __init__(self):
@@ -187,6 +187,7 @@ class AgentLoop:
                     )
                 )
 
+        router = None
         try:
             # 0. Injection scan for non-owner sources
             content = message.content
@@ -433,10 +434,11 @@ class AgentLoop:
             except Exception:
                 pass
             # Kill the backend on error
-            try:
-                await router.stop()
-            except Exception:
-                pass
+            if router is not None:
+                try:
+                    await router.stop()
+                except Exception:
+                    pass
 
             # Apply output redaction to exception messages
             error_msg = redact_output(f"An error occurred: {str(e)}")

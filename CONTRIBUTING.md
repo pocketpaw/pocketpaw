@@ -1,8 +1,23 @@
 # Contributing to PocketPaw
 
+<!-- Updated: 2026-02-26 — Added "What we don't accept" section, tightened PR expectations. -->
+
 PocketPaw is an open-source AI agent that runs locally and connects to Telegram, Discord, Slack, WhatsApp, and a web dashboard. Python 3.11+, async everywhere, protocol-oriented.
 
-We welcome contributions of all kinds: bug fixes, new tools, channel adapters, docs, tests.
+We welcome contributions that solve real problems: bug fixes, new tools, channel adapters, tests, meaningful documentation improvements.
+
+## What we don't accept
+
+To keep the review queue healthy, we close PRs that fall into these categories:
+
+- **Cosmetic-only changes** — whitespace fixes, comment rewording, reformatting code that already passes linting. If `ruff` is happy, we are too.
+- **Trivial doc changes as standalone PRs** — fixing a single typo in README, renaming a variable in a code example, updating a link. These should be a comment on an issue or batched into a larger doc PR.
+- **Unrelated changes bundled together** — a PR should do one thing. Don't sneak a README change into a bug fix. Split them.
+- **PRs without a linked issue** — every PR needs a reason to exist. Open an issue first, even if it's brief. This lets us discuss the approach before you write code.
+- **PRs targeting `main`** — these are auto-closed by our bot. See branch strategy below.
+- **AI-generated PRs with no evidence of understanding** — if the PR description is generic or the author can't explain the change, we'll close it.
+
+If you're new and want to contribute, check [`good first issue`](https://github.com/pocketpaw/pocketpaw/labels/good%20first%20issue) — those are real problems that need solving and are the best way to make a meaningful first contribution.
 
 ## Branch strategy
 
@@ -48,6 +63,10 @@ uv run pocketpaw --dev
 
 # Run tests (skip e2e, they need Playwright browsers)
 uv run pytest --ignore=tests/e2e
+
+# Run E2E tests (requires one-time Playwright browser installation first)
+# Install browsers: uv run playwright install (or .venv\Scripts\python -m playwright install on Windows)
+uv run pytest tests/e2e/ -v
 
 # Run a specific test file
 uv run pytest tests/test_bus.py -v

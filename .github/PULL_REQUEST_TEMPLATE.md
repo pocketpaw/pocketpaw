@@ -1,10 +1,17 @@
+<!-- Updated: 2026-02-26 — Added branch/issue warnings, tightened checklist. -->
+
+> **Before opening this PR:**
+> - Does it target `dev`? PRs against `main` are auto-closed.
+> - Is there a linked issue? PRs without one will be closed.
+> - Did you read [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md)?
+
 ## What does this PR do?
 
 <!-- Describe the change in 2-3 sentences. What problem does it solve? -->
 
 ## Related Issue
 
-<!-- Link the issue this PR addresses. PRs without a linked issue may be closed. -->
+<!-- Link the issue this PR addresses. PRs without a linked issue will be closed. -->
 
 Fixes #
 
@@ -32,8 +39,11 @@ paste output here
 
 ## Checklist
 
+- [ ] PR targets `dev` branch (not `main`)
+- [ ] Linked to an existing issue
 - [ ] I have run PocketPaw locally and tested my changes
-- [ ] This PR is linked to an existing issue
+- [ ] Tests pass (`uv run pytest --ignore=tests/e2e`)
+- [ ] Linting passes (`uv run ruff check .`)
 - [ ] I have added/updated tests if applicable
-- [ ] I have not made whitespace-only or typo-only changes
-- [ ] My code follows the existing style in the codebase
+- [ ] No unrelated changes bundled in this PR
+- [ ] No secrets or credentials in the diff
