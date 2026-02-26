@@ -25,11 +25,11 @@ _neonize_loop_lock = threading.Lock()
 
 
 def _ensure_neonize_loop_running() -> None:
-    """Start neonize's internal event loop in a daemon thread if not already running.
+    """Start neonize's event_global_loop in a daemon thread if not already running.
 
-    Neonize creates its own asyncio loop (event_global_loop) for dispatching
-    QR callbacks, message events, etc. via run_coroutine_threadsafe().  That loop
-    must be running for any events to fire.  It is NOT started by default.
+    Neonize dispatches all Go→Python callbacks (QR, messages, connect events)
+    via asyncio.run_coroutine_threadsafe() onto event_global_loop.  That loop
+    must be running for any callbacks to fire.
     """
     global _neonize_loop_started
     if _neonize_loop_started:
@@ -39,12 +39,13 @@ def _ensure_neonize_loop_running() -> None:
             return
         from neonize.aioze.events import event_global_loop
 
-        thread = threading.Thread(
-            target=event_global_loop.run_forever,
-            daemon=True,
-            name="neonize-event-loop",
-        )
-        thread.start()
+        if not event_global_loop.is_running():
+            thread = threading.Thread(
+                target=event_global_loop.run_forever,
+                daemon=True,
+                name="neonize-event-loop",
+            )
+            thread.start()
         _neonize_loop_started = True
         logger.debug("neonize event_global_loop started in background thread")
 
@@ -70,7 +71,7 @@ class NeonizeAdapter(BaseChannelAdapter):
         self._connected = False
         self._client_task: asyncio.Task | None = None
         self._connect_future: Any = None
-        self._neonize_loop: Any = None  # neonize's event_global_loop (set in _on_start)
+        self._neonize_loop: Any = None  # dedicated event loop for neonize (set in _on_start)
         self._buffers: dict[str, str] = {}
         self._jid_cache: dict[str, Any] = {}  # chat_id string → JID protobuf
 
@@ -92,7 +93,7 @@ class NeonizeAdapter(BaseChannelAdapter):
             from neonize.aioze.events import ConnectedEv, MessageEv
             from neonize.utils.jid import Jid2String
 
-        # Neonize dispatches events via its own loop — make sure it's running
+        # Neonize dispatches all callbacks via event_global_loop — start it
         _ensure_neonize_loop_running()
 
         # Ensure parent directory exists
@@ -193,7 +194,7 @@ class NeonizeAdapter(BaseChannelAdapter):
         # raise a catchable Python exception instead.
         await self._preflight_connectivity_check()
 
-        # Schedule connect() on neonize's own event loop (not FastAPI's)
+        # Schedule connect() on neonize's event_global_loop (not FastAPI's)
         from neonize.aioze.events import event_global_loop
 
         self._neonize_loop = event_global_loop

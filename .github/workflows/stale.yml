@@ -1,0 +1,45 @@
+# Stale — auto-close abandoned PRs and issues.
+# Created: 2026-02-26
+name: Stale
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # Every Monday at 9am UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # PRs
+          days-before-pr-stale: 14
+          days-before-pr-close: 7
+          stale-pr-label: 'stale'
+          stale-pr-message: >
+            This PR has been inactive for 14 days. It will be closed in 7 days
+            if there's no further activity. If you're still working on this,
+            push an update or leave a comment.
+          close-pr-message: >
+            Closing due to inactivity. Feel free to reopen if you'd like to
+            pick this back up.
+
+          # Issues
+          days-before-issue-stale: 30
+          days-before-issue-close: 14
+          stale-issue-label: 'stale'
+          stale-issue-message: >
+            This issue has been inactive for 30 days. It will be closed in 14 days
+            if there's no further activity.
+          close-issue-message: >
+            Closing due to inactivity. Reopen if this is still relevant.
+
+          # Don't stale these
+          exempt-issue-labels: 'pinned,good first issue,roadmap,security'
+          exempt-pr-labels: 'pinned,work-in-progress'
+          exempt-all-assignees: true

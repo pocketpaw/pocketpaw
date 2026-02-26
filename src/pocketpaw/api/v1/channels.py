@@ -1,5 +1,7 @@
 # Channels router — status, save, toggle + extras check/install.
 # Created: 2026-02-20
+# Updated: 2026-02-25 — Fix WhatsApp QR import path, revert install_extras to
+#   return error JSON (200) instead of HTTP 500 to avoid breaking dashboard JS.
 
 from __future__ import annotations
 
@@ -84,6 +86,7 @@ async def toggle_channel(request: Request):
         _CHANNEL_DEPS,
         _channel_is_configured,
         _channel_is_running,
+        _is_module_importable,
         _start_channel_adapter,
         _stop_channel_adapter,
     )
@@ -104,17 +107,21 @@ async def toggle_channel(request: Request):
             return {"error": f"{channel} is not configured — save tokens first"}
         try:
             await _start_channel_adapter(channel, settings)
-        except ImportError:
+        except ImportError as exc:
             dep = _CHANNEL_DEPS.get(channel)
             if dep:
                 _mod, package, pip_spec = dep
+                # Check if the main dep is actually installed — the ImportError
+                # might be from a sub-module or transitive dependency.
+                installed = _is_module_importable(_mod)
                 return {
-                    "missing_dep": True,
+                    "missing_dep": not installed,
                     "channel": channel,
                     "package": package,
                     "pip_spec": pip_spec,
+                    "error": str(exc) if installed else None,
                 }
-            return {"error": f"Failed to start {channel}: missing dependency"}
+            return {"error": f"Failed to start {channel}: {exc}"}
         except Exception as e:
             return {"error": f"Failed to start {channel}: {e}"}
     elif action == "stop":
@@ -131,6 +138,20 @@ async def toggle_channel(request: Request):
         "channel": channel,
         "configured": _channel_is_configured(channel, settings),
         "running": _channel_is_running(channel),
+    }
+
+
+@router.get("/whatsapp/qr")
+async def get_whatsapp_qr():
+    """Get current WhatsApp QR code for neonize pairing."""
+    from pocketpaw.dashboard_state import _channel_adapters
+
+    adapter = _channel_adapters.get("whatsapp")
+    if adapter is None or not hasattr(adapter, "_qr_data"):
+        return {"qr": None, "connected": False}
+    return {
+        "qr": getattr(adapter, "_qr_data", None),
+        "connected": getattr(adapter, "_connected", False),
     }
 
 
@@ -159,7 +180,7 @@ async def install_extras(request: Request):
 
     dep = _CHANNEL_DEPS.get(extra)
     if dep is None:
-        raise HTTPException(status_code=400, detail=f"Unknown extra: {extra}")
+        return {"status": "noop", "reason": f"No optional dependency for '{extra}'"}
 
     import_mod, _package, _pip_spec = dep
     if _is_module_importable(import_mod):
@@ -173,10 +194,26 @@ async def install_extras(request: Request):
     except RuntimeError as exc:
         return {"error": str(exc)}
 
+    import importlib
     import sys
 
+    # Clear adapter module cache so the next import picks up the new dep
     adapter_modules = [k for k in sys.modules if k.startswith("pocketpaw.bus.adapters.")]
     for mod in adapter_modules:
         del sys.modules[mod]
+
+    # Also clear the installed module itself from sys.modules cache
+    top_pkg = import_mod.split(".")[0]
+    for key in list(sys.modules):
+        if key == top_pkg or key.startswith(top_pkg + "."):
+            del sys.modules[key]
+    importlib.invalidate_caches()
+
+    # Verify the module is actually importable now
+    if not _is_module_importable(import_mod):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Installed but cannot import '{import_mod}'. You may need to restart.",
+        )
 
     return {"status": "ok"}

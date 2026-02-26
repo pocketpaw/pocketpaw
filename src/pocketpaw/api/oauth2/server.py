@@ -45,7 +45,7 @@ class AuthorizationServer:
         if client is None:
             return None, "invalid_client"
 
-        if redirect_uri not in client.redirect_uris:
+        if not client.matches_redirect_uri(redirect_uri):
             return None, "invalid_redirect_uri"
 
         if code_challenge_method != "S256":

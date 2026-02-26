@@ -15,6 +15,18 @@ Changes:
   - 2026-02-03: Handle port-in-use gracefully with automatic port finding.
 """
 
+# Force UTF-8 encoding on Windows before any imports that might produce output
+import os
+import sys
+
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 import argparse
 import asyncio
 import logging
@@ -35,9 +47,7 @@ setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
 
-def run_dashboard_mode(
-    settings: Settings, host: str, port: int, dev: bool = False
-) -> None:
+def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
     """Run in web dashboard mode."""
     from pocketpaw.dashboard import run_dashboard
 
@@ -78,9 +88,7 @@ Examples:
         action="store_true",
         help="Run Telegram-only mode (legacy pairing flow)",
     )
-    parser.add_argument(
-        "--discord", action="store_true", help="Run headless Discord bot"
-    )
+    parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
     parser.add_argument(
         "--slack",
         action="store_true",
@@ -91,18 +99,10 @@ Examples:
         action="store_true",
         help="Run headless WhatsApp webhook server",
     )
-    parser.add_argument(
-        "--signal", action="store_true", help="Run headless Signal bot"
-    )
-    parser.add_argument(
-        "--matrix", action="store_true", help="Run headless Matrix bot"
-    )
-    parser.add_argument(
-        "--teams", action="store_true", help="Run headless Teams bot"
-    )
-    parser.add_argument(
-        "--gchat", action="store_true", help="Run headless Google Chat bot"
-    )
+    parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
+    parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
+    parser.add_argument("--teams", action="store_true", help="Run headless Teams bot")
+    parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
     parser.add_argument(
         "--security-audit",
         action="store_true",
@@ -126,9 +126,7 @@ Examples:
         default=8888,
         help="Port for web server (default: 8888)",
     )
-    parser.add_argument(
-        "--dev", action="store_true", help="Development mode with auto-reload"
-    )
+    parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
         "--check-ollama",
         action="store_true",
@@ -186,9 +184,7 @@ Examples:
                         if r.fix_hint:
                             print(f"         {r.fix_hint}")
                 status = engine.overall_status
-                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(
-                    status, "0"
-                )
+                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(status, "0")
                 print(f"\n  System: \033[{color}m{status.upper()}\033[0m\n")
         except Exception:
             pass  # Health engine failure never blocks startup
@@ -249,15 +245,18 @@ Examples:
             # Default: web dashboard (also handles --web flag)
             run_dashboard_mode(settings, host, args.port, dev=args.dev)
     except KeyboardInterrupt:
-        logger.info("👋 PocketPaw stopped.")
+        logger.info("PocketPaw stopped.")
     finally:
         # Coordinated singleton shutdown
         from pocketpaw.lifecycle import shutdown_all
 
         try:
-            asyncio.run(shutdown_all())
-        except RuntimeError:
-            # Event loop already closed — best-effort sync cleanup
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(shutdown_all())
+            loop.close()
+        except (RuntimeError, OSError):
+            # RuntimeError: event loop already closed (common on Windows)
+            # OSError: socket/fd cleanup errors during forced shutdown
             pass
 
 
