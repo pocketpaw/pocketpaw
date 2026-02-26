@@ -63,7 +63,7 @@ async def authorize(
 
     server = get_oauth_server()
     client = server.storage.get_client(client_id)
-    if client is None or redirect_uri not in client.redirect_uris:
+    if client is None or not client.matches_redirect_uri(redirect_uri):
         raise HTTPException(status_code=400, detail="Invalid authorization request")
 
     scope_badges = " ".join(f'<span class="scope">{s}</span>' for s in scope.split())

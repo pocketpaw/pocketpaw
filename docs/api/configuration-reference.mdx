@@ -13,161 +13,161 @@ Complete reference of all configuration settings. All environment variables use 
 
 ## Core Settings
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `anthropic_api_key` | `POCKETPAW_ANTHROPIC_API_KEY` | — | Anthropic API key |
-| `openai_api_key` | `POCKETPAW_OPENAI_API_KEY` | — | OpenAI API key |
-| `agent_backend` | `POCKETPAW_AGENT_BACKEND` | `claude_agent_sdk` | Agent backend |
-| `claude_sdk_model` | `POCKETPAW_CLAUDE_SDK_MODEL` | `""` (auto) | Model override for Claude SDK (empty = let Claude Code decide) |
-| `claude_sdk_max_turns` | `POCKETPAW_CLAUDE_SDK_MAX_TURNS` | `25` | Max tool-use turns per query in Claude SDK |
-| `smart_routing_enabled` | `POCKETPAW_SMART_ROUTING_ENABLED` | `false` | Smart model routing (disabled by default — conflicts with Claude Code) |
-| `model_tier_simple` | `POCKETPAW_MODEL_TIER_SIMPLE` | `claude-haiku-4-5-20251001` | Model for simple tasks (when smart routing is on) |
-| `model_tier_moderate` | `POCKETPAW_MODEL_TIER_MODERATE` | `claude-sonnet-4-5-20250929` | Model for moderate tasks (when smart routing is on) |
-| `model_tier_complex` | `POCKETPAW_MODEL_TIER_COMPLEX` | `claude-opus-4-6` | Model for complex tasks (when smart routing is on) |
-| `dashboard_host` | `POCKETPAW_DASHBOARD_HOST` | `0.0.0.0` | Dashboard bind address |
-| `dashboard_port` | `POCKETPAW_DASHBOARD_PORT` | `8000` | Dashboard port |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `anthropic_api_key` | `POCKETPAW_ANTHROPIC_API_KEY` | string | — | Anthropic API key |
+| `openai_api_key` | `POCKETPAW_OPENAI_API_KEY` | string | — | OpenAI API key |
+| `agent_backend` | `POCKETPAW_AGENT_BACKEND` | enum | `claude_agent_sdk` | Agent backend (`claude_agent_sdk`, `openai_agents`, `google_adk`, `codex_cli`, `opencode`, `copilot_sdk`) |
+| `claude_sdk_model` | `POCKETPAW_CLAUDE_SDK_MODEL` | string | `""` (auto) | Model override for Claude SDK (empty = let Claude Code decide) |
+| `claude_sdk_max_turns` | `POCKETPAW_CLAUDE_SDK_MAX_TURNS` | integer | `25` | Max tool-use turns per query in Claude SDK |
+| `smart_routing_enabled` | `POCKETPAW_SMART_ROUTING_ENABLED` | boolean | `false` | Smart model routing (disabled by default — conflicts with Claude Code) |
+| `model_tier_simple` | `POCKETPAW_MODEL_TIER_SIMPLE` | string | `claude-haiku-4-5-20251001` | Model for simple tasks (when smart routing is on) |
+| `model_tier_moderate` | `POCKETPAW_MODEL_TIER_MODERATE` | string | `claude-sonnet-4-5-20250929` | Model for moderate tasks (when smart routing is on) |
+| `model_tier_complex` | `POCKETPAW_MODEL_TIER_COMPLEX` | string | `claude-opus-4-6` | Model for complex tasks (when smart routing is on) |
+| `dashboard_host` | `POCKETPAW_DASHBOARD_HOST` | string | `0.0.0.0` | Dashboard bind address |
+| `dashboard_port` | `POCKETPAW_DASHBOARD_PORT` | integer | `8000` | Dashboard port |
 
 ## LLM Provider
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `llm_provider` | `POCKETPAW_LLM_PROVIDER` | `auto` | LLM provider (`auto`, `anthropic`, `openai`, `ollama`) |
-| `ollama_host` | `POCKETPAW_OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `ollama_model` | `POCKETPAW_OLLAMA_MODEL` | `llama3.2` | Ollama model name |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `llm_provider` | `POCKETPAW_LLM_PROVIDER` | enum | `auto` | LLM provider (`auto`, `anthropic`, `openai`, `ollama`, `openai_compatible`, `gemini`) |
+| `ollama_host` | `POCKETPAW_OLLAMA_HOST` | string | `http://localhost:11434` | Ollama server URL |
+| `ollama_model` | `POCKETPAW_OLLAMA_MODEL` | string | `llama3.2` | Ollama model name |
 
 When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, otherwise falls back to Ollama.
 
 ## Tool Policy
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `tool_profile` | `POCKETPAW_TOOL_PROFILE` | `coding` | Tool profile |
-| `tools_allow` | `POCKETPAW_TOOLS_ALLOW` | `[]` | Allowed tools |
-| `tools_deny` | `POCKETPAW_TOOLS_DENY` | `[]` | Denied tools |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `tool_profile` | `POCKETPAW_TOOL_PROFILE` | enum | `full` | Tool profile (`minimal`, `coding`, `full`) |
+| `tools_allow` | `POCKETPAW_TOOLS_ALLOW` | string[] | `[]` | Allowed tools (comma-separated list) |
+| `tools_deny` | `POCKETPAW_TOOLS_DENY` | string[] | `[]` | Denied tools (comma-separated list) |
 
 ## Telegram
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `telegram_token` | `POCKETPAW_TELEGRAM_TOKEN` | — | Bot token |
-| `allowed_telegram_ids` | `POCKETPAW_ALLOWED_TELEGRAM_IDS` | `[]` | Allowed user IDs |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `telegram_token` | `POCKETPAW_TELEGRAM_TOKEN` | string | — | Bot token |
+| `allowed_telegram_ids` | `POCKETPAW_ALLOWED_TELEGRAM_IDS` | string[] | `[]` | Allowed user IDs (comma-separated) |
 
 ## Discord
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `discord_bot_token` | `POCKETPAW_DISCORD_BOT_TOKEN` | — | Bot token |
-| `discord_allowed_guild_ids` | `POCKETPAW_DISCORD_ALLOWED_GUILD_IDS` | `[]` | Allowed guilds |
-| `discord_allowed_user_ids` | `POCKETPAW_DISCORD_ALLOWED_USER_IDS` | `[]` | Allowed users |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `discord_bot_token` | `POCKETPAW_DISCORD_BOT_TOKEN` | string | — | Bot token |
+| `discord_allowed_guild_ids` | `POCKETPAW_DISCORD_ALLOWED_GUILD_IDS` | integer[] | `[]` | Allowed guilds (comma-separated IDs) |
+| `discord_allowed_user_ids` | `POCKETPAW_DISCORD_ALLOWED_USER_IDS` | integer[] | `[]` | Allowed users (comma-separated IDs) |
 
 ## Slack
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `slack_bot_token` | `POCKETPAW_SLACK_BOT_TOKEN` | — | Bot token (xoxb-) |
-| `slack_app_token` | `POCKETPAW_SLACK_APP_TOKEN` | — | App token (xapp-) |
-| `slack_allowed_channel_ids` | `POCKETPAW_SLACK_ALLOWED_CHANNEL_IDS` | `[]` | Allowed channels |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `slack_bot_token` | `POCKETPAW_SLACK_BOT_TOKEN` | string | — | Bot token (xoxb-) |
+| `slack_app_token` | `POCKETPAW_SLACK_APP_TOKEN` | string | — | App token (xapp-) |
+| `slack_allowed_channel_ids` | `POCKETPAW_SLACK_ALLOWED_CHANNEL_IDS` | string[] | `[]` | Allowed channels (comma-separated IDs) |
 
 ## WhatsApp
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `whatsapp_mode` | `POCKETPAW_WHATSAPP_MODE` | `business` | Mode (personal/business) |
-| `whatsapp_access_token` | `POCKETPAW_WHATSAPP_ACCESS_TOKEN` | — | Business API token |
-| `whatsapp_phone_number_id` | `POCKETPAW_WHATSAPP_PHONE_NUMBER_ID` | — | Phone number ID |
-| `whatsapp_verify_token` | `POCKETPAW_WHATSAPP_VERIFY_TOKEN` | — | Webhook verify token |
-| `whatsapp_allowed_phone_numbers` | `POCKETPAW_WHATSAPP_ALLOWED_PHONE_NUMBERS` | `[]` | Allowed numbers |
-| `whatsapp_neonize_db` | `POCKETPAW_WHATSAPP_NEONIZE_DB` | `~/.pocketpaw/neonize.db` | Neonize DB path |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `whatsapp_mode` | `POCKETPAW_WHATSAPP_MODE` | enum | `""` (unset) | Mode (`personal`, `business`) |
+| `whatsapp_access_token` | `POCKETPAW_WHATSAPP_ACCESS_TOKEN` | string | — | Business API token |
+| `whatsapp_phone_number_id` | `POCKETPAW_WHATSAPP_PHONE_NUMBER_ID` | string | — | Phone number ID |
+| `whatsapp_verify_token` | `POCKETPAW_WHATSAPP_VERIFY_TOKEN` | string | — | Webhook verify token |
+| `whatsapp_allowed_phone_numbers` | `POCKETPAW_WHATSAPP_ALLOWED_PHONE_NUMBERS` | string[] | `[]` | Allowed numbers (comma-separated) |
+| `whatsapp_neonize_db` | `POCKETPAW_WHATSAPP_NEONIZE_DB` | string | `~/.pocketpaw/neonize.db` | Neonize DB path |
 
 ## Signal
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `signal_api_url` | `POCKETPAW_SIGNAL_API_URL` | — | signal-cli REST API URL |
-| `signal_phone_number` | `POCKETPAW_SIGNAL_PHONE_NUMBER` | — | Registered number |
-| `signal_allowed_numbers` | `POCKETPAW_SIGNAL_ALLOWED_NUMBERS` | `[]` | Allowed numbers |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `signal_api_url` | `POCKETPAW_SIGNAL_API_URL` | string | — | signal-cli REST API URL |
+| `signal_phone_number` | `POCKETPAW_SIGNAL_PHONE_NUMBER` | string | — | Registered number |
+| `signal_allowed_numbers` | `POCKETPAW_SIGNAL_ALLOWED_NUMBERS` | string[] | `[]` | Allowed numbers (comma-separated) |
 
 ## Matrix
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `matrix_homeserver` | `POCKETPAW_MATRIX_HOMESERVER` | — | Homeserver URL |
-| `matrix_user_id` | `POCKETPAW_MATRIX_USER_ID` | — | Bot user ID |
-| `matrix_access_token` | `POCKETPAW_MATRIX_ACCESS_TOKEN` | — | Auth token |
-| `matrix_device_id` | `POCKETPAW_MATRIX_DEVICE_ID` | — | Device ID |
-| `matrix_allowed_room_ids` | `POCKETPAW_MATRIX_ALLOWED_ROOM_IDS` | `[]` | Allowed rooms |
-| `matrix_display_name` | `POCKETPAW_MATRIX_DISPLAY_NAME` | — | Display name |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `matrix_homeserver` | `POCKETPAW_MATRIX_HOMESERVER` | string | — | Homeserver URL |
+| `matrix_user_id` | `POCKETPAW_MATRIX_USER_ID` | string | — | Bot user ID |
+| `matrix_access_token` | `POCKETPAW_MATRIX_ACCESS_TOKEN` | string | — | Auth token |
+| `matrix_device_id` | `POCKETPAW_MATRIX_DEVICE_ID` | string | — | Device ID |
+| `matrix_allowed_room_ids` | `POCKETPAW_MATRIX_ALLOWED_ROOM_IDS` | string[] | `[]` | Allowed rooms (comma-separated IDs) |
+| `matrix_display_name` | `POCKETPAW_MATRIX_DISPLAY_NAME` | string | — | Display name |
 
 ## Microsoft Teams
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `teams_app_id` | `POCKETPAW_TEAMS_APP_ID` | — | Bot Framework App ID |
-| `teams_app_password` | `POCKETPAW_TEAMS_APP_PASSWORD` | — | App password |
-| `teams_tenant_id` | `POCKETPAW_TEAMS_TENANT_ID` | — | Azure tenant ID |
-| `teams_allowed_team_ids` | `POCKETPAW_TEAMS_ALLOWED_TEAM_IDS` | `[]` | Allowed teams |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `teams_app_id` | `POCKETPAW_TEAMS_APP_ID` | string | — | Bot Framework App ID |
+| `teams_app_password` | `POCKETPAW_TEAMS_APP_PASSWORD` | string | — | App password |
+| `teams_tenant_id` | `POCKETPAW_TEAMS_TENANT_ID` | string | — | Azure tenant ID |
+| `teams_allowed_team_ids` | `POCKETPAW_TEAMS_ALLOWED_TEAM_IDS` | string[] | `[]` | Allowed teams (comma-separated IDs) |
 
 ## Google Chat
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `gchat_project_id` | `POCKETPAW_GCHAT_PROJECT_ID` | — | GCP project ID |
-| `gchat_service_account_key` | `POCKETPAW_GCHAT_SERVICE_ACCOUNT_KEY` | — | SA key path |
-| `gchat_mode` | `POCKETPAW_GCHAT_MODE` | `webhook` | Connection mode |
-| `gchat_subscription` | `POCKETPAW_GCHAT_SUBSCRIPTION` | — | Pub/Sub subscription |
-| `gchat_allowed_space_ids` | `POCKETPAW_GCHAT_ALLOWED_SPACE_IDS` | `[]` | Allowed spaces |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `gchat_project_id` | `POCKETPAW_GCHAT_PROJECT_ID` | string | — | GCP project ID |
+| `gchat_service_account_key` | `POCKETPAW_GCHAT_SERVICE_ACCOUNT_KEY` | string | — | SA key path |
+| `gchat_mode` | `POCKETPAW_GCHAT_MODE` | enum | `webhook` | Connection mode (`webhook`, `pubsub`) |
+| `gchat_subscription` | `POCKETPAW_GCHAT_SUBSCRIPTION` | string | — | Pub/Sub subscription |
+| `gchat_allowed_space_ids` | `POCKETPAW_GCHAT_ALLOWED_SPACE_IDS` | string[] | `[]` | Allowed spaces (comma-separated IDs) |
 
 ## Web Search
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `web_search_provider` | `POCKETPAW_WEB_SEARCH_PROVIDER` | `tavily` | Search provider |
-| `tavily_api_key` | `POCKETPAW_TAVILY_API_KEY` | — | Tavily API key |
-| `brave_search_api_key` | `POCKETPAW_BRAVE_SEARCH_API_KEY` | — | Brave Search key |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `web_search_provider` | `POCKETPAW_WEB_SEARCH_PROVIDER` | enum | `tavily` | Search provider (`tavily`, `brave`) |
+| `tavily_api_key` | `POCKETPAW_TAVILY_API_KEY` | string | — | Tavily API key |
+| `brave_search_api_key` | `POCKETPAW_BRAVE_SEARCH_API_KEY` | string | — | Brave Search key |
 
 ## Image Generation
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `google_api_key` | `POCKETPAW_GOOGLE_API_KEY` | — | Google AI API key |
-| `image_model` | `POCKETPAW_IMAGE_MODEL` | `gemini-2.0-flash` | Model |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `google_api_key` | `POCKETPAW_GOOGLE_API_KEY` | string | — | Google AI API key |
+| `image_model` | `POCKETPAW_IMAGE_MODEL` | string | `gemini-2.0-flash` | Model |
 
 ## Voice & STT
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `tts_provider` | `POCKETPAW_TTS_PROVIDER` | `openai` | TTS provider |
-| `tts_voice` | `POCKETPAW_TTS_VOICE` | `alloy` | Voice ID |
-| `elevenlabs_api_key` | `POCKETPAW_ELEVENLABS_API_KEY` | — | ElevenLabs key |
-| `stt_model` | `POCKETPAW_STT_MODEL` | `whisper-1` | STT model |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `tts_provider` | `POCKETPAW_TTS_PROVIDER` | enum | `openai` | TTS provider (`openai`, `elevenlabs`, `sarvam`) |
+| `tts_voice` | `POCKETPAW_TTS_VOICE` | string | `alloy` | Voice ID |
+| `elevenlabs_api_key` | `POCKETPAW_ELEVENLABS_API_KEY` | string | — | ElevenLabs key |
+| `stt_model` | `POCKETPAW_STT_MODEL` | string | `whisper-1` | STT model |
 
 ## Google Integration
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `google_client_id` | `POCKETPAW_GOOGLE_CLIENT_ID` | — | OAuth client ID |
-| `google_client_secret` | `POCKETPAW_GOOGLE_CLIENT_SECRET` | — | OAuth secret |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `google_client_id` | `POCKETPAW_GOOGLE_CLIENT_ID` | string | — | OAuth client ID |
+| `google_client_secret` | `POCKETPAW_GOOGLE_CLIENT_SECRET` | string | — | OAuth secret |
 
 ## Spotify
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `spotify_client_id` | `POCKETPAW_SPOTIFY_CLIENT_ID` | — | Spotify client ID |
-| `spotify_client_secret` | `POCKETPAW_SPOTIFY_CLIENT_SECRET` | — | Spotify secret |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `spotify_client_id` | `POCKETPAW_SPOTIFY_CLIENT_ID` | string | — | Spotify client ID |
+| `spotify_client_secret` | `POCKETPAW_SPOTIFY_CLIENT_SECRET` | string | — | Spotify secret |
 
 ## MCP
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `mcp_client_metadata_url` | `POCKETPAW_MCP_CLIENT_METADATA_URL` | — | CIMD URL for MCP OAuth (for servers without dynamic client registration) |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `mcp_client_metadata_url` | `POCKETPAW_MCP_CLIENT_METADATA_URL` | string | — | CIMD URL for MCP OAuth (for servers without dynamic client registration) |
 
 ## Memory (Mem0)
 
-| Setting | Env Variable | Default | Description |
-|---------|-------------|---------|-------------|
-| `mem0_auto_learn` | `POCKETPAW_MEM0_AUTO_LEARN` | `false` | Enable auto-learn |
-| `mem0_llm_provider` | `POCKETPAW_MEM0_LLM_PROVIDER` | `ollama` | LLM provider |
-| `mem0_llm_model` | `POCKETPAW_MEM0_LLM_MODEL` | `llama3.2` | LLM model |
-| `mem0_embedder_provider` | `POCKETPAW_MEM0_EMBEDDER_PROVIDER` | `ollama` | Embedder provider |
-| `mem0_embedder_model` | `POCKETPAW_MEM0_EMBEDDER_MODEL` | `nomic-embed-text` | Embedder model |
-| `mem0_vector_store` | `POCKETPAW_MEM0_VECTOR_STORE` | `qdrant` | Vector store |
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `mem0_auto_learn` | `POCKETPAW_MEM0_AUTO_LEARN` | boolean | `false` | Enable auto-learn |
+| `mem0_llm_provider` | `POCKETPAW_MEM0_LLM_PROVIDER` | enum | `anthropic` | LLM provider (`anthropic`, `openai`, `ollama`) |
+| `mem0_llm_model` | `POCKETPAW_MEM0_LLM_MODEL` | string | `claude-haiku-4-5-20251001` | LLM model |
+| `mem0_embedder_provider` | `POCKETPAW_MEM0_EMBEDDER_PROVIDER` | enum | `openai` | Embedder provider (`openai`, `ollama`, `huggingface`) |
+| `mem0_embedder_model` | `POCKETPAW_MEM0_EMBEDDER_MODEL` | string | `text-embedding-3-small` | Embedder model |
+| `mem0_vector_store` | `POCKETPAW_MEM0_VECTOR_STORE` | enum | `qdrant` | Vector store (`qdrant`, `chroma`) |

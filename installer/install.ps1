@@ -121,8 +121,8 @@ if (-not $Python) {
             & $uvScript 2>$null
             Remove-Item $uvScript -ErrorAction SilentlyContinue
             
-            # Refresh PATH
-            $env:PATH = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.uv\bin;$env:PATH"
+            # Refresh PATH — include standard uv install locations
+            $env:PATH = "$env:LOCALAPPDATA\uv\bin;$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.uv\bin;$env:PATH"
             if (Get-Command uv -ErrorAction SilentlyContinue) {
                 $uvAvailable = $true
                 Write-Ok "uv installed"
@@ -186,8 +186,13 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
 } else {
     Write-Step "Installing uv (fast Python package manager)..."
     try {
-        Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression 2>$null
-        $env:PATH = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+        $uvScript = Join-Path $env:TEMP "uv-install.ps1"
+        Invoke-RestMethod "https://astral.sh/uv/install.ps1" -OutFile $uvScript
+        & $uvScript 2>$null
+        Remove-Item $uvScript -ErrorAction SilentlyContinue
+
+        # Refresh PATH — include standard uv install locations
+        $env:PATH = "$env:LOCALAPPDATA\uv\bin;$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
         if (Get-Command uv -ErrorAction SilentlyContinue) {
             $uvAvailable = $true
             Write-Ok "uv installed"
@@ -200,7 +205,8 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
 # Determine pip command
 $PipCmd = $null
 if ($uvAvailable) {
-    $PipCmd = "uv pip"
+    # Quote so installer.py receives it as a single argument
+    $PipCmd = "`"uv pip`""
     Write-Step "Installer: uv pip"
 } else {
     # Try python -m pip

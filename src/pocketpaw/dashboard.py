@@ -710,12 +710,12 @@ async def install_backend(request: Request):
         in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
         uv = shutil.which("uv")
         if uv:
-            cmd = [uv, "pip", "install"]
+            cmd = [uv, "pip", "install", "--python", sys.executable]
             if not in_venv:
                 cmd.append("--system")
             cmd.append(pip_spec)
         else:
-            cmd = ["pip", "install"]
+            cmd = [sys.executable, "-m", "pip", "install"]
             if not in_venv:
                 cmd.append("--user")
             cmd.append(pip_spec)

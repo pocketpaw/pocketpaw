@@ -1,5 +1,6 @@
 # Events SSE router — real-time system events via Server-Sent Events.
 # Created: 2026-02-20
+# Updated: 2026-02-25 — Align SSE envelope shape with chat.py (use "event" key, not "event_type").
 #
 # External clients (e.g. Tauri desktop app) can subscribe to this endpoint
 # instead of connecting to the WebSocket for real-time system events.
@@ -36,9 +37,8 @@ async def events_stream():
 
         async def _on_event(evt: SystemEvent) -> None:
             await queue.put({
-                "event_type": evt.event_type,
-                "content": evt.content or "",
-                "metadata": evt.metadata or {},
+                "event": evt.event_type,
+                "data": evt.data or {},
             })
 
         bus.subscribe_system(_on_event)
@@ -55,7 +55,7 @@ async def events_stream():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                     yield (
-                        f"event: {event['event_type']}\n"
+                        f"event: {event['event']}\n"
                         f"data: {json.dumps(event)}\n\n"
                     )
                 except TimeoutError:

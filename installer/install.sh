@@ -220,21 +220,13 @@ else
     INSTALLER="$TMPDIR/pocketpaw_installer.py"
     NEED_CLEANUP=1
 
-    INSTALLER_URL="${POCKETPAW_INSTALLER_URL:-https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py}"
-
-    if command -v curl >/dev/null 2>&1; then
-        DOWNLOAD="curl -fsSL"
-    elif command -v wget >/dev/null 2>&1; then
-        DOWNLOAD="wget -qO-"
-    else
-        printf '\033[31mError:\033[0m Neither curl nor wget found.\n'
-        exit 1
-    fi
+    # Reuse INSTALLER_URL, FALLBACK_URL, and DOWNLOAD defined at the top of
+    # the script. The originals include cache-busting headers (Cache-Control /
+    # --no-cache) which are important behind corporate proxies and CDNs.
 
     printf '  Downloading installer...\n'
     if ! $DOWNLOAD "$INSTALLER_URL" > "$INSTALLER" 2>/dev/null; then
         printf '\033[33mWarn:\033[0m Primary download failed, trying fallback...\n'
-        FALLBACK_URL="https://raw.githubusercontent.com/pocketpaw/pocketpaw/dev/installer/installer.py"
         if ! $DOWNLOAD "$FALLBACK_URL" > "$INSTALLER" 2>/dev/null; then
             printf '\033[31mError:\033[0m Could not download installer.\n'
             printf '       Try manually: %s\n' "$INSTALLER_URL"

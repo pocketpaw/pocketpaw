@@ -57,9 +57,7 @@ async def run_telegram_mode(settings: Settings) -> None:
     await run_bot(settings)
 
 
-async def run_multi_channel_mode(
-    settings: Settings, args: argparse.Namespace
-) -> None:
+async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -> None:
     """Run one or more channel adapters sharing a single bus and AgentLoop."""
     from pocketpaw.agents.loop import AgentLoop
     from pocketpaw.bus import get_message_bus
@@ -69,10 +67,7 @@ async def run_multi_channel_mode(
 
     if args.discord:
         if not settings.discord_bot_token:
-            logger.error(
-                "Discord bot token not configured."
-                " Set POCKETPAW_DISCORD_BOT_TOKEN."
-            )
+            logger.error("Discord bot token not configured. Set POCKETPAW_DISCORD_BOT_TOKEN.")
         else:
             from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
 
@@ -121,9 +116,7 @@ async def run_multi_channel_mode(
 
     if getattr(args, "signal", False):
         if not settings.signal_phone_number:
-            logger.error(
-                "Signal not configured. Set POCKETPAW_SIGNAL_PHONE_NUMBER."
-            )
+            logger.error("Signal not configured. Set POCKETPAW_SIGNAL_PHONE_NUMBER.")
         else:
             from pocketpaw.bus.adapters.signal_adapter import SignalAdapter
 
@@ -158,8 +151,7 @@ async def run_multi_channel_mode(
     if getattr(args, "teams", False):
         if not settings.teams_app_id or not settings.teams_app_password:
             logger.error(
-                "Teams not configured. Set POCKETPAW_TEAMS_APP_ID"
-                " and POCKETPAW_TEAMS_APP_PASSWORD."
+                "Teams not configured. Set POCKETPAW_TEAMS_APP_ID and POCKETPAW_TEAMS_APP_PASSWORD."
             )
         else:
             from pocketpaw.bus.adapters.teams_adapter import TeamsAdapter
@@ -175,10 +167,7 @@ async def run_multi_channel_mode(
 
     if getattr(args, "gchat", False):
         if not settings.gchat_service_account_key:
-            logger.error(
-                "Google Chat not configured."
-                " Set POCKETPAW_GCHAT_SERVICE_ACCOUNT_KEY."
-            )
+            logger.error("Google Chat not configured. Set POCKETPAW_GCHAT_SERVICE_ACCOUNT_KEY.")
         else:
             from pocketpaw.bus.adapters.gchat_adapter import GoogleChatAdapter
 
@@ -193,9 +182,7 @@ async def run_multi_channel_mode(
             )
 
     if not adapters:
-        logger.error(
-            "No channel adapters could be started. Check your configuration."
-        )
+        logger.error("No channel adapters could be started. Check your configuration.")
         return
 
     agent_loop = AgentLoop()
@@ -244,11 +231,9 @@ def _is_headless() -> bool:
     """Detect headless server (no display)."""
     import os
 
-    if sys.platform == "darwin":
-        return False  # macOS always has a display
-    return not os.environ.get("DISPLAY") and not os.environ.get(
-        "WAYLAND_DISPLAY"
-    )
+    if sys.platform in ("darwin", "win32"):
+        return False  # macOS and Windows always have a display
+    return not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
 
 
 def _check_extras_installed(args: argparse.Namespace) -> None:

@@ -4,6 +4,7 @@
 import json
 import os
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -48,6 +49,7 @@ class TestConfigPermissions:
             ok, msg, fixable = _check_config_permissions()
             assert ok is True
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="NTFS doesn't support Unix permissions")
     def test_world_readable(self, temp_config_dir):
         config = temp_config_dir / "config.json"
         config.write_text("{}")
@@ -58,6 +60,7 @@ class TestConfigPermissions:
             assert ok is False
             assert fixable is True
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="NTFS doesn't support Unix permissions")
     def test_fix_permissions(self, temp_config_dir):
         config = temp_config_dir / "config.json"
         config.write_text("{}")
@@ -68,6 +71,16 @@ class TestConfigPermissions:
             mode = config.stat().st_mode
             assert not (mode & stat.S_IROTH)
             assert not (mode & stat.S_IRGRP)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
+    def test_windows_skips_permission_check(self, temp_config_dir):
+        config = temp_config_dir / "config.json"
+        config.write_text("{}")
+
+        with patch("pocketpaw.security.audit_cli.get_config_path", return_value=config):
+            ok, msg, fixable = _check_config_permissions()
+            assert ok is True
+            assert "Windows" in msg
 
 
 class TestPlaintextApiKeys:

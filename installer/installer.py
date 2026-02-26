@@ -211,14 +211,19 @@ FEATURE_GROUPS: dict[str, list[tuple[str, str]]] = {
 
 BACKENDS = {
     "claude_agent_sdk": "Claude Agent SDK (recommended)",
-    "pocketpaw_native": "PocketPaw Native (Anthropic + Open Interpreter)",
-    "open_interpreter": "Open Interpreter (Experimental — Ollama/OpenAI/Anthropic)",
+    "openai_agents": "OpenAI Agents SDK",
+    "google_adk": "Google ADK (Gemini)",
+    "codex_cli": "Codex CLI (OpenAI)",
+    "opencode": "OpenCode (External Server)",
+    "copilot_sdk": "Copilot SDK",
 }
 
 LLM_PROVIDERS = {
     "anthropic": "Anthropic (Claude)",
-    "openai": "OpenAI (GPT-4o)",
+    "openai": "OpenAI (GPT-5)",
+    "gemini": "Google Gemini",
     "ollama": "Ollama (local, free)",
+    "openai_compatible": "OpenAI-Compatible (LiteLLM, OpenRouter, vLLM, etc.)",
     "auto": "Auto-detect (tries Anthropic > OpenAI > Ollama)",
 }
 
@@ -630,6 +635,12 @@ class InstallerUI:
         prompts: dict[str, list[tuple[str, str]]] = {
             "anthropic": [("anthropic_api_key", "Anthropic API Key (sk-ant-...)")],
             "openai": [("openai_api_key", "OpenAI API Key (sk-...)")],
+            "gemini": [("google_api_key", "Google API Key (from AI Studio)")],
+            "openai_compatible": [
+                ("openai_compatible_base_url", "Endpoint Base URL"),
+                ("openai_compatible_api_key", "API Key (if required)"),
+                ("openai_compatible_model", "Model Name"),
+            ],
             "ollama": [("ollama_host", "Ollama Host URL")],
             "auto": [
                 ("anthropic_api_key", "Anthropic API Key (sk-ant-..., optional)"),
@@ -1103,11 +1114,16 @@ class PocketPawInstaller:
         # Install package
         upgrade = self.system_info is not None and self.system_info.existing_version is not None
         if not pkg_installer.install(self.extras, upgrade=upgrade):
-            print("  Installation failed. Check the errors above.\n")
-            print("  Suggestions:")
+            log_path = Path.home() / ".pocketpaw" / "logs" / "launcher.log"
+            print("  Installation failed.\n")
+            print("  Troubleshooting:")
+            print(f"    - Log file: {log_path}")
             print(f"    - Try: {self.pip_cmd} install --upgrade pip")
             print(f"    - Try: {self.pip_cmd} install {PACKAGE}")
-            print("    - Check your internet connection\n")
+            print("    - Check your internet connection")
+            if platform.system() == "Windows":
+                print("    - On Windows, run PowerShell as Administrator")
+            print()
             return 1
 
         # Install Playwright browsers if selected
@@ -1165,15 +1181,31 @@ class PocketPawInstaller:
     def _launch(self) -> None:
         """Launch pocketpaw."""
         print("  Starting PocketPaw...\n")
-        try:
-            os.execvp("pocketpaw", ["pocketpaw"])
-        except FileNotFoundError:
-            # Might not be on PATH yet, try python -m
+        # Try binary locations (uv tool installs to ~/.local/bin/ or uv tools dir)
+        for bin_path in self._find_pocketpaw_binaries():
             try:
-                os.execvp(sys.executable, [sys.executable, "-m", "pocketpaw"])
-            except Exception as exc:
-                print(f"  Could not launch: {exc}")
-                print("  Try running 'pocketpaw' manually.\n")
+                os.execvp(bin_path, [bin_path])
+            except FileNotFoundError:
+                continue
+        # Fallback: python -m
+        try:
+            os.execvp(sys.executable, [sys.executable, "-m", "pocketpaw"])
+        except Exception as exc:
+            print(f"  Could not launch: {exc}")
+            print("  Try running 'pocketpaw' manually.\n")
+
+    def _find_pocketpaw_binaries(self) -> list[str]:
+        """Find candidate pocketpaw binary paths."""
+        candidates: list[str] = ["pocketpaw"]
+        if self.pip_cmd and "uv" in self.pip_cmd:
+            home = Path.home()
+            for p in [
+                home / ".local" / "bin" / "pocketpaw",
+                home / ".local" / "share" / "uv" / "tools" / "pocketpaw" / "bin" / "pocketpaw",
+            ]:
+                if p.exists():
+                    candidates.insert(0, str(p))
+        return candidates
 
 
 # ── CLI Argument Parsing ───────────────────────────────────────────────

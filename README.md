@@ -48,11 +48,37 @@ Sets up Python and PocketPaw in one click, then opens the dashboard.
 <details open>
 <summary>macOS / Linux</summary>
 
+**Prerequisites:**
+- Python 3.11 or higher ([download here](https://www.python.org/downloads/))
+- pip package manager (included with Python)
+
+**Quick install:**
+
 ```bash
 pip install pocketpaw && pocketpaw
 ```
 
-Or use the install script:
+**Recommended install (with virtual environment):**
+
+```bash
+# 1. Verify Python version (must be 3.11+)
+python3 --version
+
+# 2. Upgrade pip to latest version
+python3 -m pip install --upgrade pip
+
+# 3. Create and activate virtual environment (optional but recommended)
+python3 -m venv pocketpaw-env
+source pocketpaw-env/bin/activate
+
+# 4. Install PocketPaw
+pip install pocketpaw
+
+# 5. Run PocketPaw
+pocketpaw
+```
+
+**Or use the automated install script:**
 
 ```bash
 curl -fsSL https://pocketpaw.xyz/install.sh | sh
@@ -63,20 +89,84 @@ curl -fsSL https://pocketpaw.xyz/install.sh | sh
 <details>
 <summary>Windows (PowerShell)</summary>
 
+**Prerequisites:**
+- Python 3.11 or higher ([download here](https://www.python.org/downloads/))
+- pip package manager (included with Python)
+- Ensure Python is added to PATH during installation
+
+**Automated installer:**
+
 ```powershell
 powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
 ```
 
-Or install manually with pip:
+**Manual install with pip:**
 
 ```powershell
+# 1. Verify Python version (must be 3.11+)
+python --version
+
+# 2. Upgrade pip to latest version
+python -m pip install --upgrade pip
+
+# 3. Create and activate virtual environment (optional but recommended)
+python -m venv pocketpaw-env
+.\pocketpaw-env\Scripts\Activate.ps1
+
+# 4. Install PocketPaw
 pip install pocketpaw
+
+# 5. Run PocketPaw
 pocketpaw
 ```
+---
 
+    
 > **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
 
 </details>
+## Windows CLI Troubleshooting
+
+If you installed PocketPaw using:
+
+```powershell
+pip install pocketpaw
+```
+
+and the `pocketpaw` command is not recognized:
+
+```text
+'pocketpaw' is not recognized as an internal or external command
+```
+
+This usually means your Python Scripts directory is not added to PATH.
+
+By default, it is located at:
+
+```text
+C:\Users\<your-username>\AppData\Local\Python\Python3.XX\Scripts
+```
+
+You can find your exact Scripts path by running:
+
+```powershell
+python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+```
+
+### How to Fix
+
+1. Open Start → Search "Environment Variables"
+2. Click "Edit the system environment variables"
+3. Click "Environment Variables"
+4. Under User variables → Select `Path` → Click Edit
+5. Add the Scripts directory path
+6. Restart your terminal
+
+Alternatively, you can run PocketPaw using:
+
+```powershell
+python -m pocketpaw
+```
 
 <details>
 <summary>Other methods</summary>
@@ -167,7 +257,7 @@ Everything goes through an event-driven message bus. Channels publish messages, 
   <img src="docs/public/pocketpaw-security-stack.webp" alt="PocketPaw 7-Layer Security Stack" width="500">
 </p>
 
-A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of that: injection scanning, configurable tool policies, plan mode for human approval, `--security-audit` CLI, a self-audit daemon, and an append-only audit log. [Details in the docs](https://docs.pocketpaw.xyz/security).
+A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of that: injection scanning, configurable tool policies, plan mode for human approval, `--security-audit` CLI, a self-audit daemon, and an append-only audit log. [Details in the docs](https://pocketpaw.xyz/security).
 
 <details>
 <summary>Detailed security architecture</summary>
@@ -190,18 +280,49 @@ export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_ad
 
 > **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
 
-See the [full configuration reference](https://docs.pocketpaw.xyz/getting-started/configuration) for all settings.
+See the [full configuration reference](https://pocketpaw.xyz/getting-started/configuration) for all settings.
 
 ---
 
 ## Development
 
+**Prerequisites:**
+- Python 3.11 or higher ([download here](https://www.python.org/downloads/))
+- [uv](https://docs.astral.sh/uv/) package manager
+
+**Install uv:**
+
 ```bash
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Or via pip
+pip install uv
+```
+
+**Setup and run:**
+
+```bash
+# 1. Verify Python version
+python3 --version
+
+# 2. Clone and enter the repository
 git clone https://github.com/pocketpaw/pocketpaw.git && cd pocketpaw
-uv sync --dev               # Install with dev deps
-uv run pocketpaw --dev      # Dashboard with auto-reload
+
+# 3. Install with dev dependencies
+uv sync --dev
+
+# 4. Run PocketPaw in development mode (auto-reload)
+uv run pocketpaw --dev
+
+# 5. Run tests
 uv run pytest               # Run tests (2000+)
-uv run ruff check . && uv run ruff format .  # Lint & format
+
+# 6. Lint & format
+uv run ruff check . && uv run ruff format .
 ```
 
 <details>
@@ -222,7 +343,7 @@ pip install pocketpaw[all]                 # Everything
 
 ## Documentation
 
-**[docs.pocketpaw.xyz](https://docs.pocketpaw.xyz)** covers getting started, backends, channels, tools, integrations, security, memory, and the full API reference.
+**[pocketpaw.xyz](https://pocketpaw.xyz)** covers getting started, backends, channels, tools, integrations, security, memory, and the full API reference.
 
 ---
 
