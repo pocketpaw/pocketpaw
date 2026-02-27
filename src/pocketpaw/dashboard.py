@@ -1096,18 +1096,18 @@ async def get_identity():
         "user_file": context.user_profile,
     }
 
-
 @app.put("/api/identity")
 async def save_identity(request: Request):
     """Save edits to agent identity files. Changes take effect on the next message."""
+
     try:
         data = await request.json()
-    except ValueError:
-        return JSONResponse(
+    except Exception:
+        raise HTTPException(
             status_code=400,
-            content={"error": "Invalid JSON body"},
+            detail="Invalid JSON payload"
         )
-    
+
     identity_dir = get_config_path().parent / "identity"
     identity_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1118,6 +1118,7 @@ async def save_identity(request: Request):
         "instructions_file": "INSTRUCTIONS.md",
         "user_file": "USER.md",
     }
+
     updated = []
     for key, filename in file_map.items():
         if key in data and isinstance(data[key], str):
