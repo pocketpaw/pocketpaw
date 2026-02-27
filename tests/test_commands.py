@@ -875,7 +875,7 @@ class TestSlackSlashCommands:
 
         from pocketpaw.bus.adapters import slack_adapter
 
-        source = ast.parse(Path(slack_adapter.__file__).read_text())
+        source = ast.parse(Path(slack_adapter.__file__).read_text(encoding="utf-8"))
 
         # Find the tuple of command names in the for loop
         expected = {
