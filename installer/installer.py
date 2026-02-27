@@ -211,14 +211,19 @@ FEATURE_GROUPS: dict[str, list[tuple[str, str]]] = {
 
 BACKENDS = {
     "claude_agent_sdk": "Claude Agent SDK (recommended)",
-    "pocketpaw_native": "PocketPaw Native (Anthropic + Open Interpreter)",
-    "open_interpreter": "Open Interpreter (Experimental — Ollama/OpenAI/Anthropic)",
+    "openai_agents": "OpenAI Agents SDK",
+    "google_adk": "Google ADK (Gemini)",
+    "codex_cli": "Codex CLI (OpenAI)",
+    "opencode": "OpenCode (External Server)",
+    "copilot_sdk": "Copilot SDK",
 }
 
 LLM_PROVIDERS = {
     "anthropic": "Anthropic (Claude)",
-    "openai": "OpenAI (GPT-4o)",
+    "openai": "OpenAI (GPT-5)",
+    "gemini": "Google Gemini",
     "ollama": "Ollama (local, free)",
+    "openai_compatible": "OpenAI-Compatible (LiteLLM, OpenRouter, vLLM, etc.)",
     "auto": "Auto-detect (tries Anthropic > OpenAI > Ollama)",
 }
 
@@ -630,6 +635,12 @@ class InstallerUI:
         prompts: dict[str, list[tuple[str, str]]] = {
             "anthropic": [("anthropic_api_key", "Anthropic API Key (sk-ant-...)")],
             "openai": [("openai_api_key", "OpenAI API Key (sk-...)")],
+            "gemini": [("google_api_key", "Google API Key (from AI Studio)")],
+            "openai_compatible": [
+                ("openai_compatible_base_url", "Endpoint Base URL"),
+                ("openai_compatible_api_key", "API Key (if required)"),
+                ("openai_compatible_model", "Model Name"),
+            ],
             "ollama": [("ollama_host", "Ollama Host URL")],
             "auto": [
                 ("anthropic_api_key", "Anthropic API Key (sk-ant-..., optional)"),

@@ -33,14 +33,23 @@ uv run pocketpaw --discord --slack
 # Run in development mode (auto-reload on file changes)
 uv run pocketpaw --dev
 
-# Run all tests
-uv run pytest
+# Run all tests (excluding E2E tests)
+uv run pytest --ignore=tests/e2e
 
 # Run a single test file
 uv run pytest tests/test_bus.py
 
 # Run a specific test
 uv run pytest tests/test_bus.py::test_publish_subscribe -v
+
+# Run E2E tests (requires Playwright browsers - see below)
+uv run pytest tests/e2e/ -v
+
+# Install Playwright browsers (required for E2E tests, one-time setup)
+# Linux/Mac:
+uv run playwright install
+# Windows (if above fails with trampoline error):
+.venv\Scripts\python -m playwright install
 
 # Lint
 uv run ruff check .
