@@ -28,6 +28,16 @@ from pocketpaw.skills import SkillExecutor, get_skill_loader
 logger = logging.getLogger(__name__)
 
 
+def _api_key_response(content: str, settings: Settings) -> dict:
+    """Return a JSON-serializable dict for websocket.send_json after saving an API key."""
+    warnings = validate_api_keys(settings)
+    return {
+        "type": "settings_saved",
+        "content": content,
+        "warnings": warnings,
+    }
+
+
 async def websocket_handler(
     websocket: WebSocket,
     token: str | None,
@@ -481,69 +491,75 @@ async def websocket_handler(
                         settings.save()
                         agent_loop.reset_router()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Anthropic API key saved!")
+                            _api_key_response("\u2705 Anthropic API key saved!", settings)
                         )
                     elif provider == "openai" and key:
                         settings.openai_api_key = key
                         settings.save()
                         agent_loop.reset_router()
-                        await websocket.send_json(_api_key_response("\u2705 OpenAI API key saved!"))
+                        await websocket.send_json(
+                            _api_key_response("\u2705 OpenAI API key saved!", settings)
+                        )
                     elif provider == "google" and key:
                         settings.google_api_key = key
                         settings.save()
                         agent_loop.reset_router()
-                        await websocket.send_json(_api_key_response("\u2705 Google API key saved!"))
+                        await websocket.send_json(
+                            _api_key_response("\u2705 Google API key saved!", settings)
+                        )
                     elif provider == "tavily" and key:
                         settings.tavily_api_key = key
                         settings.save()
-                        await websocket.send_json(_api_key_response("\u2705 Tavily API key saved!"))
+                        await websocket.send_json(
+                            _api_key_response("\u2705 Tavily API key saved!", settings)
+                        )
                     elif provider == "brave" and key:
                         settings.brave_search_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Brave Search API key saved!")
+                            _api_key_response("\u2705 Brave Search API key saved!", settings)
                         )
                     elif provider == "parallel" and key:
                         settings.parallel_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Parallel AI API key saved!")
+                            _api_key_response("\u2705 Parallel AI API key saved!", settings)
                         )
                     elif provider == "elevenlabs" and key:
                         settings.elevenlabs_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 ElevenLabs API key saved!")
+                            _api_key_response("\u2705 ElevenLabs API key saved!", settings)
                         )
                     elif provider == "google_oauth_id" and key:
                         settings.google_oauth_client_id = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Google OAuth Client ID saved!")
+                            _api_key_response("\u2705 Google OAuth Client ID saved!", settings)
                         )
                     elif provider == "google_oauth_secret" and key:
                         settings.google_oauth_client_secret = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Google OAuth Client Secret saved!")
+                            _api_key_response("\u2705 Google OAuth Client Secret saved!", settings)
                         )
                     elif provider == "spotify_client_id" and key:
                         settings.spotify_client_id = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Spotify Client ID saved!")
+                            _api_key_response("\u2705 Spotify Client ID saved!", settings)
                         )
                     elif provider == "spotify_client_secret" and key:
                         settings.spotify_client_secret = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Spotify Client Secret saved!")
+                            _api_key_response("\u2705 Spotify Client Secret saved!", settings)
                         )
                     elif provider == "sarvam" and key:
                         settings.sarvam_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response("\u2705 Sarvam AI API key saved!")
+                            _api_key_response("\u2705 Sarvam AI API key saved!", settings)
                         )
                     else:
                         await websocket.send_json(
