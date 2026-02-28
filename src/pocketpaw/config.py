@@ -683,7 +683,14 @@ class Settings(BaseSettings):
 
         if data:
             try:
-                return cls(**data)
+                settings = cls(**data)
+                # Prevent runtime-resolved provider from replacing default
+                if settings.llm_provider == "ollama" and "llm_provider" not in data:
+                    settings.llm_provider = "auto"
+                # Ensure default provider remains "auto" unless explicitly saved
+                if not getattr(settings, "llm_provider", None):
+                    settings.llm_provider = "auto"
+                return settings
             except Exception:
                 pass
         return cls()
