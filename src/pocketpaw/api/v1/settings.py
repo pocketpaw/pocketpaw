@@ -65,10 +65,7 @@ async def update_settings(request: Request):
                     validation_errors.append(warning)
 
     if validation_errors:
-        raise HTTPException(
-            status_code=400,
-            detail={"errors": validation_errors}
-        )
+        raise HTTPException(status_code=400, detail={"errors": validation_errors})
 
     async with _settings_lock:
         settings = Settings.load()

@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 def _api_key_response(content: str, settings: Settings) -> dict:
-    """Return a JSON-serializable dict for websocket.send_json after saving an API key."""
     warnings = validate_api_keys(settings)
     return {
         "type": "settings_saved",

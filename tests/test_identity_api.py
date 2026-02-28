@@ -132,8 +132,12 @@ class TestSaveIdentity:
             assert (identity_dir / "IDENTITY.md").read_text(encoding="utf-8") == "New identity"
             assert (identity_dir / "SOUL.md").read_text(encoding="utf-8") == "New soul"
             assert (identity_dir / "STYLE.md").read_text(encoding="utf-8") == "New style"
-            assert (identity_dir / "INSTRUCTIONS.md").read_text(encoding="utf-8") == "New instructions"
-            assert (identity_dir / "USER.md").read_text(encoding="utf-8") == "Name: Bob\nTimezone: EST"
+            assert (identity_dir / "INSTRUCTIONS.md").read_text(
+                encoding="utf-8"
+            ) == "New instructions"
+            assert (identity_dir / "USER.md").read_text(
+                encoding="utf-8"
+            ) == "Name: Bob\nTimezone: EST"
 
     async def test_partial_update(self):
         """PUT /api/identity with only user_file updates only that file."""
