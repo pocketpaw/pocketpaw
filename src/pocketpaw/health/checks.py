@@ -197,7 +197,7 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message=(
                 "No Anthropic API key found — required for Claude SDK backend. "
                 "OAuth tokens from Free/Pro/Max plans are not permitted for third-party use."
@@ -231,7 +231,7 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message="No Google API key found for Google ADK backend",
             fix_hint=(
                 "Set your Google API key in Settings > API Keys,"
@@ -256,7 +256,7 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message="No OpenAI API key found for OpenAI Agents backend",
             fix_hint=(
                 "Set your OpenAI API key in Settings > API Keys,"
@@ -605,7 +605,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No API key to test connectivity",
                     fix_hint="Set your Anthropic API key first.",
                 )
@@ -671,7 +671,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No Google API key to test connectivity",
                     fix_hint="Set your Google API key first.",
                 )
@@ -730,7 +730,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No OpenAI API key to test connectivity",
                     fix_hint="Set your OpenAI API key first.",
                 )

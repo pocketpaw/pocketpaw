@@ -314,7 +314,7 @@ class TestCheckApiKeyPrimary:
             patch.dict("os.environ", {}, clear=True),
         ):
             r = check_api_key_primary()
-            assert r.status == "critical"
+            assert r.status == "warning"
 
     def test_claude_sdk_env_var(self):
         settings = self._mock_settings(anthropic_api_key="")
@@ -354,7 +354,7 @@ class TestCheckApiKeyPrimary:
             patch.dict("os.environ", {}, clear=True),
         ):
             r = check_api_key_primary()
-            assert r.status == "critical"
+            assert r.status == "warning"
 
     def test_openai_agents_with_key(self):
         settings = self._mock_settings(agent_backend="openai_agents", openai_api_key="sk-test")
@@ -540,7 +540,7 @@ class TestCheckLlmReachable:
             patch.dict("os.environ", {}, clear=True),
         ):
             r = await check_llm_reachable()
-            assert r.status == "critical"
+            assert r.status == "warning"
             assert "No API key" in r.message
 
     @pytest.mark.asyncio
@@ -696,6 +696,22 @@ class TestHealthEngine:
         s = engine.summary
         assert s["status"] == "healthy"
         assert s["issues"] == []
+
+    def test_summary_degraded_api_key_message(self, engine):
+        """When degraded due to api_key_primary, summary includes onboarding message."""
+        engine._results = [
+            HealthCheckResult("config_exists", "Config", "config", "ok", "ok", ""),
+            HealthCheckResult(
+                "api_key_primary", "Primary API Key", "config", "warning",
+                "No Anthropic API key found", "Add key in Settings",
+            ),
+        ]
+        engine._last_check = "2026-01-01T00:00:00"
+        s = engine.summary
+        assert s["status"] == "degraded"
+        assert s["message"] == "System running, but AI features disabled. Please add API key."
+        assert len(s["issues"]) == 1
+        assert s["issues"][0]["check_id"] == "api_key_primary"
 
     def test_health_prompt_section_healthy(self, engine):
         engine._results = [
