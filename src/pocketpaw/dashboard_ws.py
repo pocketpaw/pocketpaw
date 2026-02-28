@@ -346,7 +346,12 @@ async def websocket_handler(
                         val = data["opencode_max_turns"]
                         if isinstance(val, (int, float)) and 1 <= val <= 200:
                             settings.opencode_max_turns = int(val)
-                    settings.llm_provider = data.get("llm_provider", settings.llm_provider)
+                    # Never overwrite "auto" with runtime-resolved "ollama" (persist stored value only)
+                    new_llm_provider = data.get("llm_provider", settings.llm_provider)
+                    if not (
+                        settings.llm_provider == "auto" and new_llm_provider == "ollama"
+                    ):
+                        settings.llm_provider = new_llm_provider
                     if data.get("ollama_host"):
                         settings.ollama_host = data["ollama_host"]
                     if data.get("ollama_model"):
