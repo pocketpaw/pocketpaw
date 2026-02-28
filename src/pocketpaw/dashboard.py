@@ -1096,6 +1096,7 @@ async def get_identity():
         "user_file": context.user_profile,
     }
 
+
 @app.put("/api/identity")
 async def save_identity(request: Request):
     """Save edits to agent identity files. Changes take effect on the next message."""
