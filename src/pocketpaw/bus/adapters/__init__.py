@@ -17,7 +17,7 @@ from pocketpaw.bus.queue import MessageBus
 _log = logging.getLogger(__name__)
 
 
-def auto_install(extra: str, verify_import: str) -> None:
+def auto_install(extra: str, verify_import: str) -> dict[str, str]:
     """Auto-install an optional dependency if it is missing.
 
     Uses ``pocketpaw[<extra>]`` so version constraints stay in pyproject.toml
@@ -27,8 +27,10 @@ def auto_install(extra: str, verify_import: str) -> None:
         extra: The pocketpaw extra name (e.g. "discord").
         verify_import: A top-level module to try importing after install (e.g. "discord").
 
-    Raises:
-        RuntimeError: If the install fails or the module still can't be imported.
+    Returns:
+        A dict with keys:
+        - "status": "ok" | "restart_required" | "error"
+        - "message": Human-readable message (present for restart_required and error)
     """
     pip_spec = f"pocketpaw[{extra}]"
     _log.info("Auto-installing missing dependency: %s", pip_spec)
@@ -50,12 +52,18 @@ def auto_install(extra: str, verify_import: str) -> None:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to install {pip_spec}:\n{result.stderr.strip()}")
+            return {
+                "status": "error",
+                "message": f"Failed to install {pip_spec}:\n{result.stderr.strip()}",
+            }
         _log.info("Successfully installed %s", pip_spec)
     except FileNotFoundError:
-        raise RuntimeError(f"Cannot auto-install {pip_spec}: neither uv nor pip found on PATH")
+        return {
+            "status": "error",
+            "message": f"Cannot auto-install {pip_spec}: neither uv nor pip found on PATH",
+        }
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Timed out installing {pip_spec}")
+        return {"status": "error", "message": f"Timed out installing {pip_spec}"}
 
     # Clear cached import failures so Python retries the import
     importlib.invalidate_caches()
@@ -74,11 +82,12 @@ def auto_install(extra: str, verify_import: str) -> None:
     # Verify the module is now importable
     try:
         importlib.import_module(verify_import)
+        return {"status": "ok"}
     except ImportError:
-        raise RuntimeError(
-            f"Installed {pip_spec} but still cannot import '{verify_import}'. "
-            "You may need to restart the application."
-        )
+        return {
+            "status": "restart_required",
+            "message": f"Installed {pip_spec} successfully. Server restart required to load native extensions.",
+        }
 
 
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus", ".wma"}
