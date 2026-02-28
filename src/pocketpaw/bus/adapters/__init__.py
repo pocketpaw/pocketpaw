@@ -86,7 +86,10 @@ def auto_install(extra: str, verify_import: str) -> dict[str, str]:
     except ImportError:
         return {
             "status": "restart_required",
-            "message": f"Installed {pip_spec} successfully. Server restart required to load native extensions.",
+            "message": (
+                f"Installed {pip_spec} successfully. "
+                "Server restart required to load native extensions."
+            ),
         }
 
 
