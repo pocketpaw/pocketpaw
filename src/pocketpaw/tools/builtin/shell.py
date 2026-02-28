@@ -12,6 +12,21 @@ from pocketpaw.security.rails import COMPILED_DANGEROUS_PATTERNS
 from pocketpaw.tools.protocol import BaseTool
 
 
+def _is_guardian_auth_or_config_error(reason: str) -> bool:
+    """True if reason indicates Guardian auth/config failure (fall back to local)."""
+    r = (reason or "").lower()
+    return (
+        "invalid" in r
+        or "api_key" in r
+        or "api key" in r
+        or "api-key" in r
+        or "auth" in r
+        or "guardian error" in r
+        or "unauthorized" in r
+        or "missing" in r
+    )
+
+
 class ShellTool(BaseTool):
     """Execute shell commands."""
 
@@ -58,10 +73,18 @@ class ShellTool(BaseTool):
             if pattern.search(command):
                 return self._error(f"Dangerous command blocked: {command}")
 
-        # Check with Guardian Agent
-        is_safe, reason = await get_guardian().check_command(command)
-        if not is_safe:
-            return self._error(f"Command blocked by Guardian: {reason}")
+        # Check with Guardian Agent; fall back to local execution if Guardian
+        # is unavailable (no API key, auth error, or other failure).
+        guardian_safe: bool | None = None
+        guardian_reason: str = ""
+        try:
+            guardian_safe, guardian_reason = await get_guardian().check_command(command)
+        except Exception:
+            guardian_safe = None
+
+        # Block only if Guardian explicitly marked command unsafe and is configured.
+        if guardian_safe is False and not _is_guardian_auth_or_config_error(guardian_reason):
+            return self._error(f"Command blocked by Guardian: {guardian_reason}")
 
         try:
             # Run in thread pool to not block
