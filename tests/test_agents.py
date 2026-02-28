@@ -217,7 +217,7 @@ class TestAgentRouter:
         info = router.get_backend_info()
         assert info is not None
         assert info.name == "claude_agent_sdk"
-        
+
     def test_router_get_backend_info_uses_fallback_backend(self):
         """When configured backend is invalid, info should reflect active fallback backend."""
         from pocketpaw.agents.router import AgentRouter
@@ -226,7 +226,6 @@ class TestAgentRouter:
         info = router.get_backend_info()
         assert info is not None
         assert info.name == "claude_agent_sdk"
-
 
     @pytest.mark.asyncio
     async def test_router_has_run_method(self):
@@ -288,6 +287,8 @@ class TestClaudeSDKCliAuth:
 
         settings = Settings(agent_backend="claude_agent_sdk", smart_routing_enabled=False)
         sdk = ClaudeSDKBackend(settings)
+        # Ensure run() proceeds to resolve_llm_client (CLI may not be on PATH in CI)
+        sdk._cli_available = True
 
         resolved_providers: list[str] = []
 

@@ -702,8 +702,12 @@ class TestHealthEngine:
         engine._results = [
             HealthCheckResult("config_exists", "Config", "config", "ok", "ok", ""),
             HealthCheckResult(
-                "api_key_primary", "Primary API Key", "config", "warning",
-                "No Anthropic API key found", "Add key in Settings",
+                "api_key_primary",
+                "Primary API Key",
+                "config",
+                "warning",
+                "No Anthropic API key found",
+                "Add key in Settings",
             ),
         ]
         engine._last_check = "2026-01-01T00:00:00"

@@ -1,11 +1,10 @@
 import asyncio
 import json
 import logging
-import os
-from pathlib import Path
+
+from pocketpaw.security import get_audit_logger
 from pocketpaw.tools import ToolRegistry
 from pocketpaw.tools.builtin import ShellTool
-from pocketpaw.security import get_audit_logger, AuditSeverity
 
 # Setup Logging
 logging.basicConfig(level=logging.DEBUG)
@@ -25,9 +24,8 @@ async def verify_audit():
 
     # Clear log for clarity (optional, but good for test)
     if log_path.exists():
-        initial_siz = log_path.stat().st_size
-    else:
-        initial_siz = 0
+        log_path.stat().st_size  # ensure file exists
+    # else: empty log
 
     # 3. Execute Tool
     print("Executing 'shell' tool...")
@@ -38,7 +36,7 @@ async def verify_audit():
         print("❌ FAILED: Log file not created.")
         return
 
-    with open(log_path, "r") as f:
+    with open(log_path) as f:
         lines = f.readlines()
 
     new_lines = lines[0:]  # Simplified check, just reading all lines
@@ -54,7 +52,7 @@ async def verify_audit():
                     found_attempt = True
                 elif entry.get("status") == "success":
                     found_success = True
-        except:
+        except Exception:
             pass
 
     if found_attempt and found_success:

@@ -118,7 +118,9 @@ class HealthEngine:
         status = self.overall_status
         message = None
         if status == "degraded":
-            api_key_issues = [r for r in self._results if r.check_id == "api_key_primary" and r.status != "ok"]
+            api_key_issues = [
+                r for r in self._results if r.check_id == "api_key_primary" and r.status != "ok"
+            ]
             if api_key_issues:
                 message = "System running, but AI features disabled. Please add API key."
         return {

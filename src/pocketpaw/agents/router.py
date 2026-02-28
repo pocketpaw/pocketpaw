@@ -80,7 +80,7 @@ class AgentRouter:
         """Return metadata about the active backend."""
         if self._backend is None:
             return None
-        
+
         # Use resolved backend (important when we fall back from unknown/legacy)
         if self._active_backend_name:
             return get_backend_info(self._active_backend_name)

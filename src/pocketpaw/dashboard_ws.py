@@ -487,22 +487,16 @@ async def websocket_handler(
                         settings.openai_api_key = key
                         settings.save()
                         agent_loop.reset_router()
-                        await websocket.send_json(
-                            _api_key_response("\u2705 OpenAI API key saved!")
-                        )
+                        await websocket.send_json(_api_key_response("\u2705 OpenAI API key saved!"))
                     elif provider == "google" and key:
                         settings.google_api_key = key
                         settings.save()
                         agent_loop.reset_router()
-                        await websocket.send_json(
-                            _api_key_response("\u2705 Google API key saved!")
-                        )
+                        await websocket.send_json(_api_key_response("\u2705 Google API key saved!"))
                     elif provider == "tavily" and key:
                         settings.tavily_api_key = key
                         settings.save()
-                        await websocket.send_json(
-                            _api_key_response("\u2705 Tavily API key saved!")
-                        )
+                        await websocket.send_json(_api_key_response("\u2705 Tavily API key saved!"))
                     elif provider == "brave" and key:
                         settings.brave_search_api_key = key
                         settings.save()
@@ -531,9 +525,7 @@ async def websocket_handler(
                         settings.google_oauth_client_secret = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response(
-                                "\u2705 Google OAuth Client Secret saved!"
-                            )
+                            _api_key_response("\u2705 Google OAuth Client Secret saved!")
                         )
                     elif provider == "spotify_client_id" and key:
                         settings.spotify_client_id = key
@@ -545,9 +537,7 @@ async def websocket_handler(
                         settings.spotify_client_secret = key
                         settings.save()
                         await websocket.send_json(
-                            _api_key_response(
-                                "\u2705 Spotify Client Secret saved!"
-                            )
+                            _api_key_response("\u2705 Spotify Client Secret saved!")
                         )
                     elif provider == "sarvam" and key:
                         settings.sarvam_api_key = key

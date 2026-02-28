@@ -38,8 +38,14 @@ class TestChannelsStatus:
         assert resp.status_code == 200
         data = resp.json()
         expected_channels = {
-            "discord", "slack", "whatsapp", "telegram",
-            "signal", "matrix", "teams", "google_chat",
+            "discord",
+            "slack",
+            "whatsapp",
+            "telegram",
+            "signal",
+            "matrix",
+            "teams",
+            "google_chat",
         }
         assert set(data.keys()) == expected_channels
 

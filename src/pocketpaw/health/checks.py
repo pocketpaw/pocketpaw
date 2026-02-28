@@ -29,7 +29,6 @@ class HealthCheckResult:
     timestamp: str = ""
     details: list[str] | None = None
 
-
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now(tz=UTC).isoformat()
@@ -207,11 +206,12 @@ def check_api_key_primary() -> HealthCheckResult:
                 "and add it in Settings > API Keys, or set ANTHROPIC_API_KEY env var."
             ),
             details=[
-                "Anthropic's policy prohibits third-party use of OAuth tokens from Free/Pro/Max plans.",
+                "Anthropic's policy prohibits third-party use of OAuth tokens "
+                "from Free/Pro/Max plans.",
                 "Get an API key from https://console.anthropic.com/api-keys",
                 "Set it in PocketPaw Settings > API Keys, or as ANTHROPIC_API_KEY env var.",
                 "Alternatively, switch to Ollama (Local) for free local inference.",
-            ]
+            ],
         )
 
     elif backend == "google_adk":
@@ -234,8 +234,7 @@ def check_api_key_primary() -> HealthCheckResult:
             status="warning",
             message="No Google API key found for Google ADK backend",
             fix_hint=(
-                "Set your Google API key in Settings > API Keys,"
-                " or set GOOGLE_API_KEY env var."
+                "Set your Google API key in Settings > API Keys, or set GOOGLE_API_KEY env var."
             ),
         )
 
@@ -259,8 +258,7 @@ def check_api_key_primary() -> HealthCheckResult:
             status="warning",
             message="No OpenAI API key found for OpenAI Agents backend",
             fix_hint=(
-                "Set your OpenAI API key in Settings > API Keys,"
-                " or set OPENAI_API_KEY env var."
+                "Set your OpenAI API key in Settings > API Keys, or set OPENAI_API_KEY env var."
             ),
         )
 
@@ -636,8 +634,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                         category="connectivity",
                         status="critical",
                         message=(
-                            "Anthropic API reachable but key is invalid"
-                            f" (HTTP {resp.status_code})"
+                            f"Anthropic API reachable but key is invalid (HTTP {resp.status_code})"
                         ),
                         fix_hint="Check your API key in Settings > API Keys.",
                     )
@@ -823,7 +820,10 @@ def check_version_update() -> HealthCheckResult:
                 category="updates",
                 status="warning",
                 message=f"Update available: v{current} \u2192 v{latest}",
-                fix_hint=f"Run: pip install --upgrade pocketpaw  |  Changelog: github.com/pocketpaw/pocketpaw/releases/tag/v{latest}",
+                fix_hint=(
+                    f"Run: pip install --upgrade pocketpaw  |  "
+                    f"Changelog: github.com/pocketpaw/pocketpaw/releases/tag/v{latest}"
+                ),
             )
 
         return HealthCheckResult(

@@ -138,9 +138,7 @@ def validate_api_keys(settings: "Settings") -> list[str]:
     """Validate API key / token formats. Returns list of warning messages (never blocks save)."""
     warnings: list[str] = []
     if settings.anthropic_api_key and not settings.anthropic_api_key.startswith("sk-ant-"):
-        warnings.append(
-            "Anthropic API key may be invalid: expected to start with sk-ant-"
-        )
+        warnings.append("Anthropic API key may be invalid: expected to start with sk-ant-")
     if settings.openai_api_key and not settings.openai_api_key.startswith("sk-"):
         warnings.append("OpenAI API key may be invalid: expected to start with sk-")
     if settings.telegram_bot_token and not _TELEGRAM_BOT_TOKEN_RE.fullmatch(
@@ -216,9 +214,7 @@ class Settings(BaseSettings):
     )
 
     # Codex CLI Settings
-    codex_cli_model: str = Field(
-        default="gpt-5.3-codex", description="Model for Codex CLI backend"
-    )
+    codex_cli_model: str = Field(default="gpt-5.3-codex", description="Model for Codex CLI backend")
     codex_cli_max_turns: int = Field(
         default=100, description="Max turns per query in Codex CLI backend (0 = unlimited)"
     )
@@ -275,9 +271,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-5.2", description="OpenAI model to use")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
-    anthropic_model: str = Field(
-        default="claude-sonnet-4-6", description="Anthropic model to use"
-    )
+    anthropic_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model to use")
 
     # Memory Backend
     memory_backend: str = Field(
