@@ -639,7 +639,7 @@ async def list_available_backends():
                 attr = hint.get("verify_attr")
                 if attr and not hasattr(mod, attr):
                     return False
-            except ImportError:
+            except Exception:
                 return False
         # Check CLI binary if this backend needs one
         binary = _CLI_BINARY.get(info.name)
