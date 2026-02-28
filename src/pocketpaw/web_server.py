@@ -385,7 +385,12 @@ def create_app(settings: Settings) -> FastAPI:
 
             _temp_bot_app = app
 
-            return {"qr_url": qr_data, "session_secret": _session_secret}
+            # Return only the QR image data — never expose the session_secret
+            # in the HTTP response body. The secret is embedded inside the QR
+            # code URL and must stay server-side; returning it here would let
+            # any JS running on the page (or anyone reading DevTools) steal the
+            # Telegram pairing token before the legitimate user scans it.
+            return {"qr_url": qr_data}
 
         except Exception as e:
             logger.error(f"Setup failed: {e}")
