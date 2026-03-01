@@ -113,7 +113,12 @@ STATIC_DIR = FRONTEND_DIR
 TEMPLATES_DIR = FRONTEND_DIR / "templates"
 
 # Initialize Templates
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates = Jinja2Templates(
+    directory=TEMPLATES_DIR,
+    auto_reload=True
+)
+templates.env.auto_reload = True
+templates.env.cache = {}
 
 # Create FastAPI app
 app = FastAPI(
