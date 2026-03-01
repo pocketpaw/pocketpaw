@@ -683,8 +683,12 @@ class Settings(BaseSettings):
         if data:
             try:
                 settings = cls(**data)
-                # CRITICAL FIX: Only allow llm_provider from config file; default "auto"
-                if "llm_provider" not in data:
+                # FIX: Ignore environment-resolved provider unless explicitly saved in config.json
+                if config_path.exists():
+                    config_data = json.loads(config_path.read_text())
+                    if "llm_provider" not in config_data:
+                        settings.llm_provider = "auto"
+                else:
                     settings.llm_provider = "auto"
                 return settings
             except Exception:
