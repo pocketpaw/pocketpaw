@@ -1,5 +1,5 @@
-# PR quality gate — enforces contribution standards automatically.
-# Updated: 2026-02-26 — Added branch enforcement, cosmetic PR detection, size labels, reopen guard.
+# PR quality gate - enforces contribution standards automatically.
+# Updated: 2026-02-26 - Added branch enforcement, cosmetic PR detection, size labels, reopen guard.
 name: PR Quality Gate
 
 on:
@@ -36,10 +36,10 @@ jobs:
             const warnings = [];
             const MARKER = '<!-- pr-quality-gate -->';
 
-            // ── Hard block: PRs targeting main ──────────────────────────
+            // Hard block: PRs targeting main
             if (base === 'main') {
               const message = `${MARKER}\n` +
-                `## PR targets \`main\` — closing automatically\n\n` +
+                `## PR targets \`main\` - closing automatically\n\n` +
                 `All PRs must target the \`dev\` branch. The \`main\` branch is updated only via release merges.\n\n` +
                 `Please reopen this PR against \`dev\`:\n` +
                 `\`\`\`bash\n` +
@@ -61,10 +61,10 @@ jobs:
                 state: 'closed'
               });
 
-              return; // Stop here — no point checking anything else
+              return; // Stop here - no point checking anything else
             }
 
-            // ── Reopen guard: block reopening of previously closed PRs ──
+            // Reopen guard: block reopening of previously closed PRs
             if (context.payload.action === 'reopened') {
               // Check if the bot previously closed this PR
               const { data: comments } = await github.rest.issues.listComments({
@@ -101,7 +101,7 @@ jobs:
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: pr.number,
-                  body: `${MARKER}\n## Reopened PR closed automatically\n\n${reason} Please don't reopen closed PRs — if you've addressed the feedback, open a new PR instead.\n\nSee [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md) for guidelines.`
+                  body: `${MARKER}\n## Reopened PR closed automatically\n\n${reason} Please don't reopen closed PRs - if you've addressed the feedback, open a new PR instead.\n\nSee [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md) for guidelines.`
                 });
 
                 await github.rest.pulls.update({
@@ -115,7 +115,7 @@ jobs:
               }
             }
 
-            // ── Size labels ─────────────────────────────────────────────
+            // Size labels
             const totalChanged = additions + deletions;
             let sizeLabel = 'size/M';
             if (totalChanged <= 10 && changedFiles <= 1) sizeLabel = 'size/XS';
@@ -163,7 +163,7 @@ jobs:
               labels: [sizeLabel]
             });
 
-            // ── Cosmetic / doc-only PR detection ────────────────────────
+            // Cosmetic / doc-only PR detection
             const { data: files } = await github.rest.pulls.listFiles({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -200,7 +200,7 @@ jobs:
             });
 
             if (cosmeticPatterns && changedFiles > 0) {
-              issues.push('- This PR appears to contain only cosmetic changes (whitespace, comments, formatting). We don\'t accept PRs that only change comments or formatting — see [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md#what-we-dont-accept).');
+              issues.push('- This PR appears to contain only cosmetic changes (whitespace, comments, formatting). We don\'t accept PRs that only change comments or formatting - see [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md#what-we-dont-accept).');
             }
 
             // Doc-only PRs with tiny diffs get flagged
@@ -208,20 +208,20 @@ jobs:
               warnings.push('- This is a small documentation-only change. For minor doc fixes (typos, renamed variables), consider opening an issue or commenting instead of a full PR.');
             }
 
-            // ── Conventional commit title ───────────────────────────────
+            // Conventional commit title
             const conventionalRe = /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?:\s.+/;
             if (!conventionalRe.test(title)) {
               issues.push('- PR title does not follow [Conventional Commits](https://www.conventionalcommits.org/) format (e.g. `feat: add login page`, `fix(auth): handle expired tokens`).');
             }
 
-            // ── Linked issue ────────────────────────────────────────────
+            // Linked issue
             const hasIssueRef = /(?:fixes|closes|resolves)\s*#\d+/i.test(body) ||
                                 /#\d+/.test(body);
             if (!hasIssueRef) {
               issues.push('- No linked issue found. PRs should reference an issue (`Fixes #123`). Open an issue first if one doesn\'t exist.');
             }
 
-            // ── Description quality ─────────────────────────────────────
+            // Description quality
             const strippedBody = body
               .replace(/<!--[\s\S]*?-->/g, '')
               .replace(/#+\s*.*/g, '')
@@ -231,14 +231,14 @@ jobs:
               issues.push('- PR description is too short. Please describe what this PR does and how to test it.');
             }
 
-            // ── Testing evidence ────────────────────────────────────────
+            // Testing evidence
             const hasTestEvidence = /terminal|output|screenshot|tested|test result/i.test(body) ||
                                     /```[\s\S]*```/.test(body);
             if (!hasTestEvidence) {
               issues.push('- No evidence of local testing found. Please include terminal output or screenshots.');
             }
 
-            // ── Unrelated changes detection ─────────────────────────────
+            // Unrelated changes detection
             // Flag PRs that touch files outside the likely scope
             const hasReadmeChange = fileNames.includes('README.md');
             const hasSourceChange = fileNames.some(f => f.startsWith('src/'));
@@ -248,7 +248,7 @@ jobs:
               warnings.push('- This PR modifies both source code and README.md. If the README change is unrelated to the code change, please split it into a separate PR.');
             }
 
-            // ── Find existing bot comment ───────────────────────────────
+            // Find existing bot comment
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
