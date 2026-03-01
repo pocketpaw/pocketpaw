@@ -679,22 +679,20 @@ class Settings(BaseSettings):
         for field in SECRET_FIELDS:
             if field in secrets and secrets[field]:
                 data[field] = secrets[field]
-            # data[field] may already be set from config.json — keep it as fallback
 
         if data:
             try:
                 settings = cls(**data)
-
-                # Fix:
-                # Only use llm_provider if explicitly saved in config.json
-                # Otherwise use model default ("auto")
+                # CRITICAL FIX: Only allow llm_provider from config file; default "auto"
                 if "llm_provider" not in data:
-                    settings.llm_provider = cls.model_fields["llm_provider"].default
-
+                    settings.llm_provider = "auto"
                 return settings
             except Exception:
                 pass
-        return cls()
+        # Default settings (ignore environment for llm_provider)
+        settings = cls()
+        settings.llm_provider = "auto"
+        return settings
 
 
 @lru_cache
