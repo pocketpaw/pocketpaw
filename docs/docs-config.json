@@ -175,6 +175,11 @@
             "label": "Security Model",
             "href": "/concepts/security-model",
             "icon": "lucide:shield"
+          },
+          {
+            "label": "PocketPaw vs OpenClaw",
+            "href": "/concepts/vs-openclaw",
+            "icon": "lucide:scale"
           }
         ]
       },
