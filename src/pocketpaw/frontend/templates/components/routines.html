@@ -1,0 +1,877 @@
+<!--
+  PocketPaw Dashboard - Routines Modal (v3)
+  Three views: list → detail (read/edit) with history tab
+-->
+<div
+  class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+  x-show="showRoutines"
+  x-transition.opacity
+  @click.self="showRoutines = false"
+  x-effect="showRoutines && _refreshRoutineIcons()"
+>
+  <div
+    class="w-full max-w-[680px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden"
+    style="height: min(680px, 90vh)"
+    @click.stop
+  >
+    <!-- ══════════════════ LIST VIEW ══════════════════════════════════ -->
+    <div x-show="routineView === 'list'" class="flex flex-col h-full">
+      <!-- Header -->
+      <div
+        class="flex items-center justify-between px-6 py-4 border-b border-[var(--glass-border)] shrink-0"
+      >
+        <div class="flex items-center gap-3">
+          <i
+            data-lucide="calendar-clock"
+            class="w-5 h-5 text-[var(--accent-color)]"
+          ></i>
+          <h2 class="text-[17px] font-semibold">Routines</h2>
+          <span class="text-xs text-white/30">Scheduled messages</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            @click="openNewRoutine()"
+            class="flex items-center gap-1.5 bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white text-[13px] font-semibold px-3.5 py-1.5 rounded-lg transition-all active:scale-95"
+          >
+            <i data-lucide="plus" class="w-3.5 h-3.5"></i> New Routine
+          </button>
+          <button
+            @click="showRoutines = false"
+            class="p-2 -mr-1 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+          >
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- List body -->
+      <div class="flex-1 overflow-y-auto">
+        <!-- Loading -->
+        <template x-if="routineLoading && routines.length === 0">
+          <div
+            class="flex flex-col items-center justify-center h-full gap-3 text-white/30"
+          >
+            <i data-lucide="loader-2" class="w-7 h-7 animate-spin"></i>
+            <span class="text-sm">Loading…</span>
+          </div>
+        </template>
+
+        <!-- Empty -->
+        <template x-if="!routineLoading && routines.length === 0">
+          <div
+            class="flex flex-col items-center justify-center h-full gap-4 text-white/30 px-8 text-center"
+          >
+            <div
+              class="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center"
+            >
+              <i data-lucide="calendar-clock" class="w-8 h-8 opacity-50"></i>
+            </div>
+            <div>
+              <p class="font-medium text-white/50 mb-1">No routines yet</p>
+              <p class="text-xs">
+                Click "New Routine" to schedule your first automated message
+              </p>
+            </div>
+          </div>
+        </template>
+
+        <!-- Routine rows -->
+        <template x-if="!routineLoading && routines.length > 0">
+          <div class="divide-y divide-[var(--glass-border)]">
+            <template x-for="r in routines" :key="r.id">
+              <div
+                class="flex items-center gap-4 px-5 py-4 hover:bg-white/5 cursor-pointer transition-colors group"
+                @click="openRoutineDetail(r, false)"
+              >
+                <!-- Toggle -->
+                <button
+                  class="shrink-0 transition-transform hover:scale-110 active:scale-95"
+                  @click.stop="toggleRoutine(r.id, $event)"
+                  :title="r.enabled ? 'Pause' : 'Resume'"
+                >
+                  <i
+                    x-show="r.enabled"
+                    data-lucide="toggle-right"
+                    class="w-6 h-6 text-[var(--success-color)]"
+                  ></i>
+                  <i
+                    x-show="!r.enabled"
+                    data-lucide="toggle-left"
+                    class="w-6 h-6 text-white/25"
+                  ></i>
+                </button>
+
+                <!-- Info -->
+                <div
+                  class="flex-1 min-w-0"
+                  :class="{'opacity-50': !r.enabled}"
+                >
+                  <div class="flex items-center gap-2 mb-0.5">
+                    <span
+                      class="text-white/30 shrink-0"
+                      x-html="'<i data-lucide=\'' + channelIcon(r.channel) + '\' style=\'width:14px;height:14px;display:inline-block\'></i>'"
+                    ></span>
+                    <p
+                      class="font-semibold text-[14px] text-white truncate"
+                      x-text="r.title || r.recipient_name || r.recipient"
+                    ></p>
+                  </div>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span
+                      class="inline-flex items-center gap-1 text-[11px] text-white/40 bg-white/5 px-2 py-0.5 rounded-full"
+                    >
+                      <i data-lucide="clock" class="w-3 h-3"></i>
+                      <span x-text="cronToLabel(r.schedule)"></span>
+                    </span>
+                    <span
+                      class="text-[11px] text-white/30 bg-white/5 px-2 py-0.5 rounded-full"
+                      x-text="r.timezone"
+                    ></span>
+                  </div>
+                </div>
+
+                <!-- Right: status + edit + delete -->
+                <div class="flex items-center gap-1 shrink-0">
+                  <span
+                    class="text-[11px] font-medium px-2 py-0.5 rounded-full mr-1"
+                    :class="r.enabled ? 'text-[var(--success-color)]' : 'text-white/25'"
+                    x-text="r.enabled ? 'Active' : 'Paused'"
+                  ></span>
+                  <button
+                    class="p-2 rounded-lg text-white/20 hover:text-[var(--accent-color)] hover:bg-white/10 transition-colors opacity-0 group-hover:opacity-100"
+                    @click.stop="openRoutineDetail(r, true)"
+                    title="Edit"
+                  >
+                    <i data-lucide="pencil" class="w-4 h-4"></i>
+                  </button>
+                  <button
+                    class="p-2 rounded-lg text-white/20 hover:text-[var(--danger-color)] hover:bg-white/10 transition-colors opacity-0 group-hover:opacity-100"
+                    @click.stop="deleteRoutine(r.id, $event)"
+                    title="Delete"
+                  >
+                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                  </button>
+                  <i
+                    data-lucide="chevron-right"
+                    class="w-4 h-4 text-white/20 ml-1"
+                  ></i>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </div>
+    <!-- END LIST VIEW -->
+
+    <!-- ══════════════════ DETAIL VIEW ════════════════════════════════ -->
+    <!-- CHANGED: template x-if → div x-show -->
+    <div x-show="routineView === 'detail'" class="flex flex-col h-full">
+      <!-- Detail header -->
+      <div
+        class="flex items-center justify-between px-5 py-3.5 border-b border-[var(--glass-border)] shrink-0"
+      >
+        <div class="flex items-center gap-2">
+          <button
+            @click="routineGoBack()"
+            class="flex items-center gap-1.5 text-white/50 hover:text-white transition-colors text-[13px] -ml-1 px-2 py-1 rounded-lg hover:bg-white/10"
+          >
+            <i data-lucide="arrow-left" class="w-4 h-4"></i>
+            <span>Routines</span>
+          </button>
+          <span class="text-white/20 text-sm">/</span>
+          <span
+            class="text-[13px] text-white font-medium truncate max-w-[180px]"
+            x-text="routineSelected ? (routineSelected.title || routineSelected.recipient_name || routineSelected.recipient) : 'New Routine'"
+          ></span>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <!-- Edit toggle (only for existing routines) -->
+          <template x-if="routineSelected">
+            <button
+              @click="toggleRoutineEdit()"
+              class="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all"
+              :class="routineEditMode
+                ? 'bg-white/10 border-white/20 text-white'
+                : 'bg-transparent border-[var(--glass-border)] text-white/50 hover:text-white hover:border-white/30'"
+            >
+              <i
+                :data-lucide="routineEditMode ? 'eye' : 'pencil'"
+                class="w-3.5 h-3.5"
+              ></i>
+              <span x-text="routineEditMode ? 'View' : 'Edit'"></span>
+            </button>
+          </template>
+          <!-- Enabled toggle (existing routines only) -->
+          <template x-if="routineSelected">
+            <button
+              @click="toggleRoutine(routineSelected.id, null)"
+              class="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all"
+              :class="routineSelected.enabled
+                ? 'border-[var(--success-color)]/30 text-[var(--success-color)]'
+                : 'border-[var(--glass-border)] text-white/40 hover:text-white'"
+            >
+              <i
+                :data-lucide="routineSelected.enabled ? 'pause-circle' : 'play-circle'"
+                class="w-3.5 h-3.5 shrink-0"
+              ></i>
+              <span
+                class="whitespace-nowrap"
+                x-text="routineSelected.enabled ? 'Active' : 'Paused'"
+              ></span>
+            </button>
+          </template>
+          <button
+            @click="showRoutines = false"
+            class="p-2 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+          >
+            <i data-lucide="x" class="w-4.5 h-4.5"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Detail tabs (only for existing routines) -->
+      <template x-if="routineSelected">
+        <div class="flex border-b border-[var(--glass-border)] px-5 shrink-0">
+          <button
+            class="py-2.5 px-1 mr-5 text-[13px] font-medium border-b-2 transition-colors"
+            :class="routineDetailTab==='info' ? 'border-[var(--accent-color)] text-white' : 'border-transparent text-white/40 hover:text-white/70'"
+            @click="routineDetailTab='info'"
+          >
+            Details
+          </button>
+          <button
+            class="py-2.5 px-1 text-[13px] font-medium border-b-2 transition-colors"
+            :class="routineDetailTab==='history' ? 'border-[var(--accent-color)] text-white' : 'border-transparent text-white/40 hover:text-white/70'"
+            @click="routineDetailTab='history'; loadRoutineHistory()"
+          >
+            Send History
+          </button>
+        </div>
+      </template>
+
+      <!-- Detail / edit body -->
+      <div class="flex-1 overflow-y-auto">
+
+        <!-- ── READ-ONLY VIEW ──────────────────────────────────────── -->
+        <template
+          x-if="routineDetailTab === 'info' && !routineEditMode && routineSelected"
+        >
+          <div class="p-6 flex flex-col gap-5">
+            <!-- Routine title -->
+            <div x-show="routineSelected.title">
+              <h3
+                class="text-[20px] font-semibold text-white"
+                x-text="routineSelected.title"
+              ></h3>
+            </div>
+            <!-- Recipient card -->
+            <div
+              class="bg-white/5 rounded-xl p-4 flex items-center justify-between gap-4"
+            >
+              <div class="flex-1">
+                <div class="flex items-center gap-2 mb-1">
+                  <i
+                    :data-lucide="channelIcon(routineSelected.channel)"
+                    class="w-4 h-4 text-white/40"
+                  ></i>
+                  <span
+                    class="text-[13px] text-white/50"
+                    x-text="channelLabel(routineSelected.channel)"
+                  ></span>
+                </div>
+                <p class="text-[13px] text-white/60">
+                  To:
+                  <span
+                    class="font-medium text-white/80"
+                    x-text="routineSelected.recipient_name || routineSelected.recipient"
+                  ></span>
+                  <span
+                    x-show="routineSelected.recipient_name"
+                    class="text-white/40 ml-1"
+                    x-text="'(' + routineSelected.recipient + ')'"
+                  ></span>
+                </p>
+              </div>
+            </div>
+
+            <!-- Message -->
+            <div class="flex flex-col gap-1.5">
+              <p class="text-[11px] text-white/30 uppercase tracking-wider">
+                Message template
+              </p>
+              <div
+                class="bg-black/30 border border-[var(--glass-border)] rounded-xl p-4"
+              >
+                <p
+                  class="text-[14px] text-white/80 leading-relaxed"
+                  x-text="routineSelected.template"
+                ></p>
+              </div>
+              <p class="text-[12px] text-white/30 pl-1">
+                <span class="text-white/50">{name}</span> → will be replaced
+                with "<span
+                  class="text-white/50"
+                  x-text="routineSelected.recipient_name || 'their name'"
+                ></span>"
+              </p>
+            </div>
+
+            <!-- Schedule + Timezone -->
+            <div class="grid grid-cols-2 gap-3">
+              <div class="bg-white/5 rounded-xl p-4">
+                <p
+                  class="text-[11px] text-white/30 uppercase tracking-wider mb-1.5"
+                >
+                  Schedule
+                </p>
+                <div class="flex items-center gap-2">
+                  <i
+                    data-lucide="clock"
+                    class="w-4 h-4 text-[var(--accent-color)]"
+                  ></i>
+                  <p
+                    class="text-[14px] text-white font-medium"
+                    x-text="cronToLabel(routineSelected.schedule)"
+                  ></p>
+                </div>
+              </div>
+              <div class="bg-white/5 rounded-xl p-4">
+                <p
+                  class="text-[11px] text-white/30 uppercase tracking-wider mb-1.5"
+                >
+                  Timezone
+                </p>
+                <div class="flex items-center gap-2">
+                  <i data-lucide="globe" class="w-4 h-4 text-white/40"></i>
+                  <p
+                    class="text-[14px] text-white/80"
+                    x-text="routineSelected.timezone"
+                  ></p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Variables -->
+            <template
+              x-if="Object.keys(routineSelected.variables || {}).length > 0"
+            >
+              <div class="flex flex-col gap-2">
+                <p class="text-[11px] text-white/30 uppercase tracking-wider">
+                  Variables
+                </p>
+                <div class="flex flex-col gap-1.5">
+                  <template
+                    x-for="[k, v] in Object.entries(routineSelected.variables || {})"
+                    :key="k"
+                  >
+                    <div
+                      class="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2"
+                    >
+                      <span
+                        class="font-mono text-[13px] text-[var(--accent-color)]/70"
+                        >{<span x-text="k"></span>}</span
+                      >
+                      <span class="text-white/30">→</span>
+                      <span
+                        class="text-[13px] text-white/70"
+                        x-text="v"
+                      ></span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- Delete button -->
+            <button
+              @click="deleteRoutine(routineSelected.id, null)"
+              class="flex items-center gap-2 text-[var(--danger-color)]/60 hover:text-[var(--danger-color)] text-[13px] transition-colors mt-2"
+            >
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+              <span>Delete this routine</span>
+            </button>
+          </div>
+        </template>
+
+        <!-- ── HISTORY TAB ─────────────────────────────────────────── -->
+        <template x-if="routineDetailTab === 'history' && routineSelected">
+          <div class="p-5">
+            <template x-if="routineHistoryLoading">
+              <div
+                class="flex flex-col items-center justify-center py-16 gap-3 text-white/30"
+              >
+                <i data-lucide="loader-2" class="w-7 h-7 animate-spin"></i>
+                <span class="text-sm">Loading history…</span>
+              </div>
+            </template>
+
+            <template
+              x-if="!routineHistoryLoading && routineHistory.length === 0"
+            >
+              <div
+                class="flex flex-col items-center justify-center py-16 gap-3 text-white/25"
+              >
+                <i data-lucide="history" class="w-10 h-10 opacity-40"></i>
+                <p class="font-medium text-white/30">No messages sent yet</p>
+                <p class="text-xs text-center">
+                  History will appear here after the first scheduled send
+                </p>
+              </div>
+            </template>
+
+            <template
+              x-if="!routineHistoryLoading && routineHistory.length > 0"
+            >
+              <div
+                class="flex flex-col divide-y divide-[var(--glass-border)] border border-[var(--glass-border)] rounded-xl overflow-hidden"
+              >
+                <template x-for="h in routineHistory" :key="h.id">
+                  <div
+                    class="flex items-start gap-3 p-3.5 hover:bg-white/5 transition-colors"
+                  >
+                    <div class="mt-0.5 shrink-0">
+                      <i
+                        x-show="h.status==='delivered'"
+                        data-lucide="check-check"
+                        class="w-4 h-4 text-[var(--success-color)]"
+                      ></i>
+                      <i
+                        x-show="h.status==='sent'"
+                        data-lucide="check"
+                        class="w-4 h-4 text-white/40"
+                      ></i>
+                      <i
+                        x-show="h.status==='failed'"
+                        data-lucide="x-circle"
+                        class="w-4 h-4 text-[var(--danger-color)]"
+                      ></i>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <p
+                        class="text-[13px] text-white/70 italic truncate"
+                        x-text="h.message"
+                      ></p>
+                    </div>
+                    <div class="text-right shrink-0">
+                      <p
+                        class="text-[12px] font-medium capitalize"
+                        :class="historyStatusColor(h.status)"
+                        x-text="h.status"
+                      ></p>
+                      <p
+                        class="text-[11px] text-white/25 mt-0.5"
+                        x-text="new Date(h.sent_at).toLocaleString()"
+                      ></p>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- ── EDIT FORM ───────────────────────────────────────────── -->
+        <!-- CHANGED: template x-if/x-show → div x-show (keeps DOM alive, fixes formErrors reactivity) -->
+        <div x-show="routineEditMode" class="p-5 flex flex-col gap-4">
+
+          <!-- Routine title -->
+          <div class="flex flex-col gap-1" data-field="title">
+            <label class="text-[11px] text-white/40 uppercase tracking-wide"
+              >Routine name</label
+            >
+            <input
+              type="text"
+              required
+              x-model="routineForm.title"
+              @input="delete formErrors.title"
+              :class="{'border-red-500/50': formErrors.title}"
+              placeholder="e.g. Morning check-in for Mom, Evening medicine reminder"
+              class="bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/25"
+            />
+            <p
+              x-show="formErrors.title"
+              class="text-red-400 text-[11px] mt-1"
+              x-text="formErrors.title"
+            ></p>
+          </div>
+
+          <!-- Recipient + Name -->
+          <div class="flex flex-col md:flex-row gap-3">
+            <div class="flex-1 flex flex-col gap-1" data-field="recipient">
+              <label
+                class="text-[11px] text-white/40 uppercase tracking-wide"
+                >Phone / Chat ID</label
+              >
+              <input
+                type="text"
+                x-model="routineForm.recipient"
+                @input="delete formErrors.recipient"
+                :class="{'border-red-500/50': formErrors.recipient}"
+                placeholder="+91XXXXXXXXXX"
+                class="bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/25"
+              />
+              <p
+                x-show="formErrors.recipient"
+                class="text-red-400 text-[11px] mt-1"
+                x-text="formErrors.recipient"
+              ></p>
+            </div>
+            <div
+              class="flex-1 flex flex-col gap-1"
+              data-field="recipient_name"
+            >
+              <label
+                class="text-[11px] text-white/40 uppercase tracking-wide"
+                >Their Name</label
+              >
+              <input
+                type="text"
+                x-model="routineForm.recipient_name"
+                @input="delete formErrors.recipient_name"
+                :class="{'border-red-500/50': formErrors.recipient_name}"
+                placeholder="e.g. Mom, Grandpa"
+                class="bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/25"
+              />
+              <p
+                x-show="formErrors.recipient_name"
+                class="text-red-400 text-[11px] mt-1"
+                x-text="formErrors.recipient_name"
+              ></p>
+            </div>
+          </div>
+
+          <!-- Message with template chips -->
+          <div class="flex flex-col gap-2" data-field="template">
+            <label class="text-[11px] text-white/40 uppercase tracking-wide"
+              >Message</label
+            >
+            <!-- Template chips -->
+            <div
+              class="flex gap-2 overflow-x-auto pb-1"
+              style="scrollbar-width: none"
+            >
+              <template
+                x-for="tpl in [
+      { label: '☀️ Good morning', text: 'Good morning {name}, how are you feeling today?' },
+      { label: '💊 Medicine', text: 'Hi {name}, time for your {medicine}. Take care!' },
+      { label: '👋 Check in', text: 'Just checking in {name}. Everything okay?' },
+      { label: '⏰ Supplement', text: 'Hey {name}, did you take your {time} supplement?' },
+      { label: '✏️ Custom', text: '' }
+    ]"
+                :key="tpl.label"
+              >
+                <button
+                  type="button"
+                  @click="routineForm.template = tpl.text; syncRoutineVariables(); delete formErrors.template; delete formErrors.variables;"
+                  class="shrink-0 px-3 py-1.5 rounded-full text-[12px] font-medium border transition-all whitespace-nowrap"
+                  :class="(tpl.text ? routineForm.template === tpl.text : routineForm.template === '')
+  ? 'border-[var(--accent-color)] text-white font-semibold'
+  : 'border-[var(--glass-border)] text-white/50 hover:text-white hover:border-white/30'"
+                  x-text="tpl.label"
+                ></button>
+              </template>
+            </div>
+            <!-- Textarea -->
+            <textarea
+              x-model="routineForm.template"
+              rows="3"
+              @input="syncRoutineVariables(); delete formErrors.template; delete formErrors.variables;"
+              :class="{'border-red-500/50': formErrors.template}"
+              placeholder="Write your message or pick a template above…"
+              class="bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/25 resize-y"
+            ></textarea>
+            <!-- Error for template -->
+            <p
+              x-show="formErrors.template"
+              class="text-red-400 text-[11px]"
+              x-text="formErrors.template"
+            ></p>
+            <!-- Live preview -->
+            <p
+              x-show="routineForm.template"
+              class="text-[12px] text-white/35 pl-1"
+            >
+              Preview:
+              <span
+                class="italic text-white/55"
+                x-text="previewRoutineMessage()"
+              ></span>
+            </p>
+          </div>
+
+          <!-- Variables — key→value, auto-appear from {placeholders} -->
+          <template x-if="routineForm.variables.length > 0">
+            <div class="flex flex-col gap-1.5" data-field="variables">
+              <div class="flex items-center justify-between">
+                <label
+                  class="text-[11px] text-white/40 uppercase tracking-wide"
+                  >Variables</label
+                >
+                <span class="text-[11px] text-white/25"
+                  >{name} is auto-filled from "Their Name"</span
+                >
+              </div>
+              <!-- Header row -->
+              <div
+                class="flex text-[11px] text-white/25 uppercase tracking-wide px-1 gap-0"
+              >
+                <span class="w-[140px] shrink-0">Placeholder</span>
+                <span class="ml-10">Value</span>
+              </div>
+              <div class="flex flex-col gap-2">
+                <template
+                  x-for="(v, i) in routineForm.variables"
+                  :key="v.key"
+                >
+                  <div
+                    class="flex items-stretch gap-0 rounded-[10px] border border-[var(--glass-border)] overflow-hidden bg-black/30 focus-within:border-[var(--accent-color)]/50 transition-all"
+                  >
+                    <!-- Key — read only -->
+                    <div
+                      class="flex items-center gap-1 px-3 py-2.5 bg-white/5 border-r border-[var(--glass-border)] w-[140px] shrink-0"
+                    >
+                      <span
+                        class="text-[12px] font-mono text-[var(--accent-color)]/50"
+                        >{</span
+                      >
+                      <span
+                        class="text-[13px] font-mono text-white/70 font-medium"
+                        x-text="v.key"
+                      ></span>
+                      <span
+                        class="text-[12px] font-mono text-[var(--accent-color)]/50"
+                        >}</span
+                      >
+                    </div>
+                    <!-- Arrow -->
+                    <span
+                      class="flex items-center px-3 text-white/20 text-sm shrink-0 border-r border-[var(--glass-border)]"
+                      >→</span
+                    >
+                    <!-- Value -->
+                    <input
+                      type="text"
+                      x-model="v.value"
+                      @input="delete formErrors.variables"
+                      :placeholder="v.key === 'medicine' ? 'e.g. Metformin' : v.key === 'time' ? 'e.g. 3 PM' : 'Value…'"
+                      class="flex-1 bg-transparent py-2.5 px-3 text-[13px] text-white focus:outline-none placeholder-white/20"
+                    />
+                  </div>
+                </template>
+              </div>
+              <!-- Error for variables -->
+              <p
+                x-show="formErrors.variables"
+                class="text-red-400 text-[11px]"
+                x-text="formErrors.variables"
+              ></p>
+            </div>
+          </template>
+
+          <!-- Schedule -->
+          <div class="flex flex-col gap-2" data-field="schedule">
+            <label class="text-[11px] text-white/40 uppercase tracking-wide"
+              >Schedule</label
+            >
+            <div class="grid grid-cols-3 gap-2">
+              <div class="relative">
+                <select
+                  x-model="routineForm.frequency"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                >
+                //test
+                  <option value="daily">Every day</option>
+                  <option value="weekdays">Weekdays</option>
+                  <option value="weekends">Weekends</option>
+                  <option value="weekly">Once a week</option>
+                </select>
+                <div
+                  class="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none opacity-40"
+                >
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+              <div class="relative">
+                <select
+                  x-model="routineForm.hour"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                >
+                  <template x-for="h in routineHours()" :key="h.value">
+                    <option :value="h.value" x-text="h.label"></option>
+                  </template>
+                </select>
+                <div
+                  class="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none opacity-40"
+                >
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+              <div class="relative">
+                <select
+                  x-model="routineForm.minute"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                >
+                  <template x-for="m in routineMinutes()" :key="m.value">
+                    <option
+                      :value="m.value"
+                      x-text="m.label + ' min'"
+                    ></option>
+                  </template>
+                </select>
+                <div
+                  class="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none opacity-40"
+                >
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+            </div>
+            <!-- Day picker (weekly) -->
+            <div
+              x-show="routineForm.frequency==='weekly'"
+              x-transition
+              class="relative"
+            >
+              <select
+                x-model="routineForm.weekday"
+                class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all"
+              >
+                <option value="0">Sunday</option>
+                <option value="1">Monday</option>
+                <option value="2">Tuesday</option>
+                <option value="3">Wednesday</option>
+                <option value="4">Thursday</option>
+                <option value="5">Friday</option>
+                <option value="6">Saturday</option>
+              </select>
+              <div
+                class="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none opacity-40"
+              >
+                <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+              </div>
+            </div>
+            <p class="text-[12px] text-white/35 pl-1">
+              Will send:
+              <span
+                class="text-white/55"
+                x-text="cronToLabel(_buildCron(routineForm))"
+              ></span>
+            </p>
+          </div>
+
+          <!-- Timezone -->
+          <div class="flex flex-col gap-1 relative">
+            <label class="text-[11px] text-white/40 uppercase tracking-wide"
+              >Timezone</label
+            >
+            <button
+              type="button"
+              class="flex items-center justify-between w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white hover:border-[var(--accent-color)]/40 transition-all"
+              @click="tzDropdownOpen = !tzDropdownOpen"
+            >
+              <span
+                x-text="routineForm.timezone || 'Select timezone'"
+              ></span>
+              <i
+                data-lucide="chevron-down"
+                class="w-3.5 h-3.5 opacity-40"
+              ></i>
+            </button>
+            <div
+              x-show="tzDropdownOpen"
+              x-transition
+              @click.outside="tzDropdownOpen=false"
+              class="absolute top-full left-0 right-0 z-20 mt-1 bg-[#1c1c1e] border border-[var(--glass-border)] rounded-xl shadow-2xl overflow-hidden"
+            >
+              <div class="p-2 border-b border-[var(--glass-border)]">
+                <input
+                  type="text"
+                  x-model="tzSearch"
+                  placeholder="Search…"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all placeholder-white/25"
+                />
+              </div>
+              <div class="max-h-[160px] overflow-y-auto">
+                <template x-for="tz in filteredTimezones()" :key="tz">
+                  <button
+                    type="button"
+                    @click="selectTimezone(tz)"
+                    class="w-full text-left px-3.5 py-2 text-[13px] hover:bg-white/5 transition-colors"
+                    :class="routineForm.timezone===tz ? 'text-[var(--accent-color)]' : 'text-white/65'"
+                    x-text="tz"
+                  ></button>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Channel -->
+          <div class="flex flex-col gap-1.5" data-field="channel">
+            <label class="text-[11px] text-white/40 uppercase tracking-wide"
+              >Send via</label
+            >
+            <div class="flex gap-2 flex-wrap">
+              <template
+                x-for="ch in ['whatsapp','telegram','discord','slack','signal']"
+                :key="ch"
+              >
+                <button
+                  type="button"
+                  @click="routineForm.channel = ch; delete formErrors.channel; _refreshRoutineIcons()"
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] font-medium border transition-all"
+                  :class="routineForm.channel===ch
+    ? 'border-[var(--accent-color)] text-white font-semibold'
+    : 'border-[var(--glass-border)] text-white/40 hover:text-white hover:border-white/30'"
+                >
+                  <i :data-lucide="channelIcon(ch)" class="w-3.5 h-3.5"></i>
+                  <span x-text="channelLabel(ch)"></span>
+                </button>
+              </template>
+            </div>
+            <p
+              x-show="formErrors.channel"
+              class="text-red-400 text-[11px]"
+              x-text="formErrors.channel"
+            ></p>
+          </div>
+
+          <!-- Save + Cancel -->
+          <div class="flex gap-2 pt-1">
+            <button
+              @click="validateAndSaveRoutine()"
+              :disabled="routineSaving"
+              class="flex-1 bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[14px] font-semibold flex items-center justify-center gap-2 transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <i
+                x-show="routineSaving"
+                data-lucide="loader-2"
+                class="w-4 h-4 animate-spin"
+              ></i>
+              <i
+                x-show="!routineSaving"
+                :data-lucide="routineSelected ? 'save' : 'plus'"
+                class="w-4 h-4"
+              ></i>
+              <span
+                x-text="routineSelected ? 'Save Changes' : 'Add Routine'"
+              ></span>
+            </button>
+            <button
+              x-show="routineSelected"
+              @click="toggleRoutineEdit()"
+              class="px-4 py-2.5 rounded-[10px] text-[14px] font-medium border border-[var(--glass-border)] text-white/50 hover:text-white hover:border-white/30 transition-all"
+            >
+              Cancel
+            </button>
+          </div>
+
+        </div>
+        <!-- END EDIT FORM -->
+
+      </div>
+    </div>
+    <!-- END DETAIL VIEW -->
+
+  </div>
+</div>

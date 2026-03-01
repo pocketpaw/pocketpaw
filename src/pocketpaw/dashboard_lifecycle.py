@@ -218,6 +218,7 @@ async def startup_event(
     # Start reminder scheduler
     scheduler = get_scheduler()
     scheduler.start(callback=broadcast_reminder)
+    scheduler.load_scheduled_message_jobs()
 
     # Start proactive daemon
     daemon = get_daemon()

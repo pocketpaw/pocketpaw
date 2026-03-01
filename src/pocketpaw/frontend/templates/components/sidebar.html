@@ -347,6 +347,10 @@
           <i data-lucide="target" class="w-3.5 h-3.5"></i> Intentions
           <span x-show="intentions.filter(i => i.enabled).length > 0" class="ml-auto text-[10px] bg-success/20 text-success px-1.5 rounded-full" x-text="intentions.filter(i => i.enabled).length"></span>
         </button>
+        <button class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/5 transition-colors" @click="openRoutines(); sidebarOpen = false">
+          <i data-lucide="calendar-clock" class="w-3.5 h-3.5"></i> Routines
+          <span x-show="routines.filter(r => r.enabled).length > 0" class="ml-auto text-[10px] bg-accent/20 text-accent px-1.5 rounded-full" x-text="routines.filter(r => r.enabled).length"></span>
+        </button>
         <button class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/5 transition-colors" @click="openSkills(); sidebarOpen = false">
           <i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Skills
           <span x-show="skills.length > 0" class="ml-auto text-[10px] bg-warning/20 text-warning px-1.5 rounded-full" x-text="skills.length"></span>

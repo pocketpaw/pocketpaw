@@ -6,6 +6,7 @@ Simple reminder system with natural language time parsing.
 import json
 import logging
 import re
+from string import Formatter
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -149,6 +150,43 @@ def extract_reminder_text(message: str) -> str:
         text = text[0].upper() + text[1:]
 
     return text or message
+
+def _render_template(template: str, variables: dict) -> str:
+    """Render template string leaving unknown placeholders intact.
+    
+    e.g. "Hello {name}, take {medicine}" + {"name": "Mom"}
+      -> "Hello Mom, take {medicine}"
+    """
+    result = []
+    for literal_text, field_name, format_spec, _ in Formatter().parse(template):
+        result.append(literal_text)
+        if field_name is not None:
+            value = variables.get(field_name, f"{{{field_name}}}")
+            result.append(format(value, format_spec) if format_spec else str(value))
+    return "".join(result)
+
+
+def _log_routine_send(entry_id: str, recipient: str, recipient_name: str, message: str, status: str = "sent"):
+    """Append a send event to ~/.pocketpaw/routine_history.jsonl"""
+    import json
+    import uuid
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    history_path = Path.home() / ".pocketpaw" / "routine_history.jsonl"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    record = {
+        "id": str(uuid.uuid4()),
+        "entry_id": entry_id,
+        "recipient": recipient,
+        "recipient_name": recipient_name,
+        "message": message,
+        "status": status,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(history_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 class ReminderScheduler:
@@ -369,6 +407,165 @@ class ReminderScheduler:
     def get_reminders(self) -> list[dict]:
         """Get all active reminders."""
         return self.reminders
+    
+    # ── Scheduled Messages (Routines) ────────────────────────────────────────
+
+    def load_scheduled_message_jobs(self) -> None:
+        """Load all scheduled messages from config and register APScheduler jobs."""
+        from pocketpaw.config import Settings
+        try:
+            settings = Settings.load()
+            for entry in settings.scheduled_messages:
+                if entry.get("enabled", True):
+                    self._add_scheduled_message_job(entry)
+            logger.info(f"Loaded {len(settings.scheduled_messages)} scheduled message jobs")
+        except Exception as e:
+            logger.error(f"Failed to load scheduled messages: {e}")
+
+    def _add_scheduled_message_job(self, entry: dict) -> None:
+        """Register a single scheduled message job with APScheduler."""
+        from apscheduler.triggers.cron import CronTrigger
+        try:
+            entry_id = entry["id"]
+            job_id = f"sched_msg:{entry_id}"
+            trigger = CronTrigger.from_crontab(
+                entry["schedule"],
+                timezone=entry.get("timezone", "UTC")
+            )
+           
+            self.scheduler.add_job(
+                self._fire_scheduled_message,
+                trigger=trigger,
+                args=[entry_id],
+                id=job_id,
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            logger.debug(f"Registered scheduled message job: {job_id}")
+        except Exception as e:
+            logger.error(f"Failed to register job for {entry.get('id')}: {e}")
+
+    async def _fire_scheduled_message(self, entry_id: str) -> None:
+        """APScheduler callback — renders template and sends via MessageBus."""
+        try:
+            from pocketpaw.config import Settings
+            entries = Settings.load().scheduled_messages
+        except Exception as e:
+            logger.error("Could not load config on fire: %s", e)
+            return
+
+        entry = next((e for e in entries if e.get("id") == entry_id), None)
+        if not entry:
+            logger.warning("Entry %s not found in config — was it deleted?", entry_id)
+            return
+
+        if not entry.get("enabled", True):
+            return
+
+        # Render template
+        variables = {"name": entry.get("recipient_name", ""), **entry.get("variables", {})}
+        message = _render_template(entry["template"], variables)
+
+        # Route via MessageBus
+        try:
+            from pocketpaw.bus import get_message_bus
+            from pocketpaw.bus.events import Channel, OutboundMessage
+
+            bus = get_message_bus()
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=Channel(entry["channel"]),
+                    chat_id=entry["recipient"],
+                    content=message,
+                )
+            )
+            _log_routine_send(entry_id, entry["recipient"], entry.get("recipient_name",""), message, "sent")
+            logger.info(
+                "Fired scheduled message → %s (%s) via %s",
+                entry["recipient"], entry.get("recipient_name"), entry["channel"],
+            )
+        except Exception as e:
+            _log_routine_send(entry_id, entry["recipient"], entry.get("recipient_name",""), message, "failed")
+            logger.error("Failed to fire scheduled message %s: %s", entry_id, e)
+
+    def reload_scheduled_message_jobs(self) -> None:
+        """Remove all sched_msg:* jobs and re-register from config."""
+        for job in self.scheduler.get_jobs():
+            if job.id.startswith("sched_msg:"):
+                job.remove()
+        self.load_scheduled_message_jobs()
+
+    def add_scheduled_message(self, data: dict) -> dict:
+        """Persist a new scheduled message and register its APScheduler job."""
+        from pocketpaw.config import Settings
+        data.setdefault("id", str(uuid.uuid4()))
+        data.setdefault("title", "")
+        data.setdefault("enabled", True)
+        data.setdefault("timezone", "UTC")
+        data.setdefault("variables", {})
+        data.setdefault("recipient_name", "")
+
+        settings = Settings.load()
+        settings.scheduled_messages.append(data)
+        settings.save()
+
+        if self._started and data["enabled"]:
+            self._add_scheduled_message_job(data)
+        return data
+
+    def update_scheduled_message(self, message_id: str, updates: dict) -> dict | None:
+        """Update an existing scheduled message and re-register its job."""
+        from pocketpaw.config import Settings
+        settings = Settings.load()
+        for i, entry in enumerate(settings.scheduled_messages):
+            if entry.get("id") == message_id:
+                entry.update(updates)
+                entry["id"] = message_id
+                settings.scheduled_messages[i] = entry
+                settings.save()
+                if self._started:
+                    self.reload_scheduled_message_jobs()
+                return entry
+        return None
+
+    def delete_scheduled_message(self, message_id: str) -> bool:
+        """Delete a scheduled message and remove its job."""
+        from pocketpaw.config import Settings
+        settings = Settings.load()
+        original_count = len(settings.scheduled_messages)
+        settings.scheduled_messages = [
+            e for e in settings.scheduled_messages if e.get("id") != message_id
+        ]
+        if len(settings.scheduled_messages) < original_count:
+            settings.save()
+            job_id = f"sched_msg:{message_id}"
+            job = self.scheduler.get_job(job_id)
+            if job:
+                job.remove()
+            return True
+        return False
+
+    def toggle_scheduled_message(self, message_id: str) -> dict | None:
+        """Toggle enabled state of a scheduled message."""
+        from pocketpaw.config import Settings
+        settings = Settings.load()
+        for i, entry in enumerate(settings.scheduled_messages):
+            if entry.get("id") == message_id:
+                entry["enabled"] = not entry.get("enabled", True)
+                settings.scheduled_messages[i] = entry
+                settings.save()
+                if self._started:
+                    self.reload_scheduled_message_jobs()
+                return entry
+        return None
+
+    def get_scheduled_messages(self) -> list[dict]:
+        """Return all scheduled messages from config."""
+        from pocketpaw.config import Settings
+        try:
+            return Settings.load().scheduled_messages
+        except Exception:
+            return []
 
     def format_time_remaining(self, reminder: dict) -> str:
         """Format the time remaining for a reminder."""

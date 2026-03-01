@@ -46,6 +46,7 @@ import pocketpaw.dashboard_state as _state
 from pocketpaw.api.v1 import mount_v1_routers
 from pocketpaw.bootstrap import DefaultBootstrapProvider
 from pocketpaw.config import Settings, get_access_token, get_config_path
+from pocketpaw.scheduler import get_scheduler
 from pocketpaw.dashboard_auth import (
     AuthMiddleware,
     _is_genuine_localhost,  # noqa: F401 — re-export for backward compat
@@ -328,6 +329,98 @@ async def test_mcp_server(request: Request):
         "connected": True,
         "tools": [{"name": t.name, "description": t.description} for t in tools],
     }
+
+# ==================== Routines API ====================
+
+@app.get("/api/routines")
+async def list_routines():
+    """List all scheduled message routines."""
+    scheduler = get_scheduler()
+    return {"routines": scheduler.get_scheduled_messages()}
+
+
+@app.post("/api/routines")
+async def create_routine(request: Request):
+    """Create a new scheduled message routine."""
+    data = await request.json()
+
+    required = ("recipient", "template", "schedule", "channel")
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing fields: {', '.join(missing)}")
+
+    scheduler = get_scheduler()
+    try:
+        routine = scheduler.add_scheduled_message(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"routine": routine}
+
+
+@app.patch("/api/routines/{routine_id}")
+async def update_routine(routine_id: str, request: Request):
+    """Update an existing routine by ID."""
+    updates = await request.json()
+
+    scheduler = get_scheduler()
+    routine = scheduler.update_scheduled_message(routine_id, updates)
+    if routine is None:
+        raise HTTPException(status_code=404, detail=f"Routine '{routine_id}' not found")
+
+    return {"routine": routine}
+
+
+@app.delete("/api/routines/{routine_id}")
+async def delete_routine(routine_id: str):
+    """Delete a routine by ID."""
+    scheduler = get_scheduler()
+    deleted = scheduler.delete_scheduled_message(routine_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Routine '{routine_id}' not found")
+
+    return {"status": "ok", "id": routine_id}
+
+
+@app.post("/api/routines/{routine_id}/toggle")
+async def toggle_routine(routine_id: str):
+    """Toggle a routine's enabled state."""
+    scheduler = get_scheduler()
+    routine = scheduler.toggle_scheduled_message(routine_id)
+    if routine is None:
+        raise HTTPException(status_code=404, detail=f"Routine '{routine_id}' not found")
+
+    return {"routine": routine}
+
+
+@app.get("/api/routines/history")
+async def get_routine_history(entry_id: str = None, limit: int = 100):
+    """Return send history, optionally filtered to a single routine."""
+    import json
+    from pathlib import Path
+
+    history_path = Path.home() / ".pocketpaw" / "routine_history.jsonl"
+    if not history_path.exists():
+        return {"history": []}
+
+    records = []
+    try:
+        lines = history_path.read_text().splitlines()
+        for line in reversed(lines):
+            if len(records) >= limit:
+                break
+            try:
+                record = json.loads(line)
+                # Filter by entry_id if provided
+                if entry_id and record.get("entry_id") != entry_id:
+                    continue
+                records.append(record)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {"history": records}
 
 
 # ==================== MCP Preset Routes ====================

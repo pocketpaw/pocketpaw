@@ -290,26 +290,32 @@ class NeonizeAdapter(BaseChannelAdapter):
         """Send a text message via neonize."""
         if not self._client:
             return
+
         text = convert_markdown(text, self.channel)
         try:
-            # Look up the cached JID protobuf; fall back to building from string
+            to = to.strip()
+
+            # Normalize number
+            if "@" not in to:
+                number = to.lstrip("+")
+                to = f"{number}@s.whatsapp.net"
+
             jid = self._jid_cache.get(to)
+
             if jid is None:
                 from neonize.utils.jid import build_jid
-
-                # Parse "user@server" format if present
-                if "@" in to:
-                    user, server = to.split("@", 1)
-                    jid = build_jid(user, server)
-                else:
-                    jid = build_jid(to)
+                user, server = to.split("@", 1)
+                jid = build_jid(user, server)
+                self._jid_cache[to] = jid
 
             if self._neonize_loop and self._neonize_loop.is_running():
                 future = asyncio.run_coroutine_threadsafe(
-                    self._client.send_message(jid, text), self._neonize_loop
+                    self._client.send_message(jid, text),
+                    self._neonize_loop,
                 )
                 future.result(timeout=30)
             else:
                 await self._client.send_message(jid, text)
+
         except Exception as e:
             logger.error(f"Neonize send error: {e}")

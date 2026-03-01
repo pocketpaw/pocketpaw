@@ -525,7 +525,7 @@ class Settings(BaseSettings):
     signal_allowed_phone_numbers: list[str] = Field(
         default_factory=list, description="Signal phone numbers allowed to use the bot"
     )
-
+    
     # Matrix
     matrix_homeserver: str | None = Field(
         default=None, description="Matrix homeserver URL (e.g. https://matrix.org)"
@@ -572,6 +572,10 @@ class Settings(BaseSettings):
     )
     webhook_sync_timeout: int = Field(
         default=30, description="Default timeout (seconds) for sync webhook responses"
+    )
+    scheduled_messages: list[dict] = Field(
+        default_factory=list,
+        description="[{id, title, recipient, recipient_name, template, schedule, timezone, channel, enabled, variables}]",
     )
 
     # Web Server
