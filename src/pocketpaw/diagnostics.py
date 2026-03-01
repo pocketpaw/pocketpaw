@@ -269,7 +269,7 @@ async def check_openai_compatible(settings: Settings) -> int:
     # 2. Test tool calling
     console.print("  Testing tool calling support ...")
     try:
-        tool_response = await oc.chat.completions.create(
+        await oc.chat.completions.create(
             model=model,
             max_tokens=256,
             messages=[{"role": "user", "content": "What is 2 + 2?"}],

@@ -2,11 +2,12 @@
 Desktop interaction tools.
 """
 
+from datetime import UTC
 from typing import Any
+
 from pocketpaw.tools.protocol import BaseTool
 from pocketpaw.tools.screenshot import take_screenshot
 from pocketpaw.tools.status import get_system_status
-import base64
 
 
 class ScreenshotTool(BaseTool):
@@ -82,8 +83,8 @@ class ScreenshotTool(BaseTool):
         # Let's stick to "saving to file" as the most robust "Agentic" way.
         # It persists the data.
 
-        from datetime import datetime, timezone
-        import os
+        from datetime import datetime
+
         from pocketpaw.config import get_settings
 
         settings = get_settings()
@@ -91,7 +92,7 @@ class ScreenshotTool(BaseTool):
         screenshots_dir = jail / "screenshots"
         screenshots_dir.mkdir(exist_ok=True)
 
-        filename = f"screenshot_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}.png"
+        filename = f"screenshot_{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M%S')}.png"
         path = screenshots_dir / filename
 
         with open(path, "wb") as f:

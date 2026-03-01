@@ -44,7 +44,7 @@ class HealthCheckTool(BaseTool):
             results = engine.run_startup_checks()
 
             if include_connectivity:
-                conn_results = await engine.run_connectivity_checks()
+                await engine.run_connectivity_checks()
                 results = engine.results  # merged
 
             lines = [f"System Status: {engine.overall_status.upper()}\n"]

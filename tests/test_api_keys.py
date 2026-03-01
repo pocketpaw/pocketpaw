@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.api.api_keys import APIKeyManager, APIKeyRecord
+from pocketpaw.api.api_keys import APIKeyManager
 from pocketpaw.api.v1.api_keys import router
 
 

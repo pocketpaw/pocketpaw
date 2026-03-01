@@ -1,7 +1,6 @@
 """File browser tool."""
 
 from pathlib import Path
-from typing import Optional
 
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,7 +19,7 @@ def is_safe_path(path: Path, jail: Path) -> bool:
         return False
 
 
-def get_directory_keyboard(path: Path, jail: Optional[Path] = None) -> InlineKeyboardMarkup:
+def get_directory_keyboard(path: Path, jail: Path | None = None) -> InlineKeyboardMarkup:
     """Generate inline keyboard for directory contents."""
     if jail is None:
         jail = Path.home()
@@ -90,7 +89,7 @@ async def handle_path(path_str: str, jail: Path) -> dict:
         return {"type": "error", "message": "Path does not exist"}
 
 
-def list_directory(path_str: str, jail_str: Optional[str] = None) -> str:
+def list_directory(path_str: str, jail_str: str | None = None) -> str:
     """List directory contents as formatted string for web dashboard."""
     path = Path(path_str).resolve()
     jail = Path(jail_str).resolve() if jail_str else Path.home()

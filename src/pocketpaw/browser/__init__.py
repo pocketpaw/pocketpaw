@@ -5,9 +5,9 @@
 # accessibility tree snapshots for AI agent control.
 """Browser automation module for PocketPaw."""
 
-from .snapshot import RefMap, AccessibilityNode, SnapshotGenerator
 from .driver import BrowserDriver, NavigationResult
 from .session import BrowserSession, BrowserSessionManager, get_browser_session_manager
+from .snapshot import AccessibilityNode, RefMap, SnapshotGenerator
 
 __all__ = [
     # Snapshot

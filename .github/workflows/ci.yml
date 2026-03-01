@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for comparing with base branch
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -26,11 +28,41 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Ruff check
-        run: uv run ruff check .
+      - name: Ruff check (changed files only on PRs)
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            # For PRs, only check files changed in this PR
+            git fetch origin ${{ github.base_ref }}
+            CHANGED_FILES=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }}...HEAD | grep '\.py$' || true)
+            if [ -n "$CHANGED_FILES" ]; then
+              echo "Checking changed Python files:"
+              echo "$CHANGED_FILES"
+              echo "$CHANGED_FILES" | xargs uv run ruff check
+            else
+              echo "No Python files changed in this PR"
+            fi
+          else
+            # For pushes to dev/main, check entire codebase
+            uv run ruff check .
+          fi
 
-      - name: Ruff format check
-        run: uv run ruff format --check .
+      - name: Ruff format check (changed files only on PRs)
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            # For PRs, only check files changed in this PR
+            git fetch origin ${{ github.base_ref }}
+            CHANGED_FILES=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }}...HEAD | grep '\.py$' || true)
+            if [ -n "$CHANGED_FILES" ]; then
+              echo "Checking format of changed Python files:"
+              echo "$CHANGED_FILES"
+              echo "$CHANGED_FILES" | xargs uv run ruff format --check
+            else
+              echo "No Python files changed in this PR"
+            fi
+          else
+            # For pushes to dev/main, check entire codebase
+            uv run ruff format --check .
+          fi
 
   test:
     name: Test (Python ${{ matrix.python-version }})

@@ -1,6 +1,5 @@
 """Tests for output redaction module."""
 
-import pytest
 
 from pocketpaw.security.redact import redact_output
 

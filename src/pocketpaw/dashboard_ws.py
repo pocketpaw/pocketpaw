@@ -475,6 +475,14 @@ async def websocket_handler(
                         )
                         return
 
+                def _api_key_response(content: str):
+                    """Helper to create API key save response with optional warnings."""
+                    payload = {"type": "message", "content": content}
+                    key_warnings = validate_api_keys(settings)
+                    if key_warnings:
+                        payload["warnings"] = key_warnings
+                    return payload
+
                 async with _settings_lock:
                     if provider == "anthropic" and key:
                         settings.anthropic_api_key = key

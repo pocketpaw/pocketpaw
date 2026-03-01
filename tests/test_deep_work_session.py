@@ -583,7 +583,7 @@ class TestSystemEvent:
     async def test_executor_callback_wired_to_scheduler(self, manager, mock_executor):
         """Executor's _on_task_done_callback is wired to scheduler.on_task_completed."""
         mock_scheduler = AsyncMock(spec=DependencyScheduler)
-        session = DeepWorkSession(
+        DeepWorkSession(
             manager=manager,
             executor=mock_executor,
             scheduler=mock_scheduler,

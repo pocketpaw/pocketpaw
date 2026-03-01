@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..protocol import BaseTool
 from ...browser.session import get_browser_session_manager
+from ..protocol import BaseTool
 
 
 class BrowserTool(BaseTool):

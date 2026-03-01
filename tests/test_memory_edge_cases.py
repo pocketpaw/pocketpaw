@@ -19,7 +19,7 @@ import pytest
 
 from pocketpaw.memory.file_store import FileMemoryStore
 from pocketpaw.memory.manager import MemoryManager
-from pocketpaw.memory.protocol import MemoryEntry, MemoryType
+from pocketpaw.memory.protocol import MemoryType
 
 
 @pytest.fixture

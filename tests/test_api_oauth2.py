@@ -9,9 +9,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.api.oauth2.models import OAuthClient
-from pocketpaw.api.oauth2.server import AuthorizationServer, reset_oauth_server
-from pocketpaw.api.oauth2.storage import DEFAULT_DESKTOP_CLIENT, OAuthStorage
+from pocketpaw.api.oauth2.server import AuthorizationServer
+from pocketpaw.api.oauth2.storage import OAuthStorage
 from pocketpaw.api.v1.oauth2 import router
 
 

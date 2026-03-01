@@ -12,14 +12,14 @@ the agent when needed, not constantly running LLM queries.
 """
 
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ..config import Settings, get_settings
-from .context import ContextHub, get_context_hub
+from .context import get_context_hub
 from .executor import IntentionExecutor
-from .intentions import IntentionStore, get_intention_store
+from .intentions import get_intention_store
 from .triggers import TriggerEngine
 
 logger = logging.getLogger(__name__)
@@ -40,8 +40,8 @@ class ProactiveDaemon:
 
     def __init__(
         self,
-        settings: Optional[Settings] = None,
-        scheduler: Optional[AsyncIOScheduler] = None,
+        settings: Settings | None = None,
+        scheduler: AsyncIOScheduler | None = None,
     ):
         """
         Initialize the daemon.
@@ -63,7 +63,7 @@ class ProactiveDaemon:
         )
 
         # Callbacks
-        self._stream_callback: Optional[Callable] = None
+        self._stream_callback: Callable | None = None
         self._started = False
 
     @property
@@ -71,7 +71,7 @@ class ProactiveDaemon:
         """Check if daemon is running."""
         return self._started
 
-    def start(self, stream_callback: Optional[Callable] = None) -> None:
+    def start(self, stream_callback: Callable | None = None) -> None:
         """
         Start the daemon.
 
@@ -142,7 +142,7 @@ class ProactiveDaemon:
 
         return intentions
 
-    def get_intention(self, intention_id: str) -> Optional[dict]:
+    def get_intention(self, intention_id: str) -> dict | None:
         """Get a single intention by ID."""
         intention = self.intention_store.get_by_id(intention_id)
         if intention:
@@ -155,7 +155,7 @@ class ProactiveDaemon:
         name: str,
         prompt: str,
         trigger: dict,
-        context_sources: Optional[list[str]] = None,
+        context_sources: list[str] | None = None,
         enabled: bool = True,
     ) -> dict:
         """
@@ -185,7 +185,7 @@ class ProactiveDaemon:
 
         return intention
 
-    def update_intention(self, intention_id: str, updates: dict) -> Optional[dict]:
+    def update_intention(self, intention_id: str, updates: dict) -> dict | None:
         """
         Update an intention.
 
@@ -221,7 +221,7 @@ class ProactiveDaemon:
 
         return self.intention_store.delete(intention_id)
 
-    def toggle_intention(self, intention_id: str) -> Optional[dict]:
+    def toggle_intention(self, intention_id: str) -> dict | None:
         """
         Toggle enabled state of an intention.
 
@@ -268,12 +268,12 @@ class ProactiveDaemon:
 
 
 # Singleton pattern
-_daemon: Optional[ProactiveDaemon] = None
+_daemon: ProactiveDaemon | None = None
 
 
 def get_daemon(
-    settings: Optional[Settings] = None,
-    scheduler: Optional[AsyncIOScheduler] = None,
+    settings: Settings | None = None,
+    scheduler: AsyncIOScheduler | None = None,
 ) -> ProactiveDaemon:
     """
     Get singleton ProactiveDaemon instance.
