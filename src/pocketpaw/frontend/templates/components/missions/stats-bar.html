@@ -49,7 +49,7 @@
             <span class="text-white/30">·</span>
             <span class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.stats.active_tasks || 0"></span> active</span>
             <span class="text-white/30">·</span>
-            <span class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.stats.completed_today || 0"></span> done</span>
+            <span class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.stats.completed_today || 0"></span> done today</span>
             <span x-show="missionControl.projects.length > 0" class="text-white/30">·</span>
             <span x-show="missionControl.projects.length > 0" class="text-white/70"><span class="text-white font-semibold" x-text="missionControl.projects.length"></span> projects</span>
         </div>
@@ -59,6 +59,7 @@
         <template x-if="missionControl.crewTab === 'tasks'">
             <div class="flex items-center gap-2">
                 <button
+                    id="create-task-btn"
                     class="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-all"
                     @click="missionControl.showCreateTask = true"
                 >
@@ -66,6 +67,7 @@
                     <span>New Task</span>
                 </button>
                 <button
+                    id="create-agent-btn"
                     class="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-all"
                     @click="missionControl.showCreateAgent = true"
                 >

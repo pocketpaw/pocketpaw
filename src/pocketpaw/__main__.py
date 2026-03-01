@@ -62,7 +62,7 @@ def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = Fal
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="🐾 PocketPaw (Beta) - The AI agent that runs on your laptop",
+        description="🐾 PocketPaw - The AI agent that runs on your laptop",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

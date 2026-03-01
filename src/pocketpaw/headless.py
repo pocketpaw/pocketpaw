@@ -53,7 +53,7 @@ async def run_telegram_mode(settings: Settings) -> None:
         settings = get_settings(force_reload=True)
 
     # Start the bot
-    logger.info("🚀 Starting PocketPaw (Beta)...")
+    logger.info("🚀 Starting PocketPaw...")
     await run_bot(settings)
 
 

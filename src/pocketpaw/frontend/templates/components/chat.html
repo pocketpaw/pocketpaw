@@ -20,6 +20,7 @@
 <!-- Chat View -->
 <!-- Added explicit min-height-0 to allow flex child to shrink properly -->
 <div
+  id="chat-view"
   class="flex-1 flex flex-col pt-16 md:pt-20 overflow-hidden min-h-0"
   x-show="view === 'chat'"
   x-data="{ apiBannerDismissed: false }"
@@ -141,7 +142,8 @@
         @submit.prevent="sendMessage()"
       >
         <!-- Agent Mode Toggle (inside pill) -->
-        <label class="relative w-[36px] h-[20px] cursor-pointer ml-4 shrink-0" aria-label="Agent mode">
+        <span class="text-[13px] text-white/70 ml-2 shrink-0">Agent Mode</span>
+        <label class="relative w-[36px] h-[20px] cursor-pointer ml-2 shrink-0" aria-label="Agent mode">
           <input
             type="checkbox"
             x-model="agentActive"

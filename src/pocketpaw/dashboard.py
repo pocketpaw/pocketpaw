@@ -109,6 +109,7 @@ _uvicorn_server = None
 
 # Get frontend directory
 FRONTEND_DIR = Path(__file__).parent / "frontend"
+STATIC_DIR = FRONTEND_DIR
 TEMPLATES_DIR = FRONTEND_DIR / "templates"
 
 # Initialize Templates
@@ -167,7 +168,7 @@ async def security_headers_middleware(request: Request, call_next):
 
 
 # Mount static files
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Mount Mission Control API router
 app.include_router(mission_control_router, prefix="/api/mission-control")
@@ -886,8 +887,9 @@ async def index(request: Request):
     from importlib.metadata import version as get_version
 
     return templates.TemplateResponse(
+        request,
         "base.html",
-        {"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
+        {"v": _static_version(), "app_version": get_version("pocketpaw")},
     )
 
 

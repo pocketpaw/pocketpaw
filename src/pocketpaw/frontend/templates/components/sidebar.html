@@ -22,6 +22,7 @@
 -->
 <!-- Sidebar (Desktop: Static, Mobile: Slide-over) -->
 <aside
+    id="sidebar"
     class="fixed inset-y-0 left-0 z-50 w-72 flex flex-col px-3 py-4 bg-[var(--glass-bg)] backdrop-blur-xl border-r border-[var(--glass-border)] transition-transform duration-300 md:relative md:translate-x-0"
     :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
 >
@@ -29,7 +30,6 @@
   <div class="flex items-center gap-3 px-2 mb-3 shrink-0">
     <i data-lucide="paw-print" class="w-5 h-5 text-accent"></i>
     <span class="text-lg font-semibold tracking-tight">PocketPaw</span>
-    <span class="px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full leading-none">Beta</span>
     <!-- Health indicator dot -->
     <button
         class="w-2.5 h-2.5 rounded-full shrink-0 transition-colors"
@@ -55,7 +55,7 @@
         @click="switchSidebarTab('chats')"
     >
       <i data-lucide="message-square" class="w-3.5 h-3.5"></i>
-      Chats
+      Sessions
     </button>
     <button
         class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-all"
@@ -78,7 +78,7 @@
             @click="createNewChat()"
         >
           <i data-lucide="plus" class="w-4 h-4"></i>
-          <span>New Chat</span>
+          <span>New session</span>
         </button>
         <div class="relative">
           <i data-lucide="search" class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30"></i>

@@ -75,7 +75,7 @@ window.PocketPaw.Channels = {
                     signal: 'Signal',
                     matrix: 'Matrix',
                     teams: 'Teams',
-                    google_chat: 'GChat',
+                    google_chat: 'Google',
                     webhooks: 'Webhooks'
                 };
                 return names[tab] || tab;
