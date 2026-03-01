@@ -115,7 +115,9 @@ jobs:
               }
             }
 
-            // Size labels
+            // Size labels (only for same-repo PRs; fork PRs cannot have labels added)
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            const isSameRepo = context.payload.pull_request.head.repo.full_name === repoFullName;
             const totalChanged = additions + deletions;
             let sizeLabel = 'size/M';
             if (totalChanged <= 10 && changedFiles <= 1) sizeLabel = 'size/XS';
@@ -124,44 +126,46 @@ jobs:
             else if (totalChanged <= 500) sizeLabel = 'size/L';
             else sizeLabel = 'size/XL';
 
-            // Remove old size labels and apply new one
-            const sizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
-            for (const label of sizeLabels) {
-              try {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  name: label
-                });
-              } catch (e) { /* label wasn't present */ }
-            }
-
-            // Ensure size labels exist before applying
-            for (const label of sizeLabels) {
-              try {
-                await github.rest.issues.getLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: label
-                });
-              } catch (e) {
-                const colors = { 'size/XS': 'e6e6e6', 'size/S': 'c2e0c6', 'size/M': 'fbca04', 'size/L': 'f9a825', 'size/XL': 'e53935' };
-                await github.rest.issues.createLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: label,
-                  color: colors[label] || 'cccccc'
-                });
+            if (isSameRepo) {
+              // Remove old size labels and apply new one
+              const sizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
+              for (const label of sizeLabels) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    name: label
+                  });
+                } catch (e) { /* label wasn't present */ }
               }
-            }
 
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              labels: [sizeLabel]
-            });
+              // Ensure size labels exist before applying
+              for (const label of sizeLabels) {
+                try {
+                  await github.rest.issues.getLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: label
+                  });
+                } catch (e) {
+                  const colors = { 'size/XS': 'e6e6e6', 'size/S': 'c2e0c6', 'size/M': 'fbca04', 'size/L': 'f9a825', 'size/XL': 'e53935' };
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: label,
+                    color: colors[label] || 'cccccc'
+                  });
+                }
+              }
+
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: [sizeLabel]
+              });
+            }
 
             // Cosmetic / doc-only PR detection
             const { data: files } = await github.rest.pulls.listFiles({
@@ -262,13 +266,15 @@ jobs:
               let message = `${MARKER}\n`;
 
               if (issues.length > 0) {
-                // Add needs-work label
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  labels: ['needs-work']
-                });
+                // Add needs-work label (only for same-repo PRs)
+                if (isSameRepo) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    labels: ['needs-work']
+                  });
+                }
 
                 message += `### Issues (must fix)\n\n${issues.join('\n')}\n\n`;
               }
@@ -296,14 +302,16 @@ jobs:
               }
             } else {
               // All checks pass
-              try {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  name: 'needs-work'
-                });
-              } catch (e) { /* label wasn't present */ }
+              if (isSameRepo) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    name: 'needs-work'
+                  });
+                } catch (e) { /* label wasn't present */ }
+              }
 
               if (botComment) {
                 await github.rest.issues.updateComment({

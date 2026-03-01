@@ -130,7 +130,11 @@ class TestConfig:
     """Tests for configuration."""
 
     def test_settings_defaults(self, tmp_path, monkeypatch):
-        """Settings.load() should use config.json only; llm_provider defaults to 'auto' (env must not override)."""
+        """
+        Settings.load() should use config.json only;
+        llm_provider defaults to 'auto';
+        env must not override.
+        """
         from pocketpaw.config import Settings, get_settings
 
         config_file = tmp_path / "config.json"
