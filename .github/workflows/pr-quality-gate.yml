@@ -35,6 +35,8 @@ jobs:
             const issues = [];
             const warnings = [];
             const MARKER = '<!-- pr-quality-gate -->';
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            const isSameRepo = context.payload.pull_request.head.repo.full_name === repoFullName;
 
             // Hard block: PRs targeting main
             if (base === 'main') {
@@ -47,12 +49,14 @@ jobs:
                 `\`\`\`\n\n` +
                 `See [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md#branch-strategy) for details.`;
 
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: pr.number,
-                body: message
-              });
+              if (isSameRepo) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: message
+                });
+              }
 
               await github.rest.pulls.update({
                 owner: context.repo.owner,
@@ -97,12 +101,14 @@ jobs:
                   ? 'This PR was previously closed by the quality gate bot.'
                   : 'This PR was previously closed by a maintainer.';
 
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  body: `${MARKER}\n## Reopened PR closed automatically\n\n${reason} Please don't reopen closed PRs - if you've addressed the feedback, open a new PR instead.\n\nSee [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md) for guidelines.`
-                });
+                if (isSameRepo) {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    body: `${MARKER}\n## Reopened PR closed automatically\n\n${reason} Please don't reopen closed PRs - if you've addressed the feedback, open a new PR instead.\n\nSee [CONTRIBUTING.md](../blob/dev/CONTRIBUTING.md) for guidelines.`
+                  });
+                }
 
                 await github.rest.pulls.update({
                   owner: context.repo.owner,
@@ -116,8 +122,6 @@ jobs:
             }
 
             // Size labels (only for same-repo PRs; fork PRs cannot have labels added)
-            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
-            const isSameRepo = context.payload.pull_request.head.repo.full_name === repoFullName;
             const totalChanged = additions + deletions;
             let sizeLabel = 'size/M';
             if (totalChanged <= 10 && changedFiles <= 1) sizeLabel = 'size/XS';
@@ -285,20 +289,22 @@ jobs:
 
               message += `Please update your PR to address these points. PRs that don't meet contribution standards will be closed after 7 days.`;
 
-              if (botComment) {
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: botComment.id,
-                  body: message
-                });
-              } else {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  body: message
-                });
+              if (isSameRepo) {
+                if (botComment) {
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: botComment.id,
+                    body: message
+                  });
+                } else {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    body: message
+                  });
+                }
               }
             } else {
               // All checks pass
@@ -313,7 +319,7 @@ jobs:
                 } catch (e) { /* label wasn't present */ }
               }
 
-              if (botComment) {
+              if (isSameRepo && botComment) {
                 await github.rest.issues.updateComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
