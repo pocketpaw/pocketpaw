@@ -1006,6 +1006,74 @@ class TestAgentLoopCommandIntegration:
         # User message WAS stored in memory
         mm.add_to_session.assert_called()
 
+    @pytest.mark.asyncio
+    @patch("pocketpaw.agents.loop.get_injection_scanner")
+    @patch("pocketpaw.agents.loop.get_command_handler")
+    @patch("pocketpaw.agents.loop.get_memory_manager")
+    @patch("pocketpaw.agents.loop.get_message_bus")
+    @patch("pocketpaw.agents.loop.get_settings")
+    async def test_streaming_output_redacts_secrets_across_chunks(
+        self, mock_settings, mock_bus_fn, mock_mm_fn, mock_cmd_fn, mock_scanner_fn
+    ):
+        """Secrets spanning streaming chunks should be redacted in final output."""
+        from pocketpaw.agents.loop import AgentLoop
+
+        settings = MagicMock()
+        settings.max_concurrent_conversations = 5
+        settings.injection_scan_enabled = False
+        settings.welcome_hint_enabled = False
+        mock_settings.return_value = settings
+
+        bus = MagicMock()
+        bus.publish_outbound = AsyncMock()
+        bus.publish_system = AsyncMock()
+        mock_bus_fn.return_value = bus
+
+        mm = MagicMock()
+        mm.resolve_session_key = AsyncMock(return_value="discord:12345")
+        mm.add_to_session = AsyncMock()
+        mm.get_compacted_history = AsyncMock(return_value=[])
+        mm.get_session_history = AsyncMock(return_value=[])
+        mock_mm_fn.return_value = mm
+
+        cmd_handler = MagicMock()
+        cmd_handler.is_command.return_value = False
+        mock_cmd_fn.return_value = cmd_handler
+
+        loop = AgentLoop()
+        msg = _make_msg("hello world")
+
+        # Simulate backend streaming a secret split across two chunks.
+        with patch.object(loop, "_get_router") as mock_router:
+            router = MagicMock()
+
+            async def _gen():
+                yield {"type": "message", "content": "Your key is sk-ant-"}
+                yield {"type": "message", "content": "api03-xxxxx"}
+                yield {"type": "done", "content": ""}
+
+            router.run.return_value = _gen()
+            router.stop = AsyncMock()
+            mock_router.return_value = router
+
+            with patch.object(loop, "context_builder") as mock_ctx:
+                mock_ctx.memory = mm
+                mock_ctx.build_system_prompt = AsyncMock(return_value="sys prompt")
+                await loop._process_message_inner(msg, "discord:12345")
+
+        # Collect all non-empty outbound message contents
+        outbound_contents = [
+            call[0][0].content for call in bus.publish_outbound.call_args_list if call[0][0].content
+        ]
+
+        # There should be at least one assistant message and it should be redacted.
+        assert outbound_contents, "Expected at least one outbound message"
+        combined = "".join(outbound_contents)
+        assert "[REDACTED]" in combined
+        assert "sk-ant-api03-xxxxx" not in combined
+        assert "sk-ant-" not in combined
+        assert "api03-xxxxx" not in combined
+
     @patch("pocketpaw.agents.loop.get_command_handler")
     @patch("pocketpaw.agents.loop.get_memory_manager")
     @patch("pocketpaw.agents.loop.get_message_bus")

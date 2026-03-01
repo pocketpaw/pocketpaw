@@ -27,6 +27,7 @@ from pocketpaw.bus.events import Channel
 from pocketpaw.config import Settings, get_settings
 from pocketpaw.memory import get_memory_manager
 from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
+from pocketpaw.security.redaction import redact_output
 
 logger = logging.getLogger(__name__)
 
@@ -281,16 +282,10 @@ class AgentLoop:
                     metadata = chunk.get("metadata") or {}
 
                     if chunk_type == "message":
-                        # Stream text to user
+                        # Accumulate assistant text; redaction is applied once
+                        # the full response is available so that secrets cannot
+                        # leak across streaming chunk boundaries.
                         full_response += content
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=content,
-                                is_stream_chunk=True,
-                            )
-                        )
 
                     elif chunk_type == "code":
                         # Code block from Open Interpreter - emit as tool_use
@@ -304,17 +299,9 @@ class AgentLoop:
                                 },
                             )
                         )
-                        # Also stream to user
+                        # Also include in accumulated assistant text
                         code_block = f"\n```{language}\n{content}\n```\n"
                         full_response += code_block
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=code_block,
-                                is_stream_chunk=True,
-                            )
-                        )
 
                     elif chunk_type == "output":
                         # Output from code execution - emit as tool_result
@@ -328,17 +315,9 @@ class AgentLoop:
                                 },
                             )
                         )
-                        # Also stream to user
+                        # Also include in accumulated assistant text
                         output_block = f"\n```output\n{content}\n```\n"
                         full_response += output_block
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=output_block,
-                                is_stream_chunk=True,
-                            )
-                        )
 
                     elif chunk_type == "thinking":
                         # Thinking goes to Activity panel only
@@ -390,7 +369,7 @@ class AgentLoop:
                         media_paths.extend(_extract_media_paths(content))
 
                     elif chunk_type == "error":
-                        # Emit error and send to user
+                        # Emit error and include in accumulated assistant text
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_result",
@@ -401,14 +380,7 @@ class AgentLoop:
                                 },
                             )
                         )
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=content,
-                                is_stream_chunk=True,
-                            )
-                        )
+                        full_response += content
 
                     elif chunk_type == "done":
                         # Agent finished - will send stream_end below
@@ -417,7 +389,19 @@ class AgentLoop:
                 # Always close the async generator to kill any subprocess
                 await run_iter.aclose()
 
-            # 4. Send stream end marker (with any media files detected)
+            # 4. Emit redacted assistant response as a single streamed message
+            if full_response:
+                redacted = redact_output(full_response)
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content=redacted,
+                        is_stream_chunk=True,
+                    )
+                )
+
+            # 5. Send stream end marker (with any media files detected)
             # Fallback: if no media tags found in tool_result chunks,
             # check full_response for generated file paths (Claude SDK backend
             # runs tools via Bash — media tags stay inside the SDK and the
@@ -438,13 +422,13 @@ class AgentLoop:
                 )
             )
 
-            # 5. Store assistant response in memory
+            # 6. Store assistant response in memory
             if full_response:
                 await self.memory.add_to_session(
                     session_key=session_key, role="assistant", content=full_response
                 )
 
-                # 6. Auto-learn: extract facts from conversation (non-blocking)
+                # 7. Auto-learn: extract facts from conversation (non-blocking)
                 should_auto_learn = (
                     self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn
                 ) or (self.settings.memory_backend == "file" and self.settings.file_auto_learn)
