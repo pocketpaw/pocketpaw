@@ -655,6 +655,33 @@ class TestHealthEngine:
             statuses = {r.status for r in results}
             assert "critical" not in statuses
 
+    def test_missing_api_key_degraded_with_onboarding_message(self, engine, tmp_path):
+        """When API key is missing, health is DEGRADED and summary contains onboarding guidance."""
+        config_path = tmp_path / "config.json"
+        config_path.write_text('{"agent_backend": "claude_agent_sdk"}')
+        config_path.chmod(0o600)
+
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.anthropic_api_key = ""
+        settings.openai_api_key = ""
+        settings.google_api_key = ""
+        settings.llm_provider = "auto"
+
+        with (
+            patch(_P_CONFIG_PATH, return_value=config_path),
+            patch(_P_CONFIG_DIR, return_value=tmp_path),
+            patch(_P_SETTINGS, return_value=settings),
+            patch("importlib.util.find_spec", return_value=MagicMock()),
+        ):
+            engine.run_startup_checks()
+
+        assert engine.overall_status == "degraded"
+        s = engine.summary
+        assert s["status"] == "degraded"
+        assert s["message"] is not None
+        assert "add API key" in s["message"].lower() or "api key" in s["message"].lower()
+
     def test_overall_status_unhealthy(self, engine):
         engine._results = [
             HealthCheckResult("a", "A", "config", "ok", "fine", ""),

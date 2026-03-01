@@ -667,9 +667,11 @@ class Settings(BaseSettings):
 
         config_path = get_config_path()
         data: dict = {}
+        file_keys: set = set()
         if config_path.exists():
             try:
                 data = json.loads(config_path.read_text())
+                file_keys = set(data.keys())
             except (json.JSONDecodeError, Exception):
                 pass
 
@@ -680,16 +682,13 @@ class Settings(BaseSettings):
             if field in secrets and secrets[field]:
                 data[field] = secrets[field]
 
+        # Enforce llm_provider default from config.json only; env must not override
+        if "llm_provider" not in file_keys:
+            data["llm_provider"] = "auto"
+
         if data:
             try:
                 settings = cls(**data)
-                # FIX: Ignore environment-resolved provider unless explicitly saved in config.json
-                if config_path.exists():
-                    config_data = json.loads(config_path.read_text())
-                    if "llm_provider" not in config_data:
-                        settings.llm_provider = "auto"
-                else:
-                    settings.llm_provider = "auto"
                 return settings
             except Exception:
                 pass

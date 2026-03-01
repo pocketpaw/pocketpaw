@@ -129,11 +129,15 @@ class TestScreenshotTool:
 class TestConfig:
     """Tests for configuration."""
 
-    def test_settings_defaults(self):
-        """Settings should have sensible defaults."""
-        from pocketpaw.config import Settings
+    def test_settings_defaults(self, tmp_path, monkeypatch):
+        """Settings.load() should use config.json only; llm_provider defaults to 'auto' (env must not override)."""
+        from pocketpaw.config import Settings, get_settings
 
-        settings = Settings()
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("pocketpaw.config.get_config_path", lambda: config_file)
+        get_settings.cache_clear()
+
+        settings = Settings.load()
 
         assert settings.agent_backend == "claude_agent_sdk"  # New default
         assert settings.llm_provider == "auto"
@@ -178,6 +182,26 @@ class TestConfig:
 
         assert result.exists()
         assert result.name == ".pocketpaw"
+
+
+class TestShellGuardianFallback:
+    """Tests for Guardian auth/config error detection (fallback to local execution)."""
+
+    def test_guardian_missing_api_key_returns_true(self):
+        """Error message related to missing API key should be treated as auth/config error."""
+        from pocketpaw.tools.builtin.shell import _is_guardian_auth_or_config_error
+
+        assert _is_guardian_auth_or_config_error("missing API key") is True
+        assert _is_guardian_auth_or_config_error("Invalid api_key") is True
+        assert _is_guardian_auth_or_config_error("unauthorized") is True
+
+    def test_guardian_unrelated_error_returns_false(self):
+        """Normal unrelated error should not trigger fallback."""
+        from pocketpaw.tools.builtin.shell import _is_guardian_auth_or_config_error
+
+        assert _is_guardian_auth_or_config_error("Command blocked: rm -rf /") is False
+        assert _is_guardian_auth_or_config_error("Policy violation") is False
+        assert _is_guardian_auth_or_config_error("") is False
 
 
 class TestLLMRouter:
