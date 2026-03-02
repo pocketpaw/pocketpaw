@@ -134,35 +134,103 @@ sarvam = [
 mcp = [
     "mcp>=1.0.0",
 ]
-soul = [
-    "soul-protocol>=0.2.0",
-]
+# soul-protocol not on PyPI; extra kept for future use
+soul = []
 
-# --- Composite extras ---
+# --- Composite extras (direct deps to avoid self-reference resolution) ---
 recommended = [
-    "pocketpaw[browser,memory,desktop]",
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
 ]
 channels = [
-    "pocketpaw[discord,slack,telegram]",
+    "discord.py>=2.3.0",
+    "slack-bolt>=1.20.0",
+    "python-telegram-bot>=21.0",
 ]
 all-channels = [
-    "pocketpaw[telegram,discord,slack,whatsapp-personal,matrix,teams,gchat]",
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
 ]
 all-tools = [
-    "pocketpaw[browser,desktop,image,extract,voice,ocr,sarvam,mcp,memory]",
+    "playwright>=1.50.0",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk,copilot-sdk]",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
 ]
 paw = [
-    "pocketpaw[soul]",
     "click>=8.0",
 ]
 all = [
-    "pocketpaw[recommended,all-channels,all-tools,all-backends]",
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
 ]
 dev = [
-    "pocketpaw[all]",
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-playwright>=0.4.0",
@@ -201,7 +269,29 @@ select = ["E", "F", "I", "UP"]
 
 [dependency-groups]
 dev = [
-    "pocketpaw[all]",
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",
