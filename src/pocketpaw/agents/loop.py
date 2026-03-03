@@ -271,6 +271,11 @@ class AgentLoop:
             full_response = ""
             media_paths: list[str] = []
             cancelled = False
+            # Streaming redaction: accumulate raw content and track what has
+            # already been sent (redacted) so secrets split across chunk
+            # boundaries are still caught.
+            stream_buffer = ""
+            safe_sent = ""
 
             run_iter = router.run(
                 content, system_prompt=system_prompt, history=history, session_key=session_key
@@ -283,13 +288,18 @@ class AgentLoop:
 
                     if etype == "message":
                         full_response += econtent
-                        # Apply output redaction before sending to user
-                        redacted_content = redact_output(econtent)
+                        # Accumulate raw content and redact the full buffer so
+                        # secrets that span chunk boundaries are fully redacted.
+                        stream_buffer += econtent
+                        safe_buffer = redact_output(stream_buffer)
+                        # Send only the newly safe portion (delta from last publish).
+                        safe_chunk = safe_buffer[len(safe_sent):]
+                        safe_sent = safe_buffer
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=message.channel,
                                 chat_id=message.chat_id,
-                                content=redacted_content,
+                                content=safe_chunk,
                                 is_stream_chunk=True,
                             )
                         )
