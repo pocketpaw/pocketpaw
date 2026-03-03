@@ -1,3 +1,4 @@
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 #Requires -Version 5.1
 <#
 .SYNOPSIS
