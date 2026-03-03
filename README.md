@@ -278,6 +278,13 @@ Settings live in `~/.pocketpaw/config.json`. You can also use `POCKETPAW_`-prefi
 
 ```bash
 export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK backend
+Obtain your key from the provider's console.
+
+Open the PocketPaw dashboard at localhost:8888.
+
+Go to Settings > API Keys.
+
+Paste your key (it should look like sk-...) into the input field.
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
 ```
 
