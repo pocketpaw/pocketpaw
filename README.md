@@ -279,6 +279,13 @@ Settings live in `~/.pocketpaw/config.json`. You can also use `POCKETPAW_`-prefi
 ```bash
 export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK backend
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
+Obtain your key from the provider's console.
+
+Open the PocketPaw dashboard at localhost:8888.
+
+Go to Settings > API Keys.
+
+Paste your key (it should look like sk-...) into the input field.
 ```
 
 > **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
