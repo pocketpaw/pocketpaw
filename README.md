@@ -276,10 +276,11 @@ A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of 
 
 Settings live in `~/.pocketpaw/config.json`. You can also use `POCKETPAW_`-prefixed env vars or the dashboard Settings panel. API keys are encrypted at rest.
 
+**To this (Correct Way):**
+```markdown
 ```bash
 export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK backend
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
-```
 
 > **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
 
