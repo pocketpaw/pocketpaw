@@ -1,3 +1,4 @@
+
 <p align="center">
   <img src="paw.png" alt="PocketPaw" width="100">
 </p>
@@ -170,6 +171,7 @@ Alternatively, you can run PocketPaw using:
 ```powershell
 python -m pocketpaw
 ```
+> **Note:** If PocketPaw was installed inside a Python virtual environment, the `pocketpaw` CLI command will only work while that environment is activated.
 
 <details>
 <summary>Other methods</summary>
