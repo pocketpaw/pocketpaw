@@ -101,6 +101,12 @@ curl -fsSL https://pocketpaw.xyz/install.sh | sh
 powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
 ```
 
+> **Tip**
+> The command above downloads and runs the official PocketPaw install script.
+> 
+> If you prefer to review the script before executing it, you can open it in your browser:
+> https://pocketpaw.xyz/install.ps1
+
 **Manual install with pip:**
 
 ```powershell
