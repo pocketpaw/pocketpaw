@@ -154,7 +154,8 @@ class TestSoulBridgeObserve:
 
         with patch("pocketpaw.paw.soul_bridge.Interaction", mock_interaction_cls, create=True):
             with patch.dict(
-                "sys.modules", {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)}
+                "sys.modules",
+                {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)},
             ):
                 await bridge.observe("Hello", "Hi there")
 
@@ -177,7 +178,8 @@ class TestSoulBridgeObserve:
 
         mock_interaction_cls = MagicMock()
         with patch.dict(
-            "sys.modules", {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)}
+            "sys.modules",
+            {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)},
         ):
             # Should complete silently
             await bridge.observe("input", "output")

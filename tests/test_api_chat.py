@@ -62,7 +62,7 @@ class TestChatStream:
             await q.put({"event": "chunk", "data": {"content": "world"}})
             await q.put({"event": "stream_end", "data": {"session_id": "api:test123", "usage": {}}})
 
-        asyncio.get_event_loop().run_until_complete(_load())
+        asyncio.run(_load())
 
         with client.stream(
             "POST",
@@ -123,7 +123,7 @@ class TestChatSend:
                 {"event": "stream_end", "data": {"session_id": "api:test", "usage": {"tokens": 10}}}
             )
 
-        asyncio.get_event_loop().run_until_complete(_load())
+        asyncio.run(_load())
 
         resp = client.post("/api/v1/chat", json={"content": "Hi"})
         assert resp.status_code == 200
@@ -159,7 +159,7 @@ class TestSSEFormat:
                 {"event": "stream_end", "data": {"session_id": "api:sse-test", "usage": {}}}
             )
 
-        asyncio.get_event_loop().run_until_complete(_load())
+        asyncio.run(_load())
 
         with client.stream("POST", "/api/v1/chat/stream", json={"content": "test"}) as resp:
             assert resp.status_code == 200
