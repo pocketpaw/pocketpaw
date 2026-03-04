@@ -1,7 +1,7 @@
-# Updated: 2026-03-02 — Bump version to 0.4.5 for PyPI release.
+# Updated: 2026-03-03 — Bump version to 0.4.5.1, remove soul-protocol from PyPI extras (not on PyPI yet).
 [project]
 name = "pocketpaw"
-version = "0.4.5"
+version = "0.4.5.1"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -135,7 +135,8 @@ mcp = [
     "mcp>=1.0.0",
 ]
 soul = [
-    "soul-protocol>=0.2.0",
+    # soul-protocol is not yet on PyPI.
+    # Install manually: pip install git+https://github.com/qbtrix/soul-protocol.git
 ]
 
 # --- Composite extras ---
