@@ -2,6 +2,7 @@
   "metadata": {
     "name": "PocketPaw",
     "description": "Self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard",
+    "url": "https://pocketpaw.com",
     "version": "1.0.0"
   },
   "branding": {
@@ -90,6 +91,12 @@
         "icon": "lucide:code",
         "color": "#3b82f6",
         "groups": ["API Reference"]
+      },
+      {
+        "label": "llms.txt",
+        "href": "/llms.txt",
+        "icon": "lucide:bot",
+        "color": "#10b981"
       }
     ],
     "sidebar": [
@@ -723,6 +730,11 @@
     },
     "copyPage": {
       "enabled": true
+    },
+    "llmsTxt": {
+      "enabled": true,
+      "title": "PocketPaw",
+      "description": "Self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard. Multi-backend support (Claude, OpenAI, Google, Codex, Copilot), 50+ built-in tools, MCP servers, and extensible integrations."
     }
   },
   "assets": {

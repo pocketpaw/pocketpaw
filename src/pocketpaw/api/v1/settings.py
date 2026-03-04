@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 
 from pocketpaw.api.deps import require_scope
 
@@ -48,8 +48,8 @@ async def update_settings(request: Request):
     data = await request.json()
     settings_data = data.get("settings", data)
 
-    # Validate API keys before saving
-    validation_errors = []
+    # Validate API keys — collect warnings but never block save
+    warnings = []
     api_key_fields = [
         "anthropic_api_key",
         "openai_api_key",
@@ -62,13 +62,7 @@ async def update_settings(request: Request):
             if value:  # Only validate non-empty values
                 is_valid, warning = validate_api_key(field, value)
                 if not is_valid:
-                    validation_errors.append(warning)
-
-    if validation_errors:
-        raise HTTPException(
-            status_code=400,
-            detail={"errors": validation_errors}
-        )
+                    warnings.append(warning)
 
     async with _settings_lock:
         settings = Settings.load()
@@ -78,4 +72,7 @@ async def update_settings(request: Request):
         settings.save()
         get_settings.cache_clear()
 
-    return {"status": "ok"}
+    result: dict = {"status": "ok"}
+    if warnings:
+        result["warnings"] = warnings
+    return result
