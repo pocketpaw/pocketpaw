@@ -176,7 +176,7 @@ if (-not $Python) {
 }
 
 $pyVer = Get-PythonFullVersion $Python
-$pyPath = if ($Python -eq "py -3") { (Get-Command py).Source } else { (Get-Command $Python -ErrorAction SilentlyContinue).Source }
+$pyPath = if ($Python -eq "py -3") { (Get-Command py -ErrorAction SilentlyContinue).Source } else { (Get-Command $Python -ErrorAction SilentlyContinue).Source }
 Write-Step "Python:  $pyVer ($pyPath)"
 
 # ── Ensure uv is available ──────────────────────────────────────────────
