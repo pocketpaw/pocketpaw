@@ -399,3 +399,22 @@ MIT &copy; PocketPaw Team
   <br>
   <strong>Built for people who'd rather own their AI than rent it</strong>
 </p>
+---
+
+## Troubleshooting
+
+### Windows: 'pocketpaw' command not recognized
+
+If you installed PocketPaw using:
+
+pip install pocketpaw
+
+and see this error:
+
+'pocketpaw' is not recognized as an internal or external command
+
+Try running PocketPaw using:
+
+python -m pocketpaw
+
+This usually happens when the Python Scripts directory is not added to your system PATH or when the virtual environment is not activated.
