@@ -15,10 +15,6 @@ Changes:
   - 2026-02-03: Handle port-in-use gracefully with automatic port finding.
 """
 
-# Force UTF-8 encoding on Windows before any imports that might produce output
-"""PocketPaw entry point."""
-
-# Force UTF-8 encoding on Windows before any imports that might produce output
 import os
 import sys
 import logging
@@ -73,32 +69,77 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    # Dashboard / integration modes
     parser.add_argument("--web", "-w", action="store_true", help="Run web dashboard")
     parser.add_argument("--telegram", action="store_true", help="Run Telegram-only mode")
     parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
     parser.add_argument("--slack", action="store_true", help="Run headless Slack bot")
     parser.add_argument("--whatsapp", action="store_true", help="Run WhatsApp webhook server")
-    parser.add_argument("--signal", action="store_true")
-    parser.add_argument("--matrix", action="store_true")
-    parser.add_argument("--teams", action="store_true")
-    parser.add_argument("--gchat", action="store_true")
+    parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
+    parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
+    parser.add_argument("--teams", action="store_true", help="Run headless Microsoft Teams bot")
+    parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
 
-    parser.add_argument("--security-audit", action="store_true")
-    parser.add_argument("--fix", action="store_true")
+    # Security tools
+    parser.add_argument(
+        "--security-audit",
+        action="store_true",
+        help="Run security audit checks for the system",
+    )
 
-    parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", "-p", type=int, default=8888)
-    parser.add_argument("--dev", action="store_true")
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Automatically fix issues found during security audit",
+    )
 
-    parser.add_argument("--check-ollama", action="store_true")
-    parser.add_argument("--check-openai-compatible", action="store_true")
-    parser.add_argument("--doctor", action="store_true")
+    # Server configuration
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host address to bind the server (default: localhost)",
+    )
+
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8888,
+        help="Port number for the web server (default: 8888)",
+    )
+
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="Run server in development mode",
+    )
+
+    # Health checks
+    parser.add_argument(
+        "--check-ollama",
+        action="store_true",
+        help="Check connection to local Ollama models",
+    )
+
+    parser.add_argument(
+        "--check-openai-compatible",
+        action="store_true",
+        help="Check OpenAI-compatible API connection",
+    )
+
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Run system diagnostics and health checks",
+    )
 
     parser.add_argument(
         "--version",
         "-v",
         action="version",
         version=f"%(prog)s {APP_VERSION}",
+        help="Show PocketPaw version",
     )
 
     parser.add_argument(
@@ -140,13 +181,19 @@ def main() -> None:
 
             if issues:
                 print()
-                for r in results:
-                    if r.status == "ok":
-                        print(f"  [OK] {r.name}: {r.message}")
-                    elif r.status == "warning":
-                        print(f"  [WARN] {r.name}: {r.message}")
-                    else:
-                        print(f"  [FAIL] {r.name}: {r.message}")
+
+            for r in results:
+                if r.status == "ok":
+                    status = "\033[92m[OK]\033[0m"
+                elif r.status == "warning":
+                    status = "\033[93m[WARN]\033[0m"
+                else:
+                    status = "\033[91m[FAIL]\033[0m"
+
+                print(f"  {status} {r.name}: {r.message}")
+
+                if getattr(r, "fix_hint", None):
+                    print(f"       Fix: {r.fix_hint}")
 
         except Exception as e:
             logger.warning("Startup health check failed: %s", e)
@@ -176,7 +223,6 @@ def main() -> None:
     try:
         if args.command == "serve":
             from pocketpaw.api.serve import run_api_server
-
             run_api_server(host=host, port=args.port, dev=args.dev)
 
         elif args.check_ollama:
@@ -193,7 +239,6 @@ def main() -> None:
 
         elif args.security_audit:
             from pocketpaw.security.audit_cli import run_security_audit
-
             exit_code = asyncio.run(run_security_audit(fix=args.fix))
             raise SystemExit(exit_code)
 
