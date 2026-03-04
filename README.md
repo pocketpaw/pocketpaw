@@ -131,47 +131,59 @@ pocketpaw
 </details>
 ## Windows CLI Troubleshooting
 
-If you installed PocketPaw using:
-
-```powershell
-pip install pocketpaw
-```
-
-and the `pocketpaw` command is not recognized:
+If you installed PocketPaw with `pip install pocketpaw` and see this error when running `pocketpaw`:
 
 ```text
 'pocketpaw' is not recognized as an internal or external command
 ```
 
-This usually means your Python Scripts directory is not added to PATH.
+**Why this happens:** When you install Python packages with pip, executable scripts are placed in Python's Scripts directory. Windows needs to know where to find these executables, which is done by adding the Scripts directory to your system's PATH environment variable. If the Scripts directory isn't in your PATH, Windows won't be able to find the `pocketpaw` command.
 
-By default, it is located at:
+### Finding Your Scripts Directory
+
+Your Python Scripts directory is typically located at:
 
 ```text
-C:\Users\<your-username>\AppData\Local\Python\Python3.XX\Scripts
+C:\Users\<your-username>\AppData\Local\Programs\Python\Python3XX\Scripts
 ```
 
-You can find your exact Scripts path by running:
+or:
+
+```text
+C:\Users\<your-username>\AppData\Local\Python\Python3XX-64\Scripts
+```
+
+To find your exact Scripts path, run:
 
 ```powershell
 python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 ```
 
-### How to Fix
+Copy the output path — you'll need it in the next step.
 
-1. Open Start → Search "Environment Variables"
-2. Click "Edit the system environment variables"
-3. Click "Environment Variables"
-4. Under User variables → Select `Path` → Click Edit
-5. Add the Scripts directory path
-6. Restart your terminal
+### Fixing the PATH
 
-Alternatively, you can run PocketPaw using:
+Follow these steps to add the Scripts directory to your PATH:
+
+1. Press **Windows Key** and search for **"Environment Variables"**
+2. Click **"Edit the system environment variables"**
+3. Click the **"Environment Variables"** button at the bottom
+4. Under **"User variables"**, find and select **Path**, then click **Edit**
+5. Click **New** and paste your Scripts directory path
+6. Click **OK** on all windows to save
+
+**Important:** After updating PATH, you must **close and restart your terminal** (or PowerShell/Command Prompt) for the changes to take effect. The `pocketpaw` command won't work in terminals that were already open.
+
+### Alternative: Run Without PATH
+
+If you don't want to modify PATH or the `pocketpaw` command still doesn't work after restarting your terminal, you can always run PocketPaw using:
 
 ```powershell
 python -m pocketpaw
 ```
 > **Note:** If PocketPaw was installed inside a Python virtual environment, the `pocketpaw` CLI command will only work while that environment is activated.
+
+This works immediately without any PATH configuration.
 
 <details>
 <summary>Other methods</summary>
