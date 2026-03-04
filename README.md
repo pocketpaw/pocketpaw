@@ -180,6 +180,18 @@ Follow these steps to add the Scripts directory to your PATH:
 
 **Important:** After updating PATH, you must **close and restart your terminal** (or PowerShell/Command Prompt) for the changes to take effect. The `pocketpaw` command won't work in terminals that were already open.
 
+### Restart the Terminal
+
+After updating the PATH variable, close and reopen your terminal (PowerShell, CMD, or the VS Code terminal).
+
+This allows the system to reload the updated PATH.
+
+Then run:
+
+```powershell
+pocketpaw
+```
+
 ### Alternative: Run Without PATH
 
 If you don't want to modify PATH or the `pocketpaw` command still doesn't work after restarting your terminal, you can always run PocketPaw using:
