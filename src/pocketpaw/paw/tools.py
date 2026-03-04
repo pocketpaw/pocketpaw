@@ -210,8 +210,7 @@ class SoulStatusTool(BaseTool):
                 try:
                     images = self._soul.self_model.get_active_self_images(limit=5)
                     status["domains"] = [
-                        {"domain": img.domain, "confidence": img.confidence}
-                        for img in images
+                        {"domain": img.domain, "confidence": img.confidence} for img in images
                     ]
                 except Exception:
                     pass

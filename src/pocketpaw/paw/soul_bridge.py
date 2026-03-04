@@ -64,9 +64,7 @@ class SoulBridge:
         try:
             from soul_protocol import Interaction
 
-            await self._soul.observe(
-                Interaction(user_input=user_input, agent_output=agent_output)
-            )
+            await self._soul.observe(Interaction(user_input=user_input, agent_output=agent_output))
         except Exception:
             pass  # Observation failure should never break the agent loop
 
