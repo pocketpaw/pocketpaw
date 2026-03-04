@@ -16,20 +16,14 @@ Changes:
 """
 
 # Force UTF-8 encoding on Windows before any imports that might produce output
+"""PocketPaw entry point."""
+
+# Force UTF-8 encoding on Windows before any imports that might produce output
 import os
 import sys
-
-if sys.platform == "win32":
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, OSError):
-        pass
-
+import logging
 import argparse
 import asyncio
-import logging
 from importlib.metadata import version as get_version
 
 from pocketpaw.config import Settings, get_settings
@@ -42,9 +36,21 @@ from pocketpaw.headless import (
 )
 from pocketpaw.logging_setup import setup_logging
 
-# Setup beautiful logging with Rich
+# Setup logging
 setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
+
+# Cache version once
+APP_VERSION = get_version("pocketpaw")
+
+# Windows UTF-8 handling
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError) as e:
+        logger.debug("UTF-8 reconfiguration skipped: %s", e)
 
 
 def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
@@ -61,143 +67,102 @@ def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = Fal
 
 def main() -> None:
     """Main entry point."""
+
     parser = argparse.ArgumentParser(
         description="🐾 PocketPaw (Beta) - The AI agent that runs on your laptop",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  pocketpaw                          Start web dashboard (default)
-  pocketpaw serve                    Start API-only server (no dashboard)
-  pocketpaw --telegram               Start in Telegram-only mode
-  pocketpaw --discord                Start headless Discord bot
-  pocketpaw --slack                  Start headless Slack bot (Socket Mode)
-  pocketpaw --whatsapp               Start headless WhatsApp webhook server
-  pocketpaw --discord --slack        Run Discord + Slack simultaneously
-  pocketpaw --dev                    Start dashboard with auto-reload (dev mode)
-""",
     )
 
-    parser.add_argument(
-        "--web",
-        "-w",
-        action="store_true",
-        help="Run web dashboard (same as default, kept for compatibility)",
-    )
-    parser.add_argument(
-        "--telegram",
-        action="store_true",
-        help="Run Telegram-only mode (legacy pairing flow)",
-    )
+    parser.add_argument("--web", "-w", action="store_true", help="Run web dashboard")
+    parser.add_argument("--telegram", action="store_true", help="Run Telegram-only mode")
     parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
-    parser.add_argument(
-        "--slack",
-        action="store_true",
-        help="Run headless Slack bot (Socket Mode)",
-    )
-    parser.add_argument(
-        "--whatsapp",
-        action="store_true",
-        help="Run headless WhatsApp webhook server",
-    )
-    parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
-    parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
-    parser.add_argument("--teams", action="store_true", help="Run headless Teams bot")
-    parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
-    parser.add_argument(
-        "--security-audit",
-        action="store_true",
-        help="Run security audit and print report",
-    )
-    parser.add_argument(
-        "--fix",
-        action="store_true",
-        help="Auto-fix fixable issues found by --security-audit",
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=None,
-        help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
-    )
-    parser.add_argument(
-        "--port",
-        "-p",
-        type=int,
-        default=8888,
-        help="Port for web server (default: 8888)",
-    )
-    parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
-    parser.add_argument(
-        "--check-ollama",
-        action="store_true",
-        help="Check Ollama connectivity, model availability, and tool calling support",
-    )
-    parser.add_argument(
-        "--check-openai-compatible",
-        action="store_true",
-        help="Check OpenAI-compatible endpoint connectivity and tool calling support",
-    )
-    parser.add_argument(
-        "--doctor",
-        action="store_true",
-        help="Run diagnostics: check config, connectivity, updates, and print a health report",
-    )
+    parser.add_argument("--slack", action="store_true", help="Run headless Slack bot")
+    parser.add_argument("--whatsapp", action="store_true", help="Run WhatsApp webhook server")
+    parser.add_argument("--signal", action="store_true")
+    parser.add_argument("--matrix", action="store_true")
+    parser.add_argument("--teams", action="store_true")
+    parser.add_argument("--gchat", action="store_true")
+
+    parser.add_argument("--security-audit", action="store_true")
+    parser.add_argument("--fix", action="store_true")
+
+    parser.add_argument("--host", type=str, default=None)
+    parser.add_argument("--port", "-p", type=int, default=8888)
+    parser.add_argument("--dev", action="store_true")
+
+    parser.add_argument("--check-ollama", action="store_true")
+    parser.add_argument("--check-openai-compatible", action="store_true")
+    parser.add_argument("--doctor", action="store_true")
+
     parser.add_argument(
         "--version",
         "-v",
         action="version",
-        version=f"%(prog)s {get_version('pocketpaw')}",
+        version=f"%(prog)s {APP_VERSION}",
     )
+
     parser.add_argument(
         "command",
         nargs="?",
         default=None,
-        help="Subcommand: 'serve' starts an API-only server (no dashboard UI)",
+        help="Subcommand: 'serve' starts an API-only server",
     )
 
     args = parser.parse_args()
 
-    # Fail fast if optional deps are missing for the chosen mode
+    # Validate conflicting CLI flags
+    channel_flags = [
+        args.discord,
+        args.slack,
+        args.whatsapp,
+        args.signal,
+        args.matrix,
+        args.teams,
+        args.gchat,
+    ]
+
+    if args.telegram and any(channel_flags):
+        parser.error("--telegram cannot be combined with other channel flags")
+
     _check_extras_installed(args)
 
     settings = get_settings()
 
-    # Run startup health checks (non-blocking, informational only)
+    # Run startup health checks
     if settings.health_check_on_startup:
         try:
             from pocketpaw.health import get_health_engine
 
             engine = get_health_engine()
             results = engine.run_startup_checks()
+
             issues = [r for r in results if r.status != "ok"]
+
             if issues:
                 print()
                 for r in results:
                     if r.status == "ok":
-                        print(f"  \033[32m[OK]\033[0m   {r.name}: {r.message}")
+                        print(f"  [OK] {r.name}: {r.message}")
                     elif r.status == "warning":
-                        print(f"  \033[33m[WARN]\033[0m {r.name}: {r.message}")
-                        if r.fix_hint:
-                            print(f"         {r.fix_hint}")
+                        print(f"  [WARN] {r.name}: {r.message}")
                     else:
-                        print(f"  \033[31m[FAIL]\033[0m {r.name}: {r.message}")
-                        if r.fix_hint:
-                            print(f"         {r.fix_hint}")
-                status = engine.overall_status
-                color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(status, "0")
-                print(f"\n  System: \033[{color}m{status.upper()}\033[0m\n")
-        except Exception:
-            pass  # Health engine failure never blocks startup
+                        print(f"  [FAIL] {r.name}: {r.message}")
 
-    # Check for updates (cached daily, silent on error)
+        except Exception as e:
+            logger.warning("Startup health check failed: %s", e)
+
+    # Check updates
     from pocketpaw.config import get_config_dir
     from pocketpaw.update_check import check_for_updates, print_styled_update_notice
 
-    update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
-    if update_info and update_info.get("update_available"):
-        print_styled_update_notice(update_info)
+    try:
+        update_info = check_for_updates(APP_VERSION, get_config_dir())
+        if update_info and update_info.get("update_available"):
+            print_styled_update_notice(update_info)
+    except Exception as e:
+        logger.debug("Update check skipped: %s", e)
 
-    # Resolve host: explicit flag > config > auto-detect
+    # Resolve host
     if args.host is not None:
         host = args.host
     elif settings.web_host != "127.0.0.1":
@@ -208,56 +173,54 @@ Examples:
     else:
         host = "127.0.0.1"
 
-    has_channel_flag = (
-        args.discord
-        or args.slack
-        or args.whatsapp
-        or args.signal
-        or args.matrix
-        or args.teams
-        or args.gchat
-    )
-
     try:
         if args.command == "serve":
             from pocketpaw.api.serve import run_api_server
 
             run_api_server(host=host, port=args.port, dev=args.dev)
+
         elif args.check_ollama:
             exit_code = asyncio.run(check_ollama(settings))
             raise SystemExit(exit_code)
+
         elif args.check_openai_compatible:
             exit_code = asyncio.run(check_openai_compatible(settings))
             raise SystemExit(exit_code)
+
         elif args.doctor:
             exit_code = asyncio.run(run_doctor())
             raise SystemExit(exit_code)
+
         elif args.security_audit:
             from pocketpaw.security.audit_cli import run_security_audit
 
             exit_code = asyncio.run(run_security_audit(fix=args.fix))
             raise SystemExit(exit_code)
+
         elif args.telegram:
             asyncio.run(run_telegram_mode(settings))
-        elif has_channel_flag:
+
+        elif any(channel_flags):
             asyncio.run(run_multi_channel_mode(settings, args))
+
         else:
-            # Default: web dashboard (also handles --web flag)
             run_dashboard_mode(settings, host, args.port, dev=args.dev)
+
     except KeyboardInterrupt:
-        logger.info("PocketPaw stopped.")
+        logger.info("PocketPaw stopped by user.")
+
+    except Exception as e:
+        logger.error("Unexpected runtime error: %s", e)
+
     finally:
-        # Coordinated singleton shutdown
         from pocketpaw.lifecycle import shutdown_all
 
         try:
             loop = asyncio.new_event_loop()
             loop.run_until_complete(shutdown_all())
             loop.close()
-        except (RuntimeError, OSError):
-            # RuntimeError: event loop already closed (common on Windows)
-            # OSError: socket/fd cleanup errors during forced shutdown
-            pass
+        except (RuntimeError, OSError) as e:
+            logger.debug("Shutdown cleanup issue: %s", e)
 
 
 if __name__ == "__main__":
