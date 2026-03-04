@@ -43,14 +43,22 @@ _API_KEY_PATTERNS = {
 
 
 def validate_api_key(field_name: str, value: str) -> tuple[bool, str]:
-    """Validate API key format.
+    """Validate a **single** API key against strict regex patterns.
+
+    Used by the REST ``PUT /settings`` endpoint and the WS ``save_api_key``
+    handler to check format *before* saving.  Returns a per-key verdict so
+    the caller can surface a targeted warning.
+
+    See also :func:`validate_api_keys` which validates *all* keys on a
+    :class:`Settings` instance using looser prefix checks.
 
     Args:
-        field_name: Name of the field being validated (e.g., "anthropic_api_key")
-        value: The API key value to validate
+        field_name: Settings field name (e.g., ``"anthropic_api_key"``).
+        value: The raw API key string to validate.
 
     Returns:
-        Tuple of (is_valid, warning_message). warning_message is empty if valid.
+        ``(True, "")`` when the format is acceptable, or
+        ``(False, "<human-readable warning>")`` when it is not.
     """
     if not value or not value.strip():
         return True, ""  # Empty values are allowed (user may want to unset)
@@ -135,12 +143,16 @@ _TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]+$")
 
 
 def validate_api_keys(settings: "Settings") -> list[str]:
-    """Validate API key / token formats. Returns list of warning messages (never blocks save)."""
+    """Validate **all** API keys on a :class:`Settings` instance (batch, loose).
+
+    Uses simple prefix checks (not the strict regexes in :func:`validate_api_key`)
+    and returns a list of human-readable warnings.  Designed for advisory use
+    (e.g. ``Settings.save()`` logs warnings) — callers must **never** block a
+    save based on these results.
+    """
     warnings: list[str] = []
     if settings.anthropic_api_key and not settings.anthropic_api_key.startswith("sk-ant-"):
-        warnings.append(
-            "Anthropic API key may be invalid: expected to start with sk-ant-"
-        )
+        warnings.append("Anthropic API key may be invalid: expected to start with sk-ant-")
     if settings.openai_api_key and not settings.openai_api_key.startswith("sk-"):
         warnings.append("OpenAI API key may be invalid: expected to start with sk-")
     if settings.telegram_bot_token and not _TELEGRAM_BOT_TOKEN_RE.fullmatch(
@@ -216,9 +228,7 @@ class Settings(BaseSettings):
     )
 
     # Codex CLI Settings
-    codex_cli_model: str = Field(
-        default="gpt-5.3-codex", description="Model for Codex CLI backend"
-    )
+    codex_cli_model: str = Field(default="gpt-5.3-codex", description="Model for Codex CLI backend")
     codex_cli_max_turns: int = Field(
         default=100, description="Max turns per query in Codex CLI backend (0 = unlimited)"
     )
@@ -275,9 +285,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-5.2", description="OpenAI model to use")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
-    anthropic_model: str = Field(
-        default="claude-sonnet-4-6", description="Anthropic model to use"
-    )
+    anthropic_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model to use")
 
     # Memory Backend
     memory_backend: str = Field(

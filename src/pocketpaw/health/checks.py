@@ -311,7 +311,7 @@ def check_api_key_format() -> HealthCheckResult:
     for field_name, validator in _API_KEY_PATTERNS.items():
         value = getattr(settings, field_name, None)
         pattern = validator["pattern"]
-        if value and not pattern.match(value):
+        if value and isinstance(value, str) and not pattern.match(value):
             warnings.append(f"{field_name} doesn't match expected format ({pattern.pattern})")
 
     if warnings:
