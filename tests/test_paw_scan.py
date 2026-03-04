@@ -98,12 +98,7 @@ class TestHeuristicScanReadme:
         await heuristic_scan(tmp_path, mock_soul)
 
         importance_values = [
-<<<<<<< HEAD
             call.kwargs.get("importance") for call in mock_soul.remember.call_args_list
-=======
-            call.kwargs.get("importance")
-            for call in mock_soul.remember.call_args_list
->>>>>>> e12da98 (Replace deprecated asyncio.get_event_loop().run_until_complete with asyncio.run for Python 3.12 compatibility)
         ]
         readme_importances = [
             imp
