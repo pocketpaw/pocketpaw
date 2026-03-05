@@ -8,6 +8,7 @@ and streams AgentEvent responses back to channels.
 import asyncio
 import logging
 import re
+import time
 
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
@@ -20,6 +21,11 @@ from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scan
 from pocketpaw.security.redact import redact_output
 
 logger = logging.getLogger(__name__)
+
+# How long (seconds) a session lock must be idle before it is eligible for
+# garbage collection.  1 hour is generous enough to cover any in-flight work
+# while still bounding growth on long-running servers with many unique sessions.
+_SESSION_LOCK_TTL = 3600  # seconds
 
 _MEDIA_TAG_RE = re.compile(r"<!-- media:(.+?) -->")
 # Fallback: detect file paths in ~/.pocketpaw/generated/ mentioned in agent text.
@@ -62,6 +68,12 @@ class AgentLoop:
 
         # Concurrency controls
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Tracks the last time each session lock was touched (time.monotonic).
+        # Used by the GC task to identify and discard idle locks so that
+        # _session_locks does not grow without bound on long-running servers.
+        self._session_lock_last_used: dict[str, float] = {}
+        # Background task that periodically prunes stale locks (see _gc_session_locks).
+        self._lock_gc_task: asyncio.Task | None = None
         self._global_semaphore = asyncio.Semaphore(self.settings.max_concurrent_conversations)
         self._background_tasks: set[asyncio.Task] = set()
         self._active_tasks: dict[str, asyncio.Task] = {}  # session_key -> processing task
@@ -81,12 +93,74 @@ class AgentLoop:
         self._running = True
         settings = Settings.load()
         logger.info(f"🤖 Agent Loop started (Backend: {settings.agent_backend})")
+        # Spawn the session-lock GC before entering the main loop so it begins
+        # pruning stale locks as soon as the server is live.
+        self._lock_gc_task = asyncio.create_task(
+            self._gc_session_locks(), name="session-lock-gc"
+        )
         await self._loop()
 
     async def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        # Cancel the GC task so it does not linger after shutdown.
+        if self._lock_gc_task is not None and not self._lock_gc_task.done():
+            self._lock_gc_task.cancel()
+            try:
+                await self._lock_gc_task
+            except asyncio.CancelledError:
+                pass  # expected on clean shutdown
+            self._lock_gc_task = None
         logger.info("🛑 Agent Loop stopped")
+
+    async def _gc_session_locks(self) -> None:
+        """
+        Periodically garbage-collect idle session locks to prevent unbounded
+        memory growth.
+
+        **Problem being solved**
+        ``_session_locks`` is a dict keyed by ``session_key``.  Entries are
+        created on-demand in ``_process_message`` but the existing eager-cleanup
+        (``pop`` after the lock is released) can be bypassed when:
+
+        * An unhandled exception propagates before the ``pop`` line is reached.
+        * A task is cancelled while another coroutine is already *waiting* for
+          the same lock — the entry cannot be safely removed until all waiters
+          are gone, so the last waiter may miss cleanup under certain race
+          conditions.
+        * A session that produced an error leaves its lock entry permanently.
+
+        Over weeks of operation with thousands of unique sessions this causes
+        unbounded memory growth (one ``asyncio.Lock`` object + two dict entries
+        per dead session).
+
+        **Algorithm**
+        Every 5 minutes inspect ``_session_lock_last_used``; any lock that has
+        not been touched for longer than ``_SESSION_LOCK_TTL`` seconds *and* is
+        currently unlocked is safe to discard.  Locked entries are always
+        skipped — they are either actively held or have at least one waiter.
+
+        Because asyncio is single-threaded for coroutine scheduling, the dict
+        mutations here are safe without additional locking.
+        """
+        while True:
+            # Sleep first so we don't run immediately on a cold start.
+            await asyncio.sleep(300)  # check every 5 minutes
+            now = time.monotonic()
+            stale_keys = [
+                key
+                for key, last_used in list(self._session_lock_last_used.items())
+                if now - last_used > _SESSION_LOCK_TTL
+                and key in self._session_locks
+                and not self._session_locks[key].locked()
+            ]
+            for key in stale_keys:
+                self._session_locks.pop(key, None)
+                self._session_lock_last_used.pop(key, None)
+            if stale_keys:
+                logger.debug(
+                    "session-lock GC removed %d stale lock(s)", len(stale_keys)
+                )
 
     async def cancel_session(self, session_key: str) -> bool:
         """Cancel in-flight processing for a session. Returns True if cancelled."""
@@ -136,12 +210,18 @@ class AgentLoop:
                 if resolved_key not in self._session_locks:
                     self._session_locks[resolved_key] = asyncio.Lock()
                 lock = self._session_locks[resolved_key]
+                # Record access time so the GC task can identify idle locks.
+                self._session_lock_last_used[resolved_key] = time.monotonic()
                 async with lock:
                     await self._process_message_inner(message, resolved_key)
 
-                # Clean up lock if no one else is waiting on it
+                # Eager cleanup: remove the lock immediately when no further
+                # coroutines are waiting on it.  The GC task is a safety net
+                # for the cases where this eager path is skipped (e.g. after
+                # an exception propagates past this block).
                 if not lock.locked():
                     self._session_locks.pop(resolved_key, None)
+                    self._session_lock_last_used.pop(resolved_key, None)
         except asyncio.CancelledError:
             logger.info("Processing cancelled for session %s", session_key)
             raise
