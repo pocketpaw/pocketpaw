@@ -58,9 +58,7 @@ def auto_install(extra: str, verify_import: str) -> dict[str, str]:
             raise RuntimeError(f"Failed to install {pip_spec}:\n{result.stderr.strip()}")
         _log.info("Successfully installed %s", pip_spec)
     except FileNotFoundError:
-        raise RuntimeError(
-            f"Cannot auto-install {pip_spec}: neither uv nor pip found on PATH"
-        )
+        raise RuntimeError(f"Cannot auto-install {pip_spec}: neither uv nor pip found on PATH")
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Timed out installing {pip_spec}")
 
