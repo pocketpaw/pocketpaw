@@ -41,6 +41,7 @@ class MatrixAdapter(BaseChannelAdapter):
         self.device_id = device_id
         self._client = None  # nio.AsyncClient
         self._sync_task: asyncio.Task | None = None
+        self._initial_sync_done = False
         self._buffers: dict[str, str] = {}
         self._edit_event_ids: dict[str, str] = {}  # chat_id -> event_id for edits
         self._last_edit_time: dict[str, float] = {}
@@ -107,12 +108,35 @@ class MatrixAdapter(BaseChannelAdapter):
         logger.info("Matrix Adapter stopped")
 
     async def _sync_loop(self) -> None:
-        """Long-polling sync loop."""
+        """Long-polling sync loop with reconnection."""
         try:
-            # Initial sync to avoid processing old messages
-            await self._client.sync(timeout=10000)
-            # Now sync forever for new messages
-            await self._client.sync_forever(timeout=30000)
+            # Initial sync — callbacks fire but _initial_sync_done is False so
+            # _on_message / _on_media_message will skip old events.
+            self._initial_sync_done = False
+            resp = await self._client.sync(timeout=10000, full_state=True)
+            self._initial_sync_done = True
+            logger.info(
+                "Matrix initial sync complete (next_batch=%s)",
+                getattr(resp, "next_batch", "unknown"),
+            )
+
+            # sync_forever with reconnection — if it exits due to a transient
+            # error we retry with exponential backoff.
+            backoff = 5
+            while self._running:
+                try:
+                    await self._client.sync_forever(timeout=30000)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(
+                        "Matrix sync_forever error: %s — reconnecting in %ds", e, backoff
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60)
+                else:
+                    # sync_forever returned without error (server closed cleanly)
+                    backoff = 5
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -120,81 +144,101 @@ class MatrixAdapter(BaseChannelAdapter):
 
     async def _on_message(self, room, event) -> None:
         """Handle incoming Matrix messages."""
-        # Skip our own messages
-        if event.sender == self.user_id:
-            return
+        try:
+            # Skip events from the initial sync (historical messages)
+            if not self._initial_sync_done:
+                return
 
-        # Room filter
-        if self.allowed_room_ids and room.room_id not in self.allowed_room_ids:
-            logger.debug("Matrix message from unauthorized room: %s", room.room_id)
-            return
+            # Skip our own messages
+            if event.sender == self.user_id:
+                return
 
-        content = event.body or ""
-        if not content:
-            return
+            # Room filter
+            if self.allowed_room_ids and room.room_id not in self.allowed_room_ids:
+                logger.debug("Matrix message from unauthorized room: %s", room.room_id)
+                return
 
-        msg = InboundMessage(
-            channel=Channel.MATRIX,
-            sender_id=event.sender,
-            chat_id=room.room_id,
-            content=content,
-            metadata={
-                "event_id": event.event_id,
-                "room_name": getattr(room, "display_name", ""),
-            },
-        )
-        await self._publish_inbound(msg)
+            content = event.body or ""
+            if not content:
+                return
+
+            logger.debug(
+                "Matrix message from %s in %s: %s",
+                event.sender,
+                room.room_id,
+                content[:80],
+            )
+            msg = InboundMessage(
+                channel=Channel.MATRIX,
+                sender_id=event.sender,
+                chat_id=room.room_id,
+                content=content,
+                metadata={
+                    "event_id": event.event_id,
+                    "room_name": getattr(room, "display_name", ""),
+                },
+            )
+            await self._publish_inbound(msg)
+        except Exception as e:
+            logger.error("Error handling Matrix message: %s", e)
 
     async def _on_media_message(self, room, event) -> None:
         """Handle incoming Matrix media messages (image, file, audio, video)."""
-        if event.sender == self.user_id:
-            return
-        if self.allowed_room_ids and room.room_id not in self.allowed_room_ids:
-            return
+        try:
+            # Skip events from the initial sync (historical messages)
+            if not self._initial_sync_done:
+                return
 
-        content = getattr(event, "body", "") or ""
-        media_paths: list[str] = []
+            if event.sender == self.user_id:
+                return
+            if self.allowed_room_ids and room.room_id not in self.allowed_room_ids:
+                return
 
-        # Download media via mxc:// URL
-        mxc_url = getattr(event, "url", None)
-        if mxc_url and mxc_url.startswith("mxc://"):
-            try:
-                from pocketpaw.bus.media import build_media_hint, get_media_downloader
+            content = getattr(event, "body", "") or ""
+            media_paths: list[str] = []
 
-                # Convert mxc://server/media_id to HTTPS download URL
-                parts = mxc_url[len("mxc://") :]
-                server, _, media_id = parts.partition("/")
-                hs = self.homeserver.rstrip("/")
-                download_url = f"{hs}/_matrix/media/v3/download/{server}/{media_id}"
+            # Download media via mxc:// URL
+            mxc_url = getattr(event, "url", None)
+            if mxc_url and mxc_url.startswith("mxc://"):
+                try:
+                    from pocketpaw.bus.media import build_media_hint, get_media_downloader
 
-                name = getattr(event, "body", "media") or "media"
-                mime = None
-                info = getattr(event, "source", {}).get("content", {}).get("info", {})
-                if info:
-                    mime = info.get("mimetype")
+                    # Convert mxc://server/media_id to HTTPS download URL
+                    parts = mxc_url[len("mxc://") :]
+                    server, _, media_id = parts.partition("/")
+                    hs = self.homeserver.rstrip("/")
+                    download_url = f"{hs}/_matrix/media/v3/download/{server}/{media_id}"
 
-                downloader = get_media_downloader()
-                path = await downloader.download_url(download_url, name=name, mime=mime)
-                media_paths.append(path)
-                content += build_media_hint([name])
-            except Exception as e:
-                logger.warning("Failed to download Matrix media: %s", e)
+                    name = getattr(event, "body", "media") or "media"
+                    mime = None
+                    info = getattr(event, "source", {}).get("content", {}).get("info", {})
+                    if info:
+                        mime = info.get("mimetype")
 
-        if not content and not media_paths:
-            return
+                    downloader = get_media_downloader()
+                    path = await downloader.download_url(download_url, name=name, mime=mime)
+                    media_paths.append(path)
+                    content += build_media_hint([name])
+                except Exception as e:
+                    logger.warning("Failed to download Matrix media: %s", e)
 
-        msg = InboundMessage(
-            channel=Channel.MATRIX,
-            sender_id=event.sender,
-            chat_id=room.room_id,
-            content=content,
-            media=media_paths,
-            metadata={
-                "event_id": event.event_id,
-                "room_name": getattr(room, "display_name", ""),
-            },
-        )
-        await self._publish_inbound(msg)
+            if not content and not media_paths:
+                return
+
+            msg = InboundMessage(
+                channel=Channel.MATRIX,
+                sender_id=event.sender,
+                chat_id=room.room_id,
+                content=content,
+                media=media_paths,
+                metadata={
+                    "event_id": event.event_id,
+                    "room_name": getattr(room, "display_name", ""),
+                },
+            )
+            await self._publish_inbound(msg)
+        except Exception as e:
+            logger.error("Error handling Matrix media message: %s", e)
 
     async def send(self, message: OutboundMessage) -> None:
         """Send message to Matrix.

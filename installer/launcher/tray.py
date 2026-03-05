@@ -32,7 +32,7 @@ except ImportError:
     HAS_TRAY = False
     logger.warning("pystray or Pillow not available — tray icon disabled")
 
-from installer.launcher.common import POCKETPAW_HOME
+from installer.launcher.common import POCKETPAW_HOME  # noqa: E402
 
 LOG_FILE = POCKETPAW_HOME / "logs" / "launcher.log"
 

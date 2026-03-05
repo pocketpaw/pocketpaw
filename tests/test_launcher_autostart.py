@@ -14,7 +14,7 @@ sys.modules.setdefault("pystray", MagicMock())
 sys.modules.setdefault("PIL", MagicMock())
 sys.modules.setdefault("PIL.Image", MagicMock())
 
-from installer.launcher.autostart import AutoStartManager, get_executable_path
+from installer.launcher.autostart import AutoStartManager, get_executable_path  # noqa: E402
 
 # ── get_executable_path ─────────────────────────────────────────────────
 

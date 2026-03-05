@@ -40,7 +40,7 @@
             'bg-white/20': !healthStatus || healthStatus === 'unknown'
         }"
         @click="openHealthPanel(); sidebarOpen = false"
-        :title="'System: ' + (healthStatus || 'unknown')"
+        :title="healthStatus === 'degraded' && healthMessage ? healthMessage : ('System: ' + (healthStatus || 'unknown'))"
     ></button>
     <button class="ml-auto md:hidden" @click="sidebarOpen = false">
         <i data-lucide="x" class="w-5 h-5 text-white/50"></i>

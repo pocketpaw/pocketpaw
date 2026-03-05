@@ -8,7 +8,7 @@
 # - PlannerResult: full output from the planning phase
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pocketpaw.mission_control.models import generate_id, now_iso
@@ -18,7 +18,7 @@ from pocketpaw.mission_control.models import generate_id, now_iso
 # ============================================================================
 
 
-class ProjectStatus(str, Enum):
+class ProjectStatus(StrEnum):
     """Project lifecycle status."""
 
     DRAFT = "draft"

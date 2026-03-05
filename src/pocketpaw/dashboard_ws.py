@@ -712,21 +712,26 @@ async def websocket_handler(
                 await websocket.send_json({"type": "reminders", "reminders": reminders})
 
             elif action == "add_reminder":
-                message = data.get("message", "")
-                scheduler = get_scheduler()
-                reminder = scheduler.add_reminder(message)
+                try:
+                    message = data.get("message", "")
+                    scheduler = get_scheduler()
+                    reminder = scheduler.add_reminder(message)
 
-                if reminder:
-                    reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
-                    await websocket.send_json({"type": "reminder_added", "reminder": reminder})
-                else:
+                    if reminder:
+                        reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
+                        await websocket.send_json({"type": "reminder_added", "reminder": reminder})
+                    else:
+                        await websocket.send_json(
+                            {
+                                "type": "reminder_error",
+                                "content": (
+                                    "Could not parse time from message. Try 'in 5 minutes' or 'at 3pm'"
+                                ),
+                            }
+                        )
+                except Exception:
                     await websocket.send_json(
-                        {
-                            "type": "error",
-                            "content": (
-                                "Could not parse time from message. Try 'in 5 minutes' or 'at 3pm'"
-                            ),
-                        }
+                        {"type": "reminder_error", "content": "Error adding reminder"}
                     )
 
             elif action == "delete_reminder":
@@ -735,7 +740,9 @@ async def websocket_handler(
                 if scheduler.delete_reminder(reminder_id):
                     await websocket.send_json({"type": "reminder_deleted", "id": reminder_id})
                 else:
-                    await websocket.send_json({"type": "error", "content": "Reminder not found"})
+                    await websocket.send_json(
+                        {"type": "reminder_error", "content": "Reminder not found"}
+                    )
 
             # ==================== Intentions API ====================
 

@@ -19,28 +19,28 @@ import re
 # ---------------------------------------------------------------------------
 DANGEROUS_PATTERNS: list[str] = [
     # -- Destructive file operations --
-    r"rm\s+(-[rf]+\s+)*[/~]",       # rm -rf /, rm -r -f ~, etc.
-    r"rm\s+(-[rf]+\s+)*\*",         # rm -rf *
-    r"sudo\s+rm\b",                 # Any sudo rm
-    r">\s*/dev/",                    # Write to devices
-    r">\s*/etc/",                    # Overwrite system config
-    r"mkfs\.",                       # Format filesystem
-    r"dd\s+if=",                     # Disk operations
+    r"rm\s+(-[rf]+\s+)*[/~]",  # rm -rf /, rm -r -f ~, etc.
+    r"rm\s+(-[rf]+\s+)*\*",  # rm -rf *
+    r"sudo\s+rm\b",  # Any sudo rm
+    r">\s*/dev/",  # Write to devices
+    r">\s*/etc/",  # Overwrite system config
+    r"mkfs\.",  # Format filesystem
+    r"dd\s+if=",  # Disk operations
     r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  # Fork bomb
-    r"chmod\s+(-R\s+)?777\s+/",     # Dangerous permissions on root
+    r"chmod\s+(-R\s+)?777\s+/",  # Dangerous permissions on root
     # -- Remote code execution --
-    r"curl\s+.*\|\s*(ba)?sh",       # curl | sh / curl | bash
-    r"wget\s+.*\|\s*(ba)?sh",       # wget | sh / wget | bash
-    r"curl\s+.*-o\s*/",             # curl download to root
-    r"wget\s+.*-O\s*/",             # wget download to root
+    r"curl\s+.*\|\s*(ba)?sh",  # curl | sh / curl | bash
+    r"wget\s+.*\|\s*(ba)?sh",  # wget | sh / wget | bash
+    r"curl\s+.*-o\s*/",  # curl download to root
+    r"wget\s+.*-O\s*/",  # wget download to root
     # -- System damage --
-    r">\s*/etc/passwd",              # Overwrite passwd
-    r">\s*/etc/shadow",              # Overwrite shadow
+    r">\s*/etc/passwd",  # Overwrite passwd
+    r">\s*/etc/shadow",  # Overwrite shadow
     r"systemctl\s+(stop|disable)\s+(ssh|sshd|firewall)",
-    r"iptables\s+-F",               # Flush firewall
-    r"\bshutdown\b",                # Shutdown system
-    r"\breboot\b",                  # Reboot system
-    r"init\s+0",                    # Halt system
+    r"iptables\s+-F",  # Flush firewall
+    r"\bshutdown\b",  # Shutdown system
+    r"\breboot\b",  # Reboot system
+    r"init\s+0",  # Halt system
 ]
 
 # Pre-compiled for call sites that iterate with `.search()`.

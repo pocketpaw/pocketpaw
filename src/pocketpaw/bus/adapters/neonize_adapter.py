@@ -218,9 +218,9 @@ class NeonizeAdapter(BaseChannelAdapter):
         """
         loop = asyncio.get_running_loop()
         try:
-            await asyncio.wait_for(loop.run_in_executor(
-                None, _tcp_probe, host, port, timeout
-            ), timeout=timeout + 1)
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _tcp_probe, host, port, timeout), timeout=timeout + 1
+            )
         except Exception as exc:
             raise ConnectionError(
                 f"Cannot reach {host}:{port} — WhatsApp (neonize) adapter "

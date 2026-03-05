@@ -55,6 +55,7 @@ def _check_soul_protocol() -> bool:
 # Main group
 # ---------------------------------------------------------------------------
 
+
 @click.group(invoke_without_command=True)
 @click.pass_context
 @click.version_option(package_name="pocketpaw", prog_name="paw")
@@ -68,6 +69,7 @@ def main(ctx: click.Context) -> None:
 # paw init
 # ---------------------------------------------------------------------------
 
+
 @main.command()
 @click.option("--name", "-n", default=None, help="Name for the soul (default: Paw)")
 @click.option("--provider", "-p", default=None, help="LLM provider: claude, openai, ollama, none")
@@ -76,8 +78,7 @@ def init(name: str | None, provider: str | None, scan: bool) -> None:
     """Initialize paw in the current project directory."""
     if not _check_soul_protocol():
         _print(
-            "soul-protocol is not installed. Install with:\n"
-            "  pip install pocketpaw[soul]",
+            "soul-protocol is not installed. Install with:\n  pip install pocketpaw[soul]",
             style="bold red",
         )
         raise SystemExit(1)
@@ -87,7 +88,6 @@ def init(name: str | None, provider: str | None, scan: bool) -> None:
 
 async def _init_async(name: str | None, provider: str | None, scan: bool) -> None:
     """Async implementation of paw init."""
-    import os
 
     from pocketpaw.paw.config import PawConfig
 
@@ -151,6 +151,7 @@ async def _init_async(name: str | None, provider: str | None, scan: bool) -> Non
 # ---------------------------------------------------------------------------
 # paw ask
 # ---------------------------------------------------------------------------
+
 
 @main.command()
 @click.argument("question")
@@ -238,6 +239,7 @@ async def _ask_async(question: str) -> None:
 # paw chat
 # ---------------------------------------------------------------------------
 
+
 @main.command()
 def chat() -> None:
     """Start an interactive chat session with paw."""
@@ -259,8 +261,10 @@ async def _chat_async() -> None:
         _print("Run 'paw init' first.", style="dim")
         raise SystemExit(1)
 
-    _print(f"\n  Chat with {agent.config.soul_name} (type 'exit' or Ctrl+C to quit)\n",
-           style="bold cyan")
+    _print(
+        f"\n  Chat with {agent.config.soul_name} (type 'exit' or Ctrl+C to quit)\n",
+        style="bold cyan",
+    )
 
     try:
         from pocketpaw.agents.router import AgentRouter
@@ -292,9 +296,7 @@ async def _chat_async() -> None:
         system_prompt = bootstrap.to_system_prompt()
 
         if memories:
-            system_prompt += (
-                "\n\nRelevant memories:\n" + "\n".join(f"- {m}" for m in memories)
-            )
+            system_prompt += "\n\nRelevant memories:\n" + "\n".join(f"- {m}" for m in memories)
 
         if router:
             response_parts: list[str] = []
@@ -331,6 +333,7 @@ async def _chat_async() -> None:
 # paw serve
 # ---------------------------------------------------------------------------
 
+
 @main.command()
 @click.option("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
 @click.option("--port", "-p", default=8888, type=int, help="Port to bind (default: 8888)")
@@ -343,6 +346,7 @@ def serve(host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 # paw status
 # ---------------------------------------------------------------------------
+
 
 @main.command()
 def status() -> None:
@@ -369,7 +373,7 @@ async def _status_async() -> None:
     soul = agent.soul
     state = soul.state
 
-    _print(f"\n  paw status", style="bold cyan")
+    _print("\n  paw status", style="bold cyan")
     _print(f"  {'─' * 40}")
     _print(f"  Soul:     {config.soul_name}")
     _print(f"  Provider: {config.provider}")
@@ -387,7 +391,7 @@ async def _status_async() -> None:
         try:
             images = soul.self_model.get_active_self_images(limit=5)
             if images:
-                _print(f"\n  Active domains:")
+                _print("\n  Active domains:")
                 for img in images:
                     _print(f"    - {img.domain} (confidence: {img.confidence})")
         except Exception:
@@ -399,6 +403,7 @@ async def _status_async() -> None:
 # ---------------------------------------------------------------------------
 # paw doctor
 # ---------------------------------------------------------------------------
+
 
 @main.command()
 def doctor() -> None:
@@ -427,14 +432,14 @@ def doctor() -> None:
     # Check .paw directory
     paw_dir = Path.cwd() / ".paw"
     if paw_dir.exists():
-        _print(f"  [OK]   .paw directory exists", style="green")
+        _print("  [OK]   .paw directory exists", style="green")
     else:
         _print("  [WARN] .paw directory not found — run 'paw init'", style="yellow")
 
     # Check paw.yaml
     yaml_path = Path.cwd() / "paw.yaml"
     if yaml_path.exists():
-        _print(f"  [OK]   paw.yaml found", style="green")
+        _print("  [OK]   paw.yaml found", style="green")
     else:
         _print("  [WARN] paw.yaml not found — run 'paw init'", style="yellow")
 
@@ -471,6 +476,7 @@ def doctor() -> None:
 # paw os
 # ---------------------------------------------------------------------------
 
+
 @main.command(name="os")
 @click.option("--port", "-p", default=8888, type=int, help="Dashboard port (default: 8888)")
 @click.option("--dev", is_flag=True, help="Development mode with auto-reload")
@@ -490,6 +496,7 @@ def launch_os(port: int, dev: bool) -> None:
 # ---------------------------------------------------------------------------
 # paw channels
 # ---------------------------------------------------------------------------
+
 
 @main.command()
 @click.option("--telegram", is_flag=True, help="Start Telegram adapter")
