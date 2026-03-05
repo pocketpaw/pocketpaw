@@ -130,7 +130,10 @@ class LLMRouter:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are PocketPaw, a helpful AI assistant running locally on the user's machine.",
+                    "content": (
+                        "You are PocketPaw, a helpful AI assistant"
+                        " running locally on the user's machine."
+                    ),
                 },
                 *self.conversation_history,
             ],
@@ -148,7 +151,9 @@ class LLMRouter:
         response = await client.messages.create(
             model=self.settings.anthropic_model,
             max_tokens=4096,
-            system="You are PocketPaw, a helpful AI assistant running locally on the user's machine.",
+            system=(
+                "You are PocketPaw, a helpful AI assistant running locally on the user's machine."
+            ),
             messages=self.conversation_history,
         )
 

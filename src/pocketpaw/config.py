@@ -12,6 +12,7 @@ Changes:
 
 import json
 import logging
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -19,6 +20,63 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+
+# API key validation patterns
+_API_KEY_PATTERNS = {
+    "anthropic_api_key": {
+        "pattern": re.compile(r"^sk-ant-"),
+        "example": "sk-ant-...",
+        "name": "Anthropic API key",
+    },
+    "openai_api_key": {
+        "pattern": re.compile(r"^sk-"),
+        "example": "sk-...",
+        "name": "OpenAI API key",
+    },
+    "telegram_bot_token": {
+        "pattern": re.compile(r"^\d+:AA[A-Za-z0-9_-]{30,}$"),
+        "example": "123456789:AAH...",
+        "name": "Telegram bot token",
+    },
+}
+
+
+def validate_api_key(field_name: str, value: str) -> tuple[bool, str]:
+    """Validate a **single** API key against strict regex patterns.
+
+    Used by the REST ``PUT /settings`` endpoint and the WS ``save_api_key``
+    handler to check format *before* saving.  Returns a per-key verdict so
+    the caller can surface a targeted warning.
+
+    See also :func:`validate_api_keys` which validates *all* keys on a
+    :class:`Settings` instance using looser prefix checks.
+
+    Args:
+        field_name: Settings field name (e.g., ``"anthropic_api_key"``).
+        value: The raw API key string to validate.
+
+    Returns:
+        ``(True, "")`` when the format is acceptable, or
+        ``(False, "<human-readable warning>")`` when it is not.
+    """
+    if not value or not value.strip():
+        return True, ""  # Empty values are allowed (user may want to unset)
+
+    value = value.strip()
+
+    validator = _API_KEY_PATTERNS.get(field_name)
+    if not validator:
+        return True, ""  # No validation rule for this field
+
+    if not validator["pattern"].match(value):
+        return False, (
+            f"{validator['name']} doesn't match expected format "
+            f"(expected format: {validator['example']}). "
+            f"Double-check for typos or truncation."
+        )
+
+    return True, ""
 
 
 def _chmod_safe(path: Path, mode: int) -> None:
@@ -78,6 +136,32 @@ def get_config_path() -> Path:
 def get_token_path() -> Path:
     """Get the access token file path."""
     return get_config_dir() / "access_token"
+
+
+# Telegram bot token format: numeric id + colon + alphanumeric secret
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]+$")
+
+
+def validate_api_keys(settings: "Settings") -> list[str]:
+    """Validate **all** API keys on a :class:`Settings` instance (batch, loose).
+
+    Uses simple prefix checks (not the strict regexes in :func:`validate_api_key`)
+    and returns a list of human-readable warnings.  Designed for advisory use
+    (e.g. ``Settings.save()`` logs warnings) — callers must **never** block a
+    save based on these results.
+    """
+    warnings: list[str] = []
+    if settings.anthropic_api_key and not settings.anthropic_api_key.startswith("sk-ant-"):
+        warnings.append("Anthropic API key may be invalid: expected to start with sk-ant-")
+    if settings.openai_api_key and not settings.openai_api_key.startswith("sk-"):
+        warnings.append("OpenAI API key may be invalid: expected to start with sk-")
+    if settings.telegram_bot_token and not _TELEGRAM_BOT_TOKEN_RE.fullmatch(
+        settings.telegram_bot_token.strip()
+    ):
+        warnings.append(
+            "Telegram bot token may be invalid: expected format is numeric_id:alphanumeric_secret"
+        )
+    return warnings
 
 
 class Settings(BaseSettings):
@@ -144,9 +228,7 @@ class Settings(BaseSettings):
     )
 
     # Codex CLI Settings
-    codex_cli_model: str = Field(
-        default="gpt-5.3-codex", description="Model for Codex CLI backend"
-    )
+    codex_cli_model: str = Field(default="gpt-5.3-codex", description="Model for Codex CLI backend")
     codex_cli_max_turns: int = Field(
         default=100, description="Max turns per query in Codex CLI backend (0 = unlimited)"
     )
@@ -203,9 +285,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-5.2", description="OpenAI model to use")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
-    anthropic_model: str = Field(
-        default="claude-sonnet-4-6", description="Anthropic model to use"
-    )
+    anthropic_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model to use")
 
     # Memory Backend
     memory_backend: str = Field(
@@ -555,6 +635,9 @@ class Settings(BaseSettings):
 
         Uses model_dump() to automatically include all fields — no need to
         manually list every field when new settings are added.
+
+        Runs format validation on API keys before saving; logs warnings but
+        never blocks or raises.
         """
         from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 

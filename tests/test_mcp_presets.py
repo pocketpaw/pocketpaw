@@ -72,6 +72,16 @@ class TestPresetRegistry:
         assert p.package == ""
         assert p.env_keys == []
 
+    def test_get_preset_google_workspace(self):
+        p = get_preset("google-workspace")
+        assert p is not None
+        assert p.name == "Google Workspace"
+        assert p.package == "@googleworkspace/cli"
+        assert p.command == "gws"
+        assert p.args == ["mcp"]
+        assert p.transport == "stdio"
+        assert p.docs_url == "https://github.com/googleworkspace/cli"
+
     def test_get_preset_unknown_returns_none(self):
         assert get_preset("nonexistent-server") is None
 

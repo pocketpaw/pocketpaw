@@ -19,9 +19,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_DESKTOP_CLIENT = OAuthClient(
     client_id="pocketpaw-desktop",
     client_name="PocketPaw Desktop",
-    redirect_uris=["tauri://oauth-callback", "http://localhost:1420/oauth-callback", "http://localhost/"],
+    redirect_uris=[
+        "tauri://oauth-callback",
+        "http://localhost:1420/oauth-callback",
+        "http://localhost/",
+    ],
     # Note: http://localhost/ with any port is accepted per RFC 8252 (loopback redirect).
-    allowed_scopes=["chat", "sessions", "settings:read", "settings:write", "channels", "memory", "admin"],
+    allowed_scopes=[
+        "chat",
+        "sessions",
+        "settings:read",
+        "settings:write",
+        "channels",
+        "memory",
+        "admin",
+    ],
 )
 
 
@@ -164,9 +176,7 @@ class OAuthStorage:
             del self._codes[k]
 
         # Tokens expire based on expires_at
-        expired_tokens = [
-            k for k, v in self._tokens.items() if v.expires_at and now > v.expires_at
-        ]
+        expired_tokens = [k for k, v in self._tokens.items() if v.expires_at and now > v.expires_at]
         changed = bool(expired_tokens)
         for k in expired_tokens:
             token = self._tokens.pop(k)

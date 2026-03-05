@@ -22,7 +22,48 @@
 <div
   class="flex-1 flex flex-col pt-16 md:pt-20 overflow-hidden min-h-0"
   x-show="view === 'chat'"
+  x-data="{ apiBannerDismissed: false }"
 >
+  <!-- Onboarding Banner for Missing API Key -->
+  <template
+    x-if="
+      !apiBannerDismissed &&
+      (
+        isBackendUnconfigured() ||
+        (healthIssues && healthIssues.some(i =>
+          i.check_id === 'api_key_primary' &&
+          (i.status === 'critical' || i.status === 'warning')
+        ))
+      )
+    "
+  >
+    <div
+      class="mx-4 md:mx-8 mt-2 px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center justify-between gap-4"
+    >
+      <div class="flex items-center gap-3 text-amber-200/90">
+        <svg class="w-5 h-5 shrink-0 text-amber-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>
+        <p class="text-[13px] md:text-sm font-medium leading-tight">
+          PocketPaw is running! To enable AI features, add an API key in
+          <span class="text-amber-400 font-bold">Settings</span>.
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button
+          @click="openSettings(); sidebarOpen = false"
+          class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+        >
+          Open Settings
+        </button>
+        <button
+          @click="apiBannerDismissed = true"
+          class="p-1 hover:bg-white/5 rounded-full text-amber-200/40 hover:text-amber-200/80 transition-colors"
+        >
+          <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+    </div>
+  </template>
+
   <div
     class="messages flex-1 flex flex-col gap-2.5 overflow-y-auto p-4 md:p-8 pb-8 min-h-0"
     x-ref="messages"

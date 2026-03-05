@@ -91,7 +91,7 @@ class TestAuditAPIEvents:
         # Verify written to file
         import json
 
-        lines = (tmp_path / "test_audit.jsonl").read_text().strip().split("\n")
+        lines = (tmp_path / "test_audit.jsonl").read_text(encoding="utf-8").strip().split("\n")
         assert len(lines) == 1
         entry = json.loads(lines[0])
         assert entry["action"] == "api_key_created"
@@ -111,7 +111,7 @@ class TestAuditAPIEvents:
 
         import json
 
-        lines = (tmp_path / "test_audit.jsonl").read_text().strip().split("\n")
+        lines = (tmp_path / "test_audit.jsonl").read_text(encoding="utf-8").strip().split("\n")
         entry = json.loads(lines[0])
         assert entry["action"] == "oauth_token"
         assert entry["context"]["scope"] == "chat sessions"
@@ -128,7 +128,7 @@ class TestAuditAPIEvents:
 
         import json
 
-        lines = (tmp_path / "test_audit.jsonl").read_text().strip().split("\n")
+        lines = (tmp_path / "test_audit.jsonl").read_text(encoding="utf-8").strip().split("\n")
         entry = json.loads(lines[0])
         assert entry["action"] == "api_key_revoked"
 

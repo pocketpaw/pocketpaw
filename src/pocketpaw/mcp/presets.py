@@ -4,6 +4,7 @@ Provides a registry of pre-configured MCP servers that users can install
 from the dashboard with just an API key paste.
 
 Created: 2026-02-09
+Updated: 2026-03-05 — Added google-workspace preset (gws CLI with MCP support).
 """
 
 from __future__ import annotations
@@ -891,6 +892,18 @@ _PRESETS: list[MCPPreset] = [
         url="https://huggingface.co/mcp",
         docs_url="https://huggingface.co/docs/hub/en/hf-mcp-server",
         oauth=True,
+    ),
+    # ── Google Workspace ─────────────────────────────────────────────
+    MCPPreset(
+        id="google-workspace",
+        name="Google Workspace",
+        description="Drive, Gmail, Calendar, Sheets, Docs, Chat, and Admin via gws CLI",
+        icon="briefcase",
+        category="productivity",
+        package="@googleworkspace/cli",
+        command="gws",
+        args=["mcp"],
+        docs_url="https://github.com/googleworkspace/cli",
     ),
 ]
 

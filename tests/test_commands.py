@@ -113,7 +113,7 @@ class TestSessionAliases:
     async def test_aliases_persist_to_disk(self):
         await self.store.set_session_alias("discord:123", "discord:123:abc")
         # Read the file directly
-        data = json.loads(self.store._aliases_path.read_text())
+        data = json.loads(self.store._aliases_path.read_text(encoding="utf-8"))
         assert data["discord:123"] == "discord:123:abc"
 
     async def test_get_session_keys_includes_alias_targets(self):
@@ -875,7 +875,7 @@ class TestSlackSlashCommands:
 
         from pocketpaw.bus.adapters import slack_adapter
 
-        source = ast.parse(Path(slack_adapter.__file__).read_text())
+        source = ast.parse(Path(slack_adapter.__file__).read_text(encoding="utf-8"))
 
         # Find the tuple of command names in the for loop
         expected = {
@@ -1493,8 +1493,8 @@ class TestBackendsCommand:
         mock_settings.return_value = settings
 
         mock_list.return_value = ["claude_agent_sdk", "missing_backend"]
-        mock_info.side_effect = (
-            lambda n: None
+        mock_info.side_effect = lambda n: (
+            None
             if n == "missing_backend"
             else MagicMock(
                 display_name="Claude", capabilities=MagicMock(__iter__=lambda s: iter([]))

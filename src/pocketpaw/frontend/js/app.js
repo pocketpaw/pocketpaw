@@ -50,6 +50,7 @@ function app() {
         settingsMobileView: 'list',
         settingsSearch: '',
         settingsSearchResults: [],
+        settingsValidationWarnings: [],
         settingsSections: [
             { id: 'general', label: 'General', icon: 'settings' },
             { id: 'apikeys', label: 'API Keys', icon: 'key' },
@@ -414,6 +415,10 @@ function app() {
             socket.on('stream_end', () => this.endStreaming());
             socket.on('files', (data) => this.handleFiles(data));
             socket.on('settings', (data) => this.handleSettings(data));
+            socket.on('settings_saved', (data) => {
+                this.settingsValidationWarnings = data.warnings || [];
+                this.showToast(data.content || 'Settings updated', 'success');
+            });
 
             // Reminder handlers
             socket.on('reminders', (data) => this.handleReminders(data));
@@ -567,6 +572,7 @@ function app() {
             this.settingsMobileView = 'list';
             this.settingsSearch = '';
             this.settingsSearchResults = [];
+            this.settingsValidationWarnings = [];
             this.showSettings = true;
         },
 

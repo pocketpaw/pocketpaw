@@ -1,6 +1,7 @@
+# Updated: 2026-03-02 — Bump version to 0.4.5 for PyPI release.
 [project]
 name = "pocketpaw"
-version = "0.4.4"
+version = "0.4.5"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -52,6 +53,7 @@ dependencies = [
     "python-multipart>=0.0.22",
     # Logging & CLI
     "rich>=13.0.0",
+    "click>=8.0",
     # Scheduling
     "apscheduler>=3.10.0",
     "python-dateutil>=2.8.0",
@@ -132,7 +134,6 @@ sarvam = [
 mcp = [
     "mcp>=1.0.0",
 ]
-
 # --- Composite extras ---
 recommended = [
     "pocketpaw[browser,memory,desktop]",
@@ -169,6 +170,7 @@ Homepage = "https://github.com/pocketpaw/pocketpaw"
 Repository = "https://github.com/pocketpaw/pocketpaw"
 Issues = "https://github.com/pocketpaw/pocketpaw/issues"
 Documentation = "https://github.com/pocketpaw/pocketpaw#readme"
+Discord = "https://dsc.gg/pocketpaw"
 Twitter = "https://twitter.com/prakashd88"
 
 [build-system]

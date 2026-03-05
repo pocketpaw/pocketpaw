@@ -430,7 +430,7 @@ class FileMemoryStore:
                 ):
                     continue
                 try:
-                    data = json.loads(session_file.read_text())
+                    data = json.loads(session_file.read_text(encoding="utf-8"))
                     for msg in data:
                         if query_lower in msg.get("content", "").lower():
                             safe_key = session_file.stem
@@ -604,7 +604,7 @@ class FileMemoryStore:
                 session_data = []
                 if session_file.exists():
                     try:
-                        session_data = json.loads(session_file.read_text())
+                        session_data = json.loads(session_file.read_text(encoding="utf-8"))
                     except json.JSONDecodeError:
                         pass
                 session_data.append(
@@ -618,8 +618,19 @@ class FileMemoryStore:
                 )
                 # Atomic write: tmp file + replace to prevent corruption on crash
                 tmp = session_file.with_suffix(".tmp")
-                tmp.write_text(json.dumps(session_data, indent=2))
-                tmp.replace(session_file)
+                tmp.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
+                # On Windows, os.replace can fail with PermissionError if another
+                # process briefly holds the file handle. Retry a few times.
+                import time as _time
+
+                for _attempt in range(5):
+                    try:
+                        tmp.replace(session_file)
+                        break
+                    except PermissionError:
+                        if _attempt == 4:
+                            raise
+                        _time.sleep(0.01 * (2**_attempt))
                 return session_data
 
             session_data = await asyncio.to_thread(_read_and_append)
@@ -739,7 +750,7 @@ class FileMemoryStore:
             return []
 
         try:
-            raw = await asyncio.to_thread(session_file.read_text)
+            raw = await asyncio.to_thread(lambda: session_file.read_text(encoding="utf-8"))
             data = json.loads(raw)
             return [
                 MemoryEntry(
@@ -763,7 +774,7 @@ class FileMemoryStore:
         def _clear():
             if session_file.exists():
                 try:
-                    data = json.loads(session_file.read_text())
+                    data = json.loads(session_file.read_text(encoding="utf-8"))
                     count = len(data)
                     session_file.unlink()
                     return count

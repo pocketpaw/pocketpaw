@@ -285,7 +285,7 @@ class TestSessionListAPI:
         for session_file in sorted(
             sessions_path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
         ):
-            data = json.loads(session_file.read_text())
+            data = json.loads(session_file.read_text(encoding="utf-8"))
             if data:
                 first_msg = data[0]
                 last_msg = data[-1]
@@ -341,7 +341,7 @@ class TestSessionListAPI:
         sessions = []
         for session_file in sessions_dir.glob("*.json"):
             try:
-                data = json.loads(session_file.read_text())
+                data = json.loads(session_file.read_text(encoding="utf-8"))
                 if data:
                     sessions.append({"id": session_file.stem})
             except json.JSONDecodeError:
@@ -362,7 +362,7 @@ class TestMemoryToolRegistration:
 
     def test_tools_importable(self):
         """Test that memory tools can be imported from builtin package."""
-        from pocketpaw.tools.builtin import RememberTool, RecallTool
+        from pocketpaw.tools.builtin import RecallTool, RememberTool
 
         assert RememberTool is not None
         assert RecallTool is not None
@@ -376,8 +376,8 @@ class TestMemoryToolRegistration:
 
     def test_tools_work_with_registry(self, mock_memory_manager):
         """Test that tools work with ToolRegistry."""
+        from pocketpaw.tools.builtin.memory import RecallTool, RememberTool
         from pocketpaw.tools.registry import ToolRegistry
-        from pocketpaw.tools.builtin.memory import RememberTool, RecallTool
 
         registry = ToolRegistry()
         registry.register(RememberTool())
