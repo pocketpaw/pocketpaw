@@ -547,9 +547,7 @@ class ClaudeSDKBackend:
             # Anthropic's policy prohibits using OAuth tokens from Free/Pro/Max
             # plans in third-party products. PocketPaw must use API key auth.
             if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
-                has_api_key = bool(
-                    llm.api_key or os.environ.get("ANTHROPIC_API_KEY")
-                )
+                has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
                 if not has_api_key:
                     yield AgentEvent(
                         type="error",

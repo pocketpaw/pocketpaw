@@ -3,8 +3,11 @@
 """Tests for browser session management."""
 
 import asyncio
-import pytest
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from pocketpaw.browser.session import (
     BrowserSession,
     BrowserSessionManager,
@@ -139,9 +142,9 @@ class TestBrowserSessionManager:
             session = await manager.get_or_create("session-1")
 
             # Manually make session appear old
-            from datetime import datetime, timedelta, timezone
+            from datetime import datetime, timedelta
 
-            session._last_used_at = datetime.now(tz=timezone.utc) - timedelta(seconds=400)
+            session._last_used_at = datetime.now(tz=UTC) - timedelta(seconds=400)
 
             # Cleanup with 300 second timeout
             await manager.cleanup_idle(timeout_seconds=300)

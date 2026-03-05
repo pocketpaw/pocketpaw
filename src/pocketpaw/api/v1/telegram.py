@@ -69,10 +69,7 @@ async def setup_telegram(body: TelegramSetupRequest):
 
     is_valid, warning = validate_api_key("telegram_bot_token", bot_token)
     if not is_valid:
-        raise HTTPException(
-            status_code=400,
-            detail=warning
-        )
+        raise HTTPException(status_code=400, detail=warning)
 
     session_secret = secrets.token_urlsafe(32)
     _telegram_pairing_state["session_secret"] = session_secret

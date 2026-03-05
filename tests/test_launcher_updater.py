@@ -5,10 +5,26 @@
 from __future__ import annotations
 
 import json
+import platform
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from installer.launcher.updater import Updater
+
+
+def _make_venv_python(venv_dir: Path) -> Path:
+    """Create the venv python executable in the platform-appropriate location."""
+    if platform.system() == "Windows":
+        bin_dir = venv_dir / "Scripts"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python.exe"
+    else:
+        bin_dir = venv_dir / "bin"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python"
+    python.touch()
+    return python
+
 
 # ── Version Comparison ────────────────────────────────────────────────
 
@@ -82,10 +98,7 @@ class TestInstalledVersion:
     def test_installed(self, tmp_path: Path):
         """Should return version when installed."""
         venv_dir = tmp_path / "venv"
-        venv_bin = venv_dir / "bin"
-        venv_bin.mkdir(parents=True)
-        python = venv_bin / "python"
-        python.touch()
+        _make_venv_python(venv_dir)
 
         mock_result = MagicMock()
         mock_result.returncode = 0
@@ -162,10 +175,7 @@ class TestApplyUpdate:
     def test_successful_upgrade(self, tmp_path: Path):
         """Should run pip upgrade and report new version."""
         venv_dir = tmp_path / "venv"
-        venv_bin = venv_dir / "bin"
-        venv_bin.mkdir(parents=True)
-        python = venv_bin / "python"
-        python.touch()
+        _make_venv_python(venv_dir)
 
         mock_result = MagicMock()
         mock_result.returncode = 0
@@ -184,10 +194,7 @@ class TestApplyUpdate:
     def test_upgrade_failure(self, tmp_path: Path):
         """Should return False on pip failure."""
         venv_dir = tmp_path / "venv"
-        venv_bin = venv_dir / "bin"
-        venv_bin.mkdir(parents=True)
-        python = venv_bin / "python"
-        python.touch()
+        _make_venv_python(venv_dir)
 
         mock_result = MagicMock()
         mock_result.returncode = 1

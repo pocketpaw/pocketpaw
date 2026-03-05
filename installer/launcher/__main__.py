@@ -173,8 +173,8 @@ def main() -> int:
 
     # Reset if requested
     if args.reset:
-        import shutil
         import os
+        import shutil
         import stat
 
         if VENV_DIR.exists():

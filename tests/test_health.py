@@ -6,6 +6,7 @@
 #         playbook diagnostics, health agent tools, ContextHub health_status source.
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -280,6 +281,10 @@ class TestCheckConfigPermissions:
             r = check_config_permissions()
             assert r.status == "ok"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Unix file permissions not available on Windows",
+    )
     def test_permissions_too_open(self, tmp_path):
         config_path = tmp_path / "config.json"
         config_path.write_text("{}")
