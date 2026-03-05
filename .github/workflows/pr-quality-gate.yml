@@ -1,4 +1,5 @@
 # PR quality gate — enforces contribution standards automatically.
+# Updated: 2026-03-05 — Fix duplicate `const base` declaration that crashed the gate on every PR.
 # Updated: 2026-02-26 — Added branch enforcement, cosmetic PR detection, size labels, reopen guard.
 name: PR Quality Gate
 
@@ -32,7 +33,6 @@ jobs:
             const deletions = pr.deletions || 0;
             const changedFiles = pr.changed_files || 0;
 
-            const base = pr.base.ref;
             const issues = [];
             const warnings = [];
             const MARKER = '<!-- pr-quality-gate -->';
