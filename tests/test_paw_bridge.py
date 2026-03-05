@@ -12,7 +12,6 @@ import pytest
 from pocketpaw.bootstrap.protocol import BootstrapContext
 from pocketpaw.paw.soul_bridge import SoulBootstrapProvider, SoulBridge
 
-
 # ---------------------------------------------------------------------------
 # Shared soul fixture
 # ---------------------------------------------------------------------------
@@ -154,7 +153,9 @@ class TestSoulBridgeObserve:
         mock_interaction_cls.return_value = mock_interaction_instance
 
         with patch("pocketpaw.paw.soul_bridge.Interaction", mock_interaction_cls, create=True):
-            with patch.dict("sys.modules", {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)}):
+            with patch.dict(
+                "sys.modules", {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)}
+            ):
                 await bridge.observe("Hello", "Hi there")
 
         mock_soul.observe.assert_awaited_once()
@@ -175,7 +176,9 @@ class TestSoulBridgeObserve:
         bridge = SoulBridge(mock_soul)
 
         mock_interaction_cls = MagicMock()
-        with patch.dict("sys.modules", {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)}):
+        with patch.dict(
+            "sys.modules", {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)}
+        ):
             # Should complete silently
             await bridge.observe("input", "output")
 

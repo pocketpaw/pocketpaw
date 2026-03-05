@@ -7,7 +7,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.config import get_config_dir
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)

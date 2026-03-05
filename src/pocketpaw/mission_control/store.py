@@ -80,6 +80,8 @@ class FileMissionControlStore:
         self._tasks: dict[str, Task] = {}
         self._messages: dict[str, Message] = {}
         self._activities: dict[str, Activity] = {}
+        self._activity_seq: dict[str, int] = {}  # insertion order for stable sorting
+        self._activity_counter: int = 0
         self._documents: dict[str, Document] = {}
         self._notifications: dict[str, Notification] = {}
         self._projects: dict[str, Project] = {}
@@ -346,6 +348,8 @@ class FileMissionControlStore:
     async def save_activity(self, activity: Activity) -> str:
         """Save an activity entry."""
         self._activities[activity.id] = activity
+        self._activity_seq[activity.id] = self._activity_counter
+        self._activity_counter += 1
         self._persist_activities()
         return activity.id
 
@@ -364,14 +368,21 @@ class FileMissionControlStore:
         if task_id:
             activities = [a for a in activities if a.task_id == task_id]
 
-        # Sort by created_at (most recent first)
-        activities.sort(key=lambda a: a.created_at, reverse=True)
+        # Sort by created_at descending, with insertion order as tiebreaker
+        activities.sort(
+            key=lambda a: (a.created_at, self._activity_seq.get(a.id, 0)),
+            reverse=True,
+        )
         return activities[:limit]
 
     async def get_activity_feed(self, limit: int = 50) -> list[Activity]:
         """Get the activity feed (most recent first)."""
         activities = list(self._activities.values())
-        activities.sort(key=lambda a: a.created_at, reverse=True)
+        # Sort by created_at descending, with insertion order as tiebreaker
+        activities.sort(
+            key=lambda a: (a.created_at, self._activity_seq.get(a.id, 0)),
+            reverse=True,
+        )
         return activities[:limit]
 
     # =========================================================================

@@ -2,8 +2,10 @@
 # Changes: Initial creation with comprehensive tool integration tests
 """Tests for browser tool integration."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from pocketpaw.tools.builtin.browser import BrowserTool
 from pocketpaw.tools.protocol import BaseTool
 
@@ -235,7 +237,7 @@ class TestBrowserToolScroll:
             mock_manager.get_or_create = AsyncMock(return_value=mock_session)
             mock_get_mgr.return_value = mock_manager
 
-            result = await tool.execute(action="scroll", direction="down")
+            await tool.execute(action="scroll", direction="down")
 
             mock_driver.scroll.assert_called_once_with(direction="down")
 

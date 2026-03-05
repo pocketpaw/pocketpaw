@@ -315,9 +315,7 @@ class MCPManager:
                     await self._connect_remote_with_timeout(
                         state,
                         connect_timeout,
-                        lambda s: self._connect_streamable_http(
-                            s, auth=auth
-                        ),
+                        lambda s: self._connect_streamable_http(s, auth=auth),
                     )
                 except TimeoutError:
                     raise  # Don't waste time retrying on timeout

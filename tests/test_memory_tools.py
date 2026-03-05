@@ -362,7 +362,7 @@ class TestMemoryToolRegistration:
 
     def test_tools_importable(self):
         """Test that memory tools can be imported from builtin package."""
-        from pocketpaw.tools.builtin import RememberTool, RecallTool
+        from pocketpaw.tools.builtin import RecallTool, RememberTool
 
         assert RememberTool is not None
         assert RecallTool is not None
@@ -376,8 +376,8 @@ class TestMemoryToolRegistration:
 
     def test_tools_work_with_registry(self, mock_memory_manager):
         """Test that tools work with ToolRegistry."""
+        from pocketpaw.tools.builtin.memory import RecallTool, RememberTool
         from pocketpaw.tools.registry import ToolRegistry
-        from pocketpaw.tools.builtin.memory import RememberTool, RecallTool
 
         registry = ToolRegistry()
         registry.register(RememberTool())
