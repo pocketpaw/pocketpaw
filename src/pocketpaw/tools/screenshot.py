@@ -1,7 +1,6 @@
 """Screenshot tool."""
 
 import io
-from typing import Optional
 
 try:
     import pyautogui
@@ -11,7 +10,7 @@ except Exception:
     PYAUTOGUI_AVAILABLE = False
 
 
-def take_screenshot() -> Optional[bytes]:
+def take_screenshot() -> bytes | None:
     """Take a screenshot and return as bytes."""
     if not PYAUTOGUI_AVAILABLE:
         return None
@@ -26,6 +25,6 @@ def take_screenshot() -> Optional[bytes]:
         buffer.seek(0)
 
         return buffer.getvalue()
-    except Exception as e:
+    except Exception:
         # Common on headless servers or when display is not available
         return None

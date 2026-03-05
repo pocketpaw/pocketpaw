@@ -9,6 +9,7 @@ Extracted from dashboard.py — contains:
 
 import asyncio
 import logging
+from datetime import UTC
 
 import pocketpaw.dashboard_state as _state
 from pocketpaw.bus import get_message_bus
@@ -244,14 +245,15 @@ async def startup_event(
                 logger.warning("Health heartbeat error: %s", e)
 
         # Reuse the daemon's APScheduler
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
+
         daemon.trigger_engine.scheduler.add_job(
             _health_heartbeat,
             "interval",
             minutes=5,
             id="health_heartbeat",
             replace_existing=True,
-            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
+            next_run_time=datetime.now(UTC) + timedelta(seconds=10),
         )
         logger.info("Health heartbeat registered (every 5 min)")
     except Exception as e:
@@ -315,4 +317,3 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
         await mcp.stop_all()
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)
-

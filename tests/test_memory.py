@@ -2,13 +2,14 @@
 # Created: 2026-02-02
 
 
-import pytest
 import tempfile
 from pathlib import Path
 
-from pocketpaw.memory.protocol import MemoryType, MemoryEntry
+import pytest
+
 from pocketpaw.memory.file_store import FileMemoryStore
 from pocketpaw.memory.manager import MemoryManager
+from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
 
 @pytest.fixture
@@ -83,7 +84,7 @@ class TestFileMemoryStore:
 
         # Check file was created
         assert memory_store.long_term_file.exists()
-        content = memory_store.long_term_file.read_text()
+        content = memory_store.long_term_file.read_text(encoding="utf-8")
         assert "User prefers dark mode" in content
 
     @pytest.mark.asyncio

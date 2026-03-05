@@ -2,11 +2,12 @@
 Desktop interaction tools.
 """
 
+from datetime import UTC
 from typing import Any
+
 from pocketpaw.tools.protocol import BaseTool
 from pocketpaw.tools.screenshot import take_screenshot
 from pocketpaw.tools.status import get_system_status
-import base64
 
 
 class ScreenshotTool(BaseTool):
@@ -27,7 +28,8 @@ class ScreenshotTool(BaseTool):
         # For now, let's return a special string or handle it via a side channel?
         # Actually, let's return a description.
         # But wait, the USER wants to SEE it.
-        # The TelegramAdapter can handle 'image' content if we structure the OutboundMessage correctly.
+        # The TelegramAdapter can handle 'image' content if we structure
+        # the OutboundMessage correctly.
         # But the tool returns a string.
         # Let's return the base64 string and let the Loop/Adapter handle it?
         # Or save to a temp file and return the path?
@@ -42,7 +44,8 @@ class ScreenshotTool(BaseTool):
         # If the Tool can "emit" a message to the bus, that would be ideal.
         # But Tools are passive.
 
-        # Alternative: Tool saves file to `desktop/screenshot_<timestamp>.png` in the Memory/File store,
+        # Alternative: Tool saves file to
+        # `desktop/screenshot_<timestamp>.png` in the Memory/File store,
         # and returns "Screenshot saved to ...".
         # Then the user can ask "Send me that file".
 
@@ -51,7 +54,8 @@ class ScreenshotTool(BaseTool):
 
         # Simple approach for now:
         # Return base64 string. The LLM won't like it.
-        # Let's just return "Screenshot taken." and maybe we improve the system to support binary blobs later?
+        # Let's just return "Screenshot taken." and maybe we improve
+        # the system to support binary blobs later?
         # The USER specifically wants the existing features.
 
         # Let's use a Hack for Phase 2:
@@ -66,24 +70,30 @@ class ScreenshotTool(BaseTool):
 
         # If we return a massive base64 string, it will clog the logs/memory.
 
-        return "[Screenshot capture functionality is active but image routing to chat is pending implementation in Phase 2B]"
+        return (
+            "[Screenshot capture functionality is active but image"
+            " routing to chat is pending implementation in Phase 2B]"
+        )
 
         # Wait, I am implementing Phase 2B NOW.
-        # I should simply allow the tool to return a special result that the Agent Loop can interpret?
+        # I should simply allow the tool to return a special result
+        # that the Agent Loop can interpret?
         # No, AgentLoop is generic.
 
-        # Best approach: Save to `file_jail/screenshots/` and return the path.
+        # Best approach: Save to `file_jail/screenshots/`
+        # and return the path.
         # The Agent can then use `ReadFile` or we rely on the Adapter to detecting "File paths"?
 
         # Let's stick to the prompt: `AgentLoop` orchestration.
-        # If I return a path, the user can say "Download <path>" (if we implement Download tool or file serving).
+        # If I return a path, the user can say "Download <path>"
+        # (if we implement Download tool or file serving).
         # Telegram Adapter can potentially treat paths as files to upload?
 
         # Let's stick to "saving to file" as the most robust "Agentic" way.
         # It persists the data.
 
-        from datetime import datetime, timezone
-        import os
+        from datetime import datetime
+
         from pocketpaw.config import get_settings
 
         settings = get_settings()
@@ -91,7 +101,7 @@ class ScreenshotTool(BaseTool):
         screenshots_dir = jail / "screenshots"
         screenshots_dir.mkdir(exist_ok=True)
 
-        filename = f"screenshot_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}.png"
+        filename = f"screenshot_{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M%S')}.png"
         path = screenshots_dir / filename
 
         with open(path, "wb") as f:

@@ -642,7 +642,7 @@ class TestMemorySettings:
         with patch("pocketpaw.config.get_config_path", return_value=config_path):
             settings.save()
 
-        saved = json.loads(config_path.read_text())
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
         assert saved["memory_backend"] == "mem0"
         assert saved["mem0_llm_provider"] == "ollama"
         assert saved["mem0_auto_learn"] is False

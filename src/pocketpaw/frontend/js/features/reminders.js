@@ -22,7 +22,9 @@ window.PocketPaw.Reminders = {
             showReminders: false,
             reminders: [],
             reminderInput: '',
-            reminderLoading: false
+            reminderLoading: false,
+            _reminderCountdownTimer: null,
+            countdownTick: 0
         };
     },
 
@@ -89,9 +91,77 @@ window.PocketPaw.Reminders = {
                     Notification.requestPermission();
                 }
 
+                // Start live countdown updates
+                this._startReminderCountdown();
+
                 this.$nextTick(() => {
                     if (window.refreshIcons) window.refreshIcons();
                 });
+            },
+
+            /**
+             * Start live countdown timer
+             */
+            _startReminderCountdown() {
+                this._stopReminderCountdown();
+                this._reminderCountdownTimer = setInterval(() => {
+                    this.countdownTick++;
+                }, 1000);
+            },
+
+            /**
+             * Stop live countdown timer
+             */
+            _stopReminderCountdown() {
+                if (this._reminderCountdownTimer) {
+                    clearInterval(this._reminderCountdownTimer);
+                    this._reminderCountdownTimer = null;
+                }
+            },
+
+            /**
+             * Close reminders panel and clean up interval
+             */
+            closeReminders() {
+                this._stopReminderCountdown();
+                this.showReminders = false;
+            },
+
+            /**
+             * Calculate time remaining for a reminder (live countdown).
+             * Reads countdownTick to establish an Alpine.js reactive dependency
+             * so this expression re-evaluates every second.
+             */
+            calculateTimeRemaining(reminder) {
+                const _tick = this.countdownTick; void _tick;
+
+                const now = new Date();
+                const triggerTime = new Date(reminder.trigger_at);
+                const diff = triggerTime - now;
+
+                if (diff <= 0) {
+                    return 'past';
+                }
+
+                const totalSeconds = Math.floor(diff / 1000);
+                if (totalSeconds < 60) {
+                    return `in ${totalSeconds}s`;
+                }
+
+                const minutes = Math.floor(totalSeconds / 60);
+                if (minutes < 60) {
+                    return `in ${minutes}m`;
+                }
+
+                const hours = Math.floor(totalSeconds / 3600);
+                if (hours < 24) {
+                    const remMinutes = Math.floor((totalSeconds % 3600) / 60);
+                    if (remMinutes) return `in ${hours}h ${remMinutes}m`;
+                    return `in ${hours}h`;
+                }
+
+                const days = Math.floor(totalSeconds / 86400);
+                return `in ${days}d`;
             },
 
             /**

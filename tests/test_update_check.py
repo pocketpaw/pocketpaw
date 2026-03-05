@@ -76,7 +76,7 @@ class TestCheckForUpdates:
 
         cache_file = tmp_path / CACHE_FILENAME
         assert cache_file.exists()
-        cache = json.loads(cache_file.read_text())
+        cache = json.loads(cache_file.read_text(encoding="utf-8"))
         assert "ts" in cache
         assert cache["latest"] == "0.4.1"
 
@@ -274,7 +274,7 @@ class TestVersionSeen:
 
         mark_version_seen("0.4.2", tmp_path)
 
-        cache = json.loads(cache_file.read_text())
+        cache = json.loads(cache_file.read_text(encoding="utf-8"))
         assert cache["ts"] == 12345
         assert cache["latest"] == "0.5.0"
         assert cache["last_seen_version"] == "0.4.2"

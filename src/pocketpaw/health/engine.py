@@ -115,8 +115,17 @@ class HealthEngine:
     def summary(self) -> dict:
         """Compact dict for API/WebSocket."""
         issues = [r.to_dict() for r in self._results if r.status != "ok"]
+        status = self.overall_status
+        message = None
+        if status == "degraded":
+            api_key_issues = [
+                r for r in self._results if r.check_id == "api_key_primary" and r.status != "ok"
+            ]
+            if api_key_issues:
+                message = "System running, but AI features disabled. Please add API key."
         return {
-            "status": self.overall_status,
+            "status": status,
+            "message": message,
             "check_count": len(self._results),
             "issues": issues,
             "last_check": self._last_check,

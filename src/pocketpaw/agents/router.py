@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 
 from pocketpaw.agents.backend import BackendInfo
 from pocketpaw.agents.protocol import AgentEvent
-from pocketpaw.agents.registry import get_backend_class, get_backend_info
+from pocketpaw.agents.registry import get_backend_class
 from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -80,8 +80,4 @@ class AgentRouter:
         """Return metadata about the active backend."""
         if self._backend is None:
             return None
-        
-        # Use resolved backend (important when we fall back from unknown/legacy)
-        if self._active_backend_name:
-            return get_backend_info(self._active_backend_name)
-        return None
+        return self._backend.info()

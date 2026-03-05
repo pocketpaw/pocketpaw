@@ -87,7 +87,7 @@ class TestFileStoreUserScoping:
         )
         await store.save(entry)
         assert store.long_term_file.exists()
-        assert "Owner fact" in store.long_term_file.read_text()
+        assert "Owner fact" in store.long_term_file.read_text(encoding="utf-8")
 
     async def test_save_long_term_scoped_user(self, tmp_path):
         store = FileMemoryStore(base_path=tmp_path)
@@ -101,10 +101,10 @@ class TestFileStoreUserScoping:
         await store.save(entry)
         user_file = tmp_path / "users" / "abc123" / "MEMORY.md"
         assert user_file.exists()
-        assert "Stranger fact" in user_file.read_text()
+        assert "Stranger fact" in user_file.read_text(encoding="utf-8")
         # Root MEMORY.md should NOT contain it
         if store.long_term_file.exists():
-            assert "Stranger fact" not in store.long_term_file.read_text()
+            assert "Stranger fact" not in store.long_term_file.read_text(encoding="utf-8")
 
     async def test_get_by_type_scoped(self, tmp_path):
         store = FileMemoryStore(base_path=tmp_path)

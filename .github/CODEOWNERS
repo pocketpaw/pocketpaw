@@ -1,0 +1,21 @@
+# CODEOWNERS — require maintainer review for security-critical paths.
+# Added: 2026-03-05 — P0 security gate for CI pipeline protection.
+
+# CI/CD workflows — prevent unauthorized pipeline changes
+.github/ @pocketpaw/core
+
+# Security subsystem
+src/pocketpaw/security/ @pocketpaw/core
+
+# Config and settings (env vars, API keys, auth)
+src/pocketpaw/config.py @pocketpaw/core
+
+# Dependencies
+pyproject.toml @pocketpaw/core
+uv.lock @pocketpaw/core
+
+# Auth and OAuth
+src/pocketpaw/api/oauth2/ @pocketpaw/core
+
+# Entry points
+src/pocketpaw/__main__.py @pocketpaw/core
