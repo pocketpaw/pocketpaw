@@ -399,6 +399,11 @@
             "icon": "lucide:file-text"
           },
           {
+            "label": "Google Workspace (MCP)",
+            "href": "/integrations/google-workspace-mcp",
+            "icon": "lucide:briefcase"
+          },
+          {
             "label": "Spotify",
             "href": "/integrations/spotify",
             "icon": "lucide:music"
