@@ -70,6 +70,13 @@
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+      <!-- Onboarding message when degraded (e.g. API key missing) -->
+      <div
+          x-show="healthStatus === 'degraded' && (healthMessage || (healthIssues && healthIssues.some(i => i.check_id === 'api_key_primary')))"
+          class="rounded-lg px-4 py-3 bg-amber-500/10 border border-amber-500/30 text-amber-200/90 text-sm"
+      >
+        <span x-text="healthMessage || 'System is running. Add your API key to enable AI features.'"></span>
+      </div>
       <!-- Last check timestamp -->
       <div x-show="healthLastCheck" class="text-[11px] text-white/30">
         Last checked: <span x-text="healthLastCheck ? healthLastCheck.substring(0, 19).replace('T', ' ') + ' UTC' : 'never'"></span>

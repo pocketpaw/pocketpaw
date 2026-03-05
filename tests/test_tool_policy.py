@@ -60,7 +60,7 @@ class TestGroupExpansion:
 
     def test_expand_single_group(self):
         result = ToolPolicy._expand_names(["group:fs"])
-        assert result == {"read_file", "write_file", "edit_file", "list_dir"}
+        assert result == {"read_file", "write_file", "edit_file", "list_dir", "directory_tree"}
 
     def test_expand_multiple_groups(self):
         result = ToolPolicy._expand_names(["group:shell", "group:memory"])

@@ -191,7 +191,7 @@ class TestTaskStatusPersistence:
             task.project_id = project_id
             await manager._store.save_task(task)
 
-        asyncio.get_event_loop().run_until_complete(link())
+        asyncio.run(link())
 
         # Update status via JSON body
         client.post(

@@ -45,7 +45,7 @@ class TestUserProfile:
         DefaultBootstrapProvider(base_path=temp_identity_path)
         user_file = temp_identity_path / "USER.md"
         assert user_file.exists()
-        content = user_file.read_text()
+        content = user_file.read_text(encoding="utf-8")
         assert "# User Profile" in content
         assert "Name:" in content
         assert "Timezone:" in content
@@ -54,7 +54,7 @@ class TestUserProfile:
         # Pre-create USER.md with custom content
         (temp_identity_path / "USER.md").write_text("Name: Bob")
         DefaultBootstrapProvider(base_path=temp_identity_path)
-        content = (temp_identity_path / "USER.md").read_text()
+        content = (temp_identity_path / "USER.md").read_text(encoding="utf-8")
         assert content == "Name: Bob"
 
     async def test_user_profile_loaded_into_context(self, temp_identity_path):

@@ -1,6 +1,7 @@
+# Updated: 2026-03-03 — Bump version to 0.4.5.1, remove soul-protocol from PyPI extras (not on PyPI yet).
 [project]
 name = "pocketpaw"
-version = "0.4.4"
+version = "0.4.5.1"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -52,6 +53,7 @@ dependencies = [
     "python-multipart>=0.0.22",
     # Logging & CLI
     "rich>=13.0.0",
+    "click>=8.0",
     # Scheduling
     "apscheduler>=3.10.0",
     "python-dateutil>=2.8.0",
@@ -132,7 +134,6 @@ sarvam = [
 mcp = [
     "mcp>=1.0.0",
 ]
-
 # --- Composite extras ---
 recommended = [
     "pocketpaw[browser,memory,desktop]",

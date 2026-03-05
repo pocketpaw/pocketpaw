@@ -12,7 +12,7 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 
 def _load_pyproject() -> dict:
-    return tomllib.loads(PYPROJECT.read_text())
+    return tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def test_version_consistency():
     pyproject_version = data["project"]["version"]
 
     main_path = Path(__file__).resolve().parent.parent / "src" / "pocketpaw" / "__main__.py"
-    main_text = main_path.read_text()
+    main_text = main_path.read_text(encoding="utf-8")
 
     # Either the version string is hardcoded and matches pyproject.toml,
     # or __main__.py uses dynamic version via importlib.metadata.version()

@@ -66,7 +66,7 @@ class TestCreateSkillTool:
         skill_file = temp_skills_dir / "test-skill" / "SKILL.md"
         assert skill_file.exists()
 
-        content = skill_file.read_text()
+        content = skill_file.read_text(encoding="utf-8")
         assert "---" in content
         assert "name: test-skill" in content
         assert "description: A test skill" in content
@@ -86,7 +86,7 @@ class TestCreateSkillTool:
             )
 
         assert "created successfully" in result
-        content = (temp_skills_dir / "code-review" / "SKILL.md").read_text()
+        content = (temp_skills_dir / "code-review" / "SKILL.md").read_text(encoding="utf-8")
         assert "allowed-tools:" in content
         assert "  - read_file" in content
         assert "  - shell" in content
@@ -104,7 +104,7 @@ class TestCreateSkillTool:
             )
 
         assert "created successfully" in result
-        content = (temp_skills_dir / "internal-skill" / "SKILL.md").read_text()
+        content = (temp_skills_dir / "internal-skill" / "SKILL.md").read_text(encoding="utf-8")
         assert "user-invocable: false" in content
 
     async def test_invalid_skill_name_rejected(self, tool):
@@ -134,7 +134,7 @@ class TestCreateSkillTool:
         assert "Error" in result
         assert "already exists" in result
         # Original content preserved
-        assert (skill_dir / "SKILL.md").read_text() == "existing content"
+        assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "existing content"
 
     @patch("pocketpaw.tools.builtin.skill_gen._get_skills_dir")
     async def test_skill_loader_reload_called(self, mock_dir, tool, temp_skills_dir):
@@ -161,7 +161,7 @@ class TestCreateSkillTool:
                 instructions="Instruction body here.",
             )
 
-        content = (temp_skills_dir / "fmt-test" / "SKILL.md").read_text()
+        content = (temp_skills_dir / "fmt-test" / "SKILL.md").read_text(encoding="utf-8")
         # Check frontmatter delimiters
         parts = content.split("---")
         assert len(parts) >= 3  # before, frontmatter, after

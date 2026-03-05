@@ -24,8 +24,11 @@ class TestChannelFormatHints:
 
     def test_non_passthrough_channels_have_nonempty_hint(self):
         for ch in (
-            Channel.WHATSAPP, Channel.SLACK, Channel.SIGNAL,
-            Channel.TELEGRAM, Channel.DISCORD,
+            Channel.WHATSAPP,
+            Channel.SLACK,
+            Channel.SIGNAL,
+            Channel.TELEGRAM,
+            Channel.DISCORD,
         ):
             assert CHANNEL_FORMAT_HINTS[ch] != "", f"{ch} should have a hint"
 

@@ -237,7 +237,7 @@ class TestConfigSecretSeparation:
         )
         settings.save()
 
-        config_data = json.loads((env["tmp_path"] / "config.json").read_text())
+        config_data = json.loads((env["tmp_path"] / "config.json").read_text(encoding="utf-8"))
         assert "anthropic_api_key" not in config_data
         assert "openai_api_key" not in config_data
         assert "telegram_bot_token" not in config_data
@@ -259,7 +259,7 @@ class TestConfigSecretSeparation:
         )
         settings.save()
 
-        config_data = json.loads((env["tmp_path"] / "config.json").read_text())
+        config_data = json.loads((env["tmp_path"] / "config.json").read_text(encoding="utf-8"))
         assert config_data["agent_backend"] == "claude_agent_sdk"
         assert config_data["llm_provider"] == "anthropic"
 
@@ -413,7 +413,7 @@ class TestPlaintextMigration:
         (env["tmp_path"] / "config.json").write_text(json.dumps(old_config))
 
         # Load triggers migration
-        loaded = Settings.load()
+        Settings.load()
 
         # Verify secrets are now in encrypted store
         store = env["store"]
@@ -434,7 +434,7 @@ class TestPlaintextMigration:
 
         Settings.load()
 
-        updated = json.loads((env["tmp_path"] / "config.json").read_text())
+        updated = json.loads((env["tmp_path"] / "config.json").read_text(encoding="utf-8"))
         # Keys remain in config.json as fallback (file is chmod 600)
         assert updated.get("telegram_bot_token") == "123:AAOldToken"
         assert updated.get("anthropic_api_key") == "sk-ant-old"

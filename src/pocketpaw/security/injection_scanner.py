@@ -7,12 +7,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 logger = logging.getLogger(__name__)
 
 
-class ThreatLevel(str, Enum):
+class ThreatLevel(StrEnum):
     NONE = "none"
     LOW = "low"
     MEDIUM = "medium"

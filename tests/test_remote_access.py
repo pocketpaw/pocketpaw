@@ -1,12 +1,12 @@
-import pytest
-from pathlib import Path
-from fastapi.testclient import TestClient
-import os
 import shutil
+
+import pytest
+from fastapi.testclient import TestClient
+
+from pocketpaw.config import get_access_token, get_config_dir
 
 # Import app and config logic
 from pocketpaw.dashboard import app
-from pocketpaw.config import get_config_dir, get_access_token, regenerate_token, Settings
 
 
 # Mock config dir specifically for tests to avoid messing with real token
@@ -49,7 +49,7 @@ def test_token_generation(mock_config):
     assert token is not None
     assert len(token) > 20  # UUID length
     assert token_path.exists()
-    assert token_path.read_text() == token
+    assert token_path.read_text(encoding="utf-8") == token
 
 
 def test_auth_middleware_deny():

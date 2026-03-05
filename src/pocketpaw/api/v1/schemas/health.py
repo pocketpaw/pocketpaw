@@ -10,6 +10,7 @@ class HealthSummary(BaseModel):
     """Health engine summary."""
 
     status: str = "unknown"
+    message: str | None = None
     check_count: int = 0
     issues: list[dict] = []
     error: str | None = None

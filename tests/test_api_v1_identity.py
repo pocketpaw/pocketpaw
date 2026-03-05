@@ -69,8 +69,8 @@ class TestSaveIdentity:
             assert "IDENTITY.md" in data["updated"]
             assert "SOUL.md" in data["updated"]
             identity_dir = Path(tmpdir) / "identity"
-            assert (identity_dir / "IDENTITY.md").read_text() == "Updated identity"
-            assert (identity_dir / "SOUL.md").read_text() == "Updated soul"
+            assert (identity_dir / "IDENTITY.md").read_text(encoding="utf-8") == "Updated identity"
+            assert (identity_dir / "SOUL.md").read_text(encoding="utf-8") == "Updated soul"
 
     @patch("pocketpaw.config.get_config_path")
     def test_save_partial_update(self, mock_config_path, client):

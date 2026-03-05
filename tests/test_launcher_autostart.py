@@ -14,7 +14,7 @@ sys.modules.setdefault("pystray", MagicMock())
 sys.modules.setdefault("PIL", MagicMock())
 sys.modules.setdefault("PIL.Image", MagicMock())
 
-from installer.launcher.autostart import AutoStartManager, get_executable_path
+from installer.launcher.autostart import AutoStartManager, get_executable_path  # noqa: E402
 
 # ── get_executable_path ─────────────────────────────────────────────────
 
@@ -136,7 +136,7 @@ class TestLinuxAutoStart:
     def test_enable_creates_desktop_file(self):
         assert self.mgr.enable()
         assert self.desktop_path.exists()
-        content = self.desktop_path.read_text()
+        content = self.desktop_path.read_text(encoding="utf-8")
         assert "[Desktop Entry]" in content
         assert "PocketPaw" in content
         assert "Type=Application" in content

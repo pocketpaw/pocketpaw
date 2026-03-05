@@ -309,7 +309,7 @@ async def test_file_memory_store_session_lock(tmp_path):
 
     # Verify session file is valid JSON with all 10 entries
     session_file = store._get_session_file(session_key)
-    data = json.loads(session_file.read_text())
+    data = json.loads(session_file.read_text(encoding="utf-8"))
     assert len(data) == 10
     contents = {item["content"] for item in data}
     assert contents == {f"message {i}" for i in range(10)}
