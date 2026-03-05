@@ -1,4 +1,5 @@
-﻿#Requires -Version 5.1
+﻿[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     PocketPaw Installer for Windows.

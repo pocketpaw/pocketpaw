@@ -287,6 +287,13 @@ A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of 
 
 Settings live in `~/.pocketpaw/config.json`. You can also use `POCKETPAW_`-prefixed env vars or the dashboard Settings panel. API keys are encrypted at rest.
 
+### 🔑 First-Run Configuration
+After running the installer, your system status may initially show as **UNHEALTHY**. To fix this:
+1. Open the PocketPaw dashboard at `http://localhost:8888`.
+2. Navigate to **Settings > API Configuration**.
+3. Enter your Gemini or OpenAI API Key.
+4. Refresh the dashboard; the status should now change to **OK**.
+
 ```bash
 export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK backend
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
