@@ -9,9 +9,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.api.oauth2.models import OAuthClient
-from pocketpaw.api.oauth2.server import AuthorizationServer, reset_oauth_server
-from pocketpaw.api.oauth2.storage import DEFAULT_DESKTOP_CLIENT, OAuthStorage
+from pocketpaw.api.oauth2.server import AuthorizationServer
+from pocketpaw.api.oauth2.storage import OAuthStorage
 from pocketpaw.api.v1.oauth2 import router
 
 
@@ -19,9 +18,7 @@ def _make_pkce_pair():
     """Generate a PKCE code_verifier and code_challenge pair."""
     verifier = secrets.token_urlsafe(32)
     challenge = (
-        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-        .rstrip(b"=")
-        .decode()
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     )
     return verifier, challenge
 
@@ -94,7 +91,7 @@ class TestAuthorizationServer:
         code, error = server.authorize(
             client_id="pocketpaw-desktop",
             redirect_uri="tauri://oauth-callback",
-            scope="admin",
+            scope="superadmin",
             code_challenge=challenge,
         )
         assert error == "invalid_scope"
@@ -165,9 +162,7 @@ class TestAuthorizationServer:
             scope="chat",
             code_challenge=challenge,
         )
-        result, error = server.exchange(
-            code=code, client_id="other-client", code_verifier=verifier
-        )
+        result, error = server.exchange(code=code, client_id="other-client", code_verifier=verifier)
         assert error == "client_mismatch"
 
     def test_refresh_token(self, server):

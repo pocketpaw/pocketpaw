@@ -11,7 +11,6 @@ import pytest
 
 from pocketpaw.paw.scan import SCAN_PROMPT, heuristic_scan
 
-
 # ---------------------------------------------------------------------------
 # Shared soul fixture
 # ---------------------------------------------------------------------------
@@ -98,9 +97,12 @@ class TestHeuristicScanReadme:
 
         await heuristic_scan(tmp_path, mock_soul)
 
-        importance_values = [call.kwargs.get("importance") for call in mock_soul.remember.call_args_list]
+        importance_values = [
+            call.kwargs.get("importance") for call in mock_soul.remember.call_args_list
+        ]
         readme_importances = [
-            imp for call, imp in zip(mock_soul.remember.call_args_list, importance_values)
+            imp
+            for call, imp in zip(mock_soul.remember.call_args_list, importance_values)
             if "README" in call.args[0]
         ]
         assert all(imp >= 8 for imp in readme_importances)
@@ -176,9 +178,7 @@ class TestHeuristicScanEnvExample:
 
     @pytest.mark.asyncio
     async def test_commented_env_vars_ignored(self, tmp_path, mock_soul):
-        (tmp_path / ".env.example").write_text(
-            "# This is a comment\nACTIVE_KEY=value\n"
-        )
+        (tmp_path / ".env.example").write_text("# This is a comment\nACTIVE_KEY=value\n")
 
         await heuristic_scan(tmp_path, mock_soul)
 

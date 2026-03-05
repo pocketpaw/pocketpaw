@@ -160,9 +160,11 @@ class TestCodexCLIRun:
 
         backend = CodexCLIBackend(Settings())
         item = {"id": "item_1", "type": "agent_message", "text": "Hello from Codex!"}
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.completed", "item": item}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.completed", "item": item}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -185,9 +187,11 @@ class TestCodexCLIRun:
             "command": "bash -lc ls",
             "status": "in_progress",
         }
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.started", "item": item}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.started", "item": item}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -210,9 +214,11 @@ class TestCodexCLIRun:
             "type": "command_execution",
             "output": "file1.txt\nfile2.txt",
         }
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.completed", "item": item}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.completed", "item": item}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -235,9 +241,11 @@ class TestCodexCLIRun:
             "filename": "main.py",
             "status": "in_progress",
         }
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.started", "item": item}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.started", "item": item}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -256,9 +264,11 @@ class TestCodexCLIRun:
 
         backend = CodexCLIBackend(Settings())
         item = {"id": "item_2", "type": "file_change", "filename": "main.py"}
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.completed", "item": item}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.completed", "item": item}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -277,10 +287,12 @@ class TestCodexCLIRun:
         backend = CodexCLIBackend(Settings())
         started = {"id": "item_3", "type": "web_search", "query": "python asyncio"}
         completed = {"id": "item_3", "type": "web_search", "output": "Results found"}
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.started", "item": started}),
-            _ev({"type": "item.completed", "item": completed}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.started", "item": started}),
+                _ev({"type": "item.completed", "item": completed}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -312,10 +324,12 @@ class TestCodexCLIRun:
             "name": "my_tool",
             "output": "done",
         }
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.started", "item": started}),
-            _ev({"type": "item.completed", "item": completed}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.started", "item": started}),
+                _ev({"type": "item.completed", "item": completed}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -336,9 +350,11 @@ class TestCodexCLIRun:
 
         backend = CodexCLIBackend(Settings())
         item = {"id": "item_5", "type": "reasoning", "text": "Thinking about this..."}
-        mock_proc = _make_mock_process([
-            _ev({"type": "item.completed", "item": item}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.completed", "item": item}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -360,9 +376,11 @@ class TestCodexCLIRun:
             "cached_input_tokens": 50,
             "output_tokens": 25,
         }
-        mock_proc = _make_mock_process([
-            _ev({"type": "turn.completed", "usage": usage}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "turn.completed", "usage": usage}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -381,9 +399,11 @@ class TestCodexCLIRun:
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        mock_proc = _make_mock_process([
-            _ev({"type": "error", "message": "Rate limit exceeded"}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "error", "message": "Rate limit exceeded"}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -400,9 +420,11 @@ class TestCodexCLIRun:
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        mock_proc = _make_mock_process([
-            _ev({"type": "turn.failed", "message": "Model overloaded"}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "turn.failed", "message": "Model overloaded"}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -439,10 +461,12 @@ class TestCodexCLIRun:
 
         backend = CodexCLIBackend(Settings())
         item = {"id": "item_1", "type": "agent_message", "text": "OK"}
-        mock_proc = _make_mock_process([
-            "not valid json",
-            _ev({"type": "item.completed", "item": item}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                "not valid json",
+                _ev({"type": "item.completed", "item": item}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []
@@ -473,14 +497,16 @@ class TestCodexCLIRun:
             "cached_input_tokens": 400,
             "output_tokens": 50,
         }
-        mock_proc = _make_mock_process([
-            _ev({"type": "thread.started", "thread_id": "abc-123"}),
-            _ev({"type": "turn.started"}),
-            _ev({"type": "item.started", "item": cmd_item}),
-            _ev({"type": "item.completed", "item": cmd_done}),
-            _ev({"type": "item.completed", "item": msg_item}),
-            _ev({"type": "turn.completed", "usage": usage}),
-        ])
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "thread.started", "thread_id": "abc-123"}),
+                _ev({"type": "turn.started"}),
+                _ev({"type": "item.started", "item": cmd_item}),
+                _ev({"type": "item.completed", "item": cmd_done}),
+                _ev({"type": "item.completed", "item": msg_item}),
+                _ev({"type": "turn.completed", "usage": usage}),
+            ]
+        )
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             events = []

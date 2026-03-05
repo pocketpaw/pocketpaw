@@ -1,6 +1,7 @@
 # Tests for API key system.
 # Created: 2026-02-20
 
+import sys
 import tempfile
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.api.api_keys import APIKeyManager, APIKeyRecord
+from pocketpaw.api.api_keys import APIKeyManager
 from pocketpaw.api.v1.api_keys import router
 
 
@@ -126,11 +127,13 @@ class TestAPIKeyManager:
         assert manager.get("nope") is None
 
     def test_expired_key_rejected(self, manager):
-        record, plaintext = manager.create(
-            "expired", expires_at="2020-01-01T00:00:00+00:00"
-        )
+        record, plaintext = manager.create("expired", expires_at="2020-01-01T00:00:00+00:00")
         assert manager.verify(plaintext) is None
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Unix file permissions not available on Windows",
+    )
     def test_file_permissions(self, manager):
         import os
 

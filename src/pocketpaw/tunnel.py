@@ -2,7 +2,6 @@ import asyncio
 import logging
 import re
 import shutil
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +13,8 @@ class TunnelManager:
 
     def __init__(self, port: int = 8888):
         self.port = port
-        self.process: Optional[asyncio.subprocess.Process] = None
-        self.public_url: Optional[str] = None
+        self.process: asyncio.subprocess.Process | None = None
+        self.public_url: str | None = None
         self._shutdown_event = asyncio.Event()
 
     def is_installed(self) -> bool:
@@ -64,7 +63,8 @@ class TunnelManager:
             installed = await self.install()
             if not installed:
                 raise RuntimeError(
-                    "cloudflared is not installed and auto-installation failed. Please run 'brew install cloudflared'."
+                    "cloudflared is not installed and auto-installation failed."
+                    " Please run 'brew install cloudflared'."
                 )
 
         if self.process:
@@ -131,10 +131,13 @@ class TunnelManager:
 
                 # Check for URL
                 # Example output: ... trycloudflare.com ...
-                # or: +--------------------------------------------------------------------------------------------+
-                #     |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |
-                #     |  https://musical-example-domain.trycloudflare.com                                       |
-                #     +--------------------------------------------------------------------------------------------+
+                # or: +----------------------------------------------+
+                #     |  Your quick Tunnel has been created! Visit   |
+                #     |  it at (it may take some time to be          |
+                #     |  reachable):                                 |
+                #     |  https://musical-example-domain              |
+                #     |            .trycloudflare.com                |
+                #     +----------------------------------------------+
 
                 match = url_pattern.search(line)
                 if match:
@@ -143,7 +146,7 @@ class TunnelManager:
                     if "trycloudflare.com" in found_url:
                         return found_url
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
         raise RuntimeError("Stream ended without finding URL")
@@ -156,7 +159,7 @@ class TunnelManager:
                 self.process.terminate()
                 try:
                     await asyncio.wait_for(self.process.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     self.process.kill()
             except ProcessLookupError:
                 pass  # Already dead
@@ -175,7 +178,7 @@ class TunnelManager:
 
 
 # Global instance
-_tunnel_instance: Optional[TunnelManager] = None
+_tunnel_instance: TunnelManager | None = None
 
 
 def get_tunnel_manager(port: int = 8888) -> TunnelManager:

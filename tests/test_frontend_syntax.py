@@ -71,7 +71,6 @@ class TestJavaScriptStructure:
 
         assert "function app()" in content, "app.js should define app() function"
 
-
     def test_websocket_defines_manager(self):
         """Test that websocket.js defines WebSocket manager."""
         ws_js = FRONTEND_DIR / "js" / "websocket.js"

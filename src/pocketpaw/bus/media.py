@@ -7,6 +7,7 @@ and returns file paths for populating InboundMessage.media.
 import hashlib
 import logging
 import mimetypes
+import os
 import re
 import time
 from pathlib import Path
@@ -41,7 +42,7 @@ def _sanitize_filename(name: str) -> str:
 def _unique_filename(name: str, mime: str | None = None) -> str:
     """Generate a collision-free filename: {timestamp_hex}_{hash8}_{sanitized_name}."""
     ts_hex = format(int(time.time() * 1000), "x")
-    hash8 = hashlib.sha256(f"{time.time_ns()}{name}".encode()).hexdigest()[:8]
+    hash8 = hashlib.sha256(f"{time.time_ns()}{os.urandom(8).hex()}{name}".encode()).hexdigest()[:8]
 
     sanitized = _sanitize_filename(name)
 
