@@ -32,9 +32,7 @@ logger = logging.getLogger(__name__)
 
 # CREATE_NO_WINDOW flag prevents console window flash on Windows
 # when launching subprocesses from a GUI app (Tauri desktop launcher).
-_SUBPROCESS_FLAGS: dict = (
-    {"creationflags": 0x08000000} if platform.system() == "Windows" else {}
-)
+_SUBPROCESS_FLAGS: dict = {"creationflags": 0x08000000} if platform.system() == "Windows" else {}
 
 EMBEDDED_PYTHON_DIR = POCKETPAW_HOME / "python"
 MIN_PYTHON = (3, 11)
@@ -83,10 +81,13 @@ def _resolve_uv_version() -> str:
 
     try:
         url = "https://api.github.com/repos/astral-sh/uv/releases/latest"
-        req = urllib.request.Request(url, headers={
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "pocketpaw-installer/1.0",
-        })
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "pocketpaw-installer/1.0",
+            },
+        )
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read())
         tag = data.get("tag_name", "")
@@ -519,9 +520,7 @@ class Bootstrap:
         is_embedded = (
             python is not None
             and platform.system() == "Windows"
-            and str(Path(python).resolve()).startswith(
-                str(EMBEDDED_PYTHON_DIR.resolve())
-            )
+            and str(Path(python).resolve()).startswith(str(EMBEDDED_PYTHON_DIR.resolve()))
         )
         errors: list[str] = []
 
@@ -629,8 +628,12 @@ class Bootstrap:
 
         # Copy interpreter + essential runtime files
         for pattern in (
-            "python*.exe", "python*.dll", "vcruntime*.dll",
-            "*.pyd", "libffi*.dll", "sqlite3.dll",
+            "python*.exe",
+            "python*.dll",
+            "vcruntime*.dll",
+            "*.pyd",
+            "libffi*.dll",
+            "sqlite3.dll",
         ):
             for src in python_dir.glob(pattern):
                 shutil.copy2(src, scripts_dir / src.name)
@@ -647,9 +650,7 @@ class Bootstrap:
         # pyvenv.cfg
         version = self._get_python_version(python) or PYTHON_EMBED_VERSION
         (VENV_DIR / "pyvenv.cfg").write_text(
-            f"home = {python_dir}\n"
-            f"include-system-site-packages = false\n"
-            f"version = {version}\n",
+            f"home = {python_dir}\ninclude-system-site-packages = false\nversion = {version}\n",
             encoding="utf-8",
         )
 
@@ -667,7 +668,8 @@ class Bootstrap:
             try:
                 get_pip = scripts_dir / "get-pip.py"
                 urllib.request.urlretrieve(
-                    "https://bootstrap.pypa.io/get-pip.py", str(get_pip),
+                    "https://bootstrap.pypa.io/get-pip.py",
+                    str(get_pip),
                 )
                 subprocess.run(
                     [str(venv_py), str(get_pip), "--no-warn-script-location"],

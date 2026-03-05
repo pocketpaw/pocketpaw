@@ -39,7 +39,10 @@ class RememberTool(BaseTool):
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags to categorize the memory (e.g., 'preference', 'project', 'personal')",
+                    "description": (
+                        "Optional tags to categorize the memory"
+                        " (e.g., 'preference', 'project', 'personal')"
+                    ),
                 },
             },
             "required": ["content"],
@@ -49,7 +52,7 @@ class RememberTool(BaseTool):
         """Save to long-term memory."""
         try:
             manager = get_memory_manager()
-            entry_id = await manager.remember(content, tags=tags or [])
+            await manager.remember(content, tags=tags or [])
 
             tags_str = f" with tags: {', '.join(tags)}" if tags else ""
             return f"✅ Remembered{tags_str}: {content[:100]}{'...' if len(content) > 100 else ''}"

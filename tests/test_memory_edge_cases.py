@@ -19,7 +19,7 @@ import pytest
 
 from pocketpaw.memory.file_store import FileMemoryStore
 from pocketpaw.memory.manager import MemoryManager
-from pocketpaw.memory.protocol import MemoryEntry, MemoryType
+from pocketpaw.memory.protocol import MemoryType
 
 
 @pytest.fixture
@@ -55,9 +55,7 @@ class TestConcurrentAccess:
         session_key = "test:concurrent"
 
         async def write_message(index: int):
-            await memory_manager.add_to_session(
-                session_key, "user", f"Message {index}"
-            )
+            await memory_manager.add_to_session(session_key, "user", f"Message {index}")
 
         # Write 10 messages concurrently
         await asyncio.gather(*[write_message(i) for i in range(10)])
@@ -91,15 +89,11 @@ class TestConcurrentAccess:
         async def writer():
             """Write new messages."""
             for i in range(5):
-                await memory_manager.add_to_session(
-                    session_key, "assistant", f"New {i}"
-                )
+                await memory_manager.add_to_session(session_key, "assistant", f"New {i}")
                 await asyncio.sleep(0.001)
 
         # Run readers and writer concurrently
-        read_results = await asyncio.gather(
-            reader(), reader(), reader(), writer()
-        )
+        read_results = await asyncio.gather(reader(), reader(), reader(), writer())
 
         # Verify final state
         final_history = await memory_manager.get_session_history(session_key)
@@ -160,7 +154,7 @@ class TestCompactionThreshold:
         compacted = await memory_manager.get_compacted_history(
             session_key,
             recent_window=10,  # Keep last 10 messages
-            char_budget=500,   # Small budget
+            char_budget=500,  # Small budget
             summary_chars=200,
             llm_summarize=False,  # Disable LLM to test basic compaction
         )
@@ -204,7 +198,9 @@ class TestCompactionThreshold:
 
         # Add messages with varying lengths
         await memory_manager.add_to_session(
-            session_key, "user", "x" * 10000  # Very long message
+            session_key,
+            "user",
+            "x" * 10000,  # Very long message
         )
         await memory_manager.add_to_session(session_key, "assistant", "Short")
         await memory_manager.add_to_session(session_key, "user", "y" * 5000)
@@ -300,7 +296,7 @@ class TestUnicodeAndSpecialCharacters:
             "Path: C:\\Users\\test\\file.txt",
             "Regex: ^[a-z]+@[a-z]+\\.[a-z]{2,}$",
             "SQL: SELECT * FROM users WHERE id='1'",
-            "JSON: {\"key\": \"value\"}",
+            'JSON: {"key": "value"}',
             "Quote: \"Hello\" and 'World'",
         ]
 

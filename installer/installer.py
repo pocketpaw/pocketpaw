@@ -854,7 +854,15 @@ class PackageInstaller:
         # When using uv tool install, the package is in an isolated environment.
         # Use 'uv run' to execute playwright in that environment.
         if self.used_uv_tool and shutil.which("uv"):
-            cmd = ["uv", "run", "--with", f"{PACKAGE}[browser]", "playwright", "install", "chromium"]
+            cmd = [
+                "uv",
+                "run",
+                "--with",
+                f"{PACKAGE}[browser]",
+                "playwright",
+                "install",
+                "chromium",
+            ]
         else:
             cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
 
@@ -893,12 +901,12 @@ class PackageInstaller:
                 # Silently return for PEP 668 — caller will handle retry
                 if "externally-managed-environment" in stderr_text:
                     return False, stderr_text
-                
+
                 print(f"\n  Command failed: {' '.join(cmd)}")
                 # Stderr is already printed above
                 print()
                 return False, stderr_text
-                
+
             return True, ""
         except subprocess.TimeoutExpired:
             process.kill()
@@ -924,7 +932,7 @@ class PackageInstaller:
             console.print(f"[bold cyan]Retrying {pkg}...[/bold cyan]")
         else:
             print(f"  Retrying {pkg}...")
-        
+
         ok, _ = self._run_cmd_capture(retry_cmd)
         return ok
 

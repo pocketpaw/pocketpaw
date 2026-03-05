@@ -3,6 +3,7 @@
 # Updated: 2026-02-18 — added check_version_update (PyPI version check via update_check module).
 # Updated: 2026-02-17 — fix check_secrets_encrypted: was doing json.loads() on
 #   Fernet-encrypted bytes (always fails). Now checks for Fernet token signature.
+# Updated: 2026-03-05 — added check_gws_binary for Google Workspace CLI integration.
 # Each check returns a HealthCheckResult dataclass.
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ class HealthCheckResult:
     fix_hint: str  # e.g. "Set your API key in Settings > API Keys"
     timestamp: str = ""
     details: list[str] | None = None
-
 
     def __post_init__(self):
         if not self.timestamp:
@@ -197,7 +197,7 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message=(
                 "No Anthropic API key found — required for Claude SDK backend. "
                 "OAuth tokens from Free/Pro/Max plans are not permitted for third-party use."
@@ -207,11 +207,12 @@ def check_api_key_primary() -> HealthCheckResult:
                 "and add it in Settings > API Keys, or set ANTHROPIC_API_KEY env var."
             ),
             details=[
-                "Anthropic's policy prohibits third-party use of OAuth tokens from Free/Pro/Max plans.",
+                "Anthropic's policy prohibits third-party use of OAuth tokens"
+                " from Free/Pro/Max plans.",
                 "Get an API key from https://console.anthropic.com/api-keys",
                 "Set it in PocketPaw Settings > API Keys, or as ANTHROPIC_API_KEY env var.",
                 "Alternatively, switch to Ollama (Local) for free local inference.",
-            ]
+            ],
         )
 
     elif backend == "google_adk":
@@ -231,11 +232,10 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message="No Google API key found for Google ADK backend",
             fix_hint=(
-                "Set your Google API key in Settings > API Keys,"
-                " or set GOOGLE_API_KEY env var."
+                "Set your Google API key in Settings > API Keys, or set GOOGLE_API_KEY env var."
             ),
         )
 
@@ -256,11 +256,10 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message="No OpenAI API key found for OpenAI Agents backend",
             fix_hint=(
-                "Set your OpenAI API key in Settings > API Keys,"
-                " or set OPENAI_API_KEY env var."
+                "Set your OpenAI API key in Settings > API Keys, or set OPENAI_API_KEY env var."
             ),
         )
 
@@ -605,7 +604,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No API key to test connectivity",
                     fix_hint="Set your Anthropic API key first.",
                 )
@@ -636,8 +635,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                         category="connectivity",
                         status="critical",
                         message=(
-                            "Anthropic API reachable but key is invalid"
-                            f" (HTTP {resp.status_code})"
+                            f"Anthropic API reachable but key is invalid (HTTP {resp.status_code})"
                         ),
                         fix_hint="Check your API key in Settings > API Keys.",
                     )
@@ -671,7 +669,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No Google API key to test connectivity",
                     fix_hint="Set your Google API key first.",
                 )
@@ -730,7 +728,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No OpenAI API key to test connectivity",
                     fix_hint="Set your OpenAI API key first.",
                 )
@@ -823,7 +821,10 @@ def check_version_update() -> HealthCheckResult:
                 category="updates",
                 status="warning",
                 message=f"Update available: v{current} \u2192 v{latest}",
-                fix_hint=f"Run: pip install --upgrade pocketpaw  |  Changelog: github.com/pocketpaw/pocketpaw/releases/tag/v{latest}",
+                fix_hint=(
+                    f"Run: pip install --upgrade pocketpaw  |  "
+                    f"Changelog: github.com/pocketpaw/pocketpaw/releases/tag/v{latest}"
+                ),
             )
 
         return HealthCheckResult(
@@ -846,6 +847,34 @@ def check_version_update() -> HealthCheckResult:
 
 
 # =============================================================================
+# Optional integration checks
+# =============================================================================
+
+
+def check_gws_binary() -> HealthCheckResult:
+    """Check whether the Google Workspace CLI (gws) is installed."""
+    import shutil
+
+    if shutil.which("gws"):
+        return HealthCheckResult(
+            check_id="gws_binary",
+            name="Google Workspace CLI",
+            category="integrations",
+            status="ok",
+            message="gws binary found in PATH",
+            fix_hint="",
+        )
+    return HealthCheckResult(
+        check_id="gws_binary",
+        name="Google Workspace CLI",
+        category="integrations",
+        status="warning",
+        message="gws not found — Google Workspace MCP preset won't work without it",
+        fix_hint="Install: npm i -g @googleworkspace/cli",
+    )
+
+
+# =============================================================================
 # Check registry
 # =============================================================================
 
@@ -862,6 +891,11 @@ STARTUP_CHECKS = [
     check_audit_log_writable,
     check_memory_dir_accessible,
     check_version_update,
+]
+
+# Optional integration checks (only useful when specific presets are enabled)
+INTEGRATION_CHECKS = [
+    check_gws_binary,
 ]
 
 # Async checks (run in background, may be slow)
