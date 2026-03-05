@@ -5,11 +5,11 @@ Created: 2026-02-02
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class Channel(str, Enum):
+class Channel(StrEnum):
     """Supported communication channels."""
 
     TELEGRAM = "telegram"

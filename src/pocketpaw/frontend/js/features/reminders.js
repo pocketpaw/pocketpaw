@@ -59,6 +59,14 @@ window.PocketPaw.Reminders = {
             },
 
             /**
+             * Handle reminder error
+             */
+            handleReminderError(data) {
+                this.reminderLoading = false;
+                this.showToast(data.content || 'Failed to add reminder', 'error');
+            },
+
+            /**
              * Handle reminder triggered (notification)
              */
             handleReminderTriggered(data) {

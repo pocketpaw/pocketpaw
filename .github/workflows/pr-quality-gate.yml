@@ -1,5 +1,5 @@
-# PR quality gate — enforces contribution standards automatically.
-# Updated: 2026-02-26 — Added branch enforcement, cosmetic PR detection, size labels, reopen guard.
+# PR quality gate — enforces contribution standards and security checks.
+# Updated: 2026-03-05 — Fixed duplicate const bug, added security scan, dependency alerts, sensitive file alerts, PR size gate.
 name: PR Quality Gate
 
 on:
@@ -9,7 +9,7 @@ on:
 permissions:
   pull-requests: write
   issues: write
-  members: read
+  contents: read
 
 jobs:
   check-quality:
@@ -32,7 +32,6 @@ jobs:
             const deletions = pr.deletions || 0;
             const changedFiles = pr.changed_files || 0;
 
-            const base = pr.base.ref;
             const issues = [];
             const warnings = [];
             const MARKER = '<!-- pr-quality-gate -->';
@@ -154,14 +153,55 @@ jobs:
               issues.push('- No evidence of local testing found. Please include terminal output or screenshots.');
             }
 
+            // ── Get changed file list from API ──────────────────────────
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100
+            });
+            const fileNames = files.map(f => f.filename);
+
             // ── Unrelated changes detection ─────────────────────────────
-            // Flag PRs that touch files outside the likely scope
-            const hasReadmeChange = fileNames.includes('README.md');
+            const hasReadmeChange = fileNames.some(f => f === 'README.md');
             const hasSourceChange = fileNames.some(f => f.startsWith('src/'));
             const hasTestChange = fileNames.some(f => f.startsWith('tests/'));
 
             if (hasReadmeChange && hasSourceChange && !title.toLowerCase().includes('docs')) {
               warnings.push('- This PR modifies both source code and README.md. If the README change is unrelated to the code change, please split it into a separate PR.');
+            }
+
+            // ── PR size gate ────────────────────────────────────────────
+            const totalLines = additions + deletions;
+            if (totalLines > 500 || changedFiles > 15) {
+              warnings.push(`- Large PR detected (${totalLines} lines across ${changedFiles} files). Consider splitting into smaller, focused PRs for easier review.`);
+            }
+
+            // ── Sensitive file change alerts ────────────────────────────
+            const sensitivePatterns = [
+              { pattern: /^\.github\//, label: 'CI/CD workflows' },
+              { pattern: /^src\/pocketpaw\/security\//, label: 'security subsystem' },
+              { pattern: /^src\/pocketpaw\/config\.py$/, label: 'app configuration' },
+              { pattern: /^src\/pocketpaw\/api\/oauth2\//, label: 'OAuth/auth' },
+              { pattern: /^pyproject\.toml$/, label: 'project dependencies' },
+              { pattern: /^uv\.lock$/, label: 'lock file' },
+            ];
+            const touchedSensitive = [];
+            for (const { pattern, label } of sensitivePatterns) {
+              if (fileNames.some(f => pattern.test(f))) {
+                touchedSensitive.push(label);
+              }
+            }
+            if (touchedSensitive.length > 0) {
+              warnings.push(`- This PR touches sensitive files (${touchedSensitive.join(', ')}). These paths require maintainer review via CODEOWNERS.`);
+            }
+
+            // ── Dependency change alert ─────────────────────────────────
+            const depFiles = fileNames.filter(f => f === 'pyproject.toml' || f === 'uv.lock');
+            if (depFiles.length > 0) {
+              const depChanges = files.filter(f => depFiles.includes(f.filename));
+              const depDetail = depChanges.map(f => `\`${f.filename}\` (+${f.additions}/-${f.deletions})`).join(', ');
+              warnings.push(`- Dependency files changed: ${depDetail}. Reviewers: check for added/removed/changed packages.`);
             }
 
             // ── Find existing bot comment ───────────────────────────────
@@ -230,3 +270,148 @@ jobs:
                 });
               }
             }
+
+  security-scan:
+    runs-on: ubuntu-latest
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'renovate[bot]' &&
+      github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed
+        run: |
+          FILES=$(gh pr diff ${{ github.event.pull_request.number }} --name-only 2>/dev/null || git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD)
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan for dangerous code patterns
+        run: |
+          CHANGED_PY=$(echo "${{ steps.changed.outputs.files }}" | grep '\.py$' || true)
+          if [ -z "$CHANGED_PY" ]; then
+            echo "No Python files changed — skipping security scan."
+            exit 0
+          fi
+
+          echo "Scanning changed Python files for dangerous patterns..."
+          FOUND=0
+          REPORT=""
+
+          # Patterns that indicate potential code injection or unsafe operations
+          PATTERNS=(
+            'eval\s*\('
+            'exec\s*\('
+            'os\.system\s*\('
+            'subprocess\..*shell\s*=\s*True'
+            '__import__\s*\('
+            'pickle\.loads?\s*\('
+            'yaml\.load\s*\([^)]*$'
+            'yaml\.load\s*\([^)]*\)\s*$'
+            'marshal\.loads?\s*\('
+            'shelve\.open\s*\('
+            'compile\s*\([^)]*exec'
+          )
+
+          for file in $CHANGED_PY; do
+            if [ ! -f "$file" ]; then
+              continue
+            fi
+            for pattern in "${PATTERNS[@]}"; do
+              MATCHES=$(grep -nE "$pattern" "$file" 2>/dev/null || true)
+              if [ -n "$MATCHES" ]; then
+                FOUND=1
+                REPORT+="### $file\n"
+                REPORT+='```\n'
+                REPORT+="$MATCHES\n"
+                REPORT+='```\n\n'
+              fi
+            done
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "::warning::Dangerous code patterns detected in changed files. See details below."
+            echo -e "## Security scan: patterns detected\n\nThe following potentially dangerous patterns were found in changed files. This is not necessarily a problem — some patterns have legitimate uses — but a maintainer should verify.\n\n$REPORT"
+
+            # Post as a PR comment
+            COMMENT_BODY=$(cat <<'COMMENT_EOF'
+          <!-- security-scan -->
+          ## Security scan: review needed
+
+          Potentially dangerous code patterns detected in changed files. A maintainer should verify these are intentional and safe.
+
+          COMMENT_EOF
+          )
+            COMMENT_BODY+=$(echo -e "$REPORT")
+
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --body "$COMMENT_BODY" \
+              --edit-last 2>/dev/null || \
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --body "$COMMENT_BODY"
+
+            # Don't fail the check — just warn. Maintainers review via CODEOWNERS.
+            echo "::warning::Security patterns found. Review required."
+          else
+            echo "No dangerous patterns found."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for secrets in diff
+        run: |
+          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!uv.lock' ':!*.lock' 2>/dev/null || true)
+          if [ -z "$DIFF" ]; then
+            echo "No diff to scan."
+            exit 0
+          fi
+
+          FOUND=0
+          # Common secret patterns
+          PATTERNS=(
+            'AKIA[0-9A-Z]{16}'                           # AWS Access Key
+            'sk-[a-zA-Z0-9]{20,}'                        # OpenAI/Anthropic API key
+            'ghp_[a-zA-Z0-9]{36}'                        # GitHub PAT
+            'gho_[a-zA-Z0-9]{36}'                        # GitHub OAuth
+            'xoxb-[0-9]+-[a-zA-Z0-9]+'                   # Slack bot token
+            'xoxp-[0-9]+-[a-zA-Z0-9]+'                   # Slack user token
+            'sk_live_[a-zA-Z0-9]+'                        # Stripe secret key
+            '-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----' # Private keys
+          )
+
+          for pattern in "${PATTERNS[@]}"; do
+            if echo "$DIFF" | grep -qE "$pattern"; then
+              FOUND=1
+              echo "::error::Potential secret detected matching pattern: $pattern"
+            fi
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --body "<!-- security-scan-secrets -->
+          ## Security scan: potential secrets detected
+
+          This PR diff appears to contain secrets or API keys. Please remove them immediately and rotate any exposed credentials.
+
+          If these are false positives (e.g., placeholder patterns in tests), a maintainer will verify." \
+              --edit-last 2>/dev/null || \
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --body "<!-- security-scan-secrets -->
+          ## Security scan: potential secrets detected
+
+          This PR diff appears to contain secrets or API keys. Please remove them immediately and rotate any exposed credentials.
+
+          If these are false positives (e.g., placeholder patterns in tests), a maintainer will verify."
+            exit 1
+          fi
+
+          echo "No secrets detected in diff."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

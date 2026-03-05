@@ -17,7 +17,6 @@ from pocketpaw.paw.tools import (
     SoulStatusTool,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared soul fixture
 # ---------------------------------------------------------------------------
@@ -73,9 +72,7 @@ class TestSoulRememberTool:
 
         result = await tool.execute(content="The project uses FastAPI", importance=7)
 
-        mock_soul.remember.assert_awaited_once_with(
-            "The project uses FastAPI", importance=7
-        )
+        mock_soul.remember.assert_awaited_once_with("The project uses FastAPI", importance=7)
         assert "Remembered" in result
 
     @pytest.mark.asyncio
@@ -219,9 +216,7 @@ class TestSoulEditCoreTool:
     async def test_execute_with_both(self, mock_soul):
         tool = SoulEditCoreTool(mock_soul)
 
-        result = await tool.execute(
-            persona="Code assistant.", human="Bob, a data scientist."
-        )
+        result = await tool.execute(persona="Code assistant.", human="Bob, a data scientist.")
 
         mock_soul.edit_core_memory.assert_awaited_once_with(
             persona="Code assistant.", human="Bob, a data scientist."

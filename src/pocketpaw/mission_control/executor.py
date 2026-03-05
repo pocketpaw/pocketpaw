@@ -45,12 +45,12 @@ UUID_PATTERN = re.compile(
 MAX_CONCURRENT_TASKS = 5  # Prevent resource exhaustion
 MAX_ERROR_MESSAGE_LENGTH = 200  # Truncate error messages
 
-from pocketpaw.agents.router import AgentRouter
-from pocketpaw.bus.events import SystemEvent
-from pocketpaw.bus.queue import get_message_bus
-from pocketpaw.config import Settings, get_settings
-from pocketpaw.mission_control.manager import get_mission_control_manager
-from pocketpaw.mission_control.models import (
+from pocketpaw.agents.router import AgentRouter  # noqa: E402
+from pocketpaw.bus.events import SystemEvent  # noqa: E402
+from pocketpaw.bus.queue import get_message_bus  # noqa: E402
+from pocketpaw.config import Settings, get_settings  # noqa: E402
+from pocketpaw.mission_control.manager import get_mission_control_manager  # noqa: E402
+from pocketpaw.mission_control.models import (  # noqa: E402
     Activity,
     ActivityType,
     AgentStatus,

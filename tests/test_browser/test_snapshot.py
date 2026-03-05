@@ -2,11 +2,10 @@
 # Changes: Initial creation with comprehensive test cases
 """Tests for browser accessibility tree snapshot generator."""
 
-import pytest
 from pocketpaw.browser.snapshot import (
+    AccessibilityNode,
     RefMap,
     SnapshotGenerator,
-    AccessibilityNode,
 )
 
 

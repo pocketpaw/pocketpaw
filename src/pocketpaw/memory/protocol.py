@@ -1,14 +1,13 @@
 # Memory storage protocol - defines the interface for swappable backends.
 # Created: 2026-02-02 - Memory System
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-from typing import Protocol, Any
+from enum import StrEnum
+from typing import Any, Protocol
 
 
-class MemoryType(str, Enum):
+class MemoryType(StrEnum):
     """Types of memory entries."""
 
     LONG_TERM = "long_term"  # Facts, preferences, important info

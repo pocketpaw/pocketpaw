@@ -60,6 +60,9 @@ uv run ruff format .
 # Type check
 uv run mypy .
 
+# Run pre-commit hooks manually
+pre-commit run --all-files
+
 # Build package
 python -m build
 ```

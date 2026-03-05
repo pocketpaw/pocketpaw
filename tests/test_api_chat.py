@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.api.v1.chat import _APISessionBridge, _active_streams, router
+from pocketpaw.api.v1.chat import _active_streams, _APISessionBridge, router
 
 
 @pytest.fixture
@@ -119,7 +119,9 @@ class TestChatSend:
         async def _load():
             await q.put({"event": "chunk", "data": {"content": "Hello "}})
             await q.put({"event": "chunk", "data": {"content": "world!"}})
-            await q.put({"event": "stream_end", "data": {"session_id": "api:test", "usage": {"tokens": 10}}})
+            await q.put(
+                {"event": "stream_end", "data": {"session_id": "api:test", "usage": {"tokens": 10}}}
+            )
 
         asyncio.get_event_loop().run_until_complete(_load())
 
@@ -159,9 +161,7 @@ class TestSSEFormat:
 
         asyncio.get_event_loop().run_until_complete(_load())
 
-        with client.stream(
-            "POST", "/api/v1/chat/stream", json={"content": "test"}
-        ) as resp:
+        with client.stream("POST", "/api/v1/chat/stream", json={"content": "test"}) as resp:
             assert resp.status_code == 200
             raw = resp.read().decode()
 
@@ -171,8 +171,8 @@ class TestSSEFormat:
 
         for event_block in events:
             lines = event_block.split("\n")
-            event_line = next((l for l in lines if l.startswith("event:")), None)
-            data_line = next((l for l in lines if l.startswith("data:")), None)
+            event_line = next((line for line in lines if line.startswith("event:")), None)
+            data_line = next((line for line in lines if line.startswith("data:")), None)
 
             assert event_line is not None, f"Missing 'event:' line in SSE block: {event_block!r}"
             assert data_line is not None, f"Missing 'data:' line in SSE block: {event_block!r}"

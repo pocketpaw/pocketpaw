@@ -3,8 +3,11 @@
 # Fixed mocking for async_playwright().start() pattern
 """Tests for browser driver module."""
 
-import pytest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from pocketpaw.browser.driver import BrowserDriver
 from pocketpaw.browser.snapshot import RefMap
 
@@ -321,10 +324,11 @@ class TestBrowserDriverScreenshot:
         driver = BrowserDriver()
         driver._page = AsyncMock()
 
-        path = await driver.screenshot("/tmp/test.png")
+        test_path = str(Path("/tmp/test.png").resolve())
+        path = await driver.screenshot(test_path)
 
         driver._page.screenshot.assert_called_once()
-        assert path == "/tmp/test.png"
+        assert path == test_path
 
     @pytest.mark.asyncio
     async def test_screenshot_default_path(self):
