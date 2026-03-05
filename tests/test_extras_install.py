@@ -116,7 +116,10 @@ class TestExtrasInstall:
         with (
             _auth_bypass(),
             _dep_missing(),
-            patch("pocketpaw.bus.adapters.auto_install", return_value={"status": "ok"}) as mock_install,
+            patch(
+                "pocketpaw.bus.adapters.auto_install",
+                return_value={"status": "ok"},
+            ) as mock_install,
         ):
             resp = test_client.post(
                 "/api/extras/install",
@@ -131,7 +134,10 @@ class TestExtrasInstall:
         with (
             _auth_bypass(),
             _dep_missing(),
-            patch("pocketpaw.bus.adapters.auto_install", return_value={"status": "ok"}) as mock_install,
+            patch(
+                "pocketpaw.bus.adapters.auto_install",
+                return_value={"status": "ok"},
+            ) as mock_install,
         ):
             resp = test_client.post(
                 "/api/extras/install",
@@ -141,13 +147,13 @@ class TestExtrasInstall:
         mock_install.assert_called_once_with("whatsapp-personal", "neonize")
 
     def test_install_failure_returns_error(self, test_client):
-        """If auto_install returns an error status, return the error message."""
+        """If auto_install raises RuntimeError, return the error message."""
         with (
             _auth_bypass(),
             _dep_missing(),
             patch(
                 "pocketpaw.bus.adapters.auto_install",
-                return_value={"status": "error", "message": "pip not found"},
+                side_effect=RuntimeError("pip not found"),
             ),
         ):
             resp = test_client.post(
@@ -168,7 +174,10 @@ class TestExtrasInstall:
                 "pocketpaw.bus.adapters.auto_install",
                 return_value={
                     "status": "restart_required",
-                    "message": "Installed pocketpaw[whatsapp-personal] successfully. Server restart required to load native extensions.",
+                    "message": (
+                        "Installed pocketpaw[whatsapp-personal] successfully."
+                        " Server restart required to load native extensions."
+                    ),
                 },
             ),
         ):

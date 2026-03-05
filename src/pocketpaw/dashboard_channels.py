@@ -457,15 +457,16 @@ async def install_extras(request: Request):
 
     # Map channel name → pip extra name (most match, except whatsapp → whatsapp-personal)
     extra_name = "whatsapp-personal" if extra == "whatsapp" else extra
-    result = await asyncio.to_thread(auto_install, extra_name, import_mod)
+    try:
+        result = await asyncio.to_thread(auto_install, extra_name, import_mod)
+    except RuntimeError as exc:
+        return {"error": str(exc)}
 
-    if result["status"] == "error":
-        return {"error": result["message"]}
-    elif result["status"] == "restart_required":
+    if result.get("status") == "restart_required":
         return {
             "status": "ok",
             "restart_required": True,
-            "message": result["message"],
+            "message": result.get("message", "Server restart required"),
         }
 
     # Clear cached adapter module so _start_channel_adapter can re-import fresh
