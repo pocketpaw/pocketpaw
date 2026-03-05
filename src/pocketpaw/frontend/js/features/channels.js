@@ -375,6 +375,7 @@ window.PocketPaw.Channels = {
                         this.installLoading = false;
 
                         // Show restart confirmation
+                        // TODO: Replace native confirm() with Alpine.js modal for UI consistency
                         if (confirm(
                             `${packageName} installed successfully!\n\n` +
                             `The server must restart to load native extensions.\n\n` +
@@ -414,19 +415,37 @@ window.PocketPaw.Channels = {
              */
             async restartServerForChannel(channel) {
                 try {
-                    await fetch('/api/system/restart', {
+                    const res = await fetch('/api/system/restart', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ confirm: true })
                     });
+
+                    if (!res.ok) {
+                        const data = await res.json();
+                        this.showToast(
+                            `Failed to restart server: ${data.error || 'Unknown error'}`,
+                            'error'
+                        );
+                        return;
+                    }
+
+                    const data = await res.json();
+                    if (data.restarting) {
+                        this.showToast(
+                            'Server restarting. Reconnecting in a few seconds...',
+                            'info'
+                        );
+                        // Store channel name to retry after reconnect
+                        sessionStorage.setItem('pendingChannelStart', channel);
+                    }
+                } catch (e) {
                     this.showToast(
-                        'Server restarting. Reconnecting in a few seconds...',
+                        'Server restart initiated (connection lost)',
                         'info'
                     );
-                    // Store channel name to retry after reconnect
+                    // Store channel name anyway - server might have restarted
                     sessionStorage.setItem('pendingChannelStart', channel);
-                } catch (e) {
-                    this.showToast('Server restart initiated', 'info');
                 }
             },
 

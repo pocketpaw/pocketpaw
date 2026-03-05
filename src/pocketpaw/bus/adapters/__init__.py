@@ -29,8 +29,11 @@ def auto_install(extra: str, verify_import: str) -> dict[str, str]:
 
     Returns:
         A dict with keys:
-        - "status": "ok" | "restart_required" | "error"
-        - "message": Human-readable message (present for restart_required and error)
+        - "status": "ok" | "restart_required"
+        - "message": Human-readable message (present for restart_required)
+
+    Raises:
+        RuntimeError: If installation fails or tools are missing (backward compatible).
     """
     pip_spec = f"pocketpaw[{extra}]"
     _log.info("Auto-installing missing dependency: %s", pip_spec)
@@ -52,18 +55,14 @@ def auto_install(extra: str, verify_import: str) -> dict[str, str]:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            return {
-                "status": "error",
-                "message": f"Failed to install {pip_spec}:\n{result.stderr.strip()}",
-            }
+            raise RuntimeError(f"Failed to install {pip_spec}:\n{result.stderr.strip()}")
         _log.info("Successfully installed %s", pip_spec)
     except FileNotFoundError:
-        return {
-            "status": "error",
-            "message": f"Cannot auto-install {pip_spec}: neither uv nor pip found on PATH",
-        }
+        raise RuntimeError(
+            f"Cannot auto-install {pip_spec}: neither uv nor pip found on PATH"
+        )
     except subprocess.TimeoutExpired:
-        return {"status": "error", "message": f"Timed out installing {pip_spec}"}
+        raise RuntimeError(f"Timed out installing {pip_spec}")
 
     # Clear cached import failures so Python retries the import
     importlib.invalidate_caches()
