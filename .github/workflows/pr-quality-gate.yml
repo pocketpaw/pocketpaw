@@ -9,7 +9,6 @@ on:
 permissions:
   pull-requests: write
   issues: write
-  members: read
 
 jobs:
   check-quality:
