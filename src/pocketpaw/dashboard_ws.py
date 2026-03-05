@@ -948,6 +948,7 @@ async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data:
             for task in tasks:
                 if not task.done():
                     task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             # Only stop router if one was already created (no lazy init for panic)
             router = agent_loop._router
             if router is not None:
