@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
 
 
@@ -237,10 +239,13 @@ class TestSaveIdentity:
         request = MagicMock()
         request.json = AsyncMock(side_effect=ValueError("Invalid JSON"))
 
+        from fastapi import HTTPException
+
         from pocketpaw.dashboard import save_identity
 
-        result = await save_identity(request)
-        assert result.status_code == 400
+        with pytest.raises(HTTPException) as exc_info:
+            await save_identity(request)
+        assert exc_info.value.status_code == 400
 
 
 class TestIdentityAgentIntegration:

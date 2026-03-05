@@ -628,7 +628,9 @@ class TestCheckGwsBinary:
 
 class TestCheckRegistries:
     def test_startup_checks_count(self):
-        assert len(STARTUP_CHECKS) == 12  # 10 original + version_update + gws_binary
+        assert (
+            len(STARTUP_CHECKS) == 11
+        )  # 10 original + version_update (gws_binary moved to INTEGRATION_CHECKS)
 
     def test_connectivity_checks_count(self):
         assert len(CONNECTIVITY_CHECKS) == 1
@@ -682,7 +684,9 @@ class TestHealthEngine:
             patch("importlib.util.find_spec", return_value=MagicMock()),
         ):
             results = engine.run_startup_checks()
-            assert len(results) == 12  # 10 original + version_update + gws_binary
+            assert (
+                len(results) == 11
+            )  # 10 original + version_update (gws_binary moved to INTEGRATION_CHECKS)
             # All should be ok with valid config + key
             statuses = {r.status for r in results}
             assert "critical" not in statuses
