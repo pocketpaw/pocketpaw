@@ -17,6 +17,16 @@ Changes:
 
 import os
 import sys
+
+# Force UTF-8 encoding on Windows before anything else might produce output
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 import logging
 import argparse
 import asyncio
@@ -39,15 +49,6 @@ logger = logging.getLogger(__name__)
 # Cache version once
 APP_VERSION = get_version("pocketpaw")
 
-# Windows UTF-8 handling
-if sys.platform == "win32":
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, OSError) as e:
-        logger.debug("UTF-8 reconfiguration skipped: %s", e)
-
 
 def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
     """Run in web dashboard mode."""
@@ -67,6 +68,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="🐾 PocketPaw (Beta) - The AI agent that runs on your laptop",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  pocketpaw
+  pocketpaw --discord
+  pocketpaw --discord --slack
+  pocketpaw --telegram
+  pocketpaw serve --port 9000
+""",
     )
 
     # Dashboard / integration modes
@@ -181,19 +190,25 @@ def main() -> None:
 
             if issues:
                 print()
+                for r in results:
+                    if r.status == "ok":
+                        status = "\033[92m[OK]\033[0m"
+                    elif r.status == "warning":
+                        status = "\033[93m[WARN]\033[0m"
+                    else:
+                        status = "\033[91m[FAIL]\033[0m"
 
-            for r in results:
-                if r.status == "ok":
-                    status = "\033[92m[OK]\033[0m"
-                elif r.status == "warning":
-                    status = "\033[93m[WARN]\033[0m"
-                else:
-                    status = "\033[91m[FAIL]\033[0m"
+                    print(f"  {status} {r.name}: {r.message}")
 
-                print(f"  {status} {r.name}: {r.message}")
+                    if getattr(r, "fix_hint", None):
+                        print(f"       Fix: {r.fix_hint}")
 
-                if getattr(r, "fix_hint", None):
-                    print(f"       Fix: {r.fix_hint}")
+                # Summary line restored
+                summary = "DEGRADED" if any(r.status == "warning" for r in results) else "UNHEALTHY"
+                if all(r.status == "ok" for r in results):
+                    summary = "HEALTHY"
+
+                print(f"\nSystem: {summary}")
 
         except Exception as e:
             logger.warning("Startup health check failed: %s", e)
@@ -223,6 +238,7 @@ def main() -> None:
     try:
         if args.command == "serve":
             from pocketpaw.api.serve import run_api_server
+
             run_api_server(host=host, port=args.port, dev=args.dev)
 
         elif args.check_ollama:
@@ -239,6 +255,7 @@ def main() -> None:
 
         elif args.security_audit:
             from pocketpaw.security.audit_cli import run_security_audit
+
             exit_code = asyncio.run(run_security_audit(fix=args.fix))
             raise SystemExit(exit_code)
 
@@ -253,9 +270,6 @@ def main() -> None:
 
     except KeyboardInterrupt:
         logger.info("PocketPaw stopped by user.")
-
-    except Exception as e:
-        logger.error("Unexpected runtime error: %s", e)
 
     finally:
         from pocketpaw.lifecycle import shutdown_all
