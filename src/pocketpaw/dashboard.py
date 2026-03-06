@@ -916,7 +916,7 @@ async def start_tunnel():
         url = await manager.start()
         return {"url": url, "active": True}
     except Exception as e:
-        logger.error("Failed to start manager: %s", e)
+        logger.warning("Failed to start tunnel: %s", e)
         return {"error": str(e), "active": False}
 
 
@@ -1520,6 +1520,7 @@ async def clear_health_errors():
         logger.error("Failed to clear errors: %s", e)
         return {"cleared": False, "error": str(e)}
 
+
 @app.post("/api/system/restart")
 async def restart_server(request: Request):
     """Restart the server process so host/port changes take effect.
@@ -1535,7 +1536,6 @@ async def restart_server(request: Request):
             body = await request.json()
         except Exception as e:
             logger.debug("Request body parsing failed: %s", e)
-            body = {}
 
     if not body.get("confirm"):
         return JSONResponse(
