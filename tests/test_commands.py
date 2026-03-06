@@ -714,6 +714,25 @@ class TestIsCommandNewCommands:
     def test_recognises_delete(self):
         assert self.handler.is_command("/delete")
 
+    def test_recognises_kill(self):
+        assert self.handler.is_command("/kill")
+
+
+class TestKillCommand:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    @patch("pocketpaw.bus.commands.shutdown_all", new_callable=AsyncMock)
+    async def test_kill_triggers_shutdown_and_response(self, mock_shutdown_all):
+        msg = _make_msg("/kill")
+        response = await self.handler.handle(msg)
+
+        assert response is not None
+        assert "Kill command received" in response.content
+        mock_shutdown_all.assert_called_once()
+
 
 # =========================================================================
 # ! prefix fallback

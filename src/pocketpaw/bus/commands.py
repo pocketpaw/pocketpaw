@@ -6,12 +6,14 @@ Parses text-based commands from any channel and returns OutboundMessage
 responses without invoking the agent backend.
 """
 
+import asyncio
 import logging
 import re
 import uuid
 from collections.abc import Callable
 
 from pocketpaw.bus.events import InboundMessage, OutboundMessage
+from pocketpaw.lifecycle import shutdown_all
 from pocketpaw.memory import get_memory_manager
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ _COMMANDS = frozenset(
         "/backends",
         "/model",
         "/tools",
+        "/kill",
     }
 )
 
@@ -123,6 +126,8 @@ class CommandHandler:
             return self._cmd_tools(message, args)
         elif cmd == "/help":
             return self._cmd_help(message)
+        elif cmd == "/kill":
+            return await self._cmd_kill(message, session_key)
         return None
 
     # ------------------------------------------------------------------
@@ -588,6 +593,7 @@ class CommandHandler:
             "/backends — List all available backends\n"
             "/model — Show or switch model for current backend\n"
             "/tools — Show or switch tool profile\n"
+            "/kill — Kill the current agent run\n"
             "/help — Show this help message\n\n"
             "_Tip: Use !command instead of /command on channels"
             " where / is intercepted (e.g. Matrix)._"
@@ -596,6 +602,21 @@ class CommandHandler:
             channel=message.channel,
             chat_id=message.chat_id,
             content=text,
+        )
+
+    # ------------------------------------------------------------------
+    # /kill
+    # ------------------------------------------------------------------
+
+    async def _cmd_kill(self, message: InboundMessage, session_key: str) -> OutboundMessage:
+        """Handle the /kill command."""
+        # Trigger coordinated shutdown in the background so this response
+        # can still be delivered to the user.
+        asyncio.create_task(shutdown_all())
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content="Kill command received. Emergency stop triggered.",
         )
 
 
