@@ -724,14 +724,38 @@ class TestKillCommand:
 
         self.handler = CommandHandler()
 
-    @patch("pocketpaw.bus.commands.shutdown_all", new_callable=AsyncMock)
-    async def test_kill_triggers_shutdown_and_response(self, mock_shutdown_all):
+    async def test_kill_no_agent_loop(self):
+        self.handler.set_agent_loop(None)
+
         msg = _make_msg("/kill")
         response = await self.handler.handle(msg)
 
         assert response is not None
-        assert "Kill command received" in response.content
-        mock_shutdown_all.assert_called_once()
+        assert response.content == "No active agent run for this session."
+
+    async def test_kill_cancels_session_when_task_running(self):
+        mock_loop = MagicMock()
+        mock_loop.cancel_session = AsyncMock(return_value=True)
+        self.handler.set_agent_loop(mock_loop)
+
+        msg = _make_msg("/kill")
+        response = await self.handler.handle(msg)
+
+        assert response is not None
+        assert response.content == "Agent run cancelled for this session."
+        mock_loop.cancel_session.assert_called_once_with("discord:12345")
+
+    async def test_kill_no_task_for_session(self):
+        mock_loop = MagicMock()
+        mock_loop.cancel_session = AsyncMock(return_value=False)
+        self.handler.set_agent_loop(mock_loop)
+
+        msg = _make_msg("/kill")
+        response = await self.handler.handle(msg)
+
+        assert response is not None
+        assert response.content == "No active agent run for this session."
+        mock_loop.cancel_session.assert_called_once_with("discord:12345")
 
 
 # =========================================================================

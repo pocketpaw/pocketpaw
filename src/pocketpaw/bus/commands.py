@@ -6,14 +6,12 @@ Parses text-based commands from any channel and returns OutboundMessage
 responses without invoking the agent backend.
 """
 
-import asyncio
 import logging
 import re
 import uuid
 from collections.abc import Callable
 
 from pocketpaw.bus.events import InboundMessage, OutboundMessage
-from pocketpaw.lifecycle import shutdown_all
 from pocketpaw.memory import get_memory_manager
 
 logger = logging.getLogger(__name__)
@@ -67,6 +65,12 @@ class CommandHandler:
         # so /resume <n> can reference by number
         self._last_shown: dict[str, list[dict]] = {}
         self._on_settings_changed: Callable[[], None] | None = None
+        # Optional agent loop for /kill (set by app startup when loop is running)
+        self._agent_loop: object | None = None
+
+    def set_agent_loop(self, loop: object | None) -> None:
+        """Set the agent loop instance for session-scoped /kill. Pass None to clear."""
+        self._agent_loop = loop
 
     def set_on_settings_changed(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked after any command mutates settings."""
@@ -609,14 +613,25 @@ class CommandHandler:
     # ------------------------------------------------------------------
 
     async def _cmd_kill(self, message: InboundMessage, session_key: str) -> OutboundMessage:
-        """Handle the /kill command."""
-        # Trigger coordinated shutdown in the background so this response
-        # can still be delivered to the user.
-        asyncio.create_task(shutdown_all())
+        """Handle the /kill command: cancel the agent run for this session only."""
+        loop = self._agent_loop
+        if loop is None:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content="No active agent run for this session.",
+            )
+        cancelled = await loop.cancel_session(session_key)
+        if cancelled:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content="Agent run cancelled for this session.",
+            )
         return OutboundMessage(
             channel=message.channel,
             chat_id=message.chat_id,
-            content="Kill command received. Emergency stop triggered.",
+            content="No active agent run for this session.",
         )
 
 
