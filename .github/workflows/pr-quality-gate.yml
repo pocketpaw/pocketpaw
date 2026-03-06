@@ -1,9 +1,10 @@
 # PR quality gate — enforces contribution standards and security checks.
 # Updated: 2026-03-05 — Fixed duplicate const bug, added security scan, dependency alerts, sensitive file alerts, PR size gate.
+# Updated: 2026-03-06 — Switch to pull_request_target so GITHUB_TOKEN has write access for fork PRs (label/comment writes).
 name: PR Quality Gate
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
@@ -281,6 +282,7 @@ jobs:
       - name: Checkout PR code
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Get changed files
