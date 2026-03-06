@@ -44,7 +44,7 @@ jobs:
                 username: pr.user.login
               });
               const perm = permData.permission;
-              const isMaintainer = perm === 'admin' || perm === 'maintain';
+              const isMaintainer = perm === 'admin' || perm === 'maintain' || perm === 'write';
 
               if (!isMaintainer) {
                 const message = `${MARKER}\n` +

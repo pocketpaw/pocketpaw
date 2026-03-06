@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 # Tool groups — named sets of related tools
 # ---------------------------------------------------------------------------
 TOOL_GROUPS: dict[str, list[str]] = {
-    "group:fs": ["read_file", "write_file", "edit_file", "list_dir"],
+    "group:fs": ["read_file", "write_file", "edit_file", "list_dir", "directory_tree"],
     "group:shell": ["shell"],
     "group:browser": ["browser"],
     "group:memory": ["remember", "recall", "forget"],
-    "group:desktop": ["desktop"],
+    "group:desktop": ["desktop", "system_info"],
     "group:search": ["web_search", "url_extract"],
     "group:skills": ["create_skill", "skill"],
     "group:gmail": ["gmail_search", "gmail_read", "gmail_send"],

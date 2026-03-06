@@ -425,6 +425,7 @@ function app() {
             socket.on('reminder_added', (data) => this.handleReminderAdded(data));
             socket.on('reminder_deleted', (data) => this.handleReminderDeleted(data));
             socket.on('reminder', (data) => this.handleReminderTriggered(data));
+            socket.on('reminder_error', (data) => this.handleReminderError(data));
 
             // Intention handlers
             socket.on('intentions', (data) => this.handleIntentions(data));

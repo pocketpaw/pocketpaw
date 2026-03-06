@@ -24,6 +24,7 @@ window.PocketPaw.Health = {
     getState() {
         return {
             healthStatus: 'unknown',   // 'healthy' | 'degraded' | 'unhealthy' | 'unknown'
+            healthMessage: null,       // onboarding message when degraded (e.g. API key missing)
             healthIssues: [],           // HealthCheckResult[] (non-ok only)
             healthErrors: [],           // ErrorStore entries
             showHealthModal: false,
@@ -71,6 +72,7 @@ window.PocketPaw.Health = {
                     })
                     .then(data => {
                         this.healthStatus = data.status || 'unknown';
+                        this.healthMessage = data.message || null;
                         this.healthIssues = data.issues || [];
                         this.healthLastCheck = data.last_check;
                         this.healthLoading = false;
@@ -133,6 +135,7 @@ window.PocketPaw.Health = {
                     })
                     .then(data => {
                         this.healthStatus = data.status || 'unknown';
+                        this.healthMessage = data.message || null;
                         this.healthIssues = data.issues || [];
                         this.healthLastCheck = data.last_check;
                         this.healthLoading = false;
@@ -198,6 +201,7 @@ window.PocketPaw.Health = {
             handleHealthUpdate(data) {
                 if (data && data.data) {
                     this.healthStatus = data.data.status || 'unknown';
+                    this.healthMessage = data.data.message || null;
                     this.healthIssues = data.data.issues || [];
                     this.healthLastCheck = data.data.last_check;
 

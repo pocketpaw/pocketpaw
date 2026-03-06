@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     PocketPaw Installer for Windows.
@@ -26,6 +26,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ── Force UTF-8 output so emojis and box-drawing characters render correctly
+# on Windows terminals that default to legacy code pages (e.g. cp1252/437).
+if ([Console]::OutputEncoding.CodePage -ne 65001) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+}
+$OutputEncoding = [System.Text.Encoding]::UTF8
+# Switch the active console code page to UTF-8 (65001); suppress the output.
+try { chcp 65001 | Out-Null } catch {}
+
 # ── Banner ──────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  ┌─────────────────────────────────────────┐" -ForegroundColor Magenta
@@ -48,7 +57,7 @@ function Test-PythonVersion {
         $script = "import sys; print(f'__POCKETPAW_VER__{sys.version_info.major}.{sys.version_info.minor}__END__')"
         $out = & $Cmd -c $script 2>$null
         if ($LASTEXITCODE -ne 0) { return $false }
-        
+
         # Parse the output line by line for the signature
         $verStr = $null
         foreach ($line in ($out -split "`r`n|`n")) {
@@ -57,9 +66,9 @@ function Test-PythonVersion {
                 break
             }
         }
-        
+
         if (-not $verStr) { return $false }
-        
+
         $parts = $verStr.Split(".")
         $major = [int]$parts[0]
         $minor = [int]$parts[1]
@@ -120,7 +129,7 @@ if (-not $Python) {
             Invoke-RestMethod "https://astral.sh/uv/install.ps1" -OutFile $uvScript
             & $uvScript 2>$null
             Remove-Item $uvScript -ErrorAction SilentlyContinue
-            
+
             # Refresh PATH — include standard uv install locations
             $env:PATH = "$env:LOCALAPPDATA\uv\bin;$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.uv\bin;$env:PATH"
             if (Get-Command uv -ErrorAction SilentlyContinue) {
@@ -176,7 +185,7 @@ if (-not $Python) {
 }
 
 $pyVer = Get-PythonFullVersion $Python
-$pyPath = if ($Python -eq "py -3") { (Get-Command py).Source } else { (Get-Command $Python -ErrorAction SilentlyContinue).Source }
+$pyPath = if ($Python -eq "py -3") { (Get-Command py -ErrorAction SilentlyContinue).Source } else { (Get-Command $Python -ErrorAction SilentlyContinue).Source }
 Write-Step "Python:  $pyVer ($pyPath)"
 
 # ── Ensure uv is available ──────────────────────────────────────────────
