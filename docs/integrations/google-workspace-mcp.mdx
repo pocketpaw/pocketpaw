@@ -1,0 +1,209 @@
+---
+title: Google Workspace (MCP)
+description: "Connect PocketPaw to Google Workspace via the gws CLI MCP preset. One-click install gives your agent access to Drive, Gmail, Calendar, Sheets, Docs, Chat, and Admin APIs."
+section: Integrations
+ogType: article
+keywords: ["google workspace", "gws cli", "mcp preset", "drive", "gmail", "calendar", "sheets", "docs"]
+tags: ["integrations", "google", "mcp"]
+---
+
+# Google Workspace (MCP)
+
+PocketPaw includes a one-click MCP preset that connects your agent to **Drive, Gmail, Calendar, Sheets, Docs, Chat, and Admin** through the [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli).
+
+Unlike the individual [Gmail](/integrations/gmail), [Calendar](/integrations/calendar), and [Drive](/integrations/google-drive) built-in tools, this preset uses the official `gws` CLI which dynamically discovers **all** Workspace APIs from Google's Discovery Service — including Sheets, Chat, Admin, and any new APIs Google adds in the future.
+
+<Callout type="info">
+This preset requires the `gws` CLI to be installed and authenticated **before** installing in PocketPaw. PocketPaw does not manage Google credentials — `gws` handles its own OAuth flow.
+</Callout>
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install the gws CLI">
+    ```bash
+    npm install -g @googleworkspace/cli
+    ```
+  </Step>
+  <Step title="Set up your GCP project">
+    This configures a Google Cloud project and enables the required Workspace APIs:
+
+    ```bash
+    gws auth setup
+    ```
+
+    Follow the prompts to select or create a GCP project. The command enables Drive, Gmail, Calendar, Sheets, Docs, Chat, and Admin APIs automatically.
+  </Step>
+  <Step title="Authenticate">
+    ```bash
+    gws auth login
+    ```
+
+    Opens your browser for Google OAuth consent. Approve the requested scopes. Tokens are stored locally on your machine — PocketPaw never sees them.
+  </Step>
+  <Step title="Verify">
+    Confirm everything works:
+
+    ```bash
+    gws drive files list --page-size 3
+    ```
+
+    If this returns files from your Drive, you're ready.
+  </Step>
+</Steps>
+
+## Install the Preset
+
+### From the Dashboard
+
+1. Open the PocketPaw web dashboard
+2. Go to **MCP Servers** in the sidebar
+3. Open the **Presets** catalog
+4. Find **Google Workspace** under the **Productivity** category
+5. Click **Install**
+
+No API keys or environment variables are needed — the preset uses your existing `gws auth` session.
+
+### From the Config File
+
+Add to `~/.pocketpaw/mcp.json`:
+
+```json
+{
+  "servers": {
+    "google-workspace": {
+      "command": "gws",
+      "args": ["mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+Restart PocketPaw to pick up the change.
+
+## How It Works
+
+When installed, PocketPaw spawns `gws mcp` as a subprocess over stdio. The `gws` CLI starts a [Model Context Protocol](https://modelcontextprotocol.io) server that exposes Google Workspace APIs as structured tools. The agent can then call any Workspace API through the MCP session.
+
+```
+PocketPaw Agent
+  → MCP Manager (stdio)
+    → gws mcp (subprocess)
+      → Google Workspace APIs (Drive, Gmail, Calendar, Sheets, Docs, Chat, Admin)
+```
+
+Because `gws` reads Google's Discovery Service at runtime, it automatically picks up new API endpoints and methods without needing an update.
+
+## Example Usage
+
+Once installed, your agent can interact with any Google Workspace service:
+
+```
+User: Search my Drive for the Q4 budget spreadsheet
+Agent: [calls gws drive.files.list] → Found "Q4 Budget 2026" in Shared Drives
+
+User: Send an email to the team about tomorrow's standup
+Agent: [calls gws gmail.users.messages.send] → Email sent to team@company.com
+
+User: Create a calendar event for Friday at 2pm
+Agent: [calls gws calendar.events.insert] → Created "Team Sync" on Friday 2:00–2:30 PM
+
+User: Add a row to the expenses spreadsheet
+Agent: [calls gws sheets.spreadsheets.values.append] → Added row to "Expenses 2026"
+```
+
+## Filtering Services
+
+By default, `gws mcp` exposes all Workspace services. You can limit it to specific services by modifying the args:
+
+```json
+{
+  "servers": {
+    "google-workspace": {
+      "command": "gws",
+      "args": ["mcp", "-s", "drive,gmail,calendar"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+Available services: `drive`, `gmail`, `calendar`, `sheets`, `docs`, `chat`, `admin`, or `all` (default).
+
+## Alternative Authentication
+
+If you prefer not to use the interactive `gws auth login` flow, the `gws` CLI supports environment variables:
+
+| Method | Variable | Description |
+|--------|----------|-------------|
+| Credentials file | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | Path to `credentials.json` or service account JSON |
+| Access token | `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-fetched OAuth access token |
+
+To pass these through PocketPaw, add them to the server's `env` in `~/.pocketpaw/mcp.json`:
+
+```json
+{
+  "servers": {
+    "google-workspace": {
+      "command": "gws",
+      "args": ["mcp"],
+      "transport": "stdio",
+      "env": {
+        "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE": "/path/to/service-account.json"
+      }
+    }
+  }
+}
+```
+
+## Health Check
+
+PocketPaw includes an integration health check that verifies the `gws` binary is installed. If it's missing, the health dashboard shows:
+
+> **Google Workspace CLI** — warning
+> gws not found — Google Workspace MCP preset won't work without it
+> Fix: `npm i -g @googleworkspace/cli`
+
+## Troubleshooting
+
+### "gws: command not found"
+
+The `gws` CLI isn't in your PATH. Install it:
+
+```bash
+npm install -g @googleworkspace/cli
+```
+
+Then restart PocketPaw.
+
+### OAuth consent error
+
+If you see an OAuth error during `gws auth login`:
+
+1. Open the [OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent) in your GCP project
+2. Add your email as a test user
+3. Ensure the client type is **Desktop app** (not Web)
+4. Retry `gws auth login`
+
+### MCP server won't connect
+
+Verify `gws mcp` works standalone:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}' | gws mcp
+```
+
+You should get a JSON response with server capabilities. If not, check `gws auth login` status.
+
+## vs. Built-in Google Tools
+
+| Feature | Built-in Tools | gws MCP Preset |
+|---------|---------------|----------------|
+| Setup | PocketPaw OAuth flow | `gws auth login` (external) |
+| APIs covered | Gmail, Calendar, Drive, Docs | All Workspace APIs (auto-discovered) |
+| Sheets support | No | Yes |
+| Chat support | No | Yes |
+| Admin support | No | Yes |
+| Updates | Requires PocketPaw update | Automatic via Discovery Service |
+| Credentials | Managed by PocketPaw | Managed by gws CLI |

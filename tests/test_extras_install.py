@@ -116,7 +116,10 @@ class TestExtrasInstall:
         with (
             _auth_bypass(),
             _dep_missing(),
-            patch("pocketpaw.bus.adapters.auto_install") as mock_install,
+            patch(
+                "pocketpaw.bus.adapters.auto_install",
+                return_value={"status": "ok"},
+            ) as mock_install,
         ):
             resp = test_client.post(
                 "/api/extras/install",
@@ -131,7 +134,10 @@ class TestExtrasInstall:
         with (
             _auth_bypass(),
             _dep_missing(),
-            patch("pocketpaw.bus.adapters.auto_install") as mock_install,
+            patch(
+                "pocketpaw.bus.adapters.auto_install",
+                return_value={"status": "ok"},
+            ) as mock_install,
         ):
             resp = test_client.post(
                 "/api/extras/install",
@@ -158,6 +164,32 @@ class TestExtrasInstall:
         data = resp.json()
         assert "error" in data
         assert "pip not found" in data["error"]
+
+    def test_install_restart_required(self, test_client):
+        """When auto_install returns restart_required (e.g., neonize), return the flag."""
+        with (
+            _auth_bypass(),
+            _dep_missing(),
+            patch(
+                "pocketpaw.bus.adapters.auto_install",
+                return_value={
+                    "status": "restart_required",
+                    "message": (
+                        "Installed pocketpaw[whatsapp-personal] successfully."
+                        " Server restart required to load native extensions."
+                    ),
+                },
+            ),
+        ):
+            resp = test_client.post(
+                "/api/extras/install",
+                json={"extra": "whatsapp"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["restart_required"] is True
+        assert "restart required" in data["message"].lower()
 
     def test_install_prevents_arbitrary_packages(self, test_client):
         """Ensure only known extras can be installed (prevents arbitrary pkg install)."""

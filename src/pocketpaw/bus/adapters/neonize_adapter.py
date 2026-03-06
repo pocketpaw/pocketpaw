@@ -88,7 +88,16 @@ class NeonizeAdapter(BaseChannelAdapter):
         except ImportError:
             from pocketpaw.bus.adapters import auto_install
 
-            auto_install("whatsapp-personal", "neonize")
+            try:
+                result = auto_install("whatsapp-personal", "neonize")
+                # If restart is required, raise an error with helpful message
+                if result.get("status") == "restart_required":
+                    raise RuntimeError(result["message"])
+            except RuntimeError:
+                # auto_install raises RuntimeError for errors - just re-raise
+                raise
+
+            # If we get here, installation succeeded - try import again
             from neonize.aioze.client import NewAClient
             from neonize.aioze.events import ConnectedEv, MessageEv
             from neonize.utils.jid import Jid2String

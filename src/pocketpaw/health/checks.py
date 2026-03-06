@@ -197,7 +197,7 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message=(
                 "No Anthropic API key found — required for Claude SDK backend. "
                 "OAuth tokens from Free/Pro/Max plans are not permitted for third-party use."
@@ -232,7 +232,7 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message="No Google API key found for Google ADK backend",
             fix_hint=(
                 "Set your Google API key in Settings > API Keys, or set GOOGLE_API_KEY env var."
@@ -256,7 +256,7 @@ def check_api_key_primary() -> HealthCheckResult:
             check_id="api_key_primary",
             name="Primary API Key",
             category="config",
-            status="critical",
+            status="warning",
             message="No OpenAI API key found for OpenAI Agents backend",
             fix_hint=(
                 "Set your OpenAI API key in Settings > API Keys, or set OPENAI_API_KEY env var."
@@ -604,7 +604,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No API key to test connectivity",
                     fix_hint="Set your Anthropic API key first.",
                 )
@@ -669,7 +669,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No Google API key to test connectivity",
                     fix_hint="Set your Google API key first.",
                 )
@@ -728,7 +728,7 @@ async def check_llm_reachable() -> HealthCheckResult:
                     check_id="llm_reachable",
                     name="LLM Reachable",
                     category="connectivity",
-                    status="critical",
+                    status="warning",
                     message="No OpenAI API key to test connectivity",
                     fix_hint="Set your OpenAI API key first.",
                 )
@@ -870,7 +870,7 @@ def check_gws_binary() -> HealthCheckResult:
         category="integrations",
         status="warning",
         message="gws not found — Google Workspace MCP preset won't work without it",
-        fix_hint="Install: npm i -g @anthropic-ai/gws  (or cargo install gws)",
+        fix_hint="Install: npm i -g @googleworkspace/cli",
     )
 
 
@@ -891,6 +891,10 @@ STARTUP_CHECKS = [
     check_audit_log_writable,
     check_memory_dir_accessible,
     check_version_update,
+]
+
+# Optional integration checks (only useful when specific presets are enabled)
+INTEGRATION_CHECKS = [
     check_gws_binary,
 ]
 

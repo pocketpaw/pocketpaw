@@ -166,6 +166,14 @@ window.PocketPaw.Channels = {
                 await this.getChannelStatus();
                 await this.loadWebhooks();
                 this.startWhatsAppQrPollingIfNeeded();
+
+                // Check if there's a pending channel to start after restart
+                const pendingChannel = sessionStorage.getItem('pendingChannelStart');
+                if (pendingChannel) {
+                    sessionStorage.removeItem('pendingChannelStart');
+                    this.showToast(`Reconnected! Click Start to activate ${pendingChannel}.`, 'success');
+                }
+
                 this.$nextTick(() => {
                     if (window.refreshIcons) window.refreshIcons();
                 });
@@ -360,6 +368,27 @@ window.PocketPaw.Channels = {
                     const data = await res.json();
                     if (data.error) {
                         this.showToast('Install failed: ' + data.error, 'error');
+                    } else if (data.restart_required) {
+                        // Installation succeeded but needs restart
+                        const packageName = this.installPrompt.package;
+                        this.installPrompt = null;
+                        this.installLoading = false;
+
+                        // Show restart confirmation
+                        // TODO: Replace native confirm() with Alpine.js modal for UI consistency
+                        if (confirm(
+                            `${packageName} installed successfully!\n\n` +
+                            `The server must restart to load native extensions.\n\n` +
+                            `Restart now? (You'll reconnect automatically)`
+                        )) {
+                            await this.restartServerForChannel(channel);
+                        } else {
+                            this.showToast(
+                                `Installation complete. Restart server when ready.`,
+                                'info'
+                            );
+                        }
+                        return;
                     } else {
                         this.showToast(`${this.installPrompt.package} installed!`, 'success');
                         this.installPrompt = null;
@@ -379,6 +408,45 @@ window.PocketPaw.Channels = {
             cancelInstall() {
                 this.installPrompt = null;
                 this.installLoading = false;
+            },
+
+            /**
+             * Restart server after channel installation
+             */
+            async restartServerForChannel(channel) {
+                try {
+                    const res = await fetch('/api/system/restart', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ confirm: true })
+                    });
+
+                    if (!res.ok) {
+                        const data = await res.json();
+                        this.showToast(
+                            `Failed to restart server: ${data.error || 'Unknown error'}`,
+                            'error'
+                        );
+                        return;
+                    }
+
+                    const data = await res.json();
+                    if (data.restarting) {
+                        this.showToast(
+                            'Server restarting. Reconnecting in a few seconds...',
+                            'info'
+                        );
+                        // Store channel name to retry after reconnect
+                        sessionStorage.setItem('pendingChannelStart', channel);
+                    }
+                } catch (e) {
+                    this.showToast(
+                        'Server restart initiated (connection lost)',
+                        'info'
+                    );
+                    // Store channel name anyway - server might have restarted
+                    sessionStorage.setItem('pendingChannelStart', channel);
+                }
             },
 
             /**

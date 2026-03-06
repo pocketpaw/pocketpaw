@@ -302,7 +302,7 @@ async def websocket_handler(
                         settings.claude_sdk_model = data["claude_sdk_model"]
                     if "claude_sdk_max_turns" in data:
                         val = data["claude_sdk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.claude_sdk_max_turns = int(val)
                     # OpenAI Agents
                     if data.get("openai_agents_provider"):
@@ -311,21 +311,21 @@ async def websocket_handler(
                         settings.openai_agents_model = data["openai_agents_model"]
                     if "openai_agents_max_turns" in data:
                         val = data["openai_agents_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.openai_agents_max_turns = int(val)
                     # Google ADK
                     if "google_adk_model" in data:
                         settings.google_adk_model = data["google_adk_model"]
                     if "google_adk_max_turns" in data:
                         val = data["google_adk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.google_adk_max_turns = int(val)
                     # Codex CLI
                     if "codex_cli_model" in data:
                         settings.codex_cli_model = data["codex_cli_model"]
                     if "codex_cli_max_turns" in data:
                         val = data["codex_cli_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.codex_cli_max_turns = int(val)
                     # Copilot SDK
                     if data.get("copilot_sdk_provider"):
@@ -334,7 +334,7 @@ async def websocket_handler(
                         settings.copilot_sdk_model = data["copilot_sdk_model"]
                     if "copilot_sdk_max_turns" in data:
                         val = data["copilot_sdk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.copilot_sdk_max_turns = int(val)
                     # OpenCode
                     if "opencode_base_url" in data:
@@ -343,7 +343,7 @@ async def websocket_handler(
                         settings.opencode_model = data["opencode_model"]
                     if "opencode_max_turns" in data:
                         val = data["opencode_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.opencode_max_turns = int(val)
                     settings.llm_provider = data.get("llm_provider", settings.llm_provider)
                     if data.get("ollama_host"):
@@ -360,7 +360,7 @@ async def websocket_handler(
                         settings.openai_compatible_model = data["openai_compatible_model"]
                     if "openai_compatible_max_tokens" in data:
                         val = data["openai_compatible_max_tokens"]
-                        if isinstance(val, (int, float)) and 0 <= val <= 1000000:
+                        if isinstance(val, int | float) and 0 <= val <= 1000000:
                             settings.openai_compatible_max_tokens = int(val)
                     if data.get("gemini_model"):
                         settings.gemini_model = data["gemini_model"]
@@ -712,21 +712,24 @@ async def websocket_handler(
                 await websocket.send_json({"type": "reminders", "reminders": reminders})
 
             elif action == "add_reminder":
-                message = data.get("message", "")
-                scheduler = get_scheduler()
-                reminder = scheduler.add_reminder(message)
+                try:
+                    message = data.get("message", "")
+                    scheduler = get_scheduler()
+                    reminder = scheduler.add_reminder(message)
 
-                if reminder:
-                    reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
-                    await websocket.send_json({"type": "reminder_added", "reminder": reminder})
-                else:
+                    if reminder:
+                        reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
+                        await websocket.send_json({"type": "reminder_added", "reminder": reminder})
+                    else:
+                        await websocket.send_json(
+                            {
+                                "type": "reminder_error",
+                                "content": ("Could not parse time. Try 'in 5 minutes' or 'at 3pm'"),
+                            }
+                        )
+                except Exception:
                     await websocket.send_json(
-                        {
-                            "type": "error",
-                            "content": (
-                                "Could not parse time from message. Try 'in 5 minutes' or 'at 3pm'"
-                            ),
-                        }
+                        {"type": "reminder_error", "content": "Error adding reminder"}
                     )
 
             elif action == "delete_reminder":
@@ -735,7 +738,9 @@ async def websocket_handler(
                 if scheduler.delete_reminder(reminder_id):
                     await websocket.send_json({"type": "reminder_deleted", "id": reminder_id})
                 else:
-                    await websocket.send_json({"type": "error", "content": "Reminder not found"})
+                    await websocket.send_json(
+                        {"type": "reminder_error", "content": "Reminder not found"}
+                    )
 
             # ==================== Intentions API ====================
 
