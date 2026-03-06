@@ -71,6 +71,60 @@ class TestDefaultBootstrapProvider:
         ctx = await provider.get_context()
         assert ctx.identity == "I am CustomAgent"
 
+    @pytest.mark.asyncio
+    async def test_get_context_uses_cache(self, temp_identity_path):
+        """Second call returns cached content without re-reading from disk."""
+        from pocketpaw.bootstrap import default_provider as dp
+
+        dp._identity_file_cache.clear()
+        provider = DefaultBootstrapProvider(base_path=temp_identity_path)
+
+        ctx1 = await provider.get_context()
+        cached_snapshot = dict(dp._identity_file_cache)
+        assert len(cached_snapshot) > 0
+
+        ctx2 = await provider.get_context()
+        # Cache entries unchanged (same mtime → no re-read)
+        assert dp._identity_file_cache == cached_snapshot
+        assert ctx1.identity == ctx2.identity
+
+    @pytest.mark.asyncio
+    async def test_cache_invalidates_on_file_change(self, temp_identity_path):
+        """Cache is invalidated when a file's mtime changes."""
+        import os
+        import time
+
+        from pocketpaw.bootstrap import default_provider as dp
+
+        dp._identity_file_cache.clear()
+        provider = DefaultBootstrapProvider(base_path=temp_identity_path)
+
+        ctx1 = await provider.get_context()
+        assert "You are PocketPaw" in ctx1.identity
+
+        identity = temp_identity_path / "IDENTITY.md"
+        identity.write_text("Updated identity", encoding="utf-8")
+        # Force mtime forward regardless of filesystem resolution
+        future = time.time() + 10
+        os.utime(identity, (future, future))
+
+        ctx2 = await provider.get_context()
+        assert ctx2.identity == "Updated identity"
+
+    @pytest.mark.asyncio
+    async def test_cache_handles_missing_file(self, temp_identity_path):
+        """Cache returns empty string for missing files."""
+        from pocketpaw.bootstrap import default_provider as dp
+
+        dp._identity_file_cache.clear()
+        provider = DefaultBootstrapProvider(base_path=temp_identity_path)
+
+        # Remove USER.md
+        (temp_identity_path / "USER.md").unlink()
+
+        ctx = await provider.get_context()
+        assert ctx.user_profile == ""
+
 
 class TestAgentContextBuilder:
     """Tests for AgentContextBuilder."""
