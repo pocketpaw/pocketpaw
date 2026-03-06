@@ -408,3 +408,20 @@ MIT &copy; PocketPaw Team
   <br>
   <strong>Built for people who'd rather own their AI than rent it</strong>
 </p>
+
+## Beginner Setup Guide
+
+For beginners installing PocketPaw for the first time, it is recommended to use a virtual environment.
+
+### Create a virtual environment
+
+python -m venv venv
+
+### Activate the environment
+
+Windows:
+venv\Scripts\activate
+
+### Install dependencies
+
+pip install -r requirements.txt
