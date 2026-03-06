@@ -399,8 +399,14 @@ def create_app(settings: Settings) -> FastAPI:
             return {"qr_url": qr_data}
 
         except Exception as e:
+            error_msg = str(e)
+            # Sanitize: never expose the bot token in HTTP error responses.
+            # python-telegram-bot exceptions may embed the token in API URLs
+            # like https://api.telegram.org/bot<TOKEN>/getMe.
+            if bot_token and bot_token in error_msg:
+                error_msg = error_msg.replace(bot_token, "[REDACTED]")
             logger.error(f"Setup failed: {e}")
-            return {"error": f"Failed to connect to Telegram: {str(e)}"}
+            return {"error": f"Failed to connect to Telegram: {error_msg}"}
 
     @app.get("/status")
     async def status():
