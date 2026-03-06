@@ -214,6 +214,14 @@ docker exec pocketpaw cat /home/pocketpaw/.pocketpaw/access_token
 Agent-created files appear in `./workspace/` on the host. Optional profiles: `--profile ollama` (local LLMs), `--profile qdrant` (vector memory). Using Ollama on the host? Set `POCKETPAW_OLLAMA_HOST=http://host.docker.internal:11434` in `.env`.
 
 </details>
+### Environment Configuration
+
+PocketPaw uses environment variables for API keys and optional settings.
+
+You can copy the example environment file and customize it:
+
+```bash
+cp .env.example .env
 
 The web dashboard opens at `http://localhost:8888`. From there you can connect Discord, Slack, WhatsApp, or Telegram.
 
