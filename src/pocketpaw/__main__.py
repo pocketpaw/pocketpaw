@@ -42,11 +42,9 @@ from pocketpaw.headless import (
 )
 from pocketpaw.logging_setup import setup_logging
 
-# Setup logging
 setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
-# Cache version once
 APP_VERSION = get_version("pocketpaw")
 
 
@@ -89,59 +87,21 @@ Examples:
     parser.add_argument("--teams", action="store_true", help="Run headless Microsoft Teams bot")
     parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
 
-    # Security tools
-    parser.add_argument(
-        "--security-audit",
-        action="store_true",
-        help="Run security audit checks for the system",
-    )
+    parser.add_argument("--security-audit", action="store_true", help="Run security audit checks")
+    parser.add_argument("--fix", action="store_true", help="Automatically fix audit issues")
 
-    parser.add_argument(
-        "--fix",
-        action="store_true",
-        help="Automatically fix issues found during security audit",
-    )
+    parser.add_argument("--host", type=str, default=None, help="Server host (default localhost)")
+    parser.add_argument("--port", "-p", type=int, default=8888, help="Web server port")
+    parser.add_argument("--dev", action="store_true", help="Run server in development mode")
 
-    # Server configuration
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=None,
-        help="Host address to bind the server (default: localhost)",
-    )
-
-    parser.add_argument(
-        "--port",
-        "-p",
-        type=int,
-        default=8888,
-        help="Port number for the web server (default: 8888)",
-    )
-
-    parser.add_argument(
-        "--dev",
-        action="store_true",
-        help="Run server in development mode",
-    )
-
-    # Health checks
-    parser.add_argument(
-        "--check-ollama",
-        action="store_true",
-        help="Check connection to local Ollama models",
-    )
-
+    parser.add_argument("--check-ollama", action="store_true", help="Check Ollama connection")
     parser.add_argument(
         "--check-openai-compatible",
         action="store_true",
-        help="Check OpenAI-compatible API connection",
+        help="Check OpenAI compatible API",
     )
 
-    parser.add_argument(
-        "--doctor",
-        action="store_true",
-        help="Run system diagnostics and health checks",
-    )
+    parser.add_argument("--doctor", action="store_true", help="Run system diagnostics")
 
     parser.add_argument(
         "--version",
@@ -155,12 +115,11 @@ Examples:
         "command",
         nargs="?",
         default=None,
-        help="Subcommand: 'serve' starts an API-only server",
+        help="Subcommand: 'serve' starts API-only server",
     )
 
     args = parser.parse_args()
 
-    # Validate conflicting CLI flags
     channel_flags = [
         args.discord,
         args.slack,
@@ -178,7 +137,7 @@ Examples:
 
     settings = get_settings()
 
-    # Run startup health checks
+    # Startup health checks
     if settings.health_check_on_startup:
         try:
             from pocketpaw.health import get_health_engine
@@ -186,34 +145,30 @@ Examples:
             engine = get_health_engine()
             results = engine.run_startup_checks()
 
-            issues = [r for r in results if r.status != "ok"]
+            print()
 
-            if issues:
-                print()
-                for r in results:
-                    if r.status == "ok":
-                        status = "\033[92m[OK]\033[0m"
-                    elif r.status == "warning":
-                        status = "\033[93m[WARN]\033[0m"
-                    else:
-                        status = "\033[91m[FAIL]\033[0m"
+            for r in results:
+                if r.status == "ok":
+                    status = "\033[92m[OK]\033[0m"
+                elif r.status == "warning":
+                    status = "\033[93m[WARN]\033[0m"
+                else:
+                    status = "\033[91m[FAIL]\033[0m"
 
-                    print(f"  {status} {r.name}: {r.message}")
+                print(f"  {status} {r.name}: {r.message}")
 
-                    if getattr(r, "fix_hint", None):
-                        print(f"       Fix: {r.fix_hint}")
+                if getattr(r, "fix_hint", None):
+                    print(f"       Fix: {r.fix_hint}")
 
-                # Summary line restored
-                summary = "DEGRADED" if any(r.status == "warning" for r in results) else "UNHEALTHY"
-                if all(r.status == "ok" for r in results):
-                    summary = "HEALTHY"
+            # Correct summary using engine logic
+            status = engine.overall_status
+            color = {"healthy": "32", "degraded": "33", "unhealthy": "31"}.get(status, "0")
 
-                print(f"\nSystem: {summary}")
+            print(f"\n  System: \033[{color}m{status.upper()}\033[0m\n")
 
         except Exception as e:
             logger.warning("Startup health check failed: %s", e)
 
-    # Check updates
     from pocketpaw.config import get_config_dir
     from pocketpaw.update_check import check_for_updates, print_styled_update_notice
 
@@ -224,7 +179,6 @@ Examples:
     except Exception as e:
         logger.debug("Update check skipped: %s", e)
 
-    # Resolve host
     if args.host is not None:
         host = args.host
     elif settings.web_host != "127.0.0.1":
@@ -279,6 +233,10 @@ Examples:
             loop.run_until_complete(shutdown_all())
             loop.close()
         except (RuntimeError, OSError) as e:
+            # RuntimeError can occur if the event loop is already closed
+            # (common during interpreter shutdown on Windows).
+            # OSError may occur if sockets are already cleaned up
+            # during a forced shutdown.
             logger.debug("Shutdown cleanup issue: %s", e)
 
 
