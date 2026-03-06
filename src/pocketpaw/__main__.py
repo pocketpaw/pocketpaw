@@ -189,13 +189,22 @@ Examples:
         except Exception:
             pass  # Health engine failure never blocks startup
 
-    # Check for updates (cached daily, silent on error)
-    from pocketpaw.config import get_config_dir
-    from pocketpaw.update_check import check_for_updates, print_styled_update_notice
+    # Check for updates in background thread to avoid blocking startup
+    # (cold start or stale cache triggers a sync HTTP request to PyPI)
+    import threading
 
-    update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
-    if update_info and update_info.get("update_available"):
-        print_styled_update_notice(update_info)
+    def _bg_update_check() -> None:
+        try:
+            from pocketpaw.config import get_config_dir
+            from pocketpaw.update_check import check_for_updates, print_styled_update_notice
+
+            update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
+            if update_info and update_info.get("update_available"):
+                print_styled_update_notice(update_info)
+        except Exception:
+            pass  # Update check failure never interrupts startup
+
+    threading.Thread(target=_bg_update_check, daemon=True).start()
 
     # Resolve host: explicit flag > config > auto-detect
     if args.host is not None:
