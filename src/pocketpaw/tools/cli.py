@@ -163,7 +163,7 @@ def main() -> None:
 
     # Execute (safe when already inside a running loop, e.g. pytest-asyncio)
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         result = asyncio.run(tool.execute(**args))
     else:

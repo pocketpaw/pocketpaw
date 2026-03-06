@@ -34,6 +34,14 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version as get_version
 
 from pocketpaw.config import Settings, get_settings
+from pocketpaw.diagnostics import check_ollama, check_openai_compatible, run_doctor
+from pocketpaw.headless import (
+    _check_extras_installed,
+    _is_headless,
+    run_multi_channel_mode,
+    run_telegram_mode,
+)
+from pocketpaw.logging_setup import setup_logging
 
 
 def _run_async(coro):
@@ -45,14 +53,6 @@ def _run_async(coro):
         return asyncio.run(coro)
     with ThreadPoolExecutor(max_workers=1) as ex:
         return ex.submit(asyncio.run, coro).result()
-from pocketpaw.diagnostics import check_ollama, check_openai_compatible, run_doctor
-from pocketpaw.headless import (
-    _check_extras_installed,
-    _is_headless,
-    run_multi_channel_mode,
-    run_telegram_mode,
-)
-from pocketpaw.logging_setup import setup_logging
 
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")

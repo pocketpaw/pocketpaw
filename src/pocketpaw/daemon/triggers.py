@@ -247,7 +247,7 @@ class TriggerEngine:
             import asyncio
 
             try:
-                loop = asyncio.get_running_loop()
+                asyncio.get_running_loop()
             except RuntimeError:
                 # No event loop running — safe to use asyncio.run()
                 asyncio.run(self._fire_trigger(intention))
