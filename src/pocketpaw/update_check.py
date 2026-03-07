@@ -12,6 +12,7 @@ CLI launches and the dashboard API.
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -30,8 +31,15 @@ GITHUB_API_URL = "https://api.github.com/repos/pocketpaw/pocketpaw/releases/tags
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
-    """Parse '0.4.1' into (0, 4, 1)."""
-    return tuple(int(x) for x in v.strip().split("."))
+    """Parse '0.4.1' into (0, 4, 1).
+
+    Handles pre-release suffixes like '0.4.1rc1' by stripping non-numeric parts.
+    """
+    parts = []
+    for segment in v.strip().split("."):
+        num = re.match(r"\d+", segment)
+        parts.append(int(num.group()) if num else 0)
+    return tuple(parts)
 
 
 def check_for_updates(current_version: str, config_dir: Path) -> dict | None:
