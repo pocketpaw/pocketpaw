@@ -396,6 +396,8 @@ pip install pocketpaw[all]                 # Everything
 
 **[pocketpaw.xyz](https://pocketpaw.xyz)** covers getting started, backends, channels, tools, integrations, security, memory, and the full API reference.
 
+**[Project Details & Implementation Report (PDF)](PocketPaw_Project_Details.pdf)** — A comprehensive overview of the PocketPaw framework and the Issue #494 per-tool timeout enhancement.
+
 ---
 
 ## Star History
