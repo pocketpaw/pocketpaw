@@ -177,31 +177,6 @@ async def websocket_handler(
     # Build session safe_key for frontend
     safe_key = f"websocket_{chat_id}"
 
-    # Send welcome notification with session info
-    await websocket.send_json(
-        {
-            "type": "connection_info",
-            "content": "Connected to PocketPaw",
-            "id": safe_key,
-        }
-    )
-
-    # If resuming, send session history
-    if resumed:
-        session_key = f"websocket:{chat_id}"
-        try:
-            manager = get_memory_manager()
-            history = await manager.get_session_history(session_key, limit=100)
-            await websocket.send_json(
-                {
-                    "type": "session_history",
-                    "session_id": safe_key,
-                    "messages": history,
-                }
-            )
-        except Exception as e:
-            logger.warning("Failed to load session history for resume: %s", e)
-
     # Load settings
     settings = Settings.load()
 
@@ -209,6 +184,31 @@ async def websocket_handler(
     agent_active = False
 
     try:
+        # Send welcome notification with session info
+        await websocket.send_json(
+            {
+                "type": "connection_info",
+                "content": "Connected to PocketPaw",
+                "id": safe_key,
+            }
+        )
+
+        # If resuming, send session history
+        if resumed:
+            session_key = f"websocket:{chat_id}"
+            try:
+                manager = get_memory_manager()
+                history = await manager.get_session_history(session_key, limit=100)
+                await websocket.send_json(
+                    {
+                        "type": "session_history",
+                        "session_id": safe_key,
+                        "messages": history,
+                    }
+                )
+            except Exception as e:
+                logger.warning("Failed to load session history for resume: %s", e)
+
         while True:
             data = await websocket.receive_json()
             action = data.get("action")
@@ -219,8 +219,7 @@ async def websocket_handler(
                     f"\u26a1 Processing message with Backend: {settings.agent_backend}"
                     f" (Provider: {settings.llm_provider})"
                 )
-                logger.warning(log_msg)  # Use WARNING to ensure it shows up
-                print(log_msg)  # Force stdout just in case
+                logger.info(log_msg)
 
                 await ws_adapter.handle_message(chat_id, data)
 
@@ -236,10 +235,20 @@ async def websocket_handler(
                 session_id = data.get("session_id", "")
                 # Parse safe_key: "websocket_<uuid>"
                 parts = session_id.split("_", 1)
-                if len(parts) == 2:
+                if len(parts) == 2 and parts[0] == "websocket":
                     raw_id = parts[1]
                     channel_prefix = parts[0]
                     new_session_key = f"{channel_prefix}:{raw_id}"
+
+                    # Verify session file exists and path stays under sessions dir
+                    sessions_dir = Path.home() / ".pocketpaw" / "memory" / "sessions"
+                    session_file = sessions_dir / f"{session_id}.json"
+                    try:
+                        session_file.resolve().relative_to(sessions_dir.resolve())
+                    except ValueError:
+                        continue  # path traversal attempt
+                    if not session_file.exists():
+                        continue
 
                     # Unregister old connection, register with new chat_id
                     await ws_adapter.unregister_connection(chat_id)
@@ -427,6 +436,13 @@ async def websocket_handler(
                         settings.mem0_vector_store = data["mem0_vector_store"]
                     if data.get("mem0_ollama_base_url"):
                         settings.mem0_ollama_base_url = data["mem0_ollama_base_url"]
+                    # Web server host/port
+                    if "web_host" in data:
+                        settings.web_host = data["web_host"]
+                    if "web_port" in data:
+                        val = data["web_port"]
+                        if isinstance(val, int | float) and 1 <= val <= 65535:
+                            settings.web_port = int(val)
                     warnings = validate_api_keys(settings)
                     settings.save()
 
@@ -641,6 +657,8 @@ async def websocket_handler(
                             "hasSpotifyClientId": bool(settings.spotify_client_id),
                             "hasSpotifyClientSecret": bool(settings.spotify_client_secret),
                             "hasSarvamKey": bool(settings.sarvam_api_key),
+                            "webHost": settings.web_host,
+                            "webPort": settings.web_port,
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },
@@ -942,7 +960,19 @@ async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data:
                 "content": "\U0001f6d1 PANIC: All agent processes stopped!",
             }
         )
-        # TODO: Actually stop agent processes
+        try:
+            # Snapshot to avoid "dictionary changed size during iteration"
+            tasks = list(agent_loop._active_tasks.values())
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Only stop router if one was already created (no lazy init for panic)
+            router = agent_loop._router
+            if router is not None:
+                await router.stop()
+        except Exception as e:
+            logger.exception("Panic stop failed: %s", e)
 
     else:
         await websocket.send_json({"type": "error", "content": f"Unknown tool: {tool}"})

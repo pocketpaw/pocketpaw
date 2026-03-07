@@ -23,6 +23,9 @@ async def run_slack_bot(settings: Settings) -> None:
     )
 
     agent_loop = AgentLoop()
+    from pocketpaw.bus.commands import get_command_handler
+
+    get_command_handler().set_agent_loop(agent_loop)
 
     logger.info("Starting PocketPaw Slack bot...")
 

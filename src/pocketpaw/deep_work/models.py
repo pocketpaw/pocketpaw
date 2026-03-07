@@ -197,7 +197,7 @@ class AgentSpec:
     role: str = ""
     description: str = ""
     specialties: list[str] = field(default_factory=list)
-    backend: str = "claude_agent_sdk"
+    backend: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -217,7 +217,7 @@ class AgentSpec:
             role=data.get("role", ""),
             description=data.get("description", ""),
             specialties=data.get("specialties", []),
-            backend=data.get("backend", "claude_agent_sdk"),
+            backend=data.get("backend", ""),
         )
 
 

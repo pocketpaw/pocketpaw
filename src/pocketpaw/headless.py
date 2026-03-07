@@ -186,6 +186,9 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
         return
 
     agent_loop = AgentLoop()
+    from pocketpaw.bus.commands import get_command_handler
+
+    get_command_handler().set_agent_loop(agent_loop)
 
     for adapter in adapters:
         await adapter.start(bus)

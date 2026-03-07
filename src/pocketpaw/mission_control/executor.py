@@ -48,7 +48,7 @@ MAX_ERROR_MESSAGE_LENGTH = 200  # Truncate error messages
 from pocketpaw.agents.router import AgentRouter  # noqa: E402
 from pocketpaw.bus.events import SystemEvent  # noqa: E402
 from pocketpaw.bus.queue import get_message_bus  # noqa: E402
-from pocketpaw.config import Settings, get_settings  # noqa: E402
+from pocketpaw.config import get_settings  # noqa: E402
 from pocketpaw.mission_control.manager import get_mission_control_manager  # noqa: E402
 from pocketpaw.mission_control.models import (  # noqa: E402
     Activity,
@@ -163,16 +163,8 @@ class MCTaskExecutor:
         # tasks run headlessly (no terminal for interactive prompts).
         # The PreToolUse hook still blocks dangerous commands.
         base_settings = get_settings()
-        agent_settings = Settings(
-            agent_backend=agent.backend,
-            anthropic_api_key=base_settings.anthropic_api_key,
-            anthropic_model=base_settings.anthropic_model,
-            openai_api_key=base_settings.openai_api_key,
-            openai_model=base_settings.openai_model,
-            ollama_host=base_settings.ollama_host,
-            ollama_model=base_settings.ollama_model,
-            llm_provider=base_settings.llm_provider,
-            bypass_permissions=True,
+        agent_settings = base_settings.model_copy(
+            update={"agent_backend": agent.backend, "bypass_permissions": True}
         )
 
         # Create dedicated router for this task
@@ -218,8 +210,9 @@ class MCTaskExecutor:
                     final_status = "stopped"
                     break
 
-                chunk_type = chunk.get("type", "")
-                content = chunk.get("content", "")
+                chunk_type = chunk.type
+                content = chunk.content or ""
+                meta = chunk.metadata or {}
 
                 if chunk_type == "message" and content:
                     output_chunks.append(content)
@@ -235,7 +228,7 @@ class MCTaskExecutor:
                     )
 
                 elif chunk_type == "tool_use":
-                    tool_name = chunk.get("metadata", {}).get("name", "unknown")
+                    tool_name = meta.get("name", "unknown")
                     await self._broadcast_event(
                         "mc_task_output",
                         {

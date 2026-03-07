@@ -9,6 +9,7 @@ import importlib
 
 from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.bus.adapters.websocket_adapter import WebSocketAdapter
+from pocketpaw.bus.commands import get_command_handler as _get_cmd_handler
 from pocketpaw.config import Settings
 
 try:
@@ -21,6 +22,9 @@ except ImportError:
 
 ws_adapter = WebSocketAdapter()
 agent_loop = AgentLoop()
+
+# Wire up the agent loop so /kill can cancel in-flight sessions
+_get_cmd_handler().set_agent_loop(agent_loop)
 
 # Retain active_connections for legacy broadcasts until fully migrated
 active_connections: list[WebSocket] = []

@@ -16,8 +16,17 @@ logger = logging.getLogger(__name__)
 
 
 def _run_async(coro):
-    """Bridge sync Click commands to async internals."""
-    return asyncio.run(coro)
+    """Bridge sync Click commands to async internals. When already inside a running event loop
+    (e.g. pytest-asyncio), run the coro in a thread to avoid 'Runner.run() cannot be called
+    from a running event loop'."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, coro).result()
 
 
 def _get_console():
@@ -214,7 +223,7 @@ async def _ask_async(question: str) -> None:
 
         response_parts: list[str] = []
         async for event in router.run(question, system_prompt=system_prompt):
-            if event.type in ("text", "response"):
+            if event.type == "message":
                 response_parts.append(event.content)
             elif event.type == "error":
                 _print(f"Error: {event.content}", style="red")
@@ -301,7 +310,7 @@ async def _chat_async() -> None:
         if router:
             response_parts: list[str] = []
             async for event in router.run(user_input, system_prompt=system_prompt):
-                if event.type in ("text", "response"):
+                if event.type == "message":
                     response_parts.append(event.content)
                     # Stream to terminal
                     sys.stdout.write(event.content)
