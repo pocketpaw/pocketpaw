@@ -237,13 +237,16 @@ class NeonizeAdapter(BaseChannelAdapter):
                         self._client.disconnect(), self._neonize_loop
                     )
                     future.result(timeout=5)
+
+                    # Minimal fix for shutdown hang (exactly as reviewer requested)
+                    from neonize.aioze.events import event_global_loop
+                    if event_global_loop.is_running():
+                        event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+
                 else:
                     await self._client.disconnect()
             except Exception as e:
                 logger.debug(f"Neonize disconnect: {e}")
-
-        if self._connect_future:
-            self._connect_future.cancel()
 
         if self._client_task and not self._client_task.done():
             self._client_task.cancel()
@@ -255,6 +258,7 @@ class NeonizeAdapter(BaseChannelAdapter):
         self._connected = False
         self._qr_data = None
         logger.info("WhatsApp (neonize) Adapter stopped")
+
 
     async def send(self, message: OutboundMessage) -> None:
         """Send message to WhatsApp via neonize.
@@ -286,6 +290,7 @@ class NeonizeAdapter(BaseChannelAdapter):
         except Exception as e:
             logger.error(f"Failed to send neonize message: {e}")
 
+
     async def _send_text(self, to: str, text: str) -> None:
         """Send a text message via neonize."""
         if not self._client:
@@ -296,7 +301,6 @@ class NeonizeAdapter(BaseChannelAdapter):
             jid = self._jid_cache.get(to)
             if jid is None:
                 from neonize.utils.jid import build_jid
-
                 # Parse "user@server" format if present
                 if "@" in to:
                     user, server = to.split("@", 1)
@@ -313,3 +317,4 @@ class NeonizeAdapter(BaseChannelAdapter):
                 await self._client.send_message(jid, text)
         except Exception as e:
             logger.error(f"Neonize send error: {e}")
+
