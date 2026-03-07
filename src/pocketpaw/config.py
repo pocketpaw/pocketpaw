@@ -354,6 +354,10 @@ class Settings(BaseSettings):
     tools_deny: list[str] = Field(
         default_factory=list, description="Explicit tool deny list (highest priority)"
     )
+    tool_timeout: int = Field(
+        default=120,
+        description="Per-tool execution timeout in seconds (0 = no timeout)",
+    )
 
     # Discord
     discord_bot_token: str | None = Field(default=None, description="Discord bot token")

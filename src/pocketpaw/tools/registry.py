@@ -1,16 +1,21 @@
 # Tool registry for managing available tools.
 # Created: 2026-02-02
+# Updated: 2026-03-07 — Add per-tool execution timeout (Issue #494).
 # Updated: 2026-02-25 — Strengthen param validation: also reject None for required params.
 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from pocketpaw.security import AuditSeverity, get_audit_logger
+from pocketpaw.security.audit import AuditEvent
 from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
+
+DEFAULT_TOOL_TIMEOUT = 60  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +130,18 @@ class ToolRegistry:
 
         audit.log_tool_use(name, params, severity=severity, status="attempt")
 
+        # Per-tool timeout (Issue #494): use per-tool attribute if set,
+        # otherwise fall back to configurable global setting, then default.
+        from pocketpaw.config import get_settings
+
+        global_timeout = get_settings().tool_timeout
+        timeout = getattr(tool, "timeout", global_timeout or DEFAULT_TOOL_TIMEOUT)
+        if global_timeout == 0:
+            timeout = None  # 0 = no timeout (opt-out)
+
         try:
             logger.debug(f"🔧 Executing {name} with {params}")
-            result = await tool.execute(**params)
+            result = await asyncio.wait_for(tool.execute(**params), timeout=timeout)
 
             # Audit Log: Success
             # We don't log full result content in audit to avoid PII, usually
@@ -136,7 +150,6 @@ class ToolRegistry:
 
             # Injection scan on tool results (e.g. web content)
             try:
-                from pocketpaw.config import get_settings
                 from pocketpaw.security.injection_scanner import get_injection_scanner
 
                 settings = get_settings()
@@ -152,14 +165,25 @@ class ToolRegistry:
             log_result = result[:200] + "..." if len(result) > 200 else result
             logger.debug(f"🔧 {name} result: {log_result}")
             return result
-        except Exception as e:
-            # Audit Log: Error
-            from pocketpaw.security.audit import AuditEvent
-            from pocketpaw.security.audit import AuditSeverity as AS
-
+        except TimeoutError:
             audit.log(
                 AuditEvent.create(
-                    severity=AS.WARNING,
+                    severity=AuditSeverity.WARNING,
+                    actor="agent",
+                    action="tool_timeout",
+                    target=name,
+                    status="timeout",
+                    timeout_seconds=timeout,
+                    params=params,
+                )
+            )
+            logger.error("🔧 %s timed out after %ds", name, timeout)
+            return f"Error: Tool '{name}' timed out after {timeout}s"
+        except Exception as e:
+            # Audit Log: Error
+            audit.log(
+                AuditEvent.create(
+                    severity=AuditSeverity.WARNING,
                     actor="agent",
                     action="tool_error",
                     target=name,
