@@ -294,6 +294,31 @@ export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_ad
 
 > **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
 
+#### Tool Execution Timeout
+
+Every tool call in `ToolRegistry.execute()` is guarded by a configurable per-tool timeout via `asyncio.wait_for()`. If a tool does not complete within the limit, the underlying coroutine is cancelled and a clear error is returned to the agent so it can recover gracefully. Timeout events are recorded in the audit log with `action="tool_timeout"`.
+
+```bash
+export POCKETPAW_TOOL_TIMEOUT=60  # seconds (default: 60, set to 0 to disable)
+```
+
+Or in `~/.pocketpaw/config.json`:
+
+```json
+{
+  "tool_timeout": 60
+}
+```
+
+| Behaviour | Detail |
+| --- | --- |
+| **Default** | 60 seconds |
+| **Disable** | Set to `0` — no timeout enforced (backward-compatible) |
+| **Negative values** | Rejected at config load (Pydantic `ge=0` validation) |
+| **Precedence** | Acts as an upper bound. Tools with their own internal timeout (e.g. `ShellTool` at 120 s) will fire whichever comes first |
+| **Cancellation** | On timeout the tool coroutine is cancelled. `asyncio.CancelledError` from upstream shutdown is re-raised, never swallowed |
+| **Audit** | Timeouts are logged with `action="tool_timeout"`, `status="timeout"` |
+
 See the [full configuration reference](https://pocketpaw.xyz/getting-started/configuration) for all settings.
 
 ---

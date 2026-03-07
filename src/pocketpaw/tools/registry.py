@@ -1,10 +1,13 @@
 # Tool registry for managing available tools.
 # Created: 2026-02-02
 # Updated: 2026-02-25 — Strengthen param validation: also reject None for required params.
+# Updated: 2026-03-07 — Add per-tool execution timeout (asyncio.wait_for) to prevent
+#                        stuck tools from blocking the agent session indefinitely.
 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -13,6 +16,11 @@ from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
 
 logger = logging.getLogger(__name__)
+
+# Default timeout (seconds) used when Settings is unavailable (e.g. in tests
+# that don't bootstrap the full config stack).  Must match the default in
+# ``Settings.tool_timeout``.
+_DEFAULT_TOOL_TIMEOUT: int = 60
 
 
 class ToolRegistry:
@@ -79,8 +87,40 @@ class ToolRegistry:
                 definitions.append(defn.to_openai_schema())
         return definitions
 
+    def _get_tool_timeout(self) -> int:
+        """Return the configured per-tool timeout in seconds.
+
+        Reads ``Settings.tool_timeout`` at call-time (lazy import) so
+        hot-reloaded config changes take effect without restarting the
+        process.
+
+        Returns:
+            A non-negative ``int``.  ``0`` means "no timeout".
+            Falls back to :data:`_DEFAULT_TOOL_TIMEOUT` when Settings
+            cannot be loaded (e.g. during isolated unit tests).
+        """
+        try:
+            from pocketpaw.config import get_settings
+
+            value = int(get_settings().tool_timeout or 0)
+            return max(value, 0)  # Guard against negative values
+        except Exception:
+            # Settings unavailable (e.g. during tests) — use sensible default.
+            return _DEFAULT_TOOL_TIMEOUT
+
     async def execute(self, name: str, **params: Any) -> str:
         """Execute a tool by name.
+
+        The call is wrapped in ``asyncio.wait_for`` with a configurable
+        per-tool timeout (see ``Settings.tool_timeout``).  If the tool
+        does not complete within the limit the coroutine is cancelled and
+        a clear error string is returned to the agent loop so it can
+        recover gracefully.
+
+        **Timeout precedence:** Individual tools may enforce their own
+        internal timeout (e.g. ``ShellTool`` has a 120 s subprocess
+        timeout).  This registry-level timeout acts as an upper bound —
+        whichever fires first wins.
 
         Args:
             name: Tool name.
@@ -127,7 +167,15 @@ class ToolRegistry:
 
         try:
             logger.debug(f"🔧 Executing {name} with {params}")
-            result = await tool.execute(**params)
+
+            # ── Per-tool timeout guard ──────────────────────────────
+            timeout = self._get_tool_timeout()
+            if timeout > 0:
+                result = await asyncio.wait_for(tool.execute(**params), timeout=timeout)
+            else:
+                # Timeout disabled — preserve original behaviour.
+                result = await tool.execute(**params)
+            # ────────────────────────────────────────────────────────
 
             # Audit Log: Success
             # We don't log full result content in audit to avoid PII, usually
@@ -152,6 +200,52 @@ class ToolRegistry:
             log_result = result[:200] + "..." if len(result) > 200 else result
             logger.debug(f"🔧 {name} result: {log_result}")
             return result
+
+        except asyncio.TimeoutError:  # noqa: UP041 — intentional; explicit asyncio origin
+            # ── Timeout handling ────────────────────────────────────
+            # asyncio.wait_for() cancels the underlying coroutine before
+            # raising TimeoutError.  If the tool ignores CancelledError
+            # or performs lengthy cleanup, cancellation may not be
+            # immediate — but the agent loop is unblocked regardless.
+            timeout = self._get_tool_timeout()
+            logger.error("🔧 %s timed out after %ds", name, timeout)
+            logger.debug(
+                "🔧 Tool '%s' coroutine was cancelled by asyncio.wait_for. "
+                "If the tool spawned background tasks they may still be "
+                "running — tool authors should honour CancelledError.",
+                name,
+            )
+
+            # Audit Log: Timeout
+            from pocketpaw.security.audit import AuditEvent
+            from pocketpaw.security.audit import AuditSeverity as AS
+
+            audit.log(
+                AuditEvent.create(
+                    severity=AS.WARNING,
+                    actor="agent",
+                    action="tool_timeout",
+                    target=name,
+                    status="timeout",
+                    timeout_seconds=timeout,
+                    params=params,
+                )
+            )
+
+            return (
+                f"Error: Tool '{name}' timed out after {timeout}s. "
+                "The operation was cancelled. You may retry with simpler input "
+                "or try an alternative approach."
+            )
+            # ────────────────────────────────────────────────────────
+
+        except asyncio.CancelledError:
+            # ── Upstream cancellation (e.g. agent shutdown) ─────────
+            # Re-raise so the caller (AgentLoop) can perform its own
+            # shutdown logic.  Do NOT swallow this.
+            logger.warning("🔧 Tool '%s' execution was cancelled (agent shutdown?).", name)
+            raise
+
         except Exception as e:
             # Audit Log: Error
             from pocketpaw.security.audit import AuditEvent

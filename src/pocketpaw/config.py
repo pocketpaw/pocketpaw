@@ -354,6 +354,15 @@ class Settings(BaseSettings):
     tools_deny: list[str] = Field(
         default_factory=list, description="Explicit tool deny list (highest priority)"
     )
+    tool_timeout: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Per-tool execution timeout in seconds. "
+            "If a tool does not complete within this limit, the call is cancelled "
+            "and an error is returned to the agent. Set to 0 to disable (no timeout)."
+        ),
+    )
 
     # Discord
     discord_bot_token: str | None = Field(default=None, description="Discord bot token")
