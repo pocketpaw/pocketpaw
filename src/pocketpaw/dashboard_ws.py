@@ -942,7 +942,19 @@ async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data:
                 "content": "\U0001f6d1 PANIC: All agent processes stopped!",
             }
         )
-        # TODO: Actually stop agent processes
+        try:
+            # Snapshot to avoid "dictionary changed size during iteration"
+            tasks = list(agent_loop._active_tasks.values())
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Only stop router if one was already created (no lazy init for panic)
+            router = agent_loop._router
+            if router is not None:
+                await router.stop()
+        except Exception as e:
+            logger.exception("Panic stop failed: %s", e)
 
     else:
         await websocket.send_json({"type": "error", "content": f"Unknown tool: {tool}"})
