@@ -8,7 +8,7 @@
 # - PlannerResult: full output from the planning phase
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pocketpaw.mission_control.models import generate_id, now_iso
@@ -18,7 +18,7 @@ from pocketpaw.mission_control.models import generate_id, now_iso
 # ============================================================================
 
 
-class ProjectStatus(str, Enum):
+class ProjectStatus(StrEnum):
     """Project lifecycle status."""
 
     DRAFT = "draft"
@@ -197,7 +197,7 @@ class AgentSpec:
     role: str = ""
     description: str = ""
     specialties: list[str] = field(default_factory=list)
-    backend: str = "claude_agent_sdk"
+    backend: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -217,7 +217,7 @@ class AgentSpec:
             role=data.get("role", ""),
             description=data.get("description", ""),
             specialties=data.get("specialties", []),
-            backend=data.get("backend", "claude_agent_sdk"),
+            backend=data.get("backend", ""),
         )
 
 

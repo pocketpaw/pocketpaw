@@ -112,24 +112,18 @@ async def check_ollama(settings: Settings) -> int:
             resp.raise_for_status()
             tags_data = resp.json()
         models = [m.get("name", "") for m in tags_data.get("models", [])]
-        console.print(
-            f"  [green]\\[OK][/]  Server reachable — {len(models)} model(s) available"
-        )
+        console.print(f"  [green]\\[OK][/]  Server reachable — {len(models)} model(s) available")
     except Exception as e:
         console.print(f"  [red]\\[FAIL][/] Cannot reach Ollama server: {e}")
         console.print("         Make sure Ollama is running: [bold]ollama serve[/]")
         return 1
 
     # 2. Check configured model is available
-    model_found = any(
-        m == ollama_model or m.startswith(f"{ollama_model}:") for m in models
-    )
+    model_found = any(m == ollama_model or m.startswith(f"{ollama_model}:") for m in models)
     if model_found:
         console.print(f"  [green]\\[OK][/]  Model '{ollama_model}' is available")
     else:
-        console.print(
-            f"  [yellow]\\[WARN][/] Model '{ollama_model}' not found locally"
-        )
+        console.print(f"  [yellow]\\[WARN][/] Model '{ollama_model}' not found locally")
         if models:
             console.print(f"         Available: {', '.join(models[:10])}")
         console.print(f"         Pull it with: [bold]ollama pull {ollama_model}[/]")
@@ -145,19 +139,13 @@ async def check_ollama(settings: Settings) -> int:
             messages=[{"role": "user", "content": "Say hi"}],
         )
         text = response.content[0].text if response.content else ""
-        console.print(
-            f"  [green]\\[OK][/]  Messages API works — response: {text[:60]}"
-        )
+        console.print(f"  [green]\\[OK][/]  Messages API works — response: {text[:60]}")
     except Exception as e:
         console.print(f"  [red]\\[FAIL][/] Messages API failed: {e}")
-        console.print(
-            "         Ollama v0.14.0+ is required for Anthropic API compatibility"
-        )
+        console.print("         Ollama v0.14.0+ is required for Anthropic API compatibility")
         failures += 1
         # Skip tool test if basic API fails
-        console.print(
-            f"\n  Result: {2 - (1 if model_found else 0)}/3 checks passed"
-        )
+        console.print(f"\n  Result: {2 - (1 if model_found else 0)}/3 checks passed")
         return 1
 
     # 4. Test tool calling
@@ -188,19 +176,12 @@ async def check_ollama(settings: Settings) -> int:
         if has_tool_use:
             console.print("  [green]\\[OK][/]  Tool calling works")
         else:
-            console.print(
-                "  [yellow]\\[WARN][/] Model responded but did not use the tool"
-            )
-            console.print(
-                "         Tool calling quality varies by model."
-                " Try a larger model."
-            )
+            console.print("  [yellow]\\[WARN][/] Model responded but did not use the tool")
+            console.print("         Tool calling quality varies by model. Try a larger model.")
             failures += 1
     except Exception as e:
         console.print(f"  [yellow]\\[WARN][/] Tool calling test failed: {e}")
-        console.print(
-            "         Some models may not support tool calling reliably."
-        )
+        console.print("         Some models may not support tool calling reliably.")
         failures += 1
 
     passed = 4 - failures
@@ -231,16 +212,14 @@ async def check_openai_compatible(settings: Settings) -> int:
     if not base_url:
         console.print("\n  [red]\\[FAIL][/] No base URL configured.")
         console.print(
-            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_BASE_URL[/]"
-            " or configure in Settings.\n"
+            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_BASE_URL[/] or configure in Settings.\n"
         )
         return 1
 
     if not model:
         console.print("\n  [red]\\[FAIL][/] No model configured.")
         console.print(
-            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_MODEL[/]"
-            " or configure in Settings.\n"
+            "         Set [bold]POCKETPAW_OPENAI_COMPATIBLE_MODEL[/] or configure in Settings.\n"
         )
         return 1
 
@@ -258,9 +237,7 @@ async def check_openai_compatible(settings: Settings) -> int:
             messages=[{"role": "user", "content": "Say hi"}],
         )
         text = response.choices[0].message.content or ""
-        console.print(
-            f"  [green]\\[OK][/]  Chat Completions API works — response: {text[:60]}"
-        )
+        console.print(f"  [green]\\[OK][/]  Chat Completions API works — response: {text[:60]}")
     except Exception as e:
         console.print(f"  [red]\\[FAIL][/] Chat Completions API failed: {e}")
         console.print("\n  Result: 0/2 checks passed")
@@ -269,7 +246,7 @@ async def check_openai_compatible(settings: Settings) -> int:
     # 2. Test tool calling
     console.print("  Testing tool calling support ...")
     try:
-        tool_response = await oc.chat.completions.create(
+        await oc.chat.completions.create(
             model=model,
             max_tokens=256,
             messages=[{"role": "user", "content": "What is 2 + 2?"}],
@@ -297,9 +274,7 @@ async def check_openai_compatible(settings: Settings) -> int:
         if has_tool_use:
             console.print("  [green]\\[OK][/]  Tool calling works")
         else:
-            console.print(
-                "  [yellow]\\[WARN][/] Model responded but did not use the tool"
-            )
+            console.print("  [yellow]\\[WARN][/] Model responded but did not use the tool")
             console.print("         Tool calling quality varies by model.")
             failures += 1
     except Exception as e:

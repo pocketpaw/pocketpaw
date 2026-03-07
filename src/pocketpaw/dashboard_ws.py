@@ -2,6 +2,10 @@
 
 Extracted from dashboard.py — contains the main websocket_handler() function
 and helper functions: handle_tool(), handle_file_navigation(), handle_file_browse().
+
+Changes:
+  - 2026-03-08: Fix switch_session silently dropping requests for non-existent or
+    path-traversal session IDs (caused WS hang). Now sends empty session_history response.
 """
 
 import asyncio
@@ -177,31 +181,6 @@ async def websocket_handler(
     # Build session safe_key for frontend
     safe_key = f"websocket_{chat_id}"
 
-    # Send welcome notification with session info
-    await websocket.send_json(
-        {
-            "type": "connection_info",
-            "content": "Connected to PocketPaw",
-            "id": safe_key,
-        }
-    )
-
-    # If resuming, send session history
-    if resumed:
-        session_key = f"websocket:{chat_id}"
-        try:
-            manager = get_memory_manager()
-            history = await manager.get_session_history(session_key, limit=100)
-            await websocket.send_json(
-                {
-                    "type": "session_history",
-                    "session_id": safe_key,
-                    "messages": history,
-                }
-            )
-        except Exception as e:
-            logger.warning("Failed to load session history for resume: %s", e)
-
     # Load settings
     settings = Settings.load()
 
@@ -209,6 +188,31 @@ async def websocket_handler(
     agent_active = False
 
     try:
+        # Send welcome notification with session info
+        await websocket.send_json(
+            {
+                "type": "connection_info",
+                "content": "Connected to PocketPaw",
+                "id": safe_key,
+            }
+        )
+
+        # If resuming, send session history
+        if resumed:
+            session_key = f"websocket:{chat_id}"
+            try:
+                manager = get_memory_manager()
+                history = await manager.get_session_history(session_key, limit=100)
+                await websocket.send_json(
+                    {
+                        "type": "session_history",
+                        "session_id": safe_key,
+                        "messages": history,
+                    }
+                )
+            except Exception as e:
+                logger.warning("Failed to load session history for resume: %s", e)
+
         while True:
             data = await websocket.receive_json()
             action = data.get("action")
@@ -219,8 +223,7 @@ async def websocket_handler(
                     f"\u26a1 Processing message with Backend: {settings.agent_backend}"
                     f" (Provider: {settings.llm_provider})"
                 )
-                logger.warning(log_msg)  # Use WARNING to ensure it shows up
-                print(log_msg)  # Force stdout just in case
+                logger.info(log_msg)
 
                 await ws_adapter.handle_message(chat_id, data)
 
@@ -236,10 +239,35 @@ async def websocket_handler(
                 session_id = data.get("session_id", "")
                 # Parse safe_key: "websocket_<uuid>"
                 parts = session_id.split("_", 1)
-                if len(parts) == 2:
+                if len(parts) == 2 and parts[0] == "websocket":
                     raw_id = parts[1]
                     channel_prefix = parts[0]
                     new_session_key = f"{channel_prefix}:{raw_id}"
+
+                    # Verify session file exists and path stays under sessions dir
+                    sessions_dir = Path.home() / ".pocketpaw" / "memory" / "sessions"
+                    session_file = sessions_dir / f"{session_id}.json"
+                    try:
+                        session_file.resolve().relative_to(sessions_dir.resolve())
+                    except ValueError:
+                        logger.warning("Path traversal attempt in switch_session: %s", session_id)
+                        await websocket.send_json(
+                            {
+                                "type": "session_history",
+                                "session_id": session_id,
+                                "messages": [],
+                            }
+                        )
+                        continue
+                    if not session_file.exists():
+                        await websocket.send_json(
+                            {
+                                "type": "session_history",
+                                "session_id": session_id,
+                                "messages": [],
+                            }
+                        )
+                        continue
 
                     # Unregister old connection, register with new chat_id
                     await ws_adapter.unregister_connection(chat_id)
@@ -302,7 +330,7 @@ async def websocket_handler(
                         settings.claude_sdk_model = data["claude_sdk_model"]
                     if "claude_sdk_max_turns" in data:
                         val = data["claude_sdk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.claude_sdk_max_turns = int(val)
                     # OpenAI Agents
                     if data.get("openai_agents_provider"):
@@ -311,21 +339,21 @@ async def websocket_handler(
                         settings.openai_agents_model = data["openai_agents_model"]
                     if "openai_agents_max_turns" in data:
                         val = data["openai_agents_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.openai_agents_max_turns = int(val)
                     # Google ADK
                     if "google_adk_model" in data:
                         settings.google_adk_model = data["google_adk_model"]
                     if "google_adk_max_turns" in data:
                         val = data["google_adk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.google_adk_max_turns = int(val)
                     # Codex CLI
                     if "codex_cli_model" in data:
                         settings.codex_cli_model = data["codex_cli_model"]
                     if "codex_cli_max_turns" in data:
                         val = data["codex_cli_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.codex_cli_max_turns = int(val)
                     # Copilot SDK
                     if data.get("copilot_sdk_provider"):
@@ -334,7 +362,7 @@ async def websocket_handler(
                         settings.copilot_sdk_model = data["copilot_sdk_model"]
                     if "copilot_sdk_max_turns" in data:
                         val = data["copilot_sdk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.copilot_sdk_max_turns = int(val)
                     # OpenCode
                     if "opencode_base_url" in data:
@@ -343,7 +371,7 @@ async def websocket_handler(
                         settings.opencode_model = data["opencode_model"]
                     if "opencode_max_turns" in data:
                         val = data["opencode_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.opencode_max_turns = int(val)
                     settings.llm_provider = data.get("llm_provider", settings.llm_provider)
                     if data.get("ollama_host"):
@@ -360,7 +388,7 @@ async def websocket_handler(
                         settings.openai_compatible_model = data["openai_compatible_model"]
                     if "openai_compatible_max_tokens" in data:
                         val = data["openai_compatible_max_tokens"]
-                        if isinstance(val, (int, float)) and 0 <= val <= 1000000:
+                        if isinstance(val, int | float) and 0 <= val <= 1000000:
                             settings.openai_compatible_max_tokens = int(val)
                     if data.get("gemini_model"):
                         settings.gemini_model = data["gemini_model"]
@@ -427,6 +455,13 @@ async def websocket_handler(
                         settings.mem0_vector_store = data["mem0_vector_store"]
                     if data.get("mem0_ollama_base_url"):
                         settings.mem0_ollama_base_url = data["mem0_ollama_base_url"]
+                    # Web server host/port
+                    if "web_host" in data:
+                        settings.web_host = data["web_host"]
+                    if "web_port" in data:
+                        val = data["web_port"]
+                        if isinstance(val, int | float) and 1 <= val <= 65535:
+                            settings.web_port = int(val)
                     warnings = validate_api_keys(settings)
                     settings.save()
 
@@ -641,6 +676,8 @@ async def websocket_handler(
                             "hasSpotifyClientId": bool(settings.spotify_client_id),
                             "hasSpotifyClientSecret": bool(settings.spotify_client_secret),
                             "hasSarvamKey": bool(settings.sarvam_api_key),
+                            "webHost": settings.web_host,
+                            "webPort": settings.web_port,
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },
@@ -712,21 +749,24 @@ async def websocket_handler(
                 await websocket.send_json({"type": "reminders", "reminders": reminders})
 
             elif action == "add_reminder":
-                message = data.get("message", "")
-                scheduler = get_scheduler()
-                reminder = scheduler.add_reminder(message)
+                try:
+                    message = data.get("message", "")
+                    scheduler = get_scheduler()
+                    reminder = scheduler.add_reminder(message)
 
-                if reminder:
-                    reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
-                    await websocket.send_json({"type": "reminder_added", "reminder": reminder})
-                else:
+                    if reminder:
+                        reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
+                        await websocket.send_json({"type": "reminder_added", "reminder": reminder})
+                    else:
+                        await websocket.send_json(
+                            {
+                                "type": "reminder_error",
+                                "content": ("Could not parse time. Try 'in 5 minutes' or 'at 3pm'"),
+                            }
+                        )
+                except Exception:
                     await websocket.send_json(
-                        {
-                            "type": "error",
-                            "content": (
-                                "Could not parse time from message. Try 'in 5 minutes' or 'at 3pm'"
-                            ),
-                        }
+                        {"type": "reminder_error", "content": "Error adding reminder"}
                     )
 
             elif action == "delete_reminder":
@@ -735,7 +775,9 @@ async def websocket_handler(
                 if scheduler.delete_reminder(reminder_id):
                     await websocket.send_json({"type": "reminder_deleted", "id": reminder_id})
                 else:
-                    await websocket.send_json({"type": "error", "content": "Reminder not found"})
+                    await websocket.send_json(
+                        {"type": "reminder_error", "content": "Reminder not found"}
+                    )
 
             # ==================== Intentions API ====================
 
@@ -937,7 +979,19 @@ async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data:
                 "content": "\U0001f6d1 PANIC: All agent processes stopped!",
             }
         )
-        # TODO: Actually stop agent processes
+        try:
+            # Snapshot to avoid "dictionary changed size during iteration"
+            tasks = list(agent_loop._active_tasks.values())
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Only stop router if one was already created (no lazy init for panic)
+            router = agent_loop._router
+            if router is not None:
+                await router.stop()
+        except Exception as e:
+            logger.exception("Panic stop failed: %s", e)
 
     else:
         await websocket.send_json({"type": "error", "content": f"Unknown tool: {tool}"})

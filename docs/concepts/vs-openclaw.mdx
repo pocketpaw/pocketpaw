@@ -1,0 +1,266 @@
+---
+title: PocketPaw vs OpenClaw
+description: "How PocketPaw compares to OpenClaw: governance, security architecture, install experience, multi-agent orchestration, and which one fits your use case."
+section: Core Concepts
+ogType: article
+keywords: ["pocketpaw vs openclaw", "openclaw alternative", "ai agent comparison", "self-hosted ai agent", "guardian ai", "context compaction safety", "openclaw security", "multi-agent orchestration", "command center"]
+tags: ["comparison", "openclaw", "security", "governance"]
+---
+
+# PocketPaw vs OpenClaw
+
+> How PocketPaw compares to OpenClaw: governance, security architecture, install experience, multi-agent orchestration, and which one fits your use case.
+
+---
+
+OpenClaw is the most-starred AI agent project on GitHub (216K+ stars). Its creator Peter Steinberger joined OpenAI on February 15, 2026, and the project moved to an independent foundation with OpenAI as financial sponsor. PocketPaw launched in February 2026. Both are open-source and MIT licensed. This page is an honest technical comparison.
+
+<Callout type="info">
+  OpenClaw is a serious, well-resourced project backed by OpenAI. This comparison focuses on architecture, governance, and use case differences, not on ranking one as better than the other.
+</Callout>
+
+---
+
+## At a glance
+
+|  | PocketPaw | OpenClaw |
+|---|---|---|
+| **Language** | Python 3.11+ | Node.js 22+ |
+| **Install** | `pip install pocketpaw` | `curl \| bash` + onboarding wizard |
+| **Time to first message** | ~30 seconds | ~5 minutes |
+| **Code footprint** | Modular, ~80MB | 430,000+ lines |
+| **Agent backends** | 6 (Claude SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK) | 1 (built-in agent loop) |
+| **Messaging platforms** | 9+ (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, Web) | 12+ (Telegram, Discord, Slack, WhatsApp, Signal, iMessage, Matrix, Teams, Google Chat, Zalo, and more) |
+| **Built-in tools** | 50+ (browser, web search, image gen, voice/TTS/STT, OCR, research, delegation) | 100+ preconfigured skills |
+| **Integrations** | Gmail, Calendar, Google Drive & Docs, Spotify, Reddit, MCP servers | MCP, extensive skill marketplace |
+| **Multi-agent orchestration** | Command Center (Deep Work) | Single agent, chat-based |
+| **Web dashboard** | Yes | Yes |
+| **Local models (Ollama)** | Yes, first-class | Yes, with known config issues |
+| **Kill switch** | Architectural (terminates process) | Conversational (chat-based) |
+| **Independent safety reviewer** | Guardian AI (separate LLM, out-of-context) | None |
+| **Plan mode** | Human approval before execution | No |
+| **Self-audit daemon** | Continuous + `--security-audit` CLI | No |
+| **Credential encryption** | AES at rest, machine-derived key | External secrets (v2026.2.26+), config files prior |
+| **Audit log** | Append-only JSONL | Session-based |
+| **Governance** | Community-governed, 31 contributors | OpenAI-sponsored foundation |
+| **GitHub stars** | 529+ | 216,000+ |
+| **License** | MIT | MIT |
+
+---
+
+## Governance
+
+On February 15, 2026, OpenClaw creator Peter Steinberger announced he was joining OpenAI. The project moved to an independent foundation with OpenAI as financial sponsor. Steinberger's stated goal: "build an agent that even my mum can use."
+
+OpenClaw remains MIT licensed and model-agnostic. You can still use Claude, DeepSeek, or Ollama. But the community has raised questions about long-term independence given OpenAI's sponsorship role and its own complicated history with the word "open."
+
+PocketPaw is community-governed with 31 contributors, no corporate sponsor, and no foundation structure. The trade-off: fewer resources, but no questions about whose interests the project serves.
+
+---
+
+## Where they overlap
+
+Both projects solve the same core problem: a personal AI agent that lives in your messaging apps and can take real actions on your behalf. Both support Telegram, Discord, Slack, WhatsApp, and a web dashboard. Both support local inference via Ollama. Both are MIT licensed and self-hosted.
+
+If you're evaluating both, the differences come down to governance, security architecture, multi-agent orchestration, agent backend flexibility, and install experience.
+
+---
+
+## Where they differ
+
+### 1. Language and runtime
+
+OpenClaw is Node.js. PocketPaw is Python. If your existing tooling, scripts, or automation is in Python, PocketPaw integrates naturally. If you're in a Node.js environment, OpenClaw may fit better.
+
+### 2. Install experience
+
+```bash
+# PocketPaw
+pip install pocketpaw && pocketpaw
+```
+
+Running in under 30 seconds. Desktop installer available for Windows (no terminal needed). Docker also available for server deployments with Ollama and Qdrant as optional sidecars.
+
+```bash
+# With bundled Ollama (fully local, no API key needed)
+docker compose --profile ollama up -d
+```
+
+OpenClaw installs via a curl-pipe-bash one-liner, then requires an onboarding wizard to configure auth, gateway, and channels. Total setup time is roughly 5 minutes for a basic configuration. The setup involves more moving parts (gateway, auth configuration, channel-specific OAuth), which gives OpenClaw more flexibility but increases the surface area for things to go wrong.
+
+### 3. Agent backends
+
+This is where the architectures diverge the most.
+
+OpenClaw has one built-in agent loop. PocketPaw has six interchangeable backends, all implementing the same `AgentBackend` protocol:
+
+| Backend | Key | Providers | MCP Support |
+|---------|-----|-----------|-------------|
+| **Claude Agent SDK** (Default) | `claude_agent_sdk` | Anthropic, Ollama | Yes |
+| **OpenAI Agents SDK** | `openai_agents` | OpenAI, Ollama | No |
+| **Google ADK** | `google_adk` | Google (Gemini) | Yes |
+| **Codex CLI** | `codex_cli` | OpenAI | Yes |
+| **OpenCode** | `opencode` | External server | No |
+| **Copilot SDK** | `copilot_sdk` | Copilot, OpenAI, Azure, Anthropic | No |
+
+Swapping backends doesn't touch the rest of the system. Channels, memory, tools, and security all stay the same. PocketPaw isn't locked to any single provider's SDK roadmap.
+
+### 4. Command Center (Deep Work)
+
+PocketPaw includes multi-agent orchestration that OpenClaw doesn't have.
+
+```
+You:  "I need a competitor analysis report for our product launch"
+
+Command Center:
+  ├── Agent A (Researcher): Scraping competitor websites
+  ├── Agent B (Analyst):    Analyzing pricing data
+  ├── Agent C (Writer):     Waiting for data to compile report
+  └── Human Delegation:     "I need your login for Crunchbase"
+
+Status: 2/4 tasks complete • 1 in progress • 1 needs human input
+```
+
+Say what you want. PocketPaw researches the problem, builds a task list, spins up multiple agents, runs them in parallel, and delegates to you what it can't complete.
+
+Task lifecycle: `INBOX → ASSIGNED → IN_PROGRESS → REVIEW → DONE`
+
+Live execution streaming. Document management. Agent heartbeat monitoring. When agents get stuck, they ask you. They don't hallucinate or default to completing the task unsafely.
+
+OpenClaw is a single-agent, chat-based system. It handles one task at a time through conversational interaction.
+
+### 5. Security architecture
+
+This is the biggest technical difference between the two.
+
+#### Context compaction and safety constraints
+
+In February 2026, Meta's Director of AI Alignment gave OpenClaw access to her inbox with one instruction: suggest deletions, wait for her approval before acting. The agent deleted 200+ emails. She typed stop commands. They were ignored. She had to sprint to her computer and kill every process manually.
+
+The root cause: her inbox was large enough to trigger context compaction. When an agent's context window fills up, it compresses older messages to free space. Her safety instruction ("wait for my approval") was in those older messages. It got compressed away. Without it, the agent had no constraint and defaulted to completing the task.
+
+This isn't a bug specific to OpenClaw. It's a structural vulnerability in any agent that stores safety constraints inside the context window.
+
+**How PocketPaw handles this:**
+
+Guardian AI is a separate LLM that reviews every destructive command before execution. It doesn't participate in the primary agent's conversation. It doesn't share the primary agent's context window. Context compaction in the main agent can't touch it. It's an independent process that evaluates the proposed action against your configured policies and either clears it or blocks it.
+
+|  | OpenClaw | PocketPaw |
+|---|---|---|
+| **Safety constraint storage** | Inside agent context (compactable) | Guardian AI lives outside context |
+| **Context compaction risk** | Safety instructions can be lost | Not possible, Guardian AI is independent |
+| **Kill switch mechanism** | Chat-based stop commands | Telegram panic button, terminates process |
+| **Tool access control** | Trust-level policies | Architecture-level allow/deny lists |
+| **Plan mode** | No | Yes, agent proposes, you approve before execution |
+| **Self-audit daemon** | No | Yes, continuous background monitoring + CLI audit |
+| **Credential storage** | External secrets (v2026.2.26+) | AES encryption at rest, machine-derived key |
+| **Append-only audit log** | No | Yes, at `~/.pocketpaw/audit.jsonl` |
+| **Prompt injection scanner** | Partial (7 documented attack scenarios) | Two-tier: regex fast scan + LLM semantic deep scan |
+
+OpenClaw's v2026.2.26 release (February 27, 2026) added external secrets management, HTTP security headers, and 11 security fixes. The project is actively hardening. But the context compaction vulnerability, lack of plan mode, and conversational kill switch remain architectural gaps.
+
+#### The malicious skills crisis
+
+OpenClaw's skill marketplace has also become a serious security concern. As of early 2026, security researchers identified 1,184+ malicious skills on ClawHub, roughly 20% of available skills. These include Atomic Stealer malware, data exfiltration tools, and prompt injection attacks. Cisco's security team published a detailed analysis, and Kaspersky called OpenClaw "the biggest insider threat of 2026."
+
+PocketPaw's skill system is YAML-based with hot-reload, but doesn't have a community marketplace. Skills are local and auditable. The trade-off: fewer pre-built skills, but no supply chain attack vector.
+
+### 6. Code footprint and modularity
+
+OpenClaw has 430,000+ lines of code, 35,000+ forks, and 3,300+ open issues. It's a large, fast-moving codebase with 11,000+ commits. That scale gives it breadth: 100+ preconfigured agent skills, 12+ platform integrations, a full gateway architecture.
+
+PocketPaw is intentionally modular. The core is ~80MB with channels, backends, tools, memory, and security as swappable layers. You install what you need. The `AgentBackend` protocol means adding a new LLM provider doesn't touch channels or tools. Adding a new channel doesn't touch the agent loop.
+
+The trade-off: OpenClaw has more built-in skills and integrations out of the box. PocketPaw has 50+ tools and integrations (Gmail, Calendar, Google Drive & Docs, Spotify, Reddit, MCP servers) but a smaller pre-built skill library.
+
+---
+
+## Local model support
+
+Both support Ollama. PocketPaw treats it as a first-class backend.
+
+### Recommended models for PocketPaw
+
+| Use case | Model | Notes |
+|---|---|---|
+| General use | `qwen2.5:7b` | Best balance of speed and capability |
+| More reliable | `qwen2.5:14b` | Better on multi-step tasks, needs more RAM |
+| Lightweight | `llama3.2` | Fast on modest hardware |
+| Coding tasks | `qwen2.5-coder:7b` | Strong at code generation and shell tasks |
+| Low-end hardware | `phi3:mini` | Runs on CPU, limited reasoning depth |
+
+<Callout type="warning">
+  Local models vary a lot in tool-calling quality. Models with a 64k+ context window do better on complex agentic tasks. The Smart Model Router is disabled when using Ollama, so all messages go to the configured local model.
+</Callout>
+
+### Setup
+
+<Tabs items={["pip install", "Docker"]}>
+  <Tab title="pip install">
+    ```bash
+    # Install Ollama first: https://ollama.com
+    ollama pull qwen2.5:7b
+
+    # Configure PocketPaw
+    export POCKETPAW_OLLAMA_HOST=http://localhost:11434
+    export POCKETPAW_AGENT_BACKEND=openai_agents
+    pocketpaw
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    # Ollama runs as a compose sidecar, no separate install needed
+    docker compose --profile ollama up -d
+
+    # Pull a model into the Ollama container
+    docker exec pocketpaw-ollama ollama pull qwen2.5:7b
+    ```
+  </Tab>
+</Tabs>
+
+See the [Ollama backend guide](/backends/ollama) for full configuration options.
+
+**OpenClaw + Ollama:** Supported but has known issues. Some users report the gateway showing "0 tokens used" and never progressing. Requires setting `api: "openai-responses"` or `api: "openai-completions"` explicitly in the config. Sub-agent inference may not auto-detect local models correctly (issue #7211).
+
+---
+
+## Which one to choose
+
+**PocketPaw fits better if:**
+
+- You want pip install simplicity (30 seconds to first message)
+- Security matters to you: Guardian AI, plan mode, self-audit daemon, encrypted credentials, architectural kill switch
+- You need multi-agent orchestration (Command Center) with human delegation
+- You want 6 interchangeable agent backends, not locked to one SDK
+- You're in Python and want native integration
+- You want a lighter, modular footprint where you install only what you need
+- You want community governance with no corporate sponsor
+- You want fully local inference with no API costs (`docker compose --profile ollama up -d`)
+
+**OpenClaw fits better if:**
+
+- You want the largest ecosystem: 216K stars, 35K forks, 100+ preconfigured skills
+- You need maximum platform breadth (12+ messaging integrations including iMessage via BlueBubbles)
+- You prefer Node.js
+- You want OpenAI-backed development and foundation governance
+- You need the deepest skill marketplace (with the caveat of the malicious skills issue)
+- You want the most actively developed project in the category by contributor count
+
+Both are MIT licensed. You can run both on the same machine.
+
+---
+
+## Independent review
+
+For a third-party comparison of PocketPaw, OpenClaw, and Nanobot covering install experience, security architecture, and multi-channel support, see [this independent review by Rohit Kushwaha](https://www.rohitk06.in/blogs/pocketpaw-self-hosted-ai-agent).
+
+---
+
+## Further reading
+
+- [Security model](/concepts/security-model) - PocketPaw's 7-layer security stack in detail
+- [Guardian AI](/security/guardian-ai) - how the independent safety reviewer works
+- [Command Center](/features/command-center) - multi-agent orchestration guide
+- [Agent backends](/backends) - all 6 backends compared
+- [Ollama backend](/backends/ollama) - full local inference setup guide
+- [Docker deployment](/deployment/docker) - server deployment with Ollama and Qdrant sidecars

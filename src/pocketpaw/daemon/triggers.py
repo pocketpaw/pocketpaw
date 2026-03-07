@@ -10,8 +10,8 @@ Future support planned for:
 """
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -77,7 +77,7 @@ class TriggerEngine:
     the callback is invoked with the intention data.
     """
 
-    def __init__(self, scheduler: Optional[AsyncIOScheduler] = None):
+    def __init__(self, scheduler: AsyncIOScheduler | None = None):
         """
         Initialize the trigger engine.
 
@@ -87,7 +87,7 @@ class TriggerEngine:
         """
         self._own_scheduler = scheduler is None
         self.scheduler = scheduler or AsyncIOScheduler()
-        self.callback: Optional[Callable] = None
+        self.callback: Callable | None = None
         self._jobs: dict[str, str] = {}  # intention_id -> job_id
 
     def start(self, callback: Callable) -> None:
@@ -223,7 +223,7 @@ class TriggerEngine:
         self.remove_intention(intention["id"])
         return self.add_intention(intention)
 
-    def get_next_run_time(self, intention_id: str) -> Optional[datetime]:
+    def get_next_run_time(self, intention_id: str) -> datetime | None:
         """Get the next scheduled run time for an intention."""
         job_id = self._jobs.get(intention_id)
         if job_id:
@@ -247,11 +247,10 @@ class TriggerEngine:
             import asyncio
 
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(self._fire_trigger(intention))
-                else:
-                    loop.run_until_complete(self._fire_trigger(intention))
+                asyncio.get_running_loop()
             except RuntimeError:
-                # No event loop running
+                # No event loop running — safe to use asyncio.run()
                 asyncio.run(self._fire_trigger(intention))
+            else:
+                # Already inside a running loop (e.g. pytest-asyncio) — schedule, don't block
+                asyncio.create_task(self._fire_trigger(intention))

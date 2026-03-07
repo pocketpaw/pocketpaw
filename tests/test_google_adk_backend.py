@@ -417,16 +417,19 @@ class TestGoogleADKMCP:
         mock_session_mgr = MagicMock()
         mock_mcp = MagicMock()
 
-        with patch.dict(
-            sys.modules,
-            {
-                "google.adk.tools.mcp_tool": mock_mcp_tool,
-                "google.adk.tools.mcp_tool.mcp_session_manager": mock_session_mgr,
-                "mcp": mock_mcp,
-            },
-        ), patch(
-            "pocketpaw.mcp.config.load_mcp_config",
-            return_value=[mock_cfg_blocked, mock_cfg_allowed],
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "google.adk.tools.mcp_tool": mock_mcp_tool,
+                    "google.adk.tools.mcp_tool.mcp_session_manager": mock_session_mgr,
+                    "mcp": mock_mcp,
+                },
+            ),
+            patch(
+                "pocketpaw.mcp.config.load_mcp_config",
+                return_value=[mock_cfg_blocked, mock_cfg_allowed],
+            ),
         ):
             result = backend._build_mcp_toolsets()
 
@@ -450,16 +453,19 @@ class TestGoogleADKMCP:
         mock_session_mgr = MagicMock()
         mock_mcp = MagicMock()
 
-        with patch.dict(
-            sys.modules,
-            {
-                "google.adk.tools.mcp_tool": mock_mcp_tool,
-                "google.adk.tools.mcp_tool.mcp_session_manager": mock_session_mgr,
-                "mcp": mock_mcp,
-            },
-        ), patch(
-            "pocketpaw.mcp.config.load_mcp_config",
-            return_value=[mock_cfg],
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "google.adk.tools.mcp_tool": mock_mcp_tool,
+                    "google.adk.tools.mcp_tool.mcp_session_manager": mock_session_mgr,
+                    "mcp": mock_mcp,
+                },
+            ),
+            patch(
+                "pocketpaw.mcp.config.load_mcp_config",
+                return_value=[mock_cfg],
+            ),
         ):
             result = backend._build_mcp_toolsets()
 

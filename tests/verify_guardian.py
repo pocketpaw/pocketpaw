@@ -1,8 +1,8 @@
 import asyncio
 import logging
+
 from pocketpaw.tools import ToolRegistry
 from pocketpaw.tools.builtin import ShellTool
-from pocketpaw.security import get_guardian
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)

@@ -17,7 +17,7 @@ from pocketpaw.bus.queue import MessageBus
 _log = logging.getLogger(__name__)
 
 
-def auto_install(extra: str, verify_import: str) -> None:
+def auto_install(extra: str, verify_import: str) -> dict[str, str]:
     """Auto-install an optional dependency if it is missing.
 
     Uses ``pocketpaw[<extra>]`` so version constraints stay in pyproject.toml
@@ -27,8 +27,13 @@ def auto_install(extra: str, verify_import: str) -> None:
         extra: The pocketpaw extra name (e.g. "discord").
         verify_import: A top-level module to try importing after install (e.g. "discord").
 
+    Returns:
+        A dict with keys:
+        - "status": "ok" | "restart_required"
+        - "message": Human-readable message (present for restart_required)
+
     Raises:
-        RuntimeError: If the install fails or the module still can't be imported.
+        RuntimeError: If installation fails or tools are missing (backward compatible).
     """
     pip_spec = f"pocketpaw[{extra}]"
     _log.info("Auto-installing missing dependency: %s", pip_spec)
@@ -74,11 +79,15 @@ def auto_install(extra: str, verify_import: str) -> None:
     # Verify the module is now importable
     try:
         importlib.import_module(verify_import)
+        return {"status": "ok"}
     except ImportError:
-        raise RuntimeError(
-            f"Installed {pip_spec} but still cannot import '{verify_import}'. "
-            "You may need to restart the application."
-        )
+        return {
+            "status": "restart_required",
+            "message": (
+                f"Installed {pip_spec} successfully. "
+                "Server restart required to load native extensions."
+            ),
+        }
 
 
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus", ".wma"}

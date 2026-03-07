@@ -197,7 +197,8 @@ class ContextHub:
             "[System Status]",
             f"CPU: {status.get('cpu_percent', '?')}%",
             f"Memory: {status.get('memory_percent', '?')}% "
-            f"({status.get('memory_available_gb', '?')}GB free of {status.get('memory_total_gb', '?')}GB)",
+            f"({status.get('memory_available_gb', '?')}GB free"
+            f" of {status.get('memory_total_gb', '?')}GB)",
             f"Disk: {status.get('disk_percent', '?')}% used "
             f"({status.get('disk_free_gb', '?')}GB free)",
         ]

@@ -50,23 +50,23 @@
                     <label class="text-[10px] text-white/40 uppercase tracking-wider mb-2 block">Priority</label>
                     <select
                         x-model="missionControl.taskForm.priority"
-                        class="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-3 text-sm text-white focus:outline-none focus:border-accent"
+                        class="w-full appearance-none bg-white/10 border border-white/10 rounded-lg py-2.5 px-3 text-sm text-white focus:outline-none focus:border-accent"
                     >
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
-                        <option value="urgent">Urgent</option>
+                        <option value="low" style="background-color: #1c1c1e; color: white;">Low</option>
+                        <option value="medium" style="background-color: #1c1c1e; color: white;">Medium</option>
+                        <option value="high" style="background-color: #1c1c1e; color: white;">High</option>
+                        <option value="urgent" style="background-color: #1c1c1e; color: white;">Urgent</option>
                     </select>
                 </div>
                 <div>
                     <label class="text-[10px] text-white/40 uppercase tracking-wider mb-2 block">Assign to</label>
                     <select
                         x-model="missionControl.taskForm.assignee"
-                        class="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-3 text-sm text-white focus:outline-none focus:border-accent"
+                        class="w-full appearance-none bg-white/10 border border-white/10 rounded-lg py-2.5 px-3 text-sm text-white focus:outline-none focus:border-accent"
                     >
-                        <option value="">Unassigned</option>
+                        <option value="" style="background-color: #1c1c1e; color: white;">Unassigned</option>
                         <template x-for="agent in missionControl.agents" :key="agent.id">
-                            <option :value="agent.id" x-text="agent.name"></option>
+                            <option :value="agent.id" x-text="agent.name" style="background-color: #1c1c1e; color: white;"></option>
                         </template>
                     </select>
                 </div>

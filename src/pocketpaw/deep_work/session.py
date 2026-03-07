@@ -307,12 +307,14 @@ class DeepWorkSession:
                 if existing:
                     project.team_agent_ids.append(existing.id)
                 else:
+                    from pocketpaw.config import get_settings
+
                     agent = await self.manager.create_agent(
                         name=agent_spec.name,
                         role=agent_spec.role,
                         description=agent_spec.description,
                         specialties=agent_spec.specialties,
-                        backend=agent_spec.backend,
+                        backend=agent_spec.backend or get_settings().agent_backend,
                     )
                     project.team_agent_ids.append(agent.id)
 

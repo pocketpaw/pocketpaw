@@ -2,13 +2,14 @@
 Tests for the Skills module.
 """
 
-import pytest
 from pathlib import Path
+
+import pytest
+
 from pocketpaw.skills.loader import (
     Skill,
     SkillLoader,
     parse_skill_md,
-    SKILL_PATHS,
 )
 
 

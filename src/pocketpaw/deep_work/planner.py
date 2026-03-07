@@ -51,6 +51,8 @@ class PlannerAgent:
 
     async def ensure_profile(self) -> AgentProfile:
         """Get or create the 'deep-work-planner' agent in Mission Control."""
+        from pocketpaw.config import get_settings
+
         existing = await self.manager.get_agent_by_name("deep-work-planner")
         if existing:
             return existing
@@ -62,7 +64,7 @@ class PlannerAgent:
                 "into executable tasks, and recommends team composition"
             ),
             specialties=["planning", "research", "architecture", "task-decomposition"],
-            backend="claude_agent_sdk",
+            backend=get_settings().agent_backend,
         )
 
     async def plan(
@@ -148,7 +150,10 @@ class PlannerAgent:
         self._broadcast_phase(project_id, "team")
         tasks_json_str = json.dumps([t.to_dict() for t in tasks], indent=2)
         team_raw = await self._run_prompt(
-            TEAM_ASSEMBLY_PROMPT.format(tasks_json=tasks_json_str),
+            TEAM_ASSEMBLY_PROMPT.format(
+                tasks_json=tasks_json_str,
+                agent_backend=get_settings().agent_backend,
+            ),
             router=router,
         )
         team = self._parse_team(team_raw)

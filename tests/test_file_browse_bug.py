@@ -42,7 +42,8 @@ class TestFileBrowseHiddenFileBug:
     async def test_empty_result_with_many_hidden_dirs(
         self, mock_websocket, mock_settings, tmp_path
     ):
-        """BUG REPRODUCER: 55 hidden dirs + 5 visible dirs → should return 5 visible, but returns 0."""
+        """BUG REPRODUCER: 55 hidden dirs + 5 visible dirs
+        should return 5 visible, but returns 0."""
         from pocketpaw.dashboard import handle_file_browse
 
         # Create 55 hidden directories (sorted before any visible dir)
