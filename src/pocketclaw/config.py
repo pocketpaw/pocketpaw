@@ -607,6 +607,31 @@ def regenerate_token() -> str:
     _chmod_safe(token_path, 0o600)
     return token
 
+def validate_api_key(provider: str, api_key: str | None) -> bool:
+    """
+    Validate API key format based on provider.
+    """
+
+    if not api_key or not isinstance(api_key, str):
+        return False
+
+    api_key = api_key.strip()
+
+    if provider.lower() == "openai":
+        return api_key.startswith("sk-")
+
+    if provider.lower() == "anthropic":
+        return api_key.startswith("sk-ant-")
+
+    if provider.lower() == "telegram":
+        # Telegram bot tokens
+        return ":" in api_key and len(api_key.split(":")[0]) > 5
+
+    if provider.lower() == "tavily":
+        return api_key.startswith("tvly-")
+
+    return False
+
 
 # Flag file to avoid re-running migration on every load
 _MIGRATION_DONE_PATH: Path | None = None
