@@ -151,7 +151,8 @@ If you installed PocketPaw with `pip install pocketpaw` and the `pocketpaw` comm
 This usually means your Python Scripts directory is not on your PATH. By default it is at:
 
 ```text
-C:\Users\<your-username>\AppData\Local\Python\Python3.XX\Scripts
+C:\Users\<your-username>\AppData\Local\Python\Python311\Scripts
+// anshika8286
 ```
 
 Find your exact Scripts path:
