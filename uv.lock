@@ -2883,12 +2883,13 @@ wheels = [
 
 [[package]]
 name = "pocketpaw"
-version = "0.4.3"
+version = "0.4.6"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "apscheduler" },
     { name = "claude-agent-sdk" },
+    { name = "click" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -3069,6 +3070,7 @@ dev = [
     { name = "pocketpaw", extra = ["all"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-playwright" },
     { name = "ruff" },
 ]
 
@@ -3079,6 +3081,7 @@ requires-dist = [
     { name = "botbuilder-core", marker = "extra == 'teams'", specifier = ">=4.16.0" },
     { name = "botbuilder-integration-aiohttp", marker = "extra == 'teams'", specifier = ">=4.16.0" },
     { name = "claude-agent-sdk", specifier = ">=0.1.30" },
+    { name = "click", specifier = ">=8.0" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3.0" },
     { name = "elevenlabs", marker = "extra == 'voice'", specifier = ">=1.0.0" },
@@ -3134,6 +3137,7 @@ dev = [
     { name = "pocketpaw", extras = ["all"] },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-playwright", specifier = ">=0.7.2" },
     { name = "ruff", specifier = ">=0.4.0" },
 ]
 

@@ -16,8 +16,17 @@ logger = logging.getLogger(__name__)
 
 
 def _run_async(coro):
-    """Bridge sync Click commands to async internals."""
-    return asyncio.run(coro)
+    """Bridge sync Click commands to async internals. When already inside a running event loop
+    (e.g. pytest-asyncio), run the coro in a thread to avoid 'Runner.run() cannot be called
+    from a running event loop'."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, coro).result()
 
 
 def _get_console():
