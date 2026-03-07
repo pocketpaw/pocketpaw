@@ -287,6 +287,34 @@ A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of 
 
 Settings live in `~/.pocketpaw/config.json`. You can also use `POCKETPAW_`-prefixed env vars or the dashboard Settings panel. API keys are encrypted at rest.
 
+### Environment Variables (.env file)
+
+PocketPaw ships with a `.env.example` file that lists every supported environment variable with inline comments. Before running PocketPaw (especially when cloning from source or using Docker), copy it to `.env` and fill in the values you need:
+
+```bash
+# macOS / Linux
+cp .env.example .env
+
+# Windows (PowerShell)
+Copy-Item .env.example .env
+```
+
+Then open `.env` in your editor and uncomment / set the variables relevant to your setup. For example:
+
+```dotenv
+# LLM provider
+POCKETPAW_ANTHROPIC_API_KEY=sk-ant-...
+POCKETPAW_AGENT_BACKEND=claude_agent_sdk   # or openai_agents, google_adk, etc.
+
+# Optional: Telegram bot
+POCKETPAW_TELEGRAM_BOT_TOKEN=...
+POCKETPAW_ALLOWED_USER_ID=...
+```
+
+> **Tip:** Variables set in `.env` are loaded automatically at startup. You can also export them directly in your shell or set them via the dashboard **Settings** panel — all three methods work interchangeably.
+
+Alternatively, export variables directly in your shell:
+
 ```bash
 export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK backend
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.

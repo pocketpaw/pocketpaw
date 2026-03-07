@@ -247,11 +247,10 @@ class TriggerEngine:
             import asyncio
 
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(self._fire_trigger(intention))
-                else:
-                    loop.run_until_complete(self._fire_trigger(intention))
+                asyncio.get_running_loop()
             except RuntimeError:
-                # No event loop running
+                # No event loop running — safe to use asyncio.run()
                 asyncio.run(self._fire_trigger(intention))
+            else:
+                # Already inside a running loop (e.g. pytest-asyncio) — schedule, don't block
+                asyncio.create_task(self._fire_trigger(intention))

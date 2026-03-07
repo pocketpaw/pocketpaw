@@ -30,6 +30,7 @@ if sys.platform == "win32":
 import argparse
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version as get_version
 
 from pocketpaw.config import Settings, get_settings
@@ -41,6 +42,18 @@ from pocketpaw.headless import (
     run_telegram_mode,
 )
 from pocketpaw.logging_setup import setup_logging
+
+
+def _run_async(coro):
+    """Run coroutine; use asyncio.run() when no loop is running, else run in a thread to avoid
+    'Runner.run() cannot be called from a running event loop' (e.g. under pytest-asyncio)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, coro).result()
+
 
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")
@@ -189,13 +202,22 @@ Examples:
         except Exception:
             pass  # Health engine failure never blocks startup
 
-    # Check for updates (cached daily, silent on error)
-    from pocketpaw.config import get_config_dir
-    from pocketpaw.update_check import check_for_updates, print_styled_update_notice
+    # Check for updates in background thread to avoid blocking startup
+    # (cold start or stale cache triggers a sync HTTP request to PyPI)
+    import threading
 
-    update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
-    if update_info and update_info.get("update_available"):
-        print_styled_update_notice(update_info)
+    def _bg_update_check() -> None:
+        try:
+            from pocketpaw.config import get_config_dir
+            from pocketpaw.update_check import check_for_updates, print_styled_update_notice
+
+            update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
+            if update_info and update_info.get("update_available"):
+                print_styled_update_notice(update_info)
+        except Exception:
+            pass  # Update check failure never interrupts startup
+
+    threading.Thread(target=_bg_update_check, daemon=True).start()
 
     # Resolve host: explicit flag > config > auto-detect
     if args.host is not None:
@@ -224,23 +246,23 @@ Examples:
 
             run_api_server(host=host, port=args.port, dev=args.dev)
         elif args.check_ollama:
-            exit_code = asyncio.run(check_ollama(settings))
+            exit_code = _run_async(check_ollama(settings))
             raise SystemExit(exit_code)
         elif args.check_openai_compatible:
-            exit_code = asyncio.run(check_openai_compatible(settings))
+            exit_code = _run_async(check_openai_compatible(settings))
             raise SystemExit(exit_code)
         elif args.doctor:
-            exit_code = asyncio.run(run_doctor())
+            exit_code = _run_async(run_doctor())
             raise SystemExit(exit_code)
         elif args.security_audit:
             from pocketpaw.security.audit_cli import run_security_audit
 
-            exit_code = asyncio.run(run_security_audit(fix=args.fix))
+            exit_code = _run_async(run_security_audit(fix=args.fix))
             raise SystemExit(exit_code)
         elif args.telegram:
-            asyncio.run(run_telegram_mode(settings))
+            _run_async(run_telegram_mode(settings))
         elif has_channel_flag:
-            asyncio.run(run_multi_channel_mode(settings, args))
+            _run_async(run_multi_channel_mode(settings, args))
         else:
             # Default: web dashboard (also handles --web flag)
             run_dashboard_mode(settings, host, args.port, dev=args.dev)

@@ -6,6 +6,8 @@ PocketPaw is an open-source AI agent that runs locally and connects to Telegram,
 
 We welcome contributions that solve real problems: bug fixes, new tools, channel adapters, tests, meaningful documentation improvements.
 
+> **GitHub Copilot users:** see [`.github/copilot-instructions.md`](.github/copilot-instructions.md) for repo-specific Copilot guidance that keeps suggestions aligned with our architecture.
+
 ## What we don't accept
 
 To keep the review queue healthy, we close PRs that fall into these categories:
