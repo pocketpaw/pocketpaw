@@ -89,71 +89,78 @@ curl -fsSL https://pocketpaw.xyz/install.sh | sh
 <details>
 <summary>Windows (PowerShell)</summary>
 
-**Prerequisites:**
-- Python 3.11 or higher ([download here](https://www.python.org/downloads/))
-- pip package manager (included with Python)
-- Ensure Python is added to PATH during installation
+### Windows Installation (Step-by-Step)
 
-**Automated installer:**
+**Prerequisites:**
+- **Python 3.11 or higher** — [Download Python](https://www.python.org/downloads/). During setup, check **"Add Python to PATH"**.
+- pip (included with Python)
+
+**Option A — Automated installer (recommended for beginners):**
 
 ```powershell
 powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
 ```
 
-**Manual install with pip:**
+**Option B — Manual install:**
 
-```powershell
-# 1. Verify Python version (must be 3.11+)
-python --version
+1. Open PowerShell and verify Python version (must be 3.11+):
 
-# 2. Upgrade pip to latest version
-python -m pip install --upgrade pip
+   ```powershell
+   python --version
+   ```
 
-# 3. Create and activate virtual environment (optional but recommended)
-python -m venv pocketpaw-env
-.\pocketpaw-env\Scripts\Activate.ps1
+2. Upgrade pip:
 
-# 4. Install PocketPaw
-pip install pocketpaw
+   ```powershell
+   python -m pip install --upgrade pip
+   ```
 
-# 5. Run PocketPaw
-pocketpaw
-```
----
+3. (Optional but recommended) Create and activate a virtual environment:
 
-    
-> **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
+   ```powershell
+   python -m venv pocketpaw-env
+   .\pocketpaw-env\Scripts\Activate.ps1
+   ```
 
-</details>
-## Windows CLI Troubleshooting
+4. Install PocketPaw:
 
-If you installed PocketPaw using:
+   ```powershell
+   pip install pocketpaw
+   ```
 
-```powershell
-pip install pocketpaw
-```
+5. Verify the installation by running:
 
-and the `pocketpaw` command is not recognized:
+   ```powershell
+   pocketpaw --help
+   ```
+
+   Or start the dashboard:
+
+   ```powershell
+   pocketpaw
+   ```
+
+### Windows Troubleshooting
+
+If you installed PocketPaw with `pip install pocketpaw` and the `pocketpaw` command is not recognized:
 
 ```text
 'pocketpaw' is not recognized as an internal or external command
 ```
 
-This usually means your Python Scripts directory is not added to PATH.
-
-By default, it is located at:
+This usually means your Python Scripts directory is not on your PATH. By default it is at:
 
 ```text
 C:\Users\<your-username>\AppData\Local\Python\Python3.XX\Scripts
 ```
 
-You can find your exact Scripts path by running:
+Find your exact Scripts path:
 
 ```powershell
 python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 ```
 
-### How to Fix
+**How to fix:**
 
 1. Open Start → Search "Environment Variables"
 2. Click "Edit the system environment variables"
@@ -162,11 +169,18 @@ python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 5. Add the Scripts directory path
 6. Restart your terminal
 
-Alternatively, you can run PocketPaw using:
+Alternatively, run PocketPaw without adding Scripts to PATH:
 
 ```powershell
 python -m pocketpaw
 ```
+
+> [!TIP]
+> **First Run:** After opening the dashboard, the system health may show **UNHEALTHY** — this is expected if no API key is configured. The app itself is running correctly; only AI features are disabled. Go to **Settings > API Keys** to add your key, or [use Ollama for free local inference](#features).
+
+> **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
+
+</details>
 
 <details>
 <summary>Other methods</summary>
@@ -303,6 +317,18 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 pip install uv
 ```
 
+> **Windows Note:** After installing `uv` via the PowerShell script, you may need to **restart your terminal** for the `uv` command to be recognized. The installer adds `uv` to `C:\Users\<your-username>\.local\bin` and updates your PATH, but the current session won't reflect this change until you open a new terminal window.
+>
+> If you want to use `uv` immediately without restarting, run:
+> ```powershell
+> $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+> ```
+>
+> Verify the installation:
+> ```powershell
+> uv --version
+> ```
+
 **Setup and run:**
 
 ```bash
@@ -368,7 +394,7 @@ pip install pocketpaw[all]                 # Everything
 ## Join the Pack
 
 - Twitter: [@prakashd88](https://twitter.com/prakashd88)
-- Discord: Coming Soon
+- Discord: [dsc.gg/pocketpaw](https://dsc.gg/pocketpaw)
 - Email: pocketpawai@gmail.com
 
 PRs welcome. Come build with us.

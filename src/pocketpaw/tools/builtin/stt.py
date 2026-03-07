@@ -127,7 +127,7 @@ class SpeechToTextTool(BaseTool):
 
             filename = f"stt_{uuid.uuid4().hex[:8]}.txt"
             output_path = _get_transcripts_dir() / filename
-            output_path.write_text(text)
+            output_path.write_text(text, encoding="utf-8")
 
             return f"Transcription ({audio_path.name}):\n\n{text}\n\nSaved to: {output_path}"
 
@@ -168,7 +168,7 @@ class SpeechToTextTool(BaseTool):
 
             filename = f"stt_{uuid.uuid4().hex[:8]}.txt"
             output_path = _get_transcripts_dir() / filename
-            output_path.write_text(text)
+            output_path.write_text(text, encoding="utf-8")
 
             lang_info = f", lang={language}" if language else ""
             mode_info = f", mode={mode}" if mode else ""

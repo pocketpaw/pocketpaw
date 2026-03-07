@@ -128,7 +128,7 @@ class TestAuditLog:
             resp = client.delete("/api/v1/audit")
             assert resp.status_code == 200
             assert resp.json()["ok"] is True
-            assert Path(f.name).read_text() == ""
+            assert Path(f.name).read_text(encoding="utf-8") == ""
 
 
 class TestSecurityAudit:

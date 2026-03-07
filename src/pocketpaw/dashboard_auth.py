@@ -289,10 +289,12 @@ async def _auth_dispatch(request: Request) -> Response | None:
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         return None  # allow through
 
-    # API Protection
-    if request.url.path.startswith("/api") or request.url.path.startswith("/ws"):
-        if not is_valid:
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    # Require auth for ALL remaining paths — not only /api* and /ws*.
+    # Previously only API/WS paths were gated here, meaning any non-exempt
+    # path that didn't start with /api or /ws (e.g. /internal/*, /v1/agents)
+    # would silently fall through unauthenticated.
+    if not is_valid:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
     return None  # allow through
 

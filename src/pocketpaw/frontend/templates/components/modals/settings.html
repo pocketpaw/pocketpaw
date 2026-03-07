@@ -98,6 +98,23 @@
         class="settings-content flex-1 overflow-y-auto px-5 py-4"
         :class="settingsMobileView === 'content' ? 'is-visible' : 'is-hidden'"
       >
+        <!-- API key validation warnings (saved but format may be invalid) -->
+        <div
+          x-show="settingsValidationWarnings && settingsValidationWarnings.length > 0"
+          x-transition
+          class="mb-4 rounded-xl border border-[var(--warning-color)]/30 bg-[var(--warning-color)]/10 p-3"
+        >
+          <p class="text-[12px] font-medium text-[var(--warning-color)] flex items-center gap-2 mb-2">
+            <i data-lucide="alert-triangle" class="w-4 h-4 shrink-0"></i>
+            Validation warnings (settings were saved)
+          </p>
+          <ul class="text-[11px] text-white/80 space-y-1 list-disc list-inside">
+            <template x-for="w in (settingsValidationWarnings || [])" :key="w">
+              <li x-text="w"></li>
+            </template>
+          </ul>
+        </div>
+
         <!-- Search Results Overlay -->
         <div x-show="settingsSearchResults.length > 0" x-transition class="space-y-2 mb-4">
           <p class="text-[11px] text-white/40 uppercase tracking-wide font-medium" x-text="settingsSearchResults.length + ' result' + (settingsSearchResults.length !== 1 ? 's' : '')"></p>

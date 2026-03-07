@@ -3,15 +3,12 @@ Tests for the Proactive Daemon module.
 """
 
 import pytest
-from datetime import datetime
+
 from pocketpaw.daemon import (
-    IntentionStore,
-    get_intention_store,
-    TriggerEngine,
     ContextHub,
-    IntentionExecutor,
+    IntentionStore,
     ProactiveDaemon,
-    get_daemon,
+    TriggerEngine,
 )
 from pocketpaw.daemon.triggers import CRON_PRESETS, parse_cron_expression
 

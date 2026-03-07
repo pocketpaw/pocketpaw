@@ -12,7 +12,7 @@ sys.modules.setdefault("pystray", MagicMock())
 sys.modules.setdefault("PIL", MagicMock())
 sys.modules.setdefault("PIL.Image", MagicMock())
 
-from installer.launcher.uninstall import Component, Uninstaller
+from installer.launcher.uninstall import Component, Uninstaller  # noqa: E402
 
 
 class TestGetComponents:

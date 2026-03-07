@@ -10,12 +10,12 @@
 class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
 x-show="showReminders"
 x-transition.opacity
-@click.self="showReminders = false"
+@click.self="closeReminders()"
 >
 <div class="w-full max-w-[600px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
     <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
     <h2 class="text-[17px] font-semibold">Reminders</h2>
-    <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showReminders = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+    <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="closeReminders()"><i data-lucide="x" class="w-5 h-5"></i></button>
     </div>
     <div class="p-6">
     <div class="flex flex-col gap-5">
@@ -60,7 +60,7 @@ x-transition.opacity
                 <p class="font-medium text-[14px] truncate" x-text="reminder.text"></p>
                 <p class="text-xs text-white/50 mt-0.5">
                     <span x-text="formatReminderTime(reminder)"></span>
-                    <span class="text-[var(--accent-color)] ml-2" x-text="reminder.time_remaining"></span>
+                    <span class="text-[var(--accent-color)] ml-2" x-text="calculateTimeRemaining(reminder)"></span>
                 </p>
                 </div>
                 <button

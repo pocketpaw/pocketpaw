@@ -276,8 +276,7 @@ class TestInstallPocketpaw:
             assert result is None  # None == success
             # At least one subprocess.run call should contain the extras spec
             any_has_extras = any(
-                f"{PACKAGE_NAME}[telegram,discord]" in str(c)
-                for c in mock_run.call_args_list
+                f"{PACKAGE_NAME}[telegram,discord]" in str(c) for c in mock_run.call_args_list
             )
             assert any_has_extras
 
@@ -291,9 +290,7 @@ class TestInstallPocketpaw:
             result = b._install_pocketpaw("/path/to/python", [])
 
             assert result is None  # None == success
-            any_has_pkg = any(
-                PACKAGE_NAME in str(c) for c in mock_run.call_args_list
-            )
+            any_has_pkg = any(PACKAGE_NAME in str(c) for c in mock_run.call_args_list)
             assert any_has_pkg
 
     def test_install_pip_failure(self):

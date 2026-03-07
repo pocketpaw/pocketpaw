@@ -233,7 +233,7 @@ class TestTier2LLMSummary:
 
         assert "Fresh summary." in result[0]["content"]
         # Cache should be updated
-        cache = json.loads(cache_file.read_text())
+        cache = json.loads(cache_file.read_text(encoding="utf-8"))
         assert cache["watermark"] == 20
 
     async def test_no_sessions_path_falls_back(self):

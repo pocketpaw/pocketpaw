@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from pocketpaw.config import Settings, get_access_token
+from pocketpaw.config import Settings, get_access_token, validate_api_keys
 from pocketpaw.dashboard_state import (
     _settings_lock,
     active_connections,
@@ -26,6 +26,14 @@ from pocketpaw.security.session_tokens import verify_session_token
 from pocketpaw.skills import SkillExecutor, get_skill_loader
 
 logger = logging.getLogger(__name__)
+
+
+def _api_key_response(message: str, warnings: list[str] | None = None) -> dict:
+    """Build a standard ``api_key_saved`` WS response, optionally with warnings."""
+    resp: dict = {"type": "api_key_saved", "content": message}
+    if warnings:
+        resp["warnings"] = warnings
+    return resp
 
 
 async def websocket_handler(
@@ -294,7 +302,7 @@ async def websocket_handler(
                         settings.claude_sdk_model = data["claude_sdk_model"]
                     if "claude_sdk_max_turns" in data:
                         val = data["claude_sdk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.claude_sdk_max_turns = int(val)
                     # OpenAI Agents
                     if data.get("openai_agents_provider"):
@@ -303,21 +311,21 @@ async def websocket_handler(
                         settings.openai_agents_model = data["openai_agents_model"]
                     if "openai_agents_max_turns" in data:
                         val = data["openai_agents_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.openai_agents_max_turns = int(val)
                     # Google ADK
                     if "google_adk_model" in data:
                         settings.google_adk_model = data["google_adk_model"]
                     if "google_adk_max_turns" in data:
                         val = data["google_adk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.google_adk_max_turns = int(val)
                     # Codex CLI
                     if "codex_cli_model" in data:
                         settings.codex_cli_model = data["codex_cli_model"]
                     if "codex_cli_max_turns" in data:
                         val = data["codex_cli_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.codex_cli_max_turns = int(val)
                     # Copilot SDK
                     if data.get("copilot_sdk_provider"):
@@ -326,7 +334,7 @@ async def websocket_handler(
                         settings.copilot_sdk_model = data["copilot_sdk_model"]
                     if "copilot_sdk_max_turns" in data:
                         val = data["copilot_sdk_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.copilot_sdk_max_turns = int(val)
                     # OpenCode
                     if "opencode_base_url" in data:
@@ -335,7 +343,7 @@ async def websocket_handler(
                         settings.opencode_model = data["opencode_model"]
                     if "opencode_max_turns" in data:
                         val = data["opencode_max_turns"]
-                        if isinstance(val, (int, float)) and 1 <= val <= 200:
+                        if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.opencode_max_turns = int(val)
                     settings.llm_provider = data.get("llm_provider", settings.llm_provider)
                     if data.get("ollama_host"):
@@ -352,7 +360,7 @@ async def websocket_handler(
                         settings.openai_compatible_model = data["openai_compatible_model"]
                     if "openai_compatible_max_tokens" in data:
                         val = data["openai_compatible_max_tokens"]
-                        if isinstance(val, (int, float)) and 0 <= val <= 1000000:
+                        if isinstance(val, int | float) and 0 <= val <= 1000000:
                             settings.openai_compatible_max_tokens = int(val)
                     if data.get("gemini_model"):
                         settings.gemini_model = data["gemini_model"]
@@ -419,6 +427,7 @@ async def websocket_handler(
                         settings.mem0_vector_store = data["mem0_vector_store"]
                     if data.get("mem0_ollama_base_url"):
                         settings.mem0_ollama_base_url = data["mem0_ollama_base_url"]
+                    warnings = validate_api_keys(settings)
                     settings.save()
 
                 # Reset the agent loop's router to pick up new settings
@@ -434,13 +443,43 @@ async def websocket_handler(
                 agent_loop.context_builder.memory = agent_loop.memory
 
                 await websocket.send_json(
-                    {"type": "message", "content": "\u2699\ufe0f Settings updated"}
+                    {
+                        "type": "settings_saved",
+                        "content": "\u2699\ufe0f Settings updated",
+                        "warnings": warnings,
+                    }
                 )
 
             # Handle API key save
             elif action == "save_api_key":
+                from pocketpaw.config import validate_api_key
+
                 provider = data.get("provider")
                 key = data.get("key", "")
+
+                # Map provider names to field names for validation.
+                # Note: Some providers (google, tavily, brave, parallel, elevenlabs) don't
+                # have format validation patterns in _API_KEY_PATTERNS yet and will pass through.
+                # Patterns can be added in config.py as needed.
+                provider_to_field = {
+                    "anthropic": "anthropic_api_key",
+                    "openai": "openai_api_key",
+                    "google": "google_api_key",
+                    "tavily": "tavily_api_key",
+                    "brave": "brave_api_key",
+                    "parallel": "parallel_api_key",
+                    "elevenlabs": "elevenlabs_api_key",
+                    "openai_compatible": "openai_compatible_api_key",
+                }
+
+                field_name = provider_to_field.get(provider)
+
+                # Validate key format — warn but never block save
+                key_warnings: list[str] = []
+                if field_name and key:
+                    is_valid, warning = validate_api_key(field_name, key)
+                    if not is_valid:
+                        key_warnings.append(warning)
 
                 async with _settings_lock:
                     if provider == "anthropic" and key:
@@ -448,84 +487,77 @@ async def websocket_handler(
                         settings.save()
                         agent_loop.reset_router()
                         await websocket.send_json(
-                            {"type": "message", "content": "\u2705 Anthropic API key saved!"}
+                            _api_key_response(
+                                "\u2705 Anthropic API key saved!",
+                                warnings=key_warnings or None,
+                            )
                         )
                     elif provider == "openai" and key:
                         settings.openai_api_key = key
                         settings.save()
                         agent_loop.reset_router()
                         await websocket.send_json(
-                            {"type": "message", "content": "\u2705 OpenAI API key saved!"}
+                            _api_key_response(
+                                "\u2705 OpenAI API key saved!",
+                                warnings=key_warnings or None,
+                            )
                         )
                     elif provider == "google" and key:
                         settings.google_api_key = key
                         settings.save()
                         agent_loop.reset_router()
-                        await websocket.send_json(
-                            {"type": "message", "content": "\u2705 Google API key saved!"}
-                        )
+                        await websocket.send_json(_api_key_response("\u2705 Google API key saved!"))
                     elif provider == "tavily" and key:
                         settings.tavily_api_key = key
                         settings.save()
-                        await websocket.send_json(
-                            {"type": "message", "content": "\u2705 Tavily API key saved!"}
-                        )
+                        await websocket.send_json(_api_key_response("\u2705 Tavily API key saved!"))
                     elif provider == "brave" and key:
                         settings.brave_search_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "\u2705 Brave Search API key saved!"}
+                            _api_key_response("\u2705 Brave Search API key saved!")
                         )
                     elif provider == "parallel" and key:
                         settings.parallel_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "\u2705 Parallel AI API key saved!"}
+                            _api_key_response("\u2705 Parallel AI API key saved!")
                         )
                     elif provider == "elevenlabs" and key:
                         settings.elevenlabs_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "\u2705 ElevenLabs API key saved!"}
+                            _api_key_response("\u2705 ElevenLabs API key saved!")
                         )
                     elif provider == "google_oauth_id" and key:
                         settings.google_oauth_client_id = key
                         settings.save()
                         await websocket.send_json(
-                            {
-                                "type": "message",
-                                "content": "\u2705 Google OAuth Client ID saved!",
-                            }
+                            _api_key_response("\u2705 Google OAuth Client ID saved!")
                         )
                     elif provider == "google_oauth_secret" and key:
                         settings.google_oauth_client_secret = key
                         settings.save()
                         await websocket.send_json(
-                            {
-                                "type": "message",
-                                "content": "\u2705 Google OAuth Client Secret saved!",
-                            }
+                            _api_key_response("\u2705 Google OAuth Client Secret saved!")
                         )
                     elif provider == "spotify_client_id" and key:
                         settings.spotify_client_id = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "\u2705 Spotify Client ID saved!"}
+                            _api_key_response("\u2705 Spotify Client ID saved!")
                         )
                     elif provider == "spotify_client_secret" and key:
                         settings.spotify_client_secret = key
                         settings.save()
                         await websocket.send_json(
-                            {
-                                "type": "message",
-                                "content": "\u2705 Spotify Client Secret saved!",
-                            }
+                            _api_key_response("\u2705 Spotify Client Secret saved!")
                         )
                     elif provider == "sarvam" and key:
                         settings.sarvam_api_key = key
                         settings.save()
                         await websocket.send_json(
-                            {"type": "message", "content": "\u2705 Sarvam AI API key saved!"}
+                            _api_key_response("\u2705 Sarvam AI API key saved!")
                         )
                     else:
                         await websocket.send_json(
@@ -680,21 +712,24 @@ async def websocket_handler(
                 await websocket.send_json({"type": "reminders", "reminders": reminders})
 
             elif action == "add_reminder":
-                message = data.get("message", "")
-                scheduler = get_scheduler()
-                reminder = scheduler.add_reminder(message)
+                try:
+                    message = data.get("message", "")
+                    scheduler = get_scheduler()
+                    reminder = scheduler.add_reminder(message)
 
-                if reminder:
-                    reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
-                    await websocket.send_json({"type": "reminder_added", "reminder": reminder})
-                else:
+                    if reminder:
+                        reminder["time_remaining"] = scheduler.format_time_remaining(reminder)
+                        await websocket.send_json({"type": "reminder_added", "reminder": reminder})
+                    else:
+                        await websocket.send_json(
+                            {
+                                "type": "reminder_error",
+                                "content": ("Could not parse time. Try 'in 5 minutes' or 'at 3pm'"),
+                            }
+                        )
+                except Exception:
                     await websocket.send_json(
-                        {
-                            "type": "error",
-                            "content": (
-                                "Could not parse time from message. Try 'in 5 minutes' or 'at 3pm'"
-                            ),
-                        }
+                        {"type": "reminder_error", "content": "Error adding reminder"}
                     )
 
             elif action == "delete_reminder":
@@ -703,7 +738,9 @@ async def websocket_handler(
                 if scheduler.delete_reminder(reminder_id):
                     await websocket.send_json({"type": "reminder_deleted", "id": reminder_id})
                 else:
-                    await websocket.send_json({"type": "error", "content": "Reminder not found"})
+                    await websocket.send_json(
+                        {"type": "reminder_error", "content": "Reminder not found"}
+                    )
 
             # ==================== Intentions API ====================
 

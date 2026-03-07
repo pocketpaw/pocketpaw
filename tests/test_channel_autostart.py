@@ -62,9 +62,7 @@ async def test_startup_skips_disabled_channels():
 
     with (
         patch("pocketpaw.dashboard_lifecycle.Settings.load", return_value=settings),
-        patch(
-            "pocketpaw.dashboard._start_channel_adapter", new_callable=AsyncMock
-        ) as mock_start,
+        patch("pocketpaw.dashboard._start_channel_adapter", new_callable=AsyncMock) as mock_start,
         patch("pocketpaw.dashboard_lifecycle.agent_loop") as mock_loop,
         patch("pocketpaw.dashboard_lifecycle.ws_adapter", mock_ws),
         patch("pocketpaw.dashboard_lifecycle.get_message_bus"),
@@ -102,9 +100,7 @@ async def test_startup_starts_enabled_channels():
 
     with (
         patch("pocketpaw.dashboard_lifecycle.Settings.load", return_value=settings),
-        patch(
-            "pocketpaw.dashboard._start_channel_adapter", new_callable=AsyncMock
-        ) as mock_start,
+        patch("pocketpaw.dashboard._start_channel_adapter", new_callable=AsyncMock) as mock_start,
         patch("pocketpaw.dashboard_lifecycle.agent_loop") as mock_loop,
         patch("pocketpaw.dashboard_lifecycle.ws_adapter", mock_ws),
         patch("pocketpaw.dashboard_lifecycle.get_message_bus"),
@@ -178,6 +174,6 @@ def test_round_trip_save_load(tmp_path):
     config_path.write_text(json.dumps(save_dict))
 
     # Load back
-    data = json.loads(config_path.read_text())
+    data = json.loads(config_path.read_text(encoding="utf-8"))
     loaded = Settings(**data)
     assert loaded.channel_autostart == {"discord": False, "teams": True}

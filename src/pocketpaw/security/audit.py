@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ from pocketpaw.config import get_settings
 logger = logging.getLogger("audit")
 
 
-class AuditSeverity(str, Enum):
+class AuditSeverity(StrEnum):
     INFO = "info"  # Normal operation (e.g. reading a file)
     WARNING = "warning"  # Potentially dangerous (e.g. writing a file)
     CRITICAL = "critical"  # High risk (e.g. shell command, deleting file)
@@ -73,7 +73,7 @@ class AuditLogger:
         if log_path:
             self.log_path = log_path
         else:
-            settings = get_settings()
+            get_settings()
             # Default to adjacent to config file, or explicit audit path
             # Since settings might not have audit_path, we derive it.
             # Assuming settings.config_path is ~/.pocketpaw/config.json

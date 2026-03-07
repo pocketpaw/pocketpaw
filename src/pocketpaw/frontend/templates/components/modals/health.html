@@ -70,6 +70,13 @@
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+      <!-- Onboarding message when degraded (e.g. API key missing) -->
+      <div
+          x-show="healthStatus === 'degraded' && (healthMessage || (healthIssues && healthIssues.some(i => i.check_id === 'api_key_primary')))"
+          class="rounded-lg px-4 py-3 bg-amber-500/10 border border-amber-500/30 text-amber-200/90 text-sm"
+      >
+        <span x-text="healthMessage || 'System is running. Add your API key to enable AI features.'"></span>
+      </div>
       <!-- Last check timestamp -->
       <div x-show="healthLastCheck" class="text-[11px] text-white/30">
         Last checked: <span x-text="healthLastCheck ? healthLastCheck.substring(0, 19).replace('T', ' ') + ' UTC' : 'never'"></span>
@@ -79,6 +86,31 @@
       <!-- Check Results -->
       <div>
         <h3 class="text-xs font-semibold uppercase tracking-wider text-white/40 mb-2">Diagnostics</h3>
+        <!-- Onboarding Context for Missing API Key -->
+        <template x-if="
+              isBackendUnconfigured() ||
+              (healthStatus === 'unhealthy' &&
+              healthIssues &&
+              healthIssues.some(i =>
+                i.check_id === 'api_key_primary' &&
+                (i.status === 'critical' || i.status === 'warning')
+              ))
+            ">
+          <div class="mb-3 px-4 py-3 bg-accent/10 border border-accent/20 rounded-xl flex items-start gap-3">
+            <svg class="w-5 h-5 text-accent shrink-0 mt-0.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+              fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 16v-4" />
+              <path d="M12 8h.01" />
+            </svg>
+            <p class="text-xs text-white/70 leading-relaxed">
+              <strong class="text-white">PocketPaw is running correctly.</strong>
+              The dashboard, channels, and all non-AI features work normally.
+              AI functionality requires an API key — see the fix hint below.
+            </p>
+          </div>
+        </template>
+
         <div class="space-y-1">
           <template x-for="issue in healthIssues" :key="issue.check_id">
             <div class="flex items-start gap-2 px-3 py-2 bg-white/3 rounded-lg">
