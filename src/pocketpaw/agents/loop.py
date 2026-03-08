@@ -90,10 +90,6 @@ class AgentLoop:
 
     async def cancel_session(self, session_key: str) -> bool:
         """Cancel in-flight processing for a session. Returns True if cancelled."""
-        router = self._router
-        if router is not None:
-            await router.stop()
-
         task = self._active_tasks.get(session_key)
         if task is not None and not task.done():
             task.cancel()
@@ -107,6 +103,54 @@ class AgentLoop:
             # 1. Consume message from Bus
             message = await self.bus.consume_inbound(timeout=1.0)
             if not message:
+                continue
+
+            # Intercept /kill before entering session-locked pipeline so it
+            # can cancel an in-flight task without being blocked by the lock.
+            # Uses the same regex as CommandHandler to avoid false positives
+            # on normal sentences containing "kill".
+            content = message.content.strip()
+            _kill_match = re.match(r"^[/!]kill(?:@\S+)?(?:\s.*)?$", content, re.IGNORECASE)
+            if _kill_match:
+                cancelled = await self.cancel_session(message.session_key)
+                reply = (
+                    "Agent run cancelled for this session."
+                    if cancelled
+                    else "No active agent run for this session."
+                )
+
+                # Audit log: /kill is security-relevant
+                try:
+                    from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+                    get_audit_logger().log(
+                        AuditEvent.create(
+                            severity=AuditSeverity.WARNING,
+                            actor=message.sender_id or message.channel.value,
+                            action="kill_session",
+                            target=message.session_key,
+                            status="cancelled" if cancelled else "no_active_run",
+                            channel=message.channel.value,
+                        )
+                    )
+                except Exception:
+                    pass
+
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content=reply,
+                    )
+                )
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content="",
+                        is_stream_end=True,
+                    )
+                )
                 continue
 
             # 2. Process message in background task (to not block loop)

@@ -24,6 +24,9 @@ async def run_bot(settings: Settings) -> None:
 
     # 3. Initialize Agent Loop
     agent_loop = AgentLoop()
+    from pocketpaw.bus.commands import get_command_handler
+
+    get_command_handler().set_agent_loop(agent_loop)
 
     logger.info("🚀 Starting PocketPaw...")
 

@@ -185,13 +185,22 @@ class TestTaskStatusPersistence:
 
         # Link task to project by patching store directly
         import asyncio
+        from concurrent.futures import ThreadPoolExecutor
 
         async def link():
             task = await manager.get_task(task_id)
             task.project_id = project_id
             await manager._store.save_task(task)
 
-        asyncio.run(link())
+        def run_coro(coro):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(coro)
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                return ex.submit(asyncio.run, coro).result()
+
+        run_coro(link())
 
         # Update status via JSON body
         client.post(

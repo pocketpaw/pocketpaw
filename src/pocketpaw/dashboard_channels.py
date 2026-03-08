@@ -518,6 +518,11 @@ async def save_channel_config(request: Request):
     if channel not in _CHANNEL_CONFIG_KEYS:
         raise HTTPException(status_code=400, detail=f"Unknown channel: {channel}")
 
+    # Validate tokens before saving
+    validation_error = await _validate_channel_tokens(channel, config)
+    if validation_error:
+        return {"error": validation_error}
+
     key_map = _CHANNEL_CONFIG_KEYS[channel]
     settings = Settings.load()
 
@@ -531,6 +536,45 @@ async def save_channel_config(request: Request):
 
     settings.save()
     return {"status": "ok"}
+
+
+async def _validate_channel_tokens(channel: str, config: dict) -> str | None:
+    """Validate channel tokens before saving. Returns error message or None."""
+    if channel == "slack":
+        bot_token = config.get("bot_token", "")
+        app_token = config.get("app_token", "")
+        if bot_token:
+            if not bot_token.startswith("xoxb-"):
+                return "Invalid Slack bot token. It should start with 'xoxb-'."
+            try:
+                from slack_sdk.web.async_client import AsyncWebClient
+
+                web = AsyncWebClient(token=bot_token)
+                auth = await web.auth_test()
+                if not auth.get("ok"):
+                    return "Slack bot token is invalid. Check your Bot User OAuth Token."
+            except ImportError:
+                pass  # slack_sdk not installed, skip validation
+            except Exception as e:
+                err = str(e)
+                if bot_token and bot_token in err:
+                    err = err.replace(bot_token, "[REDACTED]")
+                return f"Slack bot token validation failed: {err}"
+        if app_token:
+            if not app_token.startswith("xapp-"):
+                return "Invalid Slack app token. It should start with 'xapp-'."
+
+    elif channel == "discord":
+        bot_token = config.get("bot_token", "")
+        if bot_token and len(bot_token) < 50:
+            return "Invalid Discord bot token. Token appears too short."
+
+    elif channel == "telegram":
+        bot_token = config.get("bot_token", "")
+        if bot_token and ":" not in bot_token:
+            return "Invalid Telegram bot token. It should be in the format '123456:ABC-DEF...'."
+
+    return None
 
 
 @channels_router.post("/api/channels/toggle")

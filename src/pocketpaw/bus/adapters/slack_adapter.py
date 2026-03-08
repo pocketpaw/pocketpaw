@@ -85,6 +85,7 @@ class SlackAdapter(BaseChannelAdapter):
             "/model",
             "/tools",
             "/help",
+            "/kill",
         ):
 
             @app.command(_cmd_name)
@@ -106,6 +107,37 @@ class SlackAdapter(BaseChannelAdapter):
                     metadata=meta,
                 )
                 await adapter._publish_inbound(msg)
+
+        # Validate tokens before starting Socket Mode to surface auth errors
+        # immediately (instead of silent retry loops in the terminal).
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        web = AsyncWebClient(token=self.bot_token)
+        try:
+            auth = await web.auth_test()
+            if not auth.get("ok"):
+                raise RuntimeError(
+                    "Slack bot token is invalid — check your Bot User OAuth Token (xoxb-...)"
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Slack bot token validation failed: {e}") from e
+
+        from slack_sdk.socket_mode.aiohttp import SocketModeClient as AiohttpSocketModeClient
+
+        try:
+            sock = AiohttpSocketModeClient(app_token=self.app_token, web_client=web)
+            wss_url = await sock.issue_new_wss_url()
+            await sock.close()
+            if not wss_url:
+                raise RuntimeError(
+                    "Slack app token is invalid — check your App-Level Token (xapp-...)"
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Slack app token validation failed: {e}") from e
 
         self._slack_app = app
         self._handler = AsyncSocketModeHandler(app, self.app_token)
@@ -262,12 +294,12 @@ class SlackAdapter(BaseChannelAdapter):
                 "ts": result["ts"],
                 "text": content,
                 "thread_ts": thread_ts,
-                "last_update": asyncio.get_event_loop().time(),
+                "last_update": asyncio.get_running_loop().time(),
             }
         else:
             self._buffers[chat_id]["text"] += content
 
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         buf = self._buffers[chat_id]
         if now - buf["last_update"] > 1.5:
             await self._update_buffer_message(chat_id)
