@@ -168,13 +168,18 @@ async def websocket_handler(
         parts = resume_session.split("_", 1)
         if len(parts) == 2 and parts[0] == "websocket":
             raw_id = parts[1]
-            # Verify session file exists
-            session_file = (
-                Path.home() / ".pocketpaw" / "memory" / "sessions" / f"{resume_session}.json"
-            )
-            if session_file.exists():
-                chat_id = raw_id
-                resumed = True
+            # Verify session file exists and path stays under sessions dir
+            sessions_dir = Path.home() / ".pocketpaw" / "memory" / "sessions"
+            session_file = sessions_dir / f"{resume_session}.json"
+            try:
+                session_file.resolve().relative_to(sessions_dir.resolve())
+            except ValueError:
+                logger.warning("Path traversal attempt in resume_session: %s", resume_session)
+                resume_session = None  # fall through to fresh session
+            else:
+                if session_file.exists():
+                    chat_id = raw_id
+                    resumed = True
 
     await ws_adapter.register_connection(websocket, chat_id)
 

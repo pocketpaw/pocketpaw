@@ -362,6 +362,14 @@ class TestSessionsRESTEndpoints:
 class TestWebSocketSessionSwitching:
     """Test WebSocket switch_session and new_session handlers."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_rate_limiter(self):
+        """Reset WS rate limiter between tests to avoid false rate-limit failures."""
+        from pocketpaw.security.rate_limiter import ws_limiter
+
+        ws_limiter.cleanup()
+        ws_limiter._buckets.clear()
+
     @pytest.fixture
     def client(self, _mock_auth):
         from fastapi.testclient import TestClient
@@ -432,6 +440,26 @@ class TestWebSocketSessionSwitching:
         finally:
             if session_file.exists():
                 session_file.unlink()
+
+    def test_websocket_resume_session_path_traversal_blocked(self, client):
+        """Path traversal in resume_session must be rejected (falls back to fresh session)."""
+        traversal_key = "websocket_../../etc/passwd"
+        with client.websocket_connect(self._ws_url(f"resume_session={traversal_key}")) as ws:
+            conn_info = ws.receive_json()
+            assert conn_info["type"] == "connection_info"
+            # Should get a fresh session UUID, not the traversal string
+            session_id = conn_info["id"]
+            assert ".." not in session_id
+
+    def test_websocket_switch_session_path_traversal_blocked(self, client):
+        """Path traversal in switch_session must return empty history."""
+        traversal_key = "websocket_../../etc/passwd"
+        with client.websocket_connect(self._ws_url()) as ws:
+            ws.receive_json()  # connection_info
+            ws.send_json({"action": "switch_session", "session_id": traversal_key})
+            data = ws.receive_json()
+            assert data["type"] == "session_history"
+            assert data["messages"] == []
 
 
 # =========================================================================
