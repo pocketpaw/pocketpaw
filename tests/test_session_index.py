@@ -447,9 +447,12 @@ class TestWebSocketSessionSwitching:
         with client.websocket_connect(self._ws_url(f"resume_session={traversal_key}")) as ws:
             conn_info = ws.receive_json()
             assert conn_info["type"] == "connection_info"
-            # Should get a fresh session UUID, not the traversal string
+            # Should get a fresh session with a valid UUID, not the traversal string
             session_id = conn_info["id"]
             assert ".." not in session_id
+            assert session_id.startswith("websocket_")
+            raw_uuid = session_id.removeprefix("websocket_")
+            uuid.UUID(raw_uuid)  # raises ValueError if not a valid UUID
 
     def test_websocket_switch_session_path_traversal_blocked(self, client):
         """Path traversal in switch_session must return empty history."""
