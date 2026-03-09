@@ -523,6 +523,12 @@ class Settings(BaseSettings):
         default=None, description="Spotify OAuth client secret"
     )
 
+    # GitHub
+    github_token: str | None = Field(
+        default=None,
+        description="GitHub personal access token for higher API rate limits and private repo access",
+    )
+
     # Signal
     signal_api_url: str = Field(
         default="http://localhost:8080", description="Signal-cli REST API URL"

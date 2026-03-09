@@ -43,6 +43,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "google_oauth_client_secret",
         "spotify_client_id",
         "spotify_client_secret",
+        "github_token",
         "matrix_access_token",
         "matrix_password",
         "teams_app_id",
