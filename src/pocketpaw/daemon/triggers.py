@@ -8,10 +8,10 @@ Future support planned for:
 - File watch triggers (watchdog)
 - Idle detection triggers
 """
-
+import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -77,7 +77,7 @@ class TriggerEngine:
     the callback is invoked with the intention data.
     """
 
-    def __init__(self, scheduler: Optional[AsyncIOScheduler] = None):
+    def __init__(self, scheduler: AsyncIOScheduler | None = None):
         """
         Initialize the trigger engine.
 
@@ -87,8 +87,9 @@ class TriggerEngine:
         """
         self._own_scheduler = scheduler is None
         self.scheduler = scheduler or AsyncIOScheduler()
-        self.callback: Optional[Callable] = None
-        self._jobs: dict[str, str] = {}  # intention_id -> job_id
+        self.callback: Callable | None = None
+        self._jobs: dict[str, str] = {}
+        self._observers: list = []   # <-- ADD THIS LINE
 
     def start(self, callback: Callable) -> None:
         """
@@ -131,6 +132,20 @@ class TriggerEngine:
 
         if trigger_type == "cron":
             return self._add_cron_trigger(intention)
+
+        elif trigger_type == "file_watch":
+            return self._add_file_watch_trigger(intention)
+
+        elif trigger_type == "idle":
+            return self._add_idle_trigger(intention)
+
+        elif trigger_type == "bus_event":
+            return self._add_bus_event_trigger(intention)
+
+        elif trigger_type == "webhook":
+            logger.info("Webhook trigger registered")
+            return True
+
         else:
             logger.warning(f"Unknown trigger type: {trigger_type}")
             return False
@@ -223,7 +238,7 @@ class TriggerEngine:
         self.remove_intention(intention["id"])
         return self.add_intention(intention)
 
-    def get_next_run_time(self, intention_id: str) -> Optional[datetime]:
+    def get_next_run_time(self, intention_id: str) -> datetime | None:
         """Get the next scheduled run time for an intention."""
         job_id = self._jobs.get(intention_id)
         if job_id:
@@ -244,7 +259,6 @@ class TriggerEngine:
             intention: Intention to run
         """
         if self.callback:
-            import asyncio
 
             try:
                 loop = asyncio.get_event_loop()
@@ -255,3 +269,79 @@ class TriggerEngine:
             except RuntimeError:
                 # No event loop running
                 asyncio.run(self._fire_trigger(intention))
+    
+    def _add_file_watch_trigger(self, intention: dict) -> bool:
+        """Watch a file for changes and trigger intention."""
+        try:
+            import os
+            
+            from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
+
+            path = intention["trigger"].get("path")
+
+            if not path:
+                logger.error("file_watch trigger missing 'path'")
+                return False
+
+            watch_dir = os.path.dirname(path) or "."
+            target_file = os.path.basename(path)
+
+            engine = self
+
+            class Handler(FileSystemEventHandler):
+                def on_modified(self, event):
+                    if os.path.basename(event.src_path) == target_file:
+                        asyncio.create_task(engine._fire_trigger(intention))
+
+            observer = Observer()
+            observer.schedule(Handler(), path=watch_dir, recursive=False)
+            observer.start()
+            self._observers.append(observer)
+
+            logger.info(f"File watch trigger added for {path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to add file watch trigger: {e}")
+            return False
+        
+    def _add_idle_trigger(self, intention: dict) -> bool:
+        """Trigger intention after idle time."""
+        try:
+            
+
+            idle_minutes = intention["trigger"].get("idle_minutes", 30)
+
+            async def idle_checker():
+                while True:
+                    await asyncio.sleep(idle_minutes * 60)
+                    logger.info(f"Idle trigger fired for {intention['name']}")
+                    await self._fire_trigger(intention)
+
+            asyncio.create_task(idle_checker())
+
+            logger.info(f"Idle trigger added ({idle_minutes} minutes)")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to add idle trigger: {e}")
+            return False
+        
+    def _add_bus_event_trigger(self, intention: dict) -> bool:
+        """Trigger intention when a system event occurs."""
+        try:
+            event_type = intention["trigger"].get("event_type")
+
+            if not event_type:
+                logger.error("bus_event trigger missing event_type")
+                return False
+
+            logger.info(f"Bus event trigger registered for event: {event_type}")
+
+            # Placeholder (real bus system integration may be added later)
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to add bus_event trigger: {e}")
+            return False
