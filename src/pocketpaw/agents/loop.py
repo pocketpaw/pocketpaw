@@ -90,14 +90,24 @@ class AgentLoop:
 
     async def cancel_session(self, session_key: str) -> bool:
         """Cancel in-flight processing for a session. Returns True if cancelled."""
-        router = self._router
-        if router is not None:
-            await router.stop()
-
         task = self._active_tasks.get(session_key)
         if task is not None and not task.done():
             task.cancel()
             logger.info("Cancelled processing task for session %s", session_key)
+            return True
+        return False
+
+    def cancel_task(self, session_key: str) -> bool:
+        """Cancel just the processing task without stopping the router.
+
+        Lighter-weight than cancel_session() — used by the SSE bridge when
+        a new stream starts for the same session so the stale task stops
+        publishing events, but the persistent client subprocess stays alive.
+        """
+        task = self._active_tasks.get(session_key)
+        if task is not None and not task.done():
+            task.cancel()
+            logger.info("Cancelled stale task for session %s", session_key)
             return True
         return False
 
@@ -109,6 +119,54 @@ class AgentLoop:
             if not message:
                 continue
 
+            # Intercept /kill before entering session-locked pipeline so it
+            # can cancel an in-flight task without being blocked by the lock.
+            # Uses the same regex as CommandHandler to avoid false positives
+            # on normal sentences containing "kill".
+            content = message.content.strip()
+            _kill_match = re.match(r"^[/!]kill(?:@\S+)?(?:\s.*)?$", content, re.IGNORECASE)
+            if _kill_match:
+                cancelled = await self.cancel_session(message.session_key)
+                reply = (
+                    "Agent run cancelled for this session."
+                    if cancelled
+                    else "No active agent run for this session."
+                )
+
+                # Audit log: /kill is security-relevant
+                try:
+                    from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+                    get_audit_logger().log(
+                        AuditEvent.create(
+                            severity=AuditSeverity.WARNING,
+                            actor=message.sender_id or message.channel.value,
+                            action="kill_session",
+                            target=message.session_key,
+                            status="cancelled" if cancelled else "no_active_run",
+                            channel=message.channel.value,
+                        )
+                    )
+                except Exception:
+                    pass
+
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content=reply,
+                    )
+                )
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content="",
+                        is_stream_end=True,
+                    )
+                )
+                continue
+
             # 2. Process message in background task (to not block loop)
             session_key = message.session_key
             task = asyncio.create_task(self._process_message(message))
@@ -117,7 +175,11 @@ class AgentLoop:
 
             def _on_done(t: asyncio.Task, key: str = session_key) -> None:
                 self._background_tasks.discard(t)
-                self._active_tasks.pop(key, None)
+                # Only remove from _active_tasks if this task is still the
+                # registered one — a newer task for the same session may have
+                # overwritten the entry already.
+                if self._active_tasks.get(key) is t:
+                    self._active_tasks.pop(key, None)
 
             task.add_done_callback(_on_done)
 
@@ -136,12 +198,18 @@ class AgentLoop:
                 if resolved_key not in self._session_locks:
                     self._session_locks[resolved_key] = asyncio.Lock()
                 lock = self._session_locks[resolved_key]
+                lock_contended = lock.locked()
+                if lock_contended:
+                    logger.info("Session lock contended for %s — waiting", resolved_key)
                 async with lock:
+                    if lock_contended:
+                        logger.info("Session lock acquired for %s", resolved_key)
                     await self._process_message_inner(message, resolved_key)
 
                 # Clean up lock if no one else is waiting on it
                 if not lock.locked():
                     self._session_locks.pop(resolved_key, None)
+                logger.info("Message processing complete for %s", session_key)
         except asyncio.CancelledError:
             logger.info("Processing cancelled for session %s", session_key)
             raise
@@ -212,6 +280,7 @@ class AgentLoop:
                                 data={
                                     "message": "Message blocked by injection scanner",
                                     "patterns": scan_result.matched_patterns,
+                                    "session_key": session_key,
                                 },
                             )
                         )
@@ -245,12 +314,14 @@ class AgentLoop:
 
             # 2. Build system prompt + session history concurrently (independent I/O)
             sender_id = message.sender_id
+            file_context = (message.metadata or {}).get("file_context")
             system_prompt, history = await asyncio.gather(
                 self.context_builder.build_system_prompt(
                     user_query=content,
                     channel=message.channel,
                     sender_id=sender_id,
                     session_key=message.session_key,
+                    file_context=file_context,
                 ),
                 self.memory.get_compacted_history(
                     session_key,
@@ -312,7 +383,10 @@ class AgentLoop:
 
                     elif etype == "token_usage":
                         await self.bus.publish_system(
-                            SystemEvent(event_type="token_usage", data=meta)
+                            SystemEvent(
+                                event_type="token_usage",
+                                data={**meta, "session_key": session_key},
+                            )
                         )
 
                     elif etype == "tool_use":
@@ -321,9 +395,29 @@ class AgentLoop:
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_start",
-                                data={"name": tool_name, "params": tool_input},
+                                data={
+                                    "name": tool_name,
+                                    "params": tool_input,
+                                    "session_key": session_key,
+                                },
                             )
                         )
+
+                        # AskUserQuestion — forward the question to the
+                        # client so the user can see and answer it.
+                        if tool_name == "AskUserQuestion":
+                            question = tool_input.get("question", "")
+                            options = tool_input.get("options", [])
+                            await self.bus.publish_system(
+                                SystemEvent(
+                                    event_type="ask_user_question",
+                                    data={
+                                        "question": question,
+                                        "options": options,
+                                        "session_key": session_key,
+                                    },
+                                )
+                            )
 
                     elif etype == "tool_result":
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
@@ -334,6 +428,7 @@ class AgentLoop:
                                     "name": tool_name,
                                     "result": econtent[:200],
                                     "status": "success",
+                                    "session_key": session_key,
                                 },
                             )
                         )
@@ -347,6 +442,7 @@ class AgentLoop:
                                     "name": "agent",
                                     "result": econtent,
                                     "status": "error",
+                                    "session_key": session_key,
                                 },
                             )
                         )

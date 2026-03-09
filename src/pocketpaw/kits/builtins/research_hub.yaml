@@ -1,0 +1,56 @@
+meta:
+  name: "Research Hub"
+  author: "PocketPaw"
+  version: "1.0.0"
+  description: "Organize research documents, track reading progress, and collect insights"
+  category: research
+  icon: book-open
+  tags: [research, documents, reading]
+  built_in: true
+
+layout:
+  columns: 2
+  sections:
+    - title: "Overview"
+      span: full
+      panels:
+        - id: metrics
+          type: metrics-row
+          items:
+            - { label: "Documents", source: "api:stats", field: "documents.total", format: "number" }
+            - { label: "To Read", source: "api:stats", field: "tasks.by_status.inbox", format: "number" }
+            - { label: "In Review", source: "api:stats", field: "tasks.by_status.in_progress", format: "number" }
+            - { label: "Completed", source: "api:stats", field: "tasks.by_status.done", format: "number" }
+
+    - title: "Reading Board"
+      span: full
+      panels:
+        - id: kanban
+          type: kanban
+          columns:
+            - { key: "inbox", label: "To Read", color: "gray" }
+            - { key: "in_progress", label: "Reading", color: "blue" }
+            - { key: "review", label: "Reviewed", color: "green" }
+          source: "api:tasks"
+          card_fields: [title, priority, task_type]
+
+    - title: "Recent Activity"
+      span: left
+      panels:
+        - id: activity_feed
+          type: feed
+          source: "api:activities"
+          max_items: 20
+
+    - title: "Research Documents"
+      span: right
+      panels:
+        - id: docs
+          type: table
+          source: "api:documents"
+          columns:
+            - { key: "title", label: "Title" }
+            - { key: "type", label: "Type" }
+            - { key: "updated_at", label: "Updated" }
+
+workflows: {}

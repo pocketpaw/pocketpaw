@@ -410,3 +410,28 @@ body {
     padding: 10px 14px;
   }
 }
+
+/* =====================================================
+   AskUserQuestion — inline option buttons
+   ===================================================== */
+.ask-user-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ask-user-option {
+  padding: 6px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--glass-border, rgba(255,255,255,0.12));
+  background: var(--bg-secondary, #1a1a2e);
+  color: var(--text-primary, #e0e0e0);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.ask-user-option:hover {
+  background: var(--accent-color, #4CAF50);
+  border-color: var(--accent-color, #4CAF50);
+  color: #fff;
+}

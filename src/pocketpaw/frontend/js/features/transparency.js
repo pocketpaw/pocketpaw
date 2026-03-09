@@ -424,6 +424,24 @@ window.PocketPaw.Transparency = {
                     return;
                 }
 
+                // AskUserQuestion — show interactive question in chat
+                if (eventType === 'ask_user_question') {
+                    const d = data.data || {};
+                    const question = d.question || 'The agent has a question:';
+                    const options = d.options || [];
+                    if (this.showAskUserQuestion) {
+                        this.showAskUserQuestion(question, options);
+                    }
+                    // Also log to activity panel
+                    const qEsc = question.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    this.activityLog.push({
+                        time: Tools.formatTime(),
+                        message: `<b>AskUserQuestion</b> ${qEsc}`,
+                        level: 'warning',
+                    });
+                    return;
+                }
+
                 // Handle standard system events
                 let message = '';
                 let level = 'info';
@@ -474,6 +492,16 @@ window.PocketPaw.Transparency = {
                     const name = data.data?.name || 'unknown';
                     const params = JSON.stringify(data.data?.params || {}).substring(0, 80);
                     this.log(`[TOOL] ${name} ${params}`, 'warning');
+
+                    // Auto-open file viewer for PDFs and images read by the agent
+                    if (name === 'Read' && data.data?.params?.file_path) {
+                        const fp = data.data.params.file_path;
+                        const ext = (fp.split('.').pop() || '').toLowerCase();
+                        const viewable = ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp'];
+                        if (viewable.includes(ext) && this.openFileViewer) {
+                            this.openFileViewer(fp);
+                        }
+                    }
                 } else if (eventType === 'tool_result') {
                     const name = data.data?.name || 'unknown';
                     const isErr = data.data?.status === 'error';

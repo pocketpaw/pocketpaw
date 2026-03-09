@@ -1,0 +1,102 @@
+<!--
+  PocketPaw Dashboard - File Viewer Modal
+
+  Created: 2026-03-03
+  Displays PDF, images, text/code, and unknown files in an in-app viewer.
+-->
+<!-- File Viewer Modal -->
+<div
+class="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+x-show="showFileViewer"
+x-transition.opacity
+@click.self="closeFileViewer()"
+@keydown.escape.window="closeFileViewer()"
+>
+<div class="w-full max-w-[900px] max-h-[90vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+
+    <!-- Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-[var(--glass-border)] shrink-0">
+        <div class="flex items-center gap-3 min-w-0">
+            <i data-lucide="file-text" class="w-5 h-5 text-[var(--accent-color)] shrink-0"></i>
+            <h2 class="text-[17px] font-semibold truncate" x-text="viewerFileName"></h2>
+            <span class="text-xs text-[var(--text-secondary)] px-2 py-0.5 bg-white/5 rounded-full shrink-0 uppercase" x-text="viewerFileType"></span>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+            <a
+                :href="viewerContentUrl"
+                download
+                class="p-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                title="Download"
+            >
+                <i data-lucide="download" class="w-4 h-4"></i>
+            </a>
+            <button class="p-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="closeFileViewer()">
+                <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Content -->
+    <div class="flex-1 overflow-hidden relative">
+
+        <!-- Loading -->
+        <template x-if="viewerLoading">
+            <div class="flex items-center justify-center h-64">
+                <div class="animate-spin w-8 h-8 border-2 border-[var(--accent-color)] border-t-transparent rounded-full"></div>
+            </div>
+        </template>
+
+        <!-- PDF viewer -->
+        <template x-if="!viewerLoading && viewerFileType === 'pdf'">
+            <iframe
+                :src="viewerContentUrl"
+                class="w-full h-full min-h-[70vh] border-0"
+                title="PDF Viewer"
+            ></iframe>
+        </template>
+
+        <!-- Image viewer -->
+        <template x-if="!viewerLoading && viewerFileType === 'image'">
+            <div class="p-6 overflow-auto flex items-center justify-center" style="max-height: calc(90vh - 70px);">
+                <img
+                    :src="viewerContentUrl"
+                    :alt="viewerFileName"
+                    class="max-w-full max-h-[75vh] object-contain rounded-lg border border-[var(--glass-border)]"
+                />
+            </div>
+        </template>
+
+        <!-- Text / Code viewer -->
+        <template x-if="!viewerLoading && viewerFileType === 'text'">
+            <div class="overflow-auto" style="max-height: calc(90vh - 70px);">
+                <pre class="p-6 text-sm leading-relaxed font-mono text-[var(--text-primary)] whitespace-pre-wrap break-words" x-text="viewerTextContent"></pre>
+            </div>
+        </template>
+
+        <!-- Error -->
+        <template x-if="!viewerLoading && viewerFileType === 'error'">
+            <div class="p-6 text-center">
+                <i data-lucide="alert-circle" class="w-12 h-12 mx-auto mb-4 text-[var(--danger-color)]"></i>
+                <p class="text-[var(--text-secondary)]" x-text="viewerTextContent"></p>
+            </div>
+        </template>
+
+        <!-- Unknown / unsupported -->
+        <template x-if="!viewerLoading && viewerFileType === 'unknown'">
+            <div class="p-6 text-center">
+                <i data-lucide="file-question" class="w-12 h-12 mx-auto mb-4 text-[var(--text-secondary)]"></i>
+                <p class="text-[var(--text-secondary)] mb-4">This file type cannot be previewed in the browser.</p>
+                <a
+                    :href="viewerContentUrl"
+                    download
+                    class="inline-flex items-center gap-2 px-4 py-2 bg-[var(--accent-color)] text-white rounded-lg hover:opacity-90 transition-opacity"
+                >
+                    <i data-lucide="download" class="w-4 h-4"></i>
+                    Download File
+                </a>
+            </div>
+        </template>
+
+    </div>
+</div>
+</div>

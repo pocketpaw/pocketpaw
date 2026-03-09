@@ -30,6 +30,7 @@ _COMMANDS = frozenset(
         "/backends",
         "/model",
         "/tools",
+        "/kill",
     }
 )
 
@@ -64,6 +65,12 @@ class CommandHandler:
         # so /resume <n> can reference by number
         self._last_shown: dict[str, list[dict]] = {}
         self._on_settings_changed: Callable[[], None] | None = None
+        # Optional agent loop for /kill (set by app startup when loop is running)
+        self._agent_loop: object | None = None
+
+    def set_agent_loop(self, loop: object | None) -> None:
+        """Set the agent loop instance for session-scoped /kill. Pass None to clear."""
+        self._agent_loop = loop
 
     def set_on_settings_changed(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked after any command mutates settings."""
@@ -123,6 +130,8 @@ class CommandHandler:
             return self._cmd_tools(message, args)
         elif cmd == "/help":
             return self._cmd_help(message)
+        elif cmd == "/kill":
+            return await self._cmd_kill(message, session_key)
         return None
 
     # ------------------------------------------------------------------
@@ -363,8 +372,7 @@ class CommandHandler:
 
         deleted = await memory.delete_session(resolved)
         # Remove alias so next message uses the default session key
-        if hasattr(memory._store, "remove_session_alias"):
-            await memory._store.remove_session_alias(session_key)
+        await memory.remove_session_alias(session_key)
 
         if deleted:
             return OutboundMessage(
@@ -588,6 +596,7 @@ class CommandHandler:
             "/backends — List all available backends\n"
             "/model — Show or switch model for current backend\n"
             "/tools — Show or switch tool profile\n"
+            "/kill — Kill the current agent run\n"
             "/help — Show this help message\n\n"
             "_Tip: Use !command instead of /command on channels"
             " where / is intercepted (e.g. Matrix)._"
@@ -596,6 +605,32 @@ class CommandHandler:
             channel=message.channel,
             chat_id=message.chat_id,
             content=text,
+        )
+
+    # ------------------------------------------------------------------
+    # /kill
+    # ------------------------------------------------------------------
+
+    async def _cmd_kill(self, message: InboundMessage, session_key: str) -> OutboundMessage:
+        """Handle the /kill command: cancel the agent run for this session only."""
+        loop = self._agent_loop
+        if loop is None:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content="No active agent run for this session.",
+            )
+        cancelled = await loop.cancel_session(session_key)
+        if cancelled:
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+                content="Agent run cancelled for this session.",
+            )
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content="No active agent run for this session.",
         )
 
 

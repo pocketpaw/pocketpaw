@@ -1,5 +1,7 @@
 # Tests for Mission Control Task Executor
 # Created: 2026-02-05
+# Updated: 2026-02-26 - Updated test_execute_task_with_error to set max_retries=0
+#   so the task goes to BLOCKED immediately (Deep Work v2 default is max_retries=1).
 # Updated: 2026-02-12 - Added test_background_execution_completes for
 #   execute_task_background self-defeating bug. Updated duplicate test
 #   to use execute_task_background entry point.
@@ -20,6 +22,7 @@ import pytest
 
 # Access the private module to inject test store
 import pocketpaw.mission_control.store as store_module
+from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.mission_control import (
     AgentProfile,
     AgentStatus,
@@ -118,19 +121,19 @@ async def assigned_task(manager, agent, task):
 
 
 def create_mock_router(chunks=None, error=None):
-    """Create a mock AgentRouter that yields predefined chunks."""
+    """Create a mock AgentRouter that yields predefined AgentEvent objects."""
     if chunks is None:
         chunks = [
-            {"type": "message", "content": "Starting task..."},
-            {"type": "tool_use", "content": "", "metadata": {"name": "search"}},
-            {"type": "tool_result", "content": "Found results"},
-            {"type": "message", "content": "Completing task."},
-            {"type": "done", "content": ""},
+            AgentEvent(type="message", content="Starting task..."),
+            AgentEvent(type="tool_use", content="", metadata={"name": "search"}),
+            AgentEvent(type="tool_result", content="Found results"),
+            AgentEvent(type="message", content="Completing task."),
+            AgentEvent(type="done", content=""),
         ]
 
     async def mock_run(prompt):
         for chunk in chunks:
-            if error and chunk.get("type") == "error":
+            if error and chunk.type == "error":
                 yield chunk
                 return
             yield chunk
@@ -231,10 +234,14 @@ class TestMCTaskExecutor:
 
     @pytest.mark.asyncio
     async def test_execute_task_with_error(self, executor, manager, assigned_task, agent):
-        """Test task execution with error."""
+        """Test task execution with error — no retries, goes straight to BLOCKED."""
+        # Set max_retries=0 so the v2 retry logic doesn't reset to ASSIGNED
+        assigned_task.max_retries = 0
+        await manager.save_task(assigned_task)
+
         error_chunks = [
-            {"type": "message", "content": "Starting..."},
-            {"type": "error", "content": "API rate limit exceeded"},
+            AgentEvent(type="message", content="Starting..."),
+            AgentEvent(type="error", content="API rate limit exceeded"),
         ]
         mock_router = create_mock_router(chunks=error_chunks, error=True)
 
@@ -250,7 +257,7 @@ class TestMCTaskExecutor:
         assert result["status"] == "error"
         assert "API rate limit" in result["error"]
 
-        # Check task status is blocked
+        # Check task status is blocked (no retries configured)
         task_updated = await manager.get_task(assigned_task.id)
         assert task_updated.status == TaskStatus.BLOCKED
 
@@ -309,7 +316,7 @@ class TestMCTaskExecutor:
 
         # Simulate a long-running task
         async def slow_run(prompt):
-            yield {"type": "message", "content": "Working..."}
+            yield AgentEvent(type="message", content="Working...")
             await asyncio.sleep(10)  # Long wait
 
         mock_router = MagicMock()

@@ -6,6 +6,8 @@ PocketPaw is an open-source AI agent that runs locally and connects to Telegram,
 
 We welcome contributions that solve real problems: bug fixes, new tools, channel adapters, tests, meaningful documentation improvements.
 
+> **GitHub Copilot users:** see [`.github/copilot-instructions.md`](.github/copilot-instructions.md) for repo-specific Copilot guidance that keeps suggestions aligned with our architecture.
+
 ## What we don't accept
 
 To keep the review queue healthy, we close PRs that fall into these categories:
@@ -207,4 +209,4 @@ Open an issue with:
 
 ## Questions
 
-Join our [Discord server](https://dsc.gg/pocketpaw), open a [Discussion](https://github.com/pocketpaw/pocketpaw/discussions), or comment on a relevant issue. We're around.
+Join our [Discord server](https://discord.gg/asRrtm95Zc), open a [Discussion](https://github.com/pocketpaw/pocketpaw/discussions), or comment on a relevant issue. We're around.

@@ -332,8 +332,7 @@ class TestDeleteSessionTool:
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:123:abc")
         mm.delete_session = AsyncMock(return_value=True)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock(return_value=True)
+        mm.remove_session_alias = AsyncMock(return_value=True)
         mock_get_mm.return_value = mm
 
         result = await self.tool.execute(session_key="discord:123")
@@ -346,8 +345,7 @@ class TestDeleteSessionTool:
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:123")
         mm.delete_session = AsyncMock(return_value=False)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock()
+        mm.remove_session_alias = AsyncMock()
         mock_get_mm.return_value = mm
 
         result = await self.tool.execute(session_key="discord:123")

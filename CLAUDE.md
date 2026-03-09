@@ -126,3 +126,42 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP
 - **Entry point**: `pocketpaw.__main__:main`
 - **Lazy imports**: Agent backends are imported inside `AgentRouter._initialize_agent()` to avoid loading unused dependencies
+
+---
+
+## Desktop Client (`client/`)
+
+The Tauri 2.0 + SvelteKit desktop app lives in `client/`. It connects to the Python backend via REST/WebSocket.
+
+### Commands
+
+```bash
+cd client && bun install               # Install deps (uses Bun, not npm)
+cd client && bun run dev               # Vite dev server (http://localhost:1420)
+cd client && bun run build             # Production build → client/build
+cd client && bun run check             # Type check (svelte-kit sync + svelte-check)
+cd client && bun run tauri dev         # Full desktop app (frontend + Tauri shell)
+cd client && bun run tauri build       # Build desktop app
+cd client && bun run tauri:android     # Android dev
+cd client && bun run tauri:ios         # iOS dev
+```
+
+### Architecture
+
+**SvelteKit 2 + Svelte 5** static SPA (adapter-static, no SSR) bundled into **Tauri 2.0** desktop app. Rust backend (`client/src-tauri/`) handles OAuth tokens, system tray, global hotkeys, notifications, and multi-window management.
+
+**State management**: Svelte 5 runes (`$state`, `$derived`, `$effect`) in `client/src/lib/stores/`.
+
+**API layer**: REST client (`client/src/lib/api/client.ts`) with Bearer auth + 401 refresh. WebSocket (`client/src/lib/api/websocket.ts`) for streaming with auto-reconnect.
+
+**UI**: shadcn-svelte (bits-ui + Tailwind CSS 4) components. Custom window chrome.
+
+### Conventions
+
+- Bun for package management (not npm/yarn)
+- TypeScript strict mode, Svelte 5 runes
+- Tailwind CSS 4 with `@tailwindcss/vite`
+- Tauri IPC commands in `client/src-tauri/src/commands.rs`
+- Internal design docs in `client/internal-docs/`
+
+See `client/CLAUDE.md` for full details.

@@ -111,6 +111,10 @@ class _FakeSDKClient:
         for msg in self._responses:
             yield msg
 
+    async def receive_messages(self):
+        for msg in self._responses:
+            yield msg
+
     async def disconnect(self):
         self.connected = False
         self.disconnected = True
@@ -328,7 +332,7 @@ async def test_chat_uses_persistent_client_for_moderate():
                 async for ev in sdk.run("analyze this code", system_prompt="identity"):
                     events.append(ev)
 
-    assert fake_client.connected
+    # Client was used (connected then disconnected by cleanup since no ResultMessage)
     assert fake_client.queries == ["analyze this code"]
     assert any(e.type == "done" for e in events)
 

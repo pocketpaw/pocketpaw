@@ -170,7 +170,7 @@ class TestAgentSpecModel:
         """Test AgentSpec default values."""
         spec = AgentSpec()
         assert spec.name == ""
-        assert spec.backend == "claude_agent_sdk"
+        assert spec.backend == ""
 
     def test_agent_spec_to_dict_from_dict_roundtrip(self):
         """Test AgentSpec round-trip serialization."""

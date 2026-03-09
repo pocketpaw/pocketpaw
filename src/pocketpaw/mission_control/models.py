@@ -1,13 +1,14 @@
 """Mission Control data models.
 
 Created: 2026-02-05
+Updated: 2026-02-26 — Deep Work v2: Added retry, timeout, output, and error
+  fields to Task model for enhanced execution control:
+  - output: store execution result directly on task
+  - retry_count / max_retries: auto-retry failed tasks
+  - timeout_minutes: per-task execution timeout
+  - error_message: last error for diagnostics
 Updated: 2026-02-12 — Added SKIPPED status to TaskStatus enum for Deep Work
-  skip-task feature. Extended Task model with Deep Work fields:
-  - project_id: optional project grouping
-  - task_type: "agent" | "human" | "review"
-  - blocks: list of task IDs this task blocks
-  - active_description: present-continuous description for spinner UI
-  - estimated_minutes: optional time estimate
+  skip-task feature. Extended Task model with Deep Work fields.
 
 Part of Mission Control feature for multi-agent orchestration.
 
@@ -231,6 +232,11 @@ class Task:
         blocks: List of task IDs this task blocks (Deep Work)
         active_description: Present-continuous description for spinner UI (Deep Work)
         estimated_minutes: Optional time estimate in minutes (Deep Work)
+        output: Execution output stored directly on the task (Deep Work v2)
+        retry_count: Current retry attempt number (Deep Work v2)
+        max_retries: Maximum auto-retries for failed tasks (Deep Work v2)
+        timeout_minutes: Per-task execution timeout in minutes (Deep Work v2)
+        error_message: Last error message for diagnostics (Deep Work v2)
     """
 
     id: str = field(default_factory=generate_id)
@@ -254,6 +260,11 @@ class Task:
     blocks: list[str] = field(default_factory=list)
     active_description: str = ""
     estimated_minutes: int | None = None
+    output: str | None = None
+    retry_count: int = 0
+    max_retries: int = 1
+    timeout_minutes: int | None = None
+    error_message: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -279,6 +290,11 @@ class Task:
             "blocks": self.blocks,
             "active_description": self.active_description,
             "estimated_minutes": self.estimated_minutes,
+            "output": self.output,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "timeout_minutes": self.timeout_minutes,
+            "error_message": self.error_message,
         }
 
     @classmethod
@@ -306,6 +322,11 @@ class Task:
             blocks=data.get("blocks", []),
             active_description=data.get("active_description", ""),
             estimated_minutes=data.get("estimated_minutes"),
+            output=data.get("output"),
+            retry_count=data.get("retry_count", 0),
+            max_retries=data.get("max_retries", 1),
+            timeout_minutes=data.get("timeout_minutes"),
+            error_message=data.get("error_message"),
         )
 
 

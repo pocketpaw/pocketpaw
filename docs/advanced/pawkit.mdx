@@ -1,0 +1,486 @@
+---
+title: PawKit Reference
+description: "Technical reference for the PawKit YAML schema — the configuration format behind Command Center templates. Covers layout, panels, workflows, user config, integrations, and the Python API for loading and saving kits."
+section: Advanced
+ogType: article
+keywords: ["pawkit", "yaml schema", "command center template", "panel types", "workflows", "dashboard config"]
+tags: ["advanced", "pawkit", "command-centers"]
+---
+
+# PawKit Reference
+
+A PawKit is a YAML file that defines everything about a [Command Center](/concepts/command-centers): what the user sees (layout), what the agent does automatically (workflows), what the user configures on install (user_config), what domain knowledge is included (skills), and what external services are needed (integrations).
+
+This page is the technical reference. For the concept and vision behind Command Centers, see [Command Centers](/concepts/command-centers).
+
+## Schema Overview
+
+```yaml
+meta:
+  name: "My Kit"
+  author: "your-name"
+  version: "0.1.0"
+  description: "What this kit does"
+  category: "business"
+  tags: [crm, sales]
+
+layout:
+  columns: 2
+  sections: [...]
+
+workflows:
+  daily_scan:
+    schedule: "daily 8am"
+    instruction: "..."
+    output_type: structured
+
+user_config:
+  - key: api_key
+    label: "API Key"
+    field_type: secret
+
+skills: [domain-knowledge.md]
+
+integrations:
+  required: [google-calendar]
+  optional: [slack]
+```
+
+## Meta
+
+Every PawKit starts with metadata for display and marketplace indexing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Display name (required) |
+| `author` | string | Creator name or handle |
+| `version` | string | Semver version (default: `0.1.0`) |
+| `description` | string | What this kit does, shown in the Kit Store |
+| `category` | enum | Domain category (see below) |
+| `tags` | list | Searchable tags |
+| `icon` | string | Icon identifier for the sidebar |
+| `preview_image` | string | Screenshot path for marketplace listing |
+| `built_in` | bool | Whether this ships with PocketPaw (default: `false`) |
+
+### Categories
+
+`general`, `code`, `business`, `creative`, `education`, `content`, `marketing`, `devops`, `finance`, `health`, `realestate`
+
+## Layout
+
+The layout defines a grid of sections, each containing one or more panels.
+
+```yaml
+layout:
+  columns: 2
+  sections:
+    - title: Overview
+      span: full
+      panels:
+        - id: key-metrics
+          panel_type: metrics_row
+          items:
+            - label: Active Projects
+              source: workflows.project_scan
+            - label: Revenue MTD
+              source: workflows.finance_scan
+    - title: Pipeline
+      span: left
+      panels:
+        - id: deals
+          panel_type: kanban
+          columns:
+            - id: lead
+              title: Leads
+            - id: proposal
+              title: Proposals
+            - id: closed
+              title: Closed
+    - title: Activity
+      span: right
+      panels:
+        - id: recent
+          panel_type: feed
+          max_items: 20
+```
+
+### Section Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | string | Section heading |
+| `span` | enum | Width: `full`, `left`, or `right` |
+| `panels` | list | One or more panels in this section |
+
+### Panel Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique panel identifier |
+| `panel_type` | enum | Widget type (see Panel Types below) |
+| `source` | string | Data source — typically a workflow output like `workflows.daily_scan` |
+| `config` | object | Panel-specific settings |
+| `actions` | list | Interactive buttons (agent_action, dismiss, navigate, api_call) |
+| `items` | list | For `metrics_row`: the stat cards to display |
+| `columns` | list | For `kanban`: the column definitions |
+| `chart_type` | enum | For `chart`: `line`, `bar`, `pie`, or `area` |
+| `max_items` | int | Limit displayed items |
+| `filter` | object | Filter criteria for the data source |
+| `card_fields` | list | Which fields to show on kanban cards |
+| `period` | string | Time range for charts (e.g., `7d`, `30d`) |
+| `label` | string | Display label override |
+
+### Panel Types
+
+| Type | What It Renders |
+|------|----------------|
+| `metrics_row` | Row of stat cards — counts, percentages, deltas |
+| `table` | Sortable, filterable data table |
+| `kanban` | Drag-and-drop columns with cards |
+| `chart` | Line, bar, pie, or area visualization |
+| `feed` | Scrollable activity or event feed |
+| `calendar` | Month or week view with events |
+| `pipeline` | Stage-based pipeline (like a sales funnel) |
+| `markdown` | Rendered markdown content block |
+| `status_list` | List of items with status indicators |
+| `progress_tracker` | Progress bar with labeled milestones |
+
+### Panel Actions
+
+Attach interactive buttons to any panel:
+
+```yaml
+panels:
+  - id: reviews
+    panel_type: feed
+    source: workflows.review_scan
+    actions:
+      - label: "Draft Reply"
+        action_type: agent_action
+        instruction: "Draft a professional reply to this review"
+      - label: "Dismiss"
+        action_type: dismiss
+```
+
+Action types: `agent_action` (triggers agent task), `dismiss` (removes item), `navigate` (opens URL), `api_call` (hits external endpoint).
+
+## Workflows
+
+Workflows are automated tasks the agent runs on a schedule or in response to a trigger. Each workflow produces structured output that panels consume.
+
+### Scheduled Workflows
+
+Run on a human-readable schedule or cron expression:
+
+```yaml
+workflows:
+  morning_brief:
+    schedule: "daily 8am"
+    instruction: >
+      Check all connected platforms. Summarize new messages,
+      pending reviews, and any metrics that changed significantly
+      since yesterday. Return structured data.
+    output_type: structured
+    retry: 2
+
+  weekly_report:
+    schedule: "0 9 * * 1"  # Monday 9 AM (cron)
+    instruction: >
+      Generate a weekly performance report covering the last 7 days.
+      Include trends, highlights, and action items.
+    output_type: document
+    channels: [telegram]
+    message: "Your weekly report is ready."
+```
+
+### Trigger-Based Workflows
+
+React to conditions instead of running on a clock:
+
+```yaml
+workflows:
+  low_stock_alert:
+    trigger:
+      trigger_type: threshold
+      source: workflows.inventory_scan
+      condition: "stock_level < 10"
+    instruction: "Generate a restock recommendation for items below threshold."
+    output_type: structured
+    channels: [telegram, slack]
+    message: "Low stock alert: {{item_count}} items need restocking."
+
+  review_response:
+    trigger:
+      trigger_type: event
+      source: "new_review"
+    instruction: "Draft a reply to this customer review."
+    output_type: feed
+    target_column: "needs_reply"
+```
+
+### Workflow Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schedule` | string | When to run — human-readable (`daily 8am`) or cron (`0 9 * * 1`) |
+| `trigger` | object | Alternative to schedule — reactive trigger |
+| `instruction` | string | What the agent should do (required) |
+| `output_type` | enum | `structured`, `task_list`, `feed`, or `document` |
+| `retry` | int | How many times to retry on failure (default: 2) |
+| `target_column` | string | For kanban panels: which column to place output items |
+| `channels` | list | Which channels to notify (e.g., `[telegram, slack]`) |
+| `message` | string | Notification message template (supports `{{placeholders}}`) |
+| `format` | string | Output format hint |
+
+A workflow must have either `schedule` or `trigger`, not both.
+
+### Trigger Types
+
+| Type | Fires When |
+|------|-----------|
+| `threshold` | A monitored value crosses a condition (e.g., `stock < 10`) |
+| `event` | An external event occurs (e.g., new review, new order) |
+| `cascade` | Another workflow completes (chain workflows together) |
+
+### Output Types
+
+| Type | What It Produces |
+|------|-----------------|
+| `structured` | JSON data consumed by table, metrics, or chart panels |
+| `task_list` | Tasks placed into a kanban column |
+| `feed` | Items appended to a feed panel |
+| `document` | Saved as a downloadable report |
+
+## User Config
+
+Fields the user fills in during PawKit installation. Workflows reference these values via `{{user_config.<key>}}` placeholders.
+
+```yaml
+user_config:
+  - key: youtube_channel_id
+    label: "YouTube Channel ID"
+    field_type: text
+    placeholder: "UC..."
+    help_url: "https://support.google.com/youtube/answer/3250431"
+
+  - key: api_key
+    label: "API Key"
+    field_type: secret
+
+  - key: brand_voice
+    label: "Brand Voice"
+    field_type: text
+    placeholder: "Friendly, professional, slightly witty"
+    default: "Professional and helpful"
+
+  - key: content_niche
+    label: "Content Niche"
+    field_type: select
+    options: [tech, lifestyle, gaming, education, business]
+
+  - key: alert_threshold
+    label: "Low Stock Alert Threshold"
+    field_type: number
+    default: 10
+
+  - key: auto_reply
+    label: "Auto-reply to reviews"
+    field_type: boolean
+    default: false
+```
+
+### Field Types
+
+| Type | Input Widget |
+|------|-------------|
+| `text` | Single-line text input |
+| `secret` | Password-style input (masked, stored securely) |
+| `select` | Dropdown from `options` list |
+| `number` | Numeric input |
+| `boolean` | Toggle switch |
+
+## Skills & Integrations
+
+### Skills
+
+Bundled domain knowledge files. These are markdown files the agent loads as context when running workflows.
+
+```yaml
+skills:
+  - youtube-seo-guide.md
+  - thumbnail-analysis-framework.md
+  - content-calendar-template.md
+```
+
+### Integrations
+
+External services the PawKit depends on. Shown to the user during install so they know what to connect.
+
+```yaml
+integrations:
+  required: [youtube-api]
+  optional: [google-analytics, social-blade]
+```
+
+## Full Example
+
+A content calendar PawKit that tracks, schedules, and analyzes content across platforms:
+
+```yaml
+meta:
+  name: Content Calendar
+  author: pocketpaw
+  version: 0.1.0
+  description: Plan, schedule, and track content across platforms
+  category: content
+  tags: [social-media, scheduling, analytics]
+  icon: lucide:calendar
+
+layout:
+  columns: 2
+  sections:
+    - title: Overview
+      span: full
+      panels:
+        - id: metrics
+          panel_type: metrics_row
+          items:
+            - label: Scheduled
+              source: workflows.content_scan
+            - label: Published This Week
+              source: workflows.content_scan
+            - label: Engagement Rate
+              source: workflows.analytics_scan
+    - title: Content Pipeline
+      span: left
+      panels:
+        - id: pipeline
+          panel_type: kanban
+          columns:
+            - id: idea
+              title: Ideas
+            - id: drafting
+              title: Drafting
+            - id: review
+              title: Review
+            - id: scheduled
+              title: Scheduled
+            - id: published
+              title: Published
+          card_fields: [title, platform, due_date]
+          actions:
+            - label: "Draft with AI"
+              action_type: agent_action
+              instruction: "Write a first draft based on this content idea"
+    - title: Recent Activity
+      span: right
+      panels:
+        - id: activity
+          panel_type: feed
+          max_items: 15
+          source: workflows.content_scan
+
+workflows:
+  content_scan:
+    schedule: "daily 8am"
+    instruction: >
+      Check all connected platforms for scheduled and recently published
+      content. Return structured data with post titles, platforms,
+      publish dates, and status.
+    output_type: structured
+    retry: 2
+
+  analytics_scan:
+    schedule: "daily 9am"
+    instruction: >
+      Pull engagement metrics for content published in the last 7 days.
+      Calculate average engagement rate and flag any posts performing
+      significantly above or below average.
+    output_type: structured
+
+  weekly_summary:
+    schedule: "0 9 * * 1"
+    instruction: >
+      Generate a weekly content performance report. Include top
+      performing posts, engagement trends, and recommendations
+      for next week's content strategy.
+    output_type: document
+    channels: [telegram]
+    message: "Your weekly content report is ready."
+
+  low_engagement_alert:
+    trigger:
+      trigger_type: threshold
+      source: workflows.analytics_scan
+      condition: "engagement_rate < 2.0"
+    instruction: "Analyze why recent posts are underperforming and suggest improvements."
+    output_type: feed
+    channels: [telegram]
+    message: "Heads up — engagement dropped below 2%. Check the dashboard for details."
+
+user_config:
+  - key: brand_voice
+    label: Brand Voice
+    field_type: text
+    placeholder: "Friendly, professional, slightly witty"
+  - key: platforms
+    label: Primary Platform
+    field_type: select
+    options: [youtube, instagram, tiktok, twitter, linkedin]
+  - key: posting_frequency
+    label: Posts Per Week
+    field_type: number
+    default: 3
+
+skills:
+  - content-strategy-guide.md
+  - platform-best-practices.md
+
+integrations:
+  required: []
+  optional: [google-calendar, reddit, youtube-api]
+```
+
+## Python API
+
+Load and save PawKit configs programmatically:
+
+```python
+from pathlib import Path
+from pocketpaw.deep_work.pawkit import (
+    load_pawkit,
+    save_pawkit,
+    load_pawkit_from_string,
+    PawKitConfig,
+    PawKitMeta,
+    LayoutConfig,
+)
+
+# Load from file
+config = load_pawkit(Path("content-calendar.yaml"))
+print(config.meta.name)        # "Content Calendar"
+print(len(config.workflows))   # 4
+print(config.layout.columns)   # 2
+
+# Modify and save
+config.meta.version = "0.2.0"
+save_pawkit(config, Path("content-calendar-v2.yaml"))
+
+# Load from string (useful for testing or API input)
+config = load_pawkit_from_string(yaml_string)
+
+# Build from scratch
+config = PawKitConfig(
+    meta=PawKitMeta(name="My Kit", category="business"),
+    layout=LayoutConfig(columns=2),
+)
+save_pawkit(config, Path("my-kit.yaml"))
+```
+
+<Callout type="warning">
+  PyYAML is required for loading and saving PawKit files. Install it with `pip install pyyaml` if it's not already available. The Pydantic models work without it for in-memory usage.
+</Callout>
+
+<Callout type="info">
+  PawKit schema is at v0.1. The core structure (meta, layout, workflows, user_config) is stable. New panel types, trigger types, and workflow features will be added as Command Centers evolve. See the [roadmap](/advanced/roadmap) for what's coming.
+</Callout>

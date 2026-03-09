@@ -1,0 +1,99 @@
+---
+title: Command Centers
+description: "Command Centers are agent-operated dashboards — not static visualizations, but living workspaces where your AI agent monitors data, runs workflows, and surfaces what matters. PawKits are publishable templates that give any Command Center a head start."
+section: Core Concepts
+ogType: article
+keywords: ["command centers", "pawkit", "agent dashboard", "ai workspace", "canva for ai", "kit store", "agent operated"]
+tags: ["concepts", "command-centers", "pawkit"]
+---
+
+# Command Centers
+
+A Command Center is a custom dashboard that your AI agent actually operates. Not a static page of charts you stare at — a workspace where the agent monitors, researches, updates, and alerts on your behalf. You manage. The agent works.
+
+## The Shift
+
+Traditional apps put you in the driver's seat. You open the app, click through menus, read data, make decisions, take action. That works until you're managing six platforms, three inboxes, and a content calendar.
+
+Command Centers flip the model:
+
+| Traditional Apps | Command Centers |
+|-----------------|-----------------|
+| You navigate to data | Agent brings data to you |
+| You check dashboards | Agent surfaces what changed |
+| You click buttons | Agent runs workflows automatically |
+| You create reports | Agent generates summaries on schedule |
+| You notice problems | Agent alerts you before they escalate |
+
+The dashboard still looks like a dashboard — metrics, tables, kanban boards, feeds. But behind every panel is an agent that's been doing the legwork while you were away.
+
+## What You See
+
+A Command Center is made of **sections** and **panels** arranged in a grid. The layout depends on the domain:
+
+- A **YouTube Creator Studio** might show a metrics row (subscribers, views, revenue), a content pipeline kanban, a comments feed, and a performance chart
+- A **Freelance Business HQ** might show active projects, invoice status, a client communication feed, and cash flow projections
+- A **DevOps War Room** might show service health, recent deployments, alert history, and on-call rotation
+
+Each panel pulls data from workflows the agent runs on a schedule or in response to triggers. When you open the Command Center in the morning, everything is already up to date.
+
+## PawKits: Templates That Work Immediately
+
+Every Command Center starts from a **PawKit** — a YAML template that bundles everything the dashboard needs:
+
+- **Layout** — which panels go where, how wide, what type (table, chart, kanban, feed)
+- **Workflows** — what the agent does automatically (morning scans, threshold alerts, weekly reports)
+- **User Config** — what you fill in during setup (API keys, brand voice, niche, preferences)
+- **Skills** — domain knowledge the agent needs (SEO tips, tax rules, content frameworks)
+- **Integrations** — which external services to connect (Google Calendar, Reddit, Spotify)
+
+When you install a PawKit, PocketPaw asks a few setup questions, renders the dashboard, and the agent starts working. Five minutes from install to a fully operational workspace.
+
+### Building Through Conversation
+
+You don't need to write YAML. Describe what you want and PocketPaw generates it:
+
+```
+You: I need a command center for managing my Etsy shop
+PocketPaw: What would you want to see at a glance?
+You: Active listings with stock levels, this week's sales, reviews
+     that need responses, and inventory alerts
+PocketPaw: What should I monitor automatically?
+You: Check reviews every morning. Alert me if stock drops below 10.
+     Send a Monday morning sales summary to Telegram.
+PocketPaw: [renders dashboard with metrics, listing table, review feed,
+            and three scheduled workflows]
+```
+
+Need to tweak it? Just say so — "move the chart above the table", "add a column for tags", "change the stock alert threshold to 5". Every change updates the config live. You never touch the YAML unless you want to.
+
+### The Kit Store
+
+PawKits are shareable. Once you've built and tuned a Command Center for your domain — spending weeks getting the workflows right, the layout polished, the skills dialed in — you can strip out your personal data and publish it.
+
+Other users browse by category, preview the layout, check what integrations are needed, and install with one click. Think app store, but for AI workspaces.
+
+Categories span the full range: content creation, e-commerce, real estate, education, marketing, DevOps, finance, health — any domain where monitoring and automation help.
+
+<Callout type="info">
+  The Kit Store ships in phases. Right now PawKits are YAML configs you load manually. Conversational building and the in-app marketplace are on the [roadmap](/advanced/roadmap).
+</Callout>
+
+## How It Connects
+
+Command Centers build on existing PocketPaw infrastructure:
+
+- **[Deep Work](/advanced/deep-work)** becomes the built-in "Project Orchestrator" Command Center — the same planning and execution engine, rendered as panels in the new framework
+- **[Mission Control](/advanced/mission-control)** handles task storage, agent management, and the execution engine underneath
+- **[Message Bus](/concepts/message-bus)** streams real-time updates to every panel via WebSocket
+- **Workflows** use the same agent backends, tools, and memory as regular chat
+
+The key insight: PocketPaw already has the engine (agents, tools, scheduling, multi-channel delivery). Command Centers give that engine a purpose-built interface for every domain.
+
+## Why This Matters
+
+Most AI agents suffer from the blank canvas problem. You install them, open the chat, and think: "now what?" PawKits solve that the same way Canva solved design — by giving you a starting point that's already useful, then letting you customize from there.
+
+A YouTube creator doesn't need to figure out what to ask the agent. They install "YouTube Creator Studio", connect their channel, and the agent is already tracking analytics, flagging comments, and drafting video descriptions by morning.
+
+For a deeper look at the YAML schema and how to build PawKits programmatically, see the [PawKit Reference](/advanced/pawkit).

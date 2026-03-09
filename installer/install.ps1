@@ -7,24 +7,28 @@
     Bootstraps Python, uv, and downloads the interactive installer.
     Equivalent to install.sh but for native Windows (PowerShell 5.1+).
 
-.PARAMETER NonInteractive
-    Run without prompts (accept defaults).
-
-.PARAMETER Profile
-    Installation profile: minimal, recommended (default), or full.
+    Supports both piped invocation (iwr ... | iex) and direct file execution.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/install.ps1 | iex
+    iwr -useb https://pocketpaw.xyz/install.ps1 | iex
+.EXAMPLE
+    .\install.ps1 -NonInteractive -Profile minimal
 #>
 
-[CmdletBinding()]
-param(
-    [switch]$NonInteractive,
-    [ValidateSet("minimal", "recommended", "full")]
-    [string]$Profile = "recommended"
-)
+# When run as a script file, [CmdletBinding()]/param() work fine.
+# When piped to iex (iwr ... | iex), PowerShell rejects them at parse time.
+# Wrapping the body in a function avoids this: iex can define and call a
+# function with [CmdletBinding()] without issue.
 
-$ErrorActionPreference = "Stop"
+function Install-PocketPaw {
+    [CmdletBinding()]
+    param(
+        [switch]$NonInteractive,
+        [ValidateSet("minimal", "recommended", "full")]
+        [string]$Profile = "recommended"
+    )
+
+    $ErrorActionPreference = "Stop"
 
 # ── Force UTF-8 output so emojis and box-drawing characters render correctly
 # on Windows terminals that default to legacy code pages (e.g. cp1252/437).
@@ -278,6 +282,9 @@ if ($uvAvailable) { $extraFlags += "--uv-available" }
 if ($NonInteractive) { $extraFlags += "--non-interactive" }
 if ($Profile -ne "recommended") { $extraFlags += "--profile"; $extraFlags += $Profile }
 
+# Ensure Python subprocess uses UTF-8 so emoji/unicode renders correctly
+$env:PYTHONIOENCODING = "utf-8"
+
 try {
     if ($Python -eq "py -3") {
         & py -3 $TempInstaller --pip-cmd $PipCmd @extraFlags
@@ -287,3 +294,10 @@ try {
 } finally {
     Remove-Item $TempInstaller -ErrorAction SilentlyContinue
 }
+
+}  # end Install-PocketPaw
+
+# ── Entry point ───────────────────────────────────────────────────────
+# When piped to iex: call with defaults (iex doesn't support passing params).
+# When run as a file: forward $args so e.g. .\install.ps1 -NonInteractive works.
+Install-PocketPaw @args

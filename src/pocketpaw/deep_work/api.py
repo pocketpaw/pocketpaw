@@ -1,10 +1,10 @@
 # Deep Work API endpoints.
 # Created: 2026-02-12
-# Updated: 2026-02-18 — Added POST /parse-goal endpoint for structured goal
-#   analysis. Updated /start to accept goal_analysis and pass to session.
-#   Plan response now includes goal_analysis from project metadata.
-# Updated: 2026-02-16 — Enrich project dict with folder_path and file_count
-#   in get_plan() so the frontend Output Files panel can browse project output.
+# Updated: 2026-02-26 — Deep Work v2: Added cancel and retry endpoints.
+#   POST /projects/{id}/cancel — cancel project, stop all tasks
+#   POST /projects/{id}/tasks/{tid}/retry — manual retry of a failed task
+# Updated: 2026-02-18 — Added POST /parse-goal endpoint.
+# Updated: 2026-02-16 — Enrich project dict with folder_path and file_count.
 #
 # FastAPI router for Deep Work orchestration:
 #   POST /parse-goal                          — analyze goal (domain, complexity)
@@ -13,7 +13,9 @@
 #   POST /projects/{id}/approve               — approve plan, start execution
 #   POST /projects/{id}/pause                 — pause execution
 #   POST /projects/{id}/resume                — resume execution
+#   POST /projects/{id}/cancel                — cancel project
 #   POST /projects/{id}/tasks/{tid}/skip      — skip a task
+#   POST /projects/{id}/tasks/{tid}/retry     — retry a failed task
 #
 # Mount: app.include_router(deep_work_router, prefix="/api/deep-work")
 
@@ -266,6 +268,69 @@ async def skip_task(project_id: str, task_id: str) -> dict[str, Any]:
         logger.warning(f"Scheduler cascade after skip failed: {e}")
 
     # Return updated task and progress
+    progress = await manager.get_project_progress(project_id)
+
+    return {
+        "success": True,
+        "task": task.to_dict(),
+        "progress": progress,
+    }
+
+
+@router.post("/projects/{project_id}/cancel")
+async def cancel_project(project_id: str) -> dict[str, Any]:
+    """Cancel a project — stop all tasks and mark as cancelled."""
+    from pocketpaw.deep_work import cancel_project as _cancel
+
+    try:
+        project = await _cancel(project_id)
+        return {"success": True, "project": project.to_dict()}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Cancel failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/retry")
+async def retry_task(project_id: str, task_id: str) -> dict[str, Any]:
+    """Manually retry a failed/blocked task.
+
+    Resets the task status to ASSIGNED and re-dispatches it.
+    Increments retry_count regardless of max_retries (manual override).
+    """
+    from pocketpaw.deep_work import get_deep_work_session
+    from pocketpaw.mission_control.manager import get_mission_control_manager
+    from pocketpaw.mission_control.models import TaskStatus, now_iso
+
+    manager = get_mission_control_manager()
+
+    task = await manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Task does not belong to this project")
+    if task.status not in (TaskStatus.BLOCKED,):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only retry tasks with status 'blocked', got '{task.status.value}'",
+        )
+
+    # Reset task for retry
+    task.status = TaskStatus.ASSIGNED
+    task.retry_count += 1
+    task.error_message = None
+    task.updated_at = now_iso()
+    await manager.save_task(task)
+
+    # Re-dispatch via scheduler
+    try:
+        session = get_deep_work_session()
+        await session.scheduler._dispatch_task(task)
+    except Exception as e:
+        logger.warning(f"Re-dispatch after manual retry failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Retry dispatch failed: {e}")
+
     progress = await manager.get_project_progress(project_id)
 
     return {

@@ -33,6 +33,11 @@ from pocketpaw.bus.format import convert_markdown
 
 logger = logging.getLogger(__name__)
 
+# Typing indicator refresh interval (Telegram clears typing after ~5s)
+_TYPING_REFRESH_INTERVAL = 4.0
+# Stream buffer update interval (rate limiting for message edits)
+_BUFFER_UPDATE_INTERVAL = 1.5
+
 
 class TelegramAdapter(BaseChannelAdapter):
     """Adapter for Telegram Bot API."""
@@ -42,6 +47,8 @@ class TelegramAdapter(BaseChannelAdapter):
         self.token = token
         self.allowed_user_id = allowed_user_id
         self.app: Application | None = None
+        self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing refresh task
+        self._buffers: dict[str, Any] = {}
 
     @property
     def channel(self) -> Channel:
@@ -70,6 +77,7 @@ class TelegramAdapter(BaseChannelAdapter):
             "model",
             "tools",
             "help",
+            "kill",
         )
         for cmd_name in _cmds:
             self.app.add_handler(CommandHandler(cmd_name, self._handle_command))
@@ -110,6 +118,7 @@ class TelegramAdapter(BaseChannelAdapter):
                     BotCommand("model", "Show or switch model"),
                     BotCommand("tools", "Show or switch tool profile"),
                     BotCommand("help", "Show available commands"),
+                    BotCommand("kill", "Cancel the current agent run"),
                 ]
             )
         except Exception as e:
@@ -119,6 +128,11 @@ class TelegramAdapter(BaseChannelAdapter):
 
     async def _on_stop(self) -> None:
         """Stop Telegram bot."""
+        # Cancel all typing indicator tasks
+        for task in self._typing_tasks.values():
+            task.cancel()
+        self._typing_tasks.clear()
+
         if self.app:
             if self.app.updater.running:
                 await self.app.updater.stop()
@@ -150,69 +164,17 @@ class TelegramAdapter(BaseChannelAdapter):
         # If message.chat_id matches our user, we send.
 
         try:
-            # Handle stream chunks? Telegram doesn't support streaming well.
-            # We should probably accumulate or ignore 'is_stream_chunk' unless we do live editing.
-            # For simplicity in Phase 2, we IGNORE stream chunks and only send the final message?
-            # OR we implement a simple buffer.
-            # `AgentLoop` sends "is_stream_chunk=True" for deltas,
-            # and "is_stream_end=True" (empty) at end.
-            # BUT, it DOESN'T validly send the "Full" message as a
-            # separate event in current loop implementation.
-            # Loop implementation:
-            #   - Yields chunks.
-            #   - DOES NOT yield full text outbound message.
-            #   - Stores full text in memory.
-            # Wait, `AgentLoop` sends `OutboundMessage(..., is_stream_chunk=True)`
-            # If I ignore chunks, I get NOTHING.
-            # So I MUST handle tokens.
-            # Telegram Rate Limits will kill us if we edit message for every token.
-            # Strategy: Accumulate tokens and edit message every 1-2 seconds.
-            pass  # placeholder comment
-
+            # Stream chunk handling with smart buffering:
+            # 1. On first chunk, send a placeholder "..." message and start typing indicator
+            # 2. Buffer chunks and update message every 1.5s (rate limiting)
+            # 3. On stream_end, final edit and stop typing indicator
             if message.is_stream_chunk:
-                # TODO: Implement "Typing..." or smart buffering.
-                # For now, just print to console? No, user needs to see it.
-                # Robust solution:
-                # 1. On first chunk, send a "..." message.
-                # 2. Buffer chunks.
-                # 3. Every 2 seconds, edit the message with buffer.
-                # 4. On stream_end, final edit.
-
-                # Given strict time/complexity, let's try a simpler approach:
-                # Just ignore chunks for now and wait for a "Done" message?
-                # BUT AgentLoop DOES NOT send a "Done" message with content.
-                # It sends empty content with is_stream_end=True.
-
-                # I should modify AgentLoop to send a "Final" message?
-                # Or keep state here.
-                # Keeping state in Adapter is complex (concurrency).
-
-                # Helper: Let's hack it. If it's a stream chunk, we ignore it for Telegram
-                # UNLESS we implement the "Live Edit" feature.
-                # Users expect streaming.
-                # Let's Implement a crude accumulator or just rely on
-                # `AgentLoop` sending the full thing?
-                # The `AgentLoop` code I wrote:
-                #   current_response_text += text_chunk
-                #   publish_outbound(..., text_chunk, is_stream_chunk=True)
-                #   ...
-                #   (After loop) publish_outbound(..., "", is_stream_end=True)
-
-                # Use Case: User wants to see output.
-                # I will modify `AgentLoop` to send the COMPLETE message at the end as well?
-                # Or just update the adapter to buffer?
-                # Let's update `AgentLoop` to be friendlier to non-streaming adapters?
-                # Actually, `AgentLoop` code is "Unified". Dashboard
-                # LOVES streaming. Telegram HATES it.
-                # I should handle this in the Adapter.
-
-                # Simple Buffer Implementation:
-                # Use a dict `_buffers[chat_id] = {"msg_id": ..., "text": "", "last_update": ...}`
-
                 await self._handle_stream_chunk(message)
                 return
 
             if message.is_stream_end:
+                # Stop typing indicator for this chat
+                self._stop_typing_indicator(message.chat_id)
                 # Flush buffer
                 await self._flush_stream_buffer(message.chat_id)
                 # Send any attached media files
@@ -240,21 +202,54 @@ class TelegramAdapter(BaseChannelAdapter):
         except Exception as e:
             logger.error(f"Failed to send telegram message: {e}")
 
-    # --- buffering logic ---
+    # --- Typing indicator management ---
 
-    _buffers: dict[str, Any] = {}
+    async def _send_typing_indicator(self, chat_id: str) -> None:
+        """Send a typing indicator to the chat."""
+        if not self.app:
+            return
+        try:
+            real_chat_id, _topic_id = self._parse_chat_id(chat_id)
+            await self.app.bot.send_chat_action(chat_id=real_chat_id, action=ChatAction.TYPING)
+        except Exception as e:
+            logger.debug("Failed to send typing indicator: %s", e)
+
+    def _start_typing_indicator(self, chat_id: str) -> None:
+        """Start a background task that periodically refreshes the typing indicator."""
+        if chat_id in self._typing_tasks:
+            return  # Already running
+
+        async def _typing_loop():
+            try:
+                while True:
+                    await self._send_typing_indicator(chat_id)
+                    await asyncio.sleep(_TYPING_REFRESH_INTERVAL)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug("Typing indicator loop error: %s", e)
+
+        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
+
+    def _stop_typing_indicator(self, chat_id: str) -> None:
+        """Stop the typing indicator refresh task for a chat."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task:
+            task.cancel()
+
+    # --- Buffering logic ---
 
     async def _handle_stream_chunk(self, message: OutboundMessage) -> None:
+        if not self.app:
+            return
         chat_id = message.chat_id
         content = message.content
 
         if chat_id not in self._buffers:
-            # Send initial message (topic-aware)
-            real_chat_id, topic_id = self._parse_chat_id(
-                chat_id
-            )  # Parse chat_id here to use for send_chat_action
-            await self.app.bot.send_chat_action(chat_id=real_chat_id, action=ChatAction.TYPING)
-            # Send initial message (topic-aware)
+            # Start periodic typing indicator
+            self._start_typing_indicator(chat_id)
+            # Send initial placeholder message (topic-aware)
+            real_chat_id, topic_id = self._parse_chat_id(chat_id)
             send_kwargs: dict[str, Any] = {"chat_id": real_chat_id, "text": "🧠 ..."}
             if topic_id is not None:
                 send_kwargs["message_thread_id"] = topic_id
@@ -262,19 +257,21 @@ class TelegramAdapter(BaseChannelAdapter):
             self._buffers[chat_id] = {
                 "message_id": sent_msg.message_id,
                 "text": content,
-                "last_update": asyncio.get_event_loop().time(),
+                "last_update": asyncio.get_running_loop().time(),
             }
         else:
             self._buffers[chat_id]["text"] += content
 
-        # Rate limited update
-        now = asyncio.get_event_loop().time()
+        # Rate-limited message update
+        now = asyncio.get_running_loop().time()
         buf = self._buffers[chat_id]
-        if now - buf["last_update"] > 1.5:  # Update every 1.5s
+        if now - buf["last_update"] > _BUFFER_UPDATE_INTERVAL:
             await self._update_message(chat_id, buf["message_id"], buf["text"])
             buf["last_update"] = now
 
     async def _flush_stream_buffer(self, chat_id: str) -> None:
+        if not self.app:
+            return
         if chat_id in self._buffers:
             buf = self._buffers[chat_id]
             text = convert_markdown(buf["text"], self.channel)
@@ -282,6 +279,8 @@ class TelegramAdapter(BaseChannelAdapter):
             del self._buffers[chat_id]
 
     async def _update_message(self, chat_id: str, message_id: int, text: str) -> None:
+        if not self.app:
+            return
         try:
             if not text.strip():
                 return
@@ -358,6 +357,9 @@ class TelegramAdapter(BaseChannelAdapter):
         topic_id = getattr(update.message, "message_thread_id", None)
         chat_id = f"{base_chat_id}:topic:{topic_id}" if topic_id else base_chat_id
 
+        # Send immediate typing indicator to show responsiveness
+        await self._send_typing_indicator(chat_id)
+
         msg = InboundMessage(
             channel=Channel.TELEGRAM,
             sender_id=str(user_id),
@@ -428,6 +430,9 @@ class TelegramAdapter(BaseChannelAdapter):
         base_chat_id = str(update.effective_chat.id)
         topic_id = getattr(tg_msg, "message_thread_id", None)
         chat_id = f"{base_chat_id}:topic:{topic_id}" if topic_id else base_chat_id
+
+        # Send immediate typing indicator to show responsiveness
+        await self._send_typing_indicator(chat_id)
 
         msg = InboundMessage(
             channel=Channel.TELEGRAM,

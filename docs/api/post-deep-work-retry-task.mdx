@@ -1,0 +1,111 @@
+---
+title: Retry Deep Work Task
+description: "Manually retry a blocked task in a Deep Work project. Resets the task to assigned status, increments the retry count, and re-dispatches it for execution — bypassing the automatic max_retries limit."
+api: POST /api/deep-work/projects/{project_id}/tasks/{task_id}/retry
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["retry task", "manual retry", "blocked task", "deep work"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Manually retries a blocked task. The task's status is reset to `ASSIGNED`, the `retry_count` is incremented, any previous error message is cleared, and the task is re-dispatched to the executor.
+
+This is a manual override — it works regardless of the task's `max_retries` limit. Use it when auto-retries have been exhausted but you want to give the task another shot, maybe after fixing an underlying issue.
+
+Only tasks with `BLOCKED` status can be retried. Tasks in any other state will return a 400 error.
+
+## Path Parameters
+
+<ResponseField name="project_id" type="string" required>
+  The project ID that owns the task.
+</ResponseField>
+
+<ResponseField name="task_id" type="string" required>
+  The ID of the blocked task to retry. Must belong to the specified project and have `BLOCKED` status.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the task was re-dispatched.
+</ResponseField>
+
+<ResponseField name="task" type="object">
+  The updated task object with `status: "assigned"` and incremented `retry_count`.
+</ResponseField>
+
+<ResponseField name="progress" type="object">
+  Updated project progress after the retry.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/projects/PROJECT_ID/tasks/TASK_ID/retry \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch(
+  'http://localhost:8000/api/deep-work/projects/PROJECT_ID/tasks/TASK_ID/retry',
+  {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer YOUR_TOKEN' },
+  }
+);
+const data = await res.json();
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.post(
+    f"http://localhost:8000/api/deep-work/projects/PROJECT_ID/tasks/TASK_ID/retry",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+)
+data = res.json()
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "400"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "task": {
+    "id": "task-3",
+    "title": "Implement user authentication",
+    "status": "assigned",
+    "retry_count": 2,
+    "max_retries": 1,
+    "error_message": null
+  },
+  "progress": {
+    "total": 8,
+    "completed": 4,
+    "in_progress": 1,
+    "percent": 50
+  }
+}
+```
+  </Tab>
+  <Tab title="400">
+```json
+{
+  "detail": "Can only retry tasks with status 'blocked', got 'done'"
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>
