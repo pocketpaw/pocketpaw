@@ -157,6 +157,25 @@ class TestFilesystemTools:
         assert "Access denied" in result
 
     @pytest.mark.asyncio
+    async def test_jail_prefix_bypass_blocked(self, temp_jail, mock_settings):
+        read_tool = ReadFileTool()
+        write_tool = WriteFileTool()
+        list_tool = ListDirTool()
+
+        outside_prefix_dir = temp_jail.parent / f"{temp_jail.name}_outside"
+        outside_prefix_dir.mkdir(exist_ok=True)
+        outside_prefix_file = outside_prefix_dir / "secret.txt"
+        outside_prefix_file.write_text("secret")
+
+        read_result = await read_tool.execute(path=str(outside_prefix_file))
+        write_result = await write_tool.execute(path=str(outside_prefix_file), content="overwrite")
+        list_result = await list_tool.execute(path=str(outside_prefix_dir))
+
+        assert "Access denied" in read_result
+        assert "Access denied" in write_result
+        assert "Access denied" in list_result
+
+    @pytest.mark.asyncio
     async def test_list_dir(self, temp_jail, mock_settings):
         list_tool = ListDirTool()
         write_tool = WriteFileTool()
