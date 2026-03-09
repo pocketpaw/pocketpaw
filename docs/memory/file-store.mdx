@@ -1,5 +1,5 @@
 ---
-title: File Store
+title: "File Store: Local JSON-Based Memory Backend"
 description: "PocketPaw's default file store saves conversations as JSON in ~/.pocketpaw/memory/ with an indexed session catalog, atomic writes, full-text search, and automatic migration from legacy formats."
 section: Memory
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["file store", "json storage", "session index", "atomic writes", "conv
 tags: ["memory", "storage"]
 ---
 
-# File Store
+# File Store: Local JSON-Based Memory Backend
 
 The file store is PocketPaw's default memory backend. It stores sessions as JSON files in `~/.pocketpaw/memory/`.
 
@@ -83,3 +83,17 @@ The file store automatically extracts key facts from conversations (e.g., user p
 - No database required — just filesystem operations
 - Suitable for single-user, moderate-volume usage
 - For heavy usage, consider enabling Mem0 for semantic search
+
+## Related
+
+<CardGroup>
+  <Card title="Mem0 Integration" icon="lucide:sparkles" href="/memory/mem0">
+    Add semantic long-term memory with auto-learning and vector search.
+  </Card>
+  <Card title="Sessions" icon="lucide:history" href="/memory/sessions">
+    Session lifecycle management, keys, and dashboard operations.
+  </Card>
+  <Card title="Context Building" icon="lucide:layers" href="/memory/context-building">
+    How stored memories are assembled into the agent's context window.
+  </Card>
+</CardGroup>

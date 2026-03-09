@@ -1,5 +1,5 @@
 ---
-title: Microsoft Teams
+title: "Microsoft Teams: Enterprise AI Bot Setup"
 description: "Connect PocketPaw to Microsoft Teams using the Bot Framework SDK. Receives messages via webhook at /api/messages/teams with enterprise-grade authentication and conversation support."
 section: Channels
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["microsoft teams bot", "bot framework", "enterprise", "teams integrat
 tags: ["channels", "teams"]
 ---
 
-# Microsoft Teams
+# Microsoft Teams: Enterprise AI Bot Setup
 
 PocketPaw integrates with Microsoft Teams via the **Bot Framework SDK**. This is ideal for enterprise environments that use Teams as their primary collaboration tool.
 
@@ -76,3 +76,20 @@ This installs the `botbuilder-core` SDK as an optional dependency.
 <Callout type="info">
   Microsoft Teams integration requires a public URL for the webhook endpoint. Use the web dashboard or set up a reverse proxy with a public domain.
 </Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Slack Bot Setup" icon="lucide:hash" href="/channels/slack">
+    Socket Mode integration with thread support and no public URL needed.
+  </Card>
+  <Card title="Google Chat Integration" icon="lucide:message-square" href="/channels/google-chat">
+    Webhook and Pub/Sub modes for Google Workspace environments.
+  </Card>
+  <Card title="Backends Overview" icon="lucide:cpu" href="/backends">
+    Choose between 6 agent backends including Claude, OpenAI, and Gemini.
+  </Card>
+  <Card title="All Channels" icon="lucide:radio" href="/channels">
+    Compare all 9+ supported messaging platforms.
+  </Card>
+</CardGroup>

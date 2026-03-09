@@ -1,12 +1,12 @@
 """Telegram bot gateway."""
 
-import logging
 import asyncio
+import logging
 
-from pocketpaw.config import Settings
+from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.bus import get_message_bus
 from pocketpaw.bus.adapters.telegram_adapter import TelegramAdapter
-from pocketpaw.agents.loop import AgentLoop
+from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,9 @@ async def run_bot(settings: Settings) -> None:
 
     # 3. Initialize Agent Loop
     agent_loop = AgentLoop()
+    from pocketpaw.bus.commands import get_command_handler
+
+    get_command_handler().set_agent_loop(agent_loop)
 
     logger.info("🚀 Starting PocketPaw...")
 

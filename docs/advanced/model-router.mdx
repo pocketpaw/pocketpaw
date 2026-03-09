@@ -1,5 +1,5 @@
 ---
-title: Model Router
+title: "Model Router: Auto-Select Local or Cloud LLMs"
 description: "PocketPaw's model router automatically classifies message complexity as SIMPLE, MODERATE, or COMPLEX using heuristic signals, then selects the optimal model size to balance cost and capability."
 section: Advanced
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["model router", "automatic model selection", "complexity classificati
 tags: ["advanced", "optimization"]
 ---
 
-# Model Router
+# Model Router: Auto-Select Local or Cloud LLMs
 
 The Model Router automatically selects the appropriate model size based on message complexity, optimizing cost and latency.
 
@@ -73,3 +73,14 @@ The router works with the Claude Agent SDK backend (and any backend that support
 <Callout type="warning">
   **Ollama users:** The model router is automatically skipped when using Ollama, since Ollama runs a single local model. There are no tiers to route between.
 </Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Plan Mode" icon="lucide:list-checks" href="/advanced/plan-mode">
+    Structured approval workflows that pair well with model routing.
+  </Card>
+  <Card title="Deep Work" icon="lucide:brain" href="/advanced/deep-work">
+    Long-running autonomous projects that benefit from smart model selection.
+  </Card>
+</CardGroup>

@@ -29,6 +29,17 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# ── Force UTF-8 on Windows ────────────────────────────────────────────
+# Python on Windows defaults to the system code page (e.g. cp1252) which
+# cannot encode emoji/unicode used in the installer output.
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass  # Python < 3.7 or non-reconfigurable stream
+
 VERSION = "0.4.1"
 PACKAGE = "pocketpaw"
 GIT_REPO = "https://github.com/pocketpaw/pocketpaw.git"
@@ -854,7 +865,15 @@ class PackageInstaller:
         # When using uv tool install, the package is in an isolated environment.
         # Use 'uv run' to execute playwright in that environment.
         if self.used_uv_tool and shutil.which("uv"):
-            cmd = ["uv", "run", "--with", f"{PACKAGE}[browser]", "playwright", "install", "chromium"]
+            cmd = [
+                "uv",
+                "run",
+                "--with",
+                f"{PACKAGE}[browser]",
+                "playwright",
+                "install",
+                "chromium",
+            ]
         else:
             cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
 
@@ -893,12 +912,12 @@ class PackageInstaller:
                 # Silently return for PEP 668 — caller will handle retry
                 if "externally-managed-environment" in stderr_text:
                     return False, stderr_text
-                
+
                 print(f"\n  Command failed: {' '.join(cmd)}")
                 # Stderr is already printed above
                 print()
                 return False, stderr_text
-                
+
             return True, ""
         except subprocess.TimeoutExpired:
             process.kill()
@@ -924,7 +943,7 @@ class PackageInstaller:
             console.print(f"[bold cyan]Retrying {pkg}...[/bold cyan]")
         else:
             print(f"  Retrying {pkg}...")
-        
+
         ok, _ = self._run_cmd_capture(retry_cmd)
         return ok
 

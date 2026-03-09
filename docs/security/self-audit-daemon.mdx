@@ -1,5 +1,5 @@
 ---
-title: Self-Audit Daemon
+title: "Self-Audit Daemon: Automated Security Scans"
 description: "PocketPaw's self-audit daemon runs 12 continuous background security and operational checks, generating JSON reports for monitoring. Detect permission issues, stale tokens, and config drift automatically."
 section: Security
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["self-audit daemon", "background checks", "json reports", "monitoring
 tags: ["security", "daemon", "audit"]
 ---
 
-# Self-Audit Daemon
+# Self-Audit Daemon: Automated Security Scans
 
 The self-audit daemon runs continuous security and health checks in the background, producing JSON reports.
 
@@ -54,3 +54,17 @@ Reports are saved as JSON in `~/.pocketpaw/audit/`:
 ## Activation
 
 The self-audit daemon starts automatically with the web dashboard. It can also be triggered manually via the dashboard's settings.
+
+## Related
+
+<CardGroup>
+  <Card title="Audit CLI" icon="lucide:terminal" href="/security/audit-cli">
+    Run the same security checks manually from the command line with auto-fix.
+  </Card>
+  <Card title="Audit Log" icon="lucide:file-check" href="/security/audit-log">
+    The append-only log that the daemon monitors for rotation and integrity.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    Full overview of PocketPaw's 7-layer security stack.
+  </Card>
+</CardGroup>

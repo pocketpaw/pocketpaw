@@ -1,13 +1,13 @@
 ---
-title: Skill Generator
-description: "Create persistent skill definitions that teach PocketPaw new capabilities. The skill generator writes SKILL.md files to ~/.claude/skills/ (the SDK standard location) and hot-reloads them into the agent context."
+title: "Skill Generator: Create Custom AI Skills"
+description: "Create persistent skill definitions that teach PocketPaw new capabilities. The skill generator writes SKILL.md files to ~/.claude/skills/ (the SDK standard location) and hot-reloads them into the running agent context."
 section: Tools
 ogType: article
 keywords: ["skill generator", "custom skills", "skill.md", "agent training", "persistent skills"]
 tags: ["tools", "skills"]
 ---
 
-# Skill Generator
+# Skill Generator: Create Custom AI Skills
 
 The skill generator tool creates persistent skill definitions (SKILL.md files) that extend PocketPaw's capabilities across sessions.
 
@@ -22,10 +22,10 @@ The skill generator tool creates persistent skill definitions (SKILL.md files) t
 
 A skill is a markdown file that provides instructions for the agent on how to handle specific types of requests. Skills can define:
 
-- **Trigger phrases** — When the skill should be activated
-- **Step-by-step instructions** — How to accomplish the task
-- **Tool chains** — Which tools to use and in what order
-- **Output templates** — How to format the response
+- **Trigger phrases** - When the skill should be activated
+- **Step-by-step instructions** - How to accomplish the task
+- **Tool chains** - Which tools to use and in what order
+- **Output templates** - How to format the response
 
 ## Example
 
@@ -71,3 +71,17 @@ The loader also checks `~/.agents/skills/` and `~/.pocketpaw/skills/` for backwa
 ## Policy Group
 
 Belongs to `group:skills` (includes both `skill_gen` and the SDK `Skill` tool).
+
+## Related
+
+<CardGroup>
+  <Card title="Custom Tools" icon="lucide:puzzle" href="/tools/custom-tools">
+    Build your own tools with the ToolProtocol interface.
+  </Card>
+  <Card title="Delegation" icon="lucide:git-branch" href="/tools/delegation">
+    Spawn sub-agents for parallel task execution.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

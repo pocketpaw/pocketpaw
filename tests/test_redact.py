@@ -1,7 +1,5 @@
 """Tests for output redaction module."""
 
-import pytest
-
 from pocketpaw.security.redact import redact_output
 
 
@@ -17,7 +15,10 @@ class TestRedactOutput:
 
     def test_redact_anthropic_key(self):
         """Test redaction of Anthropic API keys."""
-        text = "Use this key: sk-ant-api03-abc123def456ghi789jkl012mno345pqr678stu901vwx234yz567abc890def123ghi456jkl789mno012pqr345stu678vwx"
+        text = (
+            "Use this key: sk-ant-api03-abc123def456ghi789jkl012mno345"
+            "pqr678stu901vwx234yz567abc890def123ghi456jkl789mno012pqr345stu678vwx"
+        )
         result = redact_output(text)
         assert "sk-ant-" not in result
         assert "[REDACTED]" in result
@@ -69,7 +70,11 @@ class TestRedactOutput:
 
     def test_redact_jwt_token(self):
         """Test redaction of JWT tokens."""
-        text = "JWT: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.TJVA95OrM7E2cBab30RMHrHDcEfxjoYZgeFONFh7HgQ"
+        text = (
+            "JWT: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+            ".TJVA95OrM7E2cBab30RMHrHDcEfxjoYZgeFONFh7HgQ"
+        )
         result = redact_output(text)
         assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in result
         assert "[REDACTED]" in result

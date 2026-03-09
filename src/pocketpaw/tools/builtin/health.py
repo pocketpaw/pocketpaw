@@ -29,7 +29,9 @@ class HealthCheckTool(BaseTool):
             "properties": {
                 "include_connectivity": {
                     "type": "boolean",
-                    "description": "Also run connectivity checks (slower, tests LLM API). Default: false.",
+                    "description": (
+                        "Also run connectivity checks (slower, tests LLM API). Default: false."
+                    ),
                     "default": False,
                 },
             },
@@ -44,7 +46,7 @@ class HealthCheckTool(BaseTool):
             results = engine.run_startup_checks()
 
             if include_connectivity:
-                conn_results = await engine.run_connectivity_checks()
+                await engine.run_connectivity_checks()
                 results = engine.results  # merged
 
             lines = [f"System Status: {engine.overall_status.upper()}\n"]
@@ -89,7 +91,9 @@ class ErrorLogTool(BaseTool):
                 },
                 "search": {
                     "type": "string",
-                    "description": "Optional text to filter errors by (searches message, source, traceback)",
+                    "description": (
+                        "Optional text to filter errors by (searches message, source, traceback)"
+                    ),
                     "default": "",
                 },
             },

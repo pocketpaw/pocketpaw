@@ -1,7 +1,7 @@
-# Updated: 2026-03-03 — Bump version to 0.4.5.1, remove soul-protocol from PyPI extras (not on PyPI yet).
+# Updated: 2026-03-08 — Bump version to 0.4.7.
 [project]
 name = "pocketpaw"
-version = "0.4.5.1"
+version = "0.4.7"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -139,11 +139,6 @@ sarvam = [
 mcp = [
     "mcp>=1.0.0",
 ]
-soul = [
-    # soul-protocol is not yet on PyPI.
-    # Install manually: pip install git+https://github.com/qbtrix/soul-protocol.git
-]
-
 # --- Composite extras ---
 recommended = [
     "pocketpaw[browser,memory,desktop]",
@@ -160,10 +155,6 @@ all-tools = [
 all-backends = [
     "pocketpaw[openai-agents,google-adk,copilot-sdk]",
 ]
-paw = [
-    "pocketpaw[soul]",
-    "click>=8.0",
-]
 all = [
     "pocketpaw[recommended,all-channels,all-tools,all-backends]",
 ]
@@ -178,14 +169,13 @@ dev = [
 
 [project.scripts]
 pocketpaw = "pocketpaw.__main__:main"
-paw = "pocketpaw.paw.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/pocketpaw/pocketpaw"
+Homepage = "https://pocketpaw.xyz"
 Repository = "https://github.com/pocketpaw/pocketpaw"
 Issues = "https://github.com/pocketpaw/pocketpaw/issues"
-Documentation = "https://github.com/pocketpaw/pocketpaw#readme"
-Discord = "https://dsc.gg/pocketpaw"
+Documentation = "https://pocketpaw.xyz/introduction"
+Discord = "https://discord.gg/asRrtm95Zc"
 Twitter = "https://twitter.com/prakashd88"
 
 [build-system]
@@ -212,6 +202,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
+    "pytest-playwright>=0.7.2",
 ]
 
 [tool.pytest.ini_options]

@@ -1,13 +1,13 @@
 ---
-title: Troubleshooting
-description: "Common issues with PocketPaw's credential store, encryption, and security features — with step-by-step fixes."
+title: "Security Troubleshooting: Common Issues & Fixes"
+description: "Diagnose and fix common PocketPaw security issues including credential store decryption failures, API key loading problems, file permission errors, and Docker container identity drift."
 section: Security
 ogType: article
 keywords: ["troubleshooting", "credentials", "secrets.enc", "decryption failed", "credential store", "encryption"]
 tags: ["security", "troubleshooting", "credentials"]
 ---
 
-# Troubleshooting
+# Security Troubleshooting: Common Issues & Fixes
 
 Common issues related to PocketPaw's security and credential subsystems.
 
@@ -127,3 +127,14 @@ environment:
   POCKETPAW_ANTHROPIC_API_KEY: "sk-ant-..."
   POCKETPAW_OPENAI_API_KEY: "sk-..."
 ```
+
+## Related
+
+<CardGroup>
+  <Card title="Audit CLI" icon="lucide:terminal" href="/security/audit-cli">
+    Run automated security checks that detect and fix permission issues.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    Full overview of PocketPaw's 7-layer security stack.
+  </Card>
+</CardGroup>

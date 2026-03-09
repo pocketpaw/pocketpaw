@@ -20,6 +20,7 @@ import pytest
 
 # Access the private module to inject test store
 import pocketpaw.mission_control.store as store_module
+from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.mission_control import (
     AgentProfile,
     AgentStatus,
@@ -118,19 +119,19 @@ async def assigned_task(manager, agent, task):
 
 
 def create_mock_router(chunks=None, error=None):
-    """Create a mock AgentRouter that yields predefined chunks."""
+    """Create a mock AgentRouter that yields predefined AgentEvent objects."""
     if chunks is None:
         chunks = [
-            {"type": "message", "content": "Starting task..."},
-            {"type": "tool_use", "content": "", "metadata": {"name": "search"}},
-            {"type": "tool_result", "content": "Found results"},
-            {"type": "message", "content": "Completing task."},
-            {"type": "done", "content": ""},
+            AgentEvent(type="message", content="Starting task..."),
+            AgentEvent(type="tool_use", content="", metadata={"name": "search"}),
+            AgentEvent(type="tool_result", content="Found results"),
+            AgentEvent(type="message", content="Completing task."),
+            AgentEvent(type="done", content=""),
         ]
 
     async def mock_run(prompt):
         for chunk in chunks:
-            if error and chunk.get("type") == "error":
+            if error and chunk.type == "error":
                 yield chunk
                 return
             yield chunk
@@ -233,8 +234,8 @@ class TestMCTaskExecutor:
     async def test_execute_task_with_error(self, executor, manager, assigned_task, agent):
         """Test task execution with error."""
         error_chunks = [
-            {"type": "message", "content": "Starting..."},
-            {"type": "error", "content": "API rate limit exceeded"},
+            AgentEvent(type="message", content="Starting..."),
+            AgentEvent(type="error", content="API rate limit exceeded"),
         ]
         mock_router = create_mock_router(chunks=error_chunks, error=True)
 
@@ -309,7 +310,7 @@ class TestMCTaskExecutor:
 
         # Simulate a long-running task
         async def slow_run(prompt):
-            yield {"type": "message", "content": "Working..."}
+            yield AgentEvent(type="message", content="Working...")
             await asyncio.sleep(10)  # Long wait
 
         mock_router = MagicMock()

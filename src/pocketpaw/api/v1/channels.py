@@ -190,9 +190,17 @@ async def install_extras(request: Request):
 
     extra_name = "whatsapp-personal" if extra == "whatsapp" else extra
     try:
-        await asyncio.to_thread(auto_install, extra_name, import_mod)
+        result = await asyncio.to_thread(auto_install, extra_name, import_mod)
     except RuntimeError as exc:
         return {"error": str(exc)}
+
+    # Check if restart is required
+    if result.get("status") == "restart_required":
+        return {
+            "status": "ok",
+            "restart_required": True,
+            "message": result.get("message", "Server restart required"),
+        }
 
     import importlib
     import sys

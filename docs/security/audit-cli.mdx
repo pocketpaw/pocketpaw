@@ -1,5 +1,5 @@
 ---
-title: Security Audit CLI
+title: "Audit CLI: Command-Line Security Analysis"
 description: "Run 7 automated security checks on your PocketPaw installation with the --security-audit CLI flag. Detects common misconfigurations and optionally applies fixes with the --fix option."
 section: Security
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["security audit", "cli tool", "misconfiguration", "auto-fix", "securi
 tags: ["security", "cli", "audit"]
 ---
 
-# Security Audit CLI
+# Audit CLI: Command-Line Security Analysis
 
 PocketPaw includes a built-in security audit that checks for common misconfigurations and vulnerabilities.
 
@@ -60,3 +60,17 @@ When run with `--fix`, the audit automatically resolves issues it can:
 - Creates missing directories with proper permissions
 
 Issues that require manual intervention (like API key management) are reported but not auto-fixed.
+
+## Related
+
+<CardGroup>
+  <Card title="Audit Log" icon="lucide:file-check" href="/security/audit-log">
+    The append-only JSONL log that the audit CLI validates for integrity.
+  </Card>
+  <Card title="Self-Audit Daemon" icon="lucide:activity" href="/security/self-audit-daemon">
+    Automated background checks that run continuously without manual invocation.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    Full overview of PocketPaw's 7-layer security stack.
+  </Card>
+</CardGroup>

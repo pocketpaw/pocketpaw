@@ -73,8 +73,12 @@ class TestPromptTemplates:
         assert "PRD content here" in result
 
     def test_team_assembly_prompt_can_be_formatted(self):
-        result = TEAM_ASSEMBLY_PROMPT.format(tasks_json='[{"key": "t1"}]')
+        result = TEAM_ASSEMBLY_PROMPT.format(
+            tasks_json='[{"key": "t1"}]',
+            agent_backend="copilot_sdk",
+        )
         assert '{"key": "t1"}' in result
+        assert "copilot_sdk" in result
 
 
 # ============================================================================
@@ -315,7 +319,9 @@ class TestEnsureProfile:
         manager.create_agent.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_creates_new_profile(self):
+    @patch("pocketpaw.config.get_settings")
+    async def test_creates_new_profile(self, mock_get_settings):
+        mock_get_settings.return_value.agent_backend = "copilot_sdk"
         manager = AsyncMock()
         manager.get_agent_by_name = AsyncMock(return_value=None)
         new_profile = MagicMock()
@@ -335,7 +341,7 @@ class TestEnsureProfile:
                 "into executable tasks, and recommends team composition"
             ),
             specialties=["planning", "research", "architecture", "task-decomposition"],
-            backend="claude_agent_sdk",
+            backend="copilot_sdk",
         )
 
 

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     PocketPaw Installer for Windows.
@@ -7,24 +7,37 @@
     Bootstraps Python, uv, and downloads the interactive installer.
     Equivalent to install.sh but for native Windows (PowerShell 5.1+).
 
-.PARAMETER NonInteractive
-    Run without prompts (accept defaults).
-
-.PARAMETER Profile
-    Installation profile: minimal, recommended (default), or full.
+    Supports both piped invocation (iwr ... | iex) and direct file execution.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/install.ps1 | iex
+    iwr -useb https://pocketpaw.xyz/install.ps1 | iex
+.EXAMPLE
+    .\install.ps1 -NonInteractive -Profile minimal
 #>
 
-[CmdletBinding()]
-param(
-    [switch]$NonInteractive,
-    [ValidateSet("minimal", "recommended", "full")]
-    [string]$Profile = "recommended"
-)
+# When run as a script file, [CmdletBinding()]/param() work fine.
+# When piped to iex (iwr ... | iex), PowerShell rejects them at parse time.
+# Wrapping the body in a function avoids this: iex can define and call a
+# function with [CmdletBinding()] without issue.
 
-$ErrorActionPreference = "Stop"
+function Install-PocketPaw {
+    [CmdletBinding()]
+    param(
+        [switch]$NonInteractive,
+        [ValidateSet("minimal", "recommended", "full")]
+        [string]$Profile = "recommended"
+    )
+
+    $ErrorActionPreference = "Stop"
+
+# ── Force UTF-8 output so emojis and box-drawing characters render correctly
+# on Windows terminals that default to legacy code pages (e.g. cp1252/437).
+if ([Console]::OutputEncoding.CodePage -ne 65001) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+}
+$OutputEncoding = [System.Text.Encoding]::UTF8
+# Switch the active console code page to UTF-8 (65001); suppress the output.
+try { chcp 65001 | Out-Null } catch {}
 
 # ── Banner ──────────────────────────────────────────────────────────────
 Write-Host ""
@@ -48,7 +61,7 @@ function Test-PythonVersion {
         $script = "import sys; print(f'__POCKETPAW_VER__{sys.version_info.major}.{sys.version_info.minor}__END__')"
         $out = & $Cmd -c $script 2>$null
         if ($LASTEXITCODE -ne 0) { return $false }
-        
+
         # Parse the output line by line for the signature
         $verStr = $null
         foreach ($line in ($out -split "`r`n|`n")) {
@@ -57,9 +70,9 @@ function Test-PythonVersion {
                 break
             }
         }
-        
+
         if (-not $verStr) { return $false }
-        
+
         $parts = $verStr.Split(".")
         $major = [int]$parts[0]
         $minor = [int]$parts[1]
@@ -120,7 +133,7 @@ if (-not $Python) {
             Invoke-RestMethod "https://astral.sh/uv/install.ps1" -OutFile $uvScript
             & $uvScript 2>$null
             Remove-Item $uvScript -ErrorAction SilentlyContinue
-            
+
             # Refresh PATH — include standard uv install locations
             $env:PATH = "$env:LOCALAPPDATA\uv\bin;$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.uv\bin;$env:PATH"
             if (Get-Command uv -ErrorAction SilentlyContinue) {
@@ -176,7 +189,7 @@ if (-not $Python) {
 }
 
 $pyVer = Get-PythonFullVersion $Python
-$pyPath = if ($Python -eq "py -3") { (Get-Command py).Source } else { (Get-Command $Python -ErrorAction SilentlyContinue).Source }
+$pyPath = if ($Python -eq "py -3") { (Get-Command py -ErrorAction SilentlyContinue).Source } else { (Get-Command $Python -ErrorAction SilentlyContinue).Source }
 Write-Step "Python:  $pyVer ($pyPath)"
 
 # ── Ensure uv is available ──────────────────────────────────────────────
@@ -269,6 +282,9 @@ if ($uvAvailable) { $extraFlags += "--uv-available" }
 if ($NonInteractive) { $extraFlags += "--non-interactive" }
 if ($Profile -ne "recommended") { $extraFlags += "--profile"; $extraFlags += $Profile }
 
+# Ensure Python subprocess uses UTF-8 so emoji/unicode renders correctly
+$env:PYTHONIOENCODING = "utf-8"
+
 try {
     if ($Python -eq "py -3") {
         & py -3 $TempInstaller --pip-cmd $PipCmd @extraFlags
@@ -278,3 +294,10 @@ try {
 } finally {
     Remove-Item $TempInstaller -ErrorAction SilentlyContinue
 }
+
+}  # end Install-PocketPaw
+
+# ── Entry point ───────────────────────────────────────────────────────
+# When piped to iex: call with defaults (iex doesn't support passing params).
+# When run as a file: forward $args so e.g. .\install.ps1 -NonInteractive works.
+Install-PocketPaw @args

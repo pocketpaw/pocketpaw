@@ -1,5 +1,5 @@
 ---
-title: Guardian AI
+title: "Guardian AI: Secondary LLM Safety Checks"
 description: "Guardian AI is PocketPaw's secondary LLM safety check that screens every incoming message for harmful intent before it reaches the agent. Uses a separate Anthropic API call for independent evaluation."
 section: Security
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["guardian ai", "safety filter", "content moderation", "llm safety", "
 tags: ["security", "safety"]
 ---
 
-# Guardian AI
+# Guardian AI: Secondary LLM Safety Checks
 
 Guardian AI is a secondary language model that evaluates every incoming message for safety before the main agent processes it.
 
@@ -65,3 +65,17 @@ export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
 <Callout type="info">
   Guardian AI adds a small latency to each message (one additional API call). For latency-sensitive deployments, the threat level threshold can be adjusted.
 </Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Injection Scanner" icon="lucide:scan-line" href="/security/injection-scanner">
+    Two-tier prompt injection detection for messages and tool outputs.
+  </Card>
+  <Card title="Audit Log" icon="lucide:file-check" href="/security/audit-log">
+    Append-only action recording tracks every Guardian AI decision.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    Full overview of PocketPaw's 7-layer security stack.
+  </Card>
+</CardGroup>

@@ -1,13 +1,13 @@
 ---
-title: OpenAI Agents SDK
-description: "The OpenAI Agents SDK backend uses OpenAI's agent framework with GPT models. Supports Ollama for local inference via OpenAI-compatible endpoints."
+title: "OpenAI Agents SDK: GPT & Ollama Backend"
+description: "The OpenAI Agents SDK backend uses OpenAI's agent framework with GPT models and Ollama support. Features code interpreter, file search, and SQLite session persistence."
 section: Agent Backends
 ogType: article
 keywords: ["openai agents", "gpt", "openai sdk", "ollama", "agent framework"]
 tags: ["backends", "openai"]
 ---
 
-# OpenAI Agents SDK
+# OpenAI Agents SDK: GPT & Ollama Backend
 
 The OpenAI Agents SDK backend uses OpenAI's native agent framework (`openai-agents` package) with GPT models. It also supports Ollama and OpenAI-compatible providers for local inference.
 
@@ -71,3 +71,20 @@ pip install pocketpaw[openai-agents]
 ```
 
 This installs the `openai-agents` package as an optional dependency.
+
+## Related
+
+<CardGroup>
+  <Card title="Ollama: Free Local Models" icon="lucide:hard-drive" href="/backends/ollama">
+    Run the OpenAI Agents backend with local models via Ollama.
+  </Card>
+  <Card title="Claude Agent SDK" icon="lucide:sparkles" href="/backends/claude-sdk">
+    The recommended backend with native tools and MCP integration.
+  </Card>
+  <Card title="All Agent Backends" icon="lucide:layers" href="/backends">
+    Compare all six backends side by side with capability badges.
+  </Card>
+  <Card title="Local LLM Agent Guide" icon="lucide:book-open" href="/guides/local-llm-agent">
+    Step-by-step guide to running PocketPaw with local models.
+  </Card>
+</CardGroup>

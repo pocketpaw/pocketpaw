@@ -65,6 +65,9 @@ async def run_whatsapp_bot(settings: Settings) -> None:
     _whatsapp_adapter = adapter
 
     agent_loop = AgentLoop()
+    from pocketpaw.bus.commands import get_command_handler
+
+    get_command_handler().set_agent_loop(agent_loop)
 
     logger.info("Starting PocketPaw WhatsApp bot...")
 

@@ -88,8 +88,9 @@ class TriggerEngine:
         self._own_scheduler = scheduler is None
         self.scheduler = scheduler or AsyncIOScheduler()
         self.callback: Callable | None = None
-        self._jobs: dict[str, str] = {}
         self._observers: list = []   # <-- ADD THIS LINE
+        self._jobs: dict[str, str] = {}  # intention_id -> job_id
+
 
     def start(self, callback: Callable) -> None:
         """
@@ -256,19 +257,17 @@ class TriggerEngine:
         Manually trigger an intention immediately.
 
         Args:
-            intention: Intention to run
+        intention: Intention to run
         """
         if self.callback:
-
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(self._fire_trigger(intention))
-                else:
-                    loop.run_until_complete(self._fire_trigger(intention))
+                asyncio.get_running_loop()
             except RuntimeError:
-                # No event loop running
+                # No event loop running — safe to use asyncio.run()
                 asyncio.run(self._fire_trigger(intention))
+            else:
+                # Already inside a running loop (e.g. pytest-asyncio) — schedule, don't block
+                asyncio.create_task(self._fire_trigger(intention))
     
     def _add_file_watch_trigger(self, intention: dict) -> bool:
         """Watch a file for changes and trigger intention."""

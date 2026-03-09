@@ -8,11 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from click.testing import CliRunner
 
 from pocketpaw.paw.cli import main
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -84,9 +82,7 @@ class TestInitCommand:
             patch("pocketpaw.paw.cli._check_soul_protocol", return_value=True),
             patch("pocketpaw.paw.cli._init_async", new_callable=AsyncMock) as mock_init,
         ):
-            result = runner.invoke(
-                main, ["init", "--no-scan"], catch_exceptions=False
-            )
+            result = runner.invoke(main, ["init", "--no-scan"], catch_exceptions=False)
 
         assert result.exit_code == 0
         mock_init.assert_awaited_once()
