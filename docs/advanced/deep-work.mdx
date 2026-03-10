@@ -1,9 +1,9 @@
 ---
 title: Deep Work
-description: "Deep Work is PocketPaw's AI-powered project orchestrator: describe a project and it researches the domain, writes a PRD, decomposes tasks with dependencies, assembles an agent team, and executes autonomously."
+description: "Deep Work is PocketPaw's AI-powered project orchestrator: describe a project and it researches the domain, writes a PRD, decomposes tasks with dependencies, assembles an agent team, and executes autonomously — with built-in retry, timeout, cancellation, and output chaining."
 section: Advanced
 ogType: article
-keywords: ["deep work", "project planning", "task decomposition", "multi-agent", "autonomous execution", "prd"]
+keywords: ["deep work", "project planning", "task decomposition", "multi-agent", "autonomous execution", "prd", "retry", "timeout", "pawkit"]
 tags: ["advanced", "orchestration", "multi-agent"]
 ---
 
@@ -24,7 +24,7 @@ Deep Work is PocketPaw's orchestration system for complex, multi-step projects. 
     Review the generated plan — tasks, dependencies, time estimates, and team — in the dashboard. Approve when ready.
   </Step>
   <Step title="Autonomous Execution">
-    Tasks execute in dependency order. Agent tasks run via Claude, human tasks notify you for manual completion. Progress streams in real time.
+    Tasks execute in dependency order. Agent tasks run via Claude, human tasks notify you for manual completion. Failed tasks retry automatically. Progress streams in real time.
   </Step>
   <Step title="Completion">
     When all tasks finish, the project is marked complete and deliverables are saved to disk.
@@ -43,6 +43,7 @@ Deep Work is PocketPaw's orchestration system for complex, multi-step projects. 
 | `PAUSED` | Execution paused by user |
 | `COMPLETED` | All tasks finished |
 | `FAILED` | Planning or execution error |
+| `CANCELLED` | User cancelled the project — all remaining tasks skipped |
 
 ## Planning Phases
 
@@ -82,6 +83,8 @@ Decomposes the PRD into atomic tasks. Each task includes:
 | `estimated_minutes` | Time estimate (15-120 min range) |
 | `required_specialties` | Skills needed (e.g., `backend`, `frontend`) |
 | `blocked_by_keys` | Dependencies on other tasks |
+| `max_retries` | How many times to auto-retry on failure (default: 1) |
+| `timeout_minutes` | Per-task execution time limit (optional) |
 
 ### 4. Team Assembly
 
@@ -108,6 +111,40 @@ Level 2: [t5]            ← depends on level 1
 | `agent` | Runs via the agent backend (Claude Agent SDK). Output saved as deliverable document. |
 | `human` | Notification sent to your channels. You complete it manually and mark done in the dashboard. |
 | `review` | Quality gate — agent output is ready for your review before dependents proceed. |
+
+## Retry & Timeout
+
+Tasks don't just fail and stop — they fight through problems on their own.
+
+### Auto-Retry
+
+Each task has a `max_retries` count (default: 1). When an agent task fails or times out, the executor checks whether retries remain. If so, it resets the task to `ASSIGNED` and re-dispatches it automatically. The `retry_count` field tracks how many attempts have been made.
+
+Once retries are exhausted, the task moves to `BLOCKED` and waits for your attention. You can also manually retry any blocked task from the dashboard or API — manual retries bypass the `max_retries` limit.
+
+### Task Timeout
+
+Set `timeout_minutes` on a task to enforce a hard execution time limit. The executor wraps the agent call in `asyncio.wait_for` — if the agent hasn't finished within the window, it's interrupted and treated the same as a failure (triggers retry if attempts remain, otherwise goes `BLOCKED`).
+
+Leave `timeout_minutes` unset for tasks that genuinely need open-ended time, like deep research or large code generation.
+
+## Output Chaining
+
+When an agent task completes, its full output is stored directly on the `task.output` field. Downstream tasks can reference this output as context — the executor builds each task's prompt with deliverables from upstream dependencies already included.
+
+This means later tasks in the dependency chain know what earlier tasks produced, without you having to wire anything up manually.
+
+## Cancellation
+
+Cancel a running project when you need to pull the plug. Cancellation is a terminal state — once cancelled, the project can't be resumed.
+
+What happens when you cancel:
+1. All currently executing tasks are stopped immediately
+2. All pending and assigned tasks are marked `SKIPPED`
+3. Tasks already completed keep their `DONE` status (work isn't lost)
+4. The project status changes to `CANCELLED`
+
+You can't cancel a project that's already completed or already cancelled.
 
 ## Usage
 
@@ -141,9 +178,17 @@ The dashboard shows:
 | Approve plan | `POST /api/deep-work/projects/{id}/approve` |
 | Pause execution | `POST /api/deep-work/projects/{id}/pause` |
 | Resume execution | `POST /api/deep-work/projects/{id}/resume` |
+| Cancel project | `POST /api/deep-work/projects/{id}/cancel` |
 | Skip a task | `POST /api/deep-work/projects/{id}/tasks/{task_id}/skip` |
+| Retry a blocked task | `POST /api/deep-work/projects/{id}/tasks/{task_id}/retry` |
 
-Skipping a task marks it as `SKIPPED` and unblocks dependents.
+Skipping a task marks it as `SKIPPED` and unblocks dependents. Retrying resets a blocked task to `ASSIGNED` and re-dispatches it.
+
+## PawKit Templates
+
+Deep Work projects can be packaged as [PawKit](/advanced/pawkit) templates — YAML configs that define a full [Command Center](/concepts/command-centers) with layout, automated workflows, user configuration, and bundled skills. The Deep Work engine becomes the "Project Orchestrator" Command Center, and domain experts can publish their own PawKits for others to install.
+
+See [Command Centers](/concepts/command-centers) for the concept and [PawKit Reference](/advanced/pawkit) for the full YAML schema.
 
 ## Project Directories
 
@@ -163,9 +208,11 @@ The dashboard receives real-time updates:
 |-------|------|
 | `dw_planning_phase` | Each planning phase starts (research, prd, tasks, team) |
 | `dw_planning_complete` | Planning finishes or fails |
+| `dw_project_cancelled` | Project was cancelled |
 | `mc_task_started` | A task begins executing |
 | `mc_task_output` | Agent produces output (streamed) |
-| `mc_task_completed` | A task finishes |
+| `mc_task_completed` | A task finishes (includes retry info) |
+| `mc_task_retry` | A task is about to be retried after failure |
 
 <Callout type="info">
   Deep Work builds on top of [Mission Control](/advanced/mission-control) for task storage, agent management, and the execution engine. The two systems are designed to work together.

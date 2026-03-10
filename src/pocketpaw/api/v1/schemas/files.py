@@ -20,3 +20,17 @@ class BrowseResponse(BaseModel):
     path: str
     files: list[FileEntry] = []
     error: str | None = None
+
+
+class OpenPathRequest(BaseModel):
+    """Request to open a file or folder in the client explorer."""
+
+    path: str
+    action: str = "navigate"  # "navigate" or "view"
+
+
+class OpenPathResponse(BaseModel):
+    """Response for open-path request."""
+
+    ok: bool
+    error: str | None = None

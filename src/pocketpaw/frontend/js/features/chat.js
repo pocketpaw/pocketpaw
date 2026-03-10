@@ -119,11 +119,22 @@ window.PocketPaw.Chat = {
              */
             endStreaming() {
                 if (this.isStreaming && this.streamingContent) {
-                    this.addMessage('assistant', this.streamingContent);
+                    let content = this.streamingContent;
+                    // Append AskUserQuestion option buttons if pending
+                    if (this._pendingAskOptions && this._pendingAskOptions.length) {
+                        const btns = this._pendingAskOptions.map(label => {
+                            const escaped = label.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+                            return `<button class="ask-user-option" onclick="window._answerAskUser('${escaped.replace(/'/g, "\\'")}')">${escaped}</button>`;
+                        }).join('');
+                        content += `\n\n<div class="ask-user-options">${btns}</div>`;
+                        this._pendingAskOptions = null;
+                    }
+                    this.addMessage('assistant', content);
                 }
                 this.isStreaming = false;
                 this.isThinking = false;
                 this.streamingContent = '';
+                this._pendingAskOptions = null;
 
                 // Refresh sidebar sessions and auto-title
                 if (this.loadSessions) this.loadSessions();
@@ -144,6 +155,16 @@ window.PocketPaw.Chat = {
                 // Auto scroll to bottom with slight delay for DOM update
                 this.$nextTick(() => {
                     this.scrollToBottom();
+                });
+            },
+
+            /**
+             * Store AskUserQuestion options — they get appended to the
+             * final message in endStreaming() so nothing gets split.
+             */
+            showAskUserQuestion(question, options) {
+                this._pendingAskOptions = (options || []).map((opt, i) => {
+                    return typeof opt === 'string' ? opt : (opt.label || opt.text || `Option ${i + 1}`);
                 });
             },
 
@@ -222,3 +243,16 @@ window.PocketPaw.Chat = {
 };
 
 window.PocketPaw.Loader.register('Chat', window.PocketPaw.Chat);
+
+// Global callback for AskUserQuestion option buttons.
+// Sends the selected option as a normal chat message.
+window._answerAskUser = function (answer) {
+    // Remove all option buttons once one is picked
+    document.querySelectorAll('.ask-user-options').forEach(el => {
+        el.innerHTML = '<span style="opacity:0.5">Answered: ' + answer + '</span>';
+    });
+    const socket = window.socket;
+    if (socket) {
+        socket.chat(answer);
+    }
+};

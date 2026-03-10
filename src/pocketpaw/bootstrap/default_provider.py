@@ -3,10 +3,44 @@ Default bootstrap provider reading from local files.
 Created: 2026-02-02
 """
 
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from pocketpaw.bootstrap.protocol import BootstrapContext, BootstrapProviderProtocol
 from pocketpaw.config import get_config_dir
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _IdentityCache:
+    content: str
+    mtime: float
+
+
+_identity_file_cache: dict[str, _IdentityCache] = {}
+
+
+def _read_identity_file(path: Path, strip: bool = False) -> str:
+    """Read an identity file; return cached content when mtime is unchanged."""
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return ""
+    key = str(path)
+    cached = _identity_file_cache.get(key)
+    if cached and cached.mtime == mtime:
+        return cached.content
+    raw = path.read_bytes()
+    content = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    if "\ufffd" in content:
+        logger.warning("File %s contains non-UTF-8 bytes (replaced with placeholders)", path)
+    if strip:
+        content = content.strip()
+    _identity_file_cache[key] = _IdentityCache(content=content, mtime=mtime)
+    return content
+
 
 _DEFAULT_INSTRUCTIONS = """\
 ## PocketPaw Tools (call via Bash)
@@ -93,6 +127,12 @@ directly — never use a tool to look up what you already know.
 - `reddit_read '{"url": "https://reddit.com/r/python/comments/..."}'` — read post + comments
 - `reddit_trending '{"subreddit": "all", "limit": 10}'` — trending posts
 
+### File Explorer
+- `open_in_explorer '{"path": "/home/user/project"}'` — open folder in the UI file explorer
+- `open_in_explorer '{"path": "/home/user/file.py", "action": "view"}'` — open file in viewer
+**When the user asks to open, show, or navigate to a file/folder, use open_in_explorer.**
+You may also read the file contents if needed — open_in_explorer just navigates the UI.
+
 ### Delegation
 - `delegate_claude_code '{"task": "refactor auth", "timeout": 300}'` — delegate to Claude Code
 
@@ -146,14 +186,16 @@ class DefaultBootstrapProvider(BootstrapProviderProtocol):
         if not identity_file.exists():
             identity_file.write_text(
                 "You are PocketPaw, an AI agent running locally on the user's machine.\n"
-                "You are helpful, private, and secure."
+                "You are helpful, private, and secure.",
+                encoding="utf-8",
             )
 
         soul_file = self.base_path / "SOUL.md"
         if not soul_file.exists():
             soul_file.write_text(
                 "You believe in user sovereignty and local-first computing.\n"
-                "You never exfiltrate data without explicit user consent."
+                "You never exfiltrate data without explicit user consent.",
+                encoding="utf-8",
             )
 
         style_file = self.base_path / "STYLE.md"
@@ -161,7 +203,8 @@ class DefaultBootstrapProvider(BootstrapProviderProtocol):
             style_file.write_text(
                 "- Be concise and direct.\n"
                 "- Use emoji sparingly but effectively.\n"
-                "- Prefer code over prose for technical explanations."
+                "- Prefer code over prose for technical explanations.",
+                encoding="utf-8",
             )
 
         user_file = self.base_path / "USER.md"
@@ -170,28 +213,21 @@ class DefaultBootstrapProvider(BootstrapProviderProtocol):
                 "# User Profile\n"
                 "Name: (your name)\n"
                 "Timezone: UTC\n"
-                "Preferences: (describe your communication preferences)\n"
+                "Preferences: (describe your communication preferences)\n",
+                encoding="utf-8",
             )
 
         instructions_file = self.base_path / "INSTRUCTIONS.md"
         if not instructions_file.exists():
-            instructions_file.write_text(_DEFAULT_INSTRUCTIONS)
+            instructions_file.write_text(_DEFAULT_INSTRUCTIONS, encoding="utf-8")
 
     async def get_context(self) -> BootstrapContext:
-        """Load context from files."""
-        identity = (self.base_path / "IDENTITY.md").read_text()
-        soul = (self.base_path / "SOUL.md").read_text()
-        style = (self.base_path / "STYLE.md").read_text()
-
-        user_profile = ""
-        user_file = self.base_path / "USER.md"
-        if user_file.exists():
-            user_profile = user_file.read_text().strip()
-
-        instructions = ""
-        instructions_file = self.base_path / "INSTRUCTIONS.md"
-        if instructions_file.exists():
-            instructions = instructions_file.read_text().strip()
+        """Load context from files (mtime-cached to avoid redundant disk reads)."""
+        identity = _read_identity_file(self.base_path / "IDENTITY.md")
+        soul = _read_identity_file(self.base_path / "SOUL.md")
+        style = _read_identity_file(self.base_path / "STYLE.md")
+        user_profile = _read_identity_file(self.base_path / "USER.md", strip=True)
+        instructions = _read_identity_file(self.base_path / "INSTRUCTIONS.md", strip=True)
 
         return BootstrapContext(
             name="PocketPaw",

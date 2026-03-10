@@ -198,7 +198,7 @@ TASKS:
 RULES:
 - Recommend the fewest agents that cover all required_specialties
 - Each agent should have a clear, non-overlapping role
-- Use "claude_agent_sdk" as the backend for all agents
+- Use "{agent_backend}" as the backend for all agents
 - Agent names should be lowercase-hyphenated (e.g. "backend-dev", "qa-engineer")
 
 Output ONLY a valid JSON array. No markdown code fences. No commentary. \
@@ -210,7 +210,7 @@ Just the raw JSON array:
     "role": "...",
     "description": "...",
     "specialties": ["..."],
-    "backend": "claude_agent_sdk"
+    "backend": "{agent_backend}"
   }}
 ]
 """

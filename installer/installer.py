@@ -29,6 +29,17 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# ── Force UTF-8 on Windows ────────────────────────────────────────────
+# Python on Windows defaults to the system code page (e.g. cp1252) which
+# cannot encode emoji/unicode used in the installer output.
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass  # Python < 3.7 or non-reconfigurable stream
+
 VERSION = "0.4.1"
 PACKAGE = "pocketpaw"
 GIT_REPO = "https://github.com/pocketpaw/pocketpaw.git"

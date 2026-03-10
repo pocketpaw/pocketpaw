@@ -1,0 +1,57 @@
+meta:
+  name: "Content Pipeline"
+  author: "PocketPaw"
+  version: "1.0.0"
+  description: "Manage your content workflow from ideation to publication"
+  category: content
+  icon: pen-tool
+  tags: [content, writing, publishing]
+  built_in: true
+
+layout:
+  columns: 2
+  sections:
+    - title: "Content Overview"
+      span: full
+      panels:
+        - id: metrics
+          type: metrics-row
+          items:
+            - { label: "Total Items", source: "api:stats", field: "tasks.total", format: "number" }
+            - { label: "Drafting", source: "api:stats", field: "tasks.by_status.in_progress", format: "number" }
+            - { label: "In Review", source: "api:stats", field: "tasks.by_status.review", format: "number" }
+            - { label: "Published", source: "api:stats", field: "tasks.by_status.done", format: "number" }
+
+    - title: "Content Board"
+      span: full
+      panels:
+        - id: kanban
+          type: kanban
+          columns:
+            - { key: "inbox", label: "Ideas", color: "gray" }
+            - { key: "in_progress", label: "Drafting", color: "blue" }
+            - { key: "review", label: "Editing", color: "orange" }
+            - { key: "done", label: "Published", color: "green" }
+          source: "api:tasks"
+          card_fields: [title, priority, task_type]
+
+    - title: "Documents"
+      span: left
+      panels:
+        - id: docs
+          type: table
+          source: "api:documents"
+          columns:
+            - { key: "title", label: "Title" }
+            - { key: "type", label: "Type" }
+            - { key: "updated_at", label: "Updated" }
+
+    - title: "Activity Feed"
+      span: right
+      panels:
+        - id: activity_feed
+          type: feed
+          source: "api:activities"
+          max_items: 20
+
+workflows: {}

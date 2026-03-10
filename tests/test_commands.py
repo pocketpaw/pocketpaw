@@ -651,8 +651,7 @@ class TestDeleteCommand:
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:12345:abc")
         mm.delete_session = AsyncMock(return_value=True)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock(return_value=True)
+        mm.remove_session_alias = AsyncMock(return_value=True)
         mock_get_mm.return_value = mm
 
         msg = _make_msg("/delete")
@@ -660,15 +659,14 @@ class TestDeleteCommand:
 
         assert "deleted" in response.content.lower()
         mm.delete_session.assert_called_once_with("discord:12345:abc")
-        mm._store.remove_session_alias.assert_called_once_with("discord:12345")
+        mm.remove_session_alias.assert_called_once_with("discord:12345")
 
     @patch("pocketpaw.bus.commands.get_memory_manager")
     async def test_delete_nothing(self, mock_get_mm):
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:12345")
         mm.delete_session = AsyncMock(return_value=False)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock()
+        mm.remove_session_alias = AsyncMock()
         mock_get_mm.return_value = mm
 
         msg = _make_msg("/delete")
@@ -681,14 +679,13 @@ class TestDeleteCommand:
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:12345:xyz")
         mm.delete_session = AsyncMock(return_value=True)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock()
+        mm.remove_session_alias = AsyncMock()
         mock_get_mm.return_value = mm
 
         msg = _make_msg("/delete")
         await self.handler.handle(msg)
 
-        mm._store.remove_session_alias.assert_called_once_with("discord:12345")
+        mm.remove_session_alias.assert_called_once_with("discord:12345")
 
 
 # =========================================================================
@@ -713,6 +710,49 @@ class TestIsCommandNewCommands:
 
     def test_recognises_delete(self):
         assert self.handler.is_command("/delete")
+
+    def test_recognises_kill(self):
+        assert self.handler.is_command("/kill")
+
+
+class TestKillCommand:
+    def setup_method(self):
+        from pocketpaw.bus.commands import CommandHandler
+
+        self.handler = CommandHandler()
+
+    async def test_kill_no_agent_loop(self):
+        self.handler.set_agent_loop(None)
+
+        msg = _make_msg("/kill")
+        response = await self.handler.handle(msg)
+
+        assert response is not None
+        assert response.content == "No active agent run for this session."
+
+    async def test_kill_cancels_session_when_task_running(self):
+        mock_loop = MagicMock()
+        mock_loop.cancel_session = AsyncMock(return_value=True)
+        self.handler.set_agent_loop(mock_loop)
+
+        msg = _make_msg("/kill")
+        response = await self.handler.handle(msg)
+
+        assert response is not None
+        assert response.content == "Agent run cancelled for this session."
+        mock_loop.cancel_session.assert_called_once_with("discord:12345")
+
+    async def test_kill_no_task_for_session(self):
+        mock_loop = MagicMock()
+        mock_loop.cancel_session = AsyncMock(return_value=False)
+        self.handler.set_agent_loop(mock_loop)
+
+        msg = _make_msg("/kill")
+        response = await self.handler.handle(msg)
+
+        assert response is not None
+        assert response.content == "No active agent run for this session."
+        mock_loop.cancel_session.assert_called_once_with("discord:12345")
 
 
 # =========================================================================

@@ -58,6 +58,13 @@ def create_api_app():
         allow_headers=["*"],
     )
 
+    # --- Mount Mission Control + Deep Work routers ----------------------
+    from pocketpaw.deep_work.api import router as deep_work_router
+    from pocketpaw.mission_control.api import router as mission_control_router
+
+    app.include_router(mission_control_router, prefix="/api/mission-control")
+    app.include_router(deep_work_router, prefix="/api/deep-work")
+
     # --- Mount all /api/v1/ routers -------------------------------------
     mount_v1_routers(app)
 

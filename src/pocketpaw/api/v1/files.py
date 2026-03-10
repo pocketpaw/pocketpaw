@@ -1,14 +1,21 @@
-# File browser router — directory listing.
+# File browser router — directory listing + file content serving.
 # Created: 2026-02-20
 
 from __future__ import annotations
 
 import logging
+import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 
-from pocketpaw.api.v1.schemas.files import BrowseResponse, FileEntry
+from pocketpaw.api.v1.schemas.files import (
+    BrowseResponse,
+    FileEntry,
+    OpenPathRequest,
+    OpenPathResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +83,74 @@ async def browse_files(path: str = "~"):
         display_path = str(resolved_path)
 
     return BrowseResponse(path=display_path, files=files)
+
+
+@router.post("/files/open", response_model=OpenPathResponse)
+async def open_path(req: OpenPathRequest):
+    """Push an open_path event to all connected WebSocket clients.
+
+    Validates the path exists and is within the file jail, then broadcasts
+    an ``open_path`` WebSocket event so the client navigates to it.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.dashboard_lifecycle import push_open_path
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = Path(req.path).resolve()
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        return OpenPathResponse(ok=False, error="Access denied: path outside allowed directory")
+
+    if not resolved.exists():
+        return OpenPathResponse(ok=False, error="Path does not exist")
+
+    action = req.action if req.action in ("navigate", "view") else "navigate"
+    await push_open_path(str(resolved), action)
+    return OpenPathResponse(ok=True)
+
+
+_MAX_VIEWABLE_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+@router.get("/files/content")
+async def get_file_content(path: str):
+    """Serve a file's raw content with appropriate MIME type."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+
+    if path in ("~", ""):
+        raise HTTPException(status_code=400, detail="Cannot serve a directory")
+
+    # On Windows, absolute paths start with a drive letter (e.g., "D:\...")
+    # rather than "/", so check Path.is_absolute() instead.
+    candidate = Path(path)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        resolved = (Path.home() / path).resolve()
+
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Cannot serve a directory")
+
+    if resolved.stat().st_size > _MAX_VIEWABLE_BYTES:
+        raise HTTPException(status_code=413, detail="File too large to view (max 50 MB)")
+
+    mime, _ = mimetypes.guess_type(str(resolved))
+    if mime is None:
+        mime = "application/octet-stream"
+
+    # For text files requested with ?mode=text, return plain text
+    # (allows JS to fetch content for the code viewer)
+    return FileResponse(str(resolved), media_type=mime)

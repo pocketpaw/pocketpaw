@@ -45,7 +45,7 @@ class OpenAIAgentsBackend:
                 "computer_use": "shell",
             },
             required_keys=["openai_api_key"],
-            supported_providers=["openai", "ollama", "openai_compatible"],
+            supported_providers=["openai", "ollama", "openrouter", "openai_compatible"],
             install_hint={
                 "pip_package": "openai-agents",
                 "pip_spec": "pocketpaw[openai-agents]",
@@ -153,7 +153,8 @@ class OpenAIAgentsBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_openai_function_tools
 
-            self._custom_tools = build_openai_function_tools(self.settings)
+            # Cache tools at init; the tool set doesn't change at runtime.
+            self._custom_tools = build_openai_function_tools(self.settings, backend="openai_agents")
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -168,8 +169,9 @@ class OpenAIAgentsBackend:
             getattr(self.settings, "openai_agents_provider", "") or self.settings.llm_provider
         )
 
-        # If Ollama or OpenAI-compatible endpoint is configured, use OpenAIChatCompletionsModel
-        if provider in ("ollama", "openai_compatible") or (
+        # If Ollama, OpenRouter, or OpenAI-compatible endpoint is configured,
+        # use OpenAIChatCompletionsModel
+        if provider in ("ollama", "openai_compatible", "openrouter") or (
             provider == "auto" and self.settings.openai_compatible_base_url
         ):
             from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
@@ -179,6 +181,19 @@ class OpenAIAgentsBackend:
                 base_url = self.settings.ollama_host.rstrip("/") + "/v1"
                 model_name = self.settings.ollama_model
                 client = AsyncOpenAI(base_url=base_url, api_key="ollama")
+            elif provider == "openrouter":
+                base_url = "https://openrouter.ai/api/v1"
+                api_key = (
+                    self.settings.openrouter_api_key
+                    or self.settings.openai_compatible_api_key
+                    or "none"
+                )
+                model_name = (
+                    self.settings.openrouter_model
+                    or self.settings.openai_compatible_model
+                    or model_name
+                )
+                client = AsyncOpenAI(base_url=base_url, api_key=api_key)
             else:
                 base_url = self.settings.openai_compatible_base_url
                 api_key = self.settings.openai_compatible_api_key or "none"

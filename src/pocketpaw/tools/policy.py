@@ -53,6 +53,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "rename_session",
         "delete_session",
     ],
+    "group:explorer": ["open_in_explorer"],
     "group:mcp": [],  # Placeholder — MCP tools are dynamic per server
 }
 
@@ -61,10 +62,10 @@ TOOL_GROUPS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 TOOL_PROFILES: dict[str, dict] = {
     "minimal": {
-        "allow": ["group:memory", "group:sessions"],
+        "allow": ["group:memory", "group:sessions", "group:explorer"],
     },
     "coding": {
-        "allow": ["group:fs", "group:shell", "group:memory"],
+        "allow": ["group:fs", "group:shell", "group:memory", "group:explorer"],
     },
     "full": {},  # No restrictions — everything allowed
 }

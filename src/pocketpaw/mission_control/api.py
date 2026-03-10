@@ -314,6 +314,35 @@ async def create_task(request: CreateTaskRequest) -> dict[str, Any]:
     return {"task": task.to_dict()}
 
 
+@router.get("/tasks/running")
+async def get_running_tasks() -> dict[str, Any]:
+    """Get list of currently running task executions."""
+    from pocketpaw.mission_control.executor import get_mc_task_executor
+
+    manager = get_mission_control_manager()
+    executor = get_mc_task_executor()
+
+    running_ids = executor.get_running_tasks()
+
+    running_tasks = []
+    for task_id in running_ids:
+        task = await manager.get_task(task_id)
+        if task:
+            running_tasks.append(
+                {
+                    "task_id": task_id,
+                    "title": task.title,
+                    "status": task.status.value,
+                    "assignee_ids": task.assignee_ids,
+                }
+            )
+
+    return {
+        "running_tasks": running_tasks,
+        "count": len(running_tasks),
+    }
+
+
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: str) -> dict[str, Any]:
     """Get a task by ID with messages."""
@@ -980,38 +1009,4 @@ async def stop_task(task_id: str) -> dict[str, Any]:
         "status": "stopped",
         "task_id": task_id,
         "message": "Task execution stopped",
-    }
-
-
-@router.get("/tasks/running")
-async def get_running_tasks() -> dict[str, Any]:
-    """Get list of currently running task executions.
-
-    Returns:
-        List of running task IDs and their details
-    """
-    from pocketpaw.mission_control.executor import get_mc_task_executor
-
-    manager = get_mission_control_manager()
-    executor = get_mc_task_executor()
-
-    running_ids = executor.get_running_tasks()
-
-    # Fetch task details for each running task
-    running_tasks = []
-    for task_id in running_ids:
-        task = await manager.get_task(task_id)
-        if task:
-            running_tasks.append(
-                {
-                    "task_id": task_id,
-                    "title": task.title,
-                    "status": task.status.value,
-                    "assignee_ids": task.assignee_ids,
-                }
-            )
-
-    return {
-        "running_tasks": running_tasks,
-        "count": len(running_tasks),
     }

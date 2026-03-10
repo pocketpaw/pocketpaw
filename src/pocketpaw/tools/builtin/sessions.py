@@ -290,8 +290,7 @@ class DeleteSessionTool(BaseTool):
             memory = get_memory_manager()
             resolved = await memory.resolve_session_key(session_key)
             deleted = await memory.delete_session(resolved)
-            if hasattr(memory._store, "remove_session_alias"):
-                await memory._store.remove_session_alias(session_key)
+            await memory.remove_session_alias(session_key)
             if deleted:
                 return "Session deleted. Your next message will start a fresh conversation."
             return "No session to delete."

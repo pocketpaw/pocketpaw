@@ -34,6 +34,11 @@ _API_KEY_PATTERNS = {
         "example": "sk-...",
         "name": "OpenAI API key",
     },
+    "openrouter_api_key": {
+        "pattern": re.compile(r"^sk-or-v1-"),
+        "example": "sk-or-v1-...",
+        "name": "OpenRouter API key",
+    },
     "telegram_bot_token": {
         "pattern": re.compile(r"^\d+:AA[A-Za-z0-9_-]{30,}$"),
         "example": "123456789:AAH...",
@@ -281,6 +286,12 @@ class Settings(BaseSettings):
         default=0,
         description="Max output tokens for OpenAI-compatible endpoint (0 = no limit)",
     )
+    openrouter_api_key: str | None = Field(
+        default=None, description="API key for OpenRouter (sk-or-v1-...)"
+    )
+    openrouter_model: str = Field(
+        default="", description="Model slug for OpenRouter (e.g. anthropic/claude-sonnet-4-6)"
+    )
     gemini_model: str = Field(default="gemini-3-pro-preview", description="Gemini model to use")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-5.2", description="OpenAI model to use")
@@ -363,6 +374,23 @@ class Settings(BaseSettings):
     discord_allowed_user_ids: list[int] = Field(
         default_factory=list, description="Discord user IDs allowed to use the bot"
     )
+    discord_allowed_channel_ids: list[int] = Field(
+        default_factory=list, description="Discord channel IDs the bot is restricted to"
+    )
+    discord_conversation_channel_ids: list[int] = Field(
+        default_factory=list,
+        description="Discord channels where the bot participates in group conversation",
+    )
+    discord_bot_name: str = Field(
+        default="Paw", description="Display name used by the bot in conversation"
+    )
+    discord_status_type: str = Field(
+        default="online", description="Discord bot status: online, idle, dnd, invisible"
+    )
+    discord_activity_type: str = Field(
+        default="", description="Discord bot activity: playing, watching, listening, competing"
+    )
+    discord_activity_text: str = Field(default="", description="Discord bot activity text")
 
     # Slack
     slack_bot_token: str | None = Field(

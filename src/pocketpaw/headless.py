@@ -76,6 +76,12 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
                     token=settings.discord_bot_token,
                     allowed_guild_ids=settings.discord_allowed_guild_ids,
                     allowed_user_ids=settings.discord_allowed_user_ids,
+                    allowed_channel_ids=settings.discord_allowed_channel_ids,
+                    conversation_channel_ids=settings.discord_conversation_channel_ids,
+                    bot_name=settings.discord_bot_name,
+                    status_type=settings.discord_status_type,
+                    activity_type=settings.discord_activity_type,
+                    activity_text=settings.discord_activity_text,
                 )
             )
 
@@ -186,6 +192,9 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
         return
 
     agent_loop = AgentLoop()
+    from pocketpaw.bus.commands import get_command_handler
+
+    get_command_handler().set_agent_loop(agent_loop)
 
     for adapter in adapters:
         await adapter.start(bus)

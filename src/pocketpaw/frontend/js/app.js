@@ -78,9 +78,9 @@ function app() {
             claudeSdkMaxTurns: 0,
             openaiAgentsModel: '',
             openaiAgentsMaxTurns: 0,
-            googleAdkModel: 'gemini-3-pro-preview',
+            googleAdkModel: '',
             googleAdkMaxTurns: 0,
-            codexCliModel: 'gpt-5.3-codex',
+            codexCliModel: '',
             codexCliMaxTurns: 0,
             opencodeBaseUrl: 'http://localhost:4096',
             opencodeModel: '',
@@ -95,7 +95,7 @@ function app() {
             openaiCompatibleApiKey: '',
             openaiCompatibleModel: '',
             openaiCompatibleMaxTokens: 0,
-            geminiModel: 'gemini-3-pro-preview',
+            geminiModel: '',
             bypassPermissions: false,
             webSearchProvider: 'tavily',
             urlExtractProvider: 'auto',
@@ -453,6 +453,9 @@ function app() {
             socket.on('session_history', (data) => this.handleSessionHistory(data));
             socket.on('new_session', (data) => this.handleNewSession(data));
 
+            // File viewer: open_path events from agent's open_in_explorer tool
+            socket.on('open_path', (data) => this.handleOpenPath(data));
+
             // Note: Mission Control events come through system_event
             // They are handled in handleSystemEvent based on event_type prefix 'mc_'
         },
@@ -598,11 +601,27 @@ function app() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ confirm: true }),
                 });
-                this.showToast(
-                    'Server is restarting. If you changed the host or port, ' +
-                    'reconnect at the new address.',
-                    'info'
-                );
+                // Use the current browser location as the baseline. The configured
+                // webPort may differ from the actual running port when the server
+                // auto-found a free port at startup, so only redirect if the user
+                // explicitly changed host/port in settings.
+                const curHost = window.location.hostname;
+                const curPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+                const newHost = this.settings.webHost || curHost;
+                const newPort = this.settings.webPort || curPort;
+                const displayHost = (newHost === '0.0.0.0') ? curHost : newHost;
+                const newUrl = `${window.location.protocol}//${displayHost}:${newPort}`;
+                const currentUrl = `${window.location.protocol}//${curHost}:${curPort}`;
+                if (newUrl !== currentUrl) {
+                    this.showToast(
+                        `Server is restarting. Redirecting to ${newUrl} ...`,
+                        'info'
+                    );
+                    setTimeout(() => { window.location.href = newUrl; }, 3000);
+                } else {
+                    this.showToast('Server is restarting...', 'info');
+                    setTimeout(() => { window.location.reload(); }, 3000);
+                }
             } catch {
                 this.showToast('Restart request sent. Reconnecting…', 'info');
             } finally {

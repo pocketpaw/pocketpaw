@@ -98,6 +98,25 @@ async def _broadcast_health_update(summary: dict):
                 active_connections.remove(ws)
 
 
+async def push_open_path(path: str, action: str = "navigate"):
+    """Push an open_path event to all connected WebSocket clients.
+
+    Parameters
+    ----------
+    path:
+        Absolute filesystem path to open.
+    action:
+        ``"navigate"`` to open a folder in the explorer, or
+        ``"view"`` to open a file in the viewer.
+    """
+    message = {"type": "open_path", "path": path, "action": action}
+    for ws in active_connections[:]:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -172,6 +191,24 @@ async def startup_event(
             logger.info("Recovered %d interrupted Deep Work project(s)", recovered)
     except Exception as e:
         logger.warning("Failed to recover interrupted projects: %s", e)
+
+    # Ensure built-in PawKits are installed
+    try:
+        from pathlib import Path
+
+        from pocketpaw.kits.store import get_kit_store
+
+        kit_store = get_kit_store()
+        installed = await kit_store.list_kits()
+        builtin_ids = {k.id for k in installed if k.config.meta.built_in}
+        if "project-orchestrator" not in builtin_ids:
+            yaml_path = Path(__file__).parent / "kits" / "builtins" / "project_orchestrator.yaml"
+            yaml_str = yaml_path.read_text(encoding="utf-8")
+            kit = await kit_store.install_kit(yaml_str, kit_id="project-orchestrator")
+            await kit_store.activate_kit(kit.id)
+            logger.info("Auto-installed built-in PawKit: Project Orchestrator")
+    except Exception as e:
+        logger.warning("Failed to ensure built-in PawKits: %s", e)
 
     # Wire MCP OAuth broadcast + auto-start enabled MCP servers (non-blocking)
     try:
