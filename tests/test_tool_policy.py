@@ -34,6 +34,7 @@ class TestProfileResolution:
             "clear_session",
             "rename_session",
             "delete_session",
+            "open_in_explorer",
         }
 
     def test_coding_profile_includes_fs_shell_memory(self):

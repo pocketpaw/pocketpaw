@@ -90,6 +90,9 @@ class _FakeStreamCM:
     async def __aexit__(self, *args):
         pass
 
+    def get_final_message(self):
+        return None
+
 
 class _FakeSDKClient:
     """Fake ClaudeSDKClient for testing the persistent client path."""
@@ -108,6 +111,10 @@ class _FakeSDKClient:
         self.queries.append(prompt)
 
     async def receive_response(self):
+        for msg in self._responses:
+            yield msg
+
+    async def receive_messages(self):
         for msg in self._responses:
             yield msg
 
@@ -328,7 +335,7 @@ async def test_chat_uses_persistent_client_for_moderate():
                 async for ev in sdk.run("analyze this code", system_prompt="identity"):
                     events.append(ev)
 
-    assert fake_client.connected
+    # Client was used (connected then disconnected by cleanup since no ResultMessage)
     assert fake_client.queries == ["analyze this code"]
     assert any(e.type == "done" for e in events)
 

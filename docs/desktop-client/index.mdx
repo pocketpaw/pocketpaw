@@ -1,0 +1,99 @@
+---
+title: "Desktop Client: Native App for PocketPaw"
+description: "PocketPaw's native desktop app built with Tauri and SvelteKit. System tray, global shortcuts, multi-window support, and one-click backend installation."
+section: Desktop Client
+ogType: article
+keywords: ["pocketpaw desktop", "tauri app", "sveltekit desktop", "native ai client", "desktop ai agent"]
+tags: ["desktop", "client", "tauri", "sveltekit"]
+---
+
+# Desktop Client
+
+The PocketPaw desktop client is a native application built with **Tauri 2.0** and **SvelteKit**. It connects to the Python backend over REST and WebSocket, providing a polished native experience on Windows, macOS, and Linux.
+
+## Why a Desktop App?
+
+The web dashboard works great in a browser, but a native app unlocks features that browsers can't provide:
+
+- **System tray** with quick access menu and background operation
+- **Global keyboard shortcuts** that work even when the app isn't focused
+- **Multi-window support** with a side panel and quick-ask popup
+- **One-click installation** that sets up the Python backend automatically
+- **Auto-updates** via Tauri's built-in updater
+- **Native notifications** for reminders, task completions, and agent alerts
+
+## Downloads
+
+| Platform | Download |
+| --- | --- |
+| **Windows** | [PocketPaw-Setup.exe](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe) |
+| **macOS** | [PocketPaw.dmg](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.dmg) |
+| **Linux** | [PocketPaw.AppImage](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.AppImage) |
+
+## Architecture
+
+The client is split into two layers:
+
+### Frontend (SvelteKit)
+
+- **SvelteKit 2** with **Svelte 5** runes for reactive state management
+- **Tailwind CSS 4** with oklch-based design tokens
+- **shadcn-svelte** (bits-ui) component library
+- Static SPA mode (no SSR), bundled into the Tauri shell
+
+### Rust Backend (Tauri)
+
+- **System tray** with Open, Quick Ask, Settings, and Quit actions
+- **Close-to-tray** behavior (window hides instead of closing)
+- **Multi-window management** for side panel and quick-ask windows
+- **Global shortcuts** registered from the frontend
+- **OAuth token storage** and IPC commands
+
+### How It Connects
+
+The desktop client communicates with the PocketPaw Python backend (running on `localhost:8888`) through:
+
+1. **REST API** (`/api/v1/`) for CRUD operations (sessions, settings, memory, etc.)
+2. **WebSocket** (`/api/v1/ws`) for real-time streaming (chat responses, system events)
+3. **SSE** (`/api/v1/chat/stream`) for chat message streaming
+
+Authentication uses an OAuth2 PKCE flow or a master access token read from `~/.pocketpaw/access_token`.
+
+## Key Features
+
+### Onboarding Wizard
+
+First-time users get a guided setup that:
+1. Detects if the Python backend is installed
+2. Offers one-click installation (downloads and configures Python + PocketPaw)
+3. Walks through API key configuration
+4. Connects to the running backend
+
+### Chat Interface
+
+Full-featured chat with:
+- Real-time streaming responses
+- Tool call visualization (tool start, result, thinking indicators)
+- Code block syntax highlighting via CodeMirror
+- File attachment support
+- Session management (create, rename, delete, search, export)
+
+### Side Panel
+
+A compact secondary window for quick interactions without leaving your current task. Accessible via global shortcut or system tray.
+
+### Quick Ask
+
+A lightweight popup window for fast one-off questions. Opens and closes instantly.
+
+<CardGroup>
+  <Card title="Installation" icon="lucide:download" href="/desktop-client/installation">
+    Download and set up the desktop app.
+  </Card>
+  <Card title="Development" icon="lucide:code" href="/desktop-client/development">
+    Build and contribute to the desktop client.
+  </Card>
+  <Card title="API Server" icon="lucide:server" href="/desktop-client/api-server">
+    Run the headless API server for external clients.
+  </Card>
+</CardGroup>

@@ -117,6 +117,7 @@
 
             <!-- ==================== Discord ==================== -->
             <div x-show="channelsTab === 'discord'" class="flex flex-col gap-5 mt-4">
+                <!-- Bot Token -->
                 <div class="flex flex-col gap-2">
                     <div class="flex justify-between items-center">
                         <label class="text-[13px] font-medium text-[var(--text-secondary)]">Bot Token</label>
@@ -132,6 +133,93 @@
                             @click="saveChannelConfig('discord')" :disabled="channelLoading || !channelForms.discord.bot_token">Save</button>
                     </div>
                 </div>
+
+                <!-- Settings (shown when configured) -->
+                <template x-if="channelStatus.discord?.configured">
+                    <div class="flex flex-col gap-4">
+                        <div class="border-t border-white/10 pt-1"></div>
+
+                        <!-- Bot Name -->
+                        <div class="flex flex-col gap-1.5">
+                            <label class="text-[13px] font-medium text-[var(--text-secondary)]">Bot Name</label>
+                            <input type="text" x-model="discordSettings.bot_name" placeholder="Paw"
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                            <p class="text-[11px] text-white/40">The name the bot identifies as in conversations.</p>
+                        </div>
+
+                        <!-- Presence -->
+                        <div class="flex flex-col gap-2">
+                            <label class="text-[13px] font-medium text-[var(--text-secondary)]">Presence</label>
+                            <div class="flex gap-2">
+                                <select x-model="discordSettings.status_type"
+                                    class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all appearance-none cursor-pointer"
+                                    style="background-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22rgba(255,255,255,0.4)%22 stroke-width=%222%22><polyline points=%226 9 12 15 18 9%22/></svg>'); background-repeat: no-repeat; background-position: right 12px center;">
+                                    <option value="online">Online</option>
+                                    <option value="idle">Idle</option>
+                                    <option value="dnd">Do Not Disturb</option>
+                                    <option value="invisible">Invisible</option>
+                                </select>
+                                <select x-model="discordSettings.activity_type"
+                                    class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] transition-all appearance-none cursor-pointer"
+                                    style="background-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22rgba(255,255,255,0.4)%22 stroke-width=%222%22><polyline points=%226 9 12 15 18 9%22/></svg>'); background-repeat: no-repeat; background-position: right 12px center;">
+                                    <option value="">No Activity</option>
+                                    <option value="playing">Playing</option>
+                                    <option value="watching">Watching</option>
+                                    <option value="listening">Listening to</option>
+                                    <option value="competing">Competing in</option>
+                                </select>
+                            </div>
+                            <input x-show="discordSettings.activity_type" type="text" x-model="discordSettings.activity_text"
+                                placeholder="Activity text..."
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                        </div>
+
+                        <!-- Access Control -->
+                        <div class="flex flex-col gap-2">
+                            <div class="flex items-center gap-2">
+                                <label class="text-[13px] font-medium text-[var(--text-secondary)]">Access Control</label>
+                                <span class="text-[11px] text-white/30">(also via /allowchannel, /allowuser)</span>
+                            </div>
+                            <div class="flex flex-col gap-3 p-3 bg-black/20 rounded-[12px] border border-white/[0.06]">
+                                <div class="flex flex-col gap-1">
+                                    <label class="text-[11px] font-medium text-white/50 uppercase tracking-wider">Guild IDs</label>
+                                    <input type="text" x-model="discordSettings.allowed_guild_ids"
+                                        placeholder="Leave empty for all guilds"
+                                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[8px] py-2 px-3 text-[12px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/30 font-mono" />
+                                </div>
+                                <div class="flex flex-col gap-1">
+                                    <label class="text-[11px] font-medium text-white/50 uppercase tracking-wider">Channel IDs</label>
+                                    <input type="text" x-model="discordSettings.allowed_channel_ids"
+                                        placeholder="Leave empty for all channels"
+                                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[8px] py-2 px-3 text-[12px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/30 font-mono" />
+                                </div>
+                                <div class="flex flex-col gap-1">
+                                    <label class="text-[11px] font-medium text-white/50 uppercase tracking-wider">User IDs</label>
+                                    <input type="text" x-model="discordSettings.allowed_user_ids"
+                                        placeholder="Leave empty for all users"
+                                        class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[8px] py-2 px-3 text-[12px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/30 font-mono" />
+                                </div>
+                                <p class="text-[11px] text-white/30">Comma-separated Discord IDs. Enable Developer Mode in Discord settings to copy IDs.</p>
+                            </div>
+                        </div>
+
+                        <!-- Conversation Channels -->
+                        <div class="flex flex-col gap-2">
+                            <div class="flex items-center gap-2">
+                                <label class="text-[13px] font-medium text-[var(--text-secondary)]">Conversation Channels</label>
+                                <span class="text-[11px] text-white/30">(also via /converse)</span>
+                            </div>
+                            <input type="text" x-model="discordSettings.conversation_channel_ids"
+                                placeholder="No conversation channels"
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/30 font-mono" />
+                            <p class="text-[11px] text-white/40">Channels where the bot participates naturally without mentions. Comma-separated IDs.</p>
+                        </div>
+
+                        <!-- Save Settings -->
+                        <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
+                            @click="saveDiscordSettings()" :disabled="channelLoading">Save Discord Settings</button>
+                    </div>
+                </template>
             </div>
 
             <!-- ==================== Slack ==================== -->

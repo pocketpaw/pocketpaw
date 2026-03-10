@@ -231,6 +231,10 @@ class TestRunSecurityAudit:
                 "pocketpaw.security.audit_cli._check_bypass_permissions",
                 return_value=(True, "OK", False),
             ),
+            patch(
+                "pocketpaw.security.audit_cli._check_pii_protection",
+                return_value=(True, "OK", False),
+            ),
         ):
             exit_code = await run_security_audit()
             assert exit_code == 0
@@ -263,6 +267,10 @@ class TestRunSecurityAudit:
             ),
             patch(
                 "pocketpaw.security.audit_cli._check_bypass_permissions",
+                return_value=(True, "OK", False),
+            ),
+            patch(
+                "pocketpaw.security.audit_cli._check_pii_protection",
                 return_value=(True, "OK", False),
             ),
         ):
@@ -307,6 +315,10 @@ class TestRunSecurityAudit:
             ),
             patch(
                 "pocketpaw.security.audit_cli._check_bypass_permissions",
+                return_value=(True, "OK", False),
+            ),
+            patch(
+                "pocketpaw.security.audit_cli._check_pii_protection",
                 return_value=(True, "OK", False),
             ),
         ):

@@ -65,6 +65,17 @@ class TestFetchTool:
 
         assert is_safe_path(traversal_path, jail) is False
 
+    def test_is_safe_path_prefix_bypass(self, tmp_path):
+        """Prefix-matching bypass should be blocked."""
+        from pocketpaw.tools.fetch import is_safe_path
+
+        jail = tmp_path / "jail"
+        jail.mkdir()
+        outside_with_prefix = tmp_path / "jail_outside"
+        outside_with_prefix.mkdir()
+
+        assert is_safe_path(outside_with_prefix, jail) is False
+
     @pytest.mark.asyncio
     async def test_handle_path_directory(self, tmp_path):
         """Should handle directory paths."""

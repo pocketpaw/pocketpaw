@@ -37,6 +37,11 @@ def _make_fake_task(task_id="bbbbbbbb-1111-2222-3333-444444444444"):
     task.project_id = None
     task.blocked_by = []
     task.assignee_ids = []
+    task.timeout_minutes = None
+    task.retry_count = 0
+    task.max_retries = 0
+    task.output = None
+    task.error_message = None
     return task
 
 

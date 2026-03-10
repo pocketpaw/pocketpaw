@@ -1,6 +1,7 @@
 # Tests for Unified Agent Loop
 # Updated for AgentEvent-based architecture (no more dict chunks)
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -349,3 +350,144 @@ async def test_agent_loop_handles_error_before_router_init(
                             break
 
                     assert error_found, "Error message should be published to outbound channel"
+
+
+# ---------------------------------------------------------------------------
+# Session-lock GC tests  (regression for memory-leak bug)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gc_removes_stale_locks():
+    """
+    _gc_session_locks must evict locks that have been idle longer than
+    _SESSION_LOCK_TTL and are not currently held.
+    """
+    import time
+
+    from pocketpaw.agents.loop import _SESSION_LOCK_TTL, AgentLoop
+
+    with (
+        patch("pocketpaw.agents.loop.get_message_bus"),
+        patch("pocketpaw.agents.loop.get_memory_manager"),
+        patch("pocketpaw.agents.loop.AgentContextBuilder"),
+        patch("pocketpaw.agents.loop.get_settings") as mock_get_settings,
+    ):
+        settings = MagicMock()
+        settings.max_concurrent_conversations = 5
+        settings.agent_backend = "claude_agent_sdk"
+        mock_get_settings.return_value = settings
+
+        loop = AgentLoop()
+
+        # Manually insert a stale lock: last_used is far in the past
+        stale_key = "session:stale"
+        loop._session_locks[stale_key] = asyncio.Lock()
+        loop._session_lock_last_used[stale_key] = time.monotonic() - (_SESSION_LOCK_TTL + 1)
+
+        # Insert a fresh lock: last_used is now, should NOT be removed
+        fresh_key = "session:fresh"
+        loop._session_locks[fresh_key] = asyncio.Lock()
+        loop._session_lock_last_used[fresh_key] = time.monotonic()
+
+        # Patch asyncio.sleep so the GC body runs once then stops:
+        # - first call returns immediately (skips the 5-minute wait)
+        # - second call raises CancelledError to exit the while-True loop
+        sleep_call_count = 0
+
+        async def fast_sleep(_):
+            nonlocal sleep_call_count
+            sleep_call_count += 1
+            if sleep_call_count >= 2:
+                raise asyncio.CancelledError  # stop after one full GC pass
+
+        with patch("asyncio.sleep", side_effect=fast_sleep):
+            try:
+                await loop._gc_session_locks()
+            except asyncio.CancelledError:
+                pass
+
+        assert stale_key not in loop._session_locks, "Stale lock should be evicted"
+        assert stale_key not in loop._session_lock_last_used, "Stale timestamp should be evicted"
+        assert fresh_key in loop._session_locks, "Fresh lock must not be evicted"
+        assert fresh_key in loop._session_lock_last_used, "Fresh timestamp must not be evicted"
+
+
+@pytest.mark.asyncio
+async def test_gc_skips_acquired_locks():
+    """
+    _gc_session_locks must NOT evict a lock that is currently held,
+    even if its TTL has expired.
+    """
+    import time
+
+    from pocketpaw.agents.loop import _SESSION_LOCK_TTL, AgentLoop
+
+    with (
+        patch("pocketpaw.agents.loop.get_message_bus"),
+        patch("pocketpaw.agents.loop.get_memory_manager"),
+        patch("pocketpaw.agents.loop.AgentContextBuilder"),
+        patch("pocketpaw.agents.loop.get_settings") as mock_get_settings,
+    ):
+        settings = MagicMock()
+        settings.max_concurrent_conversations = 5
+        settings.agent_backend = "claude_agent_sdk"
+        mock_get_settings.return_value = settings
+
+        loop = AgentLoop()
+
+        held_key = "session:held"
+        lock = asyncio.Lock()
+        await lock.acquire()  # lock is now held — must not be evicted
+        loop._session_locks[held_key] = lock
+        loop._session_lock_last_used[held_key] = time.monotonic() - (_SESSION_LOCK_TTL + 1)
+
+        sleep_call_count = 0
+
+        async def fast_sleep(_):
+            nonlocal sleep_call_count
+            sleep_call_count += 1
+            if sleep_call_count >= 2:
+                raise asyncio.CancelledError
+
+        with patch("asyncio.sleep", side_effect=fast_sleep):
+            try:
+                await loop._gc_session_locks()
+            except asyncio.CancelledError:
+                pass
+
+        assert held_key in loop._session_locks, "Held lock must never be evicted by GC"
+        lock.release()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_gc_task():
+    """
+    stop() must cancel the GC background task so it does not outlive the loop.
+    """
+    from pocketpaw.agents.loop import AgentLoop
+
+    with (
+        patch("pocketpaw.agents.loop.get_message_bus"),
+        patch("pocketpaw.agents.loop.get_memory_manager"),
+        patch("pocketpaw.agents.loop.AgentContextBuilder"),
+        patch("pocketpaw.agents.loop.get_settings") as mock_get_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+    ):
+        settings = MagicMock()
+        settings.max_concurrent_conversations = 5
+        settings.agent_backend = "claude_agent_sdk"
+        mock_get_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+
+        # Simulate a live GC task by creating one manually
+        async def _noop():
+            await asyncio.sleep(9999)
+
+        loop._lock_gc_task = asyncio.create_task(_noop())
+
+        await loop.stop()
+
+        assert loop._lock_gc_task is None, "stop() must clear _lock_gc_task"

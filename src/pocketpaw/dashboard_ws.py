@@ -402,6 +402,16 @@ async def websocket_handler(
                         settings.injection_scan_enabled = bool(data["injection_scan_enabled"])
                     if "injection_scan_llm" in data:
                         settings.injection_scan_llm = bool(data["injection_scan_llm"])
+                    if "pii_scan_enabled" in data:
+                        settings.pii_scan_enabled = bool(data["pii_scan_enabled"])
+                    if data.get("pii_default_action"):
+                        settings.pii_default_action = data["pii_default_action"]
+                    if "pii_scan_memory" in data:
+                        settings.pii_scan_memory = bool(data["pii_scan_memory"])
+                    if "pii_scan_audit" in data:
+                        settings.pii_scan_audit = bool(data["pii_scan_audit"])
+                    if "pii_scan_logs" in data:
+                        settings.pii_scan_logs = bool(data["pii_scan_logs"])
                     if data.get("tool_profile"):
                         settings.tool_profile = data["tool_profile"]
                     if "plan_mode" in data:
@@ -647,6 +657,11 @@ async def websocket_handler(
                             "hasParallelKey": bool(settings.parallel_api_key),
                             "injectionScanEnabled": settings.injection_scan_enabled,
                             "injectionScanLlm": settings.injection_scan_llm,
+                            "piiScanEnabled": settings.pii_scan_enabled,
+                            "piiDefaultAction": settings.pii_default_action,
+                            "piiScanMemory": settings.pii_scan_memory,
+                            "piiScanAudit": settings.pii_scan_audit,
+                            "piiScanLogs": settings.pii_scan_logs,
                             "toolProfile": settings.tool_profile,
                             "planMode": settings.plan_mode,
                             "planModeTools": ",".join(settings.plan_mode_tools),

@@ -193,4 +193,10 @@ def get_tunnel_manager(port: int = 8888) -> TunnelManager:
             _tunnel_instance = None
 
         register("tunnel", shutdown=_tunnel_instance.stop, reset=_reset)
+    elif _tunnel_instance.port != port:
+        logger.warning(
+            "get_tunnel_manager called with port=%d but singleton is already on port=%d",
+            port,
+            _tunnel_instance.port,
+        )
     return _tunnel_instance

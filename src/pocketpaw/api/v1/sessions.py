@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.common import StatusResponse
 from pocketpaw.api.v1.schemas.sessions import (
+    SessionCreateResponse,
     SessionListResponse,
     SessionSearchResponse,
     SessionSearchResult,
@@ -22,6 +24,13 @@ from pocketpaw.api.v1.schemas.sessions import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Sessions"], dependencies=[Depends(require_scope("sessions"))])
+
+
+@router.post("/sessions", response_model=SessionCreateResponse)
+async def create_session():
+    """Create a new empty session and return its ID."""
+    safe_key = f"websocket_{uuid.uuid4().hex[:12]}"
+    return SessionCreateResponse(id=safe_key, title="New Chat")
 
 
 @router.get("/sessions", response_model=SessionListResponse)

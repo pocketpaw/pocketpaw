@@ -1,0 +1,16 @@
+<script lang="ts">
+  import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
+  import ChatSessionDropdown from "$lib/components/chat/ChatSessionDropdown.svelte";
+
+</script>
+
+<div class="flex h-full w-full flex-col bg-border/20 rounded-lg">
+  <!-- Session selector -->
+  <div class="shrink-0 border-b border-border/40">
+    <ChatSessionDropdown />
+  </div>
+  <!-- Chat body -->
+  <div class="flex-1 overflow-hidden">
+    <ChatPanel />
+  </div>
+</div>

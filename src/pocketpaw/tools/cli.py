@@ -48,6 +48,7 @@ from pocketpaw.tools.builtin import (
     ListSessionsTool,
     NewSessionTool,
     OCRTool,
+    OpenExplorerTool,
     RecallTool,
     RedditReadTool,
     RedditSearchTool,
@@ -118,6 +119,7 @@ _TOOLS = {
         HealthCheckTool(),
         ErrorLogTool(),
         ConfigDoctorTool(),
+        OpenExplorerTool(),
     ]
 }
 

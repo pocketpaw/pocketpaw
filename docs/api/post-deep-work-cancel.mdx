@@ -1,0 +1,95 @@
+---
+title: Cancel Deep Work Project
+description: "Cancel a running or paused Deep Work project. Stops all executing tasks, marks remaining tasks as skipped, and sets the project to a terminal cancelled state."
+api: POST /api/deep-work/projects/{project_id}/cancel
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["cancel project", "stop execution", "deep work", "abort"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Cancels a Deep Work project. All currently executing tasks are stopped, all pending tasks are marked as `SKIPPED`, and the project moves to `CANCELLED` status. Tasks that already completed keep their `DONE` status — finished work isn't lost.
+
+Cancellation is a terminal state. Once cancelled, the project can't be resumed or re-approved.
+
+## Path Parameters
+
+<ResponseField name="project_id" type="string" required>
+  The ID of the project to cancel. The project must exist and not already be in `COMPLETED` or `CANCELLED` status.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the project was cancelled.
+</ResponseField>
+
+<ResponseField name="project" type="object">
+  The updated project object with `status: "cancelled"` and a `completed_at` timestamp.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/projects/PROJECT_ID/cancel \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch(
+  'http://localhost:8000/api/deep-work/projects/PROJECT_ID/cancel',
+  {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer YOUR_TOKEN' },
+  }
+);
+const data = await res.json();
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.post(
+    "http://localhost:8000/api/deep-work/projects/PROJECT_ID/cancel",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+)
+data = res.json()
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "400"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "project": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "title": "Build a REST API for recipe management",
+    "status": "cancelled",
+    "completed_at": "2024-01-15T16:30:00Z",
+    "task_ids": ["task-1", "task-2", "task-3"],
+    "team_agent_ids": ["agent-1"]
+  }
+}
+```
+  </Tab>
+  <Tab title="400">
+```json
+{
+  "detail": "Cannot cancel project with status 'completed'"
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

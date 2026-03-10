@@ -1,0 +1,59 @@
+meta:
+  name: "Sprint Tracker"
+  author: "PocketPaw"
+  version: "1.0.0"
+  description: "Plan sprints, track velocity, and manage engineering deliverables"
+  category: engineering
+  icon: gauge
+  tags: [sprints, engineering, agile]
+  built_in: true
+
+layout:
+  columns: 2
+  sections:
+    - title: "Sprint Overview"
+      span: full
+      panels:
+        - id: metrics
+          type: metrics-row
+          items:
+            - { label: "Backlog", source: "api:stats", field: "tasks.by_status.inbox", format: "number" }
+            - { label: "Assigned", source: "api:stats", field: "tasks.by_status.blocked", format: "number" }
+            - { label: "In Progress", source: "api:stats", field: "tasks.by_status.in_progress", format: "number" }
+            - { label: "In Review", source: "api:stats", field: "tasks.by_status.review", format: "number" }
+            - { label: "Done", source: "api:stats", field: "tasks.by_status.done", format: "number" }
+
+    - title: "Sprint Board"
+      span: full
+      panels:
+        - id: kanban
+          type: kanban
+          columns:
+            - { key: "inbox", label: "Backlog", color: "gray" }
+            - { key: "blocked", label: "Assigned", color: "purple" }
+            - { key: "in_progress", label: "In Progress", color: "blue" }
+            - { key: "review", label: "Review", color: "orange" }
+            - { key: "done", label: "Done", color: "green" }
+          source: "api:tasks"
+          card_fields: [title, priority, task_type]
+
+    - title: "Activity Log"
+      span: left
+      panels:
+        - id: activity_feed
+          type: feed
+          source: "api:activities"
+          max_items: 30
+
+    - title: "Deliverables"
+      span: right
+      panels:
+        - id: docs
+          type: table
+          source: "api:documents"
+          columns:
+            - { key: "title", label: "Title" }
+            - { key: "type", label: "Type" }
+            - { key: "updated_at", label: "Updated" }
+
+workflows: {}

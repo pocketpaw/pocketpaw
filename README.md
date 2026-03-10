@@ -18,10 +18,12 @@
 
 <p align="center">
   <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.AppImage"><img src="https://img.shields.io/badge/Linux-Download_.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
 </p>
 
 <p align="center">
-  Self-hosted AI agent with a web dashboard. Talks to you over <strong>Discord</strong>, <strong>Slack</strong>, <strong>WhatsApp</strong>, <strong>Telegram</strong>, or the browser.<br>
+  Self-hosted AI agent with a native desktop app and web dashboard. Talks to you over <strong>Discord</strong>, <strong>Slack</strong>, <strong>WhatsApp</strong>, <strong>Telegram</strong>, or the browser.<br>
   No subscription. No cloud lock-in. Your data stays on your machine.
 </p>
 
@@ -35,13 +37,15 @@
 
 ## Quick Start
 
-### Via Desktop Installer
+### Desktop App (Recommended)
 
-Sets up Python and PocketPaw in one click, then opens the dashboard.
+Download the native desktop app. It bundles the backend installer and provides a full-featured UI with system tray, global shortcuts, side panel, and multi-window support.
 
 | Platform | Download |
 | --- | --- |
 | **Windows** | [PocketPaw-Setup.exe](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe) |
+| **macOS** | [PocketPaw.dmg](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.dmg) |
+| **Linux** | [PocketPaw.AppImage](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.AppImage) |
 
 ### Install via Terminal
 
@@ -254,6 +258,8 @@ Paw:  3 agents working on it. I'll ping you when it's ready.
 
 Everything goes through an event-driven message bus. Channels publish messages, the `AgentLoop` picks them up and routes to whichever backend you've configured. All six backends implement the same `AgentBackend` protocol, so swapping one for another doesn't touch the rest of the system.
 
+The **desktop client** (`client/`) is a Tauri 2.0 + SvelteKit app that connects to the Python backend over REST and WebSocket. It provides system tray integration, global hotkeys, multi-window support (side panel, quick ask), and an onboarding wizard that handles backend installation.
+
 ### Agent Backends
 
 | Backend | Key | Providers | MCP |
@@ -328,6 +334,8 @@ See the [full configuration reference](https://pocketpaw.xyz/getting-started/con
 
 ## Development
 
+### Backend (Python)
+
 **Prerequisites:**
 - Python 3.11 or higher ([download here](https://www.python.org/downloads/))
 - [uv](https://docs.astral.sh/uv/) package manager
@@ -373,7 +381,7 @@ uv sync --dev
 uv run pocketpaw --dev
 
 # 5. Run tests
-uv run pytest               # Run tests (2000+)
+uv run pytest --ignore=tests/e2e    # Run tests (2900+)
 
 # 6. Lint & format
 uv run ruff check . && uv run ruff format .
@@ -392,6 +400,26 @@ pip install pocketpaw[all]                 # Everything
 ```
 
 </details>
+
+### Desktop Client (Tauri + SvelteKit)
+
+The native desktop app lives in `client/`. It connects to the Python backend via REST/WebSocket.
+
+**Prerequisites:**
+- [Bun](https://bun.sh/) (package manager)
+- [Rust](https://rustup.rs/) (for Tauri)
+- Python backend running on `localhost:8888`
+
+```bash
+cd client
+bun install                    # Install dependencies
+bun run dev                    # Vite dev server (http://localhost:1420)
+bun run tauri dev              # Full desktop app (frontend + Tauri shell)
+bun run check                  # Type check
+bun run tauri build            # Production build
+```
+
+**Tech stack:** SvelteKit 2 + Svelte 5, Tailwind CSS 4, shadcn-svelte, Tauri 2.0 (Rust). See `client/CLAUDE.md` for full architecture details.
 
 ---
 

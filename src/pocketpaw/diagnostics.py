@@ -246,7 +246,7 @@ async def check_openai_compatible(settings: Settings) -> int:
     # 2. Test tool calling
     console.print("  Testing tool calling support ...")
     try:
-        await oc.chat.completions.create(
+        tool_response = await oc.chat.completions.create(
             model=model,
             max_tokens=256,
             messages=[{"role": "user", "content": "What is 2 + 2?"}],
@@ -270,7 +270,7 @@ async def check_openai_compatible(settings: Settings) -> int:
                 }
             ],
         )
-        has_tool_use = bool(response.choices[0].message.tool_calls)
+        has_tool_use = bool(tool_response.choices[0].message.tool_calls)
         if has_tool_use:
             console.print("  [green]\\[OK][/]  Tool calling works")
         else:

@@ -52,11 +52,18 @@ def create_api_app():
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_ORIGINS,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # --- Mount Mission Control + Deep Work routers ----------------------
+    from pocketpaw.deep_work.api import router as deep_work_router
+    from pocketpaw.mission_control.api import router as mission_control_router
+
+    app.include_router(mission_control_router, prefix="/api/mission-control")
+    app.include_router(deep_work_router, prefix="/api/deep-work")
 
     # --- Mount all /api/v1/ routers -------------------------------------
     mount_v1_routers(app)

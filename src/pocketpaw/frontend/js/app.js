@@ -101,6 +101,11 @@ function app() {
             urlExtractProvider: 'auto',
             injectionScanEnabled: true,
             injectionScanLlm: false,
+            piiScanEnabled: false,
+            piiDefaultAction: 'mask',
+            piiScanMemory: true,
+            piiScanAudit: true,
+            piiScanLogs: true,
             toolProfile: 'full',
             planMode: false,
             planModeTools: 'shell,write_file,edit_file',
@@ -453,6 +458,9 @@ function app() {
             socket.on('session_history', (data) => this.handleSessionHistory(data));
             socket.on('new_session', (data) => this.handleNewSession(data));
 
+            // File viewer: open_path events from agent's open_in_explorer tool
+            socket.on('open_path', (data) => this.handleOpenPath(data));
+
             // Note: Mission Control events come through system_event
             // They are handled in handleSystemEvent based on event_type prefix 'mc_'
         },
@@ -481,7 +489,9 @@ function app() {
                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
                 'geminiModel',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
-                'injectionScanEnabled', 'injectionScanLlm', 'toolProfile',
+                'injectionScanEnabled', 'injectionScanLlm',
+                'piiScanEnabled', 'piiDefaultAction', 'piiScanMemory', 'piiScanAudit', 'piiScanLogs',
+                'toolProfile',
                 'planMode', 'planModeTools', 'smartRoutingEnabled',
                 'modelTierSimple', 'modelTierModerate', 'modelTierComplex',
                 'ttsProvider', 'ttsVoice', 'sttProvider', 'sttModel',
@@ -865,6 +875,7 @@ function app() {
             { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Tool Profile', hint: 'minimal coding full permissions' },
             { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Plan Mode', hint: 'approval planning' },
             { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Injection Scanner', hint: 'security prompt injection' },
+            { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'PII Protection', hint: 'pii privacy ssn email phone credit card mask redact' },
             { section: 'behavior', sectionLabel: 'Behavior & Safety', label: 'Smart Routing', hint: 'model router simple complex' },
             { section: 'memory', sectionLabel: 'Memory', label: 'Memory Backend', hint: 'file mem0' },
             { section: 'memory', sectionLabel: 'Memory', label: 'Auto-Learn', hint: 'mem0 learn' },
