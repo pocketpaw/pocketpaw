@@ -203,13 +203,13 @@ def check_api_key_primary() -> HealthCheckResult:
                 "OAuth tokens from Free/Pro/Max plans are not permitted for third-party use."
             ),
             fix_hint=(
-                "Get an API key at https://console.anthropic.com/api-keys "
+                "Get an API key at https://console.anthropic.com/settings/keys "
                 "and add it in Settings > API Keys, or set ANTHROPIC_API_KEY env var."
             ),
             details=[
                 "Anthropic's policy prohibits third-party use of OAuth tokens"
                 " from Free/Pro/Max plans.",
-                "Get an API key from https://console.anthropic.com/api-keys",
+                "Get an API key from https://console.anthropic.com/settings/keys",
                 "Set it in PocketPaw Settings > API Keys, or as ANTHROPIC_API_KEY env var.",
                 "Alternatively, switch to Ollama (Local) for free local inference.",
             ],

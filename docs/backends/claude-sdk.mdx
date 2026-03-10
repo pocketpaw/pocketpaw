@@ -25,12 +25,12 @@ This backend leverages the `claude-agent-sdk` package, which provides:
 An **Anthropic API key** is required when using this backend with the Anthropic provider. This is a hard requirement — PocketPaw will not process messages without one.
 
 <Callout type="warning">
-  **OAuth tokens are not permitted.** Anthropic's [authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) prohibits third-party applications from using OAuth tokens obtained through Claude Free, Pro, or Max plans. PocketPaw must authenticate using an API key from [Claude Console](https://console.anthropic.com/api-keys).
+  **OAuth tokens are not permitted.** Anthropic's [authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) prohibits third-party applications from using OAuth tokens obtained through Claude Free, Pro, or Max plans. PocketPaw must authenticate using an API key from [Claude Console](https://console.anthropic.com/settings/keys).
 </Callout>
 
 <Steps>
   <Step title="Get an API key">
-    Go to [console.anthropic.com/api-keys](https://console.anthropic.com/api-keys) and create a new key.
+    Go to [console.anthropic.com/api-keys](https://console.anthropic.com/settings/keys) and create a new key.
   </Step>
   <Step title="Set the key">
     Add it as an environment variable, in the dashboard Settings, or in `~/.pocketpaw/config.json`:

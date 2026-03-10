@@ -690,7 +690,7 @@ class ClaudeSDKBackend:
                             "an Anthropic API key.\n\n"
                             "**How to fix:**\n"
                             "1. Get an API key at "
-                            "[console.anthropic.com](https://console.anthropic.com/api-keys)\n"
+                            "[console.anthropic.com](https://console.anthropic.com/settings/keys)\n"
                             "2. Add it in **Settings > API Keys > Anthropic API Key**\n"
                             "3. Or set the `ANTHROPIC_API_KEY` environment variable\n\n"
                             "*Alternatively, switch to **Ollama (Local)** in Settings "

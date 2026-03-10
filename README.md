@@ -326,7 +326,7 @@ export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK back
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
 ```
 
-> **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
+> **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/settings/keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
 
 See the [full configuration reference](https://pocketpaw.xyz/getting-started/configuration) for all settings.
 
