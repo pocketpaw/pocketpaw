@@ -1,6 +1,9 @@
 """Startup version check against PyPI + release notes fetching.
 
 Changes:
+  - 2026-03-09: Added async-safe wrappers check_for_updates_async() and
+    fetch_release_notes_async() to prevent blocking the asyncio event loop
+    when called from the dashboard API. Fixes #447.
   - 2026-02-18: Added styled CLI update box, release notes fetching, version seen tracking.
   - 2026-02-16: Initial implementation. Checks PyPI daily, caches result, prints update notice.
 
@@ -9,6 +12,7 @@ Cache stored in ~/.pocketpaw/.update_check so the result is shared between
 CLI launches and the dashboard API.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -39,6 +43,10 @@ def check_for_updates(current_version: str, config_dir: Path) -> dict | None:
 
     Uses a daily cache file to avoid hitting PyPI on every launch.
     Never raises — all errors are caught and logged at debug level.
+
+    NOTE: This function performs a blocking HTTP request. When calling from an
+    async context (e.g. the dashboard API), use check_for_updates_async() instead
+    to avoid freezing the asyncio event loop.
     """
     try:
         cache_file = config_dir / CACHE_FILENAME
@@ -59,7 +67,8 @@ def check_for_updates(current_version: str, config_dir: Path) -> dict | None:
             except (json.JSONDecodeError, ValueError):
                 pass  # Corrupted cache, re-fetch
 
-        # Fetch from PyPI
+        # Fetch from PyPI — NOTE: blocking network call, use check_for_updates_async()
+        # in async contexts to avoid stalling the event loop.
         req = urllib.request.Request(PYPI_URL, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             data = json.loads(resp.read())
@@ -77,6 +86,19 @@ def check_for_updates(current_version: str, config_dir: Path) -> dict | None:
     except Exception:
         logger.debug("Update check failed (network or parse error)", exc_info=True)
         return None
+
+
+async def check_for_updates_async(current_version: str, config_dir: Path) -> dict | None:
+    """Async-safe wrapper around check_for_updates() for use in async contexts.
+
+    Offloads the blocking urllib HTTP call to a thread pool executor so it does
+    not freeze the asyncio event loop. Use this instead of check_for_updates()
+    whenever calling from an async function (e.g. the dashboard API or any
+    FastAPI route/WebSocket handler).
+
+    Returns the same dict as check_for_updates() or None on error.
+    """
+    return await asyncio.to_thread(check_for_updates, current_version, config_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +184,10 @@ def fetch_release_notes(version: str, config_dir: Path) -> dict | None:
 
     Returns {version, body, html_url, published_at, name} or None on error.
     Uses per-version cache files with 1h TTL in config_dir/.release_notes_cache/.
+
+    NOTE: This function performs a blocking HTTP request. When calling from an
+    async context (e.g. the dashboard API), use fetch_release_notes_async() instead
+    to avoid freezing the asyncio event loop.
     """
     try:
         cache_dir = config_dir / RELEASE_NOTES_CACHE_DIR
@@ -177,7 +203,8 @@ def fetch_release_notes(version: str, config_dir: Path) -> dict | None:
             except (json.JSONDecodeError, ValueError):
                 pass
 
-        # Fetch from GitHub
+        # Fetch from GitHub — NOTE: blocking network call, use fetch_release_notes_async()
+        # in async contexts to avoid stalling the event loop.
         url = GITHUB_API_URL.format(version=version)
         req = urllib.request.Request(
             url, headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "pocketpaw"}
@@ -201,6 +228,19 @@ def fetch_release_notes(version: str, config_dir: Path) -> dict | None:
     except Exception:
         logger.debug("Failed to fetch release notes for v%s", version, exc_info=True)
         return None
+
+
+async def fetch_release_notes_async(version: str, config_dir: Path) -> dict | None:
+    """Async-safe wrapper around fetch_release_notes() for use in async contexts.
+
+    Offloads the blocking urllib HTTP call to a thread pool executor so it does
+    not freeze the asyncio event loop. Use this instead of fetch_release_notes()
+    whenever calling from an async function (e.g. the dashboard API or any
+    FastAPI route/WebSocket handler).
+
+    Returns the same dict as fetch_release_notes() or None on error.
+    """
+    return await asyncio.to_thread(fetch_release_notes, version, config_dir)
 
 
 def get_last_seen_version(config_dir: Path) -> str | None:
