@@ -20,6 +20,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from __future__ import annotations
 
 logger = logging.getLogger(__name__)
 
