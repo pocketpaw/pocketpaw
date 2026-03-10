@@ -17,6 +17,7 @@ docs/
 ├── public/                    # Static assets (logos, OG images)
 ├── introduction/              # Welcome & overview
 ├── getting-started/           # Install, quick-start, config, project structure
+├── desktop-client/            # Desktop app overview, installation, development, API server
 ├── concepts/                  # Architecture, message bus, agent loop, memory, tools, security
 ├── channels/                  # 9+ channel guides (Telegram, Discord, Slack, WhatsApp, etc.)
 ├── backends/                  # Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK

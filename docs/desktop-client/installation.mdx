@@ -1,0 +1,111 @@
+---
+title: "Desktop Client Installation: Download and Setup"
+description: "Install the PocketPaw desktop app on Windows, macOS, or Linux. Includes one-click backend setup and manual installation options."
+section: Desktop Client
+ogType: article
+keywords: ["pocketpaw install", "desktop app download", "tauri install", "pocketpaw setup"]
+tags: ["desktop", "installation", "setup"]
+---
+
+# Desktop Client Installation
+
+## Download
+
+Grab the latest release for your platform:
+
+| Platform | Download | Format |
+| --- | --- | --- |
+| **Windows** | [PocketPaw-Setup.exe](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe) | NSIS installer |
+| **macOS** | [PocketPaw.dmg](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.dmg) | DMG disk image |
+| **Linux** | [PocketPaw.AppImage](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.AppImage) | AppImage |
+
+## First Launch
+
+When you open the desktop app for the first time, the onboarding wizard will guide you through setup:
+
+<Steps>
+  <Step>
+    **Backend Detection** - The app checks if the PocketPaw Python backend is installed on your machine. If found, it connects automatically.
+  </Step>
+  <Step>
+    **One-Click Install** (if needed) - If the backend isn't installed, the app offers to set it up for you. This downloads Python (if needed) and installs PocketPaw via pip.
+  </Step>
+  <Step>
+    **API Key Configuration** - Enter your Anthropic API key (or configure Ollama for free local inference). You can skip this and add it later from Settings.
+  </Step>
+  <Step>
+    **Ready to Chat** - The app connects to the backend and opens the chat interface. You're good to go.
+  </Step>
+</Steps>
+
+## Requirements
+
+### All Platforms
+
+- The PocketPaw Python backend must be running on `localhost:8888` (the app can install it for you)
+- An LLM provider API key (Anthropic, OpenAI, etc.) or Ollama for local inference
+
+### Windows
+
+- Windows 10 or later
+- WebView2 runtime (included in Windows 10 1803+ and Windows 11)
+
+### macOS
+
+- macOS 10.15 (Catalina) or later
+
+### Linux
+
+- WebKitGTK 4.1+
+- `libappindicator3` (for system tray support)
+
+## Manual Backend Setup
+
+If you prefer to install the backend separately:
+
+```bash
+# Install via pip
+pip install pocketpaw
+
+# Or use uv
+uv pip install pocketpaw
+
+# Start the backend
+pocketpaw
+```
+
+The desktop app will automatically detect the running backend on `localhost:8888`.
+
+## Running the API Server
+
+For headless operation (no web dashboard), use the `serve` command:
+
+```bash
+pocketpaw serve
+```
+
+This starts the REST API and WebSocket server without serving the web dashboard frontend. The desktop client connects to it the same way. See the [API Server guide](/desktop-client/api-server) for details.
+
+## Auto-Updates
+
+The desktop app checks for updates automatically via GitHub releases. When an update is available, you'll see a notification with the option to download and install it.
+
+## Uninstalling
+
+### Windows
+Use "Add or Remove Programs" in Windows Settings, or run the uninstaller from the Start Menu.
+
+### macOS
+Drag PocketPaw from Applications to the Trash.
+
+### Linux
+Delete the AppImage file. Remove `~/.local/share/com.pocketpaw.app/` for app data.
+
+<CardGroup>
+  <Card title="Quick Start" icon="lucide:rocket" href="/getting-started/quick-start">
+    Get up and running with PocketPaw in 5 minutes.
+  </Card>
+  <Card title="Configuration" icon="lucide:settings" href="/getting-started/configuration">
+    Configure API keys, backends, and channels.
+  </Card>
+</CardGroup>

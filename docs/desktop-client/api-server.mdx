@@ -1,0 +1,296 @@
+---
+title: "API Server: Headless Mode with pocketpaw serve"
+description: "Run PocketPaw as a headless API server using pocketpaw serve. REST API and WebSocket endpoints for external clients, scripts, and the desktop app."
+section: Desktop Client
+ogType: article
+keywords: ["pocketpaw serve", "api server", "headless mode", "rest api", "websocket api"]
+tags: ["api", "server", "headless", "rest"]
+---
+
+# API Server (`pocketpaw serve`)
+
+The `pocketpaw serve` command starts PocketPaw as a **headless API server** without the web dashboard frontend. It exposes the full REST API and WebSocket endpoints, making it ideal for:
+
+- The **desktop client** (Tauri app) connecting over localhost
+- **Custom scripts** and automation
+- **External integrations** that only need the API
+- **Docker** and headless server deployments
+
+## Quick Start
+
+```bash
+# Start the API server (default: localhost:8888)
+pocketpaw serve
+
+# Custom host and port
+pocketpaw serve --host 0.0.0.0 --port 9000
+
+# Development mode with auto-reload
+pocketpaw serve --dev
+```
+
+## What's Included
+
+The API server starts the full PocketPaw backend:
+
+| Component | Status |
+| --- | --- |
+| REST API (`/api/v1/`) | Active |
+| WebSocket (`/ws`, `/api/v1/ws`) | Active |
+| Message bus | Active |
+| Agent loop | Active |
+| Memory system | Active |
+| Scheduler | Active |
+| Channel adapters | Active (if configured) |
+| Web dashboard UI | **Not served** |
+
+The only difference from the default `pocketpaw` command is that no HTML/CSS/JS frontend is served. All API endpoints work identically.
+
+## Authentication
+
+The API server supports multiple authentication methods:
+
+### Master Token
+
+On first run, PocketPaw generates a master access token saved at `~/.pocketpaw/access_token`. Use it as a Bearer token:
+
+```bash
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8888/api/v1/health
+```
+
+### Session Tokens
+
+Exchange the master token for a short-lived session token:
+
+```bash
+# Get a session token
+curl -X POST http://localhost:8888/api/v1/auth/session \
+  -H "Authorization: Bearer YOUR_MASTER_TOKEN"
+
+# Response: { "session_token": "uuid:hmac_signature" }
+```
+
+### API Keys
+
+Create scoped API keys for long-lived access:
+
+```bash
+# Create an API key
+curl -X POST http://localhost:8888/api/v1/auth/api-keys \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-script", "scopes": ["chat", "sessions"]}'
+
+# Response includes the key (shown once): { "key": "pp_xxxx...", "id": "..." }
+```
+
+### OAuth2 (PKCE)
+
+For desktop and third-party apps, use the OAuth2 PKCE flow:
+
+1. `GET /api/v1/oauth/authorize?client_id=...&code_challenge=...`
+2. User approves consent
+3. `POST /api/v1/oauth/token` with authorization code
+4. Use the returned access token (`ppat_*` prefix)
+
+### Localhost Bypass
+
+By default, requests from `127.0.0.1` or `::1` skip authentication. Disable this with:
+
+```bash
+export POCKETPAW_LOCALHOST_AUTH_BYPASS=false
+```
+
+## API Endpoints
+
+All endpoints are prefixed with `/api/v1/`. Here's a summary by category:
+
+### Chat
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/chat` | Send message, get complete response (blocking) |
+| `POST` | `/chat/stream` | Send message, receive SSE stream |
+| `POST` | `/chat/stop` | Cancel in-flight response |
+
+### Sessions
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/sessions` | Create new session |
+| `GET` | `/sessions` | List sessions (paginated) |
+| `DELETE` | `/sessions/{id}` | Delete session |
+| `POST` | `/sessions/{id}/title` | Update session title |
+| `GET` | `/sessions/search` | Search sessions by content |
+| `GET` | `/sessions/{id}/history` | Get message history |
+| `GET` | `/sessions/{id}/export` | Export as JSON or Markdown |
+
+### Settings
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/settings` | Get current settings |
+| `PUT` | `/settings` | Update settings |
+
+### Memory
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/memory/long_term` | Get long-term memories (paginated) |
+| `DELETE` | `/memory/long_term/{id}` | Delete memory entry |
+| `GET` | `/memory/settings` | Get memory backend config |
+| `POST` | `/memory/settings` | Save memory backend config |
+| `GET` | `/memory/stats` | Get memory statistics |
+
+### Health & Diagnostics
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/version` | Version and backend info |
+| `GET` | `/health` | Health engine summary |
+| `GET` | `/health/errors` | Recent errors (paginated) |
+| `POST` | `/health/check` | Trigger health check |
+| `GET` | `/audit` | Audit log entries |
+| `POST` | `/security-audit` | Run security audit |
+| `GET` | `/metrics/system` | CPU, RAM, disk, battery |
+| `GET` | `/metrics/usage` | Token usage and costs |
+
+### Identity
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/identity` | Get all identity files |
+| `PUT` | `/identity` | Save identity file edits |
+
+### Channels
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/channels/status` | Status of all channel adapters |
+| `POST` | `/channels/save` | Save channel configuration |
+| `POST` | `/channels/toggle` | Start or stop a channel |
+
+### MCP Servers
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/mcp/status` | Status of MCP servers |
+| `POST` | `/mcp/add` | Add MCP server |
+| `POST` | `/mcp/remove` | Remove MCP server |
+| `POST` | `/mcp/toggle` | Toggle MCP server |
+| `POST` | `/mcp/test` | Test connection |
+| `GET` | `/mcp/presets` | List presets |
+| `POST` | `/mcp/presets/install` | Install preset |
+
+### Skills
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/skills` | List installed skills |
+| `GET` | `/skills/search` | Search skill library |
+| `POST` | `/skills/install` | Install skill |
+| `POST` | `/skills/remove` | Remove skill |
+
+### Reminders & Intentions
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/reminders` | List reminders |
+| `POST` | `/reminders` | Create reminder (natural language) |
+| `DELETE` | `/reminders/{id}` | Delete reminder |
+| `GET` | `/intentions` | List intentions |
+| `POST` | `/intentions` | Create intention |
+| `POST` | `/intentions/{id}/toggle` | Toggle intention |
+
+### Backends
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/backends` | List backends with availability |
+| `POST` | `/backends/install` | Install backend SDK |
+
+### Kits (Command Centers)
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/kits/catalog` | List kit catalog |
+| `POST` | `/kits/catalog/{id}/install` | Install kit |
+| `GET` | `/kits` | List installed kits |
+| `DELETE` | `/kits/{id}` | Uninstall kit |
+| `POST` | `/kits/{id}/activate` | Activate kit |
+
+### Files
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/files/browse` | List directory contents |
+| `GET` | `/files/content` | Get file content |
+| `GET` | `/files/recent` | Recently accessed files |
+
+### Remote Access
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/remote/status` | Tunnel status |
+| `POST` | `/remote/start` | Start Cloudflare tunnel |
+| `POST` | `/remote/stop` | Stop tunnel |
+
+### Events (SSE)
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/events/stream` | Subscribe to real-time system events |
+
+## WebSocket
+
+Connect to the WebSocket for real-time streaming:
+
+```javascript
+const ws = new WebSocket('ws://localhost:8888/api/v1/ws?token=YOUR_TOKEN');
+
+// Send a chat message
+ws.send(JSON.stringify({
+  type: 'chat',
+  content: 'Hello, PocketPaw!',
+  session_id: 'my-session'
+}));
+
+// Receive streaming responses
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  // data.type: 'chunk', 'stream_end', 'tool_start', 'tool_result', 'thinking', 'error'
+};
+```
+
+WebSocket paths: `/ws`, `/api/v1/ws`, `/v1/ws` (all equivalent).
+
+## Comparison: `serve` vs Default Mode
+
+| | `pocketpaw` (default) | `pocketpaw serve` |
+| --- | --- | --- |
+| Web dashboard | Served at root | Not served |
+| REST API | `/api/v1/` | `/api/v1/` |
+| WebSocket | Available | Available |
+| Auto-opens browser | Yes | No |
+| All backend services | Running | Running |
+| Best for | Browser-based usage | Desktop app, scripts, headless |
+
+## OpenAPI Documentation
+
+When the API server is running, interactive API docs are available at:
+
+- **Swagger UI:** `http://localhost:8888/api/v1/docs`
+- **ReDoc:** `http://localhost:8888/api/v1/redoc`
+- **OpenAPI JSON:** `http://localhost:8888/api/v1/openapi.json`
+
+<CardGroup>
+  <Card title="API Reference" icon="lucide:server" href="/api">
+    Full endpoint documentation with request and response examples.
+  </Card>
+  <Card title="WebSocket Protocol" icon="lucide:radio" href="/api/websocket">
+    Real-time streaming protocol details.
+  </Card>
+  <Card title="Configuration" icon="lucide:settings" href="/getting-started/configuration">
+    Environment variables and settings reference.
+  </Card>
+</CardGroup>

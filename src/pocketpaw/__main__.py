@@ -127,6 +127,11 @@ Examples:
         help="Auto-fix fixable issues found by --security-audit",
     )
     parser.add_argument(
+        "--pii-scan",
+        action="store_true",
+        help="Scan existing memory files for PII and report findings",
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default=None,
@@ -258,6 +263,11 @@ Examples:
             from pocketpaw.security.audit_cli import run_security_audit
 
             exit_code = _run_async(run_security_audit(fix=args.fix))
+            raise SystemExit(exit_code)
+        elif args.pii_scan:
+            from pocketpaw.security.audit_cli import scan_memory_for_pii
+
+            exit_code = asyncio.run(scan_memory_for_pii())
             raise SystemExit(exit_code)
         elif args.telegram:
             _run_async(run_telegram_mode(settings))

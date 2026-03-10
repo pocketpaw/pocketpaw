@@ -342,6 +342,8 @@ See the [full configuration reference](https://pocketpaw.xyz/getting-started/con
 
 **Install uv:**
 
+> [!WARNING]
+> **Windows users:** You must **open a new terminal window** after running the install script below before `uv` will be recognized. The installer updates your PATH, but this change does not apply to your current terminal session — running `uv` immediately after install will give a `CommandNotFoundException` error.
 ```bash
 # macOS/Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -353,17 +355,12 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 pip install uv
 ```
 
-> **Windows Note:** After installing `uv` via the PowerShell script, you may need to **restart your terminal** for the `uv` command to be recognized. The installer adds `uv` to `C:\Users\<your-username>\.local\bin` and updates your PATH, but the current session won't reflect this change until you open a new terminal window.
->
-> If you want to use `uv` immediately without restarting, run:
+> [!TIP]
+> **Windows:** To use `uv` immediately without opening a new terminal, run:
 > ```powershell
 > $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 > ```
->
-> Verify the installation:
-> ```powershell
-> uv --version
-> ```
+> Then verify the installation: `uv --version`
 
 **Setup and run:**
 

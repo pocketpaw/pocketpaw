@@ -3,11 +3,14 @@
 Core event loop that consumes from the message bus, feeds messages
 through AgentRouter (which delegates to the configured backend),
 and streams AgentEvent responses back to channels.
+
+PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
 """
 
 import asyncio
 import logging
 import re
+import time
 
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
@@ -26,6 +29,11 @@ logger = logging.getLogger(__name__)
 # identity reminder is appended to the system prompt.  The reminder nudges
 # the model back toward the configured identity without a full re-injection.
 _IDENTITY_REINFORCE_THRESHOLD = 20
+
+# How long (seconds) a session lock must be idle before it is eligible for
+# garbage collection.  1 hour is generous enough to cover any in-flight work
+# while still bounding growth on long-running servers with many unique sessions.
+_SESSION_LOCK_TTL = 3600  # seconds
 
 _MEDIA_TAG_RE = re.compile(r"<!-- media:(.+?) -->")
 # Fallback: detect file paths in ~/.pocketpaw/generated/ mentioned in agent text.
@@ -68,6 +76,12 @@ class AgentLoop:
 
         # Concurrency controls
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Tracks the last time each session lock was touched (time.monotonic).
+        # Used by the GC task to identify and discard idle locks so that
+        # _session_locks does not grow without bound on long-running servers.
+        self._session_lock_last_used: dict[str, float] = {}
+        # Background task that periodically prunes stale locks (see _gc_session_locks).
+        self._lock_gc_task: asyncio.Task | None = None
         self._global_semaphore = asyncio.Semaphore(self.settings.max_concurrent_conversations)
         self._background_tasks: set[asyncio.Task] = set()
         self._active_tasks: dict[str, asyncio.Task] = {}  # session_key -> processing task
@@ -87,12 +101,70 @@ class AgentLoop:
         self._running = True
         settings = Settings.load()
         logger.info(f"🤖 Agent Loop started (Backend: {settings.agent_backend})")
+        # Spawn the session-lock GC before entering the main loop so it begins
+        # pruning stale locks as soon as the server is live.
+        self._lock_gc_task = asyncio.create_task(self._gc_session_locks(), name="session-lock-gc")
         await self._loop()
 
     async def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        # Cancel the GC task so it does not linger after shutdown.
+        if self._lock_gc_task is not None and not self._lock_gc_task.done():
+            self._lock_gc_task.cancel()
+            try:
+                await self._lock_gc_task
+            except asyncio.CancelledError:
+                pass  # expected on clean shutdown
+            self._lock_gc_task = None
         logger.info("🛑 Agent Loop stopped")
+
+    async def _gc_session_locks(self) -> None:
+        """
+        Periodically garbage-collect idle session locks to prevent unbounded
+        memory growth.
+
+        **Problem being solved**
+        ``_session_locks`` is a dict keyed by ``session_key``.  Entries are
+        created on-demand in ``_process_message`` but the existing eager-cleanup
+        (``pop`` after the lock is released) can be bypassed when:
+
+        * An unhandled exception propagates before the ``pop`` line is reached.
+        * A task is cancelled while another coroutine is already *waiting* for
+          the same lock — the entry cannot be safely removed until all waiters
+          are gone, so the last waiter may miss cleanup under certain race
+          conditions.
+        * A session that produced an error leaves its lock entry permanently.
+
+        Over weeks of operation with thousands of unique sessions this causes
+        unbounded memory growth (one ``asyncio.Lock`` object + two dict entries
+        per dead session).
+
+        **Algorithm**
+        Every 5 minutes inspect ``_session_lock_last_used``; any lock that has
+        not been touched for longer than ``_SESSION_LOCK_TTL`` seconds *and* is
+        currently unlocked is safe to discard.  Locked entries are always
+        skipped — they are either actively held or have at least one waiter.
+
+        Because asyncio is single-threaded for coroutine scheduling, the dict
+        mutations here are safe without additional locking.
+        """
+        while True:
+            # Sleep first so we don't run immediately on a cold start.
+            await asyncio.sleep(300)  # check every 5 minutes
+            now = time.monotonic()
+            stale_keys = [
+                key
+                for key, last_used in list(self._session_lock_last_used.items())
+                if now - last_used > _SESSION_LOCK_TTL
+                and key in self._session_locks
+                and not self._session_locks[key].locked()
+            ]
+            for key in stale_keys:
+                self._session_locks.pop(key, None)
+                self._session_lock_last_used.pop(key, None)
+            if stale_keys:
+                logger.debug("session-lock GC removed %d stale lock(s)", len(stale_keys))
 
     async def cancel_session(self, session_key: str) -> bool:
         """Cancel in-flight processing for a session. Returns True if cancelled."""
@@ -204,6 +276,8 @@ class AgentLoop:
                 if resolved_key not in self._session_locks:
                     self._session_locks[resolved_key] = asyncio.Lock()
                 lock = self._session_locks[resolved_key]
+                # Record access time so the GC task can identify idle locks.
+                self._session_lock_last_used[resolved_key] = time.monotonic()
                 lock_contended = lock.locked()
                 if lock_contended:
                     logger.info("Session lock contended for %s — waiting", resolved_key)
@@ -212,9 +286,13 @@ class AgentLoop:
                         logger.info("Session lock acquired for %s", resolved_key)
                     await self._process_message_inner(message, resolved_key)
 
-                # Clean up lock if no one else is waiting on it
+                # Eager cleanup: remove the lock immediately when no further
+                # coroutines are waiting on it.  The GC task is a safety net
+                # for the cases where this eager path is skipped (e.g. after
+                # an exception propagates past this block).
                 if not lock.locked():
                     self._session_locks.pop(resolved_key, None)
+                    self._session_lock_last_used.pop(resolved_key, None)
                 logger.info("Message processing complete for %s", session_key)
         except asyncio.CancelledError:
             logger.info("Processing cancelled for session %s", session_key)
@@ -305,6 +383,19 @@ class AgentLoop:
                 if scan_result.threat_level != ThreatLevel.NONE:
                     content = scan_result.sanitized_content
 
+            # PII scan before memory storage (opt-in)
+            if self.settings.pii_scan_enabled and self.settings.pii_scan_memory:
+                from pocketpaw.security.pii import get_pii_scanner
+
+                pii_result = get_pii_scanner().scan(content, source=session_key)
+                if pii_result.has_pii:
+                    logger.info(
+                        "PII detected in %s: %s",
+                        session_key,
+                        [t.value for t in pii_result.pii_types_found],
+                    )
+                    content = pii_result.sanitized_text
+
             # 1. Store User Message
             await self.memory.add_to_session(
                 session_key=session_key,
@@ -361,6 +452,11 @@ class AgentLoop:
             full_response = ""
             media_paths: list[str] = []
             cancelled = False
+            # Streaming redaction: accumulate raw content and track what has
+            # already been sent (redacted) so secrets split across chunk
+            # boundaries are still caught.
+            stream_buffer = ""
+            safe_sent = ""
 
             run_iter = router.run(
                 content, system_prompt=system_prompt, history=history, session_key=session_key
@@ -373,13 +469,18 @@ class AgentLoop:
 
                     if etype == "message":
                         full_response += econtent
-                        # Apply output redaction before sending to user
-                        redacted_content = redact_output(econtent)
+                        # Accumulate raw content and redact the full buffer so
+                        # secrets that span chunk boundaries are fully redacted.
+                        stream_buffer += econtent
+                        safe_buffer = redact_output(stream_buffer)
+                        # Send only the newly safe portion (delta from last publish).
+                        safe_chunk = safe_buffer[len(safe_sent) :]
+                        safe_sent = safe_buffer
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=message.channel,
                                 chat_id=message.chat_id,
-                                content=redacted_content,
+                                content=safe_chunk,
                                 is_stream_chunk=True,
                             )
                         )
@@ -532,8 +633,15 @@ class AgentLoop:
             if cancelled and full_response:
                 full_response += "\n\n[Response interrupted]"
             if full_response:
+                stored_response = full_response
+                if self.settings.pii_scan_enabled and self.settings.pii_scan_memory:
+                    from pocketpaw.security.pii import get_pii_scanner
+
+                    pii_result = get_pii_scanner().scan(full_response, source="assistant_response")
+                    if pii_result.has_pii:
+                        stored_response = pii_result.sanitized_text
                 await self.memory.add_to_session(
-                    session_key=session_key, role="assistant", content=full_response
+                    session_key=session_key, role="assistant", content=stored_response
                 )
 
                 # 6. Auto-learn: extract facts from conversation (non-blocking)

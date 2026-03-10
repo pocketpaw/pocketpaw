@@ -1,7 +1,7 @@
 {
   "metadata": {
     "name": "PocketPaw",
-    "description": "Self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard",
+    "description": "Self-hosted AI agent with a native desktop app. Controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard.",
     "url": "https://pocketpaw.xyz",
     "version": "1.0.0"
   },
@@ -114,7 +114,7 @@
         "label": "Documentation",
         "href": "/introduction",
         "icon": "lucide:book-open",
-        "groups": ["Introduction", "Getting Started", "Guides", "Core Concepts", "Channels", "Agent Backends", "Tools", "Integrations", "Security", "Memory", "Advanced", "Deployment"]
+        "groups": ["Introduction", "Getting Started", "Guides", "Core Concepts", "Desktop Client", "Channels", "Agent Backends", "Tools", "Integrations", "Security", "Memory", "Advanced", "Deployment"]
       },
       {
         "label": "API Reference",
@@ -203,6 +203,31 @@
             "label": "AI Agents vs Chatbots",
             "href": "/guides/ai-agent-vs-chatbot",
             "icon": "lucide:scale"
+          }
+        ]
+      },
+      {
+        "label": "Desktop Client",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/desktop-client",
+            "icon": "lucide:monitor"
+          },
+          {
+            "label": "Installation",
+            "href": "/desktop-client/installation",
+            "icon": "lucide:download"
+          },
+          {
+            "label": "Development",
+            "href": "/desktop-client/development",
+            "icon": "lucide:code"
+          },
+          {
+            "label": "API Server (serve)",
+            "href": "/desktop-client/api-server",
+            "icon": "lucide:server"
           }
         ]
       },

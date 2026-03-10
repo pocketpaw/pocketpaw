@@ -475,6 +475,28 @@ class Settings(BaseSettings):
         description="Model for LLM-based injection deep scan",
     )
 
+    # PII Protection
+    pii_scan_enabled: bool = Field(
+        default=False, description="Enable PII detection and masking (opt-in)"
+    )
+    pii_default_action: str = Field(
+        default="mask", description="Default PII action: 'log', 'mask', or 'hash'"
+    )
+    pii_type_actions: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-type PII actions, e.g. {'email': 'mask', 'ssn': 'hash'}",
+    )
+    pii_scan_memory: bool = Field(
+        default=True,
+        description="Apply PII masking before writing to memory (when pii_scan_enabled)",
+    )
+    pii_scan_audit: bool = Field(
+        default=True, description="Apply PII masking to audit log entries (when pii_scan_enabled)"
+    )
+    pii_scan_logs: bool = Field(
+        default=True, description="Extend log scrubber with PII patterns (when pii_scan_enabled)"
+    )
+
     # Smart Model Routing
     smart_routing_enabled: bool = Field(
         default=False,
