@@ -294,6 +294,7 @@ class TestVersionSeen:
 
 # ── Append this class at the bottom of the file ──────────────────────────────
 
+
 class TestCheckForUpdatesAsync:
     """Async wrapper mirrors the return value of the sync function."""
 

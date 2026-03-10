@@ -884,10 +884,10 @@ async def get_version_info():
     from importlib.metadata import version as get_version
 
     from pocketpaw.config import get_config_dir
-    from pocketpaw.update_check import check_for_updates_async
+    from pocketpaw.update_check import check_for_updates
 
     current = get_version("pocketpaw")
-    info = await check_for_updates_async(current, get_config_dir())
+    info = check_for_updates(current, get_config_dir())
     return info or {"current": current, "latest": current, "update_available": False}
 
 
