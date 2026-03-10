@@ -40,17 +40,33 @@ class WebSocketAdapter(BaseChannelAdapter):
         logger.info("🔌 WebSocket Adapter subscribed to System Events")
 
     async def on_system_event(self, event: SystemEvent) -> None:
-        """Handle system event by broadcasting to all clients."""
-        # Send flat structure: {type, event_type, data}
-        # Frontend expects event_type and data at top level
-        payload = {"type": "system_event", "event_type": event.event_type, "data": event.data}
+        """Route system event to the WS client that owns the session.
 
-        # Broadcast to all connected clients
-        for ws in self._connections.values():
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                pass
+        System events carry ``session_key`` in ``event.data`` (format
+        ``"websocket:<chat_id>"``).  We extract the ``chat_id`` and send
+        only to the matching WS connection.  Events without a session_key
+        (global health/daemon events) are dropped — the desktop client
+        fetches those via REST.
+        """
+        data = event.data or {}
+        sk: str = data.get("session_key", "")
+        if not sk:
+            return  # Global event — not tied to a chat session
+
+        # Extract chat_id from "websocket:<chat_id>"
+        _, _, chat_id = sk.rpartition(":")
+        if not chat_id:
+            return
+
+        ws = self._connections.get(chat_id)
+        if not ws:
+            return  # No WS connection owns this session
+
+        payload = {"type": "system_event", "event_type": event.event_type, "data": data}
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            pass
 
     async def register_connection(self, websocket: WebSocket, chat_id: str) -> None:
         """Register a new WebSocket connection."""
@@ -120,14 +136,15 @@ class WebSocketAdapter(BaseChannelAdapter):
         # Other actions (settings, tools) handled separately
 
     async def send(self, message: OutboundMessage) -> None:
-        """Send message to WebSocket client."""
+        """Send message to the WebSocket client that owns this chat_id.
+
+        If no connection matches, the message is dropped silently — it was
+        either handled by the SSE bridge or the client disconnected.
+        """
         ws = self._connections.get(message.chat_id)
         if not ws:
-            # Broadcast to all if no specific chat_id
-            for ws in self._connections.values():
-                await self._send_to_socket(ws, message)
-        else:
-            await self._send_to_socket(ws, message)
+            return
+        await self._send_to_socket(ws, message)
 
     async def _send_to_socket(self, ws: WebSocket, message: OutboundMessage) -> None:
         """Send to a specific WebSocket."""

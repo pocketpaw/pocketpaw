@@ -1,9 +1,9 @@
 # Deep Work — AI project orchestration layer for PocketPaw.
 # Created: 2026-02-12
-# Updated: 2026-02-18 — Added GoalParser and GoalAnalysis exports,
-#   parse_goal() convenience function.
+# Updated: 2026-02-26 — Deep Work v2: Added cancel_project() for project cancellation.
+#   Added PawKitConfig export. Retry/timeout/output fields propagated through.
+# Updated: 2026-02-18 — Added GoalParser and GoalAnalysis exports.
 # Updated: 2026-02-12 — Added executor integration, public API functions.
-#   Added research_depth parameter to start_deep_work().
 #
 # Provides a singleton DeepWorkSession and convenience functions for
 # starting and managing Deep Work projects.
@@ -16,6 +16,7 @@
 #   approve_project(project_id) -> Project
 #   pause_project(project_id) -> Project
 #   resume_project(project_id) -> Project
+#   cancel_project(project_id) -> Project
 
 import logging
 
@@ -45,6 +46,7 @@ __all__ = [
     "approve_project",
     "pause_project",
     "resume_project",
+    "cancel_project",
     "recover_interrupted_projects",
 ]
 
@@ -146,6 +148,19 @@ async def resume_project(project_id: str) -> Project:
     """
     session = get_deep_work_session()
     return await session.resume(project_id)
+
+
+async def cancel_project(project_id: str) -> Project:
+    """Cancel a project — stop all tasks and mark as cancelled.
+
+    Args:
+        project_id: ID of the project to cancel.
+
+    Returns:
+        The updated Project (status=CANCELLED).
+    """
+    session = get_deep_work_session()
+    return await session.cancel(project_id)
 
 
 async def recover_interrupted_projects() -> int:

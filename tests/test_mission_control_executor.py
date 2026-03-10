@@ -1,5 +1,7 @@
 # Tests for Mission Control Task Executor
 # Created: 2026-02-05
+# Updated: 2026-02-26 - Updated test_execute_task_with_error to set max_retries=0
+#   so the task goes to BLOCKED immediately (Deep Work v2 default is max_retries=1).
 # Updated: 2026-02-12 - Added test_background_execution_completes for
 #   execute_task_background self-defeating bug. Updated duplicate test
 #   to use execute_task_background entry point.
@@ -232,7 +234,11 @@ class TestMCTaskExecutor:
 
     @pytest.mark.asyncio
     async def test_execute_task_with_error(self, executor, manager, assigned_task, agent):
-        """Test task execution with error."""
+        """Test task execution with error — no retries, goes straight to BLOCKED."""
+        # Set max_retries=0 so the v2 retry logic doesn't reset to ASSIGNED
+        assigned_task.max_retries = 0
+        await manager.save_task(assigned_task)
+
         error_chunks = [
             AgentEvent(type="message", content="Starting..."),
             AgentEvent(type="error", content="API rate limit exceeded"),
@@ -251,7 +257,7 @@ class TestMCTaskExecutor:
         assert result["status"] == "error"
         assert "API rate limit" in result["error"]
 
-        # Check task status is blocked
+        # Check task status is blocked (no retries configured)
         task_updated = await manager.get_task(assigned_task.id)
         assert task_updated.status == TaskStatus.BLOCKED
 

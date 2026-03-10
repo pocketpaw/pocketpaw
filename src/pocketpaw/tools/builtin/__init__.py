@@ -64,6 +64,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "HealthCheckTool": (".health", "HealthCheckTool"),
     "ErrorLogTool": (".health", "ErrorLogTool"),
     "ConfigDoctorTool": (".health", "ConfigDoctorTool"),
+    "OpenExplorerTool": (".explorer", "OpenExplorerTool"),
     "DirectoryTreeTool": (".tree", "DirectoryTreeTool"),
     "SystemInfoTool": (".sysinfo", "SystemInfoTool"),
 }

@@ -33,7 +33,7 @@ def _read_identity_file(path: Path, strip: bool = False) -> str:
     if cached and cached.mtime == mtime:
         return cached.content
     raw = path.read_bytes()
-    content = raw.decode("utf-8", errors="replace")
+    content = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
     if "\ufffd" in content:
         logger.warning("File %s contains non-UTF-8 bytes (replaced with placeholders)", path)
     if strip:
@@ -126,6 +126,12 @@ directly — never use a tool to look up what you already know.
 - `reddit_search '{"query": "best python frameworks", "subreddit": "python"}'` — search Reddit
 - `reddit_read '{"url": "https://reddit.com/r/python/comments/..."}'` — read post + comments
 - `reddit_trending '{"subreddit": "all", "limit": 10}'` — trending posts
+
+### File Explorer
+- `open_in_explorer '{"path": "/home/user/project"}'` — open folder in the UI file explorer
+- `open_in_explorer '{"path": "/home/user/file.py", "action": "view"}'` — open file in viewer
+**When the user asks to open, show, or navigate to a file/folder, use open_in_explorer.**
+You may also read the file contents if needed — open_in_explorer just navigates the UI.
 
 ### Delegation
 - `delegate_claude_code '{"task": "refactor auth", "timeout": 300}'` — delegate to Claude Code

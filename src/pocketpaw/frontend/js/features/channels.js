@@ -50,6 +50,17 @@ window.PocketPaw.Channels = {
             // Auto-install prompt state
             installPrompt: null,   // { channel, package, pipSpec } or null
             installLoading: false,
+            // Discord settings (separate from token form)
+            discordSettings: {
+                bot_name: 'Paw',
+                status_type: 'online',
+                activity_type: '',
+                activity_text: '',
+                allowed_guild_ids: '',
+                allowed_user_ids: '',
+                allowed_channel_ids: '',
+                conversation_channel_ids: ''
+            },
             // Generic webhooks
             webhookSlots: [],
             showAddWebhook: false,
@@ -187,9 +198,73 @@ window.PocketPaw.Channels = {
                     const res = await fetch('/api/channels/status');
                     if (res.ok) {
                         this.channelStatus = await res.json();
+                        this.loadDiscordSettings();
                     }
                 } catch (e) {
                     console.error('Failed to get channel status', e);
+                }
+            },
+
+            /**
+             * Load Discord settings from the status response into the form
+             */
+            loadDiscordSettings() {
+                const d = this.channelStatus.discord;
+                if (!d) return;
+                this.discordSettings.bot_name = d.bot_name || 'Paw';
+                this.discordSettings.status_type = d.status_type || 'online';
+                this.discordSettings.activity_type = d.activity_type || '';
+                this.discordSettings.activity_text = d.activity_text || '';
+                this.discordSettings.allowed_guild_ids = (d.allowed_guild_ids || []).join(', ');
+                this.discordSettings.allowed_user_ids = (d.allowed_user_ids || []).join(', ');
+                this.discordSettings.allowed_channel_ids = (d.allowed_channel_ids || []).join(', ');
+                this.discordSettings.conversation_channel_ids = (d.conversation_channel_ids || []).join(', ');
+            },
+
+            /**
+             * Parse a comma-separated string of IDs into an array of integers
+             */
+            _parseIds(str) {
+                if (!str || !str.trim()) return [];
+                return str.split(',')
+                    .map(s => s.trim())
+                    .filter(s => s && /^\d+$/.test(s))
+                    .map(Number);
+            },
+
+            /**
+             * Save Discord settings (non-token fields)
+             */
+            async saveDiscordSettings() {
+                this.channelLoading = true;
+                try {
+                    const config = {
+                        bot_name: this.discordSettings.bot_name.trim() || 'Paw',
+                        status_type: this.discordSettings.status_type,
+                        activity_type: this.discordSettings.activity_type,
+                        activity_text: this.discordSettings.activity_text,
+                        allowed_guild_ids: this._parseIds(this.discordSettings.allowed_guild_ids),
+                        allowed_user_ids: this._parseIds(this.discordSettings.allowed_user_ids),
+                        allowed_channel_ids: this._parseIds(this.discordSettings.allowed_channel_ids),
+                        conversation_channel_ids: this._parseIds(this.discordSettings.conversation_channel_ids)
+                    };
+                    const res = await fetch('/api/channels/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ channel: 'discord', config })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'ok') {
+                        this.showToast('Discord settings saved!', 'success');
+                        await this.getChannelStatus();
+                        this.loadDiscordSettings();
+                    } else {
+                        this.showToast(data.error || 'Failed to save', 'error');
+                    }
+                } catch (e) {
+                    this.showToast('Failed to save settings: ' + e.message, 'error');
+                } finally {
+                    this.channelLoading = false;
                 }
             },
 

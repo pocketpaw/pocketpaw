@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw.config import get_settings
+from pocketpaw.tools.fetch import is_safe_path
 from pocketpaw.tools.protocol import BaseTool
 
 
@@ -45,7 +46,7 @@ class ReadFileTool(BaseTool):
 
             # Security: check file jail
             jail = get_settings().file_jail_path.resolve()
-            if not str(file_path).startswith(str(jail)):
+            if not is_safe_path(file_path, jail):
                 return self._error(f"Access denied: {path} is outside allowed directory")
 
             if not file_path.exists():
@@ -103,7 +104,7 @@ class WriteFileTool(BaseTool):
 
             # Security: check file jail
             jail = get_settings().file_jail_path.resolve()
-            if not str(file_path).startswith(str(jail)):
+            if not is_safe_path(file_path, jail):
                 return self._error(f"Access denied: {path} is outside allowed directory")
 
             # Create parent directories
@@ -153,7 +154,7 @@ class ListDirTool(BaseTool):
 
             # Security: check file jail
             jail = get_settings().file_jail_path.resolve()
-            if not str(dir_path).startswith(str(jail)):
+            if not is_safe_path(dir_path, jail):
                 return self._error(f"Access denied: {path} is outside allowed directory")
 
             if not dir_path.exists():

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PocketPaw",
+  "version": "0.1.0",
+  "identifier": "com.pocketpaw.client",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "PocketPaw",
+        "label": "main",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 480,
+        "minHeight": 400,
+        "decorations": false,
+        "transparent": true
+      },
+      {
+        "title": "PocketPaw",
+        "label": "sidepanel",
+        "url": "/sidepanel",
+        "width": 340,
+        "height": 600,
+        "minWidth": 48,
+        "minHeight": 400,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": true
+      },
+      {
+        "title": "Quick Ask",
+        "label": "quickask",
+        "url": "/quickask",
+        "width": 600,
+        "height": 120,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

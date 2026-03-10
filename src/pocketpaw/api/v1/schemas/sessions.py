@@ -40,6 +40,13 @@ class SessionSearchResult(BaseModel):
     last_activity: str = ""
 
 
+class SessionCreateResponse(BaseModel):
+    """Response from creating a new session."""
+
+    id: str
+    title: str = "New Chat"
+
+
 class SessionSearchResponse(BaseModel):
     """Session search response."""
 

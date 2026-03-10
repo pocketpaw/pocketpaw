@@ -147,7 +147,15 @@ _EXTRA_ORIGINS = list(set(_BUILTIN_ORIGINS + _custom_origins))
 async def security_headers_middleware(request: Request, call_next):
     """Add security headers to all responses."""
     response = await call_next(request)
-    response.headers["X-Frame-Options"] = "DENY"
+
+    # Allow the file-content endpoint to be embedded in same-origin iframes
+    # (used by the in-app PDF/file viewer modal).
+    is_file_content = request.url.path.startswith("/api/v1/files/content")
+    if is_file_content:
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    else:
+        response.headers["X-Frame-Options"] = "DENY"
+
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
@@ -160,6 +168,7 @@ async def security_headers_middleware(request: Request, call_next):
         "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net; "
         "img-src 'self' data: blob:; "
         "connect-src 'self' ws: wss: https://cdn.jsdelivr.net https://unpkg.com; "
+        "frame-src 'self'; "
         "frame-ancestors 'none'"
     )
     # HSTS only when accessed via HTTPS (tunnel or reverse proxy)
@@ -1692,11 +1701,22 @@ def run_dashboard(
                 reload_dirs=[src_dir],
                 reload_includes=["*.py", "*.html", "*.js", "*.css"],
                 log_level="debug",
+                ws_ping_interval=None,
+                ws_ping_timeout=None,
             )
             break  # dev mode handles its own reload, no restart loop
         else:
             _restart_requested = False
-            config = uvicorn.Config(app, host=host, port=port)
+            config = uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                # Disable WebSocket ping/pong timeout — agent tool use can
+                # run for minutes without sending WS frames, and the default
+                # 20s timeout would close the connection mid-stream.
+                ws_ping_interval=None,
+                ws_ping_timeout=None,
+            )
             _uvicorn_server = uvicorn.Server(config)
             _uvicorn_server.run()
 

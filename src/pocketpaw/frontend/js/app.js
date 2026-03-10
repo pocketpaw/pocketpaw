@@ -453,6 +453,9 @@ function app() {
             socket.on('session_history', (data) => this.handleSessionHistory(data));
             socket.on('new_session', (data) => this.handleNewSession(data));
 
+            // File viewer: open_path events from agent's open_in_explorer tool
+            socket.on('open_path', (data) => this.handleOpenPath(data));
+
             // Note: Mission Control events come through system_event
             // They are handled in handleSystemEvent based on event_type prefix 'mc_'
         },

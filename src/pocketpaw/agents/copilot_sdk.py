@@ -182,7 +182,7 @@ class CopilotSDKBackend:
             try:
                 from pocketpaw.agents.tool_bridge import get_tool_instructions_compact
 
-                tool_section = get_tool_instructions_compact(self.settings)
+                tool_section = get_tool_instructions_compact(self.settings, backend="copilot_sdk")
                 if tool_section:
                     prompt_parts.insert(-1, tool_section)
             except ImportError:

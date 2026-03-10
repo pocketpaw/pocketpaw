@@ -14,7 +14,7 @@ def is_safe_path(path: Path, jail: Path) -> bool:
     try:
         path = path.resolve()
         jail = jail.resolve()
-        return str(path).startswith(str(jail))
+        return path.is_relative_to(jail)
     except Exception:
         return False
 

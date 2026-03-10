@@ -83,6 +83,18 @@ class TestResolveLLMClient:
         llm = resolve_llm_client(settings)
         assert llm.provider == "anthropic"
 
+    def test_resolve_openrouter(self):
+        """openrouter provider resolves as openai_compatible with OpenRouter URL."""
+        settings = Settings(
+            openai_compatible_api_key="sk-or-v1-test",
+            openai_compatible_model="meta-llama/llama-4-maverick",
+        )
+        llm = resolve_llm_client(settings, force_provider="openrouter")
+        assert llm.provider == "openai_compatible"
+        assert llm.openai_compatible_base_url == "https://openrouter.ai/api/v1"
+        assert llm.api_key == "sk-or-v1-test"
+        assert llm.model == "meta-llama/llama-4-maverick"
+
 
 # ---------------------------------------------------------------------------
 # create_anthropic_client
@@ -192,6 +204,46 @@ class TestToSdkEnv:
         )
         env = llm.to_sdk_env()
         assert env == {}
+
+    def test_to_sdk_env_openrouter(self):
+        """OpenRouter uses ANTHROPIC_AUTH_TOKEN and blanks ANTHROPIC_API_KEY."""
+        llm = LLMClient(
+            provider="openai_compatible",
+            model="anthropic/claude-sonnet-4-6",
+            api_key="sk-or-v1-test",
+            ollama_host="http://localhost:11434",
+            openai_compatible_base_url="https://openrouter.ai/api/v1",
+        )
+        env = llm.to_sdk_env()
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-v1-test"
+        assert env["ANTHROPIC_API_KEY"] == ""
+        assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+
+    def test_to_sdk_env_openrouter_strips_v1(self):
+        """OpenRouter URL normalization strips trailing /v1."""
+        llm = LLMClient(
+            provider="openai_compatible",
+            model="meta-llama/llama-4-maverick",
+            api_key="sk-or-v1-key",
+            ollama_host="http://localhost:11434",
+            openai_compatible_base_url="https://openrouter.ai/api/v1",
+        )
+        env = llm.to_sdk_env()
+        # Should strip /v1 so the Anthropic skin at /api is used
+        assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+
+    def test_to_sdk_env_non_openrouter_compatible(self):
+        """Non-OpenRouter compatible endpoints use ANTHROPIC_API_KEY normally."""
+        llm = LLMClient(
+            provider="openai_compatible",
+            model="some-model",
+            api_key="my-key",
+            ollama_host="http://localhost:11434",
+            openai_compatible_base_url="http://localhost:4000/v1",
+        )
+        env = llm.to_sdk_env()
+        assert env["ANTHROPIC_API_KEY"] == "my-key"
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
 
 
 # ---------------------------------------------------------------------------

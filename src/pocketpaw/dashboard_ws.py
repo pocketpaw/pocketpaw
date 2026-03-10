@@ -2,6 +2,10 @@
 
 Extracted from dashboard.py — contains the main websocket_handler() function
 and helper functions: handle_tool(), handle_file_navigation(), handle_file_browse().
+
+Changes:
+  - 2026-03-08: Fix switch_session silently dropping requests for non-existent or
+    path-traversal session IDs (caused WS hang). Now sends empty session_history response.
 """
 
 import asyncio
@@ -246,8 +250,23 @@ async def websocket_handler(
                     try:
                         session_file.resolve().relative_to(sessions_dir.resolve())
                     except ValueError:
-                        continue  # path traversal attempt
+                        logger.warning("Path traversal attempt in switch_session: %s", session_id)
+                        await websocket.send_json(
+                            {
+                                "type": "session_history",
+                                "session_id": session_id,
+                                "messages": [],
+                            }
+                        )
+                        continue
                     if not session_file.exists():
+                        await websocket.send_json(
+                            {
+                                "type": "session_history",
+                                "session_id": session_id,
+                                "messages": [],
+                            }
+                        )
                         continue
 
                     # Unregister old connection, register with new chat_id

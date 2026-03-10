@@ -55,6 +55,12 @@ _CHANNEL_CONFIG_KEYS: dict[str, dict[str, str]] = {
         "bot_token": "discord_bot_token",
         "allowed_guild_ids": "discord_allowed_guild_ids",
         "allowed_user_ids": "discord_allowed_user_ids",
+        "allowed_channel_ids": "discord_allowed_channel_ids",
+        "conversation_channel_ids": "discord_conversation_channel_ids",
+        "bot_name": "discord_bot_name",
+        "status_type": "discord_status_type",
+        "activity_type": "discord_activity_type",
+        "activity_text": "discord_activity_text",
     },
     "slack": {
         "bot_token": "slack_bot_token",

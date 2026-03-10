@@ -89,7 +89,8 @@ class GoogleADKBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_adk_function_tools
 
-            self._custom_tools = build_adk_function_tools(self.settings)
+            # Cache tools at init; the tool set doesn't change at runtime.
+            self._custom_tools = build_adk_function_tools(self.settings, backend="google_adk")
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []

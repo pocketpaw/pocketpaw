@@ -651,8 +651,7 @@ class TestDeleteCommand:
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:12345:abc")
         mm.delete_session = AsyncMock(return_value=True)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock(return_value=True)
+        mm.remove_session_alias = AsyncMock(return_value=True)
         mock_get_mm.return_value = mm
 
         msg = _make_msg("/delete")
@@ -660,15 +659,14 @@ class TestDeleteCommand:
 
         assert "deleted" in response.content.lower()
         mm.delete_session.assert_called_once_with("discord:12345:abc")
-        mm._store.remove_session_alias.assert_called_once_with("discord:12345")
+        mm.remove_session_alias.assert_called_once_with("discord:12345")
 
     @patch("pocketpaw.bus.commands.get_memory_manager")
     async def test_delete_nothing(self, mock_get_mm):
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:12345")
         mm.delete_session = AsyncMock(return_value=False)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock()
+        mm.remove_session_alias = AsyncMock()
         mock_get_mm.return_value = mm
 
         msg = _make_msg("/delete")
@@ -681,14 +679,13 @@ class TestDeleteCommand:
         mm = MagicMock()
         mm.resolve_session_key = AsyncMock(return_value="discord:12345:xyz")
         mm.delete_session = AsyncMock(return_value=True)
-        mm._store = MagicMock()
-        mm._store.remove_session_alias = AsyncMock()
+        mm.remove_session_alias = AsyncMock()
         mock_get_mm.return_value = mm
 
         msg = _make_msg("/delete")
         await self.handler.handle(msg)
 
-        mm._store.remove_session_alias.assert_called_once_with("discord:12345")
+        mm.remove_session_alias.assert_called_once_with("discord:12345")
 
 
 # =========================================================================

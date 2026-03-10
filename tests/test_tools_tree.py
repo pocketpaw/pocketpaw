@@ -176,7 +176,12 @@ class TestSecurity:
         (target / "data.txt").write_text("ok")
 
         link = temp_jail / "link_to_target"
-        link.symlink_to(target, target_is_directory=True)
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as e:
+            if getattr(e, "winerror", None) == 1314:
+                pytest.skip("Symlink creation requires elevated privilege on this Windows setup")
+            raise
 
         result = await tree_tool.execute(path=str(temp_jail), show_hidden=True)
 

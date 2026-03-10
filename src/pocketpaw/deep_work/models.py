@@ -1,5 +1,7 @@
 # Deep Work models — Project orchestration layer.
 # Created: 2026-02-12
+# Updated: 2026-02-26 — Deep Work v2: Added CANCELLED status to ProjectStatus.
+#   Added max_retries and timeout_minutes to TaskSpec for retry/timeout control.
 #
 # Defines data structures for:
 # - Project: top-level orchestration unit grouping tasks and agents
@@ -29,6 +31,7 @@ class ProjectStatus(StrEnum):
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # ============================================================================
@@ -136,6 +139,8 @@ class TaskSpec:
         estimated_minutes: Estimated time to complete
         required_specialties: Agent specialties needed for this task
         blocked_by_keys: Keys of other TaskSpecs this depends on
+        max_retries: Maximum auto-retries for failed tasks (Deep Work v2)
+        timeout_minutes: Per-task execution timeout in minutes (Deep Work v2)
     """
 
     key: str = ""
@@ -147,6 +152,8 @@ class TaskSpec:
     estimated_minutes: int = 30
     required_specialties: list[str] = field(default_factory=list)
     blocked_by_keys: list[str] = field(default_factory=list)
+    max_retries: int = 1
+    timeout_minutes: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -160,6 +167,8 @@ class TaskSpec:
             "estimated_minutes": self.estimated_minutes,
             "required_specialties": self.required_specialties,
             "blocked_by_keys": self.blocked_by_keys,
+            "max_retries": self.max_retries,
+            "timeout_minutes": self.timeout_minutes,
         }
 
     @classmethod
@@ -175,6 +184,8 @@ class TaskSpec:
             estimated_minutes=data.get("estimated_minutes", 30),
             required_specialties=data.get("required_specialties", []),
             blocked_by_keys=data.get("blocked_by_keys", []),
+            max_retries=data.get("max_retries", 1),
+            timeout_minutes=data.get("timeout_minutes"),
         )
 
 
