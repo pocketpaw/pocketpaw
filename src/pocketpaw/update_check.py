@@ -12,6 +12,8 @@ Cache stored in ~/.pocketpaw/.update_check so the result is shared between
 CLI launches and the dashboard API.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -20,7 +22,6 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from __future__ import annotations
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +32,7 @@ REQUEST_TIMEOUT = 2  # seconds
 
 RELEASE_NOTES_CACHE_DIR = ".release_notes_cache"
 RELEASE_NOTES_TTL = 3600  # 1 hour
-GITHUB_API_URL = (
-    "https://api.github.com/repos/pocketpaw/pocketpaw/releases/tags/v{version}"
-)
+GITHUB_API_URL = "https://api.github.com/repos/pocketpaw/pocketpaw/releases/tags/v{version}"
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -84,17 +83,14 @@ def check_for_updates(current_version: str, config_dir: Path) -> dict | None:
         return {
             "current": current_version,
             "latest": latest,
-            "update_available": _parse_version(latest)
-            > _parse_version(current_version),
+            "update_available": _parse_version(latest) > _parse_version(current_version),
         }
     except Exception:
         logger.debug("Update check failed (network or parse error)", exc_info=True)
         return None
 
 
-async def check_for_updates_async(
-    current_version: str, config_dir: Path
-) -> dict | None:
+async def check_for_updates_async(current_version: str, config_dir: Path) -> dict | None:
     """Async-safe wrapper around check_for_updates() for use in async contexts.
 
     Offloads the blocking urllib HTTP call to a thread pool executor so it does
@@ -147,7 +143,9 @@ def print_styled_update_notice(info: dict) -> None:
     upgrade_cmd = "pip install --upgrade pocketpaw"
 
     # Build the content lines (without borders) to measure width
-    title_line = f"   {BOLD}Update available!{RESET}  {current} {YELLOW}\u2192{RESET} {GREEN}{latest}{RESET}"
+    title_line = (
+        f"   {BOLD}Update available!{RESET}  {current} {YELLOW}\u2192{RESET} {GREEN}{latest}{RESET}"
+    )
     changelog_line = f"   {DIM}Changelog:{RESET} {changelog_url}"
     upgrade_line = f"   {DIM}Run:{RESET}       {upgrade_cmd}"
 

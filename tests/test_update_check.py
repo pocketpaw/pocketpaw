@@ -9,10 +9,9 @@ Changes:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pocketpaw.update_check import (
     CACHE_FILENAME,
@@ -293,53 +292,91 @@ class TestVersionSeen:
         assert get_last_seen_version(tmp_path) == "0.4.2"
 
 
-class TestAsyncWrappers:
-    def test_check_for_updates_async_is_coroutine(self):
-        """check_for_updates_async must be an async function (awaitable)."""
-        assert inspect.iscoroutinefunction(check_for_updates_async)
+# ── Append this class at the bottom of the file ──────────────────────────────
 
-    def test_fetch_release_notes_async_is_coroutine(self):
-        """fetch_release_notes_async must be an async function (awaitable)."""
-        assert inspect.iscoroutinefunction(fetch_release_notes_async)
+class TestCheckForUpdatesAsync:
+    """Async wrapper mirrors the return value of the sync function."""
 
-    def test_check_for_updates_async_returns_same_value(self, tmp_path):
-        """check_for_updates_async returns the same value as check_for_updates."""
-        sentinel = {"current": "1.0.0", "latest": "1.2.0", "update_available": True}
-
-        with patch("pocketpaw.update_check.check_for_updates", return_value=sentinel) as mock_sync:
-            result = asyncio.run(check_for_updates_async("1.0.0", tmp_path))
-
-        assert result == sentinel
-        mock_sync.assert_called_once_with("1.0.0", tmp_path)
-
-    def test_fetch_release_notes_async_returns_same_value(self, tmp_path):
-        """fetch_release_notes_async returns the same value as fetch_release_notes."""
-        sentinel = {
-            "version": "1.2.0",
-            "body": "## Changelog",
-            "html_url": "https://github.com/pocketpaw/pocketpaw/releases/tag/v1.2.0",
-            "published_at": "2026-03-01T00:00:00Z",
-            "name": "v1.2.0",
+    async def test_returns_same_result_as_sync(self, tmp_path):
+        """check_for_updates_async() delegates to check_for_updates via to_thread."""
+        expected = {
+            "current": "0.4.1",
+            "latest": "0.5.0",
+            "update_available": True,
         }
-
         with patch(
-            "pocketpaw.update_check.fetch_release_notes", return_value=sentinel
-        ) as mock_sync:
-            result = asyncio.run(fetch_release_notes_async("1.2.0", tmp_path))
+            "pocketpaw.update_check.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=expected,
+        ) as mock_to_thread:
+            result = await check_for_updates_async("0.4.1", tmp_path)
 
-        assert result == sentinel
-        mock_sync.assert_called_once_with("1.2.0", tmp_path)
+        assert result == expected
+        mock_to_thread.assert_awaited_once()
 
-    def test_check_for_updates_async_propagates_none(self, tmp_path):
-        """check_for_updates_async returns None when the sync function returns None."""
-        with patch("pocketpaw.update_check.check_for_updates", return_value=None):
-            result = asyncio.run(check_for_updates_async("1.0.0", tmp_path))
+    async def test_is_awaitable(self, tmp_path):
+        """Calling check_for_updates_async returns a coroutine (not the value directly)."""
+        with patch(
+            "pocketpaw.update_check.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            coro = check_for_updates_async("0.4.1", tmp_path)
+            assert asyncio.iscoroutine(coro)
+            await coro  # must not raise
+
+    async def test_returns_none_on_error(self, tmp_path):
+        """Propagates None when the underlying sync function returns None."""
+        with patch(
+            "pocketpaw.update_check.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await check_for_updates_async("0.4.1", tmp_path)
 
         assert result is None
 
-    def test_fetch_release_notes_async_propagates_none(self, tmp_path):
-        """fetch_release_notes_async returns None when the sync function returns None."""
-        with patch("pocketpaw.update_check.fetch_release_notes", return_value=None):
-            result = asyncio.run(fetch_release_notes_async("1.2.0", tmp_path))
+
+class TestFetchReleaseNotesAsync:
+    """Async wrapper mirrors the return value of the sync function."""
+
+    async def test_returns_same_result_as_sync(self, tmp_path):
+        """fetch_release_notes_async() delegates to fetch_release_notes via to_thread."""
+        expected = {
+            "version": "0.5.0",
+            "body": "Bug fixes",
+            "html_url": "https://github.com/pocketpaw/pocketpaw/releases/tag/v0.5.0",
+            "published_at": "2026-03-01T00:00:00Z",
+            "name": "v0.5.0",
+        }
+        with patch(
+            "pocketpaw.update_check.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=expected,
+        ) as mock_to_thread:
+            result = await fetch_release_notes_async("0.5.0", tmp_path)
+
+        assert result == expected
+        mock_to_thread.assert_awaited_once()
+
+    async def test_is_awaitable(self, tmp_path):
+        """Calling fetch_release_notes_async returns a coroutine."""
+        with patch(
+            "pocketpaw.update_check.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            coro = fetch_release_notes_async("0.5.0", tmp_path)
+            assert asyncio.iscoroutine(coro)
+            await coro  # must not raise
+
+    async def test_returns_none_on_error(self, tmp_path):
+        """Propagates None when the underlying sync function returns None."""
+        with patch(
+            "pocketpaw.update_check.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await fetch_release_notes_async("0.5.0", tmp_path)
 
         assert result is None
