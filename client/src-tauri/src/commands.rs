@@ -24,31 +24,50 @@ fn _augmented_path() -> String {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let home_str = home.to_string_lossy();
 
-    let extra_dirs = [
-        format!("{}/.local/bin", home_str),          // pip install --user
-        format!("{}/.cargo/bin", home_str),           // cargo, uv
-        "/opt/homebrew/bin".to_string(),              // Homebrew on Apple Silicon
-        "/opt/homebrew/sbin".to_string(),
-        "/usr/local/bin".to_string(),                 // Homebrew on Intel, manual installs
-        "/usr/local/sbin".to_string(),
-        format!("{}/Library/Python/3.11/bin", home_str), // macOS framework Python
-        format!("{}/Library/Python/3.12/bin", home_str),
-        format!("{}/Library/Python/3.13/bin", home_str),
-    ];
+    let separator = if cfg!(windows) { ";" } else { ":" };
 
-    let mut parts: Vec<&str> = current.split(':').collect();
+    let extra_dirs: Vec<String> = if cfg!(windows) {
+        vec![
+            format!("{}\\.local\\bin", home_str),
+            format!("{}\\.cargo\\bin", home_str),
+            format!("{}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts", home_str),
+            format!("{}\\AppData\\Local\\Programs\\Python\\Python312\\Scripts", home_str),
+            format!("{}\\AppData\\Local\\Programs\\Python\\Python313\\Scripts", home_str),
+            format!("{}\\AppData\\Roaming\\Python\\Python311\\Scripts", home_str),
+            format!("{}\\AppData\\Roaming\\Python\\Python312\\Scripts", home_str),
+            format!("{}\\AppData\\Roaming\\Python\\Python313\\Scripts", home_str),
+        ]
+    } else {
+        vec![
+            format!("{}/.local/bin", home_str),
+            format!("{}/.cargo/bin", home_str),
+            "/opt/homebrew/bin".to_string(),
+            "/opt/homebrew/sbin".to_string(),
+            "/usr/local/bin".to_string(),
+            "/usr/local/sbin".to_string(),
+            format!("{}/Library/Python/3.11/bin", home_str),
+            format!("{}/Library/Python/3.12/bin", home_str),
+            format!("{}/Library/Python/3.13/bin", home_str),
+        ]
+    };
+
+    let mut parts: Vec<&str> = current.split(separator).collect();
     for dir in &extra_dirs {
         if !parts.contains(&dir.as_str()) {
             parts.push(dir);
         }
     }
-    parts.join(":")
+    parts.join(separator)
 }
 
 /// Create a Command with the augmented PATH set.
+/// Sets CWD to the home directory to avoid picking up local pyproject.toml.
 fn _cmd(program: &str) -> Command {
     let mut cmd = Command::new(program);
     cmd.env("PATH", _augmented_path());
+    if let Some(home) = dirs::home_dir() {
+        cmd.current_dir(home);
+    }
     cmd
 }
 
