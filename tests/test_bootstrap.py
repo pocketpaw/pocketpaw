@@ -41,6 +41,63 @@ class TestBootstrapContext:
         assert "# Key Knowledge" in prompt
         assert "- Fact 1" in prompt
 
+    def test_identity_wrapped_in_xml_tags(self):
+        """Identity block must be wrapped in <identity>...</identity> XML tags."""
+        ctx = BootstrapContext(
+            name="TestAgent",
+            identity="I am a test agent.",
+            soul="Soul text.",
+            style="Style text.",
+        )
+        prompt = ctx.to_system_prompt()
+        assert "<identity>" in prompt
+        assert "</identity>" in prompt
+
+    def test_identity_appears_after_instructions(self):
+        """Instructions (tool docs) must come before the identity block."""
+        ctx = BootstrapContext(
+            name="TestAgent",
+            identity="I am a test agent.",
+            soul="Soul text.",
+            style="Style text.",
+            instructions="Tool docs go here.",
+        )
+        prompt = ctx.to_system_prompt()
+        instructions_pos = prompt.index("Tool docs go here.")
+        identity_pos = prompt.index("<identity>")
+        assert instructions_pos < identity_pos, (
+            "Instructions should appear before the <identity> block"
+        )
+
+    def test_user_profile_inside_identity_block(self):
+        """USER.md content must be inside the <identity> block."""
+        ctx = BootstrapContext(
+            name="TestAgent",
+            identity="I am a test agent.",
+            soul="Soul.",
+            style="Style.",
+            user_profile="Name: Alice",
+        )
+        prompt = ctx.to_system_prompt()
+        identity_start = prompt.index("<identity>")
+        identity_end = prompt.index("</identity>")
+        user_profile_pos = prompt.index("Name: Alice")
+        assert identity_start < user_profile_pos < identity_end, (
+            "user_profile should be inside the <identity> XML block"
+        )
+
+    def test_no_instructions_prompt_has_identity_only(self):
+        """When there are no instructions, the prompt is just the identity block."""
+        ctx = BootstrapContext(
+            name="TestAgent",
+            identity="I am a test agent.",
+            soul="Soul.",
+            style="Style.",
+        )
+        prompt = ctx.to_system_prompt()
+        # Should start with <identity> (after stripping leading whitespace)
+        assert prompt.strip().startswith("<identity>")
+
 
 class TestDefaultBootstrapProvider:
     """Tests for DefaultBootstrapProvider."""

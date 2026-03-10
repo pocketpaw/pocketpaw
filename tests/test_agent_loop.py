@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pocketpaw.agents.loop import AgentLoop
+from pocketpaw.agents.loop import _IDENTITY_REINFORCE_THRESHOLD, AgentLoop
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.bus import Channel, InboundMessage
 
@@ -350,6 +350,134 @@ async def test_agent_loop_handles_error_before_router_init(
                             break
 
                     assert error_found, "Error message should be published to outbound channel"
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_identity_reinforcement_appended_on_long_conversations(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Identity reminder is appended to system_prompt when history is long."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    captured: dict = {}
+
+    async def capturing_run(message, *, system_prompt=None, history=None, session_key=None):
+        captured["system_prompt"] = system_prompt
+        yield AgentEvent(type="message", content="OK")
+        yield AgentEvent(type="done", content="")
+
+    router = MagicMock()
+    router.run = capturing_run
+    router.stop = AsyncMock()
+    mock_router_cls.return_value = router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(
+        return_value="<identity>You are PocketPaw</identity>"
+    )
+
+    # Simulate a long conversation with enough messages to trigger reinforcement
+    long_history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"message {i}"}
+        for i in range(_IDENTITY_REINFORCE_THRESHOLD)
+    ]
+    mock_memory.get_compacted_history = AsyncMock(return_value=long_history)
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            loop = AgentLoop()
+            msg = InboundMessage(
+                channel=Channel.CLI,
+                sender_id="user1",
+                chat_id="chat1",
+                content="Keep going",
+            )
+            await loop._process_message(msg)
+
+    assert "Identity Reminder" in captured.get("system_prompt", ""), (
+        "System prompt should contain identity reinforcement block for long conversations"
+    )
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_identity_reinforcement_not_appended_on_short_conversations(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Identity reminder is NOT appended when history is short."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    captured: dict = {}
+
+    async def capturing_run(message, *, system_prompt=None, history=None, session_key=None):
+        captured["system_prompt"] = system_prompt
+        yield AgentEvent(type="message", content="OK")
+        yield AgentEvent(type="done", content="")
+
+    router = MagicMock()
+    router.run = capturing_run
+    router.stop = AsyncMock()
+    mock_router_cls.return_value = router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(
+        return_value="<identity>You are PocketPaw</identity>"
+    )
+
+    # Short history — below threshold
+    short_history = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    mock_memory.get_compacted_history = AsyncMock(return_value=short_history)
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            loop = AgentLoop()
+            msg = InboundMessage(
+                channel=Channel.CLI,
+                sender_id="user1",
+                chat_id="chat1",
+                content="Hello",
+            )
+            await loop._process_message(msg)
+
+    assert "Identity Reminder" not in captured.get("system_prompt", ""), (
+        "System prompt should NOT contain identity reinforcement block for short conversations"
+    )
 
 
 # ---------------------------------------------------------------------------

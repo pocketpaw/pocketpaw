@@ -15,7 +15,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
@@ -207,7 +207,7 @@ class GoogleADKBackend:
         try:
             from google.genai import types
 
-            instruction = system_prompt or "You are PocketPaw, a helpful AI assistant."
+            instruction = system_prompt or _DEFAULT_IDENTITY
 
             # Build tools: custom PocketPaw tools + MCP toolsets
             tools = self._build_custom_tools() + self._build_mcp_toolsets()

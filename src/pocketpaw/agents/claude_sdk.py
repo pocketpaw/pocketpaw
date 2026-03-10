@@ -550,8 +550,8 @@ class ClaudeSDKBackend:
         if self._client is not None:
             try:
                 await self._client.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to disconnect Claude client: %s", e)
             self._client = None
 
         # Create and connect new client
@@ -568,8 +568,8 @@ class ClaudeSDKBackend:
         if self._client is not None:
             try:
                 await self._client.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to disconnect Claude client: %s", e)
             self._client = None
             self._client_options_key = None
             self._client_in_use = False
@@ -1132,8 +1132,8 @@ class ClaudeSDKBackend:
         if self._client is not None:
             try:
                 await self._client.interrupt()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to interrupt Claude client: %s", e)
         await self.cleanup()
         logger.info("🛑 Claude Agent SDK stop requested")
 

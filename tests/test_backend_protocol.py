@@ -2,7 +2,18 @@
 
 import inspect
 
-from pocketpaw.agents.backend import AgentBackend, BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, AgentBackend, BackendInfo, Capability
+
+
+class TestDefaultIdentity:
+    def test_default_identity_is_nonempty(self):
+        """_DEFAULT_IDENTITY must be a non-empty string used as the system-prompt fallback."""
+        assert isinstance(_DEFAULT_IDENTITY, str)
+        assert len(_DEFAULT_IDENTITY.strip()) > 0
+
+    def test_default_identity_mentions_pocketpaw(self):
+        """The fallback identity should at minimum identify the agent as PocketPaw."""
+        assert "PocketPaw" in _DEFAULT_IDENTITY
 
 
 class TestCapability:

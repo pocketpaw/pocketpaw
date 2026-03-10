@@ -16,6 +16,13 @@ if TYPE_CHECKING:
 
 from pocketpaw.agents.protocol import AgentEvent  # re-export for convenience
 
+# Default identity fallback shared across all backends.
+# Used when AgentContextBuilder cannot supply a system prompt (e.g. empty
+# identity files, first-run with no config, or legacy backend aliases).
+_DEFAULT_IDENTITY = (
+    "You are PocketPaw, a helpful AI assistant running locally on the user's computer."
+)
+
 
 class Capability(Flag):
     """Feature flags advertised by a backend."""

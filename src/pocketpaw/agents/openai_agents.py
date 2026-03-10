@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 
@@ -229,7 +229,7 @@ class OpenAIAgentsBackend:
             from openai.types.responses import ResponseTextDeltaEvent
 
             model = self._build_model()
-            instructions = system_prompt or "You are PocketPaw, a helpful AI assistant."
+            instructions = system_prompt or _DEFAULT_IDENTITY
 
             # Native session management via SQLiteSession:
             # - When session_key is provided and SQLiteSession is available,

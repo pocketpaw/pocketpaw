@@ -15,7 +15,7 @@ import shutil
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 
@@ -172,8 +172,8 @@ class CopilotSDKBackend:
 
             # Build the prompt
             prompt_parts = []
-            if system_prompt:
-                prompt_parts.append(f"[System Instructions]\n{system_prompt}\n")
+            effective_system = system_prompt or _DEFAULT_IDENTITY
+            prompt_parts.append(f"[System Instructions]\n{effective_system}\n")
             if history:
                 prompt_parts.append(self._inject_history("", history).strip())
             prompt_parts.append(message)
@@ -202,8 +202,7 @@ class CopilotSDKBackend:
                     "model": model,
                     "streaming": True,
                 }
-                if system_prompt:
-                    session_opts["system_message"] = system_prompt
+                session_opts["system_message"] = system_prompt or _DEFAULT_IDENTITY
                 if provider_config:
                     session_opts["provider"] = provider_config
 
