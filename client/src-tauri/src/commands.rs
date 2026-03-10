@@ -153,9 +153,11 @@ fn _check_binary_at_known_paths() -> bool {
 }
 
 /// Check if `pocketpaw` is available via `uv run`
+/// Uses --no-project --isolated so it won't resolve from a local pyproject.toml
+/// or cached virtual environments
 fn _check_cli_via_uv() -> bool {
     _cmd("uv")
-        .args(["run", "pocketpaw", "--version"])
+        .args(["run", "--no-project", "--isolated", "pocketpaw", "--version"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
