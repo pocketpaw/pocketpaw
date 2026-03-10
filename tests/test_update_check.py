@@ -1,10 +1,15 @@
 """Tests for update_check module.
 
 Changes:
+  - 2026-03-10: Added TestAsyncWrappers for check_for_updates_async and fetch_release_notes_async.
   - 2026-02-18: Added TestStyledUpdateNotice, TestFetchReleaseNotes, TestVersionSeen.
   - 2026-02-16: Initial tests for PyPI version check with caching.
 """
 
+from __future__ import annotations
+
+import asyncio
+import inspect
 import json
 import time
 from unittest.mock import patch
@@ -15,7 +20,9 @@ from pocketpaw.update_check import (
     RELEASE_NOTES_CACHE_DIR,
     _parse_version,
     check_for_updates,
+    check_for_updates_async,
     fetch_release_notes,
+    fetch_release_notes_async,
     get_last_seen_version,
     mark_version_seen,
     print_styled_update_notice,
@@ -286,80 +293,53 @@ class TestVersionSeen:
         assert get_last_seen_version(tmp_path) == "0.4.2"
 
 
-# ---------------------------------------------------------------------------
-# Async wrapper tests (added for PR #541)
-# ---------------------------------------------------------------------------
+class TestAsyncWrappers:
+    def test_check_for_updates_async_is_coroutine(self):
+        """check_for_updates_async must be an async function (awaitable)."""
+        assert inspect.iscoroutinefunction(check_for_updates_async)
 
-import asyncio
-import inspect
-from unittest.mock import patch
+    def test_fetch_release_notes_async_is_coroutine(self):
+        """fetch_release_notes_async must be an async function (awaitable)."""
+        assert inspect.iscoroutinefunction(fetch_release_notes_async)
 
+    def test_check_for_updates_async_returns_same_value(self, tmp_path):
+        """check_for_updates_async returns the same value as check_for_updates."""
+        sentinel = {"current": "1.0.0", "latest": "1.2.0", "update_available": True}
 
-def test_check_for_updates_async_is_coroutine():
-    """check_for_updates_async must be an async function (awaitable)."""
-    from pocketpaw.update_check import check_for_updates_async
+        with patch("pocketpaw.update_check.check_for_updates", return_value=sentinel) as mock_sync:
+            result = asyncio.run(check_for_updates_async("1.0.0", tmp_path))
 
-    assert inspect.iscoroutinefunction(check_for_updates_async)
+        assert result == sentinel
+        mock_sync.assert_called_once_with("1.0.0", tmp_path)
 
+    def test_fetch_release_notes_async_returns_same_value(self, tmp_path):
+        """fetch_release_notes_async returns the same value as fetch_release_notes."""
+        sentinel = {
+            "version": "1.2.0",
+            "body": "## Changelog",
+            "html_url": "https://github.com/pocketpaw/pocketpaw/releases/tag/v1.2.0",
+            "published_at": "2026-03-01T00:00:00Z",
+            "name": "v1.2.0",
+        }
 
-def test_fetch_release_notes_async_is_coroutine():
-    """fetch_release_notes_async must be an async function (awaitable)."""
-    from pocketpaw.update_check import fetch_release_notes_async
+        with patch(
+            "pocketpaw.update_check.fetch_release_notes", return_value=sentinel
+        ) as mock_sync:
+            result = asyncio.run(fetch_release_notes_async("1.2.0", tmp_path))
 
-    assert inspect.iscoroutinefunction(fetch_release_notes_async)
+        assert result == sentinel
+        mock_sync.assert_called_once_with("1.2.0", tmp_path)
 
+    def test_check_for_updates_async_propagates_none(self, tmp_path):
+        """check_for_updates_async returns None when the sync function returns None."""
+        with patch("pocketpaw.update_check.check_for_updates", return_value=None):
+            result = asyncio.run(check_for_updates_async("1.0.0", tmp_path))
 
-def test_check_for_updates_async_returns_same_value(tmp_path):
-    """check_for_updates_async returns the same value as check_for_updates."""
-    from pocketpaw.update_check import check_for_updates_async
+        assert result is None
 
-    sentinel = {"current": "1.0.0", "latest": "1.2.0", "update_available": True}
+    def test_fetch_release_notes_async_propagates_none(self, tmp_path):
+        """fetch_release_notes_async returns None when the sync function returns None."""
+        with patch("pocketpaw.update_check.fetch_release_notes", return_value=None):
+            result = asyncio.run(fetch_release_notes_async("1.2.0", tmp_path))
 
-    with patch(
-        "pocketpaw.update_check.check_for_updates", return_value=sentinel
-    ) as mock_sync:
-        result = asyncio.run(check_for_updates_async("1.0.0", tmp_path))
-
-    assert result == sentinel
-    mock_sync.assert_called_once_with("1.0.0", tmp_path)
-
-
-def test_fetch_release_notes_async_returns_same_value(tmp_path):
-    """fetch_release_notes_async returns the same value as fetch_release_notes."""
-    from pocketpaw.update_check import fetch_release_notes_async
-
-    sentinel = {
-        "version": "1.2.0",
-        "body": "## Changelog",
-        "html_url": "https://github.com/pocketpaw/pocketpaw/releases/tag/v1.2.0",
-        "published_at": "2026-03-01T00:00:00Z",
-        "name": "v1.2.0",
-    }
-
-    with patch(
-        "pocketpaw.update_check.fetch_release_notes", return_value=sentinel
-    ) as mock_sync:
-        result = asyncio.run(fetch_release_notes_async("1.2.0", tmp_path))
-
-    assert result == sentinel
-    mock_sync.assert_called_once_with("1.2.0", tmp_path)
-
-
-def test_check_for_updates_async_propagates_none(tmp_path):
-    """check_for_updates_async returns None when the sync function returns None."""
-    from pocketpaw.update_check import check_for_updates_async
-
-    with patch("pocketpaw.update_check.check_for_updates", return_value=None):
-        result = asyncio.run(check_for_updates_async("1.0.0", tmp_path))
-
-    assert result is None
-
-
-def test_fetch_release_notes_async_propagates_none(tmp_path):
-    """fetch_release_notes_async returns None when the sync function returns None."""
-    from pocketpaw.update_check import fetch_release_notes_async
-
-    with patch("pocketpaw.update_check.fetch_release_notes", return_value=None):
-        result = asyncio.run(fetch_release_notes_async("1.2.0", tmp_path))
-
-    assert result is None
+        assert result is None
