@@ -83,6 +83,8 @@ export interface Settings {
   openai_compatible_base_url?: string;
   openai_compatible_model?: string;
   openai_compatible_max_tokens?: number;
+  openrouter_api_key?: string;
+  openrouter_model?: string;
   gemini_model?: string;
 
   // Memory

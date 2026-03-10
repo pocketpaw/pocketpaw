@@ -3314,6 +3314,7 @@ dependencies = [
  "dirs 5.0.1",
  "image",
  "notify",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

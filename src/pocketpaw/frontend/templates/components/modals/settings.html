@@ -353,6 +353,7 @@
                 >
                   <option value="anthropic">Anthropic (Recommended)</option>
                   <option value="ollama">Ollama (Local)</option>
+                  <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
                 </select>
                 <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
@@ -365,8 +366,11 @@
               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'ollama'">
                 Runs via Ollama's Anthropic Messages API compatibility (Claude Code v0.14.0+).
               </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openrouter'">
+                Use any model on OpenRouter with full CLI tool access via their Anthropic-compatible API.
+              </small>
               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openai_compatible'">
-                Connect to any Anthropic-compatible endpoint (LiteLLM, vLLM, OpenRouter, etc.).
+                Connect to any Anthropic-compatible endpoint (LiteLLM, vLLM, etc.).
               </small>
             </div>
             <!-- Ollama config (inline, shown when provider=ollama) -->
@@ -385,6 +389,25 @@
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
                 <small class="text-white/50 text-[11px]">Run <code>ollama list</code> to see available models.</small>
+              </div>
+            </div>
+            <!-- OpenRouter config (inline, shown when provider=openrouter) -->
+            <div x-show="settings.claudeSdkProvider === 'openrouter'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">OpenRouter API Key</label>
+                <input type="password" x-model="settings.openaiCompatibleApiKey" @change="saveSettings()"
+                  :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'sk-or-v1-...'"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Get your key at <a href="https://openrouter.ai/keys" target="_blank" class="underline">openrouter.ai/keys</a></small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.openaiCompatibleModel" @change="saveSettings()"
+                  placeholder="anthropic/claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Browse models at <a href="https://openrouter.ai/models" target="_blank" class="underline">openrouter.ai/models</a></small>
               </div>
             </div>
             <!-- OpenAI-compatible config (inline, shown when provider=openai_compatible) -->
@@ -465,6 +488,7 @@
                 >
                   <option value="openai">OpenAI (Recommended)</option>
                   <option value="ollama">Ollama (Local)</option>
+                  <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
                 </select>
                 <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
@@ -474,8 +498,11 @@
               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'ollama'">
                 Uses Ollama's OpenAI-compatible API. No API key needed.
               </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openrouter'">
+                Use any model on OpenRouter. Free and paid models available.
+              </small>
               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openai_compatible'">
-                Connect to any OpenAI-compatible endpoint (NVIDIA NIM, OpenRouter, vLLM, etc.).
+                Connect to any OpenAI-compatible endpoint (NVIDIA NIM, vLLM, etc.).
               </small>
             </div>
             <!-- Ollama config (inline) -->
@@ -493,6 +520,25 @@
                   placeholder="llama3.2"
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
+              </div>
+            </div>
+            <!-- OpenRouter config (inline, for openai_agents) -->
+            <div x-show="settings.openaiAgentsProvider === 'openrouter'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">OpenRouter API Key</label>
+                <input type="password" x-model="settings.openaiCompatibleApiKey" @change="saveSettings()"
+                  :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'sk-or-v1-...'"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Get your key at <a href="https://openrouter.ai/keys" target="_blank" class="underline">openrouter.ai/keys</a></small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.openaiCompatibleModel" @change="saveSettings()"
+                  placeholder="meta-llama/llama-4-maverick"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Browse models at <a href="https://openrouter.ai/models" target="_blank" class="underline">openrouter.ai/models</a></small>
               </div>
             </div>
             <!-- OpenAI-compatible config (inline) -->

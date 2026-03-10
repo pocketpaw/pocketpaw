@@ -44,6 +44,7 @@
     openai: ["gpt-5.2", "gpt-4o", "gpt-4o-mini", "o1-preview"],
     google: ["gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro"],
     ollama: ["llama3.2", "mistral", "codellama", "gemma2", "phi3"],
+    openrouter: [], // 300+ models; user types the slug directly
     openai_compatible: [],
     copilot: [],
     azure: [],
@@ -54,6 +55,7 @@
     openai: "OpenAI",
     google: "Google",
     ollama: "Ollama (Local)",
+    openrouter: "OpenRouter",
     openai_compatible: "OpenAI Compatible",
     copilot: "GitHub Copilot",
     azure: "Azure OpenAI",
@@ -64,6 +66,7 @@
     openai: { label: "OpenAI API Key", placeholder: "sk-..." },
     google: { label: "Google API Key", placeholder: "AIza..." },
     azure: { label: "Azure API Key", placeholder: "Enter Azure key..." },
+    openrouter: { label: "OpenRouter API Key", placeholder: "sk-or-v1-..." },
     openai_compatible: { label: "API Key", placeholder: "Enter API key..." },
   };
 
@@ -290,6 +293,10 @@
       if (selectedProvider === "ollama") {
         patch.ollama_host = ollamaHost;
         patch.ollama_model = effectiveModel;
+      }
+
+      if (selectedProvider === "openrouter") {
+        patch.openrouter_model = effectiveModel;
       }
 
       if (selectedProvider === "openai_compatible") {

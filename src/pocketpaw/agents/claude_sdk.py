@@ -75,7 +75,7 @@ class ClaudeSDKBackend:
             ],
             tool_policy_map=ClaudeSDKBackend._TOOL_POLICY_MAP,
             required_keys=["anthropic_api_key"],
-            supported_providers=["anthropic", "ollama", "openai_compatible"],
+            supported_providers=["anthropic", "ollama", "openrouter", "openai_compatible"],
         )
 
     def __init__(self, settings: Settings):
