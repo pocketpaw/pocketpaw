@@ -1,5 +1,5 @@
 ---
-title: Tool Policy
+title: "Tool Policy: Permission Levels & Trust System"
 description: "Control which tools PocketPaw can use with three-tier policy: profiles (minimal, coding, full), allow-lists, and deny-lists. Deny always wins. Supports tool groups like group:gmail and group:shell."
 section: Tools
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["tool policy", "access control", "allow list", "deny list", "profiles
 tags: ["tools", "security", "policy"]
 ---
 
-# Tool Policy
+# Tool Policy: Permission Levels & Trust System
 
 The tool policy system controls which tools are available to the agent. It uses profiles, allow lists, and deny lists with a clear precedence order.
 
@@ -127,3 +127,17 @@ export POCKETPAW_TOOLS_DENY="group:mcp"
 | `group:delegation` | delegate |
 | `group:skills` | skill_gen, skill |
 | `group:mcp` | All MCP server tools |
+
+## Related
+
+<CardGroup>
+  <Card title="Custom Tools" icon="lucide:puzzle" href="/tools/custom-tools">
+    Build your own tools with the ToolProtocol interface.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    Learn about PocketPaw's 7-layer security stack.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

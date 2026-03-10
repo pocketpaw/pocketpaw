@@ -1,5 +1,5 @@
 ---
-title: Injection Scanner
+title: "Injection Scanner: Prompt Injection Defense"
 description: "PocketPaw's two-tier prompt injection scanner combines fast regex heuristics with optional LLM analysis to detect and block injection attempts in user messages and tool outputs."
 section: Security
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["prompt injection", "injection detection", "regex scanner", "llm anal
 tags: ["security", "injection"]
 ---
 
-# Injection Scanner
+# Injection Scanner: Prompt Injection Defense
 
 The injection scanner protects PocketPaw from prompt injection attacks using a two-tier detection approach.
 
@@ -63,3 +63,17 @@ Tool output scanning is critical because indirect injection can come through:
 2. A `SystemEvent` is emitted with the detection details
 3. The incident is recorded in the audit log
 4. The user receives a sanitized error message
+
+## Related
+
+<CardGroup>
+  <Card title="Guardian AI" icon="lucide:shield-alert" href="/security/guardian-ai">
+    Secondary LLM safety check that evaluates every incoming message.
+  </Card>
+  <Card title="Audit Log" icon="lucide:file-check" href="/security/audit-log">
+    All injection detections are recorded in the append-only audit log.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    Full overview of PocketPaw's 7-layer security stack.
+  </Card>
+</CardGroup>

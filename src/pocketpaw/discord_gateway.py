@@ -20,9 +20,18 @@ async def run_discord_bot(settings: Settings) -> None:
         token=settings.discord_bot_token,
         allowed_guild_ids=settings.discord_allowed_guild_ids,
         allowed_user_ids=settings.discord_allowed_user_ids,
+        allowed_channel_ids=settings.discord_allowed_channel_ids,
+        conversation_channel_ids=settings.discord_conversation_channel_ids,
+        bot_name=settings.discord_bot_name,
+        status_type=settings.discord_status_type,
+        activity_type=settings.discord_activity_type,
+        activity_text=settings.discord_activity_text,
     )
 
     agent_loop = AgentLoop()
+    from pocketpaw.bus.commands import get_command_handler
+
+    get_command_handler().set_agent_loop(agent_loop)
 
     logger.info("Starting PocketPaw Discord bot...")
 

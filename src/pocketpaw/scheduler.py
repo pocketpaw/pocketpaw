@@ -46,7 +46,7 @@ def load_reminders() -> list[dict]:
         try:
             data = json.loads(path.read_text())
             return data.get("reminders", [])
-        except (json.JSONDecodeError, Exception):
+        except Exception:
             pass
     return []
 
@@ -115,6 +115,8 @@ def parse_natural_time(text: str) -> datetime | None:
     # Try dateutil parser for other formats
     try:
         parsed = date_parser.parse(text, fuzzy=True)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
         if parsed > now:
             return parsed
     except (ValueError, TypeError):

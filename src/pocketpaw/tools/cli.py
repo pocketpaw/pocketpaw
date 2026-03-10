@@ -48,6 +48,7 @@ from pocketpaw.tools.builtin import (
     ListSessionsTool,
     NewSessionTool,
     OCRTool,
+    OpenExplorerTool,
     RecallTool,
     RedditReadTool,
     RedditSearchTool,
@@ -118,6 +119,7 @@ _TOOLS = {
         HealthCheckTool(),
         ErrorLogTool(),
         ConfigDoctorTool(),
+        OpenExplorerTool(),
     ]
 }
 
@@ -161,8 +163,16 @@ def main() -> None:
         print("Error: Args must be a JSON object", file=sys.stderr)
         sys.exit(1)
 
-    # Execute
-    result = asyncio.run(tool.execute(**args))
+    # Execute (safe when already inside a running loop, e.g. pytest-asyncio)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        result = asyncio.run(tool.execute(**args))
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            result = ex.submit(asyncio.run, tool.execute(**args)).result()
     print(result)
 
 

@@ -27,7 +27,7 @@
     <link rel="apple-touch-icon" href="./paw.webp" />
 
     <!-- Open Graph (Facebook, LinkedIn, Slack, iMessage) -->
-    <meta property="og:url" content="https://pocketpaw.netlify.app/" />
+    <meta property="og:url" content="https://pocketpaw.xyz/" />
     <meta property="og:type" content="website" />
     <meta
       property="og:title"
@@ -39,7 +39,7 @@
     />
     <meta
       property="og:image"
-      content="https://pocketpaw.netlify.app/pocket-paw-og.webp"
+      content="https://pocketpaw.xyz/pocket-paw-og.webp"
     />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
@@ -57,7 +57,7 @@
     />
     <meta
       name="twitter:image"
-      content="https://pocketpaw.netlify.app/pocket-paw-og.webp"
+      content="https://pocketpaw.xyz/pocket-paw-og.webp"
     />
 
     <link rel="icon" href="./paw.webp" type="image/png" />
@@ -69,11 +69,11 @@
         "@type": "SoftwareApplication",
         "name": "PocketPaw",
         "description": "Self-hosted, open-source AI agent you control from Telegram, Discord, Slack, WhatsApp, or a web dashboard. Encrypted credentials, modular install, 3 LLM backends.",
-        "applicationCategory": "DeveloperApplication",
+        "applicationCategory": ["DeveloperApplication", "ProductivityApplication", "UtilitiesApplication"],
         "operatingSystem": "Linux, macOS, Windows",
         "url": "https://pocketpaw.xyz",
         "downloadUrl": "https://pypi.org/project/pocketpaw/",
-        "softwareVersion": "0.1.0",
+        "softwareVersion": "0.4.7",
         "license": "https://opensource.org/licenses/MIT",
         "offers": {
           "@type": "Offer",
@@ -85,6 +85,62 @@
           "name": "PocketPaw",
           "url": "https://github.com/pocketpaw"
         }
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is a self-hosted AI agent?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "A self-hosted AI agent is software that runs on your own computer or server instead of in the cloud. It can answer questions, execute code, browse the web, manage files, and take actions on your behalf, all while keeping your data private. PocketPaw is an open-source self-hosted AI agent that connects to Telegram, Discord, Slack, WhatsApp, and more."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I run an AI agent without an API key?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. PocketPaw works with Ollama, which runs open-source language models (like Llama, Qwen, Mistral) directly on your hardware. No API keys, no accounts, no usage fees. You need at least 4GB of RAM for a 7B parameter model."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What messaging platforms does PocketPaw support?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "PocketPaw connects to 9+ platforms: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Microsoft Teams, Google Chat, and a built-in web dashboard. All channels share the same AI agent, tools, and conversation memory."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is PocketPaw free to use?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "PocketPaw is completely free and open-source under the MIT license. The software itself has no cost. If you use cloud AI providers like Anthropic or OpenAI, their standard API pricing applies. For zero-cost operation, use Ollama with free local models."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What's the difference between an AI agent and a chatbot?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "A chatbot generates text responses to questions. An AI agent can take actions: browsing websites, executing code, managing files, sending emails, and completing multi-step tasks autonomously. PocketPaw is an AI agent with 50+ built-in tools that can act on your behalf across multiple platforms."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I install PocketPaw?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Run 'pip install pocketpaw' or use the interactive installer: 'curl -fsSL https://pocketpaw.xyz/install.sh | sh'. Then run 'pocketpaw' to start the web dashboard. The whole process takes under 5 minutes. PocketPaw requires Python 3.11 or higher."
+            }
+          }
+        ]
       }
     </script>
 
@@ -2244,7 +2300,7 @@
             <span class="nav-a-text">GitHub</span>
           </a>
           <a
-            href="https://dsc.gg/pocketpaw"
+            href="https://discord.gg/asRrtm95Zc"
             target="_blank"
             rel="noopener"
             class="nav-a"
@@ -3172,6 +3228,71 @@
       </div>
     </section>
 
+    <!-- ───────────── FAQ ───────────── -->
+    <section style="padding: 80px 0; background: var(--bg, #f9f8f6);">
+      <div class="wrap" style="max-width: 800px;">
+        <h2 class="heading scroll-text" style="text-align: center; margin-bottom: 48px; font-size: clamp(1.6rem, 3vw, 2.2rem);">
+          Frequently Asked Questions
+        </h2>
+
+        <div style="display: flex; flex-direction: column; gap: 16px;">
+          <details style="border: 1px solid rgba(26,26,46,0.08); border-radius: 12px; padding: 20px 24px; background: var(--card, #fff);">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 1.05rem; font-family: 'Plus Jakarta Sans', sans-serif; color: var(--text, #1a1a2e); list-style: none; display: flex; justify-content: space-between; align-items: center;">
+              What is a self-hosted AI agent?
+            </summary>
+            <p style="margin-top: 12px; line-height: 1.7; color: rgba(26,26,46,0.7); font-size: 0.95rem;">
+              A self-hosted AI agent runs on your own computer or server instead of in the cloud. It can answer questions, execute code, browse the web, manage files, and take actions on your behalf. Your data stays on your machine. PocketPaw is an open-source self-hosted AI agent that connects to Telegram, Discord, Slack, WhatsApp, and more.
+            </p>
+          </details>
+
+          <details style="border: 1px solid rgba(26,26,46,0.08); border-radius: 12px; padding: 20px 24px; background: var(--card, #fff);">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 1.05rem; font-family: 'Plus Jakarta Sans', sans-serif; color: var(--text, #1a1a2e); list-style: none; display: flex; justify-content: space-between; align-items: center;">
+              Can I run PocketPaw without an API key?
+            </summary>
+            <p style="margin-top: 12px; line-height: 1.7; color: rgba(26,26,46,0.7); font-size: 0.95rem;">
+              Yes. PocketPaw works with <a href="/guides/local-llm-agent" style="color: #0A84FF;">Ollama</a>, which runs open-source models (Llama, Qwen, Mistral) directly on your hardware. No API keys, no accounts, no usage fees. You need at least 4GB of RAM for a 7B parameter model.
+            </p>
+          </details>
+
+          <details style="border: 1px solid rgba(26,26,46,0.08); border-radius: 12px; padding: 20px 24px; background: var(--card, #fff);">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 1.05rem; font-family: 'Plus Jakarta Sans', sans-serif; color: var(--text, #1a1a2e); list-style: none; display: flex; justify-content: space-between; align-items: center;">
+              What messaging platforms does PocketPaw support?
+            </summary>
+            <p style="margin-top: 12px; line-height: 1.7; color: rgba(26,26,46,0.7); font-size: 0.95rem;">
+              PocketPaw connects to 9+ platforms: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Microsoft Teams, Google Chat, and a built-in web dashboard. All channels share the same AI agent, tools, and conversation memory.
+            </p>
+          </details>
+
+          <details style="border: 1px solid rgba(26,26,46,0.08); border-radius: 12px; padding: 20px 24px; background: var(--card, #fff);">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 1.05rem; font-family: 'Plus Jakarta Sans', sans-serif; color: var(--text, #1a1a2e); list-style: none; display: flex; justify-content: space-between; align-items: center;">
+              Is PocketPaw free?
+            </summary>
+            <p style="margin-top: 12px; line-height: 1.7; color: rgba(26,26,46,0.7); font-size: 0.95rem;">
+              Completely free and open-source under the MIT license. If you use cloud providers like Anthropic or OpenAI, their standard API pricing applies. For zero-cost operation, use Ollama with local models.
+            </p>
+          </details>
+
+          <details style="border: 1px solid rgba(26,26,46,0.08); border-radius: 12px; padding: 20px 24px; background: var(--card, #fff);">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 1.05rem; font-family: 'Plus Jakarta Sans', sans-serif; color: var(--text, #1a1a2e); list-style: none; display: flex; justify-content: space-between; align-items: center;">
+              What's the difference between an AI agent and a chatbot?
+            </summary>
+            <p style="margin-top: 12px; line-height: 1.7; color: rgba(26,26,46,0.7); font-size: 0.95rem;">
+              A chatbot generates text responses. An AI agent can take real actions: browsing websites, writing code, managing files, sending emails, and completing multi-step tasks. PocketPaw ships with <a href="/tools" style="color: #0A84FF;">50+ built-in tools</a> that let it act on your behalf. <a href="/guides/ai-agent-vs-chatbot" style="color: #0A84FF;">Read the full comparison</a>.
+            </p>
+          </details>
+
+          <details style="border: 1px solid rgba(26,26,46,0.08); border-radius: 12px; padding: 20px 24px; background: var(--card, #fff);">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 1.05rem; font-family: 'Plus Jakarta Sans', sans-serif; color: var(--text, #1a1a2e); list-style: none; display: flex; justify-content: space-between; align-items: center;">
+              How do I install PocketPaw?
+            </summary>
+            <p style="margin-top: 12px; line-height: 1.7; color: rgba(26,26,46,0.7); font-size: 0.95rem;">
+              Run <code style="background: rgba(10,132,255,0.08); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">pip install pocketpaw</code> or use the interactive installer. Then run <code style="background: rgba(10,132,255,0.08); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">pocketpaw</code> to start the web dashboard. Takes under 5 minutes. Requires Python 3.11+. See the <a href="/getting-started/installation" style="color: #0A84FF;">full installation guide</a>.
+            </p>
+          </details>
+        </div>
+      </div>
+    </section>
+
     <!-- ───────────── FOOTER ───────────── -->
     <footer>
       <div class="wrap foot">
@@ -3185,7 +3306,12 @@
           <span class="foot-sm">Built by You &amp; Us</span>
         </div>
         <div class="foot-links">
+          <a href="/getting-started/installation" class="foot-a">Get Started</a>
           <a href="/introduction" class="foot-a">Docs</a>
+          <a href="/guides" class="foot-a">Guides</a>
+          <a href="/channels" class="foot-a">Channels</a>
+          <a href="/tools" class="foot-a">Tools</a>
+          <a href="/backends" class="foot-a">Backends</a>
           <a
             href="https://github.com/pocketpaw/pocketpaw"
             target="_blank"
@@ -3194,7 +3320,7 @@
             >GitHub</a
           >
           <a
-            href="https://dsc.gg/pocketpaw"
+            href="https://discord.gg/asRrtm95Zc"
             target="_blank"
             rel="noopener"
             class="foot-a"

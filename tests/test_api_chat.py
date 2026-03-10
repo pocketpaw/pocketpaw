@@ -125,11 +125,11 @@ class TestChatSend:
 
         asyncio.get_event_loop().run_until_complete(_load())
 
-        resp = client.post("/api/v1/chat", json={"content": "Hi"})
+        resp = client.post("/api/v1/chat", json={"content": "Hi", "session_id": "api:test"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["content"] == "Hello world!"
-        assert data["session_id"] == "api:test"
+        assert data["session_id"] == "websocket_api:test"
 
     def test_send_empty_content(self, client):
         resp = client.post("/api/v1/chat", json={"content": ""})

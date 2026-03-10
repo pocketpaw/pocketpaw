@@ -1,5 +1,5 @@
 ---
-title: Mem0 Integration
+title: "Mem0 Integration: Semantic Long-Term Memory"
 description: "Integrate Mem0 for semantic long-term memory with auto-learning: PocketPaw automatically extracts and stores facts from conversations, then retrieves relevant memories via vector similarity search."
 section: Memory
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["mem0", "semantic memory", "auto-learn", "vector search", "long-term 
 tags: ["memory", "mem0", "ai"]
 ---
 
-# Mem0 Integration
+# Mem0 Integration: Semantic Long-Term Memory
 
 [Mem0](https://mem0.ai) provides semantic memory capabilities — auto-learning from conversations and retrieving relevant memories via vector search.
 
@@ -114,3 +114,17 @@ export POCKETPAW_MEM0_VECTOR_STORE="qdrant"
 ```
 
 This runs everything locally — LLM inference, embedding, and vector storage.
+
+## Related
+
+<CardGroup>
+  <Card title="File Store" icon="lucide:database" href="/memory/file-store">
+    PocketPaw's default JSON-based memory backend for session storage.
+  </Card>
+  <Card title="Context Building" icon="lucide:layers" href="/memory/context-building">
+    How semantic memories are retrieved and injected into the agent's context.
+  </Card>
+  <Card title="Memory Isolation" icon="lucide:shield" href="/memory/memory-isolation">
+    Per-user memory scoping when Mem0 is used in shared channels.
+  </Card>
+</CardGroup>

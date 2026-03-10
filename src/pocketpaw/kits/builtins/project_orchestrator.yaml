@@ -1,0 +1,57 @@
+meta:
+  name: "Project Orchestrator"
+  author: "PocketPaw"
+  version: "1.0.0"
+  description: "Track tasks, monitor agent progress, and manage your projects"
+  category: general
+  icon: layout-dashboard
+  tags: [tasks, projects, orchestration]
+  built_in: true
+
+layout:
+  columns: 2
+  sections:
+    - title: "Overview"
+      span: full
+      panels:
+        - id: metrics
+          type: metrics-row
+          items:
+            - { label: "Total Tasks", source: "api:stats", field: "tasks.total", format: "number" }
+            - { label: "In Progress", source: "api:stats", field: "tasks.by_status.in_progress", format: "number" }
+            - { label: "Completed", source: "api:stats", field: "tasks.by_status.done", format: "number" }
+            - { label: "Blocked", source: "api:stats", field: "tasks.by_status.blocked", format: "number" }
+
+    - title: "Task Board"
+      span: full
+      panels:
+        - id: kanban
+          type: kanban
+          columns:
+            - { key: "inbox", label: "Inbox", color: "gray" }
+            - { key: "in_progress", label: "In Progress", color: "blue" }
+            - { key: "review", label: "Review", color: "orange" }
+            - { key: "done", label: "Done", color: "green" }
+          source: "api:tasks"
+          card_fields: [title, priority, task_type]
+
+    - title: "Recent Activity"
+      span: left
+      panels:
+        - id: activity_feed
+          type: feed
+          source: "api:activities"
+          max_items: 20
+
+    - title: "Documents"
+      span: right
+      panels:
+        - id: docs
+          type: table
+          source: "api:documents"
+          columns:
+            - { key: "title", label: "Title" }
+            - { key: "type", label: "Type" }
+            - { key: "updated_at", label: "Updated" }
+
+workflows: {}

@@ -2,6 +2,7 @@
 # Created: 2026-02-02
 
 
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -98,8 +99,9 @@ class TestShellTool:
     async def test_timeout(self):
         # Create tool with short timeout
         tool = ShellTool(timeout=1)
-        # Sleep for 2 seconds
-        result = await tool.execute(command="sleep 2")
+        # Use a cross-platform command that runs longer than the timeout
+        cmd = "ping -n 5 127.0.0.1" if sys.platform == "win32" else "sleep 2"
+        result = await tool.execute(command=cmd)
         assert "Command timed out" in result
 
 
@@ -155,6 +157,25 @@ class TestFilesystemTools:
         # If result is "File not found" it might mean it resolved but didn't error on jail
         # We want explicit jail error
         assert "Access denied" in result
+
+    @pytest.mark.asyncio
+    async def test_jail_prefix_bypass_blocked(self, temp_jail, mock_settings):
+        read_tool = ReadFileTool()
+        write_tool = WriteFileTool()
+        list_tool = ListDirTool()
+
+        outside_prefix_dir = temp_jail.parent / f"{temp_jail.name}_outside"
+        outside_prefix_dir.mkdir(exist_ok=True)
+        outside_prefix_file = outside_prefix_dir / "secret.txt"
+        outside_prefix_file.write_text("secret")
+
+        read_result = await read_tool.execute(path=str(outside_prefix_file))
+        write_result = await write_tool.execute(path=str(outside_prefix_file), content="overwrite")
+        list_result = await list_tool.execute(path=str(outside_prefix_dir))
+
+        assert "Access denied" in read_result
+        assert "Access denied" in write_result
+        assert "Access denied" in list_result
 
     @pytest.mark.asyncio
     async def test_list_dir(self, temp_jail, mock_settings):

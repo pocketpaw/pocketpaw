@@ -24,7 +24,15 @@ window.PocketPaw.FileBrowser = {
             filePath: '~',
             files: [],
             fileLoading: false,
-            fileError: null
+            fileError: null,
+            // File viewer
+            showFileViewer: false,
+            viewerFileName: '',
+            viewerFilePath: '',
+            viewerFileType: 'unknown', // 'pdf', 'image', 'text', 'unknown'
+            viewerContentUrl: '',
+            viewerTextContent: '',
+            viewerLoading: false,
         };
     },
 
@@ -122,11 +130,85 @@ window.PocketPaw.FileBrowser = {
                         : `${this.filePath}/${item.name}`;
                     this.navigateTo(newPath);
                 } else {
-                    // File selected - could download or preview
-                    this.log(`Selected file: ${item.name}`, 'info');
-                    this.showToast(`Selected: ${item.name}`, 'info');
-                    // TODO: Add file download/preview functionality
+                    const fullPath = this.filePath === '~'
+                        ? item.name
+                        : `${this.filePath}/${item.name}`;
+                    this.openFileViewer(fullPath);
                 }
+            },
+
+            /**
+             * Handle open_path WebSocket event from backend
+             */
+            handleOpenPath(data) {
+                if (data.action === 'navigate') {
+                    this.showFileBrowser = true;
+                    this.navigateTo(data.path);
+                } else if (data.action === 'view') {
+                    this.openFileViewer(data.path);
+                }
+            },
+
+            /**
+             * Detect file type from extension
+             */
+            _detectFileType(filename) {
+                const ext = (filename.split('.').pop() || '').toLowerCase();
+                if (ext === 'pdf') return 'pdf';
+                if (['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico'].includes(ext)) return 'image';
+                if ([
+                    'txt', 'md', 'py', 'js', 'ts', 'json', 'html', 'css',
+                    'yaml', 'yml', 'toml', 'cfg', 'ini', 'log', 'sh', 'bat',
+                    'xml', 'csv', 'env', 'rs', 'go', 'java', 'c', 'cpp', 'h',
+                    'jsx', 'tsx', 'svelte', 'vue', 'rb', 'php', 'sql', 'r',
+                    'swift', 'kt', 'lua', 'pl', 'dockerfile', 'makefile',
+                ].includes(ext)) return 'text';
+                return 'unknown';
+            },
+
+            /**
+             * Open file in the in-app viewer modal
+             */
+            async openFileViewer(filePath) {
+                const fileName = filePath.split(/[/\\]/).pop() || filePath;
+                const fileType = this._detectFileType(fileName);
+                const contentUrl = `/api/v1/files/content?path=${encodeURIComponent(filePath)}`;
+
+                this.viewerFileName = fileName;
+                this.viewerFilePath = filePath;
+                this.viewerFileType = fileType;
+                this.viewerContentUrl = contentUrl;
+                this.viewerTextContent = '';
+                this.viewerLoading = true;
+                this.showFileViewer = true;
+
+                if (fileType === 'text') {
+                    try {
+                        const resp = await fetch(contentUrl);
+                        if (!resp.ok) {
+                            const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+                            this.viewerTextContent = `Error: ${err.detail || resp.statusText}`;
+                            this.viewerFileType = 'error';
+                        } else {
+                            this.viewerTextContent = await resp.text();
+                        }
+                    } catch (e) {
+                        this.viewerTextContent = `Error loading file: ${e.message}`;
+                        this.viewerFileType = 'error';
+                    }
+                }
+
+                this.viewerLoading = false;
+                this.$nextTick(() => { if (window.refreshIcons) window.refreshIcons(); });
+            },
+
+            /**
+             * Close the file viewer
+             */
+            closeFileViewer() {
+                this.showFileViewer = false;
+                this.viewerTextContent = '';
+                this.viewerContentUrl = '';
             }
         };
     }

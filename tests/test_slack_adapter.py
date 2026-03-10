@@ -61,6 +61,43 @@ sys.modules.setdefault("slack_bolt.adapter", mock_socket_module)
 sys.modules.setdefault("slack_bolt.adapter.socket_mode", mock_socket_mode)
 sys.modules.setdefault("slack_bolt.adapter.socket_mode.async_handler", mock_async_handler)
 
+# --- Mock slack_sdk modules for token validation ---
+
+mock_slack_sdk = types.ModuleType("slack_sdk")
+mock_slack_sdk_web = types.ModuleType("slack_sdk.web")
+mock_slack_sdk_web_async = types.ModuleType("slack_sdk.web.async_client")
+mock_slack_sdk_socket = types.ModuleType("slack_sdk.socket_mode")
+mock_slack_sdk_socket_aiohttp = types.ModuleType("slack_sdk.socket_mode.aiohttp")
+
+
+class MockAsyncWebClient:
+    def __init__(self, **kwargs):
+        self.token = kwargs.get("token")
+
+    async def auth_test(self):
+        return {"ok": True, "user_id": "U123", "team": "TestTeam"}
+
+
+class MockSocketModeClient:
+    def __init__(self, **kwargs):
+        pass
+
+    async def issue_new_wss_url(self):
+        return "wss://mock.slack.com/link"
+
+    async def close(self):
+        pass
+
+
+mock_slack_sdk_web_async.AsyncWebClient = MockAsyncWebClient
+mock_slack_sdk_socket_aiohttp.SocketModeClient = MockSocketModeClient
+
+sys.modules.setdefault("slack_sdk", mock_slack_sdk)
+sys.modules.setdefault("slack_sdk.web", mock_slack_sdk_web)
+sys.modules.setdefault("slack_sdk.web.async_client", mock_slack_sdk_web_async)
+sys.modules.setdefault("slack_sdk.socket_mode", mock_slack_sdk_socket)
+sys.modules.setdefault("slack_sdk.socket_mode.aiohttp", mock_slack_sdk_socket_aiohttp)
+
 from pocketpaw.bus.adapters.slack_adapter import SlackAdapter  # noqa: E402
 from pocketpaw.bus.events import Channel, OutboundMessage  # noqa: E402
 from pocketpaw.bus.queue import MessageBus  # noqa: E402
@@ -243,6 +280,33 @@ async def test_thread_ts_in_metadata(adapter, bus):
 
     msg = await bus.consume_inbound()
     assert msg.metadata["thread_ts"] == "123.000"
+
+
+async def test_invalid_bot_token_raises(bus, monkeypatch):
+    """Invalid bot token surfaces a clear RuntimeError."""
+    adapter = SlackAdapter(bot_token="xoxb-bad", app_token="xapp-test")
+
+    async def failing_auth_test(self):
+        return {"ok": False, "error": "invalid_auth"}
+
+    monkeypatch.setattr(MockAsyncWebClient, "auth_test", failing_auth_test)
+    with pytest.raises(RuntimeError, match="Slack bot token is invalid"):
+        await adapter.start(bus)
+    # Restore
+    monkeypatch.undo()
+
+
+async def test_invalid_app_token_raises(bus, monkeypatch):
+    """Invalid app token surfaces a clear RuntimeError."""
+    adapter = SlackAdapter(bot_token="xoxb-test", app_token="xapp-bad")
+
+    async def failing_wss(self):
+        raise Exception("invalid_auth")
+
+    monkeypatch.setattr(MockSocketModeClient, "issue_new_wss_url", failing_wss)
+    with pytest.raises(RuntimeError, match="Slack app token validation failed"):
+        await adapter.start(bus)
+    monkeypatch.undo()
 
 
 async def test_bus_integration(bus):

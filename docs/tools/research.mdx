@@ -1,5 +1,5 @@
 ---
-title: Research
+title: "Research Tool: Deep Web Research & Summarization"
 description: "PocketPaw's research tool performs multi-step web research by chaining search, URL extraction, content fetching, and LLM summarization for thorough answers backed by multiple sources."
 section: Tools
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["deep research", "web research", "multi-step", "summarization", "sour
 tags: ["tools", "search", "research"]
 ---
 
-# Research
+# Research Tool: Deep Web Research & Summarization
 
 The research tool performs multi-step web research by chaining web search, URL extraction, content fetching, and LLM summarization.
 
@@ -15,10 +15,10 @@ The research tool performs multi-step web research by chaining web search, URL e
 
 The research pipeline:
 
-1. **Web Search** — Searches for the query using the configured search provider
-2. **URL Extraction** — Extracts the most relevant URLs from search results
-3. **Content Fetching** — Downloads and parses the content from each URL
-4. **LLM Summarization** — Summarizes the gathered information into a coherent response
+1. **Web Search** - Searches for the query using the configured search provider
+2. **URL Extraction** - Extracts the most relevant URLs from search results
+3. **Content Fetching** - Downloads and parses the content from each URL
+4. **LLM Summarization** - Summarizes the gathered information into a coherent response
 
 This produces much more thorough results than a single web search, as it actually reads and synthesizes the content of multiple pages.
 
@@ -68,3 +68,17 @@ export POCKETPAW_TAVILY_API_KEY="tvly-..."
 ## Policy Group
 
 Belongs to `group:research`.
+
+## Related
+
+<CardGroup>
+  <Card title="Web Search" icon="lucide:search" href="/tools/web-search">
+    Search the web via Tavily or Brave Search APIs.
+  </Card>
+  <Card title="Browser Automation" icon="lucide:globe" href="/tools/browser">
+    Navigate and scrape web pages with Playwright.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

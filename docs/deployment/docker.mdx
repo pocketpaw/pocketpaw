@@ -1,15 +1,15 @@
 ---
-title: Docker
-description: "Run PocketPaw in Docker with the included Dockerfile and docker-compose.yml. Multi-stage build, non-root user, Playwright browser support, optional Ollama and Qdrant services via Compose profiles."
+title: "Docker Deployment: Run PocketPaw in Containers"
+description: "Run PocketPaw in Docker with the included Dockerfile and docker-compose.yml. Multi-stage build, non-root user, Playwright browser support, and optional Ollama and Qdrant via Compose profiles."
 section: Deployment
 ogType: article
 keywords: ["docker", "container", "docker-compose", "dockerfile", "containerized ai"]
 tags: ["deployment", "docker"]
 ---
 
-# Docker Deployment
+# Docker Deployment: Run PocketPaw in Containers
 
-PocketPaw ships with a production-ready `Dockerfile` and `docker-compose.yml` in the repository root. The Docker image includes all extras (`[all]`), Playwright Chromium, tesseract OCR, Node.js with the Claude Code CLI and Codex CLI — everything works out of the box.
+PocketPaw ships with a production-ready `Dockerfile` and `docker-compose.yml` in the repository root. The Docker image includes all extras (`[all]`), Playwright Chromium, tesseract OCR, Node.js with the Claude Code CLI and Codex CLI -- everything works out of the box.
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ The `Dockerfile` uses a multi-stage build for a lean runtime image:
 
 ## Docker Compose
 
-The `docker-compose.yml` defines three services. Only the main `pocketpaw` service starts by default — Ollama and Qdrant are behind [Compose profiles](https://docs.docker.com/compose/profiles/).
+The `docker-compose.yml` defines three services. Only the main `pocketpaw` service starts by default -- Ollama and Qdrant are behind [Compose profiles](https://docs.docker.com/compose/profiles/).
 
 ### Default (PocketPaw only)
 
@@ -102,14 +102,14 @@ docker compose exec ollama ollama pull nomic-embed-text
 
 **Option B: Ollama on the host**
 
-If Ollama is already running on your host machine (outside Docker), the container can reach it via `host.docker.internal` — this is configured automatically in `docker-compose.yml` via `extra_hosts`. Set in your `.env`:
+If Ollama is already running on your host machine (outside Docker), the container can reach it via `host.docker.internal` -- this is configured automatically in `docker-compose.yml` via `extra_hosts`. Set in your `.env`:
 
 ```bash
 POCKETPAW_OLLAMA_HOST=http://host.docker.internal:11434
 ```
 
 <Callout type="warning">
-  The default `http://localhost:11434` won't work from inside a container — `localhost` inside the container refers to the container itself, not your host machine.
+  The default `http://localhost:11434` won't work from inside a container -- `localhost` inside the container refers to the container itself, not your host machine.
 </Callout>
 
 ### With Qdrant (vector memory)
@@ -146,7 +146,7 @@ POCKETPAW_PORT=9000 docker compose up -d
 
 Two volumes are mounted:
 
-**Config & memory** — named volume `pocketpaw-data` at `/home/pocketpaw/.pocketpaw`:
+**Config & memory** -- named volume `pocketpaw-data` at `/home/pocketpaw/.pocketpaw`:
 - Configuration (`config.json`, `secrets.enc`)
 - Session history
 - Memory data (file-based and Mem0)
@@ -155,7 +155,7 @@ Two volumes are mounted:
 - MCP server configs
 - Skills
 
-**Workspace** — bind mount `./workspace` at `/home/pocketpaw/workspace`:
+**Workspace** -- bind mount `./workspace` at `/home/pocketpaw/workspace`:
 - Files created by the agent via Write, Bash, or other tools
 - Directly accessible on the host at `./workspace/` next to your `docker-compose.yml`
 - The `POCKETPAW_FILE_JAIL_PATH` env var is set automatically in the image
@@ -191,7 +191,7 @@ git pull && docker compose build && docker compose up -d
 
 ## Browser Automation
 
-Playwright Chromium is included in the Docker image along with all required shared libraries. Browser tools work out of the box inside the container — no additional setup needed.
+Playwright Chromium is included in the Docker image along with all required shared libraries. Browser tools work out of the box inside the container -- no additional setup needed.
 
 ## Limitations
 
@@ -199,13 +199,16 @@ Playwright Chromium is included in the Docker image along with all required shar
 - **WhatsApp Personal mode** (neonize QR pairing) requires a persistent session. The named volume handles this, but the QR code must be scanned via the web dashboard on first setup.
 - **Copilot SDK backend** requires the `copilot` Go binary which is not bundled in the image. Install it manually if needed.
 
-## Next Steps
+## Related
 
 <CardGroup>
   <Card title="Self-Hosting" icon="lucide:server" href="/deployment/self-hosting">
-    Reverse proxy, SSL, and production hardening.
+    Reverse proxy, SSL, and production hardening for your PocketPaw server.
   </Card>
   <Card title="Systemd Service" icon="lucide:terminal" href="/deployment/systemd">
-    Run PocketPaw as a background service without Docker.
+    Run PocketPaw as a background daemon without Docker on Linux.
+  </Card>
+  <Card title="Configuration" icon="lucide:settings" href="/getting-started/configuration">
+    Full reference for all PocketPaw environment variables and config options.
   </Card>
 </CardGroup>

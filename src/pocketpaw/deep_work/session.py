@@ -1,13 +1,11 @@
 # Deep Work Session — project lifecycle orchestrator.
 # Created: 2026-02-12
+# Updated: 2026-02-26 — Deep Work v2: Added cancel() method for project cancellation.
+#   _materialize_tasks now copies max_retries and timeout_minutes from TaskSpec to Task.
+#   New broadcast: dw_project_cancelled. Cancel stops all running tasks and skips pending.
 # Updated: 2026-02-18 — Integrated GoalParser as first step in planning pipeline.
-#   Goal analysis stored in project.metadata["goal_analysis"]. Suggested research
-#   depth from GoalParser used when research_depth="auto".
 # Updated: 2026-02-17 — Record planning errors to health engine ErrorStore.
-# Updated: 2026-02-12 — Added executor integration for pause/stop, made
-#   planner/scheduler/human_router optional with sensible defaults,
-#   improved _assign_tasks_to_agents to use key_to_id mapping.
-#   Added research_depth parameter to start() for controlling planner depth.
+# Updated: 2026-02-12 — Added executor integration for pause/stop.
 #
 # Ties together GoalParser, Planner, DependencyScheduler, MCTaskExecutor,
 # and HumanTaskRouter into a single class that manages a Deep Work project
@@ -19,6 +17,7 @@
 #   session.approve(project_id) -> Project (kick off ready tasks)
 #   session.pause(project_id) -> Project   (stop running tasks)
 #   session.resume(project_id) -> Project  (resume dispatching)
+#   session.cancel(project_id) -> Project  (stop everything, mark cancelled)
 
 import asyncio
 import logging
@@ -307,12 +306,14 @@ class DeepWorkSession:
                 if existing:
                     project.team_agent_ids.append(existing.id)
                 else:
+                    from pocketpaw.config import get_settings
+
                     agent = await self.manager.create_agent(
                         name=agent_spec.name,
                         role=agent_spec.role,
                         description=agent_spec.description,
                         specialties=agent_spec.specialties,
-                        backend=agent_spec.backend,
+                        backend=agent_spec.backend or get_settings().agent_backend,
                     )
                     project.team_agent_ids.append(agent.id)
 
@@ -445,6 +446,50 @@ class DeepWorkSession:
         logger.info(f"Project resumed: {project.title}")
         return project
 
+    async def cancel(self, project_id: str) -> Project:
+        """Cancel a project — stop all tasks and mark as cancelled.
+
+        Stops all running tasks, marks non-completed tasks as SKIPPED,
+        and sets project status to CANCELLED. This is a terminal state.
+
+        Args:
+            project_id: ID of the project to cancel.
+
+        Returns:
+            The updated Project (status=CANCELLED).
+
+        Raises:
+            ValueError: If project not found or already completed/cancelled.
+        """
+        project = await self.manager.get_project(project_id)
+        if not project:
+            raise ValueError(f"Project not found: {project_id}")
+        if project.status in (ProjectStatus.COMPLETED, ProjectStatus.CANCELLED):
+            raise ValueError(f"Cannot cancel project with status '{project.status.value}'")
+
+        # Stop all running tasks
+        await self.executor.stop_all_project_tasks(project_id)
+
+        # Mark all non-completed tasks as SKIPPED
+        tasks = await self.manager.get_project_tasks(project_id)
+        for task in tasks:
+            if task.status not in (TaskStatus.DONE, TaskStatus.SKIPPED):
+                task.status = TaskStatus.SKIPPED
+                task.updated_at = now_iso()
+                task.error_message = "Project cancelled"
+                await self.manager.save_task(task)
+
+        # Set project status
+        project.status = ProjectStatus.CANCELLED
+        project.completed_at = now_iso()
+        await self.manager.update_project(project)
+
+        # Broadcast cancellation
+        self._broadcast_cancel(project)
+
+        logger.info(f"Project cancelled: {project.title}")
+        return project
+
     # =========================================================================
     # MessageBus event handler
     # =========================================================================
@@ -531,6 +576,30 @@ class DeepWorkSession:
         except Exception:
             pass  # Best effort
 
+    def _broadcast_cancel(self, project: Project) -> None:
+        """Broadcast a project cancellation event for the frontend."""
+        try:
+            import asyncio
+
+            from pocketpaw.bus import get_message_bus
+            from pocketpaw.bus.events import SystemEvent
+
+            bus = get_message_bus()
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                bus.publish_system(
+                    SystemEvent(
+                        event_type="dw_project_cancelled",
+                        data={
+                            "project_id": project.id,
+                            "title": project.title,
+                        },
+                    )
+                )
+            )
+        except Exception:
+            pass  # Best effort
+
     # =========================================================================
     # Internal helpers
     # =========================================================================
@@ -567,6 +636,8 @@ class DeepWorkSession:
             task.project_id = project.id
             task.task_type = spec.task_type
             task.estimated_minutes = spec.estimated_minutes
+            task.max_retries = spec.max_retries
+            task.timeout_minutes = spec.timeout_minutes
             task.blocked_by = [key_to_id[k] for k in spec.blocked_by_keys if k in key_to_id]
 
             # Set inverse blocks on upstream tasks

@@ -1,15 +1,15 @@
 ---
-title: MCP Servers
-description: "Extend PocketPaw with Model Context Protocol (MCP) servers for unlimited tool expansion. Add servers via stdio, HTTP, or SSE transport with optional OAuth authentication. Install from 55+ presets or configure custom servers."
+title: "MCP Servers: Model Context Protocol Setup"
+description: "Extend PocketPaw with Model Context Protocol (MCP) servers for unlimited tool expansion. Add servers via stdio, HTTP, or SSE transport with optional OAuth. Install from 55+ presets or add custom ones."
 section: Integrations
 ogType: article
 keywords: ["mcp servers", "model context protocol", "tool extension", "stdio transport", "mcp presets", "mcp oauth"]
 tags: ["integrations", "mcp"]
 ---
 
-# MCP Servers
+# MCP Servers: Model Context Protocol Setup
 
-PocketPaw has first-class support for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Connect any MCP server to extend your agent's capabilities — including remote servers that use OAuth authentication.
+PocketPaw has first-class support for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Connect any MCP server to extend your agent's capabilities -- including remote servers that use OAuth authentication.
 
 ## What is MCP?
 
@@ -102,18 +102,18 @@ Remote MCP servers (like GitHub, Notion, Linear) can use OAuth 2.1 for authentic
 
 PocketPaw implements the full OAuth 2.1 flow:
 
-- **Metadata discovery** — automatically finds the server's OAuth endpoints
-- **PKCE** — uses Proof Key for Code Exchange for security
-- **Dynamic client registration** — registers as an OAuth client automatically
-- **CIMD fallback** — if a server supports Client ID Metadata Documents, PocketPaw can use a pre-configured client URL instead of dynamic registration
-- **Token persistence** — tokens are saved to disk (chmod 0600) and reused across restarts
+- **Metadata discovery** -- automatically finds the server's OAuth endpoints
+- **PKCE** -- uses Proof Key for Code Exchange for security
+- **Dynamic client registration** -- registers as an OAuth client automatically
+- **CIMD fallback** -- if a server supports Client ID Metadata Documents, PocketPaw can use a pre-configured client URL instead of dynamic registration
+- **Token persistence** -- tokens are saved to disk (chmod 0600) and reused across restarts
 
 ### CIMD (Client ID Metadata Document)
 
 The OAuth 2.1 specification for MCP supports two ways for a client to identify itself:
 
-1. **Dynamic client registration** — the client registers itself automatically with the OAuth server on first use. This is the simplest approach but not all servers support it.
-2. **CIMD** — the client publishes a JSON metadata document at a public URL, and uses that URL as its `client_id`. The OAuth server fetches the CIMD to verify the client's identity and redirect URIs.
+1. **Dynamic client registration** -- the client registers itself automatically with the OAuth server on first use. This is the simplest approach but not all servers support it.
+2. **CIMD** -- the client publishes a JSON metadata document at a public URL, and uses that URL as its `client_id`. The OAuth server fetches the CIMD to verify the client's identity and redirect URIs.
 
 #### Why GitHub MCP Needs CIMD
 
@@ -169,11 +169,11 @@ Or set it in `~/.pocketpaw/config.json`:
 
 PocketPaw includes 55+ pre-configured server templates that can be installed from the dashboard with a single click. Presets cover:
 
-- **Developer tools** — GitHub, GitLab, Linear, Sentry
-- **Productivity** — Notion, Slack, Google Drive, Obsidian
-- **Data & Search** — PostgreSQL, Brave Search, Exa
-- **DevOps** — Kubernetes, Docker, Cloudflare
-- **And more** — Figma, Stripe, Spotify, Todoist
+- **Developer tools** -- GitHub, GitLab, Linear, Sentry
+- **Productivity** -- Notion, Slack, Google Drive, Obsidian
+- **Data & Search** -- PostgreSQL, Brave Search, Exa
+- **DevOps** -- Kubernetes, Docker, Cloudflare
+- **And more** -- Figma, Stripe, Spotify, Todoist
 
 Presets that use OAuth are marked with an `oauth` flag and handle authentication automatically.
 
@@ -233,10 +233,24 @@ export POCKETPAW_TOOLS_DENY="mcp:github:delete_repo"
 
 PocketPaw provides actionable error messages for MCP server failures:
 
-- **ExceptionGroup unwrapping** — the MCP library wraps errors in anyio cancel-scope exceptions; PocketPaw walks the exception tree to surface the root cause
-- **OAuth registration failures** — if dynamic client registration fails, the error message suggests configuring `mcp_client_metadata_url` or using an API token instead
-- **Timeout handling** — clear messages distinguish connection timeouts from OAuth flow timeouts
+- **ExceptionGroup unwrapping** -- the MCP library wraps errors in anyio cancel-scope exceptions; PocketPaw walks the exception tree to surface the root cause
+- **OAuth registration failures** -- if dynamic client registration fails, the error message suggests configuring `mcp_client_metadata_url` or using an API token instead
+- **Timeout handling** -- clear messages distinguish connection timeouts from OAuth flow timeouts
 
 <Callout type="info">
   MCP is an open ecosystem. Browse available servers at [modelcontextprotocol.io/servers](https://modelcontextprotocol.io).
 </Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Google Workspace MCP" icon="lucide:building" href="/integrations/google-workspace-mcp">
+    Connect to the full Google Workspace suite via the gws CLI MCP preset.
+  </Card>
+  <Card title="OAuth Framework" icon="lucide:key" href="/integrations/oauth">
+    How PocketPaw handles OAuth tokens for Google and Spotify integrations.
+  </Card>
+  <Card title="Integrations Overview" icon="lucide:plug" href="/integrations">
+    Browse all available integrations and learn how they connect.
+  </Card>
+</CardGroup>

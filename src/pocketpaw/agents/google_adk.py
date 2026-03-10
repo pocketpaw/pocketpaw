@@ -89,7 +89,8 @@ class GoogleADKBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_adk_function_tools
 
-            self._custom_tools = build_adk_function_tools(self.settings)
+            # Cache tools at init; the tool set doesn't change at runtime.
+            self._custom_tools = build_adk_function_tools(self.settings, backend="google_adk")
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -265,9 +266,18 @@ class GoogleADKBackend:
             if run_config is not None:
                 run_kwargs["run_config"] = run_config
 
+            _total_input = 0
+            _total_output = 0
+
             async for event in runner.run_async(**run_kwargs):
                 if self._stop_flag:
                     break
+
+                # Extract usage metadata if available
+                if hasattr(event, "usage_metadata") and event.usage_metadata:
+                    um = event.usage_metadata
+                    _total_input += getattr(um, "prompt_token_count", 0) or 0
+                    _total_output += getattr(um, "candidates_token_count", 0) or 0
 
                 if max_turns and turn_count >= max_turns:
                     yield AgentEvent(
@@ -322,6 +332,20 @@ class GoogleADKBackend:
                             content=output[:200],
                             metadata={"name": fr.name or "tool"},
                         )
+
+            # Emit token usage
+            if _total_input or _total_output:
+                _model = self.settings.google_adk_model or "gemini-2.5-flash"
+                yield AgentEvent(
+                    type="token_usage",
+                    content="",
+                    metadata={
+                        "input_tokens": _total_input,
+                        "output_tokens": _total_output,
+                        "model": _model,
+                        "backend": "google_adk",
+                    },
+                )
 
             yield AgentEvent(type="done", content="")
 

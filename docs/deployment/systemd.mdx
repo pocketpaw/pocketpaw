@@ -1,13 +1,13 @@
 ---
-title: Systemd Service
-description: "Run PocketPaw as a systemd service on Linux for automatic startup, restart on failure, and clean shutdown. Includes a complete unit file with security hardening and journal logging configuration."
+title: "Systemd Service: Run PocketPaw as a Daemon"
+description: "Run PocketPaw as a systemd service on Linux for automatic startup, restart on failure, and clean shutdown. Includes a complete unit file with security hardening and journal logging setup."
 section: Deployment
 ogType: article
 keywords: ["systemd", "linux service", "auto-start", "daemon", "unit file"]
 tags: ["deployment", "systemd", "linux"]
 ---
 
-# Systemd Service
+# Systemd Service: Run PocketPaw as a Daemon
 
 Run PocketPaw as a background service on Linux with systemd for automatic startup and restart.
 
@@ -146,3 +146,14 @@ User=pocketpaw
 ExecStart=/usr/local/bin/pip install --upgrade pocketpaw[recommended]
 ExecStartPost=/bin/systemctl restart pocketpaw
 ```
+
+## Related
+
+<CardGroup>
+  <Card title="Self-Hosting" icon="lucide:server" href="/deployment/self-hosting">
+    Reverse proxy, SSL, and production hardening for your PocketPaw server.
+  </Card>
+  <Card title="Docker Deployment" icon="lucide:container" href="/deployment/docker">
+    Run PocketPaw in containers with Docker Compose for easier isolation.
+  </Card>
+</CardGroup>

@@ -105,15 +105,50 @@ class LLMClient:
             max_retries=max_retries if max_retries is not None else 2,
         )
 
+    @property
+    def is_openrouter(self) -> bool:
+        """True when the endpoint is OpenRouter's Anthropic-compatible skin."""
+        from urllib.parse import urlparse
+
+        try:
+            host = urlparse(self.openai_compatible_base_url).hostname or ""
+            return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+        except Exception:
+            return False
+
     def to_sdk_env(self) -> dict[str, str]:
-        """Build env-var dict for the Claude Agent SDK subprocess."""
+        """Build env-var dict for the Claude Agent SDK subprocess.
+
+        OpenRouter requires special handling: its Anthropic-compatible skin
+        expects ANTHROPIC_AUTH_TOKEN (the OpenRouter key) and ANTHROPIC_API_KEY
+        set to empty string to avoid conflicts.
+        """
         if self.is_ollama:
             return {
                 "ANTHROPIC_BASE_URL": self.ollama_host,
                 "ANTHROPIC_API_KEY": "ollama",
             }
         if self.is_openai_compatible or self.is_gemini:
-            env: dict[str, str] = {
+            # OpenRouter's Anthropic skin uses /api (not /api/v1) and
+            # authenticates via ANTHROPIC_AUTH_TOKEN, not ANTHROPIC_API_KEY.
+            if self.is_openrouter:
+                base_url = self.openai_compatible_base_url.rstrip("/")
+                # Normalize: strip trailing /v1 if present so the SDK
+                # hits openrouter.ai/api (the Anthropic-compat endpoint).
+                if base_url.endswith("/v1"):
+                    base_url = base_url[:-3].rstrip("/")
+                env: dict[str, str] = {
+                    "ANTHROPIC_BASE_URL": base_url,
+                    # Must be empty string, not omitted. OpenRouter authenticates
+                    # via ANTHROPIC_AUTH_TOKEN; if ANTHROPIC_API_KEY is set to a
+                    # real value, the SDK sends it as Bearer and OpenRouter rejects it.
+                    "ANTHROPIC_API_KEY": "",
+                }
+                if self.api_key:
+                    env["ANTHROPIC_AUTH_TOKEN"] = self.api_key
+                return env
+
+            env = {
                 "ANTHROPIC_BASE_URL": self.openai_compatible_base_url,
             }
             if self.api_key:
@@ -263,6 +298,18 @@ def resolve_llm_client(
             model=settings.openai_model,
             api_key=settings.openai_api_key,
             ollama_host=settings.ollama_host,
+        )
+
+    if provider == "openrouter":
+        # OpenRouter has an Anthropic-compatible skin at /api.
+        # Resolve as openai_compatible so to_sdk_env() can detect
+        # the openrouter.ai URL and set the correct env vars.
+        return LLMClient(
+            provider="openai_compatible",
+            model=settings.openrouter_model or settings.openai_compatible_model,
+            api_key=settings.openrouter_api_key or settings.openai_compatible_api_key,
+            ollama_host=settings.ollama_host,
+            openai_compatible_base_url="https://openrouter.ai/api/v1",
         )
 
     if provider == "openai_compatible":

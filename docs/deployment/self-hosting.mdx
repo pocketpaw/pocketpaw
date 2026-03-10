@@ -1,13 +1,13 @@
 ---
-title: Self-Hosting
-description: "Deploy PocketPaw on your own server: system requirements, Python 3.11+ setup, reverse proxy configuration with Nginx, SSL certificates, and production hardening recommendations for self-hosted AI."
+title: "Self-Hosting PocketPaw: Server Setup Guide"
+description: "Deploy PocketPaw on your own server with Python 3.11+ setup, Nginx or Caddy reverse proxy, SSL certificates, and production security hardening tips."
 section: Deployment
 ogType: article
 keywords: ["self-hosting", "server deployment", "nginx", "ssl", "production", "ubuntu"]
 tags: ["deployment", "self-hosting"]
 ---
 
-# Self-Hosting
+# Self-Hosting PocketPaw: Server Setup Guide
 
 PocketPaw is designed to be self-hosted. Here's how to deploy it on your own server.
 
@@ -107,12 +107,12 @@ POCKETPAW_TOOL_PROFILE=coding
 
 ### Security Hardening
 
-1. **Run as a dedicated user** — Don't run as root
-2. **Restrict file permissions** — Config files should be 600
-3. **Use a firewall** — Only expose the reverse proxy port
-4. **Enable Guardian AI** — Active by default with Anthropic key
-5. **Set allowed IDs** — Restrict channel access to specific users
-6. **Run security audit** — `pocketpaw --security-audit`
+1. **Run as a dedicated user** -- Don't run as root
+2. **Restrict file permissions** -- Config files should be 600
+3. **Use a firewall** -- Only expose the reverse proxy port
+4. **Enable Guardian AI** -- Active by default with Anthropic key
+5. **Set allowed IDs** -- Restrict channel access to specific users
+6. **Run security audit** -- `pocketpaw --security-audit`
 
 ## Resource Planning
 
@@ -126,3 +126,17 @@ POCKETPAW_TOOL_PROFILE=coding
 For a typical deployment with Claude Agent SDK (cloud) and Mem0 with Ollama:
 - **Minimum**: 4GB RAM, 2 CPU cores
 - **Recommended**: 8GB RAM, 4 CPU cores
+
+## Related
+
+<CardGroup>
+  <Card title="Docker Deployment" icon="lucide:container" href="/deployment/docker">
+    Run PocketPaw in containers with Docker Compose for easier management and isolation.
+  </Card>
+  <Card title="Systemd Service" icon="lucide:terminal" href="/deployment/systemd">
+    Set up PocketPaw as a background daemon with automatic restarts on Linux.
+  </Card>
+  <Card title="Configuration" icon="lucide:settings" href="/getting-started/configuration">
+    Full reference for all PocketPaw environment variables and config options.
+  </Card>
+</CardGroup>

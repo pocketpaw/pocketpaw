@@ -1,5 +1,5 @@
 ---
-title: Session Tools
+title: "Session Tools: Conversation Management"
 description: "Manage conversation sessions through natural language with PocketPaw's 6 session tools: create new sessions, list and switch between them, rename, clear history, or delete conversations entirely."
 section: Tools
 ogType: article
@@ -7,9 +7,9 @@ keywords: ["session management", "conversation history", "multi-session", "chat 
 tags: ["tools", "memory", "sessions"]
 ---
 
-# Session Tools
+# Session Tools: Conversation Management
 
-PocketPaw provides six tools for managing conversation sessions. The agent invokes these automatically based on natural language — no special commands needed.
+PocketPaw provides six tools for managing conversation sessions. The agent invokes these automatically based on natural language - no special commands needed.
 
 ## Tools
 
@@ -72,8 +72,22 @@ Agent: [uses delete_session] → Session deleted. Next message will start a fres
 
 ## Parameters
 
-All session tools require a `session_key` parameter (automatically provided by the system prompt). The `switch_session` tool additionally takes a `target` — either a session number from `list_sessions` or text to search in titles.
+All session tools require a `session_key` parameter (automatically provided by the system prompt). The `switch_session` tool additionally takes a `target` - either a session number from `list_sessions` or text to search in titles.
 
 ## Policy Group
 
 Session tools belong to `group:memory` and are available in all tool profiles.
+
+## Related
+
+<CardGroup>
+  <Card title="Desktop Automation" icon="lucide:monitor" href="/tools/desktop">
+    Capture screenshots and monitor system resources.
+  </Card>
+  <Card title="Tool Policy" icon="lucide:shield-check" href="/tools/tool-policy">
+    Control which tools are available with profiles and allow/deny lists.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

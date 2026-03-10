@@ -3,6 +3,8 @@
 Core event loop that consumes from the message bus, feeds messages
 through AgentRouter (which delegates to the configured backend),
 and streams AgentEvent responses back to channels.
+
+PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
 """
 
 import asyncio
@@ -16,6 +18,7 @@ from pocketpaw.bus.commands import get_command_handler
 from pocketpaw.bus.events import Channel
 from pocketpaw.config import Settings, get_settings
 from pocketpaw.memory import get_memory_manager
+from pocketpaw.recent_files import get_recent_files_tracker
 from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
 from pocketpaw.security.redact import redact_output
 
@@ -90,14 +93,24 @@ class AgentLoop:
 
     async def cancel_session(self, session_key: str) -> bool:
         """Cancel in-flight processing for a session. Returns True if cancelled."""
-        router = self._router
-        if router is not None:
-            await router.stop()
-
         task = self._active_tasks.get(session_key)
         if task is not None and not task.done():
             task.cancel()
             logger.info("Cancelled processing task for session %s", session_key)
+            return True
+        return False
+
+    def cancel_task(self, session_key: str) -> bool:
+        """Cancel just the processing task without stopping the router.
+
+        Lighter-weight than cancel_session() — used by the SSE bridge when
+        a new stream starts for the same session so the stale task stops
+        publishing events, but the persistent client subprocess stays alive.
+        """
+        task = self._active_tasks.get(session_key)
+        if task is not None and not task.done():
+            task.cancel()
+            logger.info("Cancelled stale task for session %s", session_key)
             return True
         return False
 
@@ -109,6 +122,54 @@ class AgentLoop:
             if not message:
                 continue
 
+            # Intercept /kill before entering session-locked pipeline so it
+            # can cancel an in-flight task without being blocked by the lock.
+            # Uses the same regex as CommandHandler to avoid false positives
+            # on normal sentences containing "kill".
+            content = message.content.strip()
+            _kill_match = re.match(r"^[/!]kill(?:@\S+)?(?:\s.*)?$", content, re.IGNORECASE)
+            if _kill_match:
+                cancelled = await self.cancel_session(message.session_key)
+                reply = (
+                    "Agent run cancelled for this session."
+                    if cancelled
+                    else "No active agent run for this session."
+                )
+
+                # Audit log: /kill is security-relevant
+                try:
+                    from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+                    get_audit_logger().log(
+                        AuditEvent.create(
+                            severity=AuditSeverity.WARNING,
+                            actor=message.sender_id or message.channel.value,
+                            action="kill_session",
+                            target=message.session_key,
+                            status="cancelled" if cancelled else "no_active_run",
+                            channel=message.channel.value,
+                        )
+                    )
+                except Exception:
+                    pass
+
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content=reply,
+                    )
+                )
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content="",
+                        is_stream_end=True,
+                    )
+                )
+                continue
+
             # 2. Process message in background task (to not block loop)
             session_key = message.session_key
             task = asyncio.create_task(self._process_message(message))
@@ -117,7 +178,11 @@ class AgentLoop:
 
             def _on_done(t: asyncio.Task, key: str = session_key) -> None:
                 self._background_tasks.discard(t)
-                self._active_tasks.pop(key, None)
+                # Only remove from _active_tasks if this task is still the
+                # registered one — a newer task for the same session may have
+                # overwritten the entry already.
+                if self._active_tasks.get(key) is t:
+                    self._active_tasks.pop(key, None)
 
             task.add_done_callback(_on_done)
 
@@ -136,12 +201,18 @@ class AgentLoop:
                 if resolved_key not in self._session_locks:
                     self._session_locks[resolved_key] = asyncio.Lock()
                 lock = self._session_locks[resolved_key]
+                lock_contended = lock.locked()
+                if lock_contended:
+                    logger.info("Session lock contended for %s — waiting", resolved_key)
                 async with lock:
+                    if lock_contended:
+                        logger.info("Session lock acquired for %s", resolved_key)
                     await self._process_message_inner(message, resolved_key)
 
                 # Clean up lock if no one else is waiting on it
                 if not lock.locked():
                     self._session_locks.pop(resolved_key, None)
+                logger.info("Message processing complete for %s", session_key)
         except asyncio.CancelledError:
             logger.info("Processing cancelled for session %s", session_key)
             raise
@@ -212,6 +283,7 @@ class AgentLoop:
                                 data={
                                     "message": "Message blocked by injection scanner",
                                     "patterns": scan_result.matched_patterns,
+                                    "session_key": session_key,
                                 },
                             )
                         )
@@ -230,6 +302,19 @@ class AgentLoop:
                 if scan_result.threat_level != ThreatLevel.NONE:
                     content = scan_result.sanitized_content
 
+            # PII scan before memory storage (opt-in)
+            if self.settings.pii_scan_enabled and self.settings.pii_scan_memory:
+                from pocketpaw.security.pii import get_pii_scanner
+
+                pii_result = get_pii_scanner().scan(content, source=session_key)
+                if pii_result.has_pii:
+                    logger.info(
+                        "PII detected in %s: %s",
+                        session_key,
+                        [t.value for t in pii_result.pii_types_found],
+                    )
+                    content = pii_result.sanitized_text
+
             # 1. Store User Message
             await self.memory.add_to_session(
                 session_key=session_key,
@@ -245,12 +330,14 @@ class AgentLoop:
 
             # 2. Build system prompt + session history concurrently (independent I/O)
             sender_id = message.sender_id
+            file_context = (message.metadata or {}).get("file_context")
             system_prompt, history = await asyncio.gather(
                 self.context_builder.build_system_prompt(
                     user_query=content,
                     channel=message.channel,
                     sender_id=sender_id,
                     session_key=message.session_key,
+                    file_context=file_context,
                 ),
                 self.memory.get_compacted_history(
                     session_key,
@@ -312,8 +399,26 @@ class AgentLoop:
 
                     elif etype == "token_usage":
                         await self.bus.publish_system(
-                            SystemEvent(event_type="token_usage", data=meta)
+                            SystemEvent(
+                                event_type="token_usage",
+                                data={**meta, "session_key": session_key},
+                            )
                         )
+                        # Persist to usage tracker
+                        try:
+                            from pocketpaw.usage_tracker import get_usage_tracker
+
+                            get_usage_tracker().record(
+                                backend=meta.get("backend", "unknown"),
+                                model=meta.get("model", ""),
+                                input_tokens=meta.get("input_tokens", 0),
+                                output_tokens=meta.get("output_tokens", 0),
+                                cached_input_tokens=meta.get("cached_input_tokens", 0),
+                                session_id=session_key or "",
+                                total_cost_usd=meta.get("total_cost_usd"),
+                            )
+                        except Exception:
+                            pass
 
                     elif etype == "tool_use":
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
@@ -321,9 +426,37 @@ class AgentLoop:
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_start",
-                                data={"name": tool_name, "params": tool_input},
+                                data={
+                                    "name": tool_name,
+                                    "params": tool_input,
+                                    "session_key": session_key,
+                                },
                             )
                         )
+
+                        # Track file paths for recent files
+                        try:
+                            get_recent_files_tracker().record_tool_use(
+                                tool_name, tool_input if isinstance(tool_input, dict) else {}
+                            )
+                        except Exception:
+                            pass
+
+                        # AskUserQuestion — forward the question to the
+                        # client so the user can see and answer it.
+                        if tool_name == "AskUserQuestion":
+                            question = tool_input.get("question", "")
+                            options = tool_input.get("options", [])
+                            await self.bus.publish_system(
+                                SystemEvent(
+                                    event_type="ask_user_question",
+                                    data={
+                                        "question": question,
+                                        "options": options,
+                                        "session_key": session_key,
+                                    },
+                                )
+                            )
 
                     elif etype == "tool_result":
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
@@ -334,6 +467,7 @@ class AgentLoop:
                                     "name": tool_name,
                                     "result": econtent[:200],
                                     "status": "success",
+                                    "session_key": session_key,
                                 },
                             )
                         )
@@ -347,6 +481,7 @@ class AgentLoop:
                                     "name": "agent",
                                     "result": econtent,
                                     "status": "error",
+                                    "session_key": session_key,
                                 },
                             )
                         )
@@ -394,8 +529,15 @@ class AgentLoop:
             if cancelled and full_response:
                 full_response += "\n\n[Response interrupted]"
             if full_response:
+                stored_response = full_response
+                if self.settings.pii_scan_enabled and self.settings.pii_scan_memory:
+                    from pocketpaw.security.pii import get_pii_scanner
+
+                    pii_result = get_pii_scanner().scan(full_response, source="assistant_response")
+                    if pii_result.has_pii:
+                        stored_response = pii_result.sanitized_text
                 await self.memory.add_to_session(
-                    session_key=session_key, role="assistant", content=full_response
+                    session_key=session_key, role="assistant", content=stored_response
                 )
 
                 # 6. Auto-learn: extract facts from conversation (non-blocking)

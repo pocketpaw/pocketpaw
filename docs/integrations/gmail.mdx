@@ -1,5 +1,5 @@
 ---
-title: Gmail
+title: "Gmail Integration: Read & Send Email via AI"
 description: "Full Gmail management with PocketPaw: 9 tools for searching, reading, sending emails, managing labels, trashing messages, and bulk operations. Requires Google OAuth with gmail.modify scope."
 section: Integrations
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["gmail integration", "email management", "gmail api", "send email", "
 tags: ["integrations", "gmail", "google"]
 ---
 
-# Gmail
+# Gmail Integration: Read & Send Email via AI
 
 PocketPaw provides 9 tools for comprehensive Gmail management: search, read, send, label management, trash, and bulk operations.
 
@@ -63,8 +63,8 @@ User: Show me my Gmail labels
 Agent: [uses gmail_list_labels] →
   - INBOX (system)
   - SENT (system)
-  - Work/Projects (user) — Label_42
-  - Newsletters (user) — Label_15
+  - Work/Projects (user) -- Label_42
+  - Newsletters (user) -- Label_15
 ```
 
 ### gmail_create_label
@@ -125,6 +125,20 @@ export POCKETPAW_TOOLS_DENY="group:gmail"
 ## Required Scopes
 
 PocketPaw requests these Gmail scopes:
-- `gmail.readonly` — For search, read, and label listing
-- `gmail.send` — For sending emails
-- `gmail.modify` — For label management, trash, and bulk operations
+- `gmail.readonly` -- For search, read, and label listing
+- `gmail.send` -- For sending emails
+- `gmail.modify` -- For label management, trash, and bulk operations
+
+## Related
+
+<CardGroup>
+  <Card title="Google Calendar" icon="lucide:calendar" href="/integrations/calendar">
+    List, create, and search calendar events with natural language.
+  </Card>
+  <Card title="Google Drive" icon="lucide:hard-drive" href="/integrations/google-drive">
+    List, download, upload, and share files in Google Drive.
+  </Card>
+  <Card title="OAuth Framework" icon="lucide:key" href="/integrations/oauth">
+    How PocketPaw handles Google OAuth tokens and refresh flows.
+  </Card>
+</CardGroup>

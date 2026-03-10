@@ -1,10 +1,11 @@
 """Mission Control Task Executor.
 
 Created: 2026-02-05
-Updated: 2026-02-12 - Fixed execute_task_background self-defeating bug: removed
-  stale _running_tasks check from execute_task, added guard + cleanup wrapper
-  to execute_task_background to prevent zombie entries and 409 Conflicts.
-  Previous: 2026-02-05 - Added task output persistence (auto-save deliverables on completion)
+Updated: 2026-02-26 — Deep Work v2: Added task retry, timeout, output storage,
+  and project-wide stop. Tasks now store output on task.output field. Failed tasks
+  auto-retry up to max_retries. Tasks with timeout_minutes get asyncio.wait_for.
+  New: stop_all_project_tasks() for cancel/pause.
+Updated: 2026-02-12 - Fixed execute_task_background self-defeating bug.
 
 Enables execution of AI agents on tasks with real-time streaming via WebSocket.
 
@@ -15,6 +16,9 @@ Key features:
 - Updates task/agent status automatically
 - Broadcasts events via MessageBus → WebSocket
 - Auto-saves task output as deliverable document on completion
+- Auto-retry failed tasks (configurable max_retries per task)
+- Per-task timeout via asyncio.wait_for
+- Stores output directly on Task.output for cross-task chaining
 
 Security features:
 - Max concurrent task limit (default: 5)
@@ -25,7 +29,8 @@ Security features:
 WebSocket Events:
 - mc_task_started: Task execution begins
 - mc_task_output: Agent produces output
-- mc_task_completed: Execution ends (done/error)
+- mc_task_completed: Execution ends (done/error/stopped/timeout)
+- mc_task_retry: Task being retried after failure
 - mc_activity_created: Activity logged
 """
 
@@ -48,7 +53,7 @@ MAX_ERROR_MESSAGE_LENGTH = 200  # Truncate error messages
 from pocketpaw.agents.router import AgentRouter  # noqa: E402
 from pocketpaw.bus.events import SystemEvent  # noqa: E402
 from pocketpaw.bus.queue import get_message_bus  # noqa: E402
-from pocketpaw.config import Settings, get_settings  # noqa: E402
+from pocketpaw.config import get_settings  # noqa: E402
 from pocketpaw.mission_control.manager import get_mission_control_manager  # noqa: E402
 from pocketpaw.mission_control.models import (  # noqa: E402
     Activity,
@@ -77,6 +82,7 @@ class MCTaskExecutor:
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._agent_routers: dict[str, AgentRouter] = {}
         self._stop_flags: dict[str, bool] = {}
+        self._stream_errors: dict[str, str] = {}
         self._background_launched: set[str] = set()
         # Callback for direct scheduler integration (avoids MessageBus dependency
         # on the critical task-completion → cascade-dispatch path).
@@ -163,16 +169,8 @@ class MCTaskExecutor:
         # tasks run headlessly (no terminal for interactive prompts).
         # The PreToolUse hook still blocks dangerous commands.
         base_settings = get_settings()
-        agent_settings = Settings(
-            agent_backend=agent.backend,
-            anthropic_api_key=base_settings.anthropic_api_key,
-            anthropic_model=base_settings.anthropic_model,
-            openai_api_key=base_settings.openai_api_key,
-            openai_model=base_settings.openai_model,
-            ollama_host=base_settings.ollama_host,
-            ollama_model=base_settings.ollama_model,
-            llm_provider=base_settings.llm_provider,
-            bypass_permissions=True,
+        agent_settings = base_settings.model_copy(
+            update={"agent_backend": agent.backend, "bypass_permissions": True}
         )
 
         # Create dedicated router for this task
@@ -212,59 +210,30 @@ class MCTaskExecutor:
         error_message = None
 
         try:
-            async for chunk in router.run(prompt):
-                # Check stop flag
-                if self._stop_flags.get(task_id):
-                    final_status = "stopped"
-                    break
-
-                chunk_type = chunk.get("type", "")
-                content = chunk.get("content", "")
-
-                if chunk_type == "message" and content:
-                    output_chunks.append(content)
-                    # Broadcast output chunk
-                    await self._broadcast_event(
-                        "mc_task_output",
-                        {
-                            "task_id": task_id,
-                            "content": content,
-                            "output_type": "message",
-                            "timestamp": now_iso(),
-                        },
+            # Wrap execution with timeout if configured
+            if task.timeout_minutes and task.timeout_minutes > 0:
+                timeout_seconds = task.timeout_minutes * 60
+                try:
+                    await asyncio.wait_for(
+                        self._stream_task(router, prompt, task_id, output_chunks),
+                        timeout=timeout_seconds,
                     )
+                except TimeoutError:
+                    error_message = f"Task timed out after {task.timeout_minutes} minutes"
+                    final_status = "timeout"
+                    logger.warning(f"Task {task_id} timed out after {task.timeout_minutes}m")
+            else:
+                await self._stream_task(router, prompt, task_id, output_chunks)
 
-                elif chunk_type == "tool_use":
-                    tool_name = chunk.get("metadata", {}).get("name", "unknown")
-                    await self._broadcast_event(
-                        "mc_task_output",
-                        {
-                            "task_id": task_id,
-                            "content": f"Using tool: {tool_name}",
-                            "output_type": "tool_use",
-                            "timestamp": now_iso(),
-                        },
-                    )
-
-                elif chunk_type == "tool_result":
-                    result = content[:200] if content else ""
-                    await self._broadcast_event(
-                        "mc_task_output",
-                        {
-                            "task_id": task_id,
-                            "content": f"Tool result: {result}",
-                            "output_type": "tool_result",
-                            "timestamp": now_iso(),
-                        },
-                    )
-
-                elif chunk_type == "error":
-                    error_message = content
+            # Check if streaming set an error
+            if task_id in self._stop_flags and self._stop_flags[task_id]:
+                final_status = "stopped"
+            elif final_status not in ("timeout",):
+                # Check for error set during streaming via metadata
+                stream_error = self._stream_errors.pop(task_id, None)
+                if stream_error:
+                    error_message = stream_error
                     final_status = "error"
-                    break
-
-                elif chunk_type == "done":
-                    break
 
         except Exception as e:
             logger.exception(f"Error executing task {task_id}")
@@ -277,10 +246,46 @@ class MCTaskExecutor:
             self._agent_routers.pop(task_id, None)
             self._running_tasks.pop(task_id, None)
             self._stop_flags.pop(task_id, None)
+            self._stream_errors.pop(task_id, None)
 
-            # Update statuses
-            new_task_status = TaskStatus.DONE if final_status == "completed" else TaskStatus.BLOCKED
-            await manager.update_task_status(task_id, new_task_status, agent_id)
+            full_output = "".join(output_chunks)
+
+            # Store output directly on task for cross-task chaining
+            task_fresh = await manager.get_task(task_id)
+            if task_fresh:
+                if full_output:
+                    task_fresh.output = full_output
+                if error_message:
+                    task_fresh.error_message = error_message
+
+            # Determine task status and handle retry
+            should_retry = False
+            if final_status == "completed":
+                new_task_status = TaskStatus.DONE
+            elif final_status in ("error", "timeout") and task_fresh:
+                # Check if we should retry
+                if task_fresh.retry_count < task_fresh.max_retries:
+                    should_retry = True
+                    task_fresh.retry_count += 1
+                    new_task_status = TaskStatus.ASSIGNED  # Reset for retry
+                    logger.info(
+                        f"Task {task_id} will retry "
+                        f"({task_fresh.retry_count}/{task_fresh.max_retries}): "
+                        f"{error_message}"
+                    )
+                else:
+                    new_task_status = TaskStatus.BLOCKED
+            else:
+                new_task_status = TaskStatus.BLOCKED
+
+            # Persist task updates (output, error, retry_count, status)
+            if task_fresh:
+                task_fresh.status = new_task_status
+                task_fresh.updated_at = now_iso()
+                if new_task_status == TaskStatus.DONE:
+                    task_fresh.completed_at = now_iso()
+                await manager.save_task(task_fresh)
+
             await manager.set_agent_status(agent_id, AgentStatus.IDLE, None)
 
             # Broadcast completion
@@ -291,6 +296,9 @@ class MCTaskExecutor:
                     "agent_id": agent_id,
                     "status": final_status,
                     "error": error_message,
+                    "retry": should_retry,
+                    "retry_count": task_fresh.retry_count if task_fresh else 0,
+                    "max_retries": task_fresh.max_retries if task_fresh else 0,
                     "timestamp": now_iso(),
                 },
             )
@@ -305,8 +313,7 @@ class MCTaskExecutor:
                 )
 
                 # Save task output as a deliverable document
-                if output_chunks:
-                    full_output = "".join(output_chunks)
+                if full_output:
                     await self._save_task_deliverable(
                         task_id=task_id,
                         agent_id=agent_id,
@@ -314,12 +321,40 @@ class MCTaskExecutor:
                         task_title=task.title,
                     )
 
-            elif final_status == "error":
+            elif should_retry:
                 await self._log_activity(
                     ActivityType.TASK_UPDATED,
                     agent_id=agent_id,
                     task_id=task_id,
-                    message=f"{agent.name} encountered an error on '{task.title}': {error_message}",
+                    message=(
+                        f"{agent.name} retrying '{task.title}' "
+                        f"(attempt {task_fresh.retry_count}/{task_fresh.max_retries}): "
+                        f"{error_message}"
+                    ),
+                )
+                # Broadcast retry event for frontend
+                await self._broadcast_event(
+                    "mc_task_retry",
+                    {
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "retry_count": task_fresh.retry_count if task_fresh else 0,
+                        "max_retries": task_fresh.max_retries if task_fresh else 0,
+                        "error": error_message,
+                        "timestamp": now_iso(),
+                    },
+                )
+                # Re-dispatch for retry
+                asyncio.create_task(self.execute_task_background(task_id, agent_id))
+
+            elif final_status in ("error", "timeout"):
+                await self._log_activity(
+                    ActivityType.TASK_UPDATED,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    message=(
+                        f"{agent.name} failed on '{task.title}' (no retries left): {error_message}"
+                    ),
                 )
             elif final_status == "stopped":
                 await self._log_activity(
@@ -331,20 +366,88 @@ class MCTaskExecutor:
 
             # Direct scheduler callback — bypasses MessageBus for reliable
             # cascade dispatch (unblock dependents, check project completion).
-            # Fires for ALL statuses (completed, stopped, error) so deferred
-            # tasks at the same level get re-dispatched when capacity frees up.
-            if self._on_task_done_callback:
+            # Skip callback if we're retrying (task isn't actually done yet).
+            if self._on_task_done_callback and not should_retry:
                 try:
                     await self._on_task_done_callback(task_id)
                 except Exception as e:
                     logger.warning(f"Scheduler callback failed for task {task_id}: {e}")
 
-        full_output = "".join(output_chunks)
         return {
             "status": final_status,
             "output": full_output,
             "error": error_message,
         }
+
+    async def _stream_task(
+        self,
+        router: AgentRouter,
+        prompt: str,
+        task_id: str,
+        output_chunks: list[str],
+    ) -> None:
+        """Stream agent execution output, collecting chunks and broadcasting events.
+
+        Separated from execute_task so it can be wrapped in asyncio.wait_for
+        for timeout support.
+
+        Args:
+            router: The AgentRouter running this task.
+            prompt: The assembled task prompt.
+            task_id: ID of the task being executed.
+            output_chunks: Mutable list to collect output chunks into.
+        """
+        async for chunk in router.run(prompt):
+            # Check stop flag
+            if self._stop_flags.get(task_id):
+                break
+
+            chunk_type = chunk.type
+            content = chunk.content or ""
+            meta = chunk.metadata or {}
+
+            if chunk_type == "message" and content:
+                output_chunks.append(content)
+                await self._broadcast_event(
+                    "mc_task_output",
+                    {
+                        "task_id": task_id,
+                        "content": content,
+                        "output_type": "message",
+                        "timestamp": now_iso(),
+                    },
+                )
+
+            elif chunk_type == "tool_use":
+                tool_name = meta.get("name", "unknown")
+                await self._broadcast_event(
+                    "mc_task_output",
+                    {
+                        "task_id": task_id,
+                        "content": f"Using tool: {tool_name}",
+                        "output_type": "tool_use",
+                        "timestamp": now_iso(),
+                    },
+                )
+
+            elif chunk_type == "tool_result":
+                result = content[:200] if content else ""
+                await self._broadcast_event(
+                    "mc_task_output",
+                    {
+                        "task_id": task_id,
+                        "content": f"Tool result: {result}",
+                        "output_type": "tool_result",
+                        "timestamp": now_iso(),
+                    },
+                )
+
+            elif chunk_type == "error":
+                self._stream_errors[task_id] = content
+                break
+
+            elif chunk_type == "done":
+                break
 
     async def execute_task_background(
         self,
@@ -424,6 +527,26 @@ class MCTaskExecutor:
 
         logger.info(f"Stopped task execution: {task_id}")
         return True
+
+    async def stop_all_project_tasks(self, project_id: str) -> int:
+        """Stop all running tasks belonging to a project.
+
+        Used by project cancellation and pause.
+
+        Args:
+            project_id: ID of the project whose tasks to stop.
+
+        Returns:
+            Number of tasks stopped.
+        """
+        manager = get_mission_control_manager()
+        tasks = await manager.get_project_tasks(project_id)
+        stopped = 0
+        for task in tasks:
+            if self.is_task_running(task.id):
+                await self.stop_task(task.id)
+                stopped += 1
+        return stopped
 
     def is_task_running(self, task_id: str) -> bool:
         """Check if a task is currently running.

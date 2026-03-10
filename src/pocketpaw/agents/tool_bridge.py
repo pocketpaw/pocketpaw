@@ -1,10 +1,15 @@
-"""Tool bridge — adapts PocketPaw tools for use by different agent backends.
+"""Tool bridge -- adapts PocketPaw tools for use by different agent backends.
 
 Provides:
-- _instantiate_all_tools(): discover and instantiate builtin tools
+- _instantiate_all_tools(backend): discover and instantiate builtin tools, filtered by backend
 - build_openai_function_tools(): wrap tools as OpenAI Agents SDK FunctionTool objects
 - build_adk_function_tools(): wrap tools as Google ADK FunctionTool objects
 - get_tool_instructions_compact(): compact markdown for system-prompt injection
+
+Backend-aware exclusion:
+- claude_agent_sdk: shell/fs tools excluded (provided natively by CLI)
+- All other backends: shell/fs tools included via the bridge
+- BrowserTool/DesktopTool: always excluded (need special session state)
 """
 
 from __future__ import annotations
@@ -19,30 +24,33 @@ from pocketpaw.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-# Tools excluded from the bridge — these are SDK builtins or need session state.
-_EXCLUDED_TOOLS = frozenset(
-    {
-        "ShellTool",
-        "ReadFileTool",
-        "WriteFileTool",
-        "ListDirTool",
-        "BrowserTool",
-        "DesktopTool",
-    }
-)
+# Tools excluded from ALL backends -- need special session state or desktop access.
+_ALWAYS_EXCLUDED = frozenset({"BrowserTool", "DesktopTool"})
+
+# Tools excluded only for claude_agent_sdk -- these are provided natively by the CLI.
+_CLAUDE_SDK_EXCLUDED = frozenset({"ShellTool", "ReadFileTool", "WriteFileTool", "ListDirTool"})
 
 
-def _instantiate_all_tools() -> list[BaseTool]:
-    """Discover and instantiate all builtin tools (excluding SDK builtins/browser/desktop).
+def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
+    """Discover and instantiate all builtin tools, filtered by backend.
+
+    Args:
+        backend: The agent backend name. For ``claude_agent_sdk``, shell/fs
+                 tools are excluded (they're SDK builtins). Other backends
+                 get the full set minus browser/desktop.
 
     Returns a list of BaseTool instances.  Import errors per-tool are caught
     and logged so one broken tool doesn't block the rest.
     """
     from pocketpaw.tools.builtin import _LAZY_IMPORTS
 
+    excluded = _ALWAYS_EXCLUDED
+    if backend == "claude_agent_sdk":
+        excluded = excluded | _CLAUDE_SDK_EXCLUDED
+
     tools: list[BaseTool] = []
     for class_name, (module_path, attr_name) in _LAZY_IMPORTS.items():
-        if class_name in _EXCLUDED_TOOLS:
+        if class_name in excluded:
             continue
         try:
             import importlib
@@ -55,7 +63,7 @@ def _instantiate_all_tools() -> list[BaseTool]:
     return tools
 
 
-def build_openai_function_tools(settings: Any) -> list:
+def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -> list:
     """Build a list of OpenAI Agents SDK ``FunctionTool`` wrappers for PocketPaw tools.
 
     Each tool is wrapped in a FunctionTool whose ``on_invoke_tool`` callback
@@ -82,7 +90,7 @@ def build_openai_function_tools(settings: Any) -> list:
     )
 
     registry = ToolRegistry(policy=policy)
-    for tool in _instantiate_all_tools():
+    for tool in _instantiate_all_tools(backend=backend):
         registry.register(tool)
 
     function_tools: list[FunctionTool] = []
@@ -125,7 +133,7 @@ def _make_invoke_callback(tool: Any):
     return callback
 
 
-def build_adk_function_tools(settings: Any) -> list:
+def build_adk_function_tools(settings: Any, backend: str = "google_adk") -> list:
     """Build a list of Google ADK ``FunctionTool`` wrappers for PocketPaw tools.
 
     ADK accepts plain Python callables as tools via ``FunctionTool(func=...)``.
@@ -153,7 +161,7 @@ def build_adk_function_tools(settings: Any) -> list:
     )
 
     registry = ToolRegistry(policy=policy)
-    for tool in _instantiate_all_tools():
+    for tool in _instantiate_all_tools(backend=backend):
         registry.register(tool)
 
     function_tools: list = []
@@ -213,7 +221,7 @@ def _make_adk_wrapper(tool: Any):
     return _adk_tool_wrapper
 
 
-def get_tool_instructions_compact(settings: Any) -> str:
+def get_tool_instructions_compact(settings: Any, backend: str = "opencode") -> str:
     """Build a compact tool-instruction block for system prompt injection.
 
     Returns a markdown section listing available tool names that the agent
@@ -234,7 +242,7 @@ def get_tool_instructions_compact(settings: Any) -> str:
     )
 
     registry = ToolRegistry(policy=policy)
-    for tool in _instantiate_all_tools():
+    for tool in _instantiate_all_tools(backend=backend):
         registry.register(tool)
 
     allowed = registry.allowed_tool_names

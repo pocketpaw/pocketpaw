@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from pocketpaw.security import AuditSeverity, get_audit_logger
 from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
+
+DEFAULT_TOOL_TIMEOUT = 60  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +128,10 @@ class ToolRegistry:
 
         audit.log_tool_use(name, params, severity=severity, status="attempt")
 
+        timeout = getattr(tool, "timeout", DEFAULT_TOOL_TIMEOUT)
         try:
             logger.debug(f"🔧 Executing {name} with {params}")
-            result = await tool.execute(**params)
+            result = await asyncio.wait_for(tool.execute(**params), timeout=timeout)
 
             # Audit Log: Success
             # We don't log full result content in audit to avoid PII, usually
@@ -152,6 +156,10 @@ class ToolRegistry:
             log_result = result[:200] + "..." if len(result) > 200 else result
             logger.debug(f"🔧 {name} result: {log_result}")
             return result
+        except TimeoutError:
+            audit.log_tool_use(name, params, severity=severity, status="timeout")
+            logger.error(f"🔧 {name} timed out after {timeout}s")
+            return f"Error: Tool '{name}' timed out after {timeout}s"
         except Exception as e:
             # Audit Log: Error
             from pocketpaw.security.audit import AuditEvent

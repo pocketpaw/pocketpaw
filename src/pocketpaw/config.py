@@ -34,6 +34,11 @@ _API_KEY_PATTERNS = {
         "example": "sk-...",
         "name": "OpenAI API key",
     },
+    "openrouter_api_key": {
+        "pattern": re.compile(r"^sk-or-v1-"),
+        "example": "sk-or-v1-...",
+        "name": "OpenRouter API key",
+    },
     "telegram_bot_token": {
         "pattern": re.compile(r"^\d+:AA[A-Za-z0-9_-]{30,}$"),
         "example": "123456789:AAH...",
@@ -281,6 +286,12 @@ class Settings(BaseSettings):
         default=0,
         description="Max output tokens for OpenAI-compatible endpoint (0 = no limit)",
     )
+    openrouter_api_key: str | None = Field(
+        default=None, description="API key for OpenRouter (sk-or-v1-...)"
+    )
+    openrouter_model: str = Field(
+        default="", description="Model slug for OpenRouter (e.g. anthropic/claude-sonnet-4-6)"
+    )
     gemini_model: str = Field(default="gemini-3-pro-preview", description="Gemini model to use")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     openai_model: str = Field(default="gpt-5.2", description="OpenAI model to use")
@@ -363,6 +374,23 @@ class Settings(BaseSettings):
     discord_allowed_user_ids: list[int] = Field(
         default_factory=list, description="Discord user IDs allowed to use the bot"
     )
+    discord_allowed_channel_ids: list[int] = Field(
+        default_factory=list, description="Discord channel IDs the bot is restricted to"
+    )
+    discord_conversation_channel_ids: list[int] = Field(
+        default_factory=list,
+        description="Discord channels where the bot participates in group conversation",
+    )
+    discord_bot_name: str = Field(
+        default="Paw", description="Display name used by the bot in conversation"
+    )
+    discord_status_type: str = Field(
+        default="online", description="Discord bot status: online, idle, dnd, invisible"
+    )
+    discord_activity_type: str = Field(
+        default="", description="Discord bot activity: playing, watching, listening, competing"
+    )
+    discord_activity_text: str = Field(default="", description="Discord bot activity text")
 
     # Slack
     slack_bot_token: str | None = Field(
@@ -447,6 +475,28 @@ class Settings(BaseSettings):
         description="Model for LLM-based injection deep scan",
     )
 
+    # PII Protection
+    pii_scan_enabled: bool = Field(
+        default=False, description="Enable PII detection and masking (opt-in)"
+    )
+    pii_default_action: str = Field(
+        default="mask", description="Default PII action: 'log', 'mask', or 'hash'"
+    )
+    pii_type_actions: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-type PII actions, e.g. {'email': 'mask', 'ssn': 'hash'}",
+    )
+    pii_scan_memory: bool = Field(
+        default=True,
+        description="Apply PII masking before writing to memory (when pii_scan_enabled)",
+    )
+    pii_scan_audit: bool = Field(
+        default=True, description="Apply PII masking to audit log entries (when pii_scan_enabled)"
+    )
+    pii_scan_logs: bool = Field(
+        default=True, description="Extend log scrubber with PII patterns (when pii_scan_enabled)"
+    )
+
     # Smart Model Routing
     smart_routing_enabled: bool = Field(
         default=False,
@@ -482,6 +532,21 @@ class Settings(BaseSettings):
     # Health Engine
     health_check_on_startup: bool = Field(
         default=True, description="Run health checks when PocketPaw starts"
+    )
+
+    # User Preferences (set during onboarding)
+    user_display_name: str = Field(default="", description="User's display name")
+    user_avatar_emoji: str = Field(default="🐾", description="User's chosen avatar emoji")
+    theme_preference: str = Field(
+        default="system", description="Theme: 'light', 'dark', or 'system'"
+    )
+    notifications_enabled: bool = Field(default=True, description="Enable desktop notifications")
+    sound_enabled: bool = Field(default=True, description="Enable notification sounds")
+    tool_notifications_enabled: bool = Field(
+        default=True, description="Show notifications for tool executions"
+    )
+    default_workspace_dir: str = Field(
+        default="", description="Default working directory for the agent"
     )
 
     # OAuth

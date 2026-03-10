@@ -1,0 +1,164 @@
+---
+title: "How to Self-Host an AI Agent on Your Laptop"
+description: "Set up a self-hosted AI agent that runs on your laptop or home server. No cloud subscriptions, full privacy, works with Claude, GPT, or free local models via Ollama."
+section: Guides
+ogType: article
+keywords: ["self-hosted ai agent", "run ai locally", "private ai assistant", "local ai agent setup", "ai agent on laptop"]
+tags: ["guide", "self-hosting", "privacy", "local-ai"]
+---
+
+# How to Self-Host an AI Agent on Your Laptop
+
+Most AI tools run in someone else's cloud. Your prompts, your files, your data, all passing through third-party servers. Self-hosting puts you back in control.
+
+This guide covers setting up PocketPaw as a private AI agent on your own machine. By the end, you'll have a working assistant that can browse the web, manage files, search the internet, and talk to you through a clean web interface. All running locally.
+
+## What You'll Need
+
+- A computer running **macOS, Linux, or Windows** (even an older laptop works)
+- **Python 3.11+** installed
+- Either an **API key** (Anthropic, OpenAI, or Google) or **Ollama** for free local models
+- About **10 minutes**
+
+## Step-by-Step Setup
+
+<Steps>
+  <Step title="Install PocketPaw">
+    The quickest path is the interactive installer:
+
+    ```bash
+    curl -fsSL https://pocketpaw.xyz/install.sh | sh
+    ```
+
+    Or install directly with pip:
+
+    ```bash
+    pip install pocketpaw
+    ```
+
+    For the full feature set (browser automation, memory, desktop tools):
+
+    ```bash
+    pip install pocketpaw[recommended]
+    ```
+  </Step>
+
+  <Step title="Choose your AI provider">
+    You have two paths: cloud models (smarter, costs money) or local models (free, private, needs decent hardware).
+
+    **Cloud option, Anthropic Claude (recommended):**
+    ```bash
+    export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-your-key-here"
+    ```
+
+    **Free option, Ollama (runs on your machine):**
+    ```bash
+    # Install Ollama
+    curl -fsSL https://ollama.com/install.sh | sh
+
+    # Pull a model
+    ollama pull qwen2.5:7b
+
+    # Tell PocketPaw to use it
+    export POCKETPAW_LLM_PROVIDER="ollama"
+    export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
+    ```
+
+    <Callout type="tip">
+      Ollama models run entirely on your hardware. A 7B parameter model needs about 4GB of RAM. For better results, try a 14B or 32B model if your machine can handle it.
+    </Callout>
+  </Step>
+
+  <Step title="Start PocketPaw">
+    ```bash
+    pocketpaw
+    ```
+
+    That's it. The web dashboard opens at `http://localhost:8888`. You're now running your own AI agent.
+  </Step>
+
+  <Step title="Try it out">
+    Open the dashboard and try these prompts:
+
+    - "Search the web for the latest Python release notes"
+    - "Create a file called notes.txt with today's date"
+    - "What files are in my home directory?"
+
+    PocketPaw can execute code, browse websites, read/write files, and use 50+ built-in tools, all from your local machine.
+  </Step>
+</Steps>
+
+## What You Get
+
+A self-hosted PocketPaw instance gives you:
+
+| Feature | What it does |
+|---------|-------------|
+| **Web dashboard** | Chat interface at localhost:8888 with session history |
+| **50+ tools** | Web search, file management, browser, image gen, voice, OCR |
+| **Memory** | Conversations persist across sessions |
+| **Multiple channels** | Add Telegram, Discord, Slack later without reinstalling |
+| **Security** | Injection scanning, audit logs, Guardian AI safety checks |
+
+## Adding Channels Later
+
+Once your agent is running, you can connect messaging platforms:
+
+```bash
+# Add Telegram
+pip install pocketpaw[telegram]
+export POCKETPAW_TELEGRAM_BOT_TOKEN="your-bot-token"
+
+# Add Discord
+pip install pocketpaw[discord]
+export POCKETPAW_DISCORD_BOT_TOKEN="your-bot-token"
+```
+
+Restart PocketPaw and all configured channels start automatically. Same agent, same memory, multiple platforms.
+
+## Running on a Home Server
+
+For always-on access, run PocketPaw as a system service:
+
+```bash
+# Using systemd (Linux)
+sudo cp pocketpaw.service /etc/systemd/system/
+sudo systemctl enable pocketpaw
+sudo systemctl start pocketpaw
+```
+
+Or use Docker for a contained setup:
+
+```bash
+git clone https://github.com/pocketpaw/pocketpaw.git
+cd pocketpaw
+cp .env.example .env  # Add your API keys
+docker compose up -d
+```
+
+See the full [deployment guide](/deployment/self-hosting) for production configurations.
+
+## Privacy and Security
+
+Self-hosting means:
+
+- **No data leaves your machine** (unless you use a cloud LLM provider)
+- **No usage tracking**: PocketPaw collects zero telemetry
+- **Full audit trail**: every tool execution is logged locally
+- **You control updates**: upgrade when you want, not when a vendor decides
+
+For maximum privacy, use Ollama with local models. Your conversations never touch the internet.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Add Telegram" icon="lucide:send" href="/guides/telegram-ai-bot">
+    Connect your self-hosted agent to Telegram for mobile access.
+  </Card>
+  <Card title="Run with Ollama" icon="lucide:hard-drive" href="/guides/local-llm-agent">
+    Set up free local models for completely offline operation.
+  </Card>
+  <Card title="Security Model" icon="lucide:shield" href="/security">
+    Learn about PocketPaw's 7-layer security architecture.
+  </Card>
+</CardGroup>
