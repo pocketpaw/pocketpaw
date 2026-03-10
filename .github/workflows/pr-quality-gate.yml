@@ -14,11 +14,12 @@ permissions:
 jobs:
   check-quality:
     runs-on: ubuntu-latest
-    # Skip bot PRs (Dependabot, Renovate, etc.)
+    # Skip bot PRs (Dependabot, Renovate, etc.) and fork PRs (limited permissions)
     if: >-
       github.actor != 'dependabot[bot]' &&
       github.actor != 'renovate[bot]' &&
-      github.actor != 'github-actions[bot]'
+      github.actor != 'github-actions[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Check PR quality
         uses: actions/github-script@v7
