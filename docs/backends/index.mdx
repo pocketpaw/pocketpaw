@@ -1,5 +1,5 @@
 ---
-title: Agent Backends
+title: "Agent Backends: Choose Your AI Engine"
 description: "Choose between six agent backends: Claude Agent SDK (recommended), OpenAI Agents, Google ADK, Codex CLI, OpenCode, or Copilot SDK. Each provides different capabilities and trade-offs."
 section: Agent Backends
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["agent backend", "backend selection", "claude sdk", "openai agents", 
 tags: ["backends", "configuration"]
 ---
 
-# Agent Backends
+# Agent Backends: Choose Your AI Engine
 
 PocketPaw supports **six agent backends** built on a unified `AgentBackend` protocol. Each backend provides different capabilities and trade-offs. All backends yield standardized `AgentEvent` objects, so switching is seamless.
 
@@ -88,3 +88,14 @@ The following backends have been removed but their config values are automatical
 | `gemini_cli` | `google_adk` | Feb 2026 |
 
 If your config still uses a legacy backend name, PocketPaw will silently redirect to the mapped backend.
+
+## Guides
+
+<CardGroup>
+  <Card title="Run AI with Ollama" icon="lucide:hard-drive" href="/guides/local-llm-agent">
+    Set up free local models with no API key needed.
+  </Card>
+  <Card title="Self-Host Guide" icon="lucide:server" href="/guides/self-host-ai-agent">
+    Full walkthrough for running PocketPaw on your own hardware.
+  </Card>
+</CardGroup>

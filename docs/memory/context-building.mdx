@@ -1,13 +1,13 @@
 ---
-title: Context Building
-description: "The AgentContextBuilder assembles PocketPaw's full context from identity, USER.md profile, skills, long-term facts, semantic memories, and session history — prioritized to fit the model's context window."
+title: "Context Building: Memory-Augmented Prompts"
+description: "The AgentContextBuilder assembles PocketPaw's full context from identity, USER.md profile, skills, long-term facts, semantic memories, and session history, prioritized to fit the model's context window."
 section: Memory
 ogType: article
 keywords: ["context building", "system prompt", "context window", "user profile", "prompt assembly"]
 tags: ["memory", "context"]
 ---
 
-# Context Building
+# Context Building: Memory-Augmented Prompts
 
 The `AgentContextBuilder` assembles the agent's full context from multiple sources before each interaction.
 
@@ -86,3 +86,17 @@ memories = await mem0.search(
 ```
 
 This finds memories that are semantically relevant to what the user is currently asking about, even if the exact words differ.
+
+## Related
+
+<CardGroup>
+  <Card title="Mem0 Integration" icon="lucide:sparkles" href="/memory/mem0">
+    Set up semantic memory with auto-learning and vector search.
+  </Card>
+  <Card title="Memory Isolation" icon="lucide:shield" href="/memory/memory-isolation">
+    How context building adapts for owner vs. external users.
+  </Card>
+  <Card title="Sessions" icon="lucide:history" href="/memory/sessions">
+    Session management that feeds conversation history into context.
+  </Card>
+</CardGroup>

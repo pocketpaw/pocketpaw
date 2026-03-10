@@ -2,7 +2,7 @@
   "metadata": {
     "name": "PocketPaw",
     "description": "Self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard",
-    "url": "https://pocketpaw.com",
+    "url": "https://pocketpaw.xyz",
     "version": "1.0.0"
   },
   "branding": {
@@ -42,6 +42,37 @@
           "type": "dropdown",
           "items": [
             {
+              "label": "Self-Host an AI Agent",
+              "href": "/guides/self-host-ai-agent",
+              "description": "Run your own AI assistant on a laptop or server"
+            },
+            {
+              "label": "Telegram AI Bot",
+              "href": "/guides/telegram-ai-bot",
+              "description": "Build a personal AI bot on Telegram in 5 minutes"
+            },
+            {
+              "label": "Discord AI Bot",
+              "href": "/guides/discord-ai-bot",
+              "description": "Add AI to your Discord server with slash commands"
+            },
+            {
+              "label": "Run AI with Ollama",
+              "href": "/guides/local-llm-agent",
+              "description": "Free, private AI using local models, no API key"
+            },
+            {
+              "label": "All Guides",
+              "href": "/guides",
+              "description": "Browse all tutorials and walkthroughs"
+            }
+          ]
+        },
+        {
+          "label": "Reference",
+          "type": "dropdown",
+          "items": [
+            {
               "label": "Channels",
               "href": "/channels",
               "description": "Connect to 9+ messaging platforms"
@@ -70,7 +101,7 @@
           "showStars": true
         },
         "discord": {
-          "href": "https://dsc.gg/pocketpaw"
+          "href": "https://discord.gg/asRrtm95Zc"
         }
       },
       "cta": {
@@ -83,7 +114,7 @@
         "label": "Documentation",
         "href": "/introduction",
         "icon": "lucide:book-open",
-        "groups": ["Introduction", "Getting Started", "Core Concepts", "Channels", "Agent Backends", "Tools", "Integrations", "Security", "Memory", "Advanced", "Deployment"]
+        "groups": ["Introduction", "Getting Started", "Guides", "Core Concepts", "Channels", "Agent Backends", "Tools", "Integrations", "Security", "Memory", "Advanced", "Deployment"]
       },
       {
         "label": "API Reference",
@@ -137,6 +168,41 @@
             "label": "Project Structure",
             "href": "/getting-started/project-structure",
             "icon": "lucide:folder-tree"
+          }
+        ]
+      },
+      {
+        "label": "Guides",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/guides",
+            "icon": "lucide:compass"
+          },
+          {
+            "label": "Self-Host an AI Agent",
+            "href": "/guides/self-host-ai-agent",
+            "icon": "lucide:server"
+          },
+          {
+            "label": "Build a Telegram AI Bot",
+            "href": "/guides/telegram-ai-bot",
+            "icon": "lucide:send"
+          },
+          {
+            "label": "Discord AI Bot",
+            "href": "/guides/discord-ai-bot",
+            "icon": "lucide:gamepad-2"
+          },
+          {
+            "label": "Run AI with Ollama",
+            "href": "/guides/local-llm-agent",
+            "icon": "lucide:hard-drive"
+          },
+          {
+            "label": "AI Agents vs Chatbots",
+            "href": "/guides/ai-agent-vs-chatbot",
+            "icon": "lucide:scale"
           }
         ]
       },
@@ -765,15 +831,15 @@
     "showVersion": true,
     "socials": {
       "github": "https://github.com/pocketpaw/pocketpaw",
-      "discord": "https://dsc.gg/pocketpaw"
+      "discord": "https://discord.gg/asRrtm95Zc"
     },
     "links": [
       {
         "title": "Documentation",
         "items": [
           { "label": "Getting Started", "href": "/getting-started/installation" },
+          { "label": "Guides & Tutorials", "href": "/guides" },
           { "label": "Architecture", "href": "/concepts/architecture" },
-          { "label": "Channels", "href": "/channels" },
           { "label": "API Reference", "href": "/api" }
         ]
       },
@@ -790,7 +856,7 @@
         "title": "Community",
         "items": [
           { "label": "GitHub", "href": "https://github.com/pocketpaw/pocketpaw", "external": true },
-          { "label": "Discord", "href": "https://dsc.gg/pocketpaw", "external": true },
+          { "label": "Discord", "href": "https://discord.gg/asRrtm95Zc", "external": true },
           { "label": "Issues", "href": "https://github.com/pocketpaw/pocketpaw/issues", "external": true }
         ]
       }

@@ -1,5 +1,5 @@
 ---
-title: Browser Automation
+title: "Browser Automation: Playwright Web Scraping"
 description: "Automate web browsing with PocketPaw using Playwright. The browser tool navigates pages using accessibility tree snapshots instead of screenshots, enabling fast and accurate web interaction."
 section: Tools
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["browser automation", "playwright", "web scraping", "accessibility tr
 tags: ["tools", "automation", "browser"]
 ---
 
-# Browser Automation
+# Browser Automation: Playwright Web Scraping
 
 PocketPaw includes a browser automation tool powered by Playwright. Unlike screenshot-based approaches, it uses **accessibility tree snapshots** for reliable, fast interaction.
 
@@ -15,19 +15,19 @@ PocketPaw includes a browser automation tool powered by Playwright. Unlike scree
 
 The `BrowserDriver` provides:
 
-1. **Navigation** — Open URLs and navigate between pages
-2. **Accessibility tree** — Get a structured representation of the page
-3. **Ref map** — Maps reference numbers to CSS selectors for clicking/typing
-4. **Interaction** — Click elements, type text, scroll, using ref numbers
+1. **Navigation** - Open URLs and navigate between pages
+2. **Accessibility tree** - Get a structured representation of the page
+3. **Ref map** - Maps reference numbers to CSS selectors for clicking/typing
+4. **Interaction** - Click elements, type text, scroll, using ref numbers
 
 ### Why Accessibility Tree?
 
 Instead of taking screenshots and using vision models, PocketPaw reads the page's accessibility tree. This is:
 
-- **Faster** — No image processing or vision API calls
-- **More reliable** — Structured data instead of visual interpretation
-- **Cheaper** — No vision model tokens
-- **Accessible** — Works with any page, including dynamic SPAs
+- **Faster** - No image processing or vision API calls
+- **More reliable** - Structured data instead of visual interpretation
+- **Cheaper** - No vision model tokens
+- **Accessible** - Works with any page, including dynamic SPAs
 
 ## Usage
 
@@ -84,3 +84,17 @@ This installs `playwright` as an optional dependency. You also need to install b
 ```bash
 playwright install chromium
 ```
+
+## Related
+
+<CardGroup>
+  <Card title="Web Search" icon="lucide:search" href="/tools/web-search">
+    Search the web via Tavily or Brave Search APIs.
+  </Card>
+  <Card title="Research Tool" icon="lucide:book-open" href="/tools/research">
+    Multi-step web research with automatic summarization.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

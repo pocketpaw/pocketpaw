@@ -1,0 +1,151 @@
+---
+title: "Run an AI Agent with Ollama (No API Key Needed)"
+description: "Set up a completely free, private AI agent using Ollama and open-source models. No API keys, no usage fees, no data leaving your machine. Works on Mac, Linux, and Windows."
+section: Guides
+ogType: article
+keywords: ["ollama ai agent", "local llm agent", "free ai agent", "run ai without api key", "private ai assistant ollama", "self-hosted llm"]
+tags: ["guide", "ollama", "local-ai", "privacy", "free"]
+---
+
+# Run an AI Agent with Ollama (No API Key Needed)
+
+Cloud AI services charge per token, require API keys, and send your data to external servers. If you want a private AI agent that costs nothing to run, Ollama lets you run open-source models directly on your hardware.
+
+This guide sets up PocketPaw with Ollama for a completely self-contained AI agent. No accounts, no API keys, no internet needed for inference.
+
+## Hardware Requirements
+
+Ollama runs models on your CPU or GPU. Here's what you need:
+
+| Model Size | RAM Needed | Speed | Quality |
+|-----------|-----------|-------|---------|
+| 3B (e.g., phi-3) | 2-4 GB | Fast | Basic tasks, simple Q&A |
+| 7B (e.g., qwen2.5:7b) | 4-8 GB | Good | General purpose, recommended starting point |
+| 14B (e.g., qwen2.5:14b) | 8-16 GB | Moderate | Better reasoning, code generation |
+| 32B+ (e.g., qwen2.5:32b) | 16-32 GB | Slower | Near cloud-quality for most tasks |
+
+<Callout type="info">
+  GPU acceleration makes a huge difference. With a decent NVIDIA or Apple Silicon GPU, even 14B models respond in seconds. CPU-only works but expect longer wait times on larger models.
+</Callout>
+
+## Setup
+
+<Steps>
+  <Step title="Install Ollama">
+    **macOS or Linux:**
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+
+    **Windows:**
+    Download from [ollama.com/download](https://ollama.com/download)
+
+    Verify it's running:
+    ```bash
+    ollama --version
+    ```
+  </Step>
+
+  <Step title="Pull a model">
+    Start with a 7B model for a good balance of speed and quality:
+
+    ```bash
+    ollama pull qwen2.5:7b
+    ```
+
+    Other good options:
+    ```bash
+    ollama pull llama3.1:8b      # Meta's Llama 3.1
+    ollama pull mistral:7b       # Mistral AI's flagship
+    ollama pull gemma2:9b        # Google's Gemma 2
+    ollama pull deepseek-r1:7b   # DeepSeek reasoning model
+    ```
+  </Step>
+
+  <Step title="Install PocketPaw">
+    ```bash
+    pip install pocketpaw
+    ```
+  </Step>
+
+  <Step title="Configure for Ollama">
+    ```bash
+    export POCKETPAW_LLM_PROVIDER="ollama"
+    export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
+    ```
+
+    That's all the configuration you need. No API keys.
+  </Step>
+
+  <Step title="Start your agent">
+    ```bash
+    pocketpaw
+    ```
+
+    Open `http://localhost:8888` and start chatting. Everything runs on your machine.
+  </Step>
+</Steps>
+
+## Choosing the Right Model
+
+Different models suit different tasks:
+
+| Use Case | Recommended Model | Why |
+|----------|------------------|-----|
+| General assistant | `qwen2.5:7b` | Good all-rounder, fast, handles most tasks |
+| Code generation | `deepseek-coder-v2:16b` | Purpose-built for code, understands many languages |
+| Reasoning & math | `deepseek-r1:7b` | Chain-of-thought reasoning, step-by-step problem solving |
+| Creative writing | `llama3.1:8b` | Strong at narrative, varied writing styles |
+| Quick responses | `phi-3:3.8b` | Smallest useful model, very fast on modest hardware |
+
+You can switch models anytime by changing the environment variable:
+```bash
+export POCKETPAW_OLLAMA_MODEL="deepseek-coder-v2:16b"
+```
+
+## Tool Support with Local Models
+
+PocketPaw's tools (web search, file management, browser) work with Ollama models, but tool-calling quality depends on the model. Larger models handle tools more reliably.
+
+For the best tool-calling experience with local models, use:
+- `qwen2.5:14b` or larger
+- `llama3.1:8b` (good tool-calling support)
+- `mistral:7b` (decent tool support)
+
+Smaller models (3B) may struggle with complex multi-tool tasks.
+
+## Mixing Local and Cloud
+
+You can use Ollama for most tasks and a cloud provider for complex ones:
+
+```bash
+# Default to Ollama
+export POCKETPAW_LLM_PROVIDER="ollama"
+export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
+
+# Optional: add cloud key for the model router to use on hard tasks
+export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+PocketPaw's [model router](/advanced/model-router) can automatically escalate complex tasks to a cloud model while keeping simple queries local.
+
+## Performance Tips
+
+1. **Use GPU acceleration.** Ollama auto-detects NVIDIA CUDA and Apple Metal.
+2. **Keep the model loaded.** First response is slow (loading), subsequent ones are fast.
+3. **Match model to RAM.** If the model is larger than available RAM, it spills to disk and gets very slow.
+4. **Close other heavy apps.** ML inference is memory-hungry.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Self-Hosting Guide" icon="lucide:server" href="/guides/self-host-ai-agent">
+    Full guide to running PocketPaw on your own hardware.
+  </Card>
+  <Card title="Ollama Backend Docs" icon="lucide:book-open" href="/backends/ollama">
+    Detailed Ollama configuration, model management, and troubleshooting.
+  </Card>
+  <Card title="Model Router" icon="lucide:route" href="/advanced/model-router">
+    Automatically route between local and cloud models based on task complexity.
+  </Card>
+</CardGroup>

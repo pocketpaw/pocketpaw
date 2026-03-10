@@ -1,5 +1,5 @@
 ---
-title: Sessions
+title: "Sessions: Conversation History Management"
 description: "Sessions are PocketPaw's core conversation units with full lifecycle management: creation, switching, renaming, searching, and deletion. Each channel generates unique session keys for isolation."
 section: Memory
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["sessions", "conversation management", "session keys", "chat history"
 tags: ["memory", "sessions"]
 ---
 
-# Sessions
+# Sessions: Conversation History Management
 
 Sessions are the core unit of conversation in PocketPaw. Each session tracks a complete conversation thread with history and metadata.
 
@@ -82,3 +82,17 @@ The frontend uses a `StateManager` that:
 - Uses an LRU cache to limit memory usage
 - Syncs state between the sidebar and chat area
 - Persists the active session ID for page reloads
+
+## Related
+
+<CardGroup>
+  <Card title="File Store" icon="lucide:database" href="/memory/file-store">
+    How sessions are stored as JSON files on disk.
+  </Card>
+  <Card title="Context Building" icon="lucide:layers" href="/memory/context-building">
+    How session history is assembled into the agent's context window.
+  </Card>
+  <Card title="Memory Isolation" icon="lucide:shield" href="/memory/memory-isolation">
+    Per-user session scoping for multi-channel deployments.
+  </Card>
+</CardGroup>

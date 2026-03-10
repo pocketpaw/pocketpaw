@@ -1,0 +1,61 @@
+{
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "owner",
+    "name": "Prakash",
+    "email": "pocketpawai@gmail.com",
+    "phone": "",
+    "description": "Building open source AI agent infrastructure — PocketPaw (Agent OS for everyone) and Soul Protocol (portable AI identity standard). Solo developer from India, community of 31 contributors.",
+    "webpageUrl": {
+      "url": "https://pocketpaw.xyz"
+    }
+  },
+  "projects": [
+    {
+      "guid": "pocketpaw",
+      "name": "PocketPaw",
+      "description": "Open source self-hosted AI agent that installs in 30 seconds. 6 agent backends, 9+ channels, 50+ tools, 7-layer security with Guardian AI. Desktop installer or one pip command. No Docker required. MIT licensed.",
+      "webpageUrl": {
+        "url": "https://pocketpaw.xyz"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/pocketpaw/pocketpaw"
+      },
+      "licenses": [
+        "MIT"
+      ],
+      "tags": [
+        "ai-agents",
+        "python",
+        "self-hosted",
+        "security",
+        "open-source",
+        "personal-assistant"
+      ]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "github-sponsors",
+        "type": "payment-provider",
+        "address": "https://github.com/sponsors/pocketpaw",
+        "description": "GitHub Sponsors"
+      }
+    ],
+    "plans": [
+      {
+        "guid": "core-development",
+        "status": "active",
+        "name": "Core Development & Distribution",
+        "description": "Community management, documentation, infrastructure, content production for reaching non-developer users, and security audits.",
+        "amount": 10000,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": []
+      }
+    ],
+    "history": []
+  }
+}

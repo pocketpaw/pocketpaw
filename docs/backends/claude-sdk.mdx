@@ -1,5 +1,5 @@
 ---
-title: Claude Agent SDK
+title: "Claude Agent SDK: Recommended PocketPaw Backend"
 description: "The Claude Agent SDK backend is the recommended choice: official Anthropic SDK with built-in Bash, Read, Write, and Edit tools, PreToolUse safety hooks, and MCP server integration."
 section: Agent Backends
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["claude agent sdk", "anthropic sdk", "pretooluse hooks", "mcp integra
 tags: ["backends", "claude"]
 ---
 
-# Claude Agent SDK
+# Claude Agent SDK: Recommended PocketPaw Backend
 
 The Claude Agent SDK backend is the **recommended** choice for PocketPaw. It uses Anthropic's official SDK with built-in tools and native MCP support.
 
@@ -173,3 +173,20 @@ AgentEvent(type="done", content="")
 ```
 
 All backends use the same `AgentEvent` format, defined in `agents/backend.py`.
+
+## Related
+
+<CardGroup>
+  <Card title="Ollama: Run with Free Local Models" icon="lucide:hard-drive" href="/backends/ollama">
+    Use the Claude Agent SDK with local models via Ollama -- no API keys needed.
+  </Card>
+  <Card title="OpenAI Agents SDK" icon="lucide:brain" href="/backends/openai-agents">
+    Alternative backend using OpenAI's agent framework with GPT models.
+  </Card>
+  <Card title="All Agent Backends" icon="lucide:layers" href="/backends">
+    Compare all six backends side by side with capability badges.
+  </Card>
+  <Card title="Self-Host PocketPaw" icon="lucide:server" href="/guides/self-host-ai-agent">
+    Deploy PocketPaw on your own server with the Claude Agent SDK backend.
+  </Card>
+</CardGroup>

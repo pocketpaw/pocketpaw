@@ -1,13 +1,13 @@
 ---
-title: Web Search
-description: "Search the web from PocketPaw using Tavily or Brave Search APIs. Returns structured results the agent can reason over. Configure your preferred search provider with a single env variable."
+title: "Web Search Tool: Tavily & Brave Search Integration"
+description: "Search the web from PocketPaw using Tavily or Brave Search APIs. Returns structured results the agent can reason over. Configure your preferred search provider with a single environment variable."
 section: Tools
 ogType: article
 keywords: ["web search", "tavily", "brave search", "search api", "internet search"]
 tags: ["tools", "search"]
 ---
 
-# Web Search
+# Web Search Tool: Tavily & Brave Search Integration
 
 The web search tool enables PocketPaw to search the internet for real-time information.
 
@@ -76,3 +76,17 @@ export POCKETPAW_TOOLS_ALLOW="group:search"
 # Or deny it
 export POCKETPAW_TOOLS_DENY="web_search"
 ```
+
+## Related
+
+<CardGroup>
+  <Card title="Research Tool" icon="lucide:book-open" href="/tools/research">
+    Chain web search with content fetching and LLM summarization for deeper answers.
+  </Card>
+  <Card title="Browser Automation" icon="lucide:globe" href="/tools/browser">
+    Navigate and interact with web pages directly using Playwright.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

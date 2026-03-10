@@ -1,13 +1,13 @@
 ---
-title: Ollama (Local LLMs)
-description: "Run PocketPaw with local models via Ollama — no API keys, no cloud, no costs. Works with Claude Agent SDK and OpenAI Agents backends using Ollama's compatible API endpoints."
+title: "Ollama: Run PocketPaw with Free Local Models"
+description: "Run PocketPaw with local models via Ollama -- no API keys, no cloud, no costs. Works with Claude Agent SDK and OpenAI Agents backends using Ollama's compatible API endpoints."
 section: Agent Backends
 ogType: article
 keywords: ["ollama", "local llm", "self-hosted", "no api key", "anthropic compatible", "local models"]
 tags: ["backends", "ollama", "local"]
 ---
 
-# Ollama (Local LLMs)
+# Ollama: Run PocketPaw with Free Local Models
 
 Run PocketPaw entirely on your machine with [Ollama](https://ollama.com) — no API keys, no cloud, no costs. The **Claude Agent SDK** and **OpenAI Agents** backends work with Ollama out of the box.
 
@@ -214,3 +214,20 @@ Then set `ollama_model` to `qwen2.5:14b` in Settings or config.
 | `agents/router.py` | Ollama detection logging in `_initialize_agent()` |
 | `__main__.py` | `--check-ollama` CLI command |
 | `tests/test_ollama_agent.py` | Tests covering Ollama backends |
+
+## Related
+
+<CardGroup>
+  <Card title="Claude Agent SDK" icon="lucide:sparkles" href="/backends/claude-sdk">
+    The recommended backend -- works with Ollama out of the box.
+  </Card>
+  <Card title="OpenAI Agents SDK" icon="lucide:brain" href="/backends/openai-agents">
+    Alternative backend that also supports Ollama for local inference.
+  </Card>
+  <Card title="Local LLM Agent Guide" icon="lucide:book-open" href="/guides/local-llm-agent">
+    Step-by-step guide to running PocketPaw with local models.
+  </Card>
+  <Card title="Self-Host PocketPaw" icon="lucide:server" href="/guides/self-host-ai-agent">
+    Deploy PocketPaw on your own server with no cloud dependencies.
+  </Card>
+</CardGroup>

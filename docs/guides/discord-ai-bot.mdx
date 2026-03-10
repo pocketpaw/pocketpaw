@@ -1,0 +1,133 @@
+---
+title: "Add an AI Assistant to Your Discord Server"
+description: "Set up a self-hosted AI bot for your Discord server with slash commands, DM support, streaming responses, and 50+ tools. No monthly fees, runs on your machine."
+section: Guides
+ogType: article
+keywords: ["discord ai bot", "discord ai assistant", "self-hosted discord bot", "ai bot for discord server", "discord chatbot python"]
+tags: ["guide", "discord", "bot", "community"]
+---
+
+# Add an AI Assistant to Your Discord Server
+
+Discord bots are everywhere, but most are wrappers around a single API call. No memory, no tools, no ability to actually do things. PocketPaw gives your Discord server a proper AI agent that can search the web, analyze files, generate images, and remember conversations.
+
+This guide gets a PocketPaw-powered Discord bot running in your server.
+
+## What You'll Build
+
+- `/paw` slash command for interacting with the AI
+- DM support for private conversations
+- @mention support in channels
+- Streaming responses (edits in real-time as the AI thinks)
+- Persistent memory across conversations
+- Access to 50+ tools (web search, image gen, file handling, and more)
+
+## Prerequisites
+
+- **PocketPaw installed** (follow the [installation guide](/getting-started/installation))
+- **A Discord account** with permission to add bots to a server
+- **An AI provider**: Anthropic API key or [Ollama](/guides/local-llm-agent)
+
+## Setting Up the Bot
+
+<Steps>
+  <Step title="Create a Discord Application">
+    1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
+    2. Click "New Application" and give it a name
+    3. Go to the **Bot** section in the sidebar
+    4. Click "Reset Token" and copy the bot token
+
+    Under **Privileged Gateway Intents**, enable:
+    - **Message Content Intent** (required for reading messages)
+  </Step>
+
+  <Step title="Invite the bot to your server">
+    1. Go to **OAuth2 > URL Generator**
+    2. Select scopes: `bot`, `applications.commands`
+    3. Select permissions: `Send Messages`, `Read Message History`, `Use Slash Commands`, `Embed Links`, `Attach Files`
+    4. Copy the generated URL and open it in your browser
+    5. Select your server and authorize
+  </Step>
+
+  <Step title="Install the Discord extra">
+    ```bash
+    pip install pocketpaw[discord]
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    ```bash
+    export POCKETPAW_DISCORD_BOT_TOKEN="your-bot-token"
+    export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."  # or use Ollama
+
+    # Optional: restrict to specific servers and users
+    export POCKETPAW_DISCORD_ALLOWED_GUILD_IDS="111222333444"
+    export POCKETPAW_DISCORD_ALLOWED_USER_IDS="555666777888"
+    ```
+  </Step>
+
+  <Step title="Start PocketPaw">
+    ```bash
+    pocketpaw
+    ```
+
+    The web dashboard starts at localhost:8888, and your Discord bot comes online automatically. You can also run headless:
+
+    ```bash
+    pocketpaw --discord
+    ```
+  </Step>
+
+  <Step title="Test in Discord">
+    - Type `/paw what can you do?` in any channel
+    - DM the bot directly for private conversations
+    - @mention the bot in a channel message
+
+    The bot streams its response in real-time, editing the message as new text arrives.
+  </Step>
+</Steps>
+
+## How Streaming Works
+
+Discord has rate limits on message edits (roughly one edit per 1.5 seconds). PocketPaw buffers chunks and updates the message at safe intervals, so responses appear smoothly without hitting rate limits.
+
+## Access Control
+
+Control who can use the bot and where:
+
+```bash
+# Only specific servers
+export POCKETPAW_DISCORD_ALLOWED_GUILD_IDS="111222333,444555666"
+
+# Only specific users
+export POCKETPAW_DISCORD_ALLOWED_USER_IDS="123456789,987654321"
+```
+
+Without these restrictions, anyone in the server can use the bot. For public communities, setting allowed user IDs is strongly recommended.
+
+## Running Multiple Channels
+
+PocketPaw handles multiple channels from a single instance. Add Telegram alongside Discord:
+
+```bash
+pip install pocketpaw[telegram,discord]
+export POCKETPAW_TELEGRAM_BOT_TOKEN="your-telegram-token"
+export POCKETPAW_DISCORD_BOT_TOKEN="your-discord-token"
+pocketpaw
+```
+
+Both bots share the same agent, tools, and memory system. A conversation started on Discord can be continued on Telegram (through the shared memory).
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Discord Channel Docs" icon="lucide:book-open" href="/channels/discord">
+    Full reference for Discord-specific features, events, and configuration.
+  </Card>
+  <Card title="Add Telegram" icon="lucide:send" href="/guides/telegram-ai-bot">
+    Give your agent mobile access through Telegram.
+  </Card>
+  <Card title="Self-Hosting Guide" icon="lucide:server" href="/guides/self-host-ai-agent">
+    Run your bot 24/7 on a home server or VPS.
+  </Card>
+</CardGroup>

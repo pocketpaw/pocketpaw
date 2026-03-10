@@ -1,5 +1,5 @@
 ---
-title: Audit Log
+title: "Audit Log: Tool Execution Tracking"
 description: "PocketPaw maintains an append-only JSONL audit log at ~/.pocketpaw/audit.jsonl recording all security-relevant events with timestamps, severity levels, and structured metadata for compliance."
 section: Security
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["audit log", "jsonl", "security events", "compliance", "append-only l
 tags: ["security", "audit"]
 ---
 
-# Audit Log
+# Audit Log: Tool Execution Tracking
 
 PocketPaw maintains an append-only JSONL audit log at `~/.pocketpaw/audit.jsonl`.
 
@@ -63,3 +63,17 @@ The audit log's integrity is checked by the [Security Audit CLI](/security/audit
 - File permissions are restrictive (600)
 - The file hasn't been truncated
 - Entries are valid JSON
+
+## Related
+
+<CardGroup>
+  <Card title="Audit CLI" icon="lucide:terminal" href="/security/audit-cli">
+    Run 7 automated security checks including audit log integrity verification.
+  </Card>
+  <Card title="Self-Audit Daemon" icon="lucide:activity" href="/security/self-audit-daemon">
+    Continuous background checks that monitor audit log rotation and health.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    Full overview of PocketPaw's 7-layer security stack.
+  </Card>
+</CardGroup>

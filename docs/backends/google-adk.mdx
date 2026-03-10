@@ -1,13 +1,13 @@
 ---
-title: Google ADK
-description: "The Google ADK backend uses Google's Agent Development Kit with Gemini models. Features native MCP support via McpToolset and custom tool bridging."
+title: "Google ADK: Gemini Models with MCP Support"
+description: "The Google ADK backend uses Google's Agent Development Kit with Gemini models. Features native MCP support via McpToolset, custom tool bridging, and InMemoryRunner session management."
 section: Agent Backends
 ogType: article
 keywords: ["google adk", "gemini", "agent development kit", "mcp", "google ai"]
 tags: ["backends", "google"]
 ---
 
-# Google ADK
+# Google ADK: Gemini Models with MCP Support
 
 The Google ADK backend uses Google's **Agent Development Kit** (`google-adk` package) with Gemini models. It provides native MCP support and custom tool bridging.
 
@@ -73,3 +73,17 @@ This installs `google-adk>=1.0.0` as an optional dependency.
 <Callout type="info">
   **Replaces Gemini CLI:** This backend replaced the earlier `gemini_cli` backend. If your config still uses `gemini_cli`, PocketPaw will automatically redirect to `google_adk`.
 </Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Claude Agent SDK" icon="lucide:sparkles" href="/backends/claude-sdk">
+    The recommended backend with native tools and MCP integration.
+  </Card>
+  <Card title="Codex CLI" icon="lucide:code" href="/backends/codex-cli">
+    Another MCP-capable backend focused on code generation tasks.
+  </Card>
+  <Card title="All Agent Backends" icon="lucide:layers" href="/backends">
+    Compare all six backends side by side with capability badges.
+  </Card>
+</CardGroup>

@@ -1,5 +1,5 @@
 ---
-title: Google Workspace (MCP)
+title: "Google Workspace MCP: Full Suite Access"
 description: "Connect PocketPaw to Google Workspace via the gws CLI MCP preset. One-click install gives your agent access to Drive, Gmail, Calendar, Sheets, Docs, Chat, and Admin APIs."
 section: Integrations
 ogType: article
@@ -7,14 +7,14 @@ keywords: ["google workspace", "gws cli", "mcp preset", "drive", "gmail", "calen
 tags: ["integrations", "google", "mcp"]
 ---
 
-# Google Workspace (MCP)
+# Google Workspace MCP: Full Suite Access
 
 PocketPaw includes a one-click MCP preset that connects your agent to **Drive, Gmail, Calendar, Sheets, Docs, Chat, and Admin** through the [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli).
 
-Unlike the individual [Gmail](/integrations/gmail), [Calendar](/integrations/calendar), and [Drive](/integrations/google-drive) built-in tools, this preset uses the official `gws` CLI which dynamically discovers **all** Workspace APIs from Google's Discovery Service — including Sheets, Chat, Admin, and any new APIs Google adds in the future.
+Unlike the individual [Gmail](/integrations/gmail), [Calendar](/integrations/calendar), and [Drive](/integrations/google-drive) built-in tools, this preset uses the official `gws` CLI which dynamically discovers **all** Workspace APIs from Google's Discovery Service -- including Sheets, Chat, Admin, and any new APIs Google adds in the future.
 
 <Callout type="info">
-This preset requires the `gws` CLI to be installed and authenticated **before** installing in PocketPaw. PocketPaw does not manage Google credentials — `gws` handles its own OAuth flow.
+This preset requires the `gws` CLI to be installed and authenticated **before** installing in PocketPaw. PocketPaw does not manage Google credentials -- `gws` handles its own OAuth flow.
 </Callout>
 
 ## Prerequisites
@@ -39,7 +39,7 @@ This preset requires the `gws` CLI to be installed and authenticated **before** 
     gws auth login
     ```
 
-    Opens your browser for Google OAuth consent. Approve the requested scopes. Tokens are stored locally on your machine — PocketPaw never sees them.
+    Opens your browser for Google OAuth consent. Approve the requested scopes. Tokens are stored locally on your machine -- PocketPaw never sees them.
   </Step>
   <Step title="Verify">
     Confirm everything works:
@@ -62,7 +62,7 @@ This preset requires the `gws` CLI to be installed and authenticated **before** 
 4. Find **Google Workspace** under the **Productivity** category
 5. Click **Install**
 
-No API keys or environment variables are needed — the preset uses your existing `gws auth` session.
+No API keys or environment variables are needed -- the preset uses your existing `gws auth` session.
 
 ### From the Config File
 
@@ -161,8 +161,8 @@ To pass these through PocketPaw, add them to the server's `env` in `~/.pocketpaw
 
 PocketPaw includes an integration health check that verifies the `gws` binary is installed. If it's missing, the health dashboard shows:
 
-> **Google Workspace CLI** — warning
-> gws not found — Google Workspace MCP preset won't work without it
+> **Google Workspace CLI** -- warning
+> gws not found -- Google Workspace MCP preset won't work without it
 > Fix: `npm i -g @googleworkspace/cli`
 
 ## Troubleshooting
@@ -207,3 +207,17 @@ You should get a JSON response with server capabilities. If not, check `gws auth
 | Admin support | No | Yes |
 | Updates | Requires PocketPaw update | Automatic via Discovery Service |
 | Credentials | Managed by PocketPaw | Managed by gws CLI |
+
+## Related
+
+<CardGroup>
+  <Card title="MCP Servers" icon="lucide:server" href="/integrations/mcp-servers">
+    Learn about Model Context Protocol setup and configuration in PocketPaw.
+  </Card>
+  <Card title="Gmail Integration" icon="lucide:mail" href="/integrations/gmail">
+    Use the built-in Gmail tools for search, read, and send operations.
+  </Card>
+  <Card title="Google Calendar" icon="lucide:calendar" href="/integrations/calendar">
+    Use the built-in Calendar tools for event management.
+  </Card>
+</CardGroup>

@@ -1,13 +1,13 @@
 ---
-title: Image Generation
-description: "Generate images with PocketPaw using Google Gemini models. Describe what you want and receive AI-generated images directly in your chat. Requires a Google API key and the image extra."
+title: "Image Generation: AI Art with Gemini Models"
+description: "Generate images with PocketPaw using Google Gemini models. Describe what you want and receive AI-generated images directly in your chat. Requires a Google API key and the image optional extra."
 section: Tools
 ogType: article
 keywords: ["image generation", "google gemini", "ai art", "text to image", "generative ai"]
 tags: ["tools", "media"]
 ---
 
-# Image Generation
+# Image Generation: AI Art with Gemini Models
 
 PocketPaw can generate images using Google's Gemini models via the `google-genai` SDK.
 
@@ -26,7 +26,7 @@ export POCKETPAW_GOOGLE_API_KEY="your-google-api-key"
 
 | Setting | Env Variable | Default | Description |
 |---------|-------------|---------|-------------|
-| API key | `POCKETPAW_GOOGLE_API_KEY` | — | Google AI API key |
+| API key | `POCKETPAW_GOOGLE_API_KEY` | - | Google AI API key |
 | Model | `POCKETPAW_IMAGE_MODEL` | `gemini-2.0-flash` | Model to use for generation |
 
 ## Usage
@@ -77,3 +77,17 @@ pip install pocketpaw[image]
 ```
 
 This installs `google-genai` as an optional dependency.
+
+## Related
+
+<CardGroup>
+  <Card title="OCR Tool" icon="lucide:scan" href="/tools/ocr">
+    Extract text from images using GPT-4o Vision or pytesseract.
+  </Card>
+  <Card title="Voice & TTS" icon="lucide:volume-2" href="/tools/voice-tts">
+    Convert text to speech with OpenAI TTS or ElevenLabs.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>
