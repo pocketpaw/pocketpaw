@@ -174,7 +174,19 @@ Examples:
     )
 
     args = parser.parse_args()
+    # Prevent mixing Telegram mode with other channel flags
+channel_flags = [
+    args.discord,
+    args.slack,
+    args.whatsapp,
+    args.signal,
+    args.matrix,
+    args.teams,
+    args.gchat,
+]
 
+if args.telegram and any(channel_flags):
+    parser.error("--telegram cannot be combined with other channel flags")
     # Fail fast if optional deps are missing for the chosen mode
     _check_extras_installed(args)
 
