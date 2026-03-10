@@ -103,6 +103,51 @@ pub fn check_backend_running(port: u16) -> Result<bool, String> {
     }
 }
 
+/// Check if the backend on the given port is actually PocketPaw by hitting /api/v1/version.
+/// Done from Rust to avoid CORS/mixed-content issues in the Tauri webview.
+#[tauri::command]
+pub fn check_pocketpaw_version(port: u16) -> Result<Option<String>, String> {
+    let url = format!("http://127.0.0.1:{}/api/v1/version", port);
+    let client = std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", port)
+            .parse()
+            .map_err(|e| format!("{}", e))?,
+        Duration::from_secs(2),
+    );
+    if client.is_err() {
+        return Ok(None);
+    }
+
+    // Use a simple blocking HTTP GET
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build(),
+    );
+    match agent.get(&url).call() {
+        Ok(response) => {
+            let body: String = response
+                .into_body()
+                .read_to_string()
+                .unwrap_or_default();
+            // Parse JSON to extract "version" field
+            if let Some(start) = body.find("\"version\"") {
+                if let Some(colon) = body[start..].find(':') {
+                    let after_colon = &body[start + colon + 1..];
+                    let trimmed = after_colon.trim_start();
+                    if trimmed.starts_with('"') {
+                        if let Some(end) = trimmed[1..].find('"') {
+                            return Ok(Some(trimmed[1..1 + end].to_string()));
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 #[derive(Serialize, Clone)]
 pub struct InstallStatus {
     pub installed: bool,
@@ -221,6 +266,9 @@ pub async fn install_pocketpaw(app: AppHandle, profile: String) -> Result<bool, 
     //
     // Flow: download installer.py to temp dir, run with --non-interactive --profile.
     let child = if cfg!(windows) {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
         // Single PowerShell command: download installer.py then run it non-interactively.
         let ps_cmd = format!(
             "$tmp = Join-Path $env:TEMP 'pocketpaw_installer.py'; \
@@ -240,6 +288,7 @@ pub async fn install_pocketpaw(app: AppHandle, profile: String) -> Result<bool, 
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
     } else {
         _cmd("sh")
@@ -258,7 +307,7 @@ pub async fn install_pocketpaw(app: AppHandle, profile: String) -> Result<bool, 
     let reader = BufReader::new(stdout);
 
     // Strip ANSI escape sequences from installer output
-    let ansi_re = Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[^[\]].?")
+    let ansi_re = Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[^\[\]].?")
         .unwrap();
 
     for line in reader.lines() {
@@ -304,20 +353,25 @@ pub async fn install_pocketpaw(app: AppHandle, profile: String) -> Result<bool, 
 }
 
 /// Spawn backend process — platform-specific to handle Windows console hiding.
+/// Uses CREATE_NO_WINDOW to suppress console + CREATE_NEW_PROCESS_GROUP so the
+/// backend survives if the Tauri app exits. DETACHED_PROCESS is avoided because
+/// it conflicts with CREATE_NO_WINDOW and can spawn a visible console for child processes.
 #[cfg(windows)]
 fn _spawn_backend(port_str: &str) -> std::io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 
     let path = _augmented_path();
+    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
 
     Command::new("pocketpaw")
         .args(["serve", "--port", port_str])
         .env("PATH", &path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .stdin(Stdio::null())
+        .creation_flags(flags)
         .spawn()
         .or_else(|_| {
             Command::new("uv")
@@ -325,7 +379,8 @@ fn _spawn_backend(port_str: &str) -> std::io::Result<std::process::Child> {
                 .env("PATH", &path)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+                .stdin(Stdio::null())
+                .creation_flags(flags)
                 .spawn()
         })
 }

@@ -160,16 +160,9 @@
       const running = await invoke<boolean>("check_backend_running", { port: 8888 });
 
       if (running) {
-        // Verify it's actually PocketPaw on this port
-        try {
-          const resp = await fetch("http://localhost:8888/api/v1/version");
-          const data = await resp.json();
-          if (!data?.version) {
-            authState = "error";
-            authError = "Port 8888 is in use by another service, not PocketPaw. Please free this port and restart.";
-            return;
-          }
-        } catch {
+        // Verify it's actually PocketPaw on this port (done via Rust IPC to avoid CORS issues)
+        const version = await invoke<string | null>("check_pocketpaw_version", { port: 8888 });
+        if (!version) {
           authState = "error";
           authError = "Port 8888 is in use by another service, not PocketPaw. Please free this port and restart.";
           return;
@@ -191,21 +184,7 @@
         return; // SetupBackend component takes over
       }
 
-      // TCP is open, but validate the API is actually responding
-      try {
-        const healthRes = await fetch("http://localhost:8888/api/v1/health", {
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!healthRes.ok) {
-          // API exists but returned an error, treat as "starting up"
-          authState = "backend_stopped";
-          return;
-        }
-      } catch {
-        // Port is open but API isn't responding (wrong process or still starting)
-        authState = "backend_stopped";
-        return;
-      }
+      // TCP is open and version check passed — backend is confirmed running
     } catch {
       // If Tauri commands fail, fall through to normal auth
     }

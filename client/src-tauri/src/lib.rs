@@ -67,6 +67,7 @@ pub fn run() {
             commands::read_access_token,
             commands::get_pocketpaw_config_dir,
             commands::check_backend_running,
+            commands::check_pocketpaw_version,
             commands::check_pocketpaw_installed,
             commands::install_pocketpaw,
             commands::start_pocketpaw_backend,
