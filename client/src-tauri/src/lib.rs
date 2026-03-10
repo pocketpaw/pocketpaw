@@ -75,6 +75,8 @@ pub fn run() {
             oauth::read_oauth_tokens,
             oauth::save_oauth_tokens,
             oauth::clear_oauth_tokens,
+            oauth::proxy_post,
+            oauth::proxy_get,
             fs_commands::fs_read_dir,
             fs_commands::fs_read_file_text,
             fs_commands::fs_write_file,

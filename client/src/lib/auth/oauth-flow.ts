@@ -63,7 +63,7 @@ export async function startOAuthFlow(): Promise<OAuthResult> {
       settle({ success: false, error: "Sign-in timed out. Please try again." });
     }, FLOW_TIMEOUT_MS);
 
-    // Listen for the redirect URL from the Rust localhost server
+    // Register the event listener BEFORE opening the browser to avoid race conditions
     listen<string>("oauth-redirect", async (event) => {
       if (settled) return;
 
@@ -93,13 +93,15 @@ export async function startOAuthFlow(): Promise<OAuthResult> {
       } catch (err) {
         settle({ success: false, error: `Token exchange failed: ${err}` });
       }
-    }).then((unlisten) => {
+    }).then(async (unlisten) => {
       unlistenRedirect = unlisten;
-    });
 
-    // Open the OAuth URL in the system browser
-    openUrl(authorizeUrl.toString()).catch((err) => {
-      settle({ success: false, error: `Failed to open browser: ${err}` });
+      // Only open the browser AFTER the listener is registered
+      try {
+        await openUrl(authorizeUrl.toString());
+      } catch (err) {
+        settle({ success: false, error: `Failed to open browser: ${err}` });
+      }
     });
   });
 }
@@ -109,24 +111,36 @@ async function exchangeCodeForTokens(
   codeVerifier: string,
   redirectUri: string,
 ): Promise<OAuthTokens> {
-  const res = await fetch(`${API_BASE}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "authorization_code",
-      code,
-      code_verifier: codeVerifier,
-      client_id: CLIENT_ID,
-      redirect_uri: redirectUri,
-    }),
+  const url = `${API_BASE}/oauth/token`;
+  const payload = JSON.stringify({
+    grant_type: "authorization_code",
+    code,
+    code_verifier: codeVerifier,
+    client_id: CLIENT_ID,
+    redirect_uri: redirectUri,
   });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${text}`);
+  let responseText: string;
+
+  // Use Rust IPC proxy to avoid CORS/mixed-content issues in built Tauri app
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    responseText = await invoke<string>("proxy_post", { url, body: payload });
+  } catch {
+    // Fallback to fetch (works in dev mode)
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    responseText = await res.text();
   }
 
-  const data = await res.json();
+  const data = JSON.parse(responseText);
 
   return {
     access_token: data.access_token,
@@ -138,13 +152,22 @@ async function exchangeCodeForTokens(
 
 export async function revokeTokens(accessToken: string): Promise<void> {
   try {
-    await fetch(`${API_BASE}/oauth/revoke`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("proxy_post", {
+      url: `${API_BASE}/oauth/revoke`,
       body: JSON.stringify({ token: accessToken }),
     });
   } catch {
-    // Best-effort revocation
+    // Best-effort revocation, try fetch as fallback
+    try {
+      await fetch(`${API_BASE}/oauth/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: accessToken }),
+      });
+    } catch {
+      // Ignore
+    }
   }
   await clearTokens();
 }

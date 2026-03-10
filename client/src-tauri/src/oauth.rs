@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 #[cfg(desktop)]
 use std::net::TcpListener;
+use std::time::Duration;
 #[cfg(desktop)]
 use tauri::{AppHandle, Emitter};
 
@@ -115,4 +116,44 @@ pub fn start_oauth_server(app: AppHandle) -> Result<u16, String> {
     });
 
     Ok(port)
+}
+
+/// Proxy an HTTP POST to the backend, bypassing CORS/mixed-content restrictions
+/// in the Tauri webview. Returns the response body as a string.
+#[tauri::command]
+pub fn proxy_post(url: String, body: String) -> Result<String, String> {
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build(),
+    );
+    let response = agent
+        .post(&url)
+        .content_type("application/json")
+        .send(body.as_bytes())
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    response
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("Failed to read response: {}", e))
+}
+
+/// Proxy an HTTP GET to the backend, bypassing CORS/mixed-content restrictions.
+#[tauri::command]
+pub fn proxy_get(url: String) -> Result<String, String> {
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build(),
+    );
+    let response = agent
+        .get(&url)
+        .call()
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    response
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("Failed to read response: {}", e))
 }
