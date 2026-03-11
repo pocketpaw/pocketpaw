@@ -8,7 +8,7 @@
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -570,42 +570,44 @@ class TestCheckVersionUpdate:
     """Tests for check_version_update health check."""
 
     _P_GET_VERSION = "importlib.metadata.version"
-    _P_UPDATE_CHECK = "pocketpaw.update_check.check_for_updates"
+    _P_UPDATE_CHECK = "pocketpaw.update_check.check_for_updates_async"
 
-    def test_returns_ok_when_current(self, tmp_path):
+    async def test_returns_ok_when_current(self, tmp_path):
         """No update available returns ok status."""
         update_info = {"current": "0.4.2", "latest": "0.4.2", "update_available": False}
         with (
             patch(self._P_GET_VERSION, return_value="0.4.2"),
             patch(_P_CONFIG_DIR, return_value=tmp_path),
-            patch(self._P_UPDATE_CHECK, return_value=update_info),
+            patch(self._P_UPDATE_CHECK, new_callable=AsyncMock, return_value=update_info),
         ):
-            result = check_version_update()
+            result = await check_version_update()
         assert result.status == "ok"
         assert result.check_id == "version_update"
         assert "latest" in result.message
+        assert result.check_id == "version_update"
+        assert "latest" in result.message
 
-    def test_returns_warning_when_update_available(self, tmp_path):
+    async def test_returns_warning_when_update_available(self, tmp_path):
         """Update available returns warning status with upgrade hint."""
         update_info = {"current": "0.4.1", "latest": "0.4.2", "update_available": True}
         with (
             patch(self._P_GET_VERSION, return_value="0.4.1"),
             patch(_P_CONFIG_DIR, return_value=tmp_path),
-            patch(self._P_UPDATE_CHECK, return_value=update_info),
+            patch(self._P_UPDATE_CHECK, new_callable=AsyncMock, return_value=update_info),
         ):
-            result = check_version_update()
+            result = await check_version_update()
         assert result.status == "warning"
         assert "0.4.2" in result.message
         assert "pip install --upgrade pocketpaw" in result.fix_hint
 
-    def test_returns_ok_on_check_failure(self, tmp_path):
+    async def test_returns_ok_on_check_failure(self, tmp_path):
         """When update check fails (None), returns ok (no false alarm)."""
         with (
             patch(self._P_GET_VERSION, return_value="0.4.2"),
             patch(_P_CONFIG_DIR, return_value=tmp_path),
-            patch(self._P_UPDATE_CHECK, return_value=None),
+            patch(self._P_UPDATE_CHECK, new_callable=AsyncMock, return_value=None),
         ):
-            result = check_version_update()
+            result = await check_version_update()
         assert result.status == "ok"
         assert "unavailable" in result.message
 
@@ -629,11 +631,11 @@ class TestCheckGwsBinary:
 class TestCheckRegistries:
     def test_startup_checks_count(self):
         assert (
-            len(STARTUP_CHECKS) == 11
-        )  # 10 original + version_update (gws_binary moved to INTEGRATION_CHECKS)
+            len(STARTUP_CHECKS) == 10
+        )  # 10 original (version_update moved to CONNECTIVITY_CHECKS)
 
     def test_connectivity_checks_count(self):
-        assert len(CONNECTIVITY_CHECKS) == 1
+        assert len(CONNECTIVITY_CHECKS) == 2
 
     def test_integration_checks_count(self):
         assert len(INTEGRATION_CHECKS) == 1
@@ -685,8 +687,8 @@ class TestHealthEngine:
         ):
             results = engine.run_startup_checks()
             assert (
-                len(results) == 11
-            )  # 10 original + version_update (gws_binary moved to INTEGRATION_CHECKS)
+                len(results) == 10
+            )  # 10 original (version_update moved to CONNECTIVITY_CHECKS)
             # All should be ok with valid config + key
             statuses = {r.status for r in results}
             assert "critical" not in statuses
@@ -842,6 +844,7 @@ class TestHealthEngine:
         check_ids = [r.check_id for r in engine.results]
         assert "a" in check_ids
         assert "llm_reachable" in check_ids
+        assert "version_update" in check_ids
 
     @pytest.mark.asyncio
     async def test_run_all_checks(self, engine, tmp_path):

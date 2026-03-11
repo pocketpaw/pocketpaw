@@ -791,17 +791,17 @@ async def check_llm_reachable() -> HealthCheckResult:
 # =============================================================================
 
 
-def check_version_update() -> HealthCheckResult:
+async def check_version_update() -> HealthCheckResult:
     """Check if a newer version of PocketPaw is available on PyPI."""
     try:
         from importlib.metadata import version as get_version
 
         from pocketpaw.config import get_config_dir
-        from pocketpaw.update_check import check_for_updates
+        from pocketpaw.update_check import check_for_updates_async
 
         current = get_version("pocketpaw")
         config_dir = get_config_dir()
-        info = check_for_updates(current, config_dir)
+        info = await check_for_updates_async(current, config_dir)
 
         if info is None:
             return HealthCheckResult(
@@ -890,7 +890,6 @@ STARTUP_CHECKS = [
     check_disk_space,
     check_audit_log_writable,
     check_memory_dir_accessible,
-    check_version_update,
 ]
 
 # Optional integration checks (only useful when specific presets are enabled)
@@ -901,4 +900,5 @@ INTEGRATION_CHECKS = [
 # Async checks (run in background, may be slow)
 CONNECTIVITY_CHECKS = [
     check_llm_reachable,
+    check_version_update,
 ]
