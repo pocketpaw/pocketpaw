@@ -582,7 +582,7 @@
         x-show="installPrompt"
         x-transition.opacity
         class="absolute inset-0 z-10 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-[20px]"
-        @click.self="cancelInstall()"
+        @click.self="cancelInstallPrompt()"
     >
         <div class="w-full max-w-[340px] mx-4 bg-[#2a2a2e] border border-[var(--glass-border)] rounded-[16px] shadow-2xl p-5 flex flex-col gap-4" @click.stop>
             <!-- Icon + message -->
@@ -607,7 +607,7 @@
             <div x-show="!installLoading" class="flex gap-2">
                 <button
                     class="flex-1 py-2.5 rounded-[10px] text-[13px] font-medium border border-[var(--glass-border)] text-white/70 hover:text-white hover:bg-white/10 transition-all active:scale-95"
-                    @click="cancelInstall()"
+                    @click="cancelInstallPrompt()"
                 >Cancel</button>
                 <button
                     class="flex-1 py-2.5 rounded-[10px] text-[13px] font-semibold bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white transition-all active:scale-95 flex items-center justify-center gap-1.5"
