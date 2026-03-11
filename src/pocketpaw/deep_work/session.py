@@ -456,16 +456,22 @@ class DeepWorkSession:
             project_id: ID of the project to cancel.
 
         Returns:
-            The updated Project (status=CANCELLED).
+            The updated Project (status=CANCELLED), or the project unchanged
+            if it was already in a terminal state (COMPLETED or CANCELLED).
 
         Raises:
-            ValueError: If project not found or already completed/cancelled.
+            ValueError: If project not found.
         """
         project = await self.manager.get_project(project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
         if project.status in (ProjectStatus.COMPLETED, ProjectStatus.CANCELLED):
-            raise ValueError(f"Cannot cancel project with status '{project.status.value}'")
+            logger.warning(
+                "Cancel requested for project %s with terminal status '%s', returning as-is",
+                project_id,
+                project.status.value,
+            )
+            return project
 
         # Stop all running tasks
         await self.executor.stop_all_project_tasks(project_id)

@@ -95,6 +95,27 @@ class TestDateOfBirthDetection:
 # ---------------------------------------------------------------------------
 # Safe content
 # ---------------------------------------------------------------------------
+class TestPhoneIPOverlap:
+    """Ensure PHONE patterns don't false-positive on IP addresses or dates."""
+
+    def test_ip_address_not_detected_as_phone(self, scanner):
+        """An IPv4 address like 192.168.1.100 should be flagged as IP_ADDRESS, not PHONE."""
+        result = scanner.scan("Server at 192.168.1.100")
+        assert PIIType.IP_ADDRESS in result.pii_types_found
+        assert PIIType.PHONE not in result.pii_types_found
+
+    def test_date_not_detected_as_phone(self, scanner):
+        """A date like 03/15/1990 should not be detected as a phone number."""
+        result = scanner.scan("The report was filed on 03/15/1990")
+        assert PIIType.PHONE not in result.pii_types_found
+
+    def test_phone_not_detected_as_ip(self, scanner):
+        """A US phone number should not be flagged as IP_ADDRESS."""
+        result = scanner.scan("Call me at (555) 123-4567")
+        assert PIIType.PHONE in result.pii_types_found
+        assert PIIType.IP_ADDRESS not in result.pii_types_found
+
+
 class TestSafeContent:
     def test_normal_message(self, scanner):
         result = scanner.scan("How do I sort a list in Python?")

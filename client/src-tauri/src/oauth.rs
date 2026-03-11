@@ -38,7 +38,19 @@ pub fn save_oauth_tokens(tokens: OAuthTokens) -> Result<(), String> {
     }
     let data =
         serde_json::to_string_pretty(&tokens).map_err(|e| format!("Failed to serialize: {}", e))?;
-    fs::write(&path, data).map_err(|e| format!("Failed to write tokens: {}", e))
+    fs::write(&path, data).map_err(|e| format!("Failed to write tokens: {}", e))?;
+
+    // Restrict file permissions to owner-only (0600) on Unix so other users
+    // on the system cannot read the plaintext OAuth tokens.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, perms)
+            .map_err(|e| format!("Failed to set token file permissions: {}", e))?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -65,33 +77,42 @@ pub fn start_oauth_server(app: AppHandle) -> Result<u16, String> {
         .port();
 
     std::thread::spawn(move || {
-        // Accept one connection (with a 5-minute timeout)
-        listener
-            .set_nonblocking(false)
-            .ok();
-        // Set a timeout so the thread doesn't hang forever
-        use std::time::Duration;
-        let _ = listener.set_nonblocking(false);
-        // Use SO_RCVTIMEO via into_incoming or just accept with a reasonable approach
-        // We'll just accept blocking — the thread will be cleaned up when the app exits
+        // Use non-blocking mode with a poll loop so the thread exits after a
+        // timeout instead of blocking forever. This prevents thread leaks when
+        // the user cancels the OAuth flow and reopens the dialog.
+        let _ = listener.set_nonblocking(true);
+        let deadline = std::time::Instant::now() + Duration::from_secs(300); // 5 minutes
 
-        if let Ok((stream, _)) = listener.accept() {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            if reader.read_line(&mut request_line).is_ok() {
-                // Parse: "GET /path?query HTTP/1.1"
-                let parts: Vec<&str> = request_line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let path = parts[1]; // e.g. "/?code=abc&state=xyz" or "/oauth-callback?..."
-                    let redirect_url = format!("http://localhost:{}{}", port, path);
-
-                    // Emit the redirect URL to the frontend
-                    let _ = app.emit("oauth-redirect", redirect_url);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return; // timed out, exit the thread cleanly
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
                 }
+                Err(_) => return, // unexpected error, exit the thread
+            }
+        };
 
-                // Send back a simple HTML response
-                let body = r#"<!DOCTYPE html>
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+        let mut reader = BufReader::new(&stream);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_ok() {
+            // Parse: "GET /path?query HTTP/1.1"
+            let parts: Vec<&str> = request_line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let path = parts[1]; // e.g. "/?code=abc&state=xyz" or "/oauth-callback?..."
+                let redirect_url = format!("http://localhost:{}{}", port, path);
+
+                // Emit the redirect URL to the frontend
+                let _ = app.emit("oauth-redirect", redirect_url);
+            }
+
+            // Send back a simple HTML response
+            let body = r#"<!DOCTYPE html>
 <html>
 <head><title>PocketPaw</title></head>
 <body style="font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f9fafb;color:#374151;">
@@ -102,16 +123,15 @@ pub fn start_oauth_server(app: AppHandle) -> Result<u16, String> {
 </body>
 </html>"#;
 
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
 
-                let mut writer = stream;
-                let _ = writer.write_all(response.as_bytes());
-                let _ = writer.flush();
-            }
+            let mut writer = stream;
+            let _ = writer.write_all(response.as_bytes());
+            let _ = writer.flush();
         }
     });
 
@@ -119,16 +139,26 @@ pub fn start_oauth_server(app: AppHandle) -> Result<u16, String> {
 }
 
 /// Validate that a proxy URL targets localhost only (prevents SSRF).
-fn validate_proxy_url(url: &str) -> Result<(), String> {
-    // Only allow requests to 127.0.0.1 or localhost
-    let lower = url.to_lowercase();
-    if lower.starts_with("http://127.0.0.1") || lower.starts_with("http://localhost") {
-        Ok(())
-    } else {
-        Err(format!(
-            "Proxy only allows requests to localhost, got: {}",
-            url
-        ))
+/// Uses proper URL parsing to ensure the host is exactly localhost or 127.0.0.1,
+/// preventing bypasses like `http://localhost.attacker.com`.
+fn validate_proxy_url(input: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(input)
+        .map_err(|e| format!("Invalid URL '{}': {}", input, e))?;
+
+    if parsed.scheme() != "http" {
+        return Err(format!(
+            "Proxy only allows http scheme, got: {}",
+            parsed.scheme()
+        ));
+    }
+
+    match parsed.host_str() {
+        Some("127.0.0.1") | Some("localhost") => Ok(()),
+        Some(host) => Err(format!(
+            "Proxy only allows requests to localhost/127.0.0.1, got host: {}",
+            host
+        )),
+        None => Err("URL has no host".to_string()),
     }
 }
 

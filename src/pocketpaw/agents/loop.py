@@ -465,10 +465,11 @@ class AgentLoop:
             # a full re-injection (which would waste context window).
             if len(history) >= _IDENTITY_REINFORCE_THRESHOLD:
                 system_prompt += (
-                    "\n\n# Identity Reminder\n"
+                    "\n\n<identity-reminder>\n"
                     "Regardless of conversation length, you remain the agent described in the "
                     "<identity> block above. Maintain your defined personality, tone, and "
-                    "communication style consistently throughout this conversation."
+                    "communication style consistently throughout this conversation.\n"
+                    "</identity-reminder>"
                 )
 
             # 2c. Emit thinking event

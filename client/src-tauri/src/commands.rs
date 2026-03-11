@@ -1,4 +1,6 @@
 // Tauri IPC commands for the PocketPaw desktop client.
+// Updated: 2026-03-11 — Fix cross-platform compile: use #[cfg(windows)] instead
+//   of cfg!(windows) for Windows-only process creation flags in install_pocketpaw.
 // Updated: 2026-03-09 — Fix PATH detection for macOS GUI apps: augment PATH
 //   with common bin dirs (~/.local/bin, /opt/homebrew/bin, etc.) since Tauri
 //   apps don't inherit shell PATH. Smarter install detection: check config dir,
@@ -255,6 +257,54 @@ pub struct InstallProgress {
     pub success: bool,
 }
 
+/// Spawn the installer process (Windows variant).
+#[cfg(windows)]
+fn _spawn_installer(profile: &str) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let ps_cmd = format!(
+        "$tmp = Join-Path $env:TEMP 'pocketpaw_installer.py'; \
+         Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py' \
+           -OutFile $tmp -UseBasicParsing; \
+         python $tmp --non-interactive --profile {} --uv-available --no-launch; \
+         Remove-Item $tmp -ErrorAction SilentlyContinue",
+        profile
+    );
+    Command::new("powershell")
+        .args([
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &ps_cmd,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+}
+
+/// Spawn the installer process (Unix variant).
+/// Downloads installer.py to a temp file and runs it non-interactively,
+/// matching the Windows approach. The shell wrapper (install.sh) expects
+/// a TTY which isn't available when spawned from Tauri with piped I/O.
+#[cfg(not(windows))]
+fn _spawn_installer(profile: &str) -> std::io::Result<std::process::Child> {
+    let cmd = format!(
+        "tmp=$(mktemp /tmp/pocketpaw_installer.XXXXXX.py) && \
+         curl -fsSL https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py -o \"$tmp\" && \
+         python3 \"$tmp\" --non-interactive --profile {} --no-launch; \
+         rm -f \"$tmp\"",
+        profile
+    );
+    _cmd("sh")
+        .args(["-c", &cmd])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
 /// Install PocketPaw by spawning a non-interactive installer process.
 /// Streams stdout line-by-line via "install-progress" events.
 #[tauri::command]
@@ -270,41 +320,7 @@ pub async fn install_pocketpaw(app: AppHandle, profile: String) -> Result<bool, 
     // available when spawned headless from Tauri with piped stdout/stderr.
     //
     // Flow: download installer.py to temp dir, run with --non-interactive --profile.
-    let child = if cfg!(windows) {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        // Single PowerShell command: download installer.py then run it non-interactively.
-        let ps_cmd = format!(
-            "$tmp = Join-Path $env:TEMP 'pocketpaw_installer.py'; \
-             Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/pocketpaw/pocketpaw/main/installer/installer.py' \
-               -OutFile $tmp -UseBasicParsing; \
-             python $tmp --non-interactive --profile {} --uv-available --no-launch; \
-             Remove-Item $tmp -ErrorAction SilentlyContinue",
-            profile
-        );
-        Command::new("powershell")
-            .args([
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &ps_cmd,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-    } else {
-        _cmd("sh")
-            .args([
-                "-c",
-                "curl -fsSL https://pocketpaw.xyz/install.sh | sh",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-    };
+    let child = _spawn_installer(&profile);
 
     let mut child = child.map_err(|e| format!("Failed to spawn installer: {}", e))?;
 

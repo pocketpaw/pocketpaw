@@ -17,9 +17,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.AppImage"><img src="https://img.shields.io/badge/Linux-Download_.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.AppImage"><img src="https://img.shields.io/badge/Linux-Download_.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
 </p>
 
 <p align="center">
@@ -43,9 +43,11 @@ Download the native desktop app. It bundles the backend installer and provides a
 
 | Platform | Download |
 | --- | --- |
-| **Windows** | [PocketPaw-Setup.exe](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe) |
-| **macOS** | [PocketPaw.dmg](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.dmg) |
-| **Linux** | [PocketPaw.AppImage](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw.AppImage) |
+| **Windows** | [PocketPaw_0.1.2_x64-setup.exe](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64-setup.exe) |
+| **macOS (Apple Silicon)** | [PocketPaw_0.1.2_aarch64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_aarch64.dmg) |
+| **macOS (Intel)** | [PocketPaw_0.1.2_x64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64.dmg) |
+| **Linux (.deb)** | [PocketPaw_0.1.2_amd64.deb](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.deb) |
+| **Linux (.AppImage)** | [PocketPaw_0.1.2_amd64.AppImage](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.AppImage) |
 
 ### Install via Terminal
 

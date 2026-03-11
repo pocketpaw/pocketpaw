@@ -8,6 +8,7 @@ Modified: 2026-03-10 - admin gate on /info, setname sanitization,
 import asyncio
 import logging
 import time
+from collections import deque
 from typing import Any
 
 from pocketpaw.bus import BaseChannelAdapter, Channel, InboundMessage, OutboundMessage
@@ -20,6 +21,7 @@ _CONVERSATION_CHAR_BUDGET = 12_000  # Max total chars in conversation context se
 _NO_RESPONSE_MARKER = "[NO_RESPONSE]"
 _BOT_AUTHOR_KEY = "__bot__"
 _MAX_BOT_NAME_LENGTH = 64
+_IDLE_CHANNEL_TTL = 3600  # Evict conversation history for channels idle > 1 hour
 
 # Valid activity types for the /setstatus command
 _ACTIVITY_TYPES = {"playing", "watching", "listening", "competing"}
@@ -57,8 +59,10 @@ class DiscordAdapter(BaseChannelAdapter):
         self._buffers: dict[str, dict[str, Any]] = {}
         self._pending_interactions: dict[str, Any] = {}  # chat_id -> interaction
         self._start_time: float = 0.0
-        # Rolling message history for conversation channels
-        self._conversation_history: dict[int, list[dict[str, str]]] = {}
+        # Rolling message history for conversation channels (bounded per channel)
+        self._conversation_history: dict[int, deque[dict[str, str]]] = {}
+        self._conversation_last_active: dict[int, float] = {}
+        self._eviction_task: asyncio.Task | None = None
 
     @property
     def channel(self) -> Channel:
@@ -109,13 +113,32 @@ class DiscordAdapter(BaseChannelAdapter):
     def _add_to_conversation_history(self, channel_id: int, author: str, content: str) -> None:
         """Append a message to the rolling conversation history."""
         if channel_id not in self._conversation_history:
-            self._conversation_history[channel_id] = []
+            self._conversation_history[channel_id] = deque(maxlen=_CONVERSATION_HISTORY_SIZE)
         self._conversation_history[channel_id].append({"author": author, "content": content})
-        # Trim to rolling window
-        if len(self._conversation_history[channel_id]) > _CONVERSATION_HISTORY_SIZE:
-            self._conversation_history[channel_id] = self._conversation_history[channel_id][
-                -_CONVERSATION_HISTORY_SIZE:
-            ]
+        self._conversation_last_active[channel_id] = time.monotonic()
+
+    def _evict_idle_channels(self) -> None:
+        """Remove conversation history for channels idle longer than the TTL."""
+        now = time.monotonic()
+        stale = [
+            cid
+            for cid, last in self._conversation_last_active.items()
+            if now - last > _IDLE_CHANNEL_TTL
+        ]
+        for cid in stale:
+            self._conversation_history.pop(cid, None)
+            self._conversation_last_active.pop(cid, None)
+        if stale:
+            logger.debug("Evicted conversation history for %d idle channel(s)", len(stale))
+
+    async def _eviction_loop(self) -> None:
+        """Periodically evict idle channel histories."""
+        try:
+            while True:
+                await asyncio.sleep(_IDLE_CHANNEL_TTL // 2 or 300)
+                self._evict_idle_channels()
+        except asyncio.CancelledError:
+            pass
 
     def _should_respond(self, channel_id: int, latest: str) -> str | None:
         """Decide if the bot should respond. Returns response mode or None.
@@ -141,13 +164,13 @@ class DiscordAdapter(BaseChannelAdapter):
 
         # Question mark and bot was active in last 6 messages
         if lower.rstrip().endswith("?"):
-            recent = history[-6:]
+            recent = list(history)[-6:]
             for msg in recent:
                 if msg["author"] == _BOT_AUTHOR_KEY:
                     return "engaged"
 
         # Bot active in last 3 messages -> stay in the conversation
-        recent_short = history[-3:]
+        recent_short = list(history)[-3:]
         for msg in recent_short:
             if msg["author"] == _BOT_AUTHOR_KEY:
                 return "engaged"
@@ -161,11 +184,47 @@ class DiscordAdapter(BaseChannelAdapter):
         history = self._conversation_history.get(channel_id, [])
         if not history:
             return ""
+
+        # Scan user-authored messages through the injection scanner to prevent
+        # prompt injection via conversation history. Bot messages are trusted.
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        scanner = None
+        if settings.injection_scan_enabled:
+            from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
+
+            scanner = get_injection_scanner()
+
         # Build lines from most recent, staying within the character budget
-        all_lines = [
-            f"{self.bot_name if m['author'] == _BOT_AUTHOR_KEY else m['author']}: {m['content']}"
-            for m in history
-        ]
+        all_lines: list[str] = []
+        for m in history:
+            author = m["author"]
+            content = m["content"]
+            display_name = self.bot_name if author == _BOT_AUTHOR_KEY else author
+
+            # Scan non-bot messages for injection attempts
+            if scanner is not None and author != _BOT_AUTHOR_KEY:
+                scan_result = scanner.scan(content, source=f"discord-history:{author}")
+                if scan_result.threat_level == ThreatLevel.HIGH:
+                    # Drop high-threat messages from context entirely
+                    logger.warning(
+                        "Dropped HIGH threat message from conversation history "
+                        "(channel=%s, author=%s, patterns=%s)",
+                        channel_id,
+                        author,
+                        scan_result.matched_patterns,
+                    )
+                    continue
+                if scan_result.threat_level != ThreatLevel.NONE:
+                    # Use sanitized content for medium/low threats
+                    content = scan_result.sanitized_content
+
+            all_lines.append(f"{display_name}: {content}")
+
+        if not all_lines:
+            return ""
+
         # Walk backwards, keeping lines that fit the budget
         kept: list[str] = []
         budget = _CONVERSATION_CHAR_BUDGET
@@ -678,6 +737,7 @@ class DiscordAdapter(BaseChannelAdapter):
             if cid in adapter.conversation_channel_ids:
                 adapter.conversation_channel_ids.remove(cid)
                 adapter._conversation_history.pop(cid, None)
+                adapter._conversation_last_active.pop(cid, None)
                 adapter._save_restrictions()
                 await interaction.response.send_message(
                     "Conversation mode **disabled** for this channel. "
@@ -858,10 +918,17 @@ class DiscordAdapter(BaseChannelAdapter):
             self._running = False
             raise RuntimeError("Discord bot closed immediately -- check token and intents")
 
+        self._eviction_task = asyncio.create_task(self._eviction_loop())
         logger.info("Discord Adapter started")
 
     async def _on_stop(self) -> None:
         """Stop Discord bot."""
+        if self._eviction_task and not self._eviction_task.done():
+            self._eviction_task.cancel()
+            try:
+                await self._eviction_task
+            except asyncio.CancelledError:
+                pass
         if self._client and not self._client.is_closed():
             await self._client.close()
         if self._bot_task and not self._bot_task.done():
@@ -870,6 +937,8 @@ class DiscordAdapter(BaseChannelAdapter):
                 await self._bot_task
             except asyncio.CancelledError:
                 pass
+        self._conversation_history.clear()
+        self._conversation_last_active.clear()
         logger.info("Discord Adapter stopped")
 
     def _is_no_response(self, text: str) -> bool:

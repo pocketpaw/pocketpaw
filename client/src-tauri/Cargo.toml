@@ -30,6 +30,7 @@ base64 = "0.22"
 sha2 = "0.10"
 walkdir = "2"
 ureq = "3"
+url = "2"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }

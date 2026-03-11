@@ -411,7 +411,7 @@ async def test_identity_reinforcement_appended_on_long_conversations(
             )
             await loop._process_message(msg)
 
-    assert "Identity Reminder" in captured.get("system_prompt", ""), (
+    assert "identity-reminder" in captured.get("system_prompt", ""), (
         "System prompt should contain identity reinforcement block for long conversations"
     )
 
@@ -475,7 +475,7 @@ async def test_identity_reinforcement_not_appended_on_short_conversations(
             )
             await loop._process_message(msg)
 
-    assert "Identity Reminder" not in captured.get("system_prompt", ""), (
+    assert "identity-reminder" not in captured.get("system_prompt", ""), (
         "System prompt should NOT contain identity reinforcement block for short conversations"
     )
 

@@ -1,5 +1,8 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
+  tool calls (like memory save via Bash) hang on messaging channels (Telegram,
+  Discord, Slack) because there's no terminal to approve permission prompts.
 
 Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides:
 - Built-in tools: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch
@@ -841,12 +844,13 @@ class ClaudeSDKBackend:
             if self._StreamEvent is not None:
                 options_kwargs["include_partial_messages"] = True
 
-            # Permission handling — PocketPaw runs headless (web/chat), so
-            # there is no terminal to show interactive permission prompts.
-            # bypassPermissions auto-approves ALL tool calls (including MCP).
+            # Permission handling — PocketPaw always runs headless (web dashboard,
+            # Telegram, Discord, Slack, etc.) with no terminal for interactive
+            # permission prompts. Without bypassPermissions, tool calls that need
+            # approval (like Bash — used by memory save, web search, etc.) hang
+            # indefinitely on messaging channels.
             # Dangerous Bash commands are still caught by the PreToolUse hook.
-            if self.settings.bypass_permissions:
-                options_kwargs["permission_mode"] = "bypassPermissions"
+            options_kwargs["permission_mode"] = "bypassPermissions"
 
             # Model selection for Anthropic providers:
             # 1. Smart routing (opt-in) — overrides with complexity-based model

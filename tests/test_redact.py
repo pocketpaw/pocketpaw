@@ -13,6 +13,13 @@ class TestRedactOutput:
         assert "sk-abc123def456ghi789jkl012mno345" not in result
         assert "[REDACTED]" in result
 
+    def test_redact_openrouter_key(self):
+        """Test redaction of OpenRouter API keys (sk-or-v1-...)."""
+        text = "OPENROUTER_API_KEY=sk-or-v1-abc123def456"
+        result = redact_output(text)
+        assert "sk-or-v1-abc123def456" not in result
+        assert "[REDACTED]" in result
+
     def test_redact_anthropic_key(self):
         """Test redaction of Anthropic API keys."""
         text = (

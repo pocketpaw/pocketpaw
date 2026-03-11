@@ -1,7 +1,7 @@
-# Updated: 2026-03-08 — Bump version to 0.4.7.
+# Updated: 2026-03-11 — Hotfix 0.4.9: fix tool permissions hanging on messaging channels.
 [project]
 name = "pocketpaw"
-version = "0.4.7"
+version = "0.4.9"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
