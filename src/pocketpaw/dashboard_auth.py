@@ -352,26 +352,22 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
+      # Reject scoped credentials (API keys and OAuth tokens) — they must use
+    # bearer authentication directly. Allowing them here would mint a
+    # master-equivalent session cookie that bypasses require_scope() checks.
+    if submitted.startswith("pp_") or submitted.startswith("ppat_"):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "Scoped credentials (API keys and OAuth tokens) cannot be used "
+                    "for cookie login. Use bearer authentication instead."
+                )
+            },
+        )
+
     is_valid = submitted == master
-    # Accept OAuth2 access tokens (ppat_*)
-    if not is_valid and submitted.startswith("ppat_"):
-        try:
-            from pocketpaw.api.oauth2.server import get_oauth_server
-
-            if get_oauth_server().verify_access_token(submitted) is not None:
-                is_valid = True
-        except Exception:
-            pass
-    # Accept API keys (pp_*)
-    if not is_valid and submitted.startswith("pp_") and not submitted.startswith("ppat_"):
-        try:
-            from pocketpaw.api.api_keys import get_api_key_manager
-
-            if get_api_key_manager().verify(submitted) is not None:
-                is_valid = True
-        except Exception:
-            pass
-
+    
     if not is_valid:
         return JSONResponse(status_code=401, content={"detail": "Invalid access token"})
 
