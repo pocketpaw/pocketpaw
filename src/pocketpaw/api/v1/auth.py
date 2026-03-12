@@ -29,7 +29,9 @@ async def exchange_session_token(request: Request):
 
     auth_header = request.headers.get("Authorization", "")
     bearer = (
-        auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+        auth_header.removeprefix("Bearer ").strip()
+        if auth_header.startswith("Bearer ")
+        else ""
     )
     master = get_access_token()
     if bearer != master:
@@ -47,7 +49,11 @@ async def exchange_session_token(request: Request):
 async def cookie_login(request: Request):
     """Validate access token and set an HTTP-only session cookie.
 
-    Accepts master access token, OAuth2 token (ppat_*), or API key (pp_*).
+    Only accepts the master access token. Scoped credentials (API keys
+    ``pp_*`` and OAuth tokens ``ppat_*``) must use direct bearer
+    authentication and cannot be exchanged for a session cookie, because
+    the session cookie carries master-level privileges and would bypass
+    scope enforcement.
     """
     from pocketpaw.config import Settings, get_access_token
     from pocketpaw.security.session_tokens import create_session_token
@@ -60,33 +66,24 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
-    is_valid = submitted == master
-    # Accept OAuth2 access tokens (ppat_*)
-    if not is_valid and submitted.startswith("ppat_"):
-        try:
-            from pocketpaw.api.oauth2.server import get_oauth_server
+    # Reject scoped credentials (API keys and OAuth tokens) — they must use
+    # bearer authentication directly. Allowing them here would mint a
+    # master-equivalent session cookie that bypasses require_scope() checks.
+    if submitted.startswith("pp_") or submitted.startswith("ppat_"):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Scoped credentials (API keys and OAuth tokens) cannot be used "
+                "for cookie login. Use bearer authentication instead."
+            ),
+        )
 
-            if get_oauth_server().verify_access_token(submitted) is not None:
-                is_valid = True
-        except Exception:
-            pass
-    # Accept API keys (pp_*)
-    if not is_valid and submitted.startswith("pp_") and not submitted.startswith("ppat_"):
-        try:
-            from pocketpaw.api.api_keys import get_api_key_manager
-
-            if get_api_key_manager().verify(submitted) is not None:
-                is_valid = True
-        except Exception:
-            pass
-
-    if not is_valid:
+    if submitted != master:
         raise HTTPException(status_code=401, detail="Invalid access token")
 
     settings = Settings.load()
     session_token = create_session_token(master, ttl_hours=settings.session_token_ttl_hours)
     max_age = settings.session_token_ttl_hours * 3600
-
     response = JSONResponse(content={"ok": True})
     response.set_cookie(
         key="pocketpaw_session",
@@ -117,23 +114,18 @@ async def get_qr_code(request: Request):
     from pocketpaw.tunnel import get_tunnel_manager
 
     host = request.headers.get("host")
-
     tunnel = get_tunnel_manager()
     status = tunnel.get_status()
-
     qr_token = create_session_token(get_access_token(), ttl_hours=1)
-
     if status.get("active") and status.get("url"):
         login_url = f"{status['url']}/?token={qr_token}"
     else:
         protocol = "https" if "trycloudflare" in str(host) else "http"
         login_url = f"{protocol}://{host}/?token={qr_token}"
-
     img = qrcode.make(login_url)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
-
     return StreamingResponse(buf, media_type="image/png")
 
 
