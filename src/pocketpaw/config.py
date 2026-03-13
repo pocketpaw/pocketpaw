@@ -124,23 +124,38 @@ def _warn_old_config() -> None:
         )
 
 
-def get_config_dir() -> Path:
-    """Get the config directory, creating if needed."""
+def get_config_dir(create: bool = True) -> Path:
+    """Get the config directory.
+
+    Args:
+        create: When True, create the directory if needed. Read-only code paths
+            should pass False so importing or loading settings does not mutate
+            the user's home directory.
+    """
     config_dir = Path.home() / ".pocketpaw"
-    config_dir.mkdir(exist_ok=True)
-    _chmod_safe(config_dir, 0o700)
+    if create:
+        config_dir.mkdir(exist_ok=True)
+        _chmod_safe(config_dir, 0o700)
     _warn_old_config()
     return config_dir
 
 
-def get_config_path() -> Path:
+def _resolve_config_dir(*, create: bool) -> Path:
+    """Call ``get_config_dir`` while tolerating older no-arg monkeypatches in tests."""
+    try:
+        return get_config_dir(create=create)
+    except TypeError:
+        return get_config_dir()
+
+
+def get_config_path(create: bool = True) -> Path:
     """Get the config file path."""
-    return get_config_dir() / "config.json"
+    return _resolve_config_dir(create=create) / "config.json"
 
 
-def get_token_path() -> Path:
+def get_token_path(create: bool = True) -> Path:
     """Get the access token file path."""
-    return get_config_dir() / "access_token"
+    return _resolve_config_dir(create=create) / "access_token"
 
 
 # Telegram bot token format: numeric id + colon + alphanumeric secret
@@ -744,7 +759,7 @@ class Settings(BaseSettings):
         # Run one-time migration from plaintext config
         _migrate_plaintext_keys()
 
-        config_path = get_config_path()
+        config_path = get_config_path(create=False)
         data: dict = {}
         if config_path.exists():
             try:
@@ -804,25 +819,22 @@ def regenerate_token() -> str:
     return token
 
 
-# Flag file to avoid re-running migration on every load
-_MIGRATION_DONE_PATH: Path | None = None
-
-
 def _migrate_plaintext_keys() -> None:
-    """One-time migration: move plaintext API keys from config.json to encrypted store."""
+    """Best-effort migration from plaintext config.json to encrypted secrets."""
     from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 
-    global _MIGRATION_DONE_PATH  # noqa: PLW0603
-    if _MIGRATION_DONE_PATH is None:
-        _MIGRATION_DONE_PATH = get_config_dir() / ".secrets_migrated"
-
-    if _MIGRATION_DONE_PATH.exists():
+    migration_done_path = _resolve_config_dir(create=False) / ".secrets_migrated"
+    if migration_done_path.exists():
         return
 
-    config_path = get_config_path()
+    config_path = get_config_path(create=False)
     if not config_path.exists():
         # No config yet — nothing to migrate
-        _MIGRATION_DONE_PATH.write_text("1")
+        try:
+            migration_done_path.write_text("1")
+            _chmod_safe(migration_done_path, 0o600)
+        except OSError:
+            logger.debug("Skipping migration marker write in read-only config dir", exc_info=True)
         return
 
     try:
@@ -830,17 +842,23 @@ def _migrate_plaintext_keys() -> None:
     except (json.JSONDecodeError, Exception):
         return
 
-    store = get_credential_store()
-    migrated_count = 0
-
-    for field in SECRET_FIELDS:
-        value = data.get(field)
-        if value and isinstance(value, str):
-            store.set(field, value)
-            migrated_count += 1
+    try:
+        store = get_credential_store()
+        migrated_count = 0
+        for field in SECRET_FIELDS:
+            value = data.get(field)
+            if value and isinstance(value, str):
+                store.set(field, value)
+                migrated_count += 1
+    except Exception:
+        logger.debug("Skipping plaintext key migration in read-only config dir", exc_info=True)
+        return
 
     if migrated_count:
         logger.info("Copied %d secret(s) from config to encrypted store.", migrated_count)
 
-    _MIGRATION_DONE_PATH.write_text("1")
-    _chmod_safe(_MIGRATION_DONE_PATH, 0o600)
+    try:
+        migration_done_path.write_text("1")
+        _chmod_safe(migration_done_path, 0o600)
+    except OSError:
+        logger.debug("Skipping migration marker write in read-only config dir", exc_info=True)
