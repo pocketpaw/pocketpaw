@@ -212,8 +212,7 @@ class TestConfigSecretSeparation:
         test_store = CredentialStore(config_dir=tmp_path)
 
         original_fn = cfg.get_config_dir
-        cfg.get_config_dir = lambda: tmp_path
-        cfg._MIGRATION_DONE_PATH = None
+        cfg.get_config_dir = lambda *args, **kwargs: tmp_path
 
         # Mark migration as done so it doesn't interfere
         (tmp_path / ".secrets_migrated").write_text("1")
@@ -387,8 +386,7 @@ class TestPlaintextMigration:
         test_store = CredentialStore(config_dir=tmp_path)
 
         original_fn = cfg.get_config_dir
-        cfg.get_config_dir = lambda: tmp_path
-        cfg._MIGRATION_DONE_PATH = None  # Force re-check
+        cfg.get_config_dir = lambda *args, **kwargs: tmp_path
 
         with patch.object(creds, "get_credential_store", return_value=test_store):
             yield {
@@ -450,7 +448,6 @@ class TestPlaintextMigration:
 
     def test_migration_runs_only_once(self, env):
         """If the flag file exists, migration should not re-run."""
-        import pocketpaw.config as cfg
         from pocketpaw.config import Settings
 
         # Write config with plaintext key
@@ -459,7 +456,6 @@ class TestPlaintextMigration:
 
         # Pre-set the flag
         (env["tmp_path"] / ".secrets_migrated").write_text("1")
-        cfg._MIGRATION_DONE_PATH = env["tmp_path"] / ".secrets_migrated"
 
         Settings.load()
 

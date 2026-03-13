@@ -21,7 +21,32 @@ except ImportError:
 # ── Singletons ──────────────────────────────────────────────────────────────
 
 ws_adapter = WebSocketAdapter()
-agent_loop = AgentLoop()
+
+
+class _LazyAgentLoopProxy:
+    """Instantiate the dashboard agent loop only when code actually uses it."""
+
+    def __init__(self):
+        object.__setattr__(self, "_loop", None)
+
+    def _get_loop(self) -> AgentLoop:
+        loop = object.__getattribute__(self, "_loop")
+        if loop is None:
+            loop = AgentLoop()
+            object.__setattr__(self, "_loop", loop)
+        return loop
+
+    def __getattr__(self, name: str):
+        return getattr(self._get_loop(), name)
+
+    def __setattr__(self, name: str, value):
+        if name == "_loop":
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._get_loop(), name, value)
+
+
+agent_loop = _LazyAgentLoopProxy()
 
 # Wire up the agent loop so /kill can cancel in-flight sessions
 _get_cmd_handler().set_agent_loop(agent_loop)
