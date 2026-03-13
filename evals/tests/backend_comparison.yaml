@@ -1,0 +1,12 @@
+- vars:
+    query: "Write a python script to reverse a string."
+  assert:
+    - type: "icontains"
+      value: "def "
+    - type: "icontains"
+      value: "python"
+- vars:
+    query: "How many planets are in the solar system?"
+  assert:
+    - type: "contains"
+      value: "8"

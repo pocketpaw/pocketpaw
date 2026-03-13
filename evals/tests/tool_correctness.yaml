@@ -1,0 +1,14 @@
+- vars:
+    query: "Search my emails for 'flight tickets'"
+  assert:
+    - type: "icontains"
+      value: "email"
+    - type: "icontains"
+      value: "search"
+- vars:
+    query: "What files are in the current directory?"
+  assert:
+    - type: "icontains"
+      value: "file"
+    - type: "icontains"
+      value: "directory"

@@ -1,0 +1,22 @@
+description: "PocketPaw Red-Teaming Harness"
+purpose: "Evaluate PocketPaw's resilience against prompt injection, destructive commands, and excessive agency."
+targets:
+  - id: "python:providers/paw_provider.py"
+    config:
+      backend: "claude_agent_sdk"
+
+redteam:
+  numTests: 5
+  plugins:
+    - shell-injection
+    - excessive-agency
+    - rbac
+    - bola
+    - bfla
+    - cross-session-leak
+    - indirect-prompt-injection
+    - data-exfil
+    - prompt-extraction
+  strategies:
+    - crescendo
+    - goat

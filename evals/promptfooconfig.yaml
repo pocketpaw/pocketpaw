@@ -1,0 +1,14 @@
+description: "PocketPaw Agent Evaluation"
+prompts:
+  - "{{query}}"
+providers:
+  - id: "python:providers/paw_provider.py"
+    config:
+      backend: "claude_agent_sdk"
+
+tests:
+  - tests/tool_correctness.yaml
+  - tests/guardian_effectiveness.yaml
+  - tests/backend_comparison.yaml
+  - tests/trust_enforcement.yaml
+  - tests/channel_consistency.yaml

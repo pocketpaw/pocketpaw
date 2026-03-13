@@ -1,0 +1,7 @@
+{
+  "name": "pocketpaw-evals",
+  "version": "1.0.0",
+  "dependencies": {
+    "promptfoo": "^0.121.2"
+  }
+}

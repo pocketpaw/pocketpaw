@@ -70,3 +70,10 @@ client/build/
 client/src-tauri/target/
 client/src-tauri/gen/
 client/bun.lock
+
+# Evals (Promptfoo)
+evals/node_modules/
+evals/output.json
+evals/promptfoo.app/
+.promptfoo/
+evals/.promptfoo/
