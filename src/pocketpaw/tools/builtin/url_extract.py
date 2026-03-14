@@ -1,7 +1,10 @@
 # URL Extract tool — fetch clean content from URLs via Parallel AI or local fallback.
 # Created: 2026-02-06
 
+import ipaddress
 import logging
+import socket
+from urllib.parse import urlparse
 from typing import Any
 
 import httpx
@@ -10,6 +13,57 @@ from pocketpaw.config import get_settings
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_SCHEMES = {"http", "https"}
+_MAX_REDIRECTS = 5
+
+
+def _is_private_ip(addr: str) -> bool:
+    """Return True if *addr* resolves to a private/reserved IP address."""
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return True  # unparseable → block
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _validate_url(url: str) -> None:
+    """Validate a URL against SSRF attacks.
+
+    Raises ValueError if the URL targets a private/reserved IP, uses a
+    disallowed scheme, or cannot be resolved.
+    """
+    parsed = urlparse(url)
+
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(
+            f"URL scheme '{parsed.scheme}' not allowed (only http/https)"
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL has no hostname")
+
+    # Resolve hostname to IPs and check every result (prevents DNS rebinding
+    # where one A-record is public and another is private).
+    try:
+        addrinfos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve hostname '{hostname}': {exc}") from exc
+
+    for family, _type, _proto, _canonname, sockaddr in addrinfos:
+        ip_str = sockaddr[0]
+        if _is_private_ip(ip_str):
+            raise ValueError(
+                f"URL resolves to private/reserved address ({ip_str})"
+            )
 
 _PARALLEL_EXTRACT_URL = "https://api.parallel.ai/v1beta/extract"
 _MAX_CONTENT_CHARS = 50_000
@@ -128,10 +182,11 @@ class UrlExtractTool(BaseTool):
         converter.body_width = 0
 
         results = []
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        # Disable automatic redirects so we can validate each hop.
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             for url in urls:
                 try:
-                    resp = await client.get(url)
+                    resp = await self._safe_get(client, url)
                     resp.raise_for_status()
 
                     content_type = resp.headers.get("content-type", "")
@@ -162,6 +217,22 @@ class UrlExtractTool(BaseTool):
             return self._error("No content extracted from the provided URLs.")
 
         return self._format_results(results, urls)
+
+    @staticmethod
+    async def _safe_get(client: httpx.AsyncClient, url: str) -> httpx.Response:
+        """GET *url* with SSRF validation, manually following redirects."""
+        for _ in range(_MAX_REDIRECTS):
+            _validate_url(url)
+            resp = await client.get(url)
+            if resp.is_redirect:
+                location = resp.headers.get("location")
+                if not location:
+                    raise ValueError("Redirect with no Location header")
+                # Resolve relative redirects against the current URL.
+                url = str(resp.url.join(location))
+                continue
+            return resp
+        raise ValueError("Too many redirects")
 
     @staticmethod
     def _format_results(results: list[dict], urls: list[str]) -> str:
