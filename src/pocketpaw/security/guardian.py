@@ -118,6 +118,10 @@ Respond with valid JSON only:
                 messages=[{"role": "user", "content": f"Command: {command}"}],
             )
 
+            if not response.content:
+                logger.warning("Guardian returned empty response — defaulting to DANGEROUS")
+                return False, "Empty safety response"
+
             content = response.content[0].text
             import json
 
