@@ -29,8 +29,8 @@ class FetchRequest(BaseModel):
 def is_safe_path(path: Path, jail: Path) -> bool:
     """Check if path is strictly within the jail directory."""
     try:
-        path_resolved = path.resolve(strict=True)
-        jail_resolved = jail.resolve(strict=True)
+        path_resolved = path.resolve()
+        jail_resolved = jail.resolve()
         return path_resolved.is_relative_to(jail_resolved)
     except Exception:
         return False
