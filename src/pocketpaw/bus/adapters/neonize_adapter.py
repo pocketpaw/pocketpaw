@@ -333,3 +333,5 @@ class NeonizeAdapter(BaseChannelAdapter):
         except Exception as e:
             logger.error(f"Neonize send error: {e}")
 
+
+
