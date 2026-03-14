@@ -247,10 +247,17 @@ class NeonizeAdapter(BaseChannelAdapter):
                     )
                     future.result(timeout=5)
 
-                    # Minimal fix for shutdown hang (exactly as reviewer requested)
-                    from neonize.aioze.events import event_global_loop
-                    if event_global_loop.is_running():
-                        event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+                    # Restore: Cancel any pending connection attempt
+                    if self._connect_future:
+                        self._connect_future.cancel()
+
+                    # Minimal fix with try/except (exactly as reviewer requested)
+                    try:
+                        from neonize.aioze.events import event_global_loop
+                        if event_global_loop.is_running():
+                            event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+                    except Exception as e:
+                        logger.debug(f"Failed to stop neonize event loop: {e}")
 
                 else:
                     await self._client.disconnect()
@@ -267,7 +274,6 @@ class NeonizeAdapter(BaseChannelAdapter):
         self._connected = False
         self._qr_data = None
         logger.info("WhatsApp (neonize) Adapter stopped")
-
 
     async def send(self, message: OutboundMessage) -> None:
         """Send message to WhatsApp via neonize.
