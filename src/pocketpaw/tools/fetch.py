@@ -29,10 +29,10 @@ class FetchRequest(BaseModel):
 def is_safe_path(path: Path, jail: Path) -> bool:
     """Check if path is strictly within the jail directory."""
     try:
-        path_resolved = path.resolve()
-        jail_resolved = jail.resolve()
-        return path_resolved.is_relative_to(jail_resolved)
-    except Exception:
+        resolved_path = path.resolve()
+        resolved_jail = jail.resolve()
+        return resolved_path.is_relative_to(resolved_jail)
+    except (ValueError, FileNotFoundError):
         return False
 
 
@@ -69,7 +69,7 @@ def get_directory_keyboard(
             key=lambda x: (not x.is_dir(), x.name.lower()),
         )
 
-        for item in items[:req.limit]:
+        for item in items[: req.limit]:
             if item.is_dir():
                 buttons.append(
                     [InlineKeyboardButton(f"📁 {item.name}/", callback_data=f"fetch:{item}")]
@@ -112,14 +112,14 @@ async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -
 
     if not is_safe_path(path_obj, jail_obj):
         return {
-            "type": "error", 
-            "message": "Access denied: path outside allowed directory or does not exist"
+            "type": "error",
+            "message": "Access denied: path outside allowed directory or does not exist",
         }
 
     if path_obj.is_dir():
         return {
-            "type": "directory", 
-            "keyboard": get_directory_keyboard(path_obj, jail_obj, limit=req.limit)
+            "type": "directory",
+            "keyboard": get_directory_keyboard(path_obj, jail_obj, limit=req.limit),
         }
     elif path_obj.is_file():
         return {"type": "file", "path": path_obj, "filename": path_obj.name}
@@ -149,7 +149,7 @@ def list_directory(path_str: str | Path, jail_str: str | Path, limit: int = 30) 
         visible = [i for i in path_obj.iterdir() if not i.name.startswith(".")]
         items = sorted(visible, key=lambda x: (not x.is_dir(), x.name.lower()))
 
-        for item in items[:req.limit]:
+        for item in items[: req.limit]:
             if item.is_dir():
                 lines.append(f"📁 {item.name}/")
             else:
