@@ -70,8 +70,8 @@ def parse_natural_time(text: str) -> datetime | None:
     text = text.lower().strip()
     now = datetime.now(tz=UTC)
 
-    # Pattern: "in X minutes/hours/days" or "X minutes/hours/days" (in is optional)
-    relative_match = re.search(r"(?:in\s+)?(\d+)\s*(minute|min|hour|hr|day|second|sec)s?\b", text)
+    # Pattern: "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (in is optional)
+    relative_match = re.search(r"(?:in\s+)?(\d+)\s*(week|minute|min|hour|hr|day|second|sec)s?\b", text)
     if relative_match:
         amount = int(relative_match.group(1))
         unit = relative_match.group(2)
@@ -84,6 +84,8 @@ def parse_natural_time(text: str) -> datetime | None:
             return now + timedelta(days=amount)
         elif unit in ("second", "sec"):
             return now + timedelta(seconds=amount)
+        elif unit == "week":
+            return now + timedelta(weeks=amount)
 
     # Pattern: "at HH:MM" or "at H:MM AM/PM"
     at_match = re.search(r"at\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?", text)
