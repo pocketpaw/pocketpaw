@@ -71,7 +71,10 @@ def parse_natural_time(text: str) -> datetime | None:
     now = datetime.now(tz=UTC)
 
     # Pattern: "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (in is optional)
-    relative_match = re.search(r"(?:in\s+)?(\d+)\s*(week|minute|min|hour|hr|day|second|sec)s?\b", text)
+    relative_match = re.search(
+        r"(?:in\s+)?(\d+)\s*(week|minute|min|hour|hr|day|second|sec)s?\b",
+        text,
+    )
     if relative_match:
         amount = int(relative_match.group(1))
         unit = relative_match.group(2)
