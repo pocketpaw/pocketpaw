@@ -463,3 +463,7 @@ MIT &copy; PocketPaw Team
   <br>
   <strong>Built for people who'd rather own their AI than rent it</strong>
 </p>
+## Contribution Welcome
+
+We welcome everyone to contribute! Even small improvements like documentation edits or typo fixes
+help make PocketPaw better for everyone. Your contributions matter.
