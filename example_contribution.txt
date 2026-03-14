@@ -1,0 +1,2 @@
+This is an example file added for the PocketPaw internship.
+It demonstrates a small contribution without touching code files.
