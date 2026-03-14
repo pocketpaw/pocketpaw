@@ -340,6 +340,7 @@ class AgentLoop:
                 )
 
         router = None
+        agent_started = False
         try:
             # 0. Injection scan for non-owner sources
             content = message.content
@@ -472,7 +473,11 @@ class AgentLoop:
                     "</identity-reminder>"
                 )
 
-            # 2c. Emit thinking event
+            # 2c. Emit agent_start + thinking events
+            agent_started = True
+            await self.bus.publish_system(
+                SystemEvent(event_type="agent_start", data={"session_key": session_key})
+            )
             await self.bus.publish_system(
                 SystemEvent(event_type="thinking", data={"session_key": session_key})
             )
@@ -692,6 +697,12 @@ class AgentLoop:
                     self._background_tasks.add(t)
                     t.add_done_callback(self._background_tasks.discard)
 
+            # Signal agent processing complete
+            if agent_started:
+                await self.bus.publish_system(
+                    SystemEvent(event_type="agent_end", data={"session_key": session_key})
+                )
+
         except Exception as e:
             logger.exception(f"❌ Error processing message: {e}")
             # Record to persistent health error log
@@ -733,6 +744,11 @@ class AgentLoop:
                     is_stream_end=True,
                 )
             )
+            # Signal agent processing complete even on error
+            if agent_started:
+                await self.bus.publish_system(
+                    SystemEvent(event_type="agent_end", data={"session_key": session_key})
+                )
 
     async def _send_response(self, original: InboundMessage, content: str) -> None:
         """Helper to send a simple text response."""

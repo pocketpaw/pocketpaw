@@ -355,6 +355,7 @@
                   <option value="ollama">Ollama (Local)</option>
                   <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
+                  <option value="litellm">LiteLLM (100+ Providers)</option>
                 </select>
                 <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
                   <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
@@ -371,6 +372,9 @@
               </small>
               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openai_compatible'">
                 Connect to any Anthropic-compatible endpoint (LiteLLM, vLLM, etc.).
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'litellm'">
+                Route through LiteLLM proxy for HuggingFace, vLLM, Together AI, Groq, and 100+ providers.
               </small>
             </div>
             <!-- Ollama config (inline, shown when provider=ollama) -->
@@ -434,6 +438,39 @@
                 />
               </div>
             </div>
+            <!-- LiteLLM config (inline, shown when provider=litellm) -->
+            <div x-show="settings.claudeSdkProvider === 'litellm'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM Proxy URL</label>
+                <input type="text" x-model="settings.litellmApiBase" @change="saveSettings()"
+                  placeholder="http://localhost:4000"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM API Key</label>
+                <input type="password" x-model="settings.litellmApiKey" @change="saveSettings()"
+                  placeholder="Optional (proxy master key)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.litellmModel" @change="saveSettings()"
+                  placeholder="anthropic/claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Use provider/model format (e.g. huggingface/meta-llama/Llama-3-70b)</small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Output Tokens</label>
+                <input type="number" x-model="settings.litellmMaxTokens" @change="saveSettings()"
+                  min="0" max="1000000" placeholder="0 (provider default)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Set to match your model's limit (e.g. 8192 for DeepSeek). 0 = provider default.</small>
+              </div>
+            </div>
             <!-- Model override (Anthropic) -->
             <div class="flex flex-col gap-1" x-show="settings.claudeSdkProvider === 'anthropic'">
               <label
@@ -490,6 +527,7 @@
                   <option value="ollama">Ollama (Local)</option>
                   <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
+                  <option value="litellm">LiteLLM (100+ Providers)</option>
                 </select>
                 <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
                   <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
@@ -503,6 +541,9 @@
               </small>
               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openai_compatible'">
                 Connect to any OpenAI-compatible endpoint (NVIDIA NIM, vLLM, etc.).
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'litellm'">
+                Route through LiteLLM proxy for HuggingFace, vLLM, Together AI, Groq, and 100+ providers.
               </small>
             </div>
             <!-- Ollama config (inline) -->
@@ -565,6 +606,39 @@
                 />
               </div>
             </div>
+            <!-- LiteLLM config (inline, for openai_agents) -->
+            <div x-show="settings.openaiAgentsProvider === 'litellm'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM Proxy URL</label>
+                <input type="text" x-model="settings.litellmApiBase" @change="saveSettings()"
+                  placeholder="http://localhost:4000"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM API Key</label>
+                <input type="password" x-model="settings.litellmApiKey" @change="saveSettings()"
+                  placeholder="Optional (proxy master key)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.litellmModel" @change="saveSettings()"
+                  placeholder="anthropic/claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Use provider/model format (e.g. huggingface/meta-llama/Llama-3-70b)</small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Output Tokens</label>
+                <input type="number" x-model="settings.litellmMaxTokens" @change="saveSettings()"
+                  min="0" max="1000000" placeholder="0 (provider default)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Set to match your model's limit (e.g. 8192 for DeepSeek). 0 = provider default.</small>
+              </div>
+            </div>
             <!-- Model (for OpenAI provider) -->
             <div class="flex flex-col gap-1" x-show="settings.openaiAgentsProvider === 'openai'">
               <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
@@ -598,6 +672,58 @@
               Requires Google ADK. Install with: <code class="text-[var(--accent-color)]">pip install 'pocketpaw[google-adk]'</code>
             </p>
             <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Provider</label>
+              <div class="relative">
+                <select
+                  x-model="settings.googleAdkProvider"
+                  @change="saveSettings()"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+                  <option value="google">Google (Recommended)</option>
+                  <option value="litellm">LiteLLM (100+ Providers)</option>
+                </select>
+                <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+              <small class="text-white/50 text-[11px]" x-show="settings.googleAdkProvider === 'litellm'">
+                Route through LiteLLM proxy. Use provider/model format (e.g. openai/gpt-4o).
+              </small>
+            </div>
+            <!-- LiteLLM config (inline, for google_adk) -->
+            <div x-show="settings.googleAdkProvider === 'litellm'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM Proxy URL</label>
+                <input type="text" x-model="settings.litellmApiBase" @change="saveSettings()"
+                  placeholder="http://localhost:4000"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM API Key</label>
+                <input type="password" x-model="settings.litellmApiKey" @change="saveSettings()"
+                  placeholder="Optional (proxy master key)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.litellmModel" @change="saveSettings()"
+                  placeholder="openai/gpt-4o"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Use provider/model format (e.g. huggingface/meta-llama/Llama-3-70b)</small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Output Tokens</label>
+                <input type="number" x-model="settings.litellmMaxTokens" @change="saveSettings()"
+                  min="0" max="1000000" placeholder="0 (provider default)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Set to match your model's limit (e.g. 8192 for DeepSeek). 0 = provider default.</small>
+              </div>
+            </div>
+            <div class="flex flex-col gap-1" x-show="settings.googleAdkProvider !== 'litellm'">
               <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
               <input
                 type="text"
@@ -670,6 +796,7 @@
                 <option value="openai">OpenAI-compatible</option>
                 <option value="azure">Azure OpenAI</option>
                 <option value="anthropic">Anthropic</option>
+                <option value="litellm">LiteLLM (100+ Providers)</option>
               </select>
             </div>
             <div class="flex flex-col gap-1">

@@ -24,7 +24,7 @@ class TestV1RouterRegistration:
 
     def test_v1_routers_count(self):
         """Verify total number of registered routers."""
-        assert len(_V1_ROUTERS) == 23
+        assert len(_V1_ROUTERS) == 24
 
     def test_mount_v1_routers_succeeds(self):
         """mount_v1_routers should not raise on a real FastAPI app."""

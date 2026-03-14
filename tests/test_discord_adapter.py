@@ -281,12 +281,13 @@ def test_should_respond_question_with_recent_bot(convo_adapter):
     assert convo_adapter._should_respond(100, "anyone know the answer?") == "engaged"
 
 
-def test_should_respond_bot_active_in_last_3(convo_adapter):
-    """Bot active in last 3 messages -> 'engaged'."""
+def test_should_not_respond_to_unrelated_after_bot_spoke(convo_adapter):
+    """Bot spoke recently but message isn't directed at it -> None (skip)."""
     convo_adapter._add_to_conversation_history(100, _BOT_AUTHOR_KEY, "here's my take")
     convo_adapter._add_to_conversation_history(100, "alice", "interesting")
     convo_adapter._add_to_conversation_history(100, "bob", "agreed")
-    assert convo_adapter._should_respond(100, "agreed") == "engaged"
+    # "agreed" is not a question and bot is not the immediately previous speaker
+    assert convo_adapter._should_respond(100, "agreed") is None
 
 
 def test_should_respond_skip_unrelated(convo_adapter):
@@ -549,3 +550,252 @@ def test_build_status_defaults_to_online():
     """Unknown status type falls back to online."""
     a = DiscordAdapter(token="t", status_type="invalid")
     assert a.status_type == "online"  # Corrected in __init__
+
+
+# ── Reply behavior tests ──────────────────────────────────────────────
+
+
+async def test_stream_replies_to_source_message():
+    """First stream chunk replies to the source message instead of channel.send."""
+    a = DiscordAdapter(token="t")
+    mock_reply_msg = AsyncMock()
+    mock_source = AsyncMock()
+    mock_source.reply = AsyncMock(return_value=mock_reply_msg)
+
+    mock_channel = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+    a._source_messages["12345"] = mock_source
+
+    chunk = OutboundMessage(
+        channel=Channel.DISCORD,
+        chat_id="12345",
+        content="Hello",
+        is_stream_chunk=True,
+    )
+    await a.send(chunk)
+
+    mock_source.reply.assert_called_once_with("...", mention_author=False)
+    assert a._buffers["12345"]["discord_message"] == mock_reply_msg
+    # channel.send should NOT have been called (reply was used instead)
+    mock_channel.send.assert_not_called()
+
+
+async def test_normal_message_replies_to_source():
+    """Normal (non-streaming) messages reply to the source message."""
+    a = DiscordAdapter(token="t")
+    mock_source = AsyncMock()
+    mock_channel = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+    a._source_messages["12345"] = mock_source
+
+    msg = OutboundMessage(
+        channel=Channel.DISCORD,
+        chat_id="12345",
+        content="Reply here",
+    )
+    await a.send(msg)
+
+    mock_source.reply.assert_called_once_with("Reply here", mention_author=False)
+    mock_channel.send.assert_not_called()
+
+
+async def test_reply_fallback_on_deleted_source():
+    """Falls back to channel.send if the source message was deleted."""
+    a = DiscordAdapter(token="t")
+    mock_source = AsyncMock()
+    mock_source.reply = AsyncMock(side_effect=Exception("Unknown Message"))
+
+    mock_channel = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+    a._source_messages["12345"] = mock_source
+
+    msg = OutboundMessage(
+        channel=Channel.DISCORD,
+        chat_id="12345",
+        content="Fallback",
+    )
+    await a.send(msg)
+
+    # Should have tried reply, failed, then used channel.send
+    mock_source.reply.assert_called_once()
+    mock_channel.send.assert_called_once_with("Fallback")
+
+
+async def test_conversation_flush_replies_to_source():
+    """Conversation mode flush replies to the source message."""
+    a = DiscordAdapter(token="t", conversation_channel_ids=[100])
+    mock_source = AsyncMock()
+    mock_channel = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+    a._source_messages["100"] = mock_source
+
+    a._buffers["100"] = {
+        "discord_message": None,
+        "text": "Conversation reply",
+        "last_update": 0,
+        "conversation_mode": True,
+    }
+
+    end_msg = OutboundMessage(
+        channel=Channel.DISCORD, chat_id="100", content="", is_stream_end=True
+    )
+    await a.send(end_msg)
+
+    mock_source.reply.assert_called_once_with("Conversation reply", mention_author=False)
+    mock_channel.send.assert_not_called()
+
+
+# ── Typing indicator tests ─────────────────────────────────────────────
+
+
+async def test_typing_start_stop():
+    """Typing tasks are created and cleaned up."""
+    a = DiscordAdapter(token="t")
+    mock_channel = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+
+    a._start_typing("12345")
+    assert "12345" in a._typing_tasks
+    assert not a._typing_tasks["12345"].done()
+
+    a._stop_typing("12345")
+    assert "12345" not in a._typing_tasks
+
+
+async def test_typing_stopped_on_first_stream_chunk():
+    """Typing indicator stops when first stream chunk arrives."""
+    a = DiscordAdapter(token="t")
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=AsyncMock())
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+
+    a._start_typing("12345")
+    assert "12345" in a._typing_tasks
+
+    chunk = OutboundMessage(
+        channel=Channel.DISCORD, chat_id="12345", content="Hi", is_stream_chunk=True
+    )
+    await a.send(chunk)
+
+    assert "12345" not in a._typing_tasks
+
+
+async def test_typing_stopped_on_no_response():
+    """Typing indicator stops when [NO_RESPONSE] is received."""
+    a = DiscordAdapter(token="t")
+    mock_client = MagicMock()
+    a._client = mock_client
+
+    a._start_typing("12345")
+    assert "12345" in a._typing_tasks
+
+    msg = OutboundMessage(channel=Channel.DISCORD, chat_id="12345", content="[NO_RESPONSE]")
+    await a.send(msg)
+
+    assert "12345" not in a._typing_tasks
+
+
+# ── Stale interaction fallback tests ───────────────────────────────────
+
+
+async def test_stale_interaction_fallback_normal():
+    """Expired interaction falls back to channel.send for normal messages."""
+    a = DiscordAdapter(token="t")
+    mock_interaction = MagicMock()
+    mock_interaction.followup.send = AsyncMock(side_effect=Exception("expired"))
+
+    mock_channel = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+    a._pending_interactions["12345"] = mock_interaction
+
+    msg = OutboundMessage(channel=Channel.DISCORD, chat_id="12345", content="Late response")
+    await a.send(msg)
+
+    # Should have tried interaction, failed, then used channel.send
+    mock_channel.send.assert_called_once_with("Late response")
+
+
+async def test_stale_interaction_fallback_stream():
+    """Expired interaction falls back to channel reply for first stream chunk."""
+    a = DiscordAdapter(token="t")
+    mock_interaction = MagicMock()
+    mock_interaction.followup.send = AsyncMock(side_effect=Exception("expired"))
+
+    mock_sent = AsyncMock()
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=mock_sent)
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+    a._pending_interactions["12345"] = mock_interaction
+
+    chunk = OutboundMessage(
+        channel=Channel.DISCORD, chat_id="12345", content="Hi", is_stream_chunk=True
+    )
+    await a.send(chunk)
+
+    # Interaction failed, fell through to channel.send
+    mock_channel.send.assert_called_once_with("...")
+
+
+# ── Overflow tracking test ─────────────────────────────────────────────
+
+
+def test_extract_large_code_blocks():
+    """Large code blocks are extracted as file references."""
+    text = "Here's the code:\n```python\n" + "x = 1\n" * 200 + "```\nDone."
+    cleaned, files = DiscordAdapter._extract_large_code_blocks(text)
+    assert len(files) == 1
+    assert files[0][0] == "code.py"
+    assert files[0][1] == "python"
+    assert "(see attached `code.py`)" in cleaned
+    assert "```python" not in cleaned
+
+
+def test_extract_small_code_blocks_kept_inline():
+    """Small code blocks stay inline."""
+    text = "```python\nx = 1\n```"
+    cleaned, files = DiscordAdapter._extract_large_code_blocks(text)
+    assert len(files) == 0
+    assert cleaned == text
+
+
+async def test_overflow_stops_periodic_edits():
+    """After overflow, periodic edits are skipped."""
+    a = DiscordAdapter(token="t")
+    mock_sent = AsyncMock()
+    mock_channel = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.get_channel = MagicMock(return_value=mock_channel)
+    a._client = mock_client
+
+    # Prime buffer with overflow marker
+    a._buffers["12345"] = {
+        "discord_message": mock_sent,
+        "text": "x" * 100,
+        "last_update": 0,  # Forces an update attempt
+        "conversation_mode": False,
+        "overflow_at": DISCORD_MSG_LIMIT,
+    }
+
+    chunk = OutboundMessage(
+        channel=Channel.DISCORD, chat_id="12345", content="more", is_stream_chunk=True
+    )
+    await a.send(chunk)
+
+    # The edit should NOT have been called because overflow_at is set
+    mock_sent.edit.assert_not_called()

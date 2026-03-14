@@ -484,10 +484,14 @@ function app() {
             // Data-driven settings sync: map server keys to local settings
             const SETTINGS_MAP = [
                 'agentBackend', 'claudeSdkProvider', 'claudeSdkModel', 'claudeSdkMaxTurns',
-                'openaiAgentsProvider',
+                'openaiAgentsProvider', 'openaiAgentsModel', 'openaiAgentsMaxTurns',
+                'googleAdkProvider', 'googleAdkModel', 'googleAdkMaxTurns',
+                'codexCliModel', 'codexCliMaxTurns',
+                'copilotSdkProvider', 'copilotSdkModel', 'copilotSdkMaxTurns',
+                'opencodeBaseUrl', 'opencodeModel', 'opencodeMaxTurns',
                 'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
-                'geminiModel',
+                'geminiModel', 'litellmApiBase', 'litellmModel', 'litellmMaxTokens',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
                 'injectionScanEnabled', 'injectionScanLlm',
                 'piiScanEnabled', 'piiDefaultAction', 'piiScanMemory', 'piiScanAudit', 'piiScanLogs',
@@ -509,7 +513,7 @@ function app() {
             // API key availability flags
             const KEY_FLAGS = {
                 hasAnthropicKey: false, hasOpenaiKey: false, hasOpenaiCompatibleKey: false,
-                hasGoogleApiKey: false,
+                hasLitellmKey: false, hasGoogleApiKey: false,
                 hasTavilyKey: false, hasBraveKey: false,
                 hasParallelKey: false, hasElevenlabsKey: false,
                 hasGoogleOAuthId: false, hasGoogleOAuthSecret: false,

@@ -193,51 +193,49 @@ class DefaultBootstrapProvider(BootstrapProviderProtocol):
 
     def __init__(self, base_path: Path | None = None):
         self.base_path = base_path or (get_config_dir() / "identity")
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        try:
+            self.base_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # read-only or permission denied (e.g. Docker bind mount)
 
         # Initialize default files if they don't exist
         self._ensure_defaults()
 
     def _ensure_defaults(self) -> None:
-        """Create default identity files if missing."""
-        identity_file = self.base_path / "IDENTITY.md"
-        if not identity_file.exists():
-            identity_file.write_text(
+        """Create default identity files if missing.
+
+        Silently skips files that can't be written (e.g. Docker bind mounts
+        with different ownership or read-only filesystems).
+        """
+        defaults: dict[str, str] = {
+            "IDENTITY.md": (
                 "You are PocketPaw, an AI agent running locally on the user's machine.\n"
-                "You are helpful, private, and secure.",
-                encoding="utf-8",
-            )
-
-        soul_file = self.base_path / "SOUL.md"
-        if not soul_file.exists():
-            soul_file.write_text(
+                "You are helpful, private, and secure."
+            ),
+            "SOUL.md": (
                 "You believe in user sovereignty and local-first computing.\n"
-                "You never exfiltrate data without explicit user consent.",
-                encoding="utf-8",
-            )
-
-        style_file = self.base_path / "STYLE.md"
-        if not style_file.exists():
-            style_file.write_text(
+                "You never exfiltrate data without explicit user consent."
+            ),
+            "STYLE.md": (
                 "- Be concise and direct.\n"
                 "- Use emoji sparingly but effectively.\n"
-                "- Prefer code over prose for technical explanations.",
-                encoding="utf-8",
-            )
-
-        user_file = self.base_path / "USER.md"
-        if not user_file.exists():
-            user_file.write_text(
+                "- Prefer code over prose for technical explanations."
+            ),
+            "USER.md": (
                 "# User Profile\n"
                 "Name: (your name)\n"
                 "Timezone: UTC\n"
-                "Preferences: (describe your communication preferences)\n",
-                encoding="utf-8",
-            )
-
-        instructions_file = self.base_path / "INSTRUCTIONS.md"
-        if not instructions_file.exists():
-            instructions_file.write_text(_DEFAULT_INSTRUCTIONS, encoding="utf-8")
+                "Preferences: (describe your communication preferences)\n"
+            ),
+            "INSTRUCTIONS.md": _DEFAULT_INSTRUCTIONS,
+        }
+        for name, content in defaults.items():
+            path = self.base_path / name
+            if not path.exists():
+                try:
+                    path.write_text(content, encoding="utf-8")
+                except OSError:
+                    pass
 
     async def get_context(self) -> BootstrapContext:
         """Load context from files (mtime-cached to avoid redundant disk reads)."""

@@ -44,7 +44,7 @@ class CopilotSDKBackend:
                 "web_search": "browser",
             },
             required_keys=[],
-            supported_providers=["copilot", "openai", "azure", "anthropic"],
+            supported_providers=["copilot", "openai", "azure", "anthropic", "litellm"],
             install_hint={
                 "pip_package": "github-copilot-sdk",
                 "pip_spec": "github-copilot-sdk",
@@ -107,8 +107,10 @@ class CopilotSDKBackend:
         """Build BYOK provider configuration from settings.
 
         Returns None for default Copilot provider (GitHub OAuth).
-        Returns a provider dict for openai/azure/anthropic BYOK.
+        Returns a provider dict for openai/azure/anthropic/litellm BYOK.
         """
+        from pocketpaw.llm.providers import get_adapter
+
         provider = self.settings.copilot_sdk_provider
 
         if provider == "openai":
@@ -130,10 +132,22 @@ class CopilotSDKBackend:
             return cfg
 
         if provider == "anthropic":
+            adapter = get_adapter("anthropic")
+            config = adapter.resolve_config(self.settings, backend="copilot_sdk")
             cfg = {"type": "anthropic"}
-            if self.settings.anthropic_api_key:
-                cfg["api_key"] = self.settings.anthropic_api_key
+            if config.api_key:
+                cfg["api_key"] = config.api_key
             return cfg
+
+        if provider == "litellm":
+            adapter = get_adapter("litellm")
+            config = adapter.resolve_config(self.settings, backend="copilot_sdk")
+            base = (config.base_url or "http://localhost:4000").rstrip("/")
+            return {
+                "type": "openai",
+                "base_url": f"{base}/v1",
+                "api_key": config.api_key or "not-needed",
+            }
 
         # Default: use GitHub Copilot provider (no BYOK config needed)
         return None
@@ -190,7 +204,15 @@ class CopilotSDKBackend:
 
             full_prompt = "\n\n".join(prompt_parts)
 
-            model = self.settings.copilot_sdk_model or "gpt-5.2"
+            from pocketpaw.llm.providers import get_adapter
+
+            provider = self.settings.copilot_sdk_provider
+            if provider == "litellm":
+                adapter = get_adapter("litellm")
+                config = adapter.resolve_config(self.settings, backend="copilot_sdk")
+                model = config.model or "gpt-5.2"
+            else:
+                model = self.settings.copilot_sdk_model or "gpt-5.2"
             provider_config = self._get_provider_config()
 
             # Create or reuse session

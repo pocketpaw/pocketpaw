@@ -22,6 +22,8 @@ _NO_RESPONSE_MARKER = "[NO_RESPONSE]"
 _BOT_AUTHOR_KEY = "__bot__"
 _MAX_BOT_NAME_LENGTH = 64
 _IDLE_CHANNEL_TTL = 3600  # Evict conversation history for channels idle > 1 hour
+_CODE_BLOCK_FILE_THRESHOLD = 800  # Upload code blocks larger than this as files
+
 
 # Valid activity types for the /setstatus command
 _ACTIVITY_TYPES = {"playing", "watching", "listening", "competing"}
@@ -58,6 +60,8 @@ class DiscordAdapter(BaseChannelAdapter):
         self._bot_task: asyncio.Task | None = None
         self._buffers: dict[str, dict[str, Any]] = {}
         self._pending_interactions: dict[str, Any] = {}  # chat_id -> interaction
+        self._source_messages: dict[str, Any] = {}  # chat_id -> discord.Message (for replies)
+        self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing refresh task
         self._start_time: float = 0.0
         # Rolling message history for conversation channels (bounded per channel)
         self._conversation_history: dict[int, deque[dict[str, str]]] = {}
@@ -162,18 +166,12 @@ class DiscordAdapter(BaseChannelAdapter):
             if prev["author"] == _BOT_AUTHOR_KEY:
                 return "engaged"
 
-        # Question mark and bot was active in last 6 messages
+        # Question mark and bot was active in last 4 messages
         if lower.rstrip().endswith("?"):
-            recent = list(history)[-6:]
+            recent = list(history)[-4:]
             for msg in recent:
                 if msg["author"] == _BOT_AUTHOR_KEY:
                     return "engaged"
-
-        # Bot active in last 3 messages -> stay in the conversation
-        recent_short = list(history)[-3:]
-        for msg in recent_short:
-            if msg["author"] == _BOT_AUTHOR_KEY:
-                return "engaged"
 
         return None
 
@@ -244,14 +242,18 @@ class DiscordAdapter(BaseChannelAdapter):
                 f"Respond naturally and conversationally.]\n\n" + history_block
             )
 
-        # Engaged mode: bot was recently active, continue if relevant
+        # Engaged mode: bot was recently active, continue if relevant.
+        # The [NO_RESPONSE] instruction must be extremely explicit for weaker models.
         return (
             f"[You are {self.bot_name} in a Discord group chat "
-            f"#{channel_name}. You've been part of this conversation. "
-            "Continue naturally if the message is relevant to you or "
-            "the ongoing discussion. If this message clearly isn't "
-            f"directed at you, reply with exactly: "
-            f"{_NO_RESPONSE_MARKER}]\n\n" + history_block
+            f"#{channel_name}. You've been part of this conversation.\n\n"
+            "IMPORTANT RULE: If the latest message is NOT directed at you, "
+            "NOT about a topic you were discussing, and NOT asking you a question, "
+            f"you MUST reply with ONLY this exact text: {_NO_RESPONSE_MARKER}\n"
+            f"Do NOT add anything before or after {_NO_RESPONSE_MARKER}. "
+            "Do NOT explain why. Just output that exact marker and nothing else.\n\n"
+            "Only respond with a real answer if someone is clearly talking to you "
+            f"or asking about something you ({self.bot_name}) can help with.]\n\n" + history_block
         )
 
     # ── Settings persistence ────────────────────────────────────────────
@@ -372,9 +374,32 @@ class DiscordAdapter(BaseChannelAdapter):
             await _slash_to_inbound(interaction, "/sessions")
 
         @tree.command(name="resume", description="Resume a previous conversation session")
+        @discord.app_commands.describe(target="Session name or number to resume")
         async def resume_command(interaction: discord.Interaction, target: str | None = None):
             content = "/resume" if not target else f"/resume {target}"
             await _slash_to_inbound(interaction, content)
+
+        @resume_command.autocomplete("target")
+        async def _resume_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[discord.app_commands.Choice[str]]:
+            try:
+                from pocketpaw.memory import get_memory_manager
+
+                mgr = get_memory_manager()
+                chat_id = str(interaction.channel_id)
+                session_key = f"discord:{chat_id}"
+                sessions = await mgr.list_sessions_for_chat(session_key)
+                choices = []
+                for s in sessions[:25]:  # Discord limit: 25 choices
+                    title = s.get("title") or s.get("session_key", "untitled")
+                    if current and current.lower() not in title.lower():
+                        continue
+                    display = title[:100]
+                    choices.append(discord.app_commands.Choice(name=display, value=title))
+                return choices
+            except Exception:
+                return []
 
         @tree.command(name="clear", description="Clear the current session history")
         async def clear_command(interaction: discord.Interaction):
@@ -393,9 +418,26 @@ class DiscordAdapter(BaseChannelAdapter):
             await _slash_to_inbound(interaction, "/delete")
 
         @tree.command(name="backend", description="Show or switch agent backend")
+        @discord.app_commands.describe(name="Backend to switch to")
         async def backend_command(interaction: discord.Interaction, name: str | None = None):
             content = "/backend" if not name else f"/backend {name}"
             await _slash_to_inbound(interaction, content)
+
+        @backend_command.autocomplete("name")
+        async def _backend_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[discord.app_commands.Choice[str]]:
+            try:
+                from pocketpaw.agents.registry import list_backends
+
+                backends = list_backends()
+                return [
+                    discord.app_commands.Choice(name=b, value=b)
+                    for b in backends
+                    if not current or current.lower() in b.lower()
+                ][:25]
+            except Exception:
+                return []
 
         @tree.command(name="backends", description="List available backends")
         async def backends_command(interaction: discord.Interaction):
@@ -407,13 +449,51 @@ class DiscordAdapter(BaseChannelAdapter):
             await _slash_to_inbound(interaction, content)
 
         @tree.command(name="tools", description="Show or switch tool profile")
+        @discord.app_commands.describe(profile="Tool profile to switch to")
         async def tools_command(interaction: discord.Interaction, profile: str | None = None):
             content = "/tools" if not profile else f"/tools {profile}"
             await _slash_to_inbound(interaction, content)
 
+        @tools_command.autocomplete("profile")
+        async def _tools_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[discord.app_commands.Choice[str]]:
+            try:
+                from pocketpaw.tools.policy import TOOL_PROFILES
+
+                return [
+                    discord.app_commands.Choice(name=p, value=p)
+                    for p in TOOL_PROFILES
+                    if not current or current.lower() in p.lower()
+                ][:25]
+            except Exception:
+                return []
+
         @tree.command(name="help", description="Show PocketPaw help")
         async def help_command(interaction: discord.Interaction):
             await _slash_to_inbound(interaction, "/help")
+
+        @tree.command(name="kill", description="Cancel the current in-flight request")
+        async def kill_command(interaction: discord.Interaction):
+            if not adapter._check_auth(interaction.guild, interaction.user, interaction.channel_id):
+                await interaction.response.send_message("Unauthorized.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            chat_id = str(interaction.channel_id)
+            adapter._stop_typing(chat_id)
+            adapter._pending_interactions[chat_id] = interaction
+            msg = InboundMessage(
+                channel=Channel.DISCORD,
+                sender_id=str(interaction.user.id),
+                chat_id=chat_id,
+                content="/kill",
+                metadata={
+                    "username": str(interaction.user),
+                    "guild_id": (str(interaction.guild_id) if interaction.guild_id else None),
+                    "interaction_id": str(interaction.id),
+                },
+            )
+            await adapter._publish_inbound(msg)
 
         # ── Utility commands ────────────────────────────────────────
 
@@ -825,7 +905,7 @@ class DiscordAdapter(BaseChannelAdapter):
             if is_conversation and not is_mention:
                 convo_mode = adapter._should_respond(message.channel.id, message.content)
                 if convo_mode is None:
-                    return  # Skip, don't waste LLM tokens
+                    return
 
             # Only respond to DMs, mentions, or conversation channels
             if not is_dm and not is_mention and not is_conversation:
@@ -882,8 +962,14 @@ class DiscordAdapter(BaseChannelAdapter):
             chat_id = str(message.channel.id)
             metadata: dict[str, Any] = {
                 "username": str(message.author),
+                "display_name": message.author.display_name or str(message.author),
                 "guild_id": str(message.guild.id) if message.guild else None,
             }
+            # Include user's roles for context (guild channels only)
+            if message.guild and hasattr(message.author, "roles"):
+                role_names = [r.name for r in message.author.roles if r.name != "@everyone"]
+                if role_names:
+                    metadata["roles"] = role_names
             if is_conversation:
                 metadata["conversation_mode"] = True
 
@@ -895,6 +981,9 @@ class DiscordAdapter(BaseChannelAdapter):
                 media=media_paths,
                 metadata=metadata,
             )
+            adapter._source_messages[chat_id] = message
+            adapter._start_typing(chat_id)
+
             await adapter._publish_inbound(msg)
 
         self._client = client
@@ -923,6 +1012,10 @@ class DiscordAdapter(BaseChannelAdapter):
 
     async def _on_stop(self) -> None:
         """Stop Discord bot."""
+        # Cancel all typing indicator tasks
+        for task in self._typing_tasks.values():
+            task.cancel()
+        self._typing_tasks.clear()
         if self._eviction_task and not self._eviction_task.done():
             self._eviction_task.cancel()
             try:
@@ -951,6 +1044,92 @@ class DiscordAdapter(BaseChannelAdapter):
         clean = stripped.strip("`*_ .")
         return clean == _NO_RESPONSE_MARKER
 
+    # ── Typing indicator ─────────────────────────────────────────────
+
+    def _start_typing(self, chat_id: str) -> None:
+        """Start a background typing indicator loop for a channel."""
+        if chat_id in self._typing_tasks:
+            return
+
+        async def _typing_loop() -> None:
+            try:
+                channel = self._client.get_channel(int(chat_id))
+                if not channel:
+                    return
+                while True:
+                    try:
+                        await channel.typing()
+                    except Exception:
+                        pass
+                    # Discord typing lasts 10s, refresh at 8s
+                    await asyncio.sleep(8)
+            except asyncio.CancelledError:
+                pass
+
+        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
+
+    def _stop_typing(self, chat_id: str) -> None:
+        """Stop the typing indicator for a channel."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    # ── Presence ──────────────────────────────────────────────────────
+
+    async def _update_activity_from_sessions(self) -> None:
+        """Update bot activity to reflect current session count."""
+        if not self._client:
+            return
+        try:
+            import discord
+
+            # Count active buffers as a proxy for active sessions
+            active = len(self._typing_tasks) + len(self._buffers)
+            if active > 0:
+                activity = discord.Activity(
+                    type=discord.ActivityType.playing,
+                    name=f"Helping {active} user{'s' if active != 1 else ''}",
+                )
+            elif self.activity_type and self.activity_text:
+                activity = self._build_activity(discord)
+            else:
+                activity = None
+            status = self._build_status(discord)
+            await self._client.change_presence(activity=activity, status=status)
+        except Exception:
+            pass
+
+    # ── Code block extraction ─────────────────────────────────────────
+
+    @staticmethod
+    def _extract_large_code_blocks(text: str) -> tuple[str, list[tuple[str, str, str]]]:
+        """Extract large code blocks from text, replacing them with placeholders.
+
+        Returns (cleaned_text, [(filename, language, code), ...]).
+        """
+        import re
+
+        pattern = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+        files: list[tuple[str, str, str]] = []
+        counter = 0
+
+        def _replacer(match: re.Match) -> str:
+            nonlocal counter
+            lang = match.group(1) or "txt"
+            code = match.group(2).strip()
+            if len(code) < _CODE_BLOCK_FILE_THRESHOLD:
+                return match.group(0)  # Keep small blocks inline
+            counter += 1
+            ext = {"python": "py", "javascript": "js", "typescript": "ts", "bash": "sh"}.get(
+                lang, lang or "txt"
+            )
+            filename = f"code{counter}.{ext}" if counter > 1 else f"code.{ext}"
+            files.append((filename, lang, code))
+            return f"(see attached `{filename}`)"
+
+        cleaned = pattern.sub(_replacer, text)
+        return cleaned, files
+
     async def send(self, message: OutboundMessage) -> None:
         """Send message to Discord channel."""
         if not self._client:
@@ -964,6 +1143,9 @@ class DiscordAdapter(BaseChannelAdapter):
                 and self._is_no_response(message.content)
             ):
                 self._pending_interactions.pop(message.chat_id, None)
+
+                self._source_messages.pop(message.chat_id, None)
+                self._stop_typing(message.chat_id)
                 return
 
             if message.is_stream_chunk:
@@ -978,18 +1160,36 @@ class DiscordAdapter(BaseChannelAdapter):
                 return
 
             # Normal (non-streaming) message
+            self._stop_typing(message.chat_id)
             interaction = self._pending_interactions.pop(message.chat_id, None)
             if interaction:
-                for chunk in self._split_message(message.content):
-                    await interaction.followup.send(chunk)
-            else:
-                channel = self._client.get_channel(int(message.chat_id))
-                if channel:
+                try:
                     for chunk in self._split_message(message.content):
-                        await channel.send(chunk)
+                        await interaction.followup.send(chunk)
+                except Exception:
+                    logger.warning("Interaction expired, falling back to channel.send")
+                    await self._send_to_channel(message.chat_id, message.content)
+            else:
+                await self._send_to_channel(message.chat_id, message.content)
 
         except Exception as e:
             logger.error(f"Failed to send Discord message: {e}")
+
+    async def _send_to_channel(self, chat_id: str, text: str) -> None:
+        """Send text to a channel, replying to the source message if available."""
+        source_msg = self._source_messages.pop(chat_id, None)
+        channel = self._client.get_channel(int(chat_id))
+        if not channel:
+            return
+        chunks = self._split_message(text)
+        for i, chunk in enumerate(chunks):
+            if i == 0 and source_msg:
+                try:
+                    await source_msg.reply(chunk, mention_author=False)
+                except Exception:
+                    await channel.send(chunk)
+            else:
+                await channel.send(chunk)
 
     # --- Media sending ---
 
@@ -1009,12 +1209,30 @@ class DiscordAdapter(BaseChannelAdapter):
         except Exception as e:
             logger.warning("Failed to send Discord media file: %s", e)
 
+    async def _send_code_files(self, channel: Any, code_files: list[tuple[str, str, str]]) -> None:
+        """Upload extracted code blocks as file attachments."""
+        if not code_files:
+            return
+        try:
+            import io
+
+            import discord
+
+            for filename, _lang, code in code_files:
+                buf = io.BytesIO(code.encode("utf-8"))
+                await channel.send(file=discord.File(buf, filename=filename))
+        except Exception as e:
+            logger.warning("Failed to send code file attachment: %s", e)
+
     # --- Stream buffering ---
 
     async def _handle_stream_chunk(self, message: OutboundMessage) -> None:
         chat_id = message.chat_id
         content = message.content
         is_convo = int(chat_id) in self.conversation_channel_ids
+
+        # Stop typing once we start streaming content
+        self._stop_typing(chat_id)
 
         if chat_id not in self._buffers:
             if is_convo:
@@ -1027,15 +1245,29 @@ class DiscordAdapter(BaseChannelAdapter):
                 }
                 return
 
-            # Normal mode: send initial placeholder message
+            # Normal mode: send initial placeholder, reply to source if available
+            sent_msg = None
             interaction = self._pending_interactions.pop(chat_id, None)
             if interaction:
-                sent_msg = await interaction.followup.send("...", wait=True)
-            else:
+                try:
+                    sent_msg = await interaction.followup.send("...", wait=True)
+                except Exception:
+                    logger.warning("Interaction expired, falling back to channel reply")
+                    interaction = None
+
+            if sent_msg is None:
                 channel = self._client.get_channel(int(chat_id))
                 if not channel:
                     return
-                sent_msg = await channel.send("...")
+                source_msg = self._source_messages.pop(chat_id, None)
+                if source_msg:
+                    try:
+                        sent_msg = await source_msg.reply("...", mention_author=False)
+                    except Exception:
+                        sent_msg = await channel.send("...")
+                else:
+                    sent_msg = await channel.send("...")
+
             self._buffers[chat_id] = {
                 "discord_message": sent_msg,
                 "text": content,
@@ -1049,6 +1281,9 @@ class DiscordAdapter(BaseChannelAdapter):
         # Don't do periodic edits for conversation mode (no message to edit)
         if buf.get("conversation_mode"):
             return
+        # Already overflowed past the message limit, skip edits until flush
+        if buf.get("overflow_at"):
+            return
 
         now = asyncio.get_running_loop().time()
         if now - buf["last_update"] > 1.5:
@@ -1057,7 +1292,10 @@ class DiscordAdapter(BaseChannelAdapter):
 
     async def _flush_stream_buffer(self, chat_id: str) -> None:
         self._pending_interactions.pop(chat_id, None)
+        self._stop_typing(chat_id)
+
         if chat_id not in self._buffers:
+            self._source_messages.pop(chat_id, None)
             return
 
         buf = self._buffers[chat_id]
@@ -1071,19 +1309,40 @@ class DiscordAdapter(BaseChannelAdapter):
                 except Exception:
                     pass
             del self._buffers[chat_id]
+            self._source_messages.pop(chat_id, None)
             return
 
-        # Conversation mode: send the full accumulated text now
+        # Extract large code blocks as file attachments
+        cleaned_text, code_files = self._extract_large_code_blocks(text)
+
+        # Conversation mode: send the full accumulated text now, reply to source
         if buf.get("conversation_mode") and buf["discord_message"] is None:
+            source_msg = self._source_messages.pop(chat_id, None)
             channel = self._client.get_channel(int(chat_id))
             if channel:
-                for chunk in self._split_message(text):
-                    await channel.send(chunk)
+                send_text = cleaned_text if code_files else text
+                chunks = self._split_message(send_text)
+                for i, chunk in enumerate(chunks):
+                    if i == 0 and source_msg:
+                        try:
+                            await source_msg.reply(chunk, mention_author=False)
+                        except Exception:
+                            await channel.send(chunk)
+                    else:
+                        await channel.send(chunk)
+                await self._send_code_files(channel, code_files)
             del self._buffers[chat_id]
             return
 
-        # Normal mode: final edit
+        # Normal mode: final edit (with code files extracted if any)
+        self._source_messages.pop(chat_id, None)
+        if code_files:
+            buf["text"] = cleaned_text
         await self._update_buffer_message(chat_id)
+        if code_files:
+            channel = self._client.get_channel(int(chat_id))
+            if channel:
+                await self._send_code_files(channel, code_files)
         del self._buffers[chat_id]
 
     async def _update_buffer_message(self, chat_id: str) -> None:
@@ -1095,15 +1354,17 @@ class DiscordAdapter(BaseChannelAdapter):
             return
         try:
             discord_msg = buf["discord_message"]
-            # If text exceeds limit, edit with truncated and send overflow as new messages
             if len(text) <= DISCORD_MSG_LIMIT:
                 await discord_msg.edit(content=text)
             else:
+                # Edit the original message with first chunk, send overflow separately
                 await discord_msg.edit(content=text[:DISCORD_MSG_LIMIT])
                 channel = self._client.get_channel(int(chat_id))
                 if channel:
                     for chunk in self._split_message(text[DISCORD_MSG_LIMIT:]):
                         await channel.send(chunk)
+                # Mark overflow so periodic edits stop (avoids re-sending overflow)
+                buf["overflow_at"] = DISCORD_MSG_LIMIT
         except Exception as e:
             logger.warning(f"Failed to update Discord message: {e}")
 

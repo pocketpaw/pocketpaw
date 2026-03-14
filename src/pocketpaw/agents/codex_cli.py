@@ -16,6 +16,7 @@ as a command-line argument.  This avoids the Windows command-line length limit
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -141,6 +142,9 @@ class CodexCLIBackend:
                 "-",
             ]
 
+            # Explicitly pass env so runtime key changes are visible
+            proc_env = os.environ.copy()
+
             if sys.platform == "win32":
                 # On Windows, npm global installs are .cmd wrappers that
                 # create_subprocess_exec cannot run directly. Use shell mode.
@@ -150,6 +154,7 @@ class CodexCLIBackend:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
                 )
             else:
                 self._process = await asyncio.create_subprocess_exec(
@@ -158,6 +163,7 @@ class CodexCLIBackend:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
                 )
 
             # Feed the prompt via stdin and close to signal EOF

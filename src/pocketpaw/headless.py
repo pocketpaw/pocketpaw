@@ -202,6 +202,12 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
 
     loop_task = asyncio.create_task(agent_loop.start())
 
+    # Start StatusTracker
+    from pocketpaw.dashboard_state import status_tracker
+
+    status_tracker._max_concurrent = settings.max_concurrent_conversations
+    await status_tracker.subscribe()
+
     # If WhatsApp is one of the adapters, start a minimal webhook server
     whatsapp_server = None
     if args.whatsapp:
