@@ -2,7 +2,8 @@
 
 from pathlib import Path
 from typing import Any
-from pydantic import BaseModel, Field, field_validator, ValidationError
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -35,7 +36,9 @@ def is_safe_path(path: Path, jail: Path) -> bool:
         return False
 
 
-def get_directory_keyboard(path: Path | str, jail: Path | str, limit: int = 20) -> "InlineKeyboardMarkup | None":
+def get_directory_keyboard(
+    path: Path | str, jail: Path | str, limit: int = 20
+) -> "InlineKeyboardMarkup | None":
     """Generate inline keyboard for directory contents."""
     if InlineKeyboardMarkup is None:
         return None
@@ -43,7 +46,9 @@ def get_directory_keyboard(path: Path | str, jail: Path | str, limit: int = 20) 
     try:
         req = FetchRequest(path_str=path, jail_str=jail, limit=limit)
     except ValidationError:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Invalid path or jail", callback_data="noop")]])
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⛔ Invalid path or jail", callback_data="noop")]]
+        )
 
     path_obj = Path(req.path_str).resolve()
     jail_obj = Path(req.jail_str).resolve()
@@ -106,10 +111,16 @@ async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -
     jail_obj = Path(req.jail_str).resolve()
 
     if not is_safe_path(path_obj, jail_obj):
-        return {"type": "error", "message": "Access denied: path outside allowed directory or does not exist"}
+        return {
+            "type": "error", 
+            "message": "Access denied: path outside allowed directory or does not exist"
+        }
 
     if path_obj.is_dir():
-        return {"type": "directory", "keyboard": get_directory_keyboard(path_obj, jail_obj, limit=req.limit)}
+        return {
+            "type": "directory", 
+            "keyboard": get_directory_keyboard(path_obj, jail_obj, limit=req.limit)
+        }
     elif path_obj.is_file():
         return {"type": "file", "path": path_obj, "filename": path_obj.name}
     else:
