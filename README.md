@@ -463,3 +463,4 @@ MIT &copy; PocketPaw Team
   <br>
   <strong>Built for people who'd rather own their AI than rent it</strong>
 </p>
+*This README is part of the PocketPaw internship contributions. Thank you for reading!*
