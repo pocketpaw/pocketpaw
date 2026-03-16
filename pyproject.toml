@@ -88,14 +88,20 @@ google-adk = [
 copilot-sdk = [
     "github-copilot-sdk>=0.1.0",
 ]
+litellm = [
+    "litellm>=1.40.0",
+]
 memory = [
     "mem0ai>=0.1.115",
     "ollama>=0.6.1",
 ]
+soul = [
+    "soul-protocol[engine]>=0.2.3",
+]
 
 # --- Channel extras ---
 discord = [
-    "discord.py>=2.3.0",
+    "discord-cli-agent>=0.6.0",
 ]
 slack = [
     "slack-bolt>=1.20.0",
@@ -134,27 +140,129 @@ sarvam = [
 mcp = [
     "mcp>=1.0.0",
 ]
-# --- Composite extras ---
+# --- Composite extras (flattened — no recursive self-references) ---
 recommended = [
-    "pocketpaw[browser,memory,desktop]",
+    # browser
+    "playwright>=1.50.0",
+    # memory
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    # desktop
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
 ]
 channels = [
-    "pocketpaw[discord,slack,telegram]",
+    # telegram
+    "python-telegram-bot>=21.0",
+    # discord
+    "discord-cli-agent>=0.6.0",
+    # slack
+    "slack-bolt>=1.20.0",
 ]
 all-channels = [
-    "pocketpaw[telegram,discord,slack,whatsapp-personal,matrix,teams,gchat]",
+    # telegram
+    "python-telegram-bot>=21.0",
+    # discord
+    "discord-cli-agent>=0.6.0",
+    # slack
+    "slack-bolt>=1.20.0",
+    # whatsapp-personal
+    "neonize>=0.3.14",
+    # matrix
+    "matrix-nio>=0.24.0",
+    # teams
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    # gchat
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
 ]
 all-tools = [
-    "pocketpaw[browser,desktop,image,extract,voice,ocr,sarvam,mcp,memory]",
+    # browser
+    "playwright>=1.50.0",
+    # desktop
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    # image
+    "google-genai>=1.0.0",
+    # extract
+    "html2text>=2020.1.16",
+    # voice
+    "elevenlabs>=1.0.0",
+    # ocr
+    "pytesseract>=0.3.10",
+    # sarvam
+    "sarvamai>=0.1.25",
+    # mcp
+    "mcp>=1.0.0",
+    # memory
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    # soul
+    "soul-protocol[engine]>=0.2.3",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk,copilot-sdk]",
+    "pocketpaw[openai-agents,google-adk,copilot-sdk,litellm]",
 ]
 all = [
-    "pocketpaw[recommended,all-channels,all-tools,all-backends]",
+    # browser
+    "playwright>=1.50.0",
+    # memory
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    # desktop
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    # channels
+    "python-telegram-bot>=21.0",
+    "discord-cli-agent>=0.6.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    # tools
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    # soul
+    "soul-protocol[engine]>=0.2.3",
+    # backends
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
 ]
 dev = [
-    "pocketpaw[all]",
+    # all deps (flattened from [all])
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "python-telegram-bot>=21.0",
+    "discord-cli-agent>=0.6.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
+    # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-playwright>=0.4.0",
@@ -192,7 +300,31 @@ select = ["E", "F", "I", "UP"]
 
 [dependency-groups]
 dev = [
-    "pocketpaw[all]",
+    # all deps (flattened from [all])
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "python-telegram-bot>=21.0",
+    "discord-cli-agent>=0.6.4",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
+    # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",

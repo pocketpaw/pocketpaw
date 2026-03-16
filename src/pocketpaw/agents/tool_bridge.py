@@ -7,9 +7,12 @@ Provides:
 - get_tool_instructions_compact(): compact markdown for system-prompt injection
 
 Backend-aware exclusion:
-- claude_agent_sdk: shell/fs tools excluded (provided natively by CLI)
-- All other backends: shell/fs tools included via the bridge
+- claude_agent_sdk: shell/fs/edit tools excluded (provided natively by CLI)
+- All other backends: shell/fs/edit tools included via the bridge
 - BrowserTool/DesktopTool: always excluded (need special session state)
+
+Changes:
+- 2026-03-12: Added EditFileTool to _CLAUDE_SDK_EXCLUDED (has native Edit)
 """
 
 from __future__ import annotations
@@ -28,7 +31,15 @@ logger = logging.getLogger(__name__)
 _ALWAYS_EXCLUDED = frozenset({"BrowserTool", "DesktopTool"})
 
 # Tools excluded only for claude_agent_sdk -- these are provided natively by the CLI.
-_CLAUDE_SDK_EXCLUDED = frozenset({"ShellTool", "ReadFileTool", "WriteFileTool", "ListDirTool"})
+_CLAUDE_SDK_EXCLUDED = frozenset(
+    {
+        "ShellTool",
+        "ReadFileTool",
+        "WriteFileTool",
+        "ListDirTool",
+        "EditFileTool",
+    }
+)
 
 
 def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
@@ -60,6 +71,17 @@ def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
             tools.append(cls())
         except Exception as exc:
             logger.debug("Skipping tool %s: %s", class_name, exc)
+
+    # Inject soul tools if soul is active
+    try:
+        from pocketpaw.soul.manager import get_soul_manager
+
+        soul_mgr = get_soul_manager()
+        if soul_mgr is not None:
+            tools.extend(soul_mgr.get_tools())
+    except Exception:
+        pass  # Soul not available
+
     return tools
 
 
@@ -100,10 +122,20 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
             continue
 
         defn = tool.definition
+
+        # Sanitize JSON schema: strict providers (e.g. Groq) reject schemas
+        # where 'required' is present but 'properties' is empty or missing.
+        params_schema = dict(defn.parameters) if defn.parameters else {"type": "object"}
+        props = params_schema.get("properties")
+        if not props and "required" in params_schema:
+            params_schema.pop("required")
+        if not props and "properties" in params_schema:
+            params_schema.pop("properties")
+
         ft = FunctionTool(
             name=defn.name,
             description=defn.description,
-            params_json_schema=defn.parameters,
+            params_json_schema=params_schema,
             on_invoke_tool=_make_invoke_callback(tool),
         )
         function_tools.append(ft)

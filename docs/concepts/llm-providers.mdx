@@ -1,15 +1,15 @@
 ---
-title: "LLM Providers: Claude, GPT, Gemini & Ollama"
-description: "Complete guide to LLM providers and agent backends in PocketPaw. Covers Anthropic, Gemini, Ollama, OpenAI, and OpenAI-compatible endpoints across six agent backends."
+title: "LLM Providers: Claude, GPT, Gemini, Ollama & More"
+description: "Complete guide to LLM providers and agent backends in PocketPaw. Covers Anthropic, Gemini, Ollama, OpenAI, OpenAI-compatible, OpenRouter, and LiteLLM across six agent backends."
 section: Core Concepts
 ogType: article
-keywords: ["llm provider", "model selection", "gemini", "anthropic", "ollama", "openai", "openai-compatible", "model router", "configuration", "claude agent sdk", "openai agents", "google adk", "agent backend"]
+keywords: ["llm provider", "model selection", "gemini", "anthropic", "ollama", "openai", "openai-compatible", "openrouter", "litellm", "model router", "configuration", "claude agent sdk", "openai agents", "google adk", "agent backend"]
 tags: ["concepts", "configuration", "models", "backends"]
 ---
 
-# LLM Providers: Claude, GPT, Gemini & Ollama
+# LLM Providers: Claude, GPT, Gemini, Ollama & More
 
-PocketPaw supports six LLM providers, from free local models to cloud APIs. This guide covers everything: which provider to pick, which models to use, how they interact with agent backends, and how to configure them.
+PocketPaw supports eight LLM providers, from free local models to cloud APIs and multi-provider proxies. This guide covers everything: which provider to pick, which models to use, how they interact with agent backends, and how to configure them.
 
 ## Quick Start: Which Provider Should I Use?
 
@@ -20,7 +20,9 @@ PocketPaw supports six LLM providers, from free local models to cloud APIs. This
 | Fully local, no cloud | **Ollama** | Free | Claude Agent SDK or OpenAI Agents |
 | Use OpenAI models | **OpenAI** | Paid API | OpenAI Agents or Codex CLI |
 | GitHub Copilot subscription | **Copilot** | Subscription | Copilot SDK |
-| Custom endpoint (OpenRouter, vLLM, etc.) | **OpenAI-Compatible** | Varies | OpenAI Agents |
+| 100+ models, single API | **OpenRouter** | Pay-per-token | OpenAI Agents |
+| 100+ providers via proxy | **LiteLLM** | Varies | Any backend |
+| Custom endpoint (vLLM, TGI, etc.) | **OpenAI-Compatible** | Varies | OpenAI Agents |
 
 <Callout type="tip">
   **New to PocketPaw?** Start with **Gemini** (free) or **Anthropic** (best quality). You can switch providers at any time from Settings without losing data.
@@ -180,6 +182,76 @@ This runs 2 checks: API connectivity and tool calling support.
   OpenAI-Compatible endpoints work best with the **OpenAI Agents** backend. They also work with the Claude Agent SDK if the endpoint implements the Anthropic Messages API format (e.g., LiteLLM proxy).
 </Callout>
 
+### OpenRouter
+
+[OpenRouter](https://openrouter.ai) provides access to 100+ models from multiple providers through a single API. It has a dedicated adapter in PocketPaw with proper authentication handling.
+
+**Configuration:**
+```bash
+export POCKETPAW_LLM_PROVIDER="openrouter"
+export POCKETPAW_OPENROUTER_API_KEY="sk-or-v1-..."
+export POCKETPAW_OPENROUTER_MODEL="anthropic/claude-sonnet-4-6"
+```
+
+**How it differs from OpenAI-Compatible:** While you can use OpenRouter via the generic OpenAI-Compatible provider, the dedicated `openrouter` provider handles authentication correctly for both the OpenAI and Anthropic API formats. OpenRouter uses `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`) for Anthropic-format requests, and the adapter manages this automatically.
+
+**Popular models:**
+
+| Model | Slug | Provider |
+|-------|------|----------|
+| Claude Sonnet 4.6 | `anthropic/claude-sonnet-4-6` | Anthropic |
+| GPT-4o | `openai/gpt-4o` | OpenAI |
+| Gemini 2.5 Flash | `google/gemini-2.5-flash` | Google |
+| Llama 3.1 405B | `meta-llama/llama-3.1-405b-instruct` | Meta |
+| DeepSeek V3 | `deepseek/deepseek-chat` | DeepSeek |
+
+<Callout type="info">
+  Get an API key at [openrouter.ai/keys](https://openrouter.ai/keys). OpenRouter supports pay-per-token with no monthly minimums.
+</Callout>
+
+### LiteLLM (100+ Providers)
+
+[LiteLLM](https://docs.litellm.ai) is a unified interface to 100+ LLM providers including HuggingFace, Ollama, vLLM, Together AI, Groq, Mistral, and more. PocketPaw supports LiteLLM across **all four major backends**.
+
+**Two modes of operation:**
+
+- **Proxy mode** (recommended): Run a LiteLLM proxy server and point PocketPaw at it. The proxy handles model routing, load balancing, and provider-specific authentication.
+- **Direct SDK mode**: LiteLLM SDK calls providers directly. Requires LiteLLM-prefixed model names (e.g., `anthropic/claude-sonnet-4-6`).
+
+**Configuration (proxy mode):**
+```bash
+export POCKETPAW_LLM_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_API_KEY="sk-..."       # your proxy master key
+export POCKETPAW_LITELLM_MODEL="gpt-4o"          # model name as configured in the proxy
+export POCKETPAW_LITELLM_MAX_TOKENS=0             # 0 = provider default
+```
+
+**Configuration (direct SDK mode):**
+```bash
+export POCKETPAW_LLM_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE=""              # leave empty for direct mode
+export POCKETPAW_LITELLM_API_KEY="sk-ant-..."     # the target provider's API key
+export POCKETPAW_LITELLM_MODEL="anthropic/claude-sonnet-4-6"  # LiteLLM-prefixed name
+```
+
+**Backend support:**
+
+| Backend | How LiteLLM is used |
+|---------|-------------------|
+| Claude Agent SDK | Routes through proxy via `ANTHROPIC_BASE_URL` |
+| OpenAI Agents | Proxy mode: OpenAI-compat client. Direct mode: native `LitellmModel` |
+| Google ADK | ADK's `LiteLlm` model wrapper |
+| Copilot SDK | Proxy as OpenAI-compatible BYOK endpoint |
+
+<Callout type="warning">
+  **Direct SDK mode requires prefixed model names.** Without a proxy URL, LiteLLM uses the model name prefix to determine routing (e.g., `anthropic/claude-sonnet-4-6`, `openai/gpt-4o`). Without a prefix, LiteLLM may route to the wrong provider.
+</Callout>
+
+<Callout type="tip">
+  **Start the LiteLLM proxy:** `litellm --config config.yaml --port 4000`. See the [LiteLLM docs](https://docs.litellm.ai/docs/proxy/quick_start) for proxy setup.
+</Callout>
+
 ### Auto (Default)
 
 When `llm_provider` is set to `"auto"` (the default), PocketPaw auto-detects the best available provider:
@@ -203,6 +275,8 @@ Each backend has different provider support. Here's the full compatibility matri
 | Ollama | Yes | Yes | No | No | N/A | No |
 | OpenAI | No | **Yes** | No | **Yes** | N/A | Yes |
 | OpenAI-Compatible | Partial | Yes | No | No | N/A | No |
+| OpenRouter | Partial | Yes | No | No | N/A | No |
+| LiteLLM | Yes | Yes | Yes | No | N/A | Yes |
 
 | Feature | Claude SDK | OpenAI Agents | Google ADK | Codex CLI | OpenCode | Copilot SDK |
 |---------|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -223,8 +297,10 @@ The default and most capable backend. Uses the official Claude Agent SDK with bu
 
 | Provider | Works? | How |
 |----------|:------:|-----|
-| Anthropic | Yes | Native — just set `ANTHROPIC_API_KEY` |
+| Anthropic | Yes | Native, just set `ANTHROPIC_API_KEY` |
 | Ollama | Yes | Ollama v0.14+ implements the Anthropic Messages API natively |
+| OpenRouter | Partial | Only if the model supports Anthropic format |
+| LiteLLM | Yes | Routes through LiteLLM proxy via `ANTHROPIC_BASE_URL` |
 | Gemini | **No** | Use **Google ADK** backend instead |
 | OpenAI | **No** | Use **OpenAI Agents** backend instead |
 | OpenAI-Compatible | Partial | Only if the endpoint speaks Anthropic format (e.g., LiteLLM proxy) |
@@ -246,10 +322,12 @@ OpenAI's native agent framework with GPT model support and Ollama compatibility.
 | OpenAI | Yes | Native with `openai-agents` SDK |
 | Ollama | Yes | Via `OpenAIChatCompletionsModel` wrapper |
 | OpenAI-Compatible | Yes | Custom base URL support |
+| OpenRouter | Yes | Dedicated adapter with proper auth handling |
+| LiteLLM | Yes | Proxy mode (OpenAI-compat) or direct `LitellmModel` |
 
 **Built-in tools:** code_interpreter, file_search, computer_use
 
-**Best for:** OpenAI model users, Ollama users who prefer OpenAI-format APIs.
+**Best for:** OpenAI model users, Ollama users who prefer OpenAI-format APIs, or anyone wanting access to 100+ models via OpenRouter or LiteLLM.
 
 ### Google ADK
 
@@ -258,18 +336,19 @@ Google's Agent Development Kit with native Gemini support.
 | Provider | Works? | How |
 |----------|:------:|-----|
 | Gemini | Yes | Native via `google-adk` SDK |
+| LiteLLM | Yes | ADK's `LiteLlm` model wrapper for cross-provider support |
 
 **Built-in tools:** google_search, code_execution
 
 **MCP servers:** Native support via `McpToolset` (stdio, SSE, HTTP).
 
-**Best for:** Gemini users who want native Google AI integration with MCP support.
+**Best for:** Gemini users who want native Google AI integration with MCP support. LiteLLM support enables using non-Gemini models with ADK's tooling.
 
 ### Other Backends
 
 - **Codex CLI** — OpenAI's Codex CLI for code-focused tasks. Requires `codex` binary. MCP support.
 - **OpenCode** — External server backend. Model managed by the OpenCode server.
-- **Copilot SDK** — GitHub Copilot with multi-provider support (Copilot, OpenAI, Azure, Anthropic).
+- **Copilot SDK** — GitHub Copilot with multi-provider support (Copilot, OpenAI, Azure, Anthropic, LiteLLM).
 
 ---
 
@@ -327,6 +406,12 @@ export POCKETPAW_MODEL_TIER_COMPLEX="claude-opus-4-6"
 | `openai_compatible_api_key` | `POCKETPAW_OPENAI_COMPATIBLE_API_KEY` | — | Endpoint API key |
 | `openai_compatible_model` | `POCKETPAW_OPENAI_COMPATIBLE_MODEL` | — | Endpoint model name |
 | `openai_compatible_max_tokens` | `POCKETPAW_OPENAI_COMPATIBLE_MAX_TOKENS` | `0` | Max output tokens (0 = no limit) |
+| `openrouter_api_key` | `POCKETPAW_OPENROUTER_API_KEY` | -- | OpenRouter API key (sk-or-v1-...) |
+| `openrouter_model` | `POCKETPAW_OPENROUTER_MODEL` | -- | OpenRouter model slug |
+| `litellm_api_base` | `POCKETPAW_LITELLM_API_BASE` | `http://localhost:4000` | LiteLLM proxy URL (empty = direct SDK mode) |
+| `litellm_api_key` | `POCKETPAW_LITELLM_API_KEY` | -- | LiteLLM proxy master key or provider API key |
+| `litellm_model` | `POCKETPAW_LITELLM_MODEL` | -- | Model name (proxy mode) or prefixed name (direct mode) |
+| `litellm_max_tokens` | `POCKETPAW_LITELLM_MAX_TOKENS` | `0` | Max output tokens (0 = provider default) |
 | `smart_routing_enabled` | `POCKETPAW_SMART_ROUTING_ENABLED` | `true` | Enable auto model selection |
 | `model_tier_simple` | `POCKETPAW_MODEL_TIER_SIMPLE` | `claude-haiku-4-5-20251001` | Model for simple tasks |
 | `model_tier_moderate` | `POCKETPAW_MODEL_TIER_MODERATE` | `claude-sonnet-4-5-20250929` | Model for moderate tasks |

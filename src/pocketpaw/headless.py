@@ -69,7 +69,7 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
         if not settings.discord_bot_token:
             logger.error("Discord bot token not configured. Set POCKETPAW_DISCORD_BOT_TOKEN.")
         else:
-            from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
+            from pocketpaw.bus.adapters.discord_adapter import DiscliAdapter as DiscordAdapter
 
             adapters.append(
                 DiscordAdapter(
@@ -202,6 +202,12 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
 
     loop_task = asyncio.create_task(agent_loop.start())
 
+    # Start StatusTracker
+    from pocketpaw.dashboard_state import status_tracker
+
+    status_tracker._max_concurrent = settings.max_concurrent_conversations
+    await status_tracker.subscribe()
+
     # If WhatsApp is one of the adapters, start a minimal webhook server
     whatsapp_server = None
     if args.whatsapp:
@@ -259,7 +265,7 @@ def _check_extras_installed(args: argparse.Namespace) -> None:
             missing.append(("python-telegram-bot", "telegram", "telegram"))
 
     channel_checks = {
-        "discord": ("discord.py", "discord", "discord"),
+        "discord": ("discord-cli-agent", "discli", "discord"),
         "slack": ("slack-bolt", "slack_bolt", "slack"),
     }
     for flag, (pkg, mod, extra) in channel_checks.items():

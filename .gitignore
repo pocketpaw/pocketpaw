@@ -70,3 +70,4 @@ client/build/
 client/src-tauri/target/
 client/src-tauri/gen/
 client/bun.lock
+private.key

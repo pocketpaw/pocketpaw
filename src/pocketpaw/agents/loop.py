@@ -11,6 +11,7 @@ import asyncio
 import logging
 import re
 import time
+from typing import Any
 
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
@@ -86,6 +87,9 @@ class AgentLoop:
         self._background_tasks: set[asyncio.Task] = set()
         self._active_tasks: dict[str, asyncio.Task] = {}  # session_key -> processing task
 
+        # Soul Protocol (optional)
+        self._soul_manager: Any = None  # SoulManager | None
+
         self._running = False
 
     def _get_router(self) -> AgentRouter:
@@ -101,6 +105,21 @@ class AgentLoop:
         self._running = True
         settings = Settings.load()
         logger.info(f"🤖 Agent Loop started (Backend: {settings.agent_backend})")
+
+        # Initialize Soul if enabled
+        if settings.soul_enabled:
+            try:
+                from pocketpaw.soul.manager import SoulManager
+
+                self._soul_manager = SoulManager(settings)
+                await self._soul_manager.initialize()
+                if self._soul_manager.bootstrap_provider:
+                    self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
+                self._soul_manager.start_auto_save()
+            except Exception:
+                logger.exception("Soul initialization failed, continuing without soul")
+                self._soul_manager = None
+
         # Spawn the session-lock GC before entering the main loop so it begins
         # pruning stale locks as soon as the server is live.
         self._lock_gc_task = asyncio.create_task(self._gc_session_locks(), name="session-lock-gc")
@@ -117,6 +136,12 @@ class AgentLoop:
             except asyncio.CancelledError:
                 pass  # expected on clean shutdown
             self._lock_gc_task = None
+        # Persist soul state and stop auto-save
+        if self._soul_manager is not None:
+            try:
+                await self._soul_manager.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down soul")
         logger.info("🛑 Agent Loop stopped")
 
     async def _gc_session_locks(self) -> None:
@@ -340,6 +365,7 @@ class AgentLoop:
                 )
 
         router = None
+        agent_started = False
         try:
             # 0. Injection scan for non-owner sources
             content = message.content
@@ -428,6 +454,7 @@ class AgentLoop:
                     session_key=message.session_key,
                     file_context=file_context,
                     agents_md_dir=agents_md_dir,
+                    metadata=message.metadata,
                 ),
                 self.memory.get_compacted_history(
                     session_key,
@@ -472,7 +499,11 @@ class AgentLoop:
                     "</identity-reminder>"
                 )
 
-            # 2c. Emit thinking event
+            # 2c. Emit agent_start + thinking events
+            agent_started = True
+            await self.bus.publish_system(
+                SystemEvent(event_type="agent_start", data={"session_key": session_key})
+            )
             await self.bus.publish_system(
                 SystemEvent(event_type="thinking", data={"session_key": session_key})
             )
@@ -692,6 +723,20 @@ class AgentLoop:
                     self._background_tasks.add(t)
                     t.add_done_callback(self._background_tasks.discard)
 
+                # Soul observation: feed turn for personality/memory evolution
+                if self._soul_manager is not None and not cancelled:
+                    t = asyncio.create_task(
+                        self._soul_observe_and_emit(message.content, full_response, session_key)
+                    )
+                    self._background_tasks.add(t)
+                    t.add_done_callback(self._background_tasks.discard)
+
+            # Signal agent processing complete
+            if agent_started:
+                await self.bus.publish_system(
+                    SystemEvent(event_type="agent_end", data={"session_key": session_key})
+                )
+
         except Exception as e:
             logger.exception(f"❌ Error processing message: {e}")
             # Record to persistent health error log
@@ -733,6 +778,11 @@ class AgentLoop:
                     is_stream_end=True,
                 )
             )
+            # Signal agent processing complete even on error
+            if agent_started:
+                await self.bus.publish_system(
+                    SystemEvent(event_type="agent_end", data={"session_key": session_key})
+                )
 
     async def _send_response(self, original: InboundMessage, content: str) -> None:
         """Helper to send a simple text response."""
@@ -764,6 +814,73 @@ class AgentLoop:
         except Exception:
             logger.debug("Auto-learn background task failed", exc_info=True)
 
+    async def _soul_observe_and_emit(
+        self, user_input: str, agent_output: str, session_key: str
+    ) -> None:
+        """Observe interaction and emit soul state event."""
+        if self._soul_manager is None or not self._soul_manager._initialized:
+            return
+        try:
+            await self._soul_manager.observe(user_input, agent_output)
+            soul = self._soul_manager.soul
+            if soul is not None:
+                state = soul.state
+                await self.bus.publish_system(
+                    SystemEvent(
+                        event_type="soul_state",
+                        data={
+                            "mood": getattr(state, "mood", None),
+                            "energy": getattr(state, "energy", None),
+                            "session_key": session_key,
+                        },
+                    )
+                )
+        except Exception:
+            logger.debug("Soul observation failed (non-fatal)", exc_info=True)
+
     def reset_router(self) -> None:
         """Reset the router to pick up new settings."""
         self._router = None
+
+        # Handle soul_enabled toggle at runtime
+        settings = Settings.load()
+        if settings.soul_enabled and self._soul_manager is None:
+            try:
+                from pocketpaw.soul.manager import SoulManager
+
+                self._soul_manager = SoulManager(settings)
+                asyncio.create_task(self._initialize_soul_runtime())
+            except Exception:
+                logger.debug("Soul runtime init failed", exc_info=True)
+        elif not settings.soul_enabled and self._soul_manager is not None:
+            if self._soul_manager._initialized:
+                asyncio.create_task(self._teardown_soul_runtime())
+            else:
+                # Not yet initialized, just discard the reference
+                self._soul_manager = None
+
+    async def _initialize_soul_runtime(self) -> None:
+        """Initialize soul when enabled at runtime."""
+        if self._soul_manager is None:
+            return
+        try:
+            await self._soul_manager.initialize()
+            if self._soul_manager.bootstrap_provider:
+                self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
+            self._soul_manager.start_auto_save()
+        except Exception:
+            logger.exception("Soul runtime initialization failed")
+            self._soul_manager = None
+
+    async def _teardown_soul_runtime(self) -> None:
+        """Tear down soul when disabled at runtime."""
+        if self._soul_manager is None:
+            return
+        try:
+            await self._soul_manager.shutdown()
+        except Exception:
+            logger.debug("Soul runtime teardown failed", exc_info=True)
+        self._soul_manager = None
+        from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
+
+        self.context_builder.bootstrap = DefaultBootstrapProvider()

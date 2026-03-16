@@ -125,7 +125,9 @@ class UsageTracker:
         ResultMessage), it is used as the authoritative cost. Otherwise
         we estimate from the pricing table.
         """
-        total = input_tokens + output_tokens
+        # total_tokens must include cached_input_tokens — they are real tokens
+        # processed by the model even though billed at a lower rate.
+        total = input_tokens + output_tokens + cached_input_tokens
         cost = (
             total_cost_usd
             if total_cost_usd is not None
@@ -175,9 +177,35 @@ class UsageTracker:
             logger.warning("Failed to read usage records: %s", e)
         return records
 
+    def _iter_all_records(self) -> list[UsageRecord]:
+        """Read ALL records from disk without any limit.
+
+        Used internally by get_summary() to ensure aggregations are always
+        computed over the full dataset, not just the most recent N records.
+        """
+        if not self._path.exists():
+            return []
+        records: list[UsageRecord] = []
+        try:
+            for line in self._path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    records.append(UsageRecord(**data))
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("Failed to read usage records: %s", e)
+        return records
+
     def get_summary(self, since: str | None = None) -> dict:
-        """Get aggregated usage summary, optionally filtered by timestamp."""
-        records = self.get_records(limit=10_000)
+        """Get aggregated usage summary, optionally filtered by timestamp.
+
+        Uses _iter_all_records() so the summary covers every record ever
+        written, not just the most recent 10 000.
+        """
+        records = self._iter_all_records()
         if since:
             records = [r for r in records if r.timestamp >= since]
 
