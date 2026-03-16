@@ -1,4 +1,4 @@
-# Tests for DeliverArtifactTool — file delivery to user channels.
+# Tests for DeliverArtifactTool - file delivery to user channels.
 # Created: 2026-03-12
 
 from unittest.mock import patch

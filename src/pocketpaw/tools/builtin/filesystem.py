@@ -1,6 +1,6 @@
-# Filesystem tools — ReadFileTool, WriteFileTool, ListDirTool, EditFileTool.
+# Filesystem tools - ReadFileTool, WriteFileTool, ListDirTool, EditFileTool.
 # Created: 2026-02-02
-# Modified: 2026-03-12 — Added EditFileTool for find-and-replace file editing
+# Modified: 2026-03-12 - Added EditFileTool for find-and-replace file editing
 
 
 from pathlib import Path
@@ -260,7 +260,7 @@ class EditFileTool(BaseTool):
 
             if not replace_all and count > 1:
                 return self._error(
-                    f"old_string appears {count} times — provide more context to make it "
+                    f"old_string appears {count} times. Provide more context to make it "
                     f"unique, or set replace_all=true"
                 )
 

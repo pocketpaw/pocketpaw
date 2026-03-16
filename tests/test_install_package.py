@@ -1,4 +1,4 @@
-# Tests for InstallPackageTool — pip install with Guardian review.
+# Tests for InstallPackageTool - pip install with Guardian review.
 # Created: 2026-03-12
 
 import subprocess
@@ -141,7 +141,7 @@ async def test_install_package_shell_injection_semicolon(mock_guardian):
         result = await tool.execute(package="foo; rm -rf /")
 
     assert result.startswith("Error:")
-    # Guardian should never have been called — validation happens first
+    # Guardian should never have been called since validation happens first
     mock_guardian.check_command.assert_not_called()
 
 
@@ -183,7 +183,7 @@ async def test_install_package_guardian_block():
 
     blocking_guardian = MagicMock()
     blocking_guardian.check_command = AsyncMock(
-        return_value=(False, "suspicious package — possible typosquatting")
+        return_value=(False, "suspicious package, possible typosquatting")
     )
 
     with (

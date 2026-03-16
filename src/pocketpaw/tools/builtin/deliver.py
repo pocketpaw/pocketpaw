@@ -1,4 +1,4 @@
-# Artifact delivery tool — sends files back to the user via their channel.
+# Artifact delivery tool - sends files back to the user via their channel.
 # Created: 2026-03-12
 
 import mimetypes
@@ -62,15 +62,12 @@ class DeliverArtifactTool(BaseTool):
             # Check file size (100MB limit)
             size = file_path.stat().st_size
             if size > 100 * 1024 * 1024:
-                return self._error(
-                    f"File too large: {size / (1024*1024):.1f}MB (max 100MB)"
-                )
+                return self._error(f"File too large: {size / (1024 * 1024):.1f}MB (max 100MB)")
 
             # Detect MIME type for the caption
             mime, _ = mimetypes.guess_type(str(file_path))
             size_str = (
-                f"{size / (1024*1024):.1f}MB" if size > 1024 * 1024
-                else f"{size / 1024:.1f}KB"
+                f"{size / (1024 * 1024):.1f}MB" if size > 1024 * 1024 else f"{size / 1024:.1f}KB"
             )
             info = f"Delivering {file_path.name} ({mime or 'unknown'}, {size_str})"
 

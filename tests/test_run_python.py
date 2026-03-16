@@ -1,4 +1,4 @@
-# Tests for RunPythonTool — sandboxed Python execution.
+# Tests for RunPythonTool - sandboxed Python execution.
 # Created: 2026-03-12
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -149,9 +149,7 @@ async def test_run_python_guardian_block(mock_settings):
     blocking_guardian.check_command = AsyncMock(return_value=(False, "blocked by policy"))
 
     with (
-        patch(
-            "pocketpaw.tools.builtin.python_exec.get_guardian", return_value=blocking_guardian
-        ),
+        patch("pocketpaw.tools.builtin.python_exec.get_guardian", return_value=blocking_guardian),
         patch("pocketpaw.tools.builtin.python_exec.get_settings", return_value=mock_settings),
     ):
         tool = RunPythonTool()

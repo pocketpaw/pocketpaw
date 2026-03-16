@@ -1,4 +1,4 @@
-# Tests for EditFileTool — find-and-replace file editing.
+# Tests for EditFileTool - find-and-replace file editing.
 # Created: 2026-03-12
 
 from unittest.mock import patch
@@ -25,7 +25,7 @@ def mock_settings(jail):
 
 @pytest.mark.asyncio
 async def test_edit_file_basic(jail, mock_settings):
-    """Replace one occurrence — content should change."""
+    """Replace one occurrence, content should change."""
     f = jail / "hello.txt"
     f.write_text("Hello World")
 

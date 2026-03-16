@@ -1,4 +1,4 @@
-# Python execution tool — sandboxed Python script runner.
+# Python execution tool - sandboxed Python script runner.
 # Created: 2026-03-12
 
 import asyncio
@@ -65,8 +65,7 @@ class RunPythonTool(BaseTool):
         try:
             script_path.write_text(code, encoding="utf-8")
 
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
                     [sys.executable, str(script_path)],

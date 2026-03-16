@@ -1,4 +1,4 @@
-# Package installation tool — pip install with Guardian review.
+# Package installation tool - pip install with Guardian review.
 # Created: 2026-03-12
 
 import asyncio
@@ -10,11 +10,12 @@ from typing import Any
 from pocketpaw.security import get_guardian
 from pocketpaw.tools.protocol import BaseTool
 
-# Whitelist: only characters valid in a pip package spec are allowed.
+# Whitelist: only characters valid in a single pip package spec are allowed.
 # Covers package names, extras (brackets), version specifiers, and version numbers.
+# No whitespace: this tool installs one package at a time.
 # Anything outside this set (semicolons, pipes, ampersands, backticks, dollar signs,
-# parens, newlines) will fail the match and be rejected.
-_VALID_PACKAGE_SPEC_RE = re.compile(r"^[a-zA-Z0-9_\-\.\[\],~>=<!\s]+$")
+# parens, newlines, spaces) will fail the match and be rejected.
+_VALID_PACKAGE_SPEC_RE = re.compile(r"^[a-zA-Z0-9_\-\.\[\],~>=<!]+$")
 
 
 class InstallPackageTool(BaseTool):
@@ -46,7 +47,7 @@ class InstallPackageTool(BaseTool):
                 "package": {
                     "type": "string",
                     "description": (
-                        'Package name with optional version specifier '
+                        "Package name with optional version specifier "
                         '(e.g. "requests", "paw-ytp>=0.1.0")'
                     ),
                 },
@@ -66,7 +67,7 @@ class InstallPackageTool(BaseTool):
     async def execute(self, package: str, upgrade: bool = False) -> str:
         """Install a package via pip after Guardian review."""
 
-        # 1. Validate package spec — reject shell metacharacters
+        # 1. Validate package spec, reject shell metacharacters
         if not self._is_valid_package_spec(package):
             return self._error(
                 f"Invalid package spec '{package}': contains disallowed characters. "
@@ -82,15 +83,19 @@ class InstallPackageTool(BaseTool):
 
         # 3. Build the subprocess command
         cmd = [
-            sys.executable, "-m", "pip", "install", package,
-            "--no-input", "--disable-pip-version-check",
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            package,
+            "--no-input",
+            "--disable-pip-version-check",
         ]
         if upgrade:
             cmd.append("--upgrade")
 
         try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
                     cmd,
