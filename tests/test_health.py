@@ -584,8 +584,6 @@ class TestCheckVersionUpdate:
         assert result.status == "ok"
         assert result.check_id == "version_update"
         assert "latest" in result.message
-        assert result.check_id == "version_update"
-        assert "latest" in result.message
 
     async def test_returns_warning_when_update_available(self, tmp_path):
         """Update available returns warning status with upgrade hint."""
@@ -686,9 +684,7 @@ class TestHealthEngine:
             patch("importlib.util.find_spec", return_value=MagicMock()),
         ):
             results = engine.run_startup_checks()
-            assert (
-                len(results) == 10
-            )  # 10 original (version_update moved to CONNECTIVITY_CHECKS)
+            assert len(results) == 10  # 10 original (version_update moved to CONNECTIVITY_CHECKS)
             # All should be ok with valid config + key
             statuses = {r.status for r in results}
             assert "critical" not in statuses

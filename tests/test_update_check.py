@@ -291,6 +291,7 @@ class TestVersionSeen:
         mark_version_seen("0.4.2", tmp_path)
         assert get_last_seen_version(tmp_path) == "0.4.2"
 
+
 class TestCheckForUpdatesAsync:
     """Async wrapper mirrors the return value of the sync function."""
 
