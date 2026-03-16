@@ -87,6 +87,9 @@ Examples:
   pocketpaw --whatsapp               Start headless WhatsApp webhook server
   pocketpaw --discord --slack        Run Discord + Slack simultaneously
   pocketpaw --dev                    Start dashboard with auto-reload (dev mode)
+  pocketpaw status                    Show agent status
+  pocketpaw status --json             Show agent status as JSON
+  pocketpaw status --watch            Monitor status (refresh every 2s)
 """,
     )
 
@@ -167,10 +170,23 @@ Examples:
         version=f"%(prog)s {get_version('pocketpaw')}",
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON (used with 'status' command)",
+    )
+    parser.add_argument(
+        "--watch",
+        nargs="?",
+        type=float,
+        const=2.0,
+        default=0,
+        help="Watch mode: refresh status every N seconds (default: 2)",
+    )
+    parser.add_argument(
         "command",
         nargs="?",
         default=None,
-        help="Subcommand: 'serve' starts an API-only server (no dashboard UI)",
+        help="Subcommand: 'serve' or 'status'",
     )
 
     args = parser.parse_args()
@@ -179,6 +195,13 @@ Examples:
     _check_extras_installed(args)
 
     settings = get_settings()
+
+    # Push unified PocketPaw env vars so backends see the correct API keys
+    # regardless of which backend is selected. This fixes the issue where
+    # switching backends required manually setting different env vars.
+    from pocketpaw.llm.client import resolve_backend_env
+
+    resolve_backend_env(settings)
 
     # Run startup health checks (non-blocking, informational only)
     if settings.health_check_on_startup:
@@ -250,6 +273,15 @@ Examples:
             from pocketpaw.api.serve import run_api_server
 
             run_api_server(host=host, port=args.port, dev=args.dev)
+        elif args.command == "status":
+            from pocketpaw.cli.status import run_status
+
+            exit_code = run_status(
+                port=args.port,
+                as_json=args.json,
+                watch=args.watch,
+            )
+            raise SystemExit(exit_code)
         elif args.check_ollama:
             exit_code = _run_async(check_ollama(settings))
             raise SystemExit(exit_code)

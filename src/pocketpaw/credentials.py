@@ -50,6 +50,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "teams_app_password",
         "gchat_service_account_key",
         "sarvam_api_key",
+        "litellm_api_key",
     }
 )
 

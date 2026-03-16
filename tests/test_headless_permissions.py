@@ -60,7 +60,7 @@ class TestHeadlessPermissionMode:
         # The fix: permission_mode should be set unconditionally (no if statement)
         # Old broken code: 'if self.settings.bypass_permissions:'
         # Fixed code: 'options_kwargs["permission_mode"] = "bypassPermissions"'
-        assert 'if self.settings.bypass_permissions' not in source, (
+        assert "if self.settings.bypass_permissions" not in source, (
             "permission_mode is still gated behind bypass_permissions setting! "
             "This causes tool calls to hang on messaging channels."
         )
@@ -101,9 +101,7 @@ class TestHeadlessPermissionMode:
         # The assignment line should NOT be indented inside an if block
         # relative to the surrounding options_kwargs assignments
         for _idx, line in permission_lines:
-            assert not line.startswith("if "), (
-                f"permission_mode is inside a conditional: {line}"
-            )
+            assert not line.startswith("if "), f"permission_mode is inside a conditional: {line}"
 
 
 class TestToolExecutionInSubprocess:
@@ -202,6 +200,4 @@ class TestToolExecutionInSubprocess:
             # Should complete without timeout
             assert result.returncode == 0
         except subprocess.TimeoutExpired:
-            pytest.fail(
-                "Tool execution timed out after 5s — this is the permission hang bug!"
-            )
+            pytest.fail("Tool execution timed out after 5s — this is the permission hang bug!")

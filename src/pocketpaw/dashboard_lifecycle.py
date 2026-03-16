@@ -171,6 +171,14 @@ async def startup_event(
 
     # Auto-start configured channel adapters (respects per-channel autostart setting)
     settings = Settings.load()
+
+    # Start StatusTracker (agent state for external integrations)
+    from pocketpaw.dashboard_state import status_tracker
+    from pocketpaw.lifecycle import register as _register_lifecycle
+
+    status_tracker._max_concurrent = settings.max_concurrent_conversations
+    await status_tracker.subscribe()
+    _register_lifecycle("status_tracker", shutdown=status_tracker.unsubscribe)
     if _start_channel_adapter_fn:
         for ch in (
             "discord",

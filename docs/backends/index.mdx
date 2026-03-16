@@ -21,6 +21,8 @@ PocketPaw supports **six agent backends** built on a unified `AgentBackend` prot
 | MCP | Yes | No | Yes | Yes | No | No |
 | Multi-turn | Yes | Yes | Yes | Yes | Yes | Yes |
 | Local models | Ollama | Ollama | No | No | No | No |
+| OpenRouter | Partial | Yes | No | No | No | No |
+| LiteLLM | Yes | Yes | Yes | No | No | Yes |
 | Required key | [Anthropic API key](https://console.anthropic.com/settings/keys) | OpenAI | Google | OpenAI | None | None |
 
 ## Switching Backends
@@ -49,17 +51,27 @@ All six backends have access to PocketPaw's 50+ built-in tools (file operations,
 
 Tool availability is governed by the same [Tool Policy](/tools/tool-policy) system across all backends. Profiles (`safe`, `dev`, `full`) and per-tool allow/deny lists work identically regardless of backend.
 
-### OpenRouter Support
+### OpenRouter & LiteLLM Support
 
-The OpenAI Agents backend supports [OpenRouter](https://openrouter.ai) as a provider, giving access to 100+ models through a single API:
+PocketPaw has dedicated provider adapters for **OpenRouter** and **LiteLLM**, giving access to 100+ models across multiple backends.
 
+**OpenRouter** (100+ models, pay-per-token):
 ```bash
 export POCKETPAW_AGENT_BACKEND="openai_agents"
-export POCKETPAW_LLM_PROVIDER="openai_compatible"
-export POCKETPAW_OPENAI_COMPATIBLE_BASE_URL="https://openrouter.ai/api/v1"
-export POCKETPAW_OPENAI_API_KEY="your-openrouter-key"
-export POCKETPAW_OPENAI_MODEL="anthropic/claude-sonnet-4-20250514"
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="openrouter"
+export POCKETPAW_OPENROUTER_API_KEY="sk-or-v1-..."
+export POCKETPAW_OPENROUTER_MODEL="anthropic/claude-sonnet-4-6"
 ```
+
+**LiteLLM** (100+ providers via proxy or direct SDK):
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"  # works with any backend
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_MODEL="gpt-4o"
+```
+
+See [LLM Providers](/concepts/llm-providers) for detailed configuration of both providers.
 
 ## Capability System
 

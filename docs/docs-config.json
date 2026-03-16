@@ -767,6 +767,13 @@
             ]
           },
           {
+            "label": "Agent Status",
+            "items": [
+              { "label": "Get Agent Status", "href": "/api/get-agent-status", "method": "GET" },
+              { "label": "Agent Status Stream", "href": "/api/get-agent-status-stream", "method": "GET" }
+            ]
+          },
+          {
             "label": "Tunnel",
             "items": [
               { "label": "Get Tunnel Status", "href": "/api/get-tunnel-status", "method": "GET" },
