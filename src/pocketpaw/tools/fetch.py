@@ -46,7 +46,11 @@ def get_directory_keyboard(
         return None
 
     try:
-        req = FetchRequest(path_str=path, jail_str=jail, limit=limit)
+        req = FetchRequest(
+            path_str=str(path),
+            jail_str=str(jail) if jail is not None else None,
+            limit=limit,
+        )
     except ValidationError:
         return InlineKeyboardMarkup(
             [[InlineKeyboardButton("⛔ Invalid path or jail", callback_data="noop")]]
@@ -108,7 +112,11 @@ async def handle_path(
 ) -> dict:
     """Handle a path selection - return directory listing or file."""
     try:
-        req = FetchRequest(path_str=path_str, jail_str=jail, limit=limit)
+        req = FetchRequest(
+            path_str=str(path_str),
+            jail_str=str(jail) if jail is not None else None,
+            limit=limit,
+        )
     except ValidationError as e:
         return {"type": "error", "message": f"Validation Error: {e.errors()[0]['msg']}"}
 
@@ -138,7 +146,11 @@ def list_directory(
 ) -> str:
     """List directory contents as formatted string for web dashboard."""
     try:
-        req = FetchRequest(path_str=path_str, jail_str=jail_str, limit=limit)
+        req = FetchRequest(
+            path_str=str(path_str),
+            jail_str=str(jail_str) if jail_str is not None else None,
+            limit=limit,
+        )
     except ValidationError as e:
         return f"⛔ Validation Error: {e.errors()[0]['msg']}"
 
