@@ -604,15 +604,17 @@ class TestCodexCLICrossBackend:
     @pytest.mark.asyncio
     @patch("shutil.which", return_value="/usr/bin/codex")
     async def test_system_prompt_injected(self, mock_which):
-        """System prompt is included at the beginning of the full prompt."""
+        """System prompt is passed via model_instructions_file temp file."""
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
 
+        captured_cmd = None
         captured_proc = None
 
         async def capture_exec(*args, **kwargs):
-            nonlocal captured_proc
+            nonlocal captured_cmd, captured_proc
+            captured_cmd = args
             captured_proc = _make_mock_process([])
             return captured_proc
 
@@ -625,9 +627,20 @@ class TestCodexCLICrossBackend:
                 pass
 
         assert captured_proc is not None
+        assert captured_cmd is not None
+
+        # System prompt is passed via -c model_instructions_file=<path>, not stdin
+        if sys.platform == "win32":
+            cmd_str = captured_cmd[0]
+            assert "model_instructions_file=" in cmd_str
+        else:
+            cmd_list = list(captured_cmd)
+            instructions_args = [a for a in cmd_list if "model_instructions_file=" in a]
+            assert instructions_args, "Expected model_instructions_file in command args"
+
+        # Stdin should contain only the user message, not the system prompt
         prompt_value = captured_proc.stdin.written.decode("utf-8")
-        assert "[System Instructions]" in prompt_value
-        assert "helpful assistant" in prompt_value
+        assert "Hello" in prompt_value
 
     @pytest.mark.asyncio
     @patch("shutil.which", return_value="/usr/bin/codex")

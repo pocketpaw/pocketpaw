@@ -1,6 +1,11 @@
-"""Tests for config.py API key validation."""
+"""Tests for config.py API key validation and numeric field constraints."""
 
-from pocketpaw.config import validate_api_key
+from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+
+from pocketpaw.config import Settings, validate_api_key
 
 
 class TestValidateApiKey:
@@ -158,3 +163,132 @@ class TestValidateApiKey:
         assert len(result) == 2
         assert isinstance(result[0], bool)
         assert isinstance(result[1], str)
+
+
+class TestNumericFieldConstraints:
+    """Tests for gt/ge constraints on numeric settings in Settings (issue #629)."""
+
+    # ─── compaction_recent_window ───────────────────────────────────────────
+
+    def test_compaction_recent_window_zero_rejected(self):
+        """compaction_recent_window=0 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(compaction_recent_window=0)
+
+    def test_compaction_recent_window_negative_rejected(self):
+        """compaction_recent_window=-1 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(compaction_recent_window=-1)
+
+    def test_compaction_recent_window_positive_accepted(self):
+        """compaction_recent_window=1 must be accepted."""
+        s = Settings(compaction_recent_window=1)
+        assert s.compaction_recent_window == 1
+
+    # ─── compaction_char_budget ─────────────────────────────────────────────
+
+    def test_compaction_char_budget_zero_rejected(self):
+        """compaction_char_budget=0 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(compaction_char_budget=0)
+
+    def test_compaction_char_budget_negative_rejected(self):
+        """compaction_char_budget=-100 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(compaction_char_budget=-100)
+
+    def test_compaction_char_budget_positive_accepted(self):
+        """compaction_char_budget=1 must be accepted."""
+        s = Settings(compaction_char_budget=1)
+        assert s.compaction_char_budget == 1
+
+    # ─── compaction_summary_chars ───────────────────────────────────────────
+
+    def test_compaction_summary_chars_zero_rejected(self):
+        """compaction_summary_chars=0 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(compaction_summary_chars=0)
+
+    def test_compaction_summary_chars_negative_rejected(self):
+        """compaction_summary_chars=-5 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(compaction_summary_chars=-5)
+
+    def test_compaction_summary_chars_positive_accepted(self):
+        """compaction_summary_chars=1 must be accepted."""
+        s = Settings(compaction_summary_chars=1)
+        assert s.compaction_summary_chars == 1
+
+    # ─── session_token_ttl_hours ────────────────────────────────────────────
+
+    def test_session_token_ttl_hours_zero_rejected(self):
+        """session_token_ttl_hours=0 must raise a ValidationError.
+
+        Zero TTL means all session tokens are immediately expired.
+        """
+        with pytest.raises(ValidationError):
+            Settings(session_token_ttl_hours=0)
+
+    def test_session_token_ttl_hours_negative_rejected(self):
+        """session_token_ttl_hours=-1 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(session_token_ttl_hours=-1)
+
+    def test_session_token_ttl_hours_positive_accepted(self):
+        """session_token_ttl_hours=1 must be accepted."""
+        s = Settings(session_token_ttl_hours=1)
+        assert s.session_token_ttl_hours == 1
+
+    # ─── api_rate_limit_per_key ─────────────────────────────────────────────
+
+    def test_api_rate_limit_per_key_zero_rejected(self):
+        """api_rate_limit_per_key=0 must raise a ValidationError.
+
+        Zero capacity causes the rate limiter to reject every request.
+        """
+        with pytest.raises(ValidationError):
+            Settings(api_rate_limit_per_key=0)
+
+    def test_api_rate_limit_per_key_negative_rejected(self):
+        """api_rate_limit_per_key=-10 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(api_rate_limit_per_key=-10)
+
+    def test_api_rate_limit_per_key_positive_accepted(self):
+        """api_rate_limit_per_key=1 must be accepted."""
+        s = Settings(api_rate_limit_per_key=1)
+        assert s.api_rate_limit_per_key == 1
+
+    # ─── media_max_file_size_mb ─────────────────────────────────────────────
+
+    def test_media_max_file_size_mb_zero_accepted(self):
+        """media_max_file_size_mb=0 must be accepted (documented as unlimited)."""
+        s = Settings(media_max_file_size_mb=0)
+        assert s.media_max_file_size_mb == 0
+
+    def test_media_max_file_size_mb_negative_rejected(self):
+        """media_max_file_size_mb=-1 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(media_max_file_size_mb=-1)
+
+    def test_media_max_file_size_mb_positive_accepted(self):
+        """media_max_file_size_mb=100 must be accepted."""
+        s = Settings(media_max_file_size_mb=100)
+        assert s.media_max_file_size_mb == 100
+
+    # ─── max_concurrent_conversations ───────────────────────────────────────
+
+    def test_max_concurrent_conversations_zero_rejected(self):
+        """max_concurrent_conversations=0 must raise a ValidationError (zero limit deadlocks)."""
+        with pytest.raises(ValidationError):
+            Settings(max_concurrent_conversations=0)
+
+    def test_max_concurrent_conversations_negative_rejected(self):
+        """max_concurrent_conversations=-3 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            Settings(max_concurrent_conversations=-3)
+
+    def test_max_concurrent_conversations_positive_accepted(self):
+        """max_concurrent_conversations=1 must be accepted."""
+        s = Settings(max_concurrent_conversations=1)
+        assert s.max_concurrent_conversations == 1

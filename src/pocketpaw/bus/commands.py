@@ -584,6 +584,7 @@ class CommandHandler:
         """List all available commands."""
         text = (
             "**PocketPaw Commands:**\n\n"
+            "/paw <message> — Send a message to PocketPaw\n"
             "/new — Start a fresh conversation\n"
             "/sessions — List your conversation sessions\n"
             "/resume <n> — Resume session #n from the list\n"
@@ -597,6 +598,7 @@ class CommandHandler:
             "/model — Show or switch model for current backend\n"
             "/tools — Show or switch tool profile\n"
             "/kill — Kill the current agent run\n"
+            "/converse — Toggle conversation mode in this channel\n"
             "/help — Show this help message\n\n"
             "_Tip: Use !command instead of /command on channels"
             " where / is intercepted (e.g. Matrix)._"

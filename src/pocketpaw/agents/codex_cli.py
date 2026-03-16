@@ -16,11 +16,13 @@ as a command-line argument.  This avoids the Windows command-line length limit
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
@@ -105,11 +107,31 @@ class CodexCLIBackend:
 
         self._stop_flag = False
 
+        # Temp file for system prompt injection (cleaned up in finally block)
+        _instructions_file = None
+
         try:
-            # Build the prompt: system prompt + history + user message
-            prompt_parts = []
+            # Build the prompt: history + user message (sent via stdin).
+            # System prompt is passed via model_instructions_file so Codex CLI
+            # uses it as actual system-level instructions, replacing the
+            # built-in "You are Codex" identity.
             effective_system = system_prompt or _DEFAULT_IDENTITY
-            prompt_parts.append(f"[System Instructions]\n{effective_system}\n")
+
+            # Write system prompt to a temp file for model_instructions_file
+            import tempfile
+
+            _instructions_file = tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".md",
+                prefix="paw_codex_instructions_",
+                delete=False,
+                encoding="utf-8",
+            )
+            _instructions_file.write(effective_system)
+            _instructions_file.close()
+            instructions_path = _instructions_file.name
+
+            prompt_parts = []
             if history:
                 prompt_parts.append(self._inject_history("", history).strip())
             prompt_parts.append(message)
@@ -136,10 +158,15 @@ class CodexCLIBackend:
                 "exec",
                 "--json",
                 "--full-auto",
+                "-c",
+                f"model_instructions_file={instructions_path}",
                 "--model",
                 model,
                 "-",
             ]
+
+            # Explicitly pass env so runtime key changes are visible
+            proc_env = os.environ.copy()
 
             if sys.platform == "win32":
                 # On Windows, npm global installs are .cmd wrappers that
@@ -150,6 +177,7 @@ class CodexCLIBackend:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
                 )
             else:
                 self._process = await asyncio.create_subprocess_exec(
@@ -158,6 +186,7 @@ class CodexCLIBackend:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
                 )
 
             # Feed the prompt via stdin and close to signal EOF
@@ -324,6 +353,13 @@ class CodexCLIBackend:
         except Exception as e:
             logger.error("Codex CLI error: %s", e)
             yield AgentEvent(type="error", content=f"Codex CLI error: {e}")
+        finally:
+            # Clean up temp instructions file
+            if _instructions_file is not None:
+                try:
+                    Path(_instructions_file.name).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     async def stop(self) -> None:
         self._stop_flag = True
