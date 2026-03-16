@@ -70,17 +70,17 @@ def parse_natural_time(text: str) -> datetime | None:
     text = text.lower().strip()
     now = datetime.now(tz=UTC)
 
-<<<<<<< Updated upstream
+
     # Pattern: "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (in is optional)
     relative_match = re.search(
         r"(?:in\s+)?(\d+)\s*(week|minute|min|hour|hr|day|second|sec)s?\b",
         text,
     )
-=======
+
     # Pattern: "in X minutes/hours/days" or "X minutes/hours/days" (in is optional)
     pattern = r"(?:in\s+)?(\d+)\s*(minute|min|hour|hr|day|week|second|sec)s?\b"
     relative_match = re.search(pattern, text)
->>>>>>> Stashed changes
+
     if relative_match:
         amount = int(relative_match.group(1))
         unit = relative_match.group(2)

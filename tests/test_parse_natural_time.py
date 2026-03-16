@@ -253,7 +253,6 @@ class TestParseNaturalTimeInvalidInputs:
         result = parse_natural_time("minutes")
         assert result is None
 
-<<<<<<< Updated upstream
 
 class TestParseNaturalTimeWeeks:
     """Tests for week/weeks support."""
@@ -289,5 +288,4 @@ class TestParseNaturalTimeWeeks:
         now = datetime.now(result.tzinfo)
         expected = now + timedelta(weeks=1)
         assert abs((result - expected).total_seconds()) < 1
-=======
->>>>>>> Stashed changes
+
