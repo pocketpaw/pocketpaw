@@ -72,7 +72,9 @@ class ExternalAgentDelegate:
                 exit_code=1,
                 error=(
                     "Claude Code CLI not found. "
-                    "Install with: npm install -g @anthropic-ai/claude-code"
+                    "Install with: npm install -g @anthropic-ai/claude-code\n"
+                    "Windows: irm https://claude.ai/install.ps1 | iex\n"
+                    "macOS/Linux: curl -fsSL https://claude.ai/install.sh | bash"
                 ),
             )
 

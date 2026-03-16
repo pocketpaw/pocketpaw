@@ -2,6 +2,7 @@ import type { Session } from "$lib/api";
 import { toast } from "svelte-sonner";
 import { connectionStore } from "./connection.svelte";
 import { chatStore } from "./chat.svelte";
+import { logger } from "$lib/utils/logger";
 
 const STORAGE_KEY = "pocketpaw_active_session";
 const PINNED_KEY = "pocketpaw_pinned_sessions";
@@ -97,7 +98,7 @@ class SessionStore {
         this.setActiveSession(target);
       }
     } catch (err) {
-      console.error("[SessionStore] Failed to load sessions:", err);
+      logger.error("[SessionStore] Failed to load sessions:", err);
       toast.error("Failed to load sessions");
     } finally {
       this.isLoading = false;

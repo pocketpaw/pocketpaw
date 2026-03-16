@@ -231,33 +231,57 @@ class TestTelegramMediaSend:
 
 
 class TestDiscordMediaSend:
-    """Tests for DiscordAdapter._send_media_file()."""
+    """Tests for DiscliAdapter media sending via _send_command."""
 
     async def test_sends_file(self, tmp_path):
-        sys.modules["discord"] = MagicMock()
-        sys.modules["discord.app_commands"] = MagicMock()
-        from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
+        from pocketpaw.bus.adapters.discord_adapter import DiscliAdapter
 
-        adapter = DiscordAdapter(token="fake")
-        channel_mock = AsyncMock()
-        client_mock = MagicMock()
-        client_mock.get_channel.return_value = channel_mock
-        adapter._client = client_mock
+        adapter = DiscliAdapter(token="fake")
+        adapter._proc = MagicMock()
+        adapter._send_command = AsyncMock(return_value={"ok": True})
 
         audio_file = tmp_path / "test.wav"
         audio_file.write_bytes(b"fake audio")
 
-        await adapter._send_media_file("999", str(audio_file))
-        channel_mock.send.assert_called_once()
+        from pocketpaw.bus.events import Channel, OutboundMessage
 
-    async def test_skips_missing_file(self, tmp_path):
-        sys.modules["discord"] = MagicMock()
-        sys.modules["discord.app_commands"] = MagicMock()
-        from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
+        msg = OutboundMessage(
+            channel=Channel.DISCORD,
+            chat_id="999",
+            content="Here's the file",
+            media=[str(audio_file)],
+        )
+        await adapter.send(msg)
 
-        adapter = DiscordAdapter(token="fake")
-        adapter._client = MagicMock()
-        await adapter._send_media_file("999", "/nonexistent.wav")
+        adapter._send_command.assert_any_call(
+            "send", channel_id="999", content="", files=[str(audio_file)]
+        )
+
+    async def test_sends_media_on_stream_end(self, tmp_path):
+        from pocketpaw.bus.adapters.discord_adapter import DiscliAdapter
+
+        adapter = DiscliAdapter(token="fake")
+        adapter._proc = MagicMock()
+        adapter._send_command = AsyncMock(return_value={"ok": True})
+        adapter._active_streams["999"] = "s1"
+
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"fake audio")
+
+        from pocketpaw.bus.events import Channel, OutboundMessage
+
+        msg = OutboundMessage(
+            channel=Channel.DISCORD,
+            chat_id="999",
+            content="",
+            is_stream_end=True,
+            media=[str(audio_file)],
+        )
+        await adapter.send(msg)
+
+        adapter._send_command.assert_any_call(
+            "send", channel_id="999", content="", files=[str(audio_file)]
+        )
 
 
 class TestSlackMediaSend:
@@ -669,17 +693,16 @@ class TestTelegramStreamEndMedia:
 
 
 class TestDiscordStreamEndMedia:
-    """Discord adapter should call _send_media_file for each media on stream_end."""
+    """Discord adapter should send each media file via _send_command on stream_end."""
 
     async def test_stream_end_sends_media(self, tmp_path):
-        sys.modules["discord"] = MagicMock()
-        sys.modules["discord.app_commands"] = MagicMock()
-        from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
+        from pocketpaw.bus.adapters.discord_adapter import DiscliAdapter
         from pocketpaw.bus.events import Channel, OutboundMessage
 
-        adapter = DiscordAdapter(token="fake")
-        adapter._client = MagicMock()
-        adapter._send_media_file = AsyncMock()
+        adapter = DiscliAdapter(token="fake")
+        adapter._proc = MagicMock()
+        adapter._send_command = AsyncMock(return_value={"ok": True})
+        adapter._active_streams["999"] = "s1"
 
         msg = OutboundMessage(
             channel=Channel.DISCORD,
@@ -689,7 +712,13 @@ class TestDiscordStreamEndMedia:
             media=["/tmp/tts.wav", "/tmp/img.png"],
         )
         await adapter.send(msg)
-        assert adapter._send_media_file.call_count == 2
+
+        media_calls = [
+            c
+            for c in adapter._send_command.call_args_list
+            if c[0][0] == "send" and c[1].get("files")
+        ]
+        assert len(media_calls) == 2
 
 
 class TestSlackStreamEndMedia:

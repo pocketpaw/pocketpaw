@@ -70,3 +70,11 @@ client/build/
 client/src-tauri/target/
 client/src-tauri/gen/
 client/bun.lock
+<<<<<<< fix/client-first-install-reliability
+
+
+
+private.key
+=======
+private.key
+>>>>>>> dev

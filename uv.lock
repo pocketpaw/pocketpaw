@@ -676,6 +676,19 @@ wheels = [
 ]
 
 [[package]]
+name = "discord-cli-agent"
+version = "0.6.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "discord-py" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/84/5a/3da941ae2151485f9578a68eb53875e85962e1ebb7a96992487fc0f68013/discord_cli_agent-0.6.4.tar.gz", hash = "sha256:05d452bda26b01acde26ba6dfcef34e1a7e03ed1f343a9cff981e18f5f710c75", size = 34201, upload-time = "2026-03-16T10:15:13.145Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/b6/a6339cd0be37fff1d4514e95020e26e585e82db39092dafefb9691afe77a/discord_cli_agent-0.6.4-py3-none-any.whl", hash = "sha256:d429dbfe87d069382b6b44b0c012218777b73a5c1df899308fe87dcf32281a09", size = 36624, upload-time = "2026-03-16T10:15:11.691Z" },
+]
+
+[[package]]
 name = "discord-py"
 version = "2.6.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3054,7 +3067,7 @@ dependencies = [
 all = [
     { name = "botbuilder-core" },
     { name = "botbuilder-integration-aiohttp" },
-    { name = "discord-py" },
+    { name = "discord-cli-agent" },
     { name = "elevenlabs" },
     { name = "github-copilot-sdk" },
     { name = "google-adk" },
@@ -3075,6 +3088,7 @@ all = [
     { name = "python-telegram-bot" },
     { name = "sarvamai" },
     { name = "slack-bolt" },
+    { name = "soul-protocol", extra = ["engine"] },
 ]
 all-backends = [
     { name = "github-copilot-sdk" },
@@ -3085,7 +3099,7 @@ all-backends = [
 all-channels = [
     { name = "botbuilder-core" },
     { name = "botbuilder-integration-aiohttp" },
-    { name = "discord-py" },
+    { name = "discord-cli-agent" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "matrix-nio" },
@@ -3105,12 +3119,13 @@ all-tools = [
     { name = "pyautogui" },
     { name = "pytesseract" },
     { name = "sarvamai" },
+    { name = "soul-protocol", extra = ["engine"] },
 ]
 browser = [
     { name = "playwright" },
 ]
 channels = [
-    { name = "discord-py" },
+    { name = "discord-cli-agent" },
     { name = "python-telegram-bot" },
     { name = "slack-bolt" },
 ]
@@ -3124,7 +3139,7 @@ desktop = [
 dev = [
     { name = "botbuilder-core" },
     { name = "botbuilder-integration-aiohttp" },
-    { name = "discord-py" },
+    { name = "discord-cli-agent" },
     { name = "elevenlabs" },
     { name = "github-copilot-sdk" },
     { name = "google-adk" },
@@ -3152,7 +3167,7 @@ dev = [
     { name = "slack-bolt" },
 ]
 discord = [
-    { name = "discord-py" },
+    { name = "discord-cli-agent" },
 ]
 extract = [
     { name = "html2text" },
@@ -3199,6 +3214,9 @@ sarvam = [
 slack = [
     { name = "slack-bolt" },
 ]
+soul = [
+    { name = "soul-protocol", extra = ["engine"] },
+]
 teams = [
     { name = "botbuilder-core" },
     { name = "botbuilder-integration-aiohttp" },
@@ -3217,7 +3235,7 @@ whatsapp-personal = [
 dev = [
     { name = "botbuilder-core" },
     { name = "botbuilder-integration-aiohttp" },
-    { name = "discord-py" },
+    { name = "discord-cli-agent" },
     { name = "elevenlabs" },
     { name = "github-copilot-sdk" },
     { name = "google-adk" },
@@ -3260,11 +3278,11 @@ requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.1.30" },
     { name = "click", specifier = ">=8.0" },
     { name = "cryptography", specifier = ">=42.0" },
-    { name = "discord-py", marker = "extra == 'all'", specifier = ">=2.3.0" },
-    { name = "discord-py", marker = "extra == 'all-channels'", specifier = ">=2.3.0" },
-    { name = "discord-py", marker = "extra == 'channels'", specifier = ">=2.3.0" },
-    { name = "discord-py", marker = "extra == 'dev'", specifier = ">=2.3.0" },
-    { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3.0" },
+    { name = "discord-cli-agent", marker = "extra == 'all'", specifier = ">=0.6.0" },
+    { name = "discord-cli-agent", marker = "extra == 'all-channels'", specifier = ">=0.6.0" },
+    { name = "discord-cli-agent", marker = "extra == 'channels'", specifier = ">=0.6.0" },
+    { name = "discord-cli-agent", marker = "extra == 'dev'", specifier = ">=0.6.0" },
+    { name = "discord-cli-agent", marker = "extra == 'discord'", specifier = ">=0.6.0" },
     { name = "elevenlabs", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "elevenlabs", marker = "extra == 'all-tools'", specifier = ">=1.0.0" },
     { name = "elevenlabs", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -3367,15 +3385,18 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'channels'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'dev'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", specifier = ">=0.2.3" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", specifier = ">=0.2.3" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", specifier = ">=0.2.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
-provides-extras = ["dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "litellm", "memory", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
+provides-extras = ["dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "botbuilder-core", specifier = ">=4.16.0" },
     { name = "botbuilder-integration-aiohttp", specifier = ">=4.16.0" },
-    { name = "discord-py", specifier = ">=2.3.0" },
+    { name = "discord-cli-agent", specifier = ">=0.6.4" },
     { name = "elevenlabs", specifier = ">=1.0.0" },
     { name = "github-copilot-sdk", specifier = ">=0.1.0" },
     { name = "google-adk", specifier = ">=1.0.0" },
@@ -4652,6 +4673,26 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
+]
+
+[[package]]
+name = "soul-protocol"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/68/30/898865eb30b55c004373df34554709e9ab7107a9920ba7de0361008380f3/soul_protocol-0.2.3.tar.gz", hash = "sha256:d5b3f45a635ed5a2d5e51964f4a3d0be17f077288fae4cb1d8062dc8588a58e8", size = 1124039, upload-time = "2026-03-13T14:31:41.136Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/90/2b3328c0830d2399636cba62998d984912e6e9ec5cb33e4a69c3d56c5e4a/soul_protocol-0.2.3-py3-none-any.whl", hash = "sha256:8b8aad5df781205f3ac9581db2b6ea33671ebfd361d62eac7c495c11e04134da", size = 173248, upload-time = "2026-03-13T14:31:35.078Z" },
+]
+
+[package.optional-dependencies]
+engine = [
+    { name = "click" },
+    { name = "cryptography" },
+    { name = "pyyaml" },
+    { name = "rich" },
 ]
 
 [[package]]

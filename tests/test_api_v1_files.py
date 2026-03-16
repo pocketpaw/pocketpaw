@@ -125,3 +125,251 @@ class TestBrowseFiles:
             # Dirs should come first
             assert files[0]["name"] == "aaa_dir"
             assert files[0]["isDir"] is True
+
+
+class TestDownloadFile:
+    """Tests for GET /api/v1/files/download."""
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_download_returns_file(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        (tmp_path / "hello.txt").write_text("world")
+
+        resp = client.get(
+            "/api/v1/files/download",
+            params={"path": str(tmp_path / "hello.txt")},
+        )
+        assert resp.status_code == 200
+        assert resp.text == "world"
+        cd = resp.headers.get("content-disposition", "")
+        assert "attachment" in cd
+        assert "hello.txt" in cd
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_download_nonexistent(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        resp = client.get(
+            "/api/v1/files/download",
+            params={"path": str(tmp_path / "nope.txt")},
+        )
+        assert resp.status_code == 404
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=False)
+    @patch("pocketpaw.config.get_settings")
+    def test_download_path_traversal_rejected(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        resp = client.get(
+            "/api/v1/files/download",
+            params={"path": "/etc/passwd"},
+        )
+        assert resp.status_code == 403
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_download_directory_rejected(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        (tmp_path / "subdir").mkdir()
+
+        resp = client.get(
+            "/api/v1/files/download",
+            params={"path": str(tmp_path / "subdir")},
+        )
+        assert resp.status_code == 400
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_download_content_disposition_rfc5987(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        name = "café report.txt"
+        (tmp_path / name).write_text("data")
+
+        resp = client.get(
+            "/api/v1/files/download",
+            params={"path": str(tmp_path / name)},
+        )
+        assert resp.status_code == 200
+        cd = resp.headers.get("content-disposition", "")
+        assert "filename*=UTF-8''" in cd
+
+
+class TestDownloadZip:
+    """Tests for GET /api/v1/files/download-zip."""
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_zip_returns_archive(self, mock_settings, mock_safe, client, tmp_path):
+        import zipfile as zf
+
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        d = tmp_path / "project"
+        d.mkdir()
+        (d / "a.txt").write_text("aaa")
+        (d / "b.txt").write_text("bbb")
+
+        resp = client.get(
+            "/api/v1/files/download-zip",
+            params={"path": str(d)},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/zip"
+
+        import io
+
+        buf = io.BytesIO(resp.content)
+        with zf.ZipFile(buf) as z:
+            names = z.namelist()
+            assert "a.txt" in names
+            assert "b.txt" in names
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=False)
+    @patch("pocketpaw.config.get_settings")
+    def test_zip_path_traversal_rejected(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        resp = client.get(
+            "/api/v1/files/download-zip",
+            params={"path": "/etc"},
+        )
+        assert resp.status_code == 403
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_zip_not_a_directory(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        (tmp_path / "file.txt").write_text("hi")
+
+        resp = client.get(
+            "/api/v1/files/download-zip",
+            params={"path": str(tmp_path / "file.txt")},
+        )
+        assert resp.status_code == 400
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_zip_too_many_files(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        d = tmp_path / "big"
+        d.mkdir()
+        # We don't actually create 10k files — patch the constant
+        with patch("pocketpaw.api.v1.files._ZIP_MAX_FILES", 2):
+            for i in range(3):
+                (d / f"f{i}.txt").write_text("x")
+            resp = client.get(
+                "/api/v1/files/download-zip",
+                params={"path": str(d)},
+            )
+        assert resp.status_code == 413
+        assert "Too many files" in resp.json()["detail"]
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_zip_cumulative_size_exceeded(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        d = tmp_path / "heavy"
+        d.mkdir()
+        (d / "a.txt").write_text("data")
+        # Cap at 1 byte so the first real file exceeds the limit
+        with patch("pocketpaw.api.v1.files._ZIP_MAX_BYTES", 1):
+            resp = client.get(
+                "/api/v1/files/download-zip",
+                params={"path": str(d)},
+            )
+        assert resp.status_code == 413
+        assert "size exceeds" in resp.json()["detail"]
+
+
+class TestWriteFile:
+    """Tests for POST /api/v1/files/write."""
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_write_existing_file(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        target = tmp_path / "edit.txt"
+        target.write_text("old")
+
+        resp = client.post(
+            "/api/v1/files/write",
+            json={"path": str(target), "content": "new"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert target.read_text() == "new"
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_write_nonexistent_file_rejected(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        resp = client.post(
+            "/api/v1/files/write",
+            json={
+                "path": str(tmp_path / "missing.txt"),
+                "content": "data",
+            },
+        )
+        assert resp.status_code == 404
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=False)
+    @patch("pocketpaw.config.get_settings")
+    def test_write_path_traversal_rejected(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        resp = client.post(
+            "/api/v1/files/write",
+            json={"path": "/etc/passwd", "content": "bad"},
+        )
+        assert resp.status_code == 403
+
+    @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
+    @patch("pocketpaw.config.get_settings")
+    def test_write_directory_rejected(self, mock_settings, mock_safe, client, tmp_path):
+        settings = MagicMock()
+        settings.file_jail_path = tmp_path
+        mock_settings.return_value = settings
+
+        (tmp_path / "adir").mkdir()
+
+        resp = client.post(
+            "/api/v1/files/write",
+            json={"path": str(tmp_path / "adir"), "content": "x"},
+        )
+        assert resp.status_code == 400
