@@ -54,6 +54,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "delete_session",
     ],
     "group:explorer": ["open_in_explorer"],
+    "group:discord": ["discord_cli"],
     "group:mcp": [],  # Placeholder — MCP tools are dynamic per server
 }
 

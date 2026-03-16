@@ -60,6 +60,17 @@ def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
             tools.append(cls())
         except Exception as exc:
             logger.debug("Skipping tool %s: %s", class_name, exc)
+
+    # Inject soul tools if soul is active
+    try:
+        from pocketpaw.soul.manager import get_soul_manager
+
+        soul_mgr = get_soul_manager()
+        if soul_mgr is not None:
+            tools.extend(soul_mgr.get_tools())
+    except Exception:
+        pass  # Soul not available
+
     return tools
 
 

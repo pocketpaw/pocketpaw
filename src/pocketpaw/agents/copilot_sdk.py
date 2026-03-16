@@ -184,10 +184,9 @@ class CopilotSDKBackend:
         try:
             client = await self._ensure_client()
 
-            # Build the prompt
+            # Build the prompt — system_prompt goes into session.system_message
+            # (line 227), so we only include history + user message here.
             prompt_parts = []
-            effective_system = system_prompt or _DEFAULT_IDENTITY
-            prompt_parts.append(f"[System Instructions]\n{effective_system}\n")
             if history:
                 prompt_parts.append(self._inject_history("", history).strip())
             prompt_parts.append(message)
