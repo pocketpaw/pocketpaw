@@ -14,10 +14,10 @@ except ImportError:
 
 class FetchRequest(BaseModel):
     path_str: str = Field(..., description="The path to explore. Cannot be empty.")
-    jail_str: str = Field(..., description="The strictly enforced jail directory. Cannot be empty.")
+    jail_str: str | None = Field(None, description="The strictly enforced jail directory. If None, falls back to home.")
     limit: int = Field(20, ge=1, le=100, description="Number of items to return.")
 
-    @field_validator("path_str", "jail_str", mode="before")
+    @field_validator("path_str", mode="before")
     @classmethod
     def prevent_empty(cls, v: Any) -> str:
         target = str(v) if v is not None else ""
@@ -37,7 +37,7 @@ def is_safe_path(path: Path, jail: Path) -> bool:
 
 
 def get_directory_keyboard(
-    path: Path | str, jail: Path | str, limit: int = 20
+    path: Path | str, jail: Path | str | None = None, limit: int = 20
 ) -> "InlineKeyboardMarkup | None":
     """Generate inline keyboard for directory contents."""
     if InlineKeyboardMarkup is None:
@@ -51,7 +51,8 @@ def get_directory_keyboard(
         )
 
     path_obj = Path(req.path_str).resolve()
-    jail_obj = Path(req.jail_str).resolve()
+    jail_target = req.jail_str if req.jail_str is not None else str(Path.home())
+    jail_obj = Path(jail_target).resolve()
 
     if not is_safe_path(path_obj, jail_obj):
         path_obj = jail_obj
@@ -100,7 +101,7 @@ def get_directory_keyboard(
     return InlineKeyboardMarkup(buttons)
 
 
-async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -> dict:
+async def handle_path(path_str: str | Path, jail: str | Path | None = None, limit: int = 20) -> dict:
     """Handle a path selection - return directory listing or file."""
     try:
         req = FetchRequest(path_str=path_str, jail_str=jail, limit=limit)
@@ -108,7 +109,8 @@ async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -
         return {"type": "error", "message": f"Validation Error: {e.errors()[0]['msg']}"}
 
     path_obj = Path(req.path_str).resolve()
-    jail_obj = Path(req.jail_str).resolve()
+    jail_target = req.jail_str if req.jail_str is not None else str(Path.home())
+    jail_obj = Path(jail_target).resolve()
 
     if not is_safe_path(path_obj, jail_obj):
         return {
@@ -127,7 +129,7 @@ async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -
         return {"type": "error", "message": "Path does not exist"}
 
 
-def list_directory(path_str: str | Path, jail_str: str | Path, limit: int = 30) -> str:
+def list_directory(path_str: str | Path, jail_str: str | Path | None = None, limit: int = 30) -> str:
     """List directory contents as formatted string for web dashboard."""
     try:
         req = FetchRequest(path_str=path_str, jail_str=jail_str, limit=limit)
@@ -135,7 +137,8 @@ def list_directory(path_str: str | Path, jail_str: str | Path, limit: int = 30) 
         return f"⛔ Validation Error: {e.errors()[0]['msg']}"
 
     path_obj = Path(req.path_str).resolve()
-    jail_obj = Path(req.jail_str).resolve()
+    jail_target = req.jail_str if req.jail_str is not None else str(Path.home())
+    jail_obj = Path(jail_target).resolve()
 
     if not is_safe_path(path_obj, jail_obj):
         return "⛔ Access denied: path outside allowed directory or does not exist"

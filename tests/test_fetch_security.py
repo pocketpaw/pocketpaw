@@ -15,7 +15,10 @@ async def test_empty_path_rejection():
 
 
 @pytest.mark.asyncio
-async def test_path_traversal_denied():
+async def test_path_traversal_denied(tmp_path):
     # This confirms the jail is respected
-    result = await handle_path("../../", "/tmp")
+    jail_dir = tmp_path / "jail"
+    jail_dir.mkdir()
+    result = await handle_path("../../etc/passwd", str(jail_dir))
     assert result.get("type") == "error"
+    assert "Access denied" in result.get("message", "")
