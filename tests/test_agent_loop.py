@@ -175,7 +175,6 @@ async def test_agent_loop_handles_error(
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
 @patch("pocketpaw.agents.loop.AgentContextBuilder")
-@pytest.mark.asyncio
 async def test_kill_audit_failure_is_logged(
     mock_builder_cls, mock_get_memory, mock_get_bus, mock_bus, mock_memory, caplog
 ):
@@ -235,7 +234,6 @@ async def test_kill_audit_failure_is_logged(
 @patch("pocketpaw.agents.loop.get_memory_manager")
 @patch("pocketpaw.agents.loop.AgentContextBuilder")
 @patch("pocketpaw.agents.loop.AgentRouter")
-@pytest.mark.asyncio
 async def test_recent_file_tracker_failures_are_logged(
     mock_router_cls,
     mock_builder_cls,
@@ -259,6 +257,9 @@ async def test_recent_file_tracker_failures_are_logged(
         settings.agent_backend = "claude_agent_sdk"
         settings.max_concurrent_conversations = 5
         settings.injection_scan_enabled = False
+        settings.injection_scan_llm = False
+        settings.pii_scan_enabled = False
+        settings.pii_scan_memory = False
         settings.welcome_hint_enabled = False
         mock_settings.return_value = settings
 
