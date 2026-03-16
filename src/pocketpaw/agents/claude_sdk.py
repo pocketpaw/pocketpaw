@@ -1,8 +1,5 @@
 """
-Claude Agent SDK backend for PocketPaw.
-Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
-  tool calls (like memory save via Bash) hang on messaging channels (Telegram,
-  Discord, Slack) because there's no terminal to approve permission prompts.
+Claude Agent SDK wrapper for PocketPaw.
 
 Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides:
 - Built-in tools: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch
@@ -10,105 +7,203 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 - PreToolUse hooks for security
 - Permission management
 - MCP server support for custom tools
+
+Created: 2026-02-02
+Changes:
+  - 2026-02-02: Initial implementation with streaming support.
+  - 2026-02-02: Added set_executor() for 2-layer architecture wiring.
+  - 2026-02-02: Fixed streaming - properly handle all SDK message types.
+  - 2026-02-02: REWRITE - Use official claude-agent-sdk properly with all features.
+                Now uses real SDK imports (AssistantMessage, TextBlock, etc.)
+  - 2026-02-12: Hardened _block_dangerous_hook — wrapped in try/except to prevent
+                unhandled exceptions from tearing down the CLI stream. Updated hook
+                signature to match SDK 0.1.31 types (PreToolUseHookInput, HookContext).
 """
 
 import logging
-import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
-from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.agents.protocol import AgentEvent, ExecutorProtocol
 from pocketpaw.config import Settings
-from pocketpaw.security.rails import DANGEROUS_SUBSTRINGS as DANGEROUS_PATTERNS
 from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
+
+# Dangerous command patterns to block via PreToolUse hook
+DANGEROUS_PATTERNS = [
+    "rm -rf /",
+    "rm -rf ~",
+    "rm -rf *",
+    "sudo rm",
+    "> /dev/",
+    "format ",
+    "mkfs",
+    "chmod 777 /",
+    ":(){ :|:& };:",  # Fork bomb
+    "dd if=/dev/zero",
+    "dd if=/dev/random",
+    "> /etc/passwd",
+    "> /etc/shadow",
+    "curl | sh",
+    "curl | bash",
+    "wget | sh",
+    "wget | bash",
+]
 
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
     "You are PocketPaw, a helpful AI assistant running locally on the user's computer."
 )
 
+# Tool-specific instructions — appended to every system prompt regardless of source
+_TOOL_INSTRUCTIONS = """
+## Built-in SDK Tools
+- Bash: Run shell commands
+- Read/Write/Edit: File operations
+- Glob/Grep: Search files and content
+- WebSearch/WebFetch: Search the web and fetch URLs
 
-class ClaudeSDKBackend:
-    """Claude Agent SDK backend — the recommended default.
+## PocketPaw Tools (call via Bash)
 
-    Provides all built-in tools (Bash, Read, Write, Edit, Glob, Grep,
-    WebSearch, WebFetch), streaming responses, PreToolUse hooks for
-    security, and MCP server support.
+You have extra tools installed. Call them with:
+```bash
+python -m pocketpaw.tools.cli <tool_name> '<json_args>'
+```
+
+### Memory
+- `remember '{"content": "User name is Alice", "tags": ["personal"]}'` — save to long-term memory
+- `forget '{"query": "old preference"}'` — remove outdated memories
+
+**When to use remember:**
+- User tells you their name, preferences, or personal details
+- User explicitly asks "remember this"
+- You learn something important about the user's projects or workflow
+
+**Always remember proactively** — don't wait to be asked.
+If someone shares personal info, immediately call remember.
+
+**Reading memories:** Your system prompt already contains a "Memory
+Context" section with ALL saved memories pre-loaded. Just read it
+directly — never use a tool to look up what you already know.
+
+### Email (Gmail — requires OAuth)
+- `gmail_search '{"query": "is:unread", "max_results": 10}'` — search emails
+- `gmail_read '{"message_id": "MSG_ID"}'` — read full email
+- `gmail_send '{"to": "x@y.com", "subject": "Hi", "body": "..."}'` — send email
+- `gmail_list_labels '{}'` — list all labels
+- `gmail_create_label '{"name": "MyLabel"}'` — create label (use / for nesting)
+- `gmail_modify '{"message_id": "ID", "add_labels": ["LABEL"], "remove_labels": ["INBOX"]}'`
+- `gmail_trash '{"message_id": "ID"}'` — trash a message
+- `gmail_batch_modify '{"message_ids": ["ID1","ID2"], "add_labels": ["L1"]}'`
+  Built-in label IDs: INBOX, SPAM, TRASH, UNREAD, STARRED, IMPORTANT
+
+### Calendar (Google Calendar — requires OAuth)
+- `calendar_list '{"max_results": 10}'` — list upcoming events
+- `calendar_create '{"summary": "Meeting", "start": "2026-02-08T10:00:00", "end": "2026-02-08T11:00:00"}'`
+- `calendar_prep '{"hours_ahead": 24}'` — prep summary for upcoming meetings
+
+### Voice / TTS
+- `text_to_speech '{"text": "Hello world", "voice": "alloy"}'` — generate speech audio
+  Voices (OpenAI): alloy, echo, fable, onyx, nova, shimmer
+- `speech_to_text '{"audio_file": "/path/to/audio.mp3"}'` — transcribe audio to text
+  Optional: `"language": "en"` (auto-detected if omitted). Supports mp3/wav/m4a/webm.
+
+### Research
+- `research '{"topic": "quantum computing", "depth": "standard"}'` — multi-source research
+  Depths: quick (3 sources), standard (5), deep (10)
+
+### Image Generation
+- `image_generate '{"prompt": "a sunset over mountains", "aspect_ratio": "16:9"}'`
+
+### Web Content
+- `web_search '{"query": "latest news on AI"}'` — web search (Tavily/Brave)
+- `url_extract '{"urls": ["https://example.com"]}'` — extract clean text from URLs
+
+### Skills
+- `create_skill '{"skill_name": "my-skill", "description": "...", "prompt_template": "..."}'`
+
+### Google Drive (requires OAuth)
+- `drive_list '{"query": "name contains \\'report\\'"}'` — list/search files
+- `drive_download '{"file_id": "FILE_ID"}'` — download a file
+- `drive_upload '{"file_path": "/path/to/file.pdf", "folder_id": "FOLDER_ID"}'` — upload file
+- `drive_share '{"file_id": "FILE_ID", "email": "user@example.com", "role": "reader"}'` — share
+
+### Google Docs (requires OAuth)
+- `docs_read '{"document_id": "DOC_ID"}'` — read document as plain text
+- `docs_create '{"title": "My Doc", "content": "Hello world"}'` — create a new document
+- `docs_search '{"query": "meeting notes"}'` — search Google Docs by name
+
+### Spotify (requires OAuth)
+- `spotify_search '{"query": "bohemian rhapsody", "type": "track"}'` — search tracks/albums/artists
+- `spotify_now_playing '{}'` — what's currently playing
+- `spotify_playback '{"action": "play"}'` — play/pause/next/prev/volume (actions: play, pause, next, prev, volume)
+- `spotify_playlist '{"action": "list"}'` — list playlists or add track
+
+### OCR
+- `ocr '{"image_path": "/path/to/image.png"}'` — extract text from image (uses GPT-4o vision)
+
+### Reddit
+- `reddit_search '{"query": "best python frameworks", "subreddit": "python"}'` — search Reddit
+- `reddit_read '{"url": "https://reddit.com/r/python/comments/..."}'` — read post + comments
+- `reddit_trending '{"subreddit": "all", "limit": 10}'` — trending posts
+
+### Delegation
+- `delegate_claude_code '{"task": "refactor the auth module", "timeout": 300}'` — delegate to Claude Code CLI
+
+## Guidelines
+
+1. **Be AGENTIC** — execute tasks using tools, don't just describe how.
+2. **Use PocketPaw tools** — always prefer `python -m pocketpaw.tools.cli` over platform-specific commands (AppleScript, PowerShell, etc.). These tools work on all operating systems.
+3. **Be concise** — give clear, helpful responses.
+4. **Be safe** — don't run destructive commands. Ask for confirmation if unsure.
+5. If Gmail/Calendar/Drive/Docs returns "not authenticated", tell the user to visit:
+   http://localhost:8888/api/oauth/authorize?service=google_gmail (or google_calendar, google_drive, google_docs)
+6. If Spotify returns "not authenticated", tell the user to visit:
+   http://localhost:8888/api/oauth/authorize?service=spotify
+"""
+
+
+class ClaudeAgentSDK:
+    """Wraps Claude Agent SDK for autonomous task execution.
+
+    This is the RECOMMENDED backend for PocketPaw - it provides:
+    - All built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch)
+    - Streaming responses for real-time feedback
+    - PreToolUse hooks for security (block dangerous commands)
+    - Permission management (can bypass for automation)
 
     Requires: pip install claude-agent-sdk
     """
 
-    _TOOL_POLICY_MAP: dict[str, str] = {
+    # Map SDK tool names to policy tool names for filtering
+    _SDK_TO_POLICY: dict[str, str] = {
         "Bash": "shell",
         "Read": "read_file",
         "Write": "write_file",
         "Edit": "edit_file",
         "Glob": "list_dir",
-        "Grep": "shell",
+        "Grep": "shell",  # search is shell-adjacent
         "WebSearch": "browser",
         "WebFetch": "browser",
-        "Skill": "skill",
     }
 
-    @staticmethod
-    def info() -> BackendInfo:
-        return BackendInfo(
-            name="claude_agent_sdk",
-            display_name="Claude Agent SDK",
-            capabilities=(
-                Capability.STREAMING
-                | Capability.TOOLS
-                | Capability.MCP
-                | Capability.MULTI_TURN
-                | Capability.CUSTOM_SYSTEM_PROMPT
-            ),
-            builtin_tools=[
-                "Bash",
-                "Read",
-                "Write",
-                "Edit",
-                "Glob",
-                "Grep",
-                "WebSearch",
-                "WebFetch",
-            ],
-            tool_policy_map=ClaudeSDKBackend._TOOL_POLICY_MAP,
-            required_keys=["anthropic_api_key"],
-            supported_providers=[
-                "anthropic",
-                "ollama",
-                "openrouter",
-                "openai_compatible",
-                "litellm",
-            ],
-        )
-
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, executor: ExecutorProtocol | None = None):
         self.settings = settings
+        self._executor = executor  # Optional - SDK has built-in execution
         self._stop_flag = False
         self._sdk_available = False
         self._cli_available = False  # Whether the `claude` CLI binary is installed
-        self._cwd = settings.file_jail_path  # Default working directory
+        self._cwd = Path.home()  # Default working directory
         self._policy = ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
             deny=settings.tools_deny,
         )
 
-        # Persistent client — reuses subprocess across messages.
-        # _client_in_use prevents concurrent queries on the same client
-        # (cross-session messages fall back to stateless query()).
-        self._client = None
-        self._client_options_key: str | None = None
-        self._client_in_use = False
-
         # SDK imports (set during initialization)
         self._query = None
-        self._ClaudeSDKClient = None
         self._ClaudeAgentOptions = None
         self._HookMatcher = None
         self._AssistantMessage = None
@@ -131,7 +226,6 @@ class ClaudeSDKBackend:
             from claude_agent_sdk import (
                 AssistantMessage,
                 ClaudeAgentOptions,
-                ClaudeSDKClient,
                 HookMatcher,
                 ResultMessage,
                 SystemMessage,
@@ -144,7 +238,6 @@ class ClaudeSDKBackend:
 
             # Store references
             self._query = query
-            self._ClaudeSDKClient = ClaudeSDKClient
             self._ClaudeAgentOptions = ClaudeAgentOptions
             self._HookMatcher = HookMatcher
             self._AssistantMessage = AssistantMessage
@@ -186,6 +279,15 @@ class ClaudeSDKBackend:
             logger.error(f"❌ Failed to initialize Claude Agent SDK: {e}")
             self._sdk_available = False
 
+    def set_executor(self, executor: ExecutorProtocol) -> None:
+        """Inject an optional executor for custom tool execution.
+
+        Note: Claude Agent SDK has built-in execution, so this is optional.
+        Can be used for custom tools or fallback execution.
+        """
+        self._executor = executor
+        logger.info("🔗 Optional executor connected to Claude Agent SDK")
+
     def set_working_directory(self, path: Path) -> None:
         """Set the working directory for file operations."""
         self._cwd = path
@@ -204,51 +306,6 @@ class ClaudeSDKBackend:
         for pattern in DANGEROUS_PATTERNS:
             if pattern.lower() in command_lower:
                 return pattern
-        return None
-
-    # Patterns that indicate an OS-level "open file" command.
-    _FILE_OPEN_PATTERNS = [
-        re.compile(
-            r"(?:^|&&|\|\||;)\s*start\s+(?:\"\"?\s*)?(.+)",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"(?:^|&&|\|\||;)\s*explorer(?:\.exe)?\s+(.+)",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"(?:^|&&|\|\||;)\s*xdg-open\s+(.+)",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"(?:^|&&|\|\||;)\s*open\s+(?!-a)(.+)",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"(?:^|&&|\|\||;)\s*(?:powershell(?:\.exe)?\s+(?:-[Cc]ommand\s+)?)?"
-            r"Invoke-Item\s+(.+)",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"(?:^|&&|\|\||;)\s*cmd\s+/[cC]\s+start\s+(?:\"\"?\s*)?(.+)",
-            re.IGNORECASE,
-        ),
-    ]
-
-    def _is_file_open_command(self, command: str) -> str | None:
-        """Detect OS-level file-open commands and extract the file path.
-
-        Returns the file path if the command is an OS open, or None.
-        """
-        stripped = command.strip()
-        for pattern in self._FILE_OPEN_PATTERNS:
-            m = pattern.search(stripped)
-            if m:
-                path = m.group(1).strip().strip("'\"")
-                # Skip if it's opening a URL (http/https) — not a local file
-                if path.startswith(("http://", "https://")):
-                    return None
-                return path
         return None
 
     async def _block_dangerous_hook(self, input_data, tool_use_id: str | None, context) -> dict:
@@ -289,24 +346,6 @@ class ClaudeSDKBackend:
                         "permissionDecision": "deny",
                         "permissionDecisionReason": (
                             f"PocketPaw security: '{matched}' pattern is blocked"
-                        ),
-                    }
-                }
-
-            # Redirect OS file-open commands to the in-app viewer.
-            # Matches: start, explorer, xdg-open, open (macOS), Invoke-Item
-            redirect = self._is_file_open_command(command)
-            if redirect:
-                logger.info("↩ Redirecting OS open command to open_in_explorer: %s", redirect)
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": (
-                            "Do not use OS commands to open files. "
-                            "Instead, use the PocketPaw in-app viewer:\n"
-                            "python -m pocketpaw.tools.cli open_in_explorer "
-                            f'\'{{"path": "{redirect}", "action": "view"}}\''
                         ),
                     }
                 }
@@ -425,227 +464,26 @@ class ClaudeSDKBackend:
             servers[cfg.name] = entry
         return servers
 
-    @staticmethod
-    def _merge_consecutive_roles(messages: list[dict]) -> list[dict]:
-        """Merge consecutive messages with the same role for API compliance.
-
-        The Anthropic API requires alternating user/assistant roles.
-        Consecutive same-role messages are concatenated with newlines.
-        """
-        if not messages:
-            return []
-        merged: list[dict] = [messages[0].copy()]
-        for msg in messages[1:]:
-            if msg["role"] == merged[-1]["role"]:
-                merged[-1]["content"] += "\n" + msg["content"]
-            else:
-                merged.append(msg.copy())
-        return merged
-
-    async def _fast_chat(
-        self,
-        message: str,
-        *,
-        system_prompt: str,
-        history: list[dict] | None = None,
-        model: str,
-    ) -> AsyncIterator[AgentEvent]:
-        """Direct Anthropic API path for simple messages.
-
-        Bypasses the Claude CLI subprocess entirely, saving ~1.5-3s of
-        process fork + Node.js startup + CLI initialization overhead.
-        No tools are provided (simple messages don't need them).
-        """
-        try:
-            import time
-
-            from pocketpaw.llm.client import resolve_llm_client
-
-            t0 = time.monotonic()
-            llm = resolve_llm_client(self.settings)
-            client = llm.create_anthropic_client()
-            t1 = time.monotonic()
-            logger.info("Fast-path: client created in %.0fms", (t1 - t0) * 1000)
-
-            # Build API messages from history + current message
-            api_messages: list[dict] = []
-            if history:
-                for msg in history:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    if role in ("user", "assistant") and content:
-                        api_messages.append({"role": role, "content": content})
-            api_messages.append({"role": "user", "content": message})
-
-            # Merge consecutive same-role messages for API compliance
-            api_messages = self._merge_consecutive_roles(api_messages)
-
-            logger.info(
-                "Fast-path: calling %s (system=%d chars, msgs=%d)",
-                model,
-                len(system_prompt),
-                len(api_messages),
-            )
-            t2 = time.monotonic()
-
-            # Respect provider max_tokens (e.g. DeepSeek caps at 8192)
-            provider = self.settings.claude_sdk_provider or "anthropic"
-            if provider == "litellm" and self.settings.litellm_max_tokens > 0:
-                fast_max_tokens = self.settings.litellm_max_tokens
-            elif provider == "openai_compatible" and self.settings.openai_compatible_max_tokens > 0:
-                fast_max_tokens = self.settings.openai_compatible_max_tokens
-            else:
-                fast_max_tokens = 1024
-
-            async with client.messages.stream(
-                model=model,
-                system=system_prompt,
-                messages=api_messages,
-                max_tokens=fast_max_tokens,
-            ) as stream:
-                t3 = time.monotonic()
-                logger.info("Fast-path: stream opened in %.0fms", (t3 - t2) * 1000)
-                first_token = True
-                async for text in stream.text_stream:
-                    if first_token:
-                        t4 = time.monotonic()
-                        logger.info(
-                            "Fast-path: first token in %.0fms (total %.0fms)",
-                            (t4 - t3) * 1000,
-                            (t4 - t0) * 1000,
-                        )
-                        first_token = False
-                    if self._stop_flag:
-                        logger.info("Fast-path: stop flag set, breaking stream")
-                        break
-                    yield AgentEvent(type="message", content=text)
-
-                # Extract usage from the final message
-                final_msg = stream.get_final_message()
-                if final_msg and hasattr(final_msg, "usage") and final_msg.usage:
-                    u = final_msg.usage
-                    yield AgentEvent(
-                        type="token_usage",
-                        content="",
-                        metadata={
-                            "input_tokens": getattr(u, "input_tokens", 0),
-                            "output_tokens": getattr(u, "output_tokens", 0),
-                            "cached_input_tokens": getattr(u, "cache_read_input_tokens", 0)
-                            + getattr(u, "cache_creation_input_tokens", 0),
-                            "model": model,
-                            "backend": "claude_agent_sdk",
-                        },
-                    )
-
-            yield AgentEvent(type="done", content="")
-
-        except Exception as e:
-            from pocketpaw.llm.client import resolve_llm_client
-
-            llm = resolve_llm_client(self.settings)
-            logger.error("Fast-path API error: %s", e)
-            yield AgentEvent(type="error", content=llm.format_api_error(e))
-
-    async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
-        """Get or create a persistent ClaudeSDKClient.
-
-        Reuses the existing subprocess if model, tools, **and session** haven't
-        changed.  Different sessions get a fresh subprocess so the CLI's
-        internal conversation context doesn't leak between chats.
-        """
-        import time
-
-        key = (
-            f"{session_key or ''}:"
-            f"{getattr(options, 'model', '')}:{sorted(getattr(options, 'allowed_tools', []) or [])}"
-        )
-
-        if self._client is not None and self._client_options_key == key:
-            logger.debug("Reusing persistent client (key=%s)", key)
-            return self._client
-
-        # Disconnect stale client
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception as e:
-                logger.debug("Failed to disconnect Claude client: %s", e)
-            self._client = None
-
-        # Create and connect new client
-        t0 = time.monotonic()
-        self._client = self._ClaudeSDKClient(options=options)
-        await self._client.connect()
-        self._client_options_key = key
-        t1 = time.monotonic()
-        logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
-        return self._client
-
-    async def cleanup(self) -> None:
-        """Disconnect the persistent client and release resources."""
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception as e:
-                logger.debug("Failed to disconnect Claude client: %s", e)
-            self._client = None
-            self._client_options_key = None
-            self._client_in_use = False
-            logger.info("Persistent client disconnected")
-
-    async def _resilient_receive(self, client):
-        """Iterate over client messages, recovering from parse errors.
-
-        Uses ``receive_messages()`` directly (not ``receive_response()``)
-        and handles generator death from ``MessageParseError`` by
-        re-creating the iterator from the same underlying anyio channel.
-
-        When ``parse_message()`` raises inside the SDK's
-        ``receive_messages()`` generator, the exception kills the entire
-        generator chain.  The old ``_safe_iter`` wrapper caught the error
-        and called ``continue``, but the generator was already dead — so
-        the next ``__anext__()`` returned ``StopAsyncIteration`` and the
-        loop exited early, leaving unconsumed events in the channel that
-        leaked into the *next* turn.
-
-        This method instead re-creates the ``receive_messages()``
-        iterator after a parse error, which reads from the same
-        underlying anyio memory channel and picks up where it left off.
-        """
-        _max_consecutive_errors = 50  # safety valve
-        _consecutive = 0
-        while _consecutive < _max_consecutive_errors:
-            try:
-                async for msg in client.receive_messages():
-                    _consecutive = 0  # reset on every successful message
-                    yield msg
-                    if self._ResultMessage and isinstance(msg, self._ResultMessage):
-                        return  # normal completion
-                # Generator ended naturally (end-of-stream) without ResultMessage
-                return
-            except Exception as exc:
-                if "MessageParseError" in type(exc).__name__:
-                    _consecutive += 1
-                    logger.debug(
-                        "Skipping unrecognised SDK event (retry %d), re-creating iterator: %s",
-                        _consecutive,
-                        exc,
-                    )
-                    continue
-                raise  # re-raise non-parse errors
-        logger.error("Too many consecutive MessageParseErrors — aborting stream")
-
-    async def run(
+    async def chat(
         self,
         message: str,
         *,
         system_prompt: str | None = None,
         history: list[dict] | None = None,
-        session_key: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
-        Yields AgentEvent objects as the agent responds.
+        Uses the SDK's built-in tools and streaming capabilities.
+
+        Args:
+            message: User message to process.
+            system_prompt: Dynamic system prompt from AgentContextBuilder.
+                Falls back to _DEFAULT_IDENTITY if not provided.
+            history: Recent session history as {"role", "content"} dicts.
+                Injected into the system prompt (SDK query() takes a single prompt string).
+
+        Yields:
+            AgentEvent objects as the agent responds
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -675,91 +513,10 @@ class ClaudeSDKBackend:
 
         self._stop_flag = False
 
-        # ── Prevent the SDK from closing stdin too early ──────────
-        # When hooks are present the SDK's stream_input() waits for
-        # the first ResultMessage before closing stdin.  The default
-        # timeout is 60 s which is far too short for long-running
-        # tool use (file search, code analysis, etc.).  Set to 24 h
-        # so the agent can work as long as it needs.
-        os.environ.setdefault(
-            "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT",
-            str(24 * 60 * 60 * 1000),  # 24 hours in ms
-        )
-
-        _stderr_lines: list[str] = []
         try:
-            # Resolve LLM provider early -- needed for routing + env.
-            # Use per-backend provider setting (defaults to "anthropic").
-            # An API key is REQUIRED for Anthropic provider -- OAuth tokens from
-            # Claude Free/Pro/Max plans are not permitted for third-party use.
-            # See: https://code.claude.com/docs/en/legal-and-compliance
-            from pocketpaw.llm.client import resolve_llm_client
-
-            provider = self.settings.claude_sdk_provider or "anthropic"
-            llm = resolve_llm_client(self.settings, force_provider=provider)
-
-            # ── API key check for Anthropic provider ──────────────
-            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini or llm.is_litellm):
-                has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
-                if not has_api_key:
-                    yield AgentEvent(
-                        type="error",
-                        content=(
-                            "**API key required** -- The Claude SDK backend needs "
-                            "an Anthropic API key.\n\n"
-                            "**How to fix:**\n"
-                            "1. Get an API key at "
-                            "[console.anthropic.com](https://console.anthropic.com/settings/keys)\n"
-                            "2. Add it in **Settings > API Keys > Anthropic API Key**\n"
-                            "3. Or set the `ANTHROPIC_API_KEY` environment variable\n\n"
-                            "*Alternatively, switch to **Ollama (Local)** in Settings "
-                            "> General for free local inference.*"
-                        ),
-                    )
-                    return
-
-            # Smart model routing — classify BEFORE prompt composition so we
-            # can skip tool instructions for SIMPLE messages and dispatch to
-            # the fast-path (direct API) for simple queries.
-            is_simple = False
-            selection = None
-            if (
-                self.settings.smart_routing_enabled
-                and not llm.is_ollama
-                and not llm.is_openai_compatible
-                and not llm.is_gemini
-                and not llm.is_litellm
-            ):
-                from pocketpaw.agents.model_router import ModelRouter, TaskComplexity
-
-                model_router = ModelRouter(self.settings)
-                selection = model_router.classify(message)
-                is_simple = selection.complexity == TaskComplexity.SIMPLE
-                logger.info(
-                    "Smart routing: %s -> %s (%s)",
-                    selection.complexity.value,
-                    selection.model,
-                    selection.reason,
-                )
-
-            # Fast path: bypass CLI subprocess entirely for simple messages.
-            # Uses the Anthropic API directly (requires API key, already enforced above).
-            has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
-            if is_simple and selection is not None and has_api_key:
-                identity = system_prompt or _DEFAULT_IDENTITY
-                async for event in self._fast_chat(
-                    message,
-                    system_prompt=identity,
-                    history=history,
-                    model=selection.model,
-                ):
-                    yield event
-                return
-
-            # System prompt — instructions are now part of identity
-            # (injected by BootstrapContext.to_system_prompt() via INSTRUCTIONS.md)
+            # Compose final system prompt: identity/memory + tool docs
             identity = system_prompt or _DEFAULT_IDENTITY
-            final_prompt = identity
+            final_prompt = identity + "\n" + _TOOL_INSTRUCTIONS
 
             # Inject session history into system prompt (SDK query() takes a single string)
             if history:
@@ -783,12 +540,11 @@ class ClaudeSDKBackend:
                 "Grep",
                 "WebSearch",
                 "WebFetch",
-                "Skill",
             ]
             allowed_tools = [
                 t
                 for t in all_sdk_tools
-                if self._policy.is_tool_allowed(self._TOOL_POLICY_MAP.get(t, t))
+                if self._policy.is_tool_allowed(self._SDK_TO_POLICY.get(t, t))
             ]
             if len(allowed_tools) < len(all_sdk_tools):
                 blocked = set(all_sdk_tools) - set(allowed_tools)
@@ -808,48 +564,25 @@ class ClaudeSDKBackend:
             options_kwargs = {
                 "system_prompt": final_prompt,
                 "allowed_tools": allowed_tools,
-                "setting_sources": ["user", "project"],
                 "hooks": hooks,
                 "cwd": str(self._cwd),
-                "max_turns": self.settings.claude_sdk_max_turns or None,
+                "max_turns": 25,  # Safety net against runaway tool loops
             }
 
             # Configure LLM provider for the Claude CLI subprocess.
-            # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
+            from pocketpaw.llm.client import resolve_llm_client
+
+            llm = resolve_llm_client(self.settings)
             sdk_env = llm.to_sdk_env()
             if not sdk_env:
+                # Fall back to env var if settings has no key
                 env_key = os.environ.get("ANTHROPIC_API_KEY")
                 if env_key:
                     sdk_env = {"ANTHROPIC_API_KEY": env_key}
-
-            # Strip nesting-detection env vars (set when launched from
-            # a Claude Code terminal) so the subprocess starts cleanly.
-            # These should already be removed by main(), but do it here
-            # too as a safety net.
-            for _strip_key in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
-                os.environ.pop(_strip_key, None)
             if sdk_env:
                 options_kwargs["env"] = sdk_env
-            if llm.is_ollama or llm.is_openai_compatible or llm.is_gemini or llm.is_litellm:
+            if llm.is_ollama:
                 options_kwargs["model"] = llm.model
-
-            # ── Debug logging for troubleshooting SDK startup ──
-            import shutil as _shutil
-
-            logger.info(
-                "SDK launch: provider=%s, has_api_key=%s, "
-                "CLAUDECODE=%s, CLAUDE_CODE_ENTRYPOINT=%s, "
-                "ANTHROPIC_API_KEY=%s, sdk_env_keys=%s, "
-                "cli_path=%s, cwd=%s",
-                provider,
-                bool(llm.api_key),
-                os.environ.get("CLAUDECODE", "<unset>"),
-                os.environ.get("CLAUDE_CODE_ENTRYPOINT", "<unset>"),
-                "set" if os.environ.get("ANTHROPIC_API_KEY") else "<unset>",
-                list(sdk_env.keys()) if sdk_env else "none",
-                _shutil.which("claude") or "<not found>",
-                self._cwd,
-            )
 
             # Wire in MCP servers (policy-filtered)
             mcp_servers = self._get_mcp_servers()
@@ -861,271 +594,129 @@ class ClaudeSDKBackend:
             if self._StreamEvent is not None:
                 options_kwargs["include_partial_messages"] = True
 
-            # Permission handling — PocketPaw always runs headless (web dashboard,
-            # Telegram, Discord, Slack, etc.) with no terminal for interactive
-            # permission prompts. Without bypassPermissions, tool calls that need
-            # approval (like Bash — used by memory save, web search, etc.) hang
-            # indefinitely on messaging channels.
+            # Permission handling — PocketPaw runs headless (web/chat), so
+            # there is no terminal to show interactive permission prompts.
+            # bypassPermissions auto-approves ALL tool calls (including MCP).
             # Dangerous Bash commands are still caught by the PreToolUse hook.
-            options_kwargs["permission_mode"] = "bypassPermissions"
+            if self.settings.bypass_permissions:
+                options_kwargs["permission_mode"] = "bypassPermissions"
 
-            # Model selection for Anthropic providers:
-            # 1. Smart routing (opt-in) — overrides with complexity-based model
-            # 2. Explicit claude_sdk_model — user-chosen fixed model
-            # 3. Neither set — let Claude Code CLI auto-select (recommended)
-            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini or llm.is_litellm):
-                if self.settings.smart_routing_enabled:
-                    from pocketpaw.agents.model_router import ModelRouter
+            # Smart model routing (opt-in, skip for Ollama — model already set)
+            if self.settings.smart_routing_enabled and not llm.is_ollama:
+                from pocketpaw.agents.model_router import ModelRouter
 
-                    model_router = ModelRouter(self.settings)
-                    selection = model_router.classify(message)
-                    options_kwargs["model"] = selection.model
-                elif self.settings.claude_sdk_model:
-                    options_kwargs["model"] = self.settings.claude_sdk_model
-
-            # Capture stderr for better error diagnostics
-            def _on_stderr(line: str) -> None:
-                _stderr_lines.append(line)
-                logger.debug("Claude CLI stderr: %s", line)
-
-            options_kwargs["stderr"] = _on_stderr
+                model_router = ModelRouter(self.settings)
+                selection = model_router.classify(message)
+                options_kwargs["model"] = selection.model
+                logger.info(
+                    "Smart routing: %s -> %s (%s)",
+                    selection.complexity.value,
+                    selection.model,
+                    selection.reason,
+                )
 
             # Create options (after all kwargs are set, including model)
             options = self._ClaudeAgentOptions(**options_kwargs)
 
             logger.debug(f"🚀 Starting Claude Agent SDK query: {message[:100]}...")
 
-            # Try persistent client first, fall back to stateless query.
-            # _client_in_use guard prevents concurrent queries on the same
-            # subprocess — cross-session messages fall back to stateless query.
-            event_stream = None
-            logger.info(
-                "SDK dispatch: _client_in_use=%s, session_key=%s",
-                self._client_in_use,
-                session_key,
-            )
-            _persistent_client = None
-            if not self._client_in_use:
-                try:
-                    self._client_in_use = True
-                    _persistent_client = await self._get_or_create_client(
-                        options, session_key=session_key
-                    )
-                    logger.info("Persistent client: sending query (%d chars)", len(message))
-                    await _persistent_client.query(message)
-                    # Use _resilient_receive instead of receive_response() +
-                    # _safe_iter.  This handles MessageParseError by
-                    # re-creating the iterator from the same anyio channel,
-                    # preventing stale events from leaking into the next turn.
-                    event_stream = self._resilient_receive(_persistent_client)
-                    logger.info("Persistent client: _resilient_receive() ready")
-                except Exception as client_err:
-                    logger.warning(
-                        "Persistent client failed, falling back to stateless query: %s",
-                        client_err,
-                    )
-                    # Log stderr lines captured so far
-                    if _stderr_lines:
-                        logger.warning(
-                            "CLI stderr during persistent client failure:\n%s",
-                            "\n".join(_stderr_lines),
-                        )
-                    # Clear broken client so next call creates a fresh one
-                    self._client = None
-                    self._client_options_key = None
-                    self._client_in_use = False
-                    _persistent_client = None
-
-            if event_stream is None:
-                logger.info("Starting stateless query (fallback — _client_in_use was True)")
-                event_stream = self._query(prompt=message, options=options)
-
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False
             _announced_tools: set[str] = set()
-            _event_count = 0
-            _saw_result = False  # Track if ResultMessage was consumed
 
-            # Stream responses — release the persistent client guard when done
-            try:
-                async for event in event_stream:
-                    _event_count += 1
-                    if _event_count <= 3:
-                        logger.info(
-                            "SDK event #%d: type=%s",
-                            _event_count,
-                            type(event).__name__,
-                        )
-                    if self._stop_flag:
-                        logger.info("🛑 Stop flag set, breaking stream")
-                        break
+            # Stream responses from the SDK
+            async for event in self._query(prompt=message, options=options):
+                if self._stop_flag:
+                    logger.info("🛑 Stop flag set, breaking stream")
+                    break
 
-                    # Handle different message types using isinstance checks
+                # Handle different message types using isinstance checks
 
-                    # ========== StreamEvent - token-by-token streaming ==========
-                    if self._StreamEvent and isinstance(event, self._StreamEvent):
-                        raw = getattr(event, "event", None) or {}
-                        event_type = raw.get("type", "")
-                        delta = raw.get("delta", {})
+                # ========== StreamEvent - token-by-token streaming ==========
+                if self._StreamEvent and isinstance(event, self._StreamEvent):
+                    raw = getattr(event, "event", None) or {}
+                    event_type = raw.get("type", "")
+                    delta = raw.get("delta", {})
 
-                        if event_type == "content_block_delta":
-                            if "text" in delta:
-                                yield AgentEvent(type="message", content=delta["text"])
-                                _streamed_via_events = True
-                            elif "thinking" in delta:
-                                yield AgentEvent(type="thinking", content=delta["thinking"])
-                        elif event_type == "content_block_start":
-                            cb = raw.get("content_block", {})
-                            if cb.get("type") == "tool_use":
-                                tool_name = cb.get("name", "unknown")
-                                _announced_tools.add(tool_name)
-                                yield AgentEvent(
-                                    type="tool_use",
-                                    content=f"Using {tool_name}...",
-                                    metadata={"name": tool_name, "input": {}},
-                                )
-                        elif event_type == "content_block_stop":
-                            if getattr(event, "_block_type", None) == "thinking":
-                                yield AgentEvent(type="thinking_done", content="")
-                        continue
-
-                    # ========== SystemMessage - metadata, skip ==========
-                    if self._SystemMessage and isinstance(event, self._SystemMessage):
-                        subtype = getattr(event, "subtype", "")
-                        logger.debug(f"SystemMessage: {subtype}")
-                        continue
-
-                    # ========== UserMessage - extract media from tool results ==========
-                    if self._UserMessage and isinstance(event, self._UserMessage):
-                        # UserMessages in multi-turn SDK flow contain ToolResultBlocks
-                        # with the raw output of Bash commands (including media tags).
-                        if hasattr(event, "content") and isinstance(event.content, list):
-                            for block in event.content:
-                                if not (
-                                    self._ToolResultBlock
-                                    and isinstance(block, self._ToolResultBlock)
-                                ):
-                                    continue
-                                block_content = getattr(block, "content", "")
-                                if isinstance(block_content, str):
-                                    result_text = block_content
-                                elif isinstance(block_content, list):
-                                    result_text = " ".join(
-                                        getattr(b, "text", "")
-                                        for b in block_content
-                                        if hasattr(b, "text")
-                                    )
-                                else:
-                                    continue
-                                if result_text and "<!-- media:" in result_text:
-                                    yield AgentEvent(
-                                        type="tool_result",
-                                        content=result_text,
-                                        metadata={"name": "bash"},
-                                    )
-                        logger.debug("UserMessage processed")
-                        continue
-
-                    # ========== AssistantMessage - main content ==========
-                    if self._AssistantMessage and isinstance(event, self._AssistantMessage):
-                        if not _streamed_via_events:
-                            text = self._extract_text_from_message(event)
-                            if text:
-                                yield AgentEvent(type="message", content=text)
-
-                        tools = self._extract_tool_info(event)
-                        for tool in tools:
-                            if tool["name"] not in _announced_tools:
-                                logger.info(f"🔧 Tool: {tool['name']}")
-                                yield AgentEvent(
-                                    type="tool_use",
-                                    content=f"Using {tool['name']}...",
-                                    metadata={
-                                        "name": tool["name"],
-                                        "input": tool["input"],
-                                    },
-                                )
-
-                        _streamed_via_events = False
-                        _announced_tools.clear()
-                        continue
-
-                    # ========== ResultMessage - final result ==========
-                    if self._ResultMessage and isinstance(event, self._ResultMessage):
-                        _saw_result = True
-                        is_error = getattr(event, "is_error", False)
-                        result = getattr(event, "result", "")
-
-                        # Extract token usage from ResultMessage
-                        # Per SDK docs: ResultMessage has total_cost_usd and usage dict
-                        total_cost = getattr(event, "total_cost_usd", None)
-                        usage = getattr(event, "usage", None) or {}
-                        if isinstance(usage, dict) and (usage or total_cost):
-                            _model_name = options_kwargs.get("model", "claude")
+                    if event_type == "content_block_delta":
+                        if "text" in delta:
+                            yield AgentEvent(type="message", content=delta["text"])
+                            _streamed_via_events = True
+                        elif "thinking" in delta:
+                            yield AgentEvent(type="thinking", content=delta["thinking"])
+                    elif event_type == "content_block_start":
+                        cb = raw.get("content_block", {})
+                        if cb.get("type") == "tool_use":
+                            tool_name = cb.get("name", "unknown")
+                            _announced_tools.add(tool_name)
                             yield AgentEvent(
-                                type="token_usage",
-                                content="",
-                                metadata={
-                                    "input_tokens": usage.get("input_tokens", 0),
-                                    "output_tokens": usage.get("output_tokens", 0),
-                                    "cached_input_tokens": usage.get("cache_read_input_tokens", 0)
-                                    + usage.get("cache_creation_input_tokens", 0),
-                                    "total_cost_usd": total_cost,
-                                    "model": _model_name
-                                    if isinstance(_model_name, str)
-                                    else "claude",
-                                    "backend": "claude_agent_sdk",
-                                },
+                                type="tool_use",
+                                content=f"Using {tool_name}...",
+                                metadata={"name": tool_name, "input": {}},
+                            )
+                    elif event_type == "content_block_stop":
+                        # Detect thinking block stop via the partial field
+                        if getattr(event, "_block_type", None) == "thinking":
+                            yield AgentEvent(type="thinking_done", content="")
+                    continue
+
+                # ========== SystemMessage - metadata, skip ==========
+                if self._SystemMessage and isinstance(event, self._SystemMessage):
+                    subtype = getattr(event, "subtype", "")
+                    logger.debug(f"SystemMessage: {subtype}")
+                    continue
+
+                # ========== UserMessage - echo, skip ==========
+                if self._UserMessage and isinstance(event, self._UserMessage):
+                    logger.debug("UserMessage (echo), skipping")
+                    continue
+
+                # ========== AssistantMessage - main content ==========
+                if self._AssistantMessage and isinstance(event, self._AssistantMessage):
+                    # Skip text if already streamed via StreamEvent deltas
+                    if not _streamed_via_events:
+                        text = self._extract_text_from_message(event)
+                        if text:
+                            yield AgentEvent(type="message", content=text)
+
+                    # Emit tool_use events only for tools NOT already announced
+                    tools = self._extract_tool_info(event)
+                    for tool in tools:
+                        if tool["name"] not in _announced_tools:
+                            logger.info(f"🔧 Tool: {tool['name']}")
+                            yield AgentEvent(
+                                type="tool_use",
+                                content=f"Using {tool['name']}...",
+                                metadata={"name": tool["name"], "input": tool["input"]},
                             )
 
-                        if is_error:
-                            logger.error(f"ResultMessage error: {result}")
-                            yield AgentEvent(type="error", content=str(result))
-                        else:
-                            logger.debug(f"ResultMessage: {str(result)[:100]}...")
-                        continue
+                    # Reset for next turn in multi-turn loops
+                    _streamed_via_events = False
+                    _announced_tools.clear()
+                    continue
 
-                    # ========== Unknown event type - log it ==========
-                    event_class = event.__class__.__name__
-                    logger.debug(f"Unknown event type: {event_class}")
-            finally:
-                # ── Drain remaining events if the main loop exited
-                # before consuming the ResultMessage.  For the persistent
-                # client, _resilient_receive handles this.  For the
-                # stateless path or early-break scenarios (stop flag),
-                # we still need to ensure the pipe is clean. ──
-                if _persistent_client is not None and not _saw_result and self._client is not None:
-                    logger.warning(
-                        "Main loop exited without ResultMessage — "
-                        "destroying persistent client to avoid stale data"
-                    )
-                    try:
-                        await self._client.disconnect()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("Failed to disconnect client during cleanup: %s", exc)
-                    self._client = None
-                    self._client_options_key = None
+                # ========== ResultMessage - final result ==========
+                if self._ResultMessage and isinstance(event, self._ResultMessage):
+                    is_error = getattr(event, "is_error", False)
+                    result = getattr(event, "result", "")
 
-                self._client_in_use = False
-                logger.info(
-                    "SDK stream finished: %d events, _client_in_use=False",
-                    _event_count,
-                )
+                    if is_error:
+                        logger.error(f"ResultMessage error: {result}")
+                        yield AgentEvent(type="error", content=str(result))
+                    else:
+                        logger.debug(f"ResultMessage: {str(result)[:100]}...")
+                        # Result is usually a summary, text was already streamed
+                    continue
+
+                # ========== Unknown event type - log it ==========
+                event_class = event.__class__.__name__
+                logger.debug(f"Unknown event type: {event_class}")
 
             yield AgentEvent(type="done", content="")
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Claude Agent SDK error: {error_msg}", exc_info=True)
-
-            # Log any stderr captured from the CLI subprocess
-            if _stderr_lines:
-                logger.error("CLI stderr output:\n%s", "\n".join(_stderr_lines))
-
-            # Clear client on unexpected errors
-            self._client = None
-            self._client_options_key = None
-            self._client_in_use = False
+            logger.error(f"Claude Agent SDK error: {error_msg}")
 
             # Provide helpful error messages
             if "CLINotFoundError" in error_msg:
@@ -1139,21 +730,11 @@ class ClaudeSDKBackend:
                     ),
                 )
             else:
-                stderr_text = "\n".join(_stderr_lines) if _stderr_lines else ""
-                yield AgentEvent(
-                    type="error",
-                    content=llm.format_api_error(e, stderr=stderr_text),
-                )
+                yield AgentEvent(type="error", content=llm.format_api_error(e))
 
     async def stop(self) -> None:
-        """Stop the agent execution and disconnect persistent client."""
+        """Stop the agent execution."""
         self._stop_flag = True
-        if self._client is not None:
-            try:
-                await self._client.interrupt()
-            except Exception as e:
-                logger.debug("Failed to interrupt Claude client: %s", e)
-        await self.cleanup()
         logger.info("🛑 Claude Agent SDK stop requested")
 
     async def get_status(self) -> dict:
@@ -1172,6 +753,24 @@ class ClaudeSDKBackend:
         }
 
 
-# Backward-compat aliases
-ClaudeAgentSDK = ClaudeSDKBackend
-ClaudeAgentSDKWrapper = ClaudeSDKBackend
+# Backwards-compatible wrapper for router
+class ClaudeAgentSDKWrapper(ClaudeAgentSDK):
+    """Wrapper to match existing agent interface expected by router.
+
+    Provides the `run()` method that yields dicts instead of AgentEvents.
+    """
+
+    async def run(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[dict]:
+        """Run the agent, yielding dict chunks for compatibility."""
+        async for event in self.chat(message, system_prompt=system_prompt, history=history):
+            yield {
+                "type": event.type,
+                "content": event.content,
+                "metadata": getattr(event, "metadata", None),
+            }
