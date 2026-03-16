@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 TOOL_GROUPS: dict[str, list[str]] = {
     "group:fs": ["read_file", "write_file", "edit_file", "list_dir", "directory_tree"],
-    "group:shell": ["shell"],
+    "group:shell": ["shell", "run_python"],
+    "group:packages": ["install_package"],
     "group:browser": ["browser"],
     "group:memory": ["remember", "recall", "forget"],
     "group:desktop": ["desktop", "system_info"],
@@ -42,7 +43,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "spotify_playback",
         "spotify_playlist",
     ],
-    "group:media": ["image_generate", "ocr"],
+    "group:media": ["image_generate", "ocr", "deliver_artifact"],
     "group:translate": ["translate"],
     "group:reddit": ["reddit_search", "reddit_read", "reddit_trending"],
     "group:sessions": [
@@ -54,6 +55,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "delete_session",
     ],
     "group:explorer": ["open_in_explorer"],
+    "group:discord": ["discord_cli"],
     "group:mcp": [],  # Placeholder — MCP tools are dynamic per server
 }
 
@@ -65,7 +67,7 @@ TOOL_PROFILES: dict[str, dict] = {
         "allow": ["group:memory", "group:sessions", "group:explorer"],
     },
     "coding": {
-        "allow": ["group:fs", "group:shell", "group:memory", "group:explorer"],
+        "allow": ["group:fs", "group:shell", "group:packages", "group:memory", "group:explorer"],
     },
     "full": {},  # No restrictions — everything allowed
 }

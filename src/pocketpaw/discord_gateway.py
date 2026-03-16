@@ -5,7 +5,7 @@ import logging
 
 from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.bus import get_message_bus
-from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
+from pocketpaw.bus.adapters.discord_adapter import DiscliAdapter as DiscordAdapter
 from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)

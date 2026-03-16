@@ -2333,6 +2333,74 @@
             </div>
           </div>
         </div>
+
+<!-- Soul Protocol -->
+<div x-show="settingsSection === 'soul' && settingsSearchResults.length === 0" class="space-y-4">
+  <h3 class="text-[14px] font-semibold text-white/80 mb-3">Soul Protocol</h3>
+  <p class="text-[11px] text-white/40 -mt-1 mb-3">Persistent AI identity with psychology-informed memory, OCEAN personality, and emotional state.</p>
+
+  <!-- Enable -->
+  <div>
+    <label class="flex items-start gap-2.5 cursor-pointer group">
+      <input type="checkbox" x-model="settings.soulEnabled" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4" />
+      <div class="flex flex-col">
+        <span class="text-[13px] font-medium group-hover:text-white transition-colors">Enable Soul Protocol</span>
+        <span class="text-[11px] text-white/50 mt-0.5">Give the agent persistent identity, memory, and emotion</span>
+      </div>
+    </label>
+  </div>
+
+  <!-- Conditional sub-fields -->
+  <div x-show="settings.soulEnabled" x-transition class="flex flex-col gap-3.5 pl-2 border-l-2 border-[var(--accent-color)]/30 ml-1">
+    <!-- Soul Name -->
+    <div class="flex flex-col gap-1.5">
+      <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Soul Name</label>
+      <input type="text" x-model="settings.soulName" @change="saveSettings()" placeholder="Paw" class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+    </div>
+
+    <!-- Archetype -->
+    <div class="flex flex-col gap-1.5">
+      <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Archetype</label>
+      <input type="text" x-model="settings.soulArchetype" @change="saveSettings()" placeholder="The Helpful Assistant" class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+      <span class="text-[11px] text-white/40">e.g. "The Coding Expert", "The Compassionate Creator"</span>
+    </div>
+
+    <!-- Persona -->
+    <div class="flex flex-col gap-1.5">
+      <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Custom Persona</label>
+      <textarea x-model="settings.soulPersona" @change="saveSettings()" placeholder="Leave empty for auto-generated persona" rows="3" class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40 resize-y"></textarea>
+    </div>
+
+    <!-- Auto-Save Interval -->
+    <div class="flex flex-col gap-1.5">
+      <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Auto-Save Interval (seconds)</label>
+      <input type="number" x-model.number="settings.soulAutoSaveInterval" @change="saveSettings()" min="0" max="3600" placeholder="300" class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+      <span class="text-[11px] text-white/40">How often to auto-save soul state (0 = disabled, default 300 = 5 minutes)</span>
+    </div>
+
+    <!-- Import / Export -->
+    <div class="flex flex-col gap-2 mt-1 pt-3 border-t border-white/10">
+      <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Import / Export</label>
+      <div class="flex gap-2">
+        <!-- Import button -->
+        <label class="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-black/30 border border-[var(--glass-border)] rounded-[10px] text-[13px] text-white/70 hover:text-white hover:border-[var(--accent-color)] transition-all cursor-pointer">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Import
+          <input type="file" accept=".soul,.yaml,.yml,.json" @change="importSoulFile($event)" class="hidden" />
+        </label>
+        <!-- Export button -->
+        <button @click="exportSoulFile()" class="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-black/30 border border-[var(--glass-border)] rounded-[10px] text-[13px] text-white/70 hover:text-white hover:border-[var(--accent-color)] transition-all">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Export
+        </button>
+      </div>
+      <span class="text-[11px] text-white/40">Import a .soul, .yaml, or .json file. Export saves the current soul to disk.</span>
+      <!-- Status message -->
+      <div x-show="soulImportStatus" x-transition class="text-[12px] mt-0.5" :class="soulImportError ? 'text-red-400' : 'text-green-400'" x-text="soulImportStatus"></div>
+    </div>
+  </div>
+</div>
+
       </div>
     </div>
 

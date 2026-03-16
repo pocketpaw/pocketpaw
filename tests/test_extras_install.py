@@ -44,7 +44,7 @@ class TestExtrasCheck:
         data = resp.json()
         assert data["installed"] is True
         assert data["extra"] == "discord"
-        assert data["package"] == "discord.py"
+        assert data["package"] == "discord-cli-agent"
         assert data["pip_spec"] == "pocketpaw[discord]"
 
     def test_check_missing_dep(self, test_client):
@@ -54,7 +54,7 @@ class TestExtrasCheck:
         assert resp.status_code == 200
         data = resp.json()
         assert data["installed"] is False
-        assert data["package"] == "discord.py"
+        assert data["package"] == "discord-cli-agent"
 
     def test_check_unknown_channel_returns_installed(self, test_client):
         """Unknown channels (e.g. signal) have no optional dep — always installed."""
@@ -127,7 +127,7 @@ class TestExtrasInstall:
             )
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
-        mock_install.assert_called_once_with("discord", "discord.ext.commands")
+        mock_install.assert_called_once_with("discord", "discli")
 
     def test_install_whatsapp_uses_personal_extra(self, test_client):
         """WhatsApp should use 'whatsapp-personal' as the extra name."""

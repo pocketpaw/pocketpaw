@@ -22,6 +22,34 @@ x-transition.opacity
             <span class="text-xs text-[var(--text-secondary)] px-2 py-0.5 bg-white/5 rounded-full shrink-0 uppercase" x-text="viewerFileType"></span>
         </div>
         <div class="flex items-center gap-2 shrink-0">
+            <!-- Diff toggle (only in edit mode) -->
+            <button
+                x-show="viewerEditMode"
+                @click="toggleDiffView()"
+                class="p-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors text-xs font-medium px-3"
+                :class="viewerShowDiff ? 'bg-white/10 text-white' : ''"
+                title="Toggle diff view"
+            >
+                Diff
+            </button>
+            <!-- Save (only in edit mode) -->
+            <button
+                x-show="viewerEditMode"
+                @click="saveFileEdits()"
+                class="p-2 bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white rounded-lg transition-colors text-xs font-medium px-3"
+                title="Save changes"
+            >
+                Save
+            </button>
+            <!-- Edit / Cancel toggle (text and markdown only) -->
+            <button
+                x-show="viewerFileType === 'text' || viewerFileType === 'markdown'"
+                @click="toggleEditMode()"
+                class="p-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                :title="viewerEditMode ? 'Cancel editing' : 'Edit file'"
+            >
+                <i :data-lucide="viewerEditMode ? 'x-circle' : 'pencil'" class="w-4 h-4"></i>
+            </button>
             <a
                 :href="viewerContentUrl"
                 download
@@ -30,6 +58,16 @@ x-transition.opacity
             >
                 <i data-lucide="download" class="w-4 h-4"></i>
             </a>
+            <!-- Add to chat -->
+            <button
+                x-show="!viewerEditMode"
+                @click="addFileToChat()"
+                class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--accent-color)] hover:text-white bg-[var(--accent-color)]/10 hover:bg-[var(--accent-color)] rounded-lg transition-colors"
+                title="Add file reference to chat input"
+            >
+                <i data-lucide="message-square-plus" class="w-3.5 h-3.5"></i>
+                Add to chat
+            </button>
             <button class="p-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="closeFileViewer()">
                 <i data-lucide="x" class="w-5 h-5"></i>
             </button>
@@ -66,10 +104,56 @@ x-transition.opacity
             </div>
         </template>
 
-        <!-- Text / Code viewer -->
-        <template x-if="!viewerLoading && viewerFileType === 'text'">
+        <!-- Text / Code viewer (syntax-highlighted when hljs available) -->
+        <template x-if="!viewerLoading && viewerFileType === 'text' && !viewerEditMode">
             <div class="overflow-auto" style="max-height: calc(90vh - 70px);">
-                <pre class="p-6 text-sm leading-relaxed font-mono text-[var(--text-primary)] whitespace-pre-wrap break-words" x-text="viewerTextContent"></pre>
+                <!-- Syntax highlighted -->
+                <template x-if="viewerHighlightedHtml">
+                    <pre class="hljs p-6 text-sm leading-relaxed font-mono" style="background:transparent;border-radius:0;margin:0"><code x-html="viewerHighlightedHtml"></code></pre>
+                </template>
+                <!-- Plain text fallback -->
+                <template x-if="!viewerHighlightedHtml">
+                    <pre class="p-6 text-sm leading-relaxed font-mono text-[var(--text-primary)] whitespace-pre-wrap break-words" x-text="viewerTextContent"></pre>
+                </template>
+            </div>
+        </template>
+
+        <!-- Markdown viewer -->
+        <template x-if="!viewerLoading && viewerFileType === 'markdown' && !viewerEditMode">
+            <div class="overflow-auto prose prose-invert prose-sm max-w-none px-8 py-6" style="max-height: calc(90vh - 70px);" x-html="viewerMarkdownHtml"></div>
+        </template>
+
+        <!-- Inline editor (text + markdown when edit mode active) -->
+        <template x-if="!viewerLoading && viewerEditMode && !viewerShowDiff && (viewerFileType === 'text' || viewerFileType === 'markdown')">
+            <div class="flex flex-col flex-1 overflow-hidden" style="max-height: calc(90vh - 70px);">
+                <textarea
+                    x-model="viewerEditContent"
+                    class="flex-1 w-full h-full resize-none p-6 text-sm font-mono bg-[#1a1a1c] text-[var(--text-primary)] focus:outline-none border-0"
+                    spellcheck="false"
+                    style="min-height: 400px;"
+                ></textarea>
+            </div>
+        </template>
+
+        <!-- Diff view -->
+        <template x-if="!viewerLoading && viewerEditMode && viewerShowDiff">
+            <div class="overflow-auto font-mono text-xs" style="max-height: calc(90vh - 70px);">
+                <template x-for="(row, idx) in _computeDiff(viewerOriginalContent, viewerEditContent)" :key="idx">
+                    <div
+                        class="flex gap-0 leading-6 px-4"
+                        :class="{
+                            'bg-[var(--success-color)]/10 text-[var(--success-color)]': row.type === 'added',
+                            'bg-[var(--danger-color)]/10 text-[var(--danger-color)] line-through': row.type === 'removed',
+                            'text-white/50': row.type === 'same'
+                        }"
+                    >
+                        <span class="w-8 shrink-0 select-none opacity-40" x-text="row.num"></span>
+                        <span class="w-5 shrink-0 select-none"
+                            x-text="row.type === 'added' ? '+' : (row.type === 'removed' ? '-' : ' ')"
+                        ></span>
+                        <span class="whitespace-pre-wrap break-all" x-text="row.line"></span>
+                    </div>
+                </template>
             </div>
         </template>
 

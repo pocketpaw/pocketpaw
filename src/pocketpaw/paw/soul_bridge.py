@@ -18,14 +18,29 @@ class SoulBootstrapProvider:
 
     Maps the soul's system prompt, personality, and memories into
     the BootstrapContext fields that AgentContextBuilder consumes.
+    Preserves instructions (tool docs) and user profile from the
+    default provider so the agent retains all its capabilities.
     """
 
     def __init__(self, soul: Soul) -> None:
         self._soul = soul
+        # Load instructions and user profile from default provider once
+        from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
+
+        self._default = DefaultBootstrapProvider()
 
     async def get_context(self) -> BootstrapContext:
-        """Build BootstrapContext from the soul's current state."""
+        """Build BootstrapContext from the soul's current state.
+
+        Identity, soul, and style come from the Soul instance.
+        Instructions and user_profile come from the default provider
+        (INSTRUCTIONS.md, USER.md) so tool docs and user context are preserved.
+        """
         soul = self._soul
+
+        # Load default context for instructions + user_profile
+        default_ctx = await self._default.get_context()
+
         system_prompt = soul.to_system_prompt()
 
         # Extract personality and mood for style hints
@@ -49,7 +64,9 @@ class SoulBootstrapProvider:
             identity=system_prompt,
             soul="I am a persistent AI companion powered by soul-protocol.",
             style="; ".join(style_parts) if style_parts else "Helpful and attentive.",
+            instructions=default_ctx.instructions,
             knowledge=knowledge,
+            user_profile=default_ctx.user_profile,
         )
 
 
