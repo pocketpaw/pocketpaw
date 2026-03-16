@@ -105,6 +105,22 @@ export POCKETPAW_DISCORD_ALLOWED_USER_IDS="123456789,987654321"
 
 Without these restrictions, anyone in the server can use the bot. For public communities, setting allowed user IDs is strongly recommended.
 
+## Conversation Mode
+
+Let the bot participate naturally in group channels without requiring `/paw` or @mentions:
+
+1. Use the `/converse` slash command in any channel (requires Administrator or Manage Server permission)
+2. The bot will track the last 30 messages and decide when to respond based on context
+3. It stays silent when the conversation isn't directed at it
+
+Toggle it off the same way -- run `/converse` again in the same channel.
+
+## Server Management
+
+The bot can manage your Discord server directly: send messages to channels, create threads, run polls, assign roles, and more. These capabilities are exposed via an MCP server that auto-registers on startup, so they work with any agent backend (Claude, Codex, Gemini, etc.).
+
+The bot keeps its internal tool details hidden from users. When someone asks it to create a poll, it just does it and confirms naturally.
+
 ## Running Multiple Channels
 
 PocketPaw handles multiple channels from a single instance. Add Telegram alongside Discord:

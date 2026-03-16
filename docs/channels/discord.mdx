@@ -9,7 +9,7 @@ tags: ["channels", "discord"]
 
 # Discord Bot Setup: Add PocketPaw to Your Server
 
-PocketPaw integrates with Discord via `discord.py`. It supports slash commands, direct messages, and @mention in channels.
+PocketPaw integrates with Discord via `discli` (Discord CLI agent). It supports slash commands, direct messages, @mention in channels, and full server management through an MCP-based tool layer that works across all agent backends.
 
 ## Setup
 
@@ -93,27 +93,37 @@ When enabled for a channel, the bot:
 
 Enable conversation mode per channel with the `/converse` admin command.
 
-### Admin Commands
-
-All admin commands require Discord `Administrator` permission.
+### Slash Commands
 
 | Command | Description |
 |---------|-------------|
-| `/converse` | Toggle conversation mode for the current channel |
-| `/setstatus` | Set bot presence (online/idle/dnd/invisible) and activity (playing/watching/listening/competing) |
-| `/setname` | Set the bot's display name used in conversation prompts |
-| `/allowchannel` | Restrict bot to specific channels (whitelist) |
-| `/blockchannel` | Remove a channel from the whitelist |
-| `/allowuser` | Restrict bot to specific users (whitelist) |
-| `/blockuser` | Remove a user from the whitelist |
-| `/restrictions` | View all current guild/channel/user restrictions and conversation settings |
-| `/info` | Show bot metadata: backend, model, uptime, server count, latency |
-
-All restriction changes are persisted to `~/.pocketpaw/config.json` and survive restarts.
+| `/paw <message>` | Send a message to the AI agent |
+| `/new` | Start a fresh conversation |
+| `/sessions` | List your conversation sessions |
+| `/resume <target>` | Resume a previous session |
+| `/clear` | Clear the current session history |
+| `/rename <title>` | Rename the current session |
+| `/status` | Show current session info |
+| `/delete` | Delete the current session |
+| `/backend [name]` | Show or switch agent backend |
+| `/backends` | List all available backends |
+| `/model [name]` | Show or switch model |
+| `/tools [name]` | Show or toggle a specific tool |
+| `/help` | Show PocketPaw help |
+| `/kill` | Cancel the current request |
+| `/converse` | Toggle conversation mode (requires Administrator or Manage Server) |
 
 ### Kill Command
 
 Send `/kill` or `!kill` in any channel to cancel the currently running agent task for that session. This is useful when a response is taking too long or the agent is stuck. The kill command works across all channels (Discord, Telegram, Slack, WhatsApp, and the web dashboard).
+
+### Discord MCP Server
+
+When the Discord adapter starts, it auto-registers a `pocketpaw-discord` MCP server. This exposes Discord operations (send messages, create polls, manage roles, etc.) as native MCP tools available to any backend -- including `codex_cli`, `google_adk`, and `claude_agent_sdk`.
+
+The MCP server wraps the `discli` CLI and provides structured tools like `discord_send_message`, `discord_create_poll`, `discord_add_reaction`, etc. Backends don't need special Discord integration; they just call MCP tools.
+
+The server config is saved to `~/.pocketpaw/mcp_servers.json` and persists across restarts.
 
 ## Installation
 
@@ -124,7 +134,7 @@ curl -fsSL https://pocketpaw.xyz/install.sh | sh
 pip install pocketpaw[discord]
 ```
 
-This installs `discord.py` as an optional dependency.
+This installs `discord.py` and `discord-cli-agent` as optional dependencies.
 
 ## Related
 

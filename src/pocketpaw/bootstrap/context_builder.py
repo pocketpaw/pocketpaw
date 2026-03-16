@@ -47,6 +47,7 @@ class AgentContextBuilder:
         session_key: str | None = None,
         file_context: dict | None = None,
         agents_md_dir: str | None = None,
+        metadata: dict | None = None,
     ) -> str:
         """Build the complete system prompt.
 
@@ -110,6 +111,25 @@ class AgentContextBuilder:
             if hint:
                 parts.append(f"\n# Response Format\n{hint}")
 
+        # 4b. Inject channel-specific instructions (e.g. discord.md)
+        if channel:
+            channel_instructions = self._load_channel_instructions(channel)
+            if channel_instructions:
+                # Inject dynamic context (username, guild_id) from metadata
+                meta = metadata or {}
+                username = meta.get("username", "")
+                guild_id = meta.get("guild_id", "")
+                ctx_lines = []
+                if sender_id:
+                    ctx_lines.append(f"sender_id: {sender_id}")
+                if username:
+                    ctx_lines.append(f"discord_username: {username}")
+                if guild_id:
+                    ctx_lines.append(f"discord_guild_id: {guild_id}")
+                if ctx_lines:
+                    channel_instructions += "\n\n## Current Context\n" + "\n".join(ctx_lines)
+                parts.append(channel_instructions)
+
         # 5. Inject session key for session management tools
         if session_key:
             parts.append(
@@ -160,3 +180,22 @@ class AgentContextBuilder:
                 pass  # AGENTS.md failure never breaks prompt building
 
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _load_channel_instructions(channel: Channel) -> str:
+        """Load channel-specific instruction file (e.g. discord.md)."""
+        from pathlib import Path
+
+        _channel_files = {
+            Channel.DISCORD: "discord.md",
+        }
+        filename = _channel_files.get(channel)
+        if not filename:
+            return ""
+        path = Path(__file__).parent / filename
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
