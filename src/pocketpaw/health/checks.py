@@ -171,9 +171,9 @@ def check_api_key_primary() -> HealthCheckResult:
         # See: https://code.claude.com/docs/en/legal-and-compliance
         import os
 
-        # Skip check for non-Anthropic providers (Ollama, OpenAI-compatible, Gemini)
+        # Skip check for non-Anthropic providers (Ollama, OpenAI-compatible, Gemini, LiteLLM)
         sdk_provider = getattr(settings, "claude_sdk_provider", None) or "anthropic"
-        if sdk_provider in ("ollama", "openai_compatible", "gemini"):
+        if sdk_provider in ("ollama", "openai_compatible", "gemini", "litellm"):
             return HealthCheckResult(
                 check_id="api_key_primary",
                 name="Primary API Key",
@@ -203,13 +203,13 @@ def check_api_key_primary() -> HealthCheckResult:
                 "OAuth tokens from Free/Pro/Max plans are not permitted for third-party use."
             ),
             fix_hint=(
-                "Get an API key at https://console.anthropic.com/api-keys "
+                "Get an API key at https://console.anthropic.com/settings/keys "
                 "and add it in Settings > API Keys, or set ANTHROPIC_API_KEY env var."
             ),
             details=[
                 "Anthropic's policy prohibits third-party use of OAuth tokens"
                 " from Free/Pro/Max plans.",
-                "Get an API key from https://console.anthropic.com/api-keys",
+                "Get an API key from https://console.anthropic.com/settings/keys",
                 "Set it in PocketPaw Settings > API Keys, or as ANTHROPIC_API_KEY env var.",
                 "Alternatively, switch to Ollama (Local) for free local inference.",
             ],
@@ -217,6 +217,18 @@ def check_api_key_primary() -> HealthCheckResult:
 
     elif backend == "google_adk":
         import os
+
+        # Skip check for LiteLLM provider (no Google key needed)
+        adk_provider = getattr(settings, "google_adk_provider", None) or "google"
+        if adk_provider == "litellm":
+            return HealthCheckResult(
+                check_id="api_key_primary",
+                name="Primary API Key",
+                category="config",
+                status="ok",
+                message="Google ADK using LiteLLM provider (no Google key needed)",
+                fix_hint="",
+            )
 
         has_key = bool(settings.google_api_key) or bool(os.environ.get("GOOGLE_API_KEY"))
         if has_key:
@@ -241,6 +253,18 @@ def check_api_key_primary() -> HealthCheckResult:
 
     elif backend == "openai_agents":
         import os
+
+        # Skip check for non-OpenAI providers (Ollama, OpenAI-compatible, LiteLLM)
+        agents_provider = getattr(settings, "openai_agents_provider", None) or "openai"
+        if agents_provider in ("ollama", "openai_compatible", "litellm"):
+            return HealthCheckResult(
+                check_id="api_key_primary",
+                name="Primary API Key",
+                category="config",
+                status="ok",
+                message=(f"OpenAI Agents using {agents_provider} provider (no OpenAI key needed)"),
+                fix_hint="",
+            )
 
         has_key = bool(settings.openai_api_key) or bool(os.environ.get("OPENAI_API_KEY"))
         if has_key:

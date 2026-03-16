@@ -7,10 +7,13 @@
 
   let { hideLogoRow = false }: { hideLogoRow?: boolean } = $props();
 
+  let isFilesMode = $derived(page.url.pathname === "/");
+
   function newChat() {
     sessionStore.createNewSession();
-    if (page.url.pathname !== "/") {
-      goto("/");
+    // Only navigate if on the files tab - otherwise stay on current page
+    if (page.url.pathname === "/") {
+      goto("/chat");
     }
   }
 
@@ -30,14 +33,16 @@
     </div>
   {/if}
 
-  <!-- New chat button -->
-  <Button
-    onclick={newChat}
-    variant="outline"
-    size="sm"
-    class={btnClass}
-  >
-    <Plus class="h-3.5 w-3.5" strokeWidth={2} />
-    New Chat
-  </Button>
+  {#if !isFilesMode}
+    <!-- New chat button -->
+    <Button
+      onclick={newChat}
+      variant="outline"
+      size="sm"
+      class={btnClass}
+    >
+      <Plus class="h-3.5 w-3.5" strokeWidth={2} />
+      New Chat
+    </Button>
+  {/if}
 </div>

@@ -4,7 +4,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { sessionStore, platformStore } from "$lib/stores";
-  import { MessageSquare, MoreHorizontal, Pencil, Trash2, FileDown, FileJson } from "@lucide/svelte";
+  import { MessageSquare, MoreHorizontal, Pencil, Trash2, FileDown, FileJson, Star } from "@lucide/svelte";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
   import * as Dialog from "$lib/components/ui/dialog";
   import { Button } from "$lib/components/ui/button";
@@ -42,8 +42,9 @@
   function handleClick() {
     if (!isEditing) {
       sessionStore.switchSession(session.id);
-      if (page.url.pathname !== "/") {
-        goto("/");
+      // Only navigate if on the files tab - otherwise stay on current page
+      if (page.url.pathname === "/") {
+        goto("/chat");
       }
     }
   }
@@ -116,6 +117,37 @@
     >
       <MessageSquare class="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
       <span class="min-w-0 flex-1 truncate">{session.title}</span>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <span
+        role="button"
+        tabindex="-1"
+        onclick={(e: MouseEvent) => {
+          e.stopPropagation();
+          sessionStore.togglePin(session.id);
+        }}
+        onkeydown={(e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.stopPropagation();
+            e.preventDefault();
+            sessionStore.togglePin(session.id);
+          }
+        }}
+        class={[
+          "shrink-0 rounded-sm p-0.5 transition-colors",
+          sessionStore.isSessionPinned(session.id)
+            ? "text-amber-500"
+            : platformStore.isTouch
+              ? "text-transparent active:text-muted-foreground"
+              : "text-transparent group-hover:text-muted-foreground/40 hover:!text-amber-500",
+        ].join(" ")}
+        title={sessionStore.isSessionPinned(session.id) ? "Unpin" : "Pin"}
+      >
+        <Star
+          class="h-3 w-3"
+          strokeWidth={1.75}
+          fill={sessionStore.isSessionPinned(session.id) ? "currentColor" : "none"}
+        />
+      </span>
       <span class="shrink-0 text-[10px] text-muted-foreground/60 group-hover:hidden">{relativeTime}</span>
     </button>
 

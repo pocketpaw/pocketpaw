@@ -1,5 +1,5 @@
 ---
-title: Security Overview
+title: "Security Overview: PocketPaw's 7-Layer Protection"
 description: "PocketPaw's multi-layered security architecture combines Guardian AI safety checks, prompt injection scanning, append-only audit logging, automated security audits, and fine-grained tool policies."
 section: Security
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["ai security", "defense in depth", "safety layers", "audit logging", 
 tags: ["security", "overview"]
 ---
 
-# Security
+# Security Overview: PocketPaw's 7-Layer Protection
 
 PocketPaw implements defense-in-depth with multiple security layers. Every message is checked before processing, every action is logged, and tools are governed by a policy system.
 
@@ -50,6 +50,12 @@ PocketPaw implements defense-in-depth with multiple security layers. Every messa
   </Card>
   <Card title="Self-Audit Daemon" icon="lucide:activity" href="/security/self-audit-daemon">
     12 continuous background checks with JSON reports.
+  </Card>
+  <Card title="PII Detection" icon="lucide:user-x" href="/security/pii-masking">
+    Detect and mask personal data (SSNs, emails, credit cards) before storage.
+  </Card>
+  <Card title="Streaming Redaction" icon="lucide:eye-off" href="/security/streaming-redaction">
+    Automatic API key and credential redaction in agent output.
   </Card>
 </CardGroup>
 

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { X } from "@lucide/svelte";
+  import { page } from "$app/state";
   import SidebarHeader from "./SidebarHeader.svelte";
   import SidebarSessions from "./SidebarSessions.svelte";
+  import SidebarExplorer from "./SidebarExplorer.svelte";
   import SidebarFooter from "./SidebarFooter.svelte";
 
   let {
@@ -12,10 +14,12 @@
     onClose?: () => void;
   } = $props();
 
+  let isFilesMode = $derived(page.url.pathname === "/");
+
   let sidebarClass = $derived(
     isDrawer
       ? "flex h-full w-full flex-col overflow-hidden bg-background border-r border-border"
-      : "flex h-full w-[260px] shrink-0 flex-col overflow-hidden  border-r border-border"
+      : "flex h-full w-full flex-col overflow-hidden"
   );
 </script>
 
@@ -40,6 +44,10 @@
     <!-- In drawer mode, show New Chat button below the close row -->
     <SidebarHeader hideLogoRow />
   {/if}
-  <SidebarSessions />
+  {#if isFilesMode}
+    <SidebarExplorer />
+  {:else}
+    <SidebarSessions />
+  {/if}
   <SidebarFooter />
 </aside>

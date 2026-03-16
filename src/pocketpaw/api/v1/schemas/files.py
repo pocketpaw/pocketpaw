@@ -34,3 +34,20 @@ class OpenPathResponse(BaseModel):
 
     ok: bool
     error: str | None = None
+
+
+class RecentFileEntry(BaseModel):
+    """A recently accessed file from agent tool usage."""
+
+    path: str
+    name: str
+    is_dir: bool = False
+    extension: str = ""
+    timestamp: float = 0
+    tool: str = ""
+
+
+class RecentFilesResponse(BaseModel):
+    """List of recently accessed files."""
+
+    files: list[RecentFileEntry] = []

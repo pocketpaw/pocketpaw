@@ -2,13 +2,15 @@
   import type { FileEntry } from "$lib/filesystem";
   import { localFs, parentDir } from "$lib/filesystem";
   import { explorerStore } from "$lib/stores";
-  import FileTypeIcon from "./FileTypeIcon.svelte";
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import X from "@lucide/svelte/icons/x";
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import Loader2 from "@lucide/svelte/icons/loader-2";
   import AlertCircle from "@lucide/svelte/icons/alert-circle";
   import FileQuestion from "@lucide/svelte/icons/file-question";
   import Save from "@lucide/svelte/icons/save";
+  import { cn } from "$lib/utils";
 
   let {
     file,
@@ -232,8 +234,24 @@
     }
   }
 
+  // Prev / next file navigation
+  let siblingFiles = $derived(explorerStore.sortedFiles.filter((f) => !f.isDir));
+  let currentIndex = $derived(siblingFiles.findIndex((f) => f.path === file.path));
+  let canGoPrev = $derived(currentIndex > 0);
+  let canGoNext = $derived(currentIndex >= 0 && currentIndex < siblingFiles.length - 1);
+
+  function goPrev() {
+    if (canGoPrev) explorerStore.openFileDetail(siblingFiles[currentIndex - 1]);
+  }
+
+  function goNext() {
+    if (canGoNext) explorerStore.openFileDetail(siblingFiles[currentIndex + 1]);
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") close();
+    if (e.key === "ArrowLeft" && !e.ctrlKey && !e.metaKey) goPrev();
+    if (e.key === "ArrowRight" && !e.ctrlKey && !e.metaKey) goNext();
   }
 
   function formatSize(bytes: number): string {
@@ -247,52 +265,82 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="flex h-full flex-col">
-  <!-- Header bar -->
-  <div class="flex items-center gap-3 border-b border-border/50 px-4 py-2">
-    <FileTypeIcon extension={file.extension} size={20} />
-    <div class="min-w-0 flex-1">
-      <h2 class="truncate text-sm font-medium text-foreground" title={file.path}>
+  <!-- Header -->
+  <div class="flex h-9 items-center gap-1 px-2">
+    <!-- Prev / Next -->
+    <button
+      type="button"
+      class={cn(
+        "rounded-md p-1 transition-colors",
+        canGoPrev
+          ? "text-muted-foreground hover:bg-muted hover:text-foreground"
+          : "text-muted-foreground/30 cursor-not-allowed",
+      )}
+      disabled={!canGoPrev}
+      onclick={goPrev}
+      title="Previous file (←)"
+    >
+      <ChevronLeft class="h-4 w-4" />
+    </button>
+    <button
+      type="button"
+      class={cn(
+        "rounded-md p-1 transition-colors",
+        canGoNext
+          ? "text-muted-foreground hover:bg-muted hover:text-foreground"
+          : "text-muted-foreground/30 cursor-not-allowed",
+      )}
+      disabled={!canGoNext}
+      onclick={goNext}
+      title="Next file (→)"
+    >
+      <ChevronRight class="h-4 w-4" />
+    </button>
+
+    <div class="mx-1 h-4 w-px bg-border/50"></div>
+
+    <!-- File info -->
+    <div class="flex min-w-0 flex-1 items-center gap-2">
+      <span class="truncate text-xs text-foreground" title={file.path}>
         {file.name}
-        {#if unsavedChanges}
-          <span class="text-orange-400" title="Unsaved changes">&nbsp;●</span>
-        {/if}
-      </h2>
-      <p class="truncate text-xs text-muted-foreground">
+      </span>
+      {#if unsavedChanges}
+        <span class="text-orange-400 text-xs" title="Unsaved changes">●</span>
+      {/if}
+      <span class="shrink-0 text-[10px] text-muted-foreground/60">
         {formatSize(file.size)}
-        {#if file.extension}
-          &middot; .{file.extension}
-        {/if}
-      </p>
+      </span>
     </div>
-    <div class="flex items-center gap-1">
+
+    <!-- Actions -->
+    <div class="flex items-center gap-0.5">
       {#if unsavedChanges}
         <button
           type="button"
-          class="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20"
+          class="rounded-md p-1 text-primary hover:bg-primary/10"
           onclick={() => {
             if (textContent !== null) handleSave(textContent);
           }}
           title="Save (Ctrl+S)"
         >
           <Save class="h-3.5 w-3.5" />
-          Save
         </button>
       {/if}
       <button
         type="button"
-        class="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+        class="rounded-md p-1 text-muted-foreground/60 hover:bg-muted hover:text-foreground"
         onclick={openInSystem}
-        title="Open in system app"
+        title="Open externally"
       >
-        <ExternalLink class="h-4 w-4" />
+        <ExternalLink class="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
-        class="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+        class="rounded-md p-1 text-muted-foreground/60 hover:bg-muted hover:text-foreground"
         onclick={close}
         title="Close (Esc)"
       >
-        <X class="h-4 w-4" />
+        <X class="h-3.5 w-3.5" />
       </button>
     </div>
   </div>

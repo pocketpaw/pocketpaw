@@ -67,9 +67,14 @@
     const now = Date.now() / 1000;
     const diff = now - timestamp;
     if (diff < 60) return "Just now";
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+    const mins = Math.floor(diff / 60);
+    if (diff < 3600) return `${mins} ${mins === 1 ? "minute" : "minutes"} ago`;
+    const hrs = Math.floor(diff / 3600);
+    if (diff < 86400) return `${hrs} ${hrs === 1 ? "hour" : "hours"} ago`;
+    const days = Math.floor(diff / 86400);
+    if (diff < 604800) return `${days} ${days === 1 ? "day" : "days"} ago`;
+    const weeks = Math.floor(diff / 604800);
+    if (diff < 2592000) return `${weeks} ${weeks === 1 ? "week" : "weeks"} ago`;
     return new Date(timestamp * 1000).toLocaleDateString();
   }
 
@@ -192,11 +197,8 @@
     <p class="truncate text-xs text-muted-foreground">
       {#if file.isDir}
         Folder
-      {:else}
-        {formatSize(file.size)}
-        {#if file.modified}
-          &middot; {formatRelativeTime(file.modified)}
-        {/if}
+      {:else if file.modified}
+        {formatRelativeTime(file.modified)}
       {/if}
     </p>
   </div>

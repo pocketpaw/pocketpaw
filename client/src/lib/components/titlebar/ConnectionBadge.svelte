@@ -9,7 +9,13 @@
   });
 
   const tooltipText = $derived.by(() => {
+    if (connectionStore.isOffline) {
+      return "Offline · No network connection";
+    }
     if (connectionStore.status === "disconnected") {
+      if (connectionStore.consecutiveFailures >= 5) {
+        return "Disconnected · Backend may not be running";
+      }
       return connectionStore.error
         ? `Disconnected · ${connectionStore.error}`
         : "Disconnected · Reconnecting...";

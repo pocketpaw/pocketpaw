@@ -302,7 +302,8 @@ class TestIdentityAgentIntegration:
             assert "CUSTOM_USER" in prompt
 
     async def test_instructions_between_style_and_knowledge(self):
-        """Instructions section appears after style but before user profile."""
+        """Instructions (tool docs) appear before the identity block; user profile is
+        inside the identity block, after style."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             provider = DefaultBootstrapProvider(base_path=base)
@@ -316,7 +317,8 @@ class TestIdentityAgentIntegration:
             style_pos = prompt.index("STYLE_MARKER")
             instr_pos = prompt.index("INSTR_MARKER")
             user_pos = prompt.index("USER_MARKER")
-            assert style_pos < instr_pos < user_pos
+            # New layout: instructions first, then <identity> block (style … user_profile)
+            assert instr_pos < style_pos < user_pos
 
     async def test_saved_instructions_in_system_prompt(self):
         """After saving INSTRUCTIONS.md, the next get_context() picks it up."""

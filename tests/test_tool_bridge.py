@@ -18,23 +18,35 @@ class TestInstantiateAllTools:
         assert isinstance(tools, list)
         assert len(tools) > 0
 
-    def test_excludes_shell_and_filesystem(self):
+    def test_excludes_shell_and_filesystem_for_claude_sdk(self):
         from pocketpaw.agents.tool_bridge import _instantiate_all_tools
 
-        tools = _instantiate_all_tools()
+        tools = _instantiate_all_tools(backend="claude_agent_sdk")
         names = {type(t).__name__ for t in tools}
         assert "ShellTool" not in names
         assert "ReadFileTool" not in names
         assert "WriteFileTool" not in names
         assert "ListDirTool" not in names
 
-    def test_excludes_browser_and_desktop(self):
+    def test_includes_shell_and_filesystem_for_other_backends(self):
         from pocketpaw.agents.tool_bridge import _instantiate_all_tools
 
-        tools = _instantiate_all_tools()
-        names = {type(t).__name__ for t in tools}
-        assert "BrowserTool" not in names
-        assert "DesktopTool" not in names
+        for backend in ["openai_agents", "google_adk", "codex_cli", "copilot_sdk"]:
+            tools = _instantiate_all_tools(backend=backend)
+            names = {type(t).__name__ for t in tools}
+            assert "ShellTool" in names, f"ShellTool missing for {backend}"
+            assert "ReadFileTool" in names, f"ReadFileTool missing for {backend}"
+            assert "WriteFileTool" in names, f"WriteFileTool missing for {backend}"
+            assert "ListDirTool" in names, f"ListDirTool missing for {backend}"
+
+    def test_excludes_browser_and_desktop_always(self):
+        from pocketpaw.agents.tool_bridge import _instantiate_all_tools
+
+        for backend in ["claude_agent_sdk", "openai_agents", "google_adk"]:
+            tools = _instantiate_all_tools(backend=backend)
+            names = {type(t).__name__ for t in tools}
+            assert "BrowserTool" not in names, f"BrowserTool included for {backend}"
+            assert "DesktopTool" not in names, f"DesktopTool included for {backend}"
 
     def test_handles_import_errors_gracefully(self):
         """If a tool module fails to import, it's skipped without crashing."""

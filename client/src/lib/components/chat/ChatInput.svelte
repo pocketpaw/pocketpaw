@@ -133,9 +133,14 @@
       if (attachedFiles.length >= 10) break;
       try {
         const stat = await localFs.stat(filePath);
-        if (stat.isDir) continue;
-
         const name = getFileName(filePath);
+
+        if (stat.isDir) {
+          const file = new File([], name, { type: "inode/directory" });
+          attachedFiles.push({ name, type: "inode/directory", size: 0, file, path: filePath });
+          continue;
+        }
+
         const ext = getExtension(filePath);
         const mime = mimeFromExtension(ext);
 
@@ -145,6 +150,19 @@
             data = await localFs.readFileBase64(filePath);
           } catch {
             // Skip preview if read fails
+          }
+        } else {
+          // Load text snippet for previewable files
+          try {
+            const { isTextPreviewable } = await import("$lib/components/explorer/file-icon-colors");
+            if (isTextPreviewable(ext)) {
+              const text = await localFs.readFileText(filePath);
+              if (text) {
+                data = text.slice(0, 500);
+              }
+            }
+          } catch {
+            // Skip preview
           }
         }
 

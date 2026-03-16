@@ -1,12 +1,14 @@
 <script lang="ts">
   import { explorerStore } from "$lib/stores";
   import { parentDir } from "$lib/filesystem";
-  import StatusBar from "./StatusBar.svelte";
   import HomeView from "./HomeView.svelte";
   import FileGrid from "./FileGrid.svelte";
   import FileList from "./FileList.svelte";
   import FileViewer from "./FileViewer.svelte";
   import { CommandPalette } from "$lib/components/command-palette";
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import { cn } from "$lib/utils";
   import { onMount } from "svelte";
 
   onMount(() => {
@@ -89,8 +91,40 @@
 </script>
 
 <div class="flex h-full min-w-0 flex-1 flex-col">
-  <div class="shrink-0  px-2 py-1.5">
-    <CommandPalette />
+  <div class="flex shrink-0 items-center gap-1.5 px-2 py-1.5">
+    <div class="flex items-center gap-0.5">
+      <button
+        type="button"
+        class={cn(
+          "rounded-md p-1 transition-colors",
+          explorerStore.canGoBack
+            ? "hover:bg-muted text-foreground"
+            : "text-muted-foreground/40 cursor-not-allowed",
+        )}
+        disabled={!explorerStore.canGoBack}
+        onclick={() => explorerStore.goBack()}
+        title="Go back (Alt+Left)"
+      >
+        <ChevronLeft class="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        class={cn(
+          "rounded-md p-1 transition-colors",
+          explorerStore.canGoForward
+            ? "hover:bg-muted text-foreground"
+            : "text-muted-foreground/40 cursor-not-allowed",
+        )}
+        disabled={!explorerStore.canGoForward}
+        onclick={() => explorerStore.goForward()}
+        title="Go forward (Alt+Right)"
+      >
+        <ChevronRight class="h-4 w-4" />
+      </button>
+    </div>
+    <div class="min-w-0 flex-1">
+      <CommandPalette />
+    </div>
   </div>
   <div class="flex flex-1 overflow-hidden">
     {#if explorerStore.webPreviewUrl}
@@ -115,7 +149,4 @@
       </div>
     {/if}
   </div>
-  {#if !explorerStore.isHome}
-    <StatusBar />
-  {/if}
 </div>

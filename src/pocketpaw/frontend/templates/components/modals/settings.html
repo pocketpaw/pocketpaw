@@ -282,7 +282,7 @@
               <div class="flex flex-col gap-1.5">
                 <div class="flex justify-between items-center">
                   <label class="text-[11px] text-white/60">Anthropic API Key</label>
-                  <a href="https://console.anthropic.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
+                  <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="api-key-help">
                     <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
                   </a>
                 </div>
@@ -353,7 +353,9 @@
                 >
                   <option value="anthropic">Anthropic (Recommended)</option>
                   <option value="ollama">Ollama (Local)</option>
+                  <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
+                  <option value="litellm">LiteLLM (100+ Providers)</option>
                 </select>
                 <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
                   <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
@@ -365,8 +367,14 @@
               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'ollama'">
                 Runs via Ollama's Anthropic Messages API compatibility (Claude Code v0.14.0+).
               </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openrouter'">
+                Use any model on OpenRouter with full CLI tool access via their Anthropic-compatible API.
+              </small>
               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openai_compatible'">
-                Connect to any Anthropic-compatible endpoint (LiteLLM, vLLM, OpenRouter, etc.).
+                Connect to any Anthropic-compatible endpoint (LiteLLM, vLLM, etc.).
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'litellm'">
+                Route through LiteLLM proxy for HuggingFace, vLLM, Together AI, Groq, and 100+ providers.
               </small>
             </div>
             <!-- Ollama config (inline, shown when provider=ollama) -->
@@ -385,6 +393,25 @@
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
                 <small class="text-white/50 text-[11px]">Run <code>ollama list</code> to see available models.</small>
+              </div>
+            </div>
+            <!-- OpenRouter config (inline, shown when provider=openrouter) -->
+            <div x-show="settings.claudeSdkProvider === 'openrouter'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">OpenRouter API Key</label>
+                <input type="password" x-model="settings.openaiCompatibleApiKey" @change="saveSettings()"
+                  :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'sk-or-v1-...'"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Get your key at <a href="https://openrouter.ai/keys" target="_blank" class="underline">openrouter.ai/keys</a></small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.openaiCompatibleModel" @change="saveSettings()"
+                  placeholder="anthropic/claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Browse models at <a href="https://openrouter.ai/models" target="_blank" class="underline">openrouter.ai/models</a></small>
               </div>
             </div>
             <!-- OpenAI-compatible config (inline, shown when provider=openai_compatible) -->
@@ -409,6 +436,39 @@
                   placeholder="claude-sonnet-4-6"
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
+              </div>
+            </div>
+            <!-- LiteLLM config (inline, shown when provider=litellm) -->
+            <div x-show="settings.claudeSdkProvider === 'litellm'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM Proxy URL</label>
+                <input type="text" x-model="settings.litellmApiBase" @change="saveSettings()"
+                  placeholder="http://localhost:4000"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM API Key</label>
+                <input type="password" x-model="settings.litellmApiKey" @change="saveSettings()"
+                  placeholder="Optional (proxy master key)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.litellmModel" @change="saveSettings()"
+                  placeholder="anthropic/claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Use provider/model format (e.g. huggingface/meta-llama/Llama-3-70b)</small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Output Tokens</label>
+                <input type="number" x-model="settings.litellmMaxTokens" @change="saveSettings()"
+                  min="0" max="1000000" placeholder="0 (provider default)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Set to match your model's limit (e.g. 8192 for DeepSeek). 0 = provider default.</small>
               </div>
             </div>
             <!-- Model override (Anthropic) -->
@@ -465,7 +525,9 @@
                 >
                   <option value="openai">OpenAI (Recommended)</option>
                   <option value="ollama">Ollama (Local)</option>
+                  <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
+                  <option value="litellm">LiteLLM (100+ Providers)</option>
                 </select>
                 <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
                   <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
@@ -474,8 +536,14 @@
               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'ollama'">
                 Uses Ollama's OpenAI-compatible API. No API key needed.
               </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openrouter'">
+                Use any model on OpenRouter. Free and paid models available.
+              </small>
               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openai_compatible'">
-                Connect to any OpenAI-compatible endpoint (NVIDIA NIM, OpenRouter, vLLM, etc.).
+                Connect to any OpenAI-compatible endpoint (NVIDIA NIM, vLLM, etc.).
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'litellm'">
+                Route through LiteLLM proxy for HuggingFace, vLLM, Together AI, Groq, and 100+ providers.
               </small>
             </div>
             <!-- Ollama config (inline) -->
@@ -493,6 +561,25 @@
                   placeholder="llama3.2"
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
+              </div>
+            </div>
+            <!-- OpenRouter config (inline, for openai_agents) -->
+            <div x-show="settings.openaiAgentsProvider === 'openrouter'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">OpenRouter API Key</label>
+                <input type="password" x-model="settings.openaiCompatibleApiKey" @change="saveSettings()"
+                  :placeholder="hasOpenaiCompatibleKey ? '••••••••••••••••' : 'sk-or-v1-...'"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Get your key at <a href="https://openrouter.ai/keys" target="_blank" class="underline">openrouter.ai/keys</a></small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.openaiCompatibleModel" @change="saveSettings()"
+                  placeholder="meta-llama/llama-4-maverick"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Browse models at <a href="https://openrouter.ai/models" target="_blank" class="underline">openrouter.ai/models</a></small>
               </div>
             </div>
             <!-- OpenAI-compatible config (inline) -->
@@ -517,6 +604,39 @@
                   placeholder="gpt-5.2"
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
+              </div>
+            </div>
+            <!-- LiteLLM config (inline, for openai_agents) -->
+            <div x-show="settings.openaiAgentsProvider === 'litellm'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM Proxy URL</label>
+                <input type="text" x-model="settings.litellmApiBase" @change="saveSettings()"
+                  placeholder="http://localhost:4000"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM API Key</label>
+                <input type="password" x-model="settings.litellmApiKey" @change="saveSettings()"
+                  placeholder="Optional (proxy master key)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.litellmModel" @change="saveSettings()"
+                  placeholder="anthropic/claude-sonnet-4-6"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Use provider/model format (e.g. huggingface/meta-llama/Llama-3-70b)</small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Output Tokens</label>
+                <input type="number" x-model="settings.litellmMaxTokens" @change="saveSettings()"
+                  min="0" max="1000000" placeholder="0 (provider default)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Set to match your model's limit (e.g. 8192 for DeepSeek). 0 = provider default.</small>
               </div>
             </div>
             <!-- Model (for OpenAI provider) -->
@@ -552,6 +672,58 @@
               Requires Google ADK. Install with: <code class="text-[var(--accent-color)]">pip install 'pocketpaw[google-adk]'</code>
             </p>
             <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Provider</label>
+              <div class="relative">
+                <select
+                  x-model="settings.googleAdkProvider"
+                  @change="saveSettings()"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+                  <option value="google">Google (Recommended)</option>
+                  <option value="litellm">LiteLLM (100+ Providers)</option>
+                </select>
+                <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+              <small class="text-white/50 text-[11px]" x-show="settings.googleAdkProvider === 'litellm'">
+                Route through LiteLLM proxy. Use provider/model format (e.g. openai/gpt-4o).
+              </small>
+            </div>
+            <!-- LiteLLM config (inline, for google_adk) -->
+            <div x-show="settings.googleAdkProvider === 'litellm'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM Proxy URL</label>
+                <input type="text" x-model="settings.litellmApiBase" @change="saveSettings()"
+                  placeholder="http://localhost:4000"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LiteLLM API Key</label>
+                <input type="password" x-model="settings.litellmApiKey" @change="saveSettings()"
+                  placeholder="Optional (proxy master key)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
+                <input type="text" x-model="settings.litellmModel" @change="saveSettings()"
+                  placeholder="openai/gpt-4o"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Use provider/model format (e.g. huggingface/meta-llama/Llama-3-70b)</small>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Output Tokens</label>
+                <input type="number" x-model="settings.litellmMaxTokens" @change="saveSettings()"
+                  min="0" max="1000000" placeholder="0 (provider default)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+                <small class="text-white/50 text-[11px]">Set to match your model's limit (e.g. 8192 for DeepSeek). 0 = provider default.</small>
+              </div>
+            </div>
+            <div class="flex flex-col gap-1" x-show="settings.googleAdkProvider !== 'litellm'">
               <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
               <input
                 type="text"
@@ -624,6 +796,7 @@
                 <option value="openai">OpenAI-compatible</option>
                 <option value="azure">Azure OpenAI</option>
                 <option value="anthropic">Anthropic</option>
+                <option value="litellm">LiteLLM (100+ Providers)</option>
               </select>
             </div>
             <div class="flex flex-col gap-1">
@@ -721,7 +894,7 @@
             <div class="flex justify-between items-center">
               <label class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Anthropic API Key</label>
               <div class="flex items-center gap-2">
-                <a href="https://console.anthropic.com/api-keys" target="_blank" rel="noopener" class="api-key-help">
+                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="api-key-help">
                   <i data-lucide="external-link" class="w-3 h-3"></i> Get Key
                 </a>
                 <span x-show="hasAnthropicKey" class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1">
@@ -737,7 +910,7 @@
               <button class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
                 @click="saveApiKey('anthropic')">Save</button>
             </div>
-            <small class="text-white/50 text-[11px]">Required for Claude SDK backend — get a key at <a href="https://console.anthropic.com/api-keys" target="_blank" rel="noopener" class="underline hover:text-white/70">console.anthropic.com</a></small>
+            <small class="text-white/50 text-[11px]">Required for Claude SDK backend — get a key at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="underline hover:text-white/70">console.anthropic.com</a></small>
           </div>
 
           <!-- OpenAI key: OpenAI Agents + OpenAI provider -->
@@ -1411,6 +1584,101 @@
                 <span class="text-[11px] text-white/50 mt-0.5"
                   >Use a secondary LLM to analyze suspicious content (requires
                   API key)</span
+                >
+              </div>
+            </label>
+          </div>
+
+          <!-- PII Protection -->
+          <div class="mt-4">
+            <label class="flex items-start gap-2.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                x-model="settings.piiScanEnabled"
+                @change="saveSettings()"
+                class="mt-0.5 accent-[var(--accent-color)] w-4 h-4"
+              />
+              <div class="flex flex-col">
+                <span
+                  class="text-[13px] font-medium group-hover:text-white transition-colors"
+                  >PII Protection</span
+                >
+                <span class="text-[11px] text-white/50 mt-0.5"
+                  >Detect and mask sensitive data (SSN, email, phone, credit card) before storing</span
+                >
+              </div>
+            </label>
+          </div>
+
+          <!-- PII sub-options -->
+          <div class="pl-7 space-y-3" x-show="settings.piiScanEnabled" x-transition>
+            <!-- Default Action -->
+            <div class="flex items-center gap-2">
+              <span class="text-[12px] text-white/50 w-20 shrink-0">Action:</span>
+              <select
+                x-model="settings.piiDefaultAction"
+                @change="saveSettings()"
+                class="bg-white/5 border border-white/10 rounded-md px-2 py-1 text-[12px] text-white/80 w-full max-w-[160px]"
+              >
+                <option value="mask">Mask ([REDACTED])</option>
+                <option value="hash">Hash (SHA256)</option>
+                <option value="log">Log only</option>
+              </select>
+            </div>
+
+            <!-- Scan Memory -->
+            <label class="flex items-start gap-2.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                x-model="settings.piiScanMemory"
+                @change="saveSettings()"
+                class="mt-0.5 accent-[var(--accent-color)] w-4 h-4"
+              />
+              <div class="flex flex-col">
+                <span
+                  class="text-[13px] font-medium group-hover:text-white transition-colors"
+                  >Scan Memory</span
+                >
+                <span class="text-[11px] text-white/50 mt-0.5"
+                  >Mask PII before writing to session history and long-term memory</span
+                >
+              </div>
+            </label>
+
+            <!-- Scan Audit Log -->
+            <label class="flex items-start gap-2.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                x-model="settings.piiScanAudit"
+                @change="saveSettings()"
+                class="mt-0.5 accent-[var(--accent-color)] w-4 h-4"
+              />
+              <div class="flex flex-col">
+                <span
+                  class="text-[13px] font-medium group-hover:text-white transition-colors"
+                  >Scan Audit Log</span
+                >
+                <span class="text-[11px] text-white/50 mt-0.5"
+                  >Mask PII in audit log entries</span
+                >
+              </div>
+            </label>
+
+            <!-- Scan Logs -->
+            <label class="flex items-start gap-2.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                x-model="settings.piiScanLogs"
+                @change="saveSettings()"
+                class="mt-0.5 accent-[var(--accent-color)] w-4 h-4"
+              />
+              <div class="flex flex-col">
+                <span
+                  class="text-[13px] font-medium group-hover:text-white transition-colors"
+                  >Scan Log Output</span
+                >
+                <span class="text-[11px] text-white/50 mt-0.5"
+                  >Scrub PII patterns from application log output</span
                 >
               </div>
             </label>

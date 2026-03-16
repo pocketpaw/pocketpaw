@@ -14,6 +14,7 @@ import {
   type MCPStatusMap,
   type MCPTestResponse,
   type MediaAttachment,
+  type RecentFileEntry,
   type MemoryEntry,
   type MemorySettings,
   type MemoryStats,
@@ -35,6 +36,36 @@ import {
 } from "./types";
 import type { TaskStatus, TaskPriority, DocumentType } from "$lib/types/pawkit";
 import { BACKEND_URL, API_PREFIX } from "./config";
+
+/** Default timeout for REST requests (30 seconds). */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Timeout for streaming requests (5 minutes). */
+const STREAM_TIMEOUT_MS = 5 * 60_000;
+
+/** Timeout between stream chunks before we consider it stalled (60 seconds). */
+const STREAM_STALL_TIMEOUT_MS = 60_000;
+
+/**
+ * Map raw fetch/network errors to user-friendly messages.
+ */
+export function friendlyErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 0) return "Could not reach the backend. Is it running?";
+    if (err.status === 401) return "Session expired. Please sign in again.";
+    if (err.status === 502 || err.status === 503)
+      return "Backend is starting up or temporarily unavailable. Try again in a moment.";
+    if (err.status === 504) return "Request timed out. The backend may be overloaded.";
+    if (err.detail) return err.detail;
+    return err.message;
+  }
+  if (err instanceof DOMException && err.name === "AbortError")
+    return "Request timed out. The backend may be unresponsive.";
+  if (err instanceof TypeError)
+    return "Could not reach the backend. Check your connection and make sure it's running.";
+  if (err instanceof Error) return err.message;
+  return "An unexpected error occurred.";
+}
 
 export class PocketPawClient {
   private baseUrl: string;
@@ -78,11 +109,21 @@ export class PocketPawClient {
     _retried = false,
   ): Promise<T> {
     const url = `${this.apiBase}${path}`;
-    const res = await fetch(url, {
-      method,
-      headers: this.headers(),
-      body: body != null ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: this.headers(),
+        body: body != null ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      throw new ApiError(0, friendlyErrorMessage(err));
+    }
+    clearTimeout(timer);
     if (!res.ok) {
       // On 401, try refreshing the token and retrying once
       if (res.status === 401 && !_retried) {
@@ -136,11 +177,21 @@ export class PocketPawClient {
     body?: unknown,
   ): Promise<T> {
     const url = `${this.baseUrl}/api/mission-control${path}`;
-    const res = await fetch(url, {
-      method,
-      headers: this.headers(),
-      body: body != null ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: this.headers(),
+        body: body != null ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      throw new ApiError(0, friendlyErrorMessage(err));
+    }
+    clearTimeout(timer);
     if (!res.ok) {
       let detail: string | undefined;
       try {
@@ -163,11 +214,21 @@ export class PocketPawClient {
     body?: unknown,
   ): Promise<T> {
     const url = `${this.baseUrl}/api/deep-work${path}`;
-    const res = await fetch(url, {
-      method,
-      headers: this.headers(),
-      body: body != null ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: this.headers(),
+        body: body != null ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      throw new ApiError(0, friendlyErrorMessage(err));
+    }
+    clearTimeout(timer);
     if (!res.ok) {
       let detail: string | undefined;
       try {
@@ -257,69 +318,107 @@ export class PocketPawClient {
     const url = `${this.apiBase}/chat/stream`;
     const body: Record<string, unknown> = { content, media, session_id: sessionId };
     if (fileContext) body.file_context = fileContext;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: this.headers(),
-      body: JSON.stringify(body),
-      signal,
-    });
+
+    // Use caller's signal if provided, otherwise create a timeout signal
+    const streamController = new AbortController();
+    const streamTimer = setTimeout(() => streamController.abort(), STREAM_TIMEOUT_MS);
+
+    // If the caller provides a signal (e.g. user stop), forward it
+    if (signal) {
+      signal.addEventListener("abort", () => streamController.abort(), { once: true });
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal: streamController.signal,
+      });
+    } catch (err) {
+      clearTimeout(streamTimer);
+      // Re-throw AbortError from caller's signal as-is
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      throw new ApiError(0, friendlyErrorMessage(err));
+    }
 
     if (!res.ok) {
+      clearTimeout(streamTimer);
       const detail = await res.text().catch(() => "");
-      throw new ApiError(res.status, `POST /chat/stream failed: ${res.status}`, detail);
+      throw new ApiError(res.status, friendlyErrorMessage(new ApiError(res.status, "", detail)), detail);
     }
 
     const reader = res.body?.getReader();
-    if (!reader) throw new ApiError(0, "No readable stream");
+    if (!reader) {
+      clearTimeout(streamTimer);
+      throw new ApiError(0, "No readable stream");
+    }
 
     const decoder = new TextDecoder();
     let buffer = "";
     let currentEvent = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    // Stall detection: abort if no data received for STREAM_STALL_TIMEOUT_MS
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        streamController.abort();
+      }, STREAM_STALL_TIMEOUT_MS);
+    };
+    resetStallTimer();
 
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        resetStallTimer();
+        buffer += decoder.decode(value, { stream: true });
 
-      for (const line of lines) {
-        if (line.startsWith("event: ")) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith("data: ")) {
-          const raw = line.slice(6);
-          try {
-            const data = JSON.parse(raw);
-            switch (currentEvent) {
-              case "chunk":
-                handlers.onChunk?.(data);
-                break;
-              case "tool_start":
-                handlers.onToolStart?.(data);
-                break;
-              case "tool_result":
-                handlers.onToolResult?.(data);
-                break;
-              case "thinking":
-                handlers.onThinking?.(data);
-                break;
-              case "ask_user_question":
-                handlers.onAskUser?.(data);
-                break;
-              case "stream_end":
-                handlers.onStreamEnd?.(data);
-                break;
-              case "error":
-                handlers.onError?.(data);
-                break;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            const raw = line.slice(6);
+            try {
+              const data = JSON.parse(raw);
+              switch (currentEvent) {
+                case "chunk":
+                  handlers.onChunk?.(data);
+                  break;
+                case "tool_start":
+                  handlers.onToolStart?.(data);
+                  break;
+                case "tool_result":
+                  handlers.onToolResult?.(data);
+                  break;
+                case "thinking":
+                  handlers.onThinking?.(data);
+                  break;
+                case "ask_user_question":
+                  handlers.onAskUser?.(data);
+                  break;
+                case "stream_end":
+                  handlers.onStreamEnd?.(data);
+                  break;
+                case "error":
+                  handlers.onError?.(data);
+                  break;
+              }
+            } catch {
+              // skip unparseable lines
             }
-          } catch {
-            // skip unparseable lines
+            currentEvent = "";
           }
-          currentEvent = "";
         }
       }
+    } finally {
+      clearTimeout(streamTimer);
+      if (stallTimer) clearTimeout(stallTimer);
     }
   }
 
@@ -499,8 +598,8 @@ export class PocketPawClient {
     return this.get<BackendInfo[]>("/backends");
   }
 
-  async installBackend(name: string): Promise<void> {
-    await this.post("/backends/install", { backend: name });
+  async installBackend(name: string): Promise<{ status?: string; error?: string }> {
+    return this.post<{ status?: string; error?: string }>("/backends/install", { backend: name });
   }
 
   async fetchOllamaModels(host?: string): Promise<string[]> {
@@ -536,6 +635,23 @@ export class PocketPawClient {
 
   async getVersion(): Promise<VersionInfo> {
     return this.get<VersionInfo>("/version");
+  }
+
+  async getSystemMetrics(): Promise<import("./types").SystemMetrics> {
+    return this.get("/metrics/system");
+  }
+
+  async getUsageSummary(since?: string): Promise<import("./types").UsageSummary> {
+    const params = since ? `?since=${encodeURIComponent(since)}` : "";
+    return this.get(`/metrics/usage${params}`);
+  }
+
+  async getRecentUsage(limit = 50): Promise<import("./types").UsageRecord[]> {
+    return this.get(`/metrics/usage/recent?limit=${limit}`);
+  }
+
+  async clearUsage(): Promise<void> {
+    await this.del("/metrics/usage");
   }
 
   // ---------------------------------------------------------------------------
@@ -672,6 +788,11 @@ export class PocketPawClient {
 
   async browseFiles(path: string): Promise<{ path: string; files: import("./types").FileEntry[] }> {
     return this.get(`/files/browse?path=${encodeURIComponent(path)}`);
+  }
+
+  async getRecentFiles(limit = 20): Promise<RecentFileEntry[]> {
+    const res = await this.get<{ files: RecentFileEntry[] }>(`/files/recent?limit=${limit}`);
+    return res.files;
   }
 
   // ---------------------------------------------------------------------------

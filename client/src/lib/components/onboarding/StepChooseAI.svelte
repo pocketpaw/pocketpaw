@@ -2,6 +2,7 @@
   import { Cpu, Cloud } from "@lucide/svelte";
   import OllamaSetup from "./OllamaSetup.svelte";
   import ApiKeySetup from "./ApiKeySetup.svelte";
+  import Typewriter from "./Typewriter.svelte";
 
   let { onNext }: { onNext: () => void } = $props();
 
@@ -19,7 +20,9 @@
 {:else}
   <div class="flex w-full max-w-lg flex-col items-center gap-6">
     <div class="flex flex-col gap-1 text-center">
-      <h2 class="text-lg font-semibold text-foreground">Choose Your AI</h2>
+      <h2 class="text-lg font-semibold text-foreground">
+        <Typewriter text="Now, let's pick your AI brain!" speed={35} />
+      </h2>
       <p class="text-sm text-muted-foreground">Pick how you'd like to power your assistant.</p>
     </div>
 
@@ -58,5 +61,12 @@
         <span class="mt-auto text-xs font-medium text-primary">Set up &rarr;</span>
       </button>
     </div>
+
+    <button
+      onclick={onNext}
+      class="text-xs text-muted-foreground transition-colors hover:text-foreground"
+    >
+      Skip for now
+    </button>
   </div>
 {/if}

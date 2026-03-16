@@ -72,6 +72,49 @@ async def update_settings(request: Request):
         settings.save()
         get_settings.cache_clear()
 
+    # Sync user_display_name into USER.md so the agent knows the user's name
+    if "user_display_name" in settings_data and settings_data["user_display_name"]:
+        try:
+            from pocketpaw.config import get_config_dir
+
+            user_file = get_config_dir() / "identity" / "USER.md"
+            user_file.parent.mkdir(parents=True, exist_ok=True)
+            import re as _re
+
+            # Sanitize display name: strip newlines and limit to safe characters
+            raw_name = settings_data["user_display_name"]
+            display_name = _re.sub(r"[^\w\s\-.,'\u0080-\uffff]", "", raw_name).strip()[:100]
+            if not display_name:
+                display_name = "User"
+            if user_file.exists():
+                content = user_file.read_text(encoding="utf-8")
+                import re
+
+                updated = re.sub(
+                    r"^Name:\s*.*$",
+                    f"Name: {display_name}",
+                    content,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+                if updated == content and "Name:" not in content:
+                    # No Name: line found, prepend it
+                    updated = f"# User Profile\nName: {display_name}\n\n{content}"
+                user_file.write_text(updated, encoding="utf-8")
+            else:
+                user_file.write_text(
+                    f"# User Profile\nName: {display_name}\n",
+                    encoding="utf-8",
+                )
+            # Invalidate the identity file cache so changes are picked up immediately
+            from pocketpaw.bootstrap.default_provider import _identity_file_cache
+
+            cache_key = str(user_file)
+            _identity_file_cache.pop(cache_key, None)
+            logger.info("Synced user_display_name '%s' to USER.md", display_name)
+        except Exception:
+            logger.debug("Could not sync user_display_name to USER.md", exc_info=True)
+
     # Apply runtime side-effects so changes take effect without restart
     try:
         from pocketpaw.dashboard_state import agent_loop

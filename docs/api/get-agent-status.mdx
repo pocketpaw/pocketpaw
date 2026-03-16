@@ -1,0 +1,170 @@
+---
+title: Get Agent Status
+description: "Retrieve the current agent status including global state (idle, active, degraded) and per-session breakdown with tool usage and token counts."
+api: GET /api/v1/agent/status
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: none
+section: API Reference
+ogType: article
+keywords: ["agent status", "session state", "monitoring"]
+tags: ["api", "status"]
+---
+
+## Overview
+
+Returns a snapshot of the agent's current state. The response includes a `global` summary (idle, active, or degraded) and a `sessions` array with per-session details like current state, active tool, duration, and token usage.
+
+<Callout type="info">
+If `POCKETPAW_STATUS_API_KEY` is set, requests must include the key via the `X-Status-Key` header or `?key=` query parameter. When no key is configured, the endpoint is open.
+</Callout>
+
+## Authentication
+
+This endpoint uses its own auth mechanism, separate from the dashboard bearer token:
+
+| Method | Example |
+|--------|---------|
+| Header | `X-Status-Key: your-key` |
+| Query param | `?key=your-key` |
+| No key configured | Open access (default) |
+
+## Response
+
+<ResponseField name="global" type="object">
+  Global agent status summary.
+
+  <ResponseField name="state" type="string">Overall state: `idle` (no active sessions), `active` (processing), or `degraded` (one or more sessions in error).</ResponseField>
+  <ResponseField name="active_sessions" type="integer">Number of currently active sessions.</ResponseField>
+  <ResponseField name="max_concurrent" type="integer">Maximum allowed concurrent conversations.</ResponseField>
+  <ResponseField name="uptime_seconds" type="integer">Seconds since the status tracker was initialized.</ResponseField>
+</ResponseField>
+
+<ResponseField name="sessions" type="array">
+  List of active sessions. Empty when idle.
+
+  <ResponseField name="session_key" type="string">Full session key (e.g. `websocket:abc123`).</ResponseField>
+  <ResponseField name="session_id" type="string">Session ID portion of the key.</ResponseField>
+  <ResponseField name="channel" type="string">Channel type: `websocket`, `telegram`, `discord`, `slack`, `whatsapp`, etc.</ResponseField>
+  <ResponseField name="title" type="string | null">Session title from memory, if available.</ResponseField>
+  <ResponseField name="state" type="string">Current state: `thinking`, `tool_running`, `streaming`, `waiting_for_user`, or `error`.</ResponseField>
+  <ResponseField name="tool_name" type="string | null">Name of the currently running tool (only set when `state` is `tool_running`).</ResponseField>
+  <ResponseField name="duration_seconds" type="number">Seconds since the last state change.</ResponseField>
+  <ResponseField name="token_usage" type="object | null">Accumulated token counts with `input` and `output` fields. Null if no tokens have been tracked yet.</ResponseField>
+  <ResponseField name="error_message" type="string | null">Error description when `state` is `error`.</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    # No auth key configured
+    curl http://localhost:8000/api/v1/agent/status
+
+    # With auth key
+    curl http://localhost:8000/api/v1/agent/status \
+      -H "X-Status-Key: your-key"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/v1/agent/status", {
+      headers: { "X-Status-Key": "your-key" }
+    });
+    const data = await response.json();
+    console.log(data.global.state); // "idle", "active", or "degraded"
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/v1/agent/status",
+        headers={"X-Status-Key": "your-key"}
+    )
+    data = response.json()
+    print(data["global"]["state"])
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200 (Idle)", "200 (Active)", "200 (Degraded)"]}>
+  <Tab title="200 (Idle)">
+    ```json
+    {
+      "global": {
+        "state": "idle",
+        "active_sessions": 0,
+        "max_concurrent": 5,
+        "uptime_seconds": 3600
+      },
+      "sessions": []
+    }
+    ```
+  </Tab>
+  <Tab title="200 (Active)">
+    ```json
+    {
+      "global": {
+        "state": "active",
+        "active_sessions": 1,
+        "max_concurrent": 5,
+        "uptime_seconds": 3600
+      },
+      "sessions": [
+        {
+          "session_key": "websocket:abc123",
+          "session_id": "abc123",
+          "channel": "websocket",
+          "title": "Help with Python script",
+          "state": "tool_running",
+          "tool_name": "bash",
+          "duration_seconds": 2.3,
+          "token_usage": { "input": 1500, "output": 320 },
+          "error_message": null
+        }
+      ]
+    }
+    ```
+  </Tab>
+  <Tab title="200 (Degraded)">
+    ```json
+    {
+      "global": {
+        "state": "degraded",
+        "active_sessions": 2,
+        "max_concurrent": 5,
+        "uptime_seconds": 7200
+      },
+      "sessions": [
+        {
+          "session_key": "websocket:abc123",
+          "session_id": "abc123",
+          "channel": "websocket",
+          "title": null,
+          "state": "thinking",
+          "tool_name": null,
+          "duration_seconds": 1.0,
+          "token_usage": null,
+          "error_message": null
+        },
+        {
+          "session_key": "discord:xyz789",
+          "session_id": "xyz789",
+          "channel": "discord",
+          "title": null,
+          "state": "error",
+          "tool_name": null,
+          "duration_seconds": 15.2,
+          "token_usage": { "input": 800, "output": 50 },
+          "error_message": "Rate limit exceeded"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

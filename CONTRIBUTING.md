@@ -2,7 +2,7 @@
 
 <!-- Updated: 2026-02-26 — Added "What we don't accept" section, tightened PR expectations. -->
 
-PocketPaw is an open-source AI agent that runs locally and connects to Telegram, Discord, Slack, WhatsApp, and a web dashboard. Python 3.11+, async everywhere, protocol-oriented.
+PocketPaw is an open-source AI agent that runs locally, with a native desktop app (Tauri + SvelteKit) and a web dashboard. Connects to Telegram, Discord, Slack, WhatsApp, and more. Python 3.11+, async everywhere, protocol-oriented.
 
 We welcome contributions that solve real problems: bug fixes, new tools, channel adapters, tests, meaningful documentation improvements.
 
@@ -37,6 +37,8 @@ If you're new and want to contribute, check [`good first issue`](https://github.
 
 ## Setting up your environment
 
+### Backend (Python)
+
 1. **Fork** the repository and clone your fork.
 2. **Create a feature branch** off `dev`:
    ```bash
@@ -59,7 +61,30 @@ If you're new and want to contribute, check [`good first issue`](https://github.
    ```
    The web dashboard should open at `http://localhost:8888`.
 
+### Desktop Client (Tauri + SvelteKit)
+
+If you're working on the desktop client in `client/`, you'll also need:
+
+1. **[Bun](https://bun.sh/)** for package management (not npm/yarn).
+2. **[Rust](https://rustup.rs/)** for the Tauri backend.
+3. **Install client dependencies:**
+   ```bash
+   cd client && bun install
+   ```
+4. **Start the backend** in one terminal:
+   ```bash
+   uv run pocketpaw
+   ```
+5. **Start the client** in another terminal:
+   ```bash
+   cd client && bun run tauri dev
+   ```
+
+See `client/CLAUDE.md` for full architecture details, Svelte 5 rules, and Tailwind CSS 4 conventions.
+
 ## Development commands
+
+### Backend
 
 ```bash
 # Run the app (web dashboard)
@@ -91,6 +116,20 @@ uv run mypy .
 pre-commit run --all-files
 ```
 
+### Desktop Client
+
+```bash
+cd client
+bun install                    # Install dependencies (uses Bun, not npm)
+bun run dev                    # Vite dev server (http://localhost:1420)
+bun run tauri dev              # Full desktop app (frontend + Tauri shell)
+bun run check                  # Type check (svelte-kit sync + svelte-check)
+bun run build                  # Production frontend build
+bun run tauri build            # Build desktop app installer
+bun run tauri:android          # Android dev
+bun run tauri:ios              # iOS dev
+```
+
 ### Pre-commit hooks
 
 This repo uses [pre-commit](https://pre-commit.com/) to catch issues before they hit CI:
@@ -109,6 +148,7 @@ If a hook fails, the action is blocked. Fix the issue and try again.
 ```
 src/pocketpaw/
   agents/            # Agent backends (Claude SDK, OpenAI Agents, Google ADK, Codex, OpenCode, Copilot) + router + registry
+  api/               # v1 REST API (FastAPI router)
   bus/               # Message bus + event types
     adapters/        # Channel adapters (Telegram, Discord, Slack, WhatsApp, etc.)
   tools/
@@ -127,7 +167,15 @@ src/pocketpaw/
   dashboard.py       # FastAPI server, WebSocket handler, REST APIs
   scheduler.py       # APScheduler-based reminders and cron jobs
 frontend/            # Vanilla JS/CSS/HTML dashboard (no build step)
-tests/               # pytest suite (2000+ tests)
+client/              # Tauri 2.0 + SvelteKit desktop app
+  src/               # SvelteKit frontend (Svelte 5 + Tailwind CSS 4)
+    lib/api/         # REST client + WebSocket with auto-reconnect
+    lib/stores/      # Svelte 5 rune-based state management
+    lib/components/  # UI components (shadcn-svelte)
+    lib/auth/        # OAuth PKCE flow
+    routes/          # SPA routes (chat, settings, onboarding, side panel)
+  src-tauri/         # Rust backend (system tray, global shortcuts, multi-window)
+tests/               # pytest suite (2900+ tests)
 ```
 
 ## Writing code
@@ -182,16 +230,24 @@ Keep the subject line under 72 characters. Add a body if the change needs explan
 
 ## Pull request checklist
 
+**All PRs:**
 - [ ] Branch is based on `dev` (not `main`)
 - [ ] PR targets the `dev` branch
 - [ ] Pre-commit hooks pass (`pre-commit run --all-files`)
+- [ ] No secrets or credentials in the diff
+
+**Backend PRs:**
 - [ ] Tests pass (`uv run pytest --ignore=tests/e2e`)
 - [ ] Linting passes (`uv run ruff check .`)
-- [ ] No secrets or credentials in the diff
 - [ ] New config fields are added to `Settings.save()` dict
 - [ ] New secret fields are added to `SECRET_FIELDS` in `credentials.py`
 - [ ] New tools are registered in the appropriate policy group
 - [ ] New optional dependencies are declared in `pyproject.toml` extras
+
+**Client PRs:**
+- [ ] Type check passes (`cd client && bun run check`)
+- [ ] Desktop app builds without errors (`cd client && bun run tauri build`)
+- [ ] New Tauri IPC commands are added to `src-tauri/capabilities/default.json`
 
 ## Code review
 

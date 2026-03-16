@@ -1,5 +1,6 @@
 # Security Audit CLI — run security checks and print a report.
 # Created: 2026-02-06
+# Updated: 2026-02-16 — Added PII protection check and --pii-scan memory scanner.
 # Part of Phase 1 Quick Wins
 
 import logging
@@ -43,8 +44,8 @@ def _fix_config_permissions() -> None:
     if config_path.exists():
         try:
             os.chmod(config_path, stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass  # Windows NTFS doesn't support Unix permissions
+        except OSError as exc:
+            logger.debug("Could not set config file permissions (expected on Windows): %s", exc)
 
 
 def _check_plaintext_api_keys() -> tuple[bool, str, bool]:
@@ -77,8 +78,8 @@ def _check_plaintext_api_keys() -> tuple[bool, str, bool]:
                 val = data.get(field)
                 if val:
                     found.append(field)
-            except Exception:
-                pass
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.debug("Could not parse config file for API key check: %s", exc)
 
     if found:
         return (
@@ -107,8 +108,8 @@ def _fix_audit_log() -> None:
         audit_path.touch()
     try:
         os.chmod(audit_path, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass  # Windows NTFS doesn't support Unix permissions
+    except OSError as exc:
+        logger.debug("Could not set audit log permissions (expected on Windows): %s", exc)
 
 
 def _check_guardian_reachable() -> tuple[bool, str, bool]:
@@ -159,6 +160,75 @@ def _check_bypass_permissions() -> tuple[bool, str, bool]:
     return True, "Permission prompts enabled", False
 
 
+def _check_pii_protection() -> tuple[bool, str, bool]:
+    """Check if PII protection is enabled."""
+    settings = get_settings()
+    if not settings.pii_scan_enabled:
+        return (
+            False,
+            "PII protection disabled — user messages stored verbatim in memory",
+            False,
+        )
+    active = []
+    if settings.pii_scan_memory:
+        active.append("memory")
+    if settings.pii_scan_audit:
+        active.append("audit")
+    if settings.pii_scan_logs:
+        active.append("logs")
+    return True, f"PII protection enabled for: {', '.join(active)}", False
+
+
+async def scan_memory_for_pii() -> int:
+    """Scan existing memory files for PII and report findings."""
+    from pocketpaw.security.pii import PIIAction, PIIScanner
+
+    scanner = PIIScanner(default_action=PIIAction.LOG)
+    memory_dir = get_config_dir() / "memory"
+
+    print("\n  PII Memory Scan")
+    print("  " + "-" * 40 + "\n")
+
+    if not memory_dir.exists():
+        print("  No memory directory found.")
+        return 0
+
+    total_findings = 0
+
+    # Scan markdown files
+    for md_file in sorted(memory_dir.glob("**/*.md")):
+        content = md_file.read_text(encoding="utf-8")
+        result = scanner.scan(content, source=str(md_file))
+        if result.has_pii:
+            total_findings += len(result.matches)
+            rel = md_file.relative_to(memory_dir)
+            print(f"  [FOUND] {rel}: {len(result.matches)} PII item(s)")
+            for m in result.matches:
+                preview = m.original[:20] + "..." if len(m.original) > 20 else m.original
+                print(f"           - {m.pii_type.value}: {preview}")
+
+    # Scan session JSON files
+    sessions_dir = memory_dir / "sessions"
+    if sessions_dir.exists():
+        for json_file in sorted(sessions_dir.glob("*.json")):
+            if json_file.name.startswith("_"):
+                continue
+            content = json_file.read_text(encoding="utf-8")
+            result = scanner.scan(content, source=str(json_file))
+            if result.has_pii:
+                total_findings += len(result.matches)
+                print(f"  [FOUND] sessions/{json_file.name}: {len(result.matches)} PII item(s)")
+
+    print()
+    if total_findings == 0:
+        print("  No PII found in memory files.")
+    else:
+        print(f"  Total: {total_findings} PII item(s) found across memory files.")
+    print()
+
+    return 1 if total_findings > 0 else 0
+
+
 async def run_security_audit(fix: bool = False) -> int:
     """Run security checks, print report, return exit code (0=pass, 1=issues).
 
@@ -176,6 +246,7 @@ async def run_security_audit(fix: bool = False) -> int:
         ("File jail", _check_file_jail, None),
         ("Tool profile", _check_tool_profile, None),
         ("Bypass permissions", _check_bypass_permissions, None),
+        ("PII protection", _check_pii_protection, None),
     ]
 
     print("\n" + "=" * 60)

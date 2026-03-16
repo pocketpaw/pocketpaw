@@ -29,6 +29,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "openai_api_key",
         "anthropic_api_key",
         "openai_compatible_api_key",
+        "openrouter_api_key",
         "discord_bot_token",
         "slack_bot_token",
         "slack_app_token",
@@ -49,6 +50,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "teams_app_password",
         "gchat_service_account_key",
         "sarvam_api_key",
+        "litellm_api_key",
     }
 )
 

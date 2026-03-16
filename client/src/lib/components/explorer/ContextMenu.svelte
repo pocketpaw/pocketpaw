@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import Eye from "@lucide/svelte/icons/eye";
+  import MessageSquarePlus from "@lucide/svelte/icons/message-square-plus";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
@@ -125,6 +126,17 @@
       },
     });
 
+    result.push({
+      label: "Add to Chat",
+      icon: MessageSquarePlus,
+      action: () => {
+        window.dispatchEvent(
+          new CustomEvent("explorer:add-to-chat", { detail: { paths: [file.path] } }),
+        );
+        onClose();
+      },
+    });
+
     if (file.isDir) {
       result.push("separator");
       result.push({
@@ -164,7 +176,7 @@
 
 <div
   bind:this={menuRef}
-  class="fixed z-50 min-w-48 rounded-lg border border-border bg-popover p-1 shadow-lg"
+  class="fixed z-50 min-w-48 rounded-lg border border-border bg-popover p-1 "
   style="left: {adjustedPos.x}px; top: {adjustedPos.y}px;"
 >
   {#each items as item}

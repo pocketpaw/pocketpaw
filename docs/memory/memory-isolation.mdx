@@ -1,5 +1,5 @@
 ---
-title: Memory Isolation
+title: "Memory Isolation: Per-Channel Data Separation"
 description: "PocketPaw isolates memory per user in multi-channel deployments: the owner gets full memory access while external users receive SHA-256 hashed private memory silos for complete data separation."
 section: Memory
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["memory isolation", "multi-user", "per-user memory", "privacy", "data
 tags: ["memory", "security", "multi-tenant"]
 ---
 
-# Memory Isolation
+# Memory Isolation: Per-Channel Data Separation
 
 When PocketPaw is connected to shared channels (Discord servers, Slack workspaces, group chats), multiple users interact with the same agent. Memory isolation ensures each user's memories are scoped and private, while the owner gets full access to all stored knowledge.
 
@@ -80,3 +80,17 @@ Some data is intentionally not scoped per-user:
 <Callout type="warning">
   If `owner_id` is not set, all users are treated as the owner and share the same memory store. Set your owner ID when deploying to shared channels.
 </Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Context Building" icon="lucide:layers" href="/memory/context-building">
+    How the context builder uses isolation to inject the right identity block.
+  </Card>
+  <Card title="Mem0 Integration" icon="lucide:sparkles" href="/memory/mem0">
+    Semantic memory with per-user isolation via tagged user IDs.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    PocketPaw's full security stack including data separation.
+  </Card>
+</CardGroup>

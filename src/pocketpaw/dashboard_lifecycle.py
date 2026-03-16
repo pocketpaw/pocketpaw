@@ -47,11 +47,38 @@ async def broadcast_reminder(reminder: dict):
         except Exception:
             pass
 
+    # Persist reminder as an assistant message in every active WebSocket session
+    # so it survives session switches and page reloads.
+    reminder_text = reminder.get("text", "")
+    reminder_content = f"Reminder: {reminder_text}"
+    try:
+        from pocketpaw.memory import get_memory_manager
+
+        manager = get_memory_manager()
+        for chat_id in list(ws_adapter._connections.keys()):
+            session_key = f"websocket:{chat_id}"
+            try:
+                await manager.add_to_session(
+                    session_key=session_key,
+                    role="assistant",
+                    content=reminder_content,
+                    metadata={
+                        "reminder_id": reminder.get("id", ""),
+                        "type": "reminder",
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist reminder to session %s", session_key, exc_info=True
+                )
+    except Exception:
+        logger.warning("Failed to persist reminder to session history", exc_info=True)
+
     # Push to notification channels
     try:
         from pocketpaw.bus.notifier import notify
 
-        await notify(f"Reminder: {reminder.get('text', '')}")
+        await notify(reminder_content)
     except Exception:
         pass
 
@@ -144,6 +171,14 @@ async def startup_event(
 
     # Auto-start configured channel adapters (respects per-channel autostart setting)
     settings = Settings.load()
+
+    # Start StatusTracker (agent state for external integrations)
+    from pocketpaw.dashboard_state import status_tracker
+    from pocketpaw.lifecycle import register as _register_lifecycle
+
+    status_tracker._max_concurrent = settings.max_concurrent_conversations
+    await status_tracker.subscribe()
+    _register_lifecycle("status_tracker", shutdown=status_tracker.unsubscribe)
     if _start_channel_adapter_fn:
         for ch in (
             "discord",

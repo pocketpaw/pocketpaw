@@ -34,6 +34,11 @@ _API_KEY_PATTERNS = {
         "example": "sk-...",
         "name": "OpenAI API key",
     },
+    "openrouter_api_key": {
+        "pattern": re.compile(r"^sk-or-v1-"),
+        "example": "sk-or-v1-...",
+        "name": "OpenRouter API key",
+    },
     "telegram_bot_token": {
         "pattern": re.compile(r"^\d+:AA[A-Za-z0-9_-]{30,}$"),
         "example": "123456789:AAH...",
@@ -181,14 +186,18 @@ class Settings(BaseSettings):
     agent_backend: str = Field(
         default="claude_agent_sdk",
         description=(
-            "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', or 'opencode'"
+            "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', "
+            "'codex_cli', 'opencode', or 'copilot_sdk'. "
+            "All backends support 'litellm' as a provider for open-source model access."
         ),
     )
 
     # Claude Agent SDK Settings
     claude_sdk_provider: str = Field(
         default="anthropic",
-        description="Provider for Claude SDK: 'anthropic', 'ollama', or 'openai_compatible'",
+        description=(
+            "Provider for Claude SDK: 'anthropic', 'ollama', 'openai_compatible', or 'litellm'"
+        ),
     )
     claude_sdk_model: str = Field(
         default="",
@@ -202,7 +211,9 @@ class Settings(BaseSettings):
     # OpenAI Agents SDK Settings
     openai_agents_provider: str = Field(
         default="openai",
-        description="Provider for OpenAI Agents: 'openai', 'ollama', or 'openai_compatible'",
+        description=(
+            "Provider for OpenAI Agents: 'openai', 'ollama', 'openai_compatible', or 'litellm'"
+        ),
     )
     openai_agents_model: str = Field(
         default="", description="Model for OpenAI Agents backend (empty = gpt-5.2)"
@@ -220,6 +231,10 @@ class Settings(BaseSettings):
     )
 
     # Google ADK Settings
+    google_adk_provider: str = Field(
+        default="google",
+        description="Provider for Google ADK: 'google' or 'litellm'",
+    )
     google_adk_model: str = Field(
         default="gemini-3-pro-preview", description="Model for Google ADK backend"
     )
@@ -236,7 +251,9 @@ class Settings(BaseSettings):
     # Copilot SDK Settings
     copilot_sdk_provider: str = Field(
         default="copilot",
-        description="Provider for Copilot SDK: 'copilot', 'openai', 'azure', or 'anthropic'",
+        description=(
+            "Provider for Copilot SDK: 'copilot', 'openai', 'azure', 'anthropic', or 'litellm'"
+        ),
     )
     copilot_sdk_model: str = Field(
         default="", description="Model for Copilot SDK backend (empty = gpt-5.2)"
@@ -258,11 +275,34 @@ class Settings(BaseSettings):
         default=100, description="Max turns per query in OpenCode backend (0 = unlimited)"
     )
 
+    # LiteLLM Proxy / SDK Configuration
+    litellm_api_base: str = Field(
+        default="http://localhost:4000",
+        description="LiteLLM proxy server URL (used when any backend provider is set to 'litellm')",
+    )
+    litellm_api_key: str | None = Field(
+        default=None,
+        description="API key for LiteLLM proxy (the master key configured on the proxy)",
+    )
+    litellm_model: str = Field(
+        default="",
+        description=(
+            "Default model for LiteLLM. Use provider/model format for direct mode "
+            "(e.g. 'anthropic/claude-sonnet-4-6', 'huggingface/meta-llama/Llama-3-70b') "
+            "or a model alias defined in LiteLLM proxy config.yaml"
+        ),
+    )
+    litellm_max_tokens: int = Field(
+        default=0,
+        description="Max output tokens for LiteLLM models (0 = provider default)",
+    )
+
     # LLM Configuration
     llm_provider: str = Field(
         default="auto",
         description=(
-            "LLM provider: 'auto', 'ollama', 'openai', 'anthropic', 'openai_compatible', 'gemini'"
+            "LLM provider: 'auto', 'ollama', 'openai', 'anthropic', "
+            "'openai_compatible', 'gemini', 'litellm'"
         ),
     )
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
@@ -280,6 +320,12 @@ class Settings(BaseSettings):
     openai_compatible_max_tokens: int = Field(
         default=0,
         description="Max output tokens for OpenAI-compatible endpoint (0 = no limit)",
+    )
+    openrouter_api_key: str | None = Field(
+        default=None, description="API key for OpenRouter (sk-or-v1-...)"
+    )
+    openrouter_model: str = Field(
+        default="", description="Model slug for OpenRouter (e.g. anthropic/claude-sonnet-4-6)"
     )
     gemini_model: str = Field(default="gemini-3-pro-preview", description="Gemini model to use")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
@@ -363,6 +409,23 @@ class Settings(BaseSettings):
     discord_allowed_user_ids: list[int] = Field(
         default_factory=list, description="Discord user IDs allowed to use the bot"
     )
+    discord_allowed_channel_ids: list[int] = Field(
+        default_factory=list, description="Discord channel IDs the bot is restricted to"
+    )
+    discord_conversation_channel_ids: list[int] = Field(
+        default_factory=list,
+        description="Discord channels where the bot participates in group conversation",
+    )
+    discord_bot_name: str = Field(
+        default="Paw", description="Display name used by the bot in conversation"
+    )
+    discord_status_type: str = Field(
+        default="online", description="Discord bot status: online, idle, dnd, invisible"
+    )
+    discord_activity_type: str = Field(
+        default="", description="Discord bot activity: playing, watching, listening, competing"
+    )
+    discord_activity_text: str = Field(default="", description="Discord bot activity text")
 
     # Slack
     slack_bot_token: str | None = Field(
@@ -447,6 +510,28 @@ class Settings(BaseSettings):
         description="Model for LLM-based injection deep scan",
     )
 
+    # PII Protection
+    pii_scan_enabled: bool = Field(
+        default=False, description="Enable PII detection and masking (opt-in)"
+    )
+    pii_default_action: str = Field(
+        default="mask", description="Default PII action: 'log', 'mask', or 'hash'"
+    )
+    pii_type_actions: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-type PII actions, e.g. {'email': 'mask', 'ssn': 'hash'}",
+    )
+    pii_scan_memory: bool = Field(
+        default=True,
+        description="Apply PII masking before writing to memory (when pii_scan_enabled)",
+    )
+    pii_scan_audit: bool = Field(
+        default=True, description="Apply PII masking to audit log entries (when pii_scan_enabled)"
+    )
+    pii_scan_logs: bool = Field(
+        default=True, description="Extend log scrubber with PII patterns (when pii_scan_enabled)"
+    )
+
     # Smart Model Routing
     smart_routing_enabled: bool = Field(
         default=False,
@@ -482,6 +567,21 @@ class Settings(BaseSettings):
     # Health Engine
     health_check_on_startup: bool = Field(
         default=True, description="Run health checks when PocketPaw starts"
+    )
+
+    # User Preferences (set during onboarding)
+    user_display_name: str = Field(default="", description="User's display name")
+    user_avatar_emoji: str = Field(default="🐾", description="User's chosen avatar emoji")
+    theme_preference: str = Field(
+        default="system", description="Theme: 'light', 'dark', or 'system'"
+    )
+    notifications_enabled: bool = Field(default=True, description="Enable desktop notifications")
+    sound_enabled: bool = Field(default=True, description="Enable notification sounds")
+    tool_notifications_enabled: bool = Field(
+        default=True, description="Show notifications for tool executions"
+    )
+    default_workspace_dir: str = Field(
+        default="", description="Default working directory for the agent"
     )
 
     # OAuth
@@ -600,6 +700,12 @@ class Settings(BaseSettings):
     notification_channels: list[str] = Field(
         default_factory=list,
         description="Targets for autonomous messages, e.g. ['telegram:12345', 'discord:98765']",
+    )
+
+    # Status API
+    status_api_key: str = Field(
+        default="",
+        description="Optional API key for the agent status endpoint. Leave empty to skip auth.",
     )
 
     # Media Downloads

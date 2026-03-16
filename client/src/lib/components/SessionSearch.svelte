@@ -24,7 +24,7 @@
   let hasValue = $derived(value.length > 0);
 </script>
 
-<div class="relative px-2 pb-1">
+<div class="relative px-3 pb-3">
   <div class="relative">
     <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
     <input
@@ -34,7 +34,7 @@
       placeholder="Search..."
       class={platformStore.isTouch
         ? "h-9 w-full rounded-md border border-border bg-muted/50 pl-7 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
-        : "h-7 w-full rounded-md border border-border bg-muted/50 pl-7 pr-7 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"}
+        : "h-9 w-full rounded-md border border-border bg-muted/50 pl-7 pr-7 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"}
     />
     {#if hasValue}
       <button

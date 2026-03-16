@@ -1,4 +1,5 @@
 import type { ChatMessage, FileContext, MediaAttachment } from "$lib/api";
+import { friendlyErrorMessage } from "$lib/api/client";
 import { toast } from "svelte-sonner";
 import { connectionStore } from "./connection.svelte";
 import { sessionStore } from "./sessions.svelte";
@@ -264,7 +265,7 @@ class ChatStore {
         activityStore.isAgentWorking = false;
         return;
       }
-      const message = err instanceof Error ? err.message : "Failed to send message";
+      const message = friendlyErrorMessage(err);
       this.error = message;
       toast.error(message);
       if (this.isStreaming) {

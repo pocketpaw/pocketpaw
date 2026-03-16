@@ -1,12 +1,12 @@
 # Build desktop launcher for macOS and Windows
-# Triggers on release or manual dispatch
+# Updated: 2026-03-11 — Removed automatic trigger on release. Desktop builds
+#   now ship via the Tauri client workflow (publish-client.yml). This launcher
+#   is kept for manual dispatch only as a legacy fallback.
 # Created: 2026-02-10
 
 name: Build Desktop Launcher
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       version:

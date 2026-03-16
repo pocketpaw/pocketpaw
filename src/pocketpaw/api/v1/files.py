@@ -15,6 +15,7 @@ from pocketpaw.api.v1.schemas.files import (
     FileEntry,
     OpenPathRequest,
     OpenPathResponse,
+    RecentFilesResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -154,3 +155,13 @@ async def get_file_content(path: str):
     # For text files requested with ?mode=text, return plain text
     # (allows JS to fetch content for the code viewer)
     return FileResponse(str(resolved), media_type=mime)
+
+
+@router.get("/files/recent", response_model=RecentFilesResponse)
+async def get_recent_files(limit: int = 20):
+    """Return recently accessed files from agent tool usage."""
+    from pocketpaw.recent_files import get_recent_files_tracker
+
+    tracker = get_recent_files_tracker()
+    entries = tracker.get_recent(limit=min(limit, 50))
+    return RecentFilesResponse(files=entries)

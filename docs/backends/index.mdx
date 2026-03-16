@@ -1,5 +1,5 @@
 ---
-title: Agent Backends
+title: "Agent Backends: Choose Your AI Engine"
 description: "Choose between six agent backends: Claude Agent SDK (recommended), OpenAI Agents, Google ADK, Codex CLI, OpenCode, or Copilot SDK. Each provides different capabilities and trade-offs."
 section: Agent Backends
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["agent backend", "backend selection", "claude sdk", "openai agents", 
 tags: ["backends", "configuration"]
 ---
 
-# Agent Backends
+# Agent Backends: Choose Your AI Engine
 
 PocketPaw supports **six agent backends** built on a unified `AgentBackend` protocol. Each backend provides different capabilities and trade-offs. All backends yield standardized `AgentEvent` objects, so switching is seamless.
 
@@ -21,7 +21,9 @@ PocketPaw supports **six agent backends** built on a unified `AgentBackend` prot
 | MCP | Yes | No | Yes | Yes | No | No |
 | Multi-turn | Yes | Yes | Yes | Yes | Yes | Yes |
 | Local models | Ollama | Ollama | No | No | No | No |
-| Required key | [Anthropic API key](https://console.anthropic.com/api-keys) | OpenAI | Google | OpenAI | None | None |
+| OpenRouter | Partial | Yes | No | No | No | No |
+| LiteLLM | Yes | Yes | Yes | No | No | Yes |
+| Required key | [Anthropic API key](https://console.anthropic.com/settings/keys) | OpenAI | Google | OpenAI | None | None |
 
 ## Switching Backends
 
@@ -38,15 +40,48 @@ export POCKETPAW_AGENT_BACKEND="copilot_sdk"
 
 Or change it in the web dashboard's **Settings** panel — the backend dropdown shows available backends with capability badges.
 
+## Full Tool Access
+
+All six backends have access to PocketPaw's 50+ built-in tools (file operations, web search, memory, integrations, and more). Tools are wrapped differently for each backend's expectations through a unified tool bridge:
+
+- **Claude SDK** uses native SDK tools (Bash, Read, Write, etc.)
+- **OpenAI Agents** and **Copilot SDK** wrap tools as `FunctionTool` objects with JSON schema
+- **Google ADK** wraps tools as Python callables with introspected signatures
+- **Codex CLI** and **OpenCode** inject tool instructions into the system prompt with a CLI bridge
+
+Tool availability is governed by the same [Tool Policy](/tools/tool-policy) system across all backends. Profiles (`safe`, `dev`, `full`) and per-tool allow/deny lists work identically regardless of backend.
+
+### OpenRouter & LiteLLM Support
+
+PocketPaw has dedicated provider adapters for **OpenRouter** and **LiteLLM**, giving access to 100+ models across multiple backends.
+
+**OpenRouter** (100+ models, pay-per-token):
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="openrouter"
+export POCKETPAW_OPENROUTER_API_KEY="sk-or-v1-..."
+export POCKETPAW_OPENROUTER_MODEL="anthropic/claude-sonnet-4-6"
+```
+
+**LiteLLM** (100+ providers via proxy or direct SDK):
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"  # works with any backend
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_MODEL="gpt-4o"
+```
+
+See [LLM Providers](/concepts/llm-providers) for detailed configuration of both providers.
+
 ## Capability System
 
 Each backend declares its capabilities via a `Capability` flag enum:
 
-- **STREAMING** — Real-time token-by-token output
-- **TOOLS** — Can call tools (built-in or custom)
-- **MCP** — Native Model Context Protocol server support
-- **MULTI_TURN** — Maintains conversation context across turns
-- **CUSTOM_SYSTEM_PROMPT** — Accepts a custom system prompt from PocketPaw
+- **STREAMING** -- Real-time token-by-token output
+- **TOOLS** -- Can call tools (built-in or custom)
+- **MCP** -- Native Model Context Protocol server support
+- **MULTI_TURN** -- Maintains conversation context across turns
+- **CUSTOM_SYSTEM_PROMPT** -- Accepts a custom system prompt from PocketPaw
 
 The dashboard shows capability badges for each backend so you can compare at a glance.
 
@@ -88,3 +123,14 @@ The following backends have been removed but their config values are automatical
 | `gemini_cli` | `google_adk` | Feb 2026 |
 
 If your config still uses a legacy backend name, PocketPaw will silently redirect to the mapped backend.
+
+## Guides
+
+<CardGroup>
+  <Card title="Run AI with Ollama" icon="lucide:hard-drive" href="/guides/local-llm-agent">
+    Set up free local models with no API key needed.
+  </Card>
+  <Card title="Self-Host Guide" icon="lucide:server" href="/guides/self-host-ai-agent">
+    Full walkthrough for running PocketPaw on your own hardware.
+  </Card>
+</CardGroup>

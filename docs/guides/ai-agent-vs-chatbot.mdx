@@ -1,0 +1,114 @@
+---
+title: "AI Agents vs Chatbots: What's the Difference?"
+description: "AI agents can take actions, use tools, and work autonomously. Chatbots just generate text. Here's a practical breakdown of the differences and when to use each."
+section: Guides
+ogType: article
+keywords: ["ai agent vs chatbot", "difference between ai agent and chatbot", "what is an ai agent", "ai agent explained", "chatbot vs agent"]
+tags: ["guide", "concepts", "comparison", "educational"]
+---
+
+# AI Agents vs Chatbots: What's the Difference?
+
+The terms get used interchangeably, but they describe very different capabilities. Understanding the distinction helps you pick the right tool for your use case.
+
+## The Short Version
+
+**Chatbots** generate text responses based on input. That's it. They can't browse websites, create files, check your email, or take any action in the real world.
+
+**AI agents** can think, plan, and act. They use tools to accomplish tasks: browsing the web, writing code, managing files, calling APIs. They break complex requests into steps and execute them.
+
+## A Practical Comparison
+
+| Capability | Chatbot | AI Agent |
+|-----------|---------|----------|
+| Answer questions | Yes | Yes |
+| Remember past conversations | Sometimes | Yes |
+| Search the web | No | Yes |
+| Read and write files | No | Yes |
+| Execute code | No | Yes |
+| Send emails | No | Yes |
+| Browse websites | No | Yes |
+| Break down complex tasks | No | Yes |
+| Work across platforms | Rarely | Yes |
+| Learn from interactions | No | Yes (via memory) |
+
+## What Makes an Agent an Agent?
+
+Three things separate agents from chatbots:
+
+### 1. Tool Use
+
+An agent has access to tools, functions it can call to interact with the outside world. When you ask "what's trending on Hacker News?", a chatbot guesses based on its training data. An agent opens a browser, navigates to the site, and reads the actual current page.
+
+PocketPaw ships with 50+ tools:
+- Web search (Tavily, Brave)
+- Browser automation (Playwright)
+- File system operations
+- Image generation
+- Gmail, Calendar, Drive integration
+- Code execution
+- Desktop automation, OCR, voice synthesis
+
+### 2. Planning and Reasoning
+
+Ask a chatbot to "organize my downloads folder by file type." It'll tell you how to do it. An agent figures out the steps, lists the files, creates folders, and moves everything.
+
+Agents maintain an internal plan:
+1. List files in ~/Downloads
+2. Identify file types
+3. Create folders (images/, documents/, videos/)
+4. Move each file to the right folder
+5. Report what was done
+
+### 3. Memory
+
+Chatbots typically start fresh each conversation. Agents remember context across sessions and platforms.
+
+Tell your agent "I prefer dark mode in all my apps" on Telegram. It remembers that preference when you chat through Discord later.
+
+## When to Use a Chatbot
+
+Chatbots are fine when you just need:
+- Quick answers to simple questions
+- Text generation (drafting emails, brainstorming)
+- Translation
+- Summarization
+
+If your use case is "ask question, get text back," a chatbot works.
+
+## When to Use an Agent
+
+Switch to an agent when you need:
+- **Actions taken on your behalf**: file management, web browsing, email handling
+- **Multi-step workflows**: research a topic, compile findings, create a report
+- **Persistent context**: an assistant that knows your preferences and history
+- **Cross-platform access**: same assistant on phone, desktop, and web
+- **Privacy**: self-hosted, your data stays on your machine
+
+## How PocketPaw Fits In
+
+PocketPaw is an AI agent framework. It connects to an LLM (Claude, GPT, Gemini, or local Ollama models) and wraps it with tools, memory, security, and multi-channel access.
+
+The LLM provides intelligence. PocketPaw provides agency.
+
+```
+Chatbot:   User → LLM → Text Response
+
+Agent:     User → LLM + Tools + Memory + Planning → Actions + Response
+                   ↕        ↕         ↕
+              Web Search  File System  Past Context
+```
+
+## Try It Yourself
+
+<CardGroup>
+  <Card title="Install PocketPaw" icon="lucide:download" href="/getting-started/installation">
+    Go from chatbot to agent in under 5 minutes.
+  </Card>
+  <Card title="Self-Host Guide" icon="lucide:server" href="/guides/self-host-ai-agent">
+    Run your own AI agent on your laptop or home server.
+  </Card>
+  <Card title="Run Free with Ollama" icon="lucide:hard-drive" href="/guides/local-llm-agent">
+    No API keys needed. Run entirely on your hardware.
+  </Card>
+</CardGroup>

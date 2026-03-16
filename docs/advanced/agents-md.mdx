@@ -1,0 +1,79 @@
+---
+title: "AGENTS.md Support"
+description: "PocketPaw reads AGENTS.md files from target repositories and injects project-specific constraints into the agent's system prompt, following the standardized agent capability declaration format."
+section: Advanced
+ogType: article
+keywords: ["agents.md", "agent constraints", "project rules", "capability declaration"]
+tags: ["advanced", "configuration"]
+---
+
+# AGENTS.md Support
+
+PocketPaw supports the [AGENTS.md standard](https://github.com/anthropics/agents-md), a convention for declaring what an AI agent can and cannot do in a repository. When PocketPaw operates on a codebase, it reads any `AGENTS.md` file and injects those constraints into the agent's system prompt.
+
+## How It Works
+
+1. On every message, PocketPaw looks for `AGENTS.md` starting from the working directory
+2. It walks up parent directories until it finds the file or hits a `.git` boundary (repo root)
+3. If found, the file content is injected into the system prompt as a `# Project AGENTS.md Constraints` block
+4. The dashboard Activity panel shows an `agents_md_loaded` event when a file is discovered
+
+## Search Behavior
+
+The loader mirrors how Git finds `.gitignore`:
+
+- Starts at the current working directory (or `file_jail_path` as fallback)
+- Checks for `AGENTS.md` in each directory
+- If found, stops and uses it (nearest file wins)
+- Walks up to the parent directory
+- Stops at `.git` boundary (repo root) or after 20 levels
+- Files larger than 32 KB are truncated to prevent oversized prompts
+
+## Writing an AGENTS.md
+
+An `AGENTS.md` file declares your project's rules for AI agents:
+
+```markdown
+## Capabilities
+
+- Read and write files in the src/ directory
+- Run tests with `npm test`
+- Search code with grep
+
+## Forbidden Operations
+
+- Never delete the database
+- Never push to main branch directly
+- Never modify .env files
+
+## Coding Conventions
+
+- Use TypeScript strict mode
+- Follow the existing naming conventions
+- All new functions need tests
+```
+
+PocketPaw reads the entire file and injects it as-is. You can use any Markdown structure, but clear headings like `Capabilities`, `Forbidden Operations`, and `Conventions` help the agent parse the intent.
+
+## Caching
+
+Parsed `AGENTS.md` files are cached by `(path, mtime)`. Repeated calls within the same process are free. Editing the file automatically invalidates the cache on the next message.
+
+## Configuration
+
+No configuration is needed. AGENTS.md support is automatic when a file exists in the project directory tree. The feature is resilient by design: if discovery fails for any reason, the agent continues without constraints.
+
+## PocketPaw's Own AGENTS.md
+
+PocketPaw publishes its own `AGENTS.md` at the repository root, declaring its tools, safety boundaries, forbidden operations, and coding conventions for other agents working on the codebase.
+
+## Related
+
+<CardGroup>
+  <Card title="Agent Loop" icon="lucide:repeat" href="/concepts/agent-loop">
+    How PocketPaw processes messages and builds context.
+  </Card>
+  <Card title="Context Building" icon="lucide:layers" href="/memory/context-building">
+    How the system prompt is assembled from identity, memory, and state.
+  </Card>
+</CardGroup>

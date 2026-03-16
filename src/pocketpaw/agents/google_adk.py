@@ -15,7 +15,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
@@ -47,7 +47,7 @@ class GoogleADKBackend:
                 "code_execution": "shell",
             },
             required_keys=["google_api_key"],
-            supported_providers=["google"],
+            supported_providers=["google", "litellm"],
             install_hint={
                 "pip_package": "google-adk",
                 "pip_spec": "pocketpaw[google-adk]",
@@ -72,14 +72,25 @@ class GoogleADKBackend:
             self._sdk_available = True
             logger.info("Google ADK SDK ready")
         except ImportError:
-            logger.warning("Google ADK not installed — pip install 'pocketpaw[google-adk]'")
+            logger.warning("Google ADK not installed -- pip install 'pocketpaw[google-adk]'")
             return
 
-        # Set API key env var for ADK
-        api_key = self.settings.google_api_key
-        if api_key:
-            os.environ["GOOGLE_API_KEY"] = api_key
-        # Disable Vertex AI — use direct API key auth
+        from pocketpaw.llm.providers import get_adapter
+
+        provider = self.settings.google_adk_provider
+        if provider == "litellm":
+            adapter = get_adapter("litellm")
+            config = adapter.resolve_config(self.settings, backend="google_adk")
+            if config.api_key:
+                os.environ["LITELLM_PROXY_API_KEY"] = config.api_key
+            os.environ["LITELLM_PROXY_API_BASE"] = config.base_url or ""
+        else:
+            adapter = get_adapter("gemini")
+            config = adapter.resolve_config(self.settings, backend="google_adk")
+            if config.api_key:
+                os.environ["GOOGLE_API_KEY"] = config.api_key
+
+        # Disable Vertex AI -- use direct API key auth
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
 
     def _build_custom_tools(self) -> list:
@@ -89,7 +100,8 @@ class GoogleADKBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_adk_function_tools
 
-            self._custom_tools = build_adk_function_tools(self.settings)
+            # Cache tools at init; the tool set doesn't change at runtime.
+            self._custom_tools = build_adk_function_tools(self.settings, backend="google_adk")
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -155,12 +167,25 @@ class GoogleADKBackend:
         logger.info("Built %d MCP toolsets for ADK", len(toolsets))
         return toolsets
 
+    def _build_model(self) -> Any:
+        """Build the model via provider adapter."""
+        from pocketpaw.llm.providers import get_adapter
+
+        provider = self.settings.google_adk_provider
+        if provider == "litellm":
+            adapter = get_adapter("litellm")
+            config = adapter.resolve_config(self.settings, backend="google_adk")
+            return adapter.build_adk_model(config)
+
+        # Native Google mode -- return model name string
+        return self.settings.google_adk_model or "gemini-3-pro-preview"
+
     def _get_runner(self, instruction: str, tools: list):
         """Create or reuse the InMemoryRunner."""
         from google.adk.agents import LlmAgent
         from google.adk.runners import InMemoryRunner
 
-        model = self.settings.google_adk_model or "gemini-3-pro-preview"
+        model = self._build_model()
 
         agent = LlmAgent(
             name="PocketPaw",
@@ -206,7 +231,7 @@ class GoogleADKBackend:
         try:
             from google.genai import types
 
-            instruction = system_prompt or "You are PocketPaw, a helpful AI assistant."
+            instruction = system_prompt or _DEFAULT_IDENTITY
 
             # Build tools: custom PocketPaw tools + MCP toolsets
             tools = self._build_custom_tools() + self._build_mcp_toolsets()
@@ -265,9 +290,18 @@ class GoogleADKBackend:
             if run_config is not None:
                 run_kwargs["run_config"] = run_config
 
+            _total_input = 0
+            _total_output = 0
+
             async for event in runner.run_async(**run_kwargs):
                 if self._stop_flag:
                     break
+
+                # Extract usage metadata if available
+                if hasattr(event, "usage_metadata") and event.usage_metadata:
+                    um = event.usage_metadata
+                    _total_input += getattr(um, "prompt_token_count", 0) or 0
+                    _total_output += getattr(um, "candidates_token_count", 0) or 0
 
                 if max_turns and turn_count >= max_turns:
                     yield AgentEvent(
@@ -322,6 +356,20 @@ class GoogleADKBackend:
                             content=output[:200],
                             metadata={"name": fr.name or "tool"},
                         )
+
+            # Emit token usage
+            if _total_input or _total_output:
+                _model = self.settings.google_adk_model or "gemini-2.5-flash"
+                yield AgentEvent(
+                    type="token_usage",
+                    content="",
+                    metadata={
+                        "input_tokens": _total_input,
+                        "output_tokens": _total_output,
+                        "model": _model,
+                        "backend": "google_adk",
+                    },
+                )
 
             yield AgentEvent(type="done", content="")
 

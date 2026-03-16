@@ -1,9 +1,12 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
   import TitleBar from "./titlebar/TitleBar.svelte";
   import MobileHeader from "./MobileHeader.svelte";
   import AppSidebar from "./AppSidebar.svelte";
-  import { uiStore, platformStore } from "$lib/stores";
+  import * as Resizable from "$lib/components/ui/resizable/index.js";
+  import { uiStore, platformStore, sessionStore } from "$lib/stores";
 
   let { children }: { children: Snippet } = $props();
 
@@ -19,50 +22,59 @@
     }
   }
 
-  let outerClass = $derived.by(() => {
-    let bg = platformStore.hasNativeBlur ? "bg-transparent" : "bg-background";
-    let base = `flex h-dvh w-screen flex-col overflow-hidden ${bg}`;
-    if (platformStore.hasWindowChrome) {
-      base += " rounded-lg";
+  // Global keyboard shortcuts
+  onMount(() => {
+    function handleKeydown(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey;
+      // Cmd/Ctrl+N — new chat
+      if (mod && e.key === "n" && !e.shiftKey) {
+        e.preventDefault();
+        sessionStore.createNewSession();
+        // Only navigate if on the files tab - otherwise stay on current page
+        if (window.location.pathname === "/") {
+          goto("/chat");
+        }
+      }
     }
-    return base;
+    document.addEventListener("keydown", handleKeydown);
+    return () => document.removeEventListener("keydown", handleKeydown);
   });
+
+
 </script>
 
-<div class={outerClass}>
-  <!-- Header: TitleBar on desktop platforms (has window chrome), MobileHeader on native mobile -->
-  {#if platformStore.hasWindowChrome}
-    <TitleBar onToggleSidebar={handleToggleSidebar} />
+<!-- Body: sidebar + main content -->
+<div class="relative flex flex-1 overflow-hidden">
+  {#if platformStore.isDesktop && uiStore.sidebarOpen}
+    <!-- Desktop: resizable sidebar + main -->
+    <Resizable.PaneGroup direction="horizontal" autoSaveId="app-sidebar" class="h-full">
+      <Resizable.Pane defaultSize={20} minSize={15} maxSize={35}>
+        <AppSidebar />
+      </Resizable.Pane>
+      <Resizable.Handle />
+      <Resizable.Pane defaultSize={80}>
+        <main class="flex h-full flex-col overflow-hidden">
+          {@render children()}
+        </main>
+      </Resizable.Pane>
+    </Resizable.PaneGroup>
   {:else}
-    <MobileHeader />
-  {/if}
-
-  <!-- Body: sidebar + main content -->
-  <div class="relative flex flex-1 overflow-hidden">
-    <!-- Desktop inline sidebar -->
-    {#if platformStore.isDesktop && uiStore.sidebarOpen}
-      <AppSidebar />
-    {/if}
-
     <!-- Mobile/tablet drawer overlay -->
     {#if !platformStore.isDesktop && uiStore.sidebarDrawerOpen}
-      <!-- Backdrop scrim -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="absolute inset-0 z-40 bg-black/50"
         onclick={handleBackdropClick}
         onkeydown={(e) => { if (e.key === "Escape") uiStore.closeDrawer(); }}
       ></div>
-
-      <!-- Drawer panel -->
-      <div class="absolute inset-y-0 left-0 z-50 w-[280px] max-w-[80vw] shadow-xl">
+      <div class="absolute inset-y-0 left-0 z-50 w-[280px] max-w-[80vw]">
         <AppSidebar isDrawer onClose={() => uiStore.closeDrawer()} />
       </div>
     {/if}
 
-    <!-- Main content area -->
+    <!-- Main content area (no sidebar or sidebar hidden) -->
     <main class="flex flex-1 flex-col overflow-hidden">
       {@render children()}
     </main>
-  </div>
+  {/if}
 </div>

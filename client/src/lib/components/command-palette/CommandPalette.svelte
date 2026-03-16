@@ -184,7 +184,7 @@
   {#if expanded}
     <div class="absolute left-0 top-[calc(100%+4px)] z-50 w-full min-w-[400px]">
       <Command.Root
-        class="rounded-lg border border-border bg-background shadow-xl"
+        class="rounded-lg border border-border bg-background "
         shouldFilter={searchValue.trim().length < 2}
       >
         <!-- Hidden input syncs with our visible input for cmdk filtering -->

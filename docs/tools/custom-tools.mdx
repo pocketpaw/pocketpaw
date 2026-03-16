@@ -1,5 +1,5 @@
 ---
-title: Custom Tools
+title: "Custom Tools: Build Your Own PocketPaw Extensions"
 description: "Build custom tools for PocketPaw using the ToolProtocol interface. Define tool schemas compatible with both Anthropic and OpenAI APIs, register them in the ToolRegistry, and use them immediately."
 section: Tools
 ogType: article
@@ -8,7 +8,7 @@ keywords:
 tags: ["tools", "development"]
 ---
 
-# Custom Tools
+# Custom Tools: Build Your Own PocketPaw Extensions
 
 PocketPaw's tool system is extensible. You can create custom tools by implementing the `ToolProtocol`.
 
@@ -76,9 +76,23 @@ openai_schema = tool.definition.to_openai()
 
 ## Best Practices
 
-1. **Keep tools focused** — Each tool should do one thing well
-2. **Validate inputs** — Check required parameters before execution
-3. **Return strings** — Tool results are always strings
-4. **Handle errors** — Return error messages instead of raising exceptions
-5. **Be async** — The `execute` method must be async
-6. **Document inputs** — Provide clear descriptions in the schema so the LLM knows how to use the tool
+1. **Keep tools focused** - Each tool should do one thing well
+2. **Validate inputs** - Check required parameters before execution
+3. **Return strings** - Tool results are always strings
+4. **Handle errors** - Return error messages instead of raising exceptions
+5. **Be async** - The `execute` method must be async
+6. **Document inputs** - Provide clear descriptions in the schema so the LLM knows how to use the tool
+
+## Related
+
+<CardGroup>
+  <Card title="Tool Policy" icon="lucide:shield-check" href="/tools/tool-policy">
+    Control which tools are available with profiles and allow/deny lists.
+  </Card>
+  <Card title="Skill Generator" icon="lucide:wand-2" href="/tools/skill-generator">
+    Create persistent skill definitions that extend agent capabilities.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

@@ -17,11 +17,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.AppImage"><img src="https://img.shields.io/badge/Linux-Download_.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
 </p>
 
 <p align="center">
-  Self-hosted AI agent with a web dashboard. Talks to you over <strong>Discord</strong>, <strong>Slack</strong>, <strong>WhatsApp</strong>, <strong>Telegram</strong>, or the browser.<br>
+  Self-hosted AI agent with a native desktop app and web dashboard. Talks to you over <strong>Discord</strong>, <strong>Slack</strong>, <strong>WhatsApp</strong>, <strong>Telegram</strong>, or the browser.<br>
   No subscription. No cloud lock-in. Your data stays on your machine.
 </p>
 
@@ -35,13 +37,17 @@
 
 ## Quick Start
 
-### Via Desktop Installer
+### Desktop App (Recommended)
 
-Sets up Python and PocketPaw in one click, then opens the dashboard.
+Download the native desktop app. It bundles the backend installer and provides a full-featured UI with system tray, global shortcuts, side panel, and multi-window support.
 
 | Platform | Download |
 | --- | --- |
-| **Windows** | [PocketPaw-Setup.exe](https://github.com/pocketpaw/pocketpaw/releases/latest/download/PocketPaw-Setup.exe) |
+| **Windows** | [PocketPaw_0.1.2_x64-setup.exe](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64-setup.exe) |
+| **macOS (Apple Silicon)** | [PocketPaw_0.1.2_aarch64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_aarch64.dmg) |
+| **macOS (Intel)** | [PocketPaw_0.1.2_x64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64.dmg) |
+| **Linux (.deb)** | [PocketPaw_0.1.2_amd64.deb](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.deb) |
+| **Linux (.AppImage)** | [PocketPaw_0.1.2_amd64.AppImage](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.AppImage) |
 
 ### Install via Terminal
 
@@ -254,6 +260,8 @@ Paw:  3 agents working on it. I'll ping you when it's ready.
 
 Everything goes through an event-driven message bus. Channels publish messages, the `AgentLoop` picks them up and routes to whichever backend you've configured. All six backends implement the same `AgentBackend` protocol, so swapping one for another doesn't touch the rest of the system.
 
+The **desktop client** (`client/`) is a Tauri 2.0 + SvelteKit app that connects to the Python backend over REST and WebSocket. It provides system tray integration, global hotkeys, multi-window support (side panel, quick ask), and an onboarding wizard that handles backend installation.
+
 ### Agent Backends
 
 | Backend | Key | Providers | MCP |
@@ -320,7 +328,7 @@ export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."   # Required for Claude SDK back
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"  # or openai_agents, google_adk, etc.
 ```
 
-> **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/api-keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
+> **Note:** An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/settings/keys) is required for the Claude SDK backend. OAuth tokens from Claude Free/Pro/Max plans are [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) for third-party use. For free local inference, use Ollama instead.
 
 See the [full configuration reference](https://pocketpaw.xyz/getting-started/configuration) for all settings.
 
@@ -328,12 +336,16 @@ See the [full configuration reference](https://pocketpaw.xyz/getting-started/con
 
 ## Development
 
+### Backend (Python)
+
 **Prerequisites:**
 - Python 3.11 or higher ([download here](https://www.python.org/downloads/))
 - [uv](https://docs.astral.sh/uv/) package manager
 
 **Install uv:**
 
+> [!WARNING]
+> **Windows users:** You must **open a new terminal window** after running the install script below before `uv` will be recognized. The installer updates your PATH, but this change does not apply to your current terminal session — running `uv` immediately after install will give a `CommandNotFoundException` error.
 ```bash
 # macOS/Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -345,17 +357,12 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 pip install uv
 ```
 
-> **Windows Note:** After installing `uv` via the PowerShell script, you may need to **restart your terminal** for the `uv` command to be recognized. The installer adds `uv` to `C:\Users\<your-username>\.local\bin` and updates your PATH, but the current session won't reflect this change until you open a new terminal window.
->
-> If you want to use `uv` immediately without restarting, run:
+> [!TIP]
+> **Windows:** To use `uv` immediately without opening a new terminal, run:
 > ```powershell
 > $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 > ```
->
-> Verify the installation:
-> ```powershell
-> uv --version
-> ```
+> Then verify the installation: `uv --version`
 
 **Setup and run:**
 
@@ -373,7 +380,7 @@ uv sync --dev
 uv run pocketpaw --dev
 
 # 5. Run tests
-uv run pytest               # Run tests (2000+)
+uv run pytest --ignore=tests/e2e    # Run tests (2900+)
 
 # 6. Lint & format
 uv run ruff check . && uv run ruff format .
@@ -392,6 +399,26 @@ pip install pocketpaw[all]                 # Everything
 ```
 
 </details>
+
+### Desktop Client (Tauri + SvelteKit)
+
+The native desktop app lives in `client/`. It connects to the Python backend via REST/WebSocket.
+
+**Prerequisites:**
+- [Bun](https://bun.sh/) (package manager)
+- [Rust](https://rustup.rs/) (for Tauri)
+- Python backend running on `localhost:8888`
+
+```bash
+cd client
+bun install                    # Install dependencies
+bun run dev                    # Vite dev server (http://localhost:1420)
+bun run tauri dev              # Full desktop app (frontend + Tauri shell)
+bun run check                  # Type check
+bun run tauri build            # Production build
+```
+
+**Tech stack:** SvelteKit 2 + Svelte 5, Tailwind CSS 4, shadcn-svelte, Tauri 2.0 (Rust). See `client/CLAUDE.md` for full architecture details.
 
 ---
 

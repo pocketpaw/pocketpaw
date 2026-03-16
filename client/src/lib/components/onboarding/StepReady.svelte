@@ -1,6 +1,19 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { Check } from "@lucide/svelte";
+  import Confetti from "./Confetti.svelte";
+  import Typewriter from "./Typewriter.svelte";
+
+  let {
+    userName = "",
+    avatarEmoji = "🐾",
+    theme = "system",
+  }: {
+    userName?: string;
+    avatarEmoji?: string;
+    theme?: string;
+  } = $props();
+
+  let showContent = $state(false);
 
   function startChatting() {
     localStorage.setItem("pocketpaw_onboarded", "true");
@@ -8,20 +21,40 @@
   }
 </script>
 
-<div class="flex flex-col items-center gap-6 text-center">
-  <div class="flex h-12 w-12 items-center justify-center rounded-full bg-paw-success/10">
-    <Check class="h-6 w-6 text-paw-success" strokeWidth={2} />
-  </div>
+<Confetti />
 
-  <div class="flex flex-col gap-2">
-    <h1 class="text-2xl font-semibold text-foreground">You're all set!</h1>
-    <p class="text-sm text-muted-foreground">Your AI assistant is ready to go.</p>
-  </div>
+<div class="flex w-full max-w-md flex-col items-center gap-8">
+  <div class="text-7xl">{avatarEmoji}</div>
 
-  <button
-    onclick={startChatting}
-    class="mt-2 rounded-lg bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
-  >
-    Start Chatting
-  </button>
+  <h2 class="text-center text-2xl font-semibold text-foreground">
+    <Typewriter
+      text={userName ? `You're all set, ${userName}!` : "You're all set!"}
+      speed={35}
+      onDone={() => (showContent = true)}
+    />
+  </h2>
+
+  {#if showContent}
+    <div class="flex flex-col items-center gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div class="flex flex-wrap justify-center gap-2">
+        <span class="rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+          {avatarEmoji} {userName || "User"}
+        </span>
+        <span class="rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+          🎨 {theme === "system" ? "System theme" : theme === "dark" ? "Dark mode" : "Light mode"}
+        </span>
+      </div>
+
+      <p class="text-center text-sm text-muted-foreground">
+        Your AI assistant is ready. Let's get to work.
+      </p>
+
+      <button
+        onclick={startChatting}
+        class="rounded-xl bg-primary px-8 py-3 text-sm font-medium text-primary-foreground transition-all hover:opacity-90 hover:scale-[1.02]"
+      >
+        Start Chatting 🚀
+      </button>
+    </div>
+  {/if}
 </div>

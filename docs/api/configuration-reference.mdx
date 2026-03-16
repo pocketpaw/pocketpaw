@@ -31,11 +31,27 @@ Complete reference of all configuration settings. All environment variables use 
 
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
-| `llm_provider` | `POCKETPAW_LLM_PROVIDER` | enum | `auto` | LLM provider (`auto`, `anthropic`, `openai`, `ollama`, `openai_compatible`, `gemini`) |
+| `llm_provider` | `POCKETPAW_LLM_PROVIDER` | enum | `auto` | LLM provider (`auto`, `anthropic`, `openai`, `ollama`, `openai_compatible`, `openrouter`, `gemini`, `litellm`) |
 | `ollama_host` | `POCKETPAW_OLLAMA_HOST` | string | `http://localhost:11434` | Ollama server URL |
 | `ollama_model` | `POCKETPAW_OLLAMA_MODEL` | string | `llama3.2` | Ollama model name |
 
 When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, otherwise falls back to Ollama.
+
+## OpenRouter
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `openrouter_api_key` | `POCKETPAW_OPENROUTER_API_KEY` | string | -- | OpenRouter API key (sk-or-v1-...) |
+| `openrouter_model` | `POCKETPAW_OPENROUTER_MODEL` | string | `""` | Model slug (e.g., `anthropic/claude-sonnet-4-6`) |
+
+## LiteLLM
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `litellm_api_base` | `POCKETPAW_LITELLM_API_BASE` | string | `http://localhost:4000` | LiteLLM proxy URL (leave empty for direct SDK mode) |
+| `litellm_api_key` | `POCKETPAW_LITELLM_API_KEY` | string | -- | Proxy master key or target provider API key |
+| `litellm_model` | `POCKETPAW_LITELLM_MODEL` | string | `""` | Model name (use LiteLLM-prefixed names in direct mode) |
+| `litellm_max_tokens` | `POCKETPAW_LITELLM_MAX_TOKENS` | integer | `0` | Max output tokens (0 = provider default) |
 
 ## Tool Policy
 

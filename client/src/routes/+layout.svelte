@@ -8,8 +8,10 @@
   import { Toaster } from "$lib/components/ui/sonner";
   import { Provider as TooltipProvider } from "$lib/components/ui/tooltip";
   import AppShell from "$lib/components/AppShell.svelte";
+  import TitleBar from "$lib/components/titlebar/TitleBar.svelte";
+  import MobileHeader from "$lib/components/MobileHeader.svelte";
   import SetupBackend from "$lib/components/onboarding/SetupBackend.svelte";
-  import { initializeStores, activityStore, connectionStore, platformStore, sessionStore, chatStore, settingsStore } from "$lib/stores";
+  import { initializeStores, activityStore, connectionStore, platformStore, sessionStore, chatStore, settingsStore, uiStore } from "$lib/stores";
   import {
     isTauri,
     getValidToken,
@@ -36,6 +38,14 @@
   let { children }: { children: Snippet } = $props();
 
   let isOnboarding = $derived(page.url.pathname.startsWith("/onboarding"));
+
+  function handleToggleSidebar() {
+    if (platformStore.isDesktop) {
+      uiStore.toggleSidebar();
+    } else {
+      uiStore.toggleDrawer();
+    }
+  }
   let isSidePanel = $derived(page.url.pathname.startsWith("/sidepanel"));
   let isQuickAsk = $derived(page.url.pathname.startsWith("/quickask"));
   let isOAuthCallback = $derived(page.url.pathname.startsWith("/oauth-callback"));
@@ -108,8 +118,16 @@
   }
 
   function onTokenRefreshFailed(_error: Error) {
-    authState = "error";
-    authError = "Session expired. Please sign in again.";
+    // Don't blow away the entire UI. Show a toast and let the user re-authenticate.
+    import("svelte-sonner").then(({ toast }) => {
+      toast.error("Session expired. Click 'Try again' to sign in.", {
+        duration: 10000,
+        action: {
+          label: "Sign in",
+          onClick: () => retryAuth(),
+        },
+      });
+    });
   }
 
   async function readMasterToken(): Promise<string | null> {
@@ -135,13 +153,21 @@
       return;
     }
 
-    // Step 1: Check if backend is running (TCP check)
+    // Step 1: Check if backend is running (TCP check + HTTP health validation)
     authState = "checking_backend";
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const running = await invoke<boolean>("check_backend_running", { port: 8888 });
 
-      if (!running) {
+      if (running) {
+        // Verify it's actually PocketPaw on this port (done via Rust IPC to avoid CORS issues)
+        const version = await invoke<string | null>("check_pocketpaw_version", { port: 8888 });
+        if (!version) {
+          authState = "error";
+          authError = "Port 8888 is in use by another service, not PocketPaw. Please free this port and restart.";
+          return;
+        }
+      } else {
         // Backend not running — check if PocketPaw is installed
         const status = await invoke<{
           installed: boolean;
@@ -157,6 +183,8 @@
         }
         return; // SetupBackend component takes over
       }
+
+      // TCP is open and version check passed — backend is confirmed running
     } catch {
       // If Tauri commands fail, fall through to normal auth
     }
@@ -170,18 +198,25 @@
     const existingToken = await getValidToken();
 
     if (existingToken) {
-      await initializeStores(existingToken, undefined, masterToken ?? undefined);
-      authState = "authenticated";
+      try {
+        await initializeStores(existingToken, undefined, masterToken ?? undefined);
+        authState = "authenticated";
 
-      // Schedule auto-refresh using the stored tokens
-      const { readTokens } = await import("$lib/auth/token-store");
-      const tokens = await readTokens();
-      if (tokens) {
-        scheduleTokenRefresh(tokens, onTokenRefreshed, onTokenRefreshFailed);
+        // Schedule auto-refresh using the stored tokens
+        const { readTokens } = await import("$lib/auth/token-store");
+        const tokens = await readTokens();
+        if (tokens) {
+          scheduleTokenRefresh(tokens, onTokenRefreshed, onTokenRefreshFailed);
+        }
+
+        finishSetup();
+        return;
+      } catch (e) {
+        console.error("Failed to initialize stores:", e);
+        authState = "error";
+        authError = `Connection failed: ${e instanceof Error ? e.message : String(e)}`;
+        return;
       }
-
-      finishSetup();
-      return;
     }
 
     // No valid token — start OAuth flow
@@ -290,48 +325,61 @@
   <TooltipProvider>
     {#if isSidePanel || isQuickAsk || isOAuthCallback}
       {@render children()}
-    {:else if authState === "checking_backend" || authState === "loading"}
-      <div class="flex h-dvh w-screen items-center justify-center bg-background">
-        <div class="flex flex-col items-center gap-3">
-          <div class="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
-          <p class="text-sm text-muted-foreground">
-            {authState === "checking_backend" ? "Checking backend..." : "Connecting..."}
-          </p>
-        </div>
-      </div>
-    {:else if authState === "backend_missing" || authState === "backend_stopped" || authState === "installing" || authState === "starting"}
-      <SetupBackend backendState={authState} onReady={() => {
-        // Fresh install/start — force onboarding to re-run
-        localStorage.removeItem("pocketpaw_onboarded");
-        authenticate();
-      }} />
-    {:else if authState === "authenticating"}
-      <div class="flex h-dvh w-screen items-center justify-center bg-background">
-        <div class="flex flex-col items-center gap-3">
-          <div class="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
-          <p class="text-sm text-muted-foreground">Waiting for sign-in...</p>
-        </div>
-      </div>
-    {:else if authState === "error"}
-      <div class="flex h-dvh w-screen items-center justify-center bg-background">
-        <div class="flex flex-col items-center gap-4 text-center">
-          <p class="text-sm text-destructive">{authError ?? "Authentication failed."}</p>
-          <button
-            onclick={retryAuth}
-            class="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:opacity-90"
-          >
-            Try again
-          </button>
-        </div>
-      </div>
-    {:else if isOnboarding}
-      <div class="flex h-dvh w-screen items-center justify-center bg-background">
-        {@render children()}
-      </div>
     {:else}
-      <AppShell>
-        {@render children()}
-      </AppShell>
+      <div class="flex h-dvh w-screen flex-col bg-background">
+        {#if platformStore.isNativeMobile}
+          <MobileHeader />
+        {:else}
+          {@const isAppReady = authState === "authenticated" && !isOnboarding}
+          <TitleBar onToggleSidebar={isAppReady ? handleToggleSidebar : undefined} showTabs={isAppReady} />
+        {/if}
+
+        {#if authState === "checking_backend" || authState === "loading"}
+          <div class="flex flex-1 items-center justify-center">
+            <div class="flex flex-col items-center gap-3">
+              <div class="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+              <p class="text-sm text-muted-foreground">
+                {authState === "checking_backend" ? "Checking backend..." : "Connecting..."}
+              </p>
+            </div>
+          </div>
+        {:else if authState === "backend_missing" || authState === "backend_stopped" || authState === "installing" || authState === "starting"}
+          <div class="flex flex-1 overflow-hidden">
+            <SetupBackend backendState={authState} onReady={() => {
+              // Fresh install/start — force onboarding to re-run
+              localStorage.removeItem("pocketpaw_onboarded");
+              authenticate();
+            }} />
+          </div>
+        {:else if authState === "authenticating"}
+          <div class="flex flex-1 items-center justify-center">
+            <div class="flex flex-col items-center gap-3">
+              <div class="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+              <p class="text-sm text-muted-foreground">Waiting for sign-in...</p>
+            </div>
+          </div>
+        {:else if authState === "error"}
+          <div class="flex flex-1 items-center justify-center">
+            <div class="flex flex-col items-center gap-4 text-center">
+              <p class="text-sm text-destructive">{authError ?? "Authentication failed."}</p>
+              <button
+                onclick={retryAuth}
+                class="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:opacity-90"
+              >
+                Try again
+              </button>
+            </div>
+          </div>
+        {:else if isOnboarding}
+          <div class="flex flex-1 items-center justify-center overflow-hidden">
+            {@render children()}
+          </div>
+        {:else}
+          <AppShell>
+            {@render children()}
+          </AppShell>
+        {/if}
+      </div>
     {/if}
   </TooltipProvider>
   {#if !isSidePanel && !isQuickAsk}

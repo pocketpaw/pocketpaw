@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 
@@ -45,7 +45,7 @@ class OpenAIAgentsBackend:
                 "computer_use": "shell",
             },
             required_keys=["openai_api_key"],
-            supported_providers=["openai", "ollama", "openai_compatible"],
+            supported_providers=["openai", "ollama", "openrouter", "openai_compatible", "litellm"],
             install_hint={
                 "pip_package": "openai-agents",
                 "pip_spec": "pocketpaw[openai-agents]",
@@ -153,41 +153,39 @@ class OpenAIAgentsBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_openai_function_tools
 
-            self._custom_tools = build_openai_function_tools(self.settings)
+            # Cache tools at init; the tool set doesn't change at runtime.
+            self._custom_tools = build_openai_function_tools(self.settings, backend="openai_agents")
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []
         return self._custom_tools
 
     def _build_model(self) -> Any:
-        """Build the model instance, supporting Ollama via OpenAI-compat."""
-        model_name = self.settings.openai_agents_model or self.settings.openai_model or "gpt-5.2"
+        """Build the model instance via provider adapters."""
+        from pocketpaw.llm.providers import get_adapter
 
-        # Per-backend provider setting, with fallback to global llm_provider
         provider = (
             getattr(self.settings, "openai_agents_provider", "") or self.settings.llm_provider
         )
+        if provider == "auto" and self.settings.openai_compatible_base_url:
+            provider = "openai_compatible"
 
-        # If Ollama or OpenAI-compatible endpoint is configured, use OpenAIChatCompletionsModel
-        if provider in ("ollama", "openai_compatible") or (
-            provider == "auto" and self.settings.openai_compatible_base_url
-        ):
-            from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-            from openai import AsyncOpenAI
+        # Default (native OpenAI) -- just return the model name string
+        if provider in ("openai", "auto"):
+            return self.settings.openai_agents_model or self.settings.openai_model or "gpt-5.2"
 
-            if provider == "ollama":
-                base_url = self.settings.ollama_host.rstrip("/") + "/v1"
-                model_name = self.settings.ollama_model
-                client = AsyncOpenAI(base_url=base_url, api_key="ollama")
-            else:
-                base_url = self.settings.openai_compatible_base_url
-                api_key = self.settings.openai_compatible_api_key or "none"
-                model_name = self.settings.openai_compatible_model or model_name
-                client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        adapter = get_adapter(provider)
+        config = adapter.resolve_config(self.settings, backend="openai_agents")
 
-            return OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+        # LiteLLM: prefer native SDK model wrapper
+        if provider == "litellm" and hasattr(adapter, "build_agents_model"):
+            return adapter.build_agents_model(config)
 
-        return model_name
+        # All other providers: wrap in OpenAIChatCompletionsModel
+        from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+
+        client = adapter.build_openai_client(config)
+        return OpenAIChatCompletionsModel(model=config.model, openai_client=client)
 
     async def run(
         self,
@@ -214,7 +212,7 @@ class OpenAIAgentsBackend:
             from openai.types.responses import ResponseTextDeltaEvent
 
             model = self._build_model()
-            instructions = system_prompt or "You are PocketPaw, a helpful AI assistant."
+            instructions = system_prompt or _DEFAULT_IDENTITY
 
             # Native session management via SQLiteSession:
             # - When session_key is provided and SQLiteSession is available,
@@ -254,6 +252,9 @@ class OpenAIAgentsBackend:
                 run_kwargs["session"] = session
             result = Runner.run_streamed(agent, **run_kwargs)
 
+            _total_input = 0
+            _total_output = 0
+
             async for event in result.stream_events():
                 if self._stop_flag:
                     break
@@ -261,6 +262,11 @@ class OpenAIAgentsBackend:
                 if event.type == "raw_response_event":
                     if isinstance(event.data, ResponseTextDeltaEvent):
                         yield AgentEvent(type="message", content=event.data.delta)
+                    # Capture usage from response.completed events
+                    data = event.data
+                    if hasattr(data, "usage") and data.usage:
+                        _total_input += getattr(data.usage, "input_tokens", 0)
+                        _total_output += getattr(data.usage, "output_tokens", 0)
 
                 elif event.type == "run_item_stream_event":
                     item = event.item
@@ -277,6 +283,19 @@ class OpenAIAgentsBackend:
                             content=str(item.output)[:200],
                             metadata={"name": "tool"},
                         )
+
+            # Emit token usage
+            if _total_input or _total_output:
+                yield AgentEvent(
+                    type="token_usage",
+                    content="",
+                    metadata={
+                        "input_tokens": _total_input,
+                        "output_tokens": _total_output,
+                        "model": model,
+                        "backend": "openai_agents",
+                    },
+                )
 
             yield AgentEvent(type="done", content="")
 

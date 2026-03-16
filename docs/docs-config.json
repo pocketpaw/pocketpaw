@@ -1,7 +1,7 @@
 {
   "metadata": {
     "name": "PocketPaw",
-    "description": "Self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard",
+    "description": "Self-hosted AI agent with a native desktop app. Controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard.",
     "url": "https://pocketpaw.xyz",
     "version": "1.0.0"
   },
@@ -39,6 +39,37 @@
         },
         {
           "label": "Guides",
+          "type": "dropdown",
+          "items": [
+            {
+              "label": "Self-Host an AI Agent",
+              "href": "/guides/self-host-ai-agent",
+              "description": "Run your own AI assistant on a laptop or server"
+            },
+            {
+              "label": "Telegram AI Bot",
+              "href": "/guides/telegram-ai-bot",
+              "description": "Build a personal AI bot on Telegram in 5 minutes"
+            },
+            {
+              "label": "Discord AI Bot",
+              "href": "/guides/discord-ai-bot",
+              "description": "Add AI to your Discord server with slash commands"
+            },
+            {
+              "label": "Run AI with Ollama",
+              "href": "/guides/local-llm-agent",
+              "description": "Free, private AI using local models, no API key"
+            },
+            {
+              "label": "All Guides",
+              "href": "/guides",
+              "description": "Browse all tutorials and walkthroughs"
+            }
+          ]
+        },
+        {
+          "label": "Reference",
           "type": "dropdown",
           "items": [
             {
@@ -83,7 +114,7 @@
         "label": "Documentation",
         "href": "/introduction",
         "icon": "lucide:book-open",
-        "groups": ["Introduction", "Getting Started", "Core Concepts", "Channels", "Agent Backends", "Tools", "Integrations", "Security", "Memory", "Advanced", "Deployment"]
+        "groups": ["Introduction", "Getting Started", "Guides", "Core Concepts", "Desktop Client", "Channels", "Agent Backends", "Tools", "Integrations", "Security", "Memory", "Advanced", "Deployment"]
       },
       {
         "label": "API Reference",
@@ -137,6 +168,66 @@
             "label": "Project Structure",
             "href": "/getting-started/project-structure",
             "icon": "lucide:folder-tree"
+          }
+        ]
+      },
+      {
+        "label": "Guides",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/guides",
+            "icon": "lucide:compass"
+          },
+          {
+            "label": "Self-Host an AI Agent",
+            "href": "/guides/self-host-ai-agent",
+            "icon": "lucide:server"
+          },
+          {
+            "label": "Build a Telegram AI Bot",
+            "href": "/guides/telegram-ai-bot",
+            "icon": "lucide:send"
+          },
+          {
+            "label": "Discord AI Bot",
+            "href": "/guides/discord-ai-bot",
+            "icon": "lucide:gamepad-2"
+          },
+          {
+            "label": "Run AI with Ollama",
+            "href": "/guides/local-llm-agent",
+            "icon": "lucide:hard-drive"
+          },
+          {
+            "label": "AI Agents vs Chatbots",
+            "href": "/guides/ai-agent-vs-chatbot",
+            "icon": "lucide:scale"
+          }
+        ]
+      },
+      {
+        "label": "Desktop Client",
+        "items": [
+          {
+            "label": "Overview",
+            "href": "/desktop-client",
+            "icon": "lucide:monitor"
+          },
+          {
+            "label": "Installation",
+            "href": "/desktop-client/installation",
+            "icon": "lucide:download"
+          },
+          {
+            "label": "Development",
+            "href": "/desktop-client/development",
+            "icon": "lucide:code"
+          },
+          {
+            "label": "API Server (serve)",
+            "href": "/desktop-client/api-server",
+            "icon": "lucide:server"
           }
         ]
       },
@@ -457,6 +548,16 @@
             "label": "Self-Audit Daemon",
             "href": "/security/self-audit-daemon",
             "icon": "lucide:activity"
+          },
+          {
+            "label": "PII Detection",
+            "href": "/security/pii-masking",
+            "icon": "lucide:user-x"
+          },
+          {
+            "label": "Streaming Redaction",
+            "href": "/security/streaming-redaction",
+            "icon": "lucide:eye-off"
           }
         ]
       },
@@ -537,6 +638,11 @@
             "label": "Autonomous Messaging",
             "href": "/advanced/autonomous-messaging",
             "icon": "lucide:bell"
+          },
+          {
+            "label": "AGENTS.md",
+            "href": "/advanced/agents-md",
+            "icon": "lucide:file-text"
           },
           {
             "label": "WebMCP",
@@ -658,6 +764,13 @@
               { "label": "Create Task", "href": "/api/post-mc-task", "method": "POST" },
               { "label": "Run Task", "href": "/api/post-mc-run-task", "method": "POST" },
               { "label": "Get Standup", "href": "/api/get-mc-standup", "method": "GET" }
+            ]
+          },
+          {
+            "label": "Agent Status",
+            "items": [
+              { "label": "Get Agent Status", "href": "/api/get-agent-status", "method": "GET" },
+              { "label": "Agent Status Stream", "href": "/api/get-agent-status-stream", "method": "GET" }
             ]
           },
           {
@@ -784,8 +897,8 @@
         "title": "Documentation",
         "items": [
           { "label": "Getting Started", "href": "/getting-started/installation" },
+          { "label": "Guides & Tutorials", "href": "/guides" },
           { "label": "Architecture", "href": "/concepts/architecture" },
-          { "label": "Channels", "href": "/channels" },
           { "label": "API Reference", "href": "/api" }
         ]
       },

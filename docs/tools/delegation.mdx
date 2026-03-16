@@ -1,13 +1,13 @@
 ---
-title: Delegation
-description: "Delegate complex sub-tasks to a separate Claude Code subprocess for parallel execution. The delegation tool spawns an independent agent that works autonomously and returns results to the parent."
+title: "Delegation: Multi-Agent Task Splitting"
+description: "Delegate complex sub-tasks to a separate Claude Code subprocess for parallel execution. The delegation tool spawns an independent agent that works autonomously and returns results to the parent agent."
 section: Tools
 ogType: article
 keywords: ["task delegation", "sub-agent", "parallel execution", "claude code", "subprocess"]
 tags: ["tools", "automation", "multi-agent"]
 ---
 
-# Delegation
+# Delegation: Multi-Agent Task Splitting
 
 The delegation tool allows PocketPaw to spawn sub-agents for parallel task execution. This is useful for complex tasks that can be broken into independent subtasks.
 
@@ -72,3 +72,17 @@ Belongs to `group:delegation`.
 <Callout type="warning">
   Each delegated task spawns a new Claude API call. Be mindful of API costs when delegating multiple tasks.
 </Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Skill Generator" icon="lucide:wand-2" href="/tools/skill-generator">
+    Create custom skill definitions that persist across sessions.
+  </Card>
+  <Card title="Tool Policy" icon="lucide:shield-check" href="/tools/tool-policy">
+    Control which tools are available with profiles and allow/deny lists.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

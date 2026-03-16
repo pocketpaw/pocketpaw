@@ -40,7 +40,7 @@
   ></button>
 
   <!-- Slide-over -->
-  <div class="fixed top-0 right-0 z-50 flex h-full w-96 flex-col border-l border-border bg-background shadow-xl">
+  <div class="fixed top-0 right-0 z-50 flex h-full w-96 flex-col border-l border-border bg-background ">
     <!-- Header -->
     <div class="flex items-center justify-between border-b border-border px-4 py-3">
       <div class="min-w-0 flex-1">

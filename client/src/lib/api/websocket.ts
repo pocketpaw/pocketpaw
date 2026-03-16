@@ -11,6 +11,7 @@ const DEFAULT_WS_URL = BACKEND_URL.replace(/^http/, "ws") + `${API_PREFIX}/ws`;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const CONNECTION_TIMEOUT_MS = 10_000;
 
 export class PocketPawWebSocket {
   private url: string;
@@ -20,7 +21,9 @@ export class PocketPawWebSocket {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private connectionTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
+  private pendingQueue: WSAction[] = [];
 
   state: ConnectionState = "disconnected";
 
@@ -46,10 +49,23 @@ export class PocketPawWebSocket {
     const wsUrl = this.token ? `${this.url}?token=${encodeURIComponent(this.token)}` : this.url;
     this.ws = new WebSocket(wsUrl);
 
+    // Connection timeout: if we don't get onopen within 10s, close and retry
+    this.connectionTimer = setTimeout(() => {
+      this.connectionTimer = null;
+      if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+        this.ws.close();
+      }
+    }, CONNECTION_TIMEOUT_MS);
+
     this.ws.onopen = () => {
+      if (this.connectionTimer) {
+        clearTimeout(this.connectionTimer);
+        this.connectionTimer = null;
+      }
       this.reconnectAttempt = 0;
       this.setState("connected");
       this.startHeartbeat();
+      this.flushPendingQueue();
     };
 
     this.ws.onmessage = (event) => {
@@ -78,6 +94,7 @@ export class PocketPawWebSocket {
     this.intentionalClose = true;
     this.cancelReconnect();
     this.cleanup();
+    this.pendingQueue = [];
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -87,10 +104,25 @@ export class PocketPawWebSocket {
 
   send(action: WSAction): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.warn("[PocketPawWS] Cannot send — not connected");
+      // Queue the message to send when reconnected (max 50 to prevent memory bloat)
+      if (this.pendingQueue.length < 50) {
+        this.pendingQueue.push(action);
+      }
       return;
     }
     this.ws.send(JSON.stringify(action));
+  }
+
+  private flushPendingQueue(): void {
+    if (this.pendingQueue.length === 0 || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const queue = this.pendingQueue.splice(0);
+    for (const action of queue) {
+      try {
+        this.ws.send(JSON.stringify(action));
+      } catch {
+        // Drop on send failure
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -186,6 +218,10 @@ export class PocketPawWebSocket {
 
   private cleanup(): void {
     this.stopHeartbeat();
+    if (this.connectionTimer) {
+      clearTimeout(this.connectionTimer);
+      this.connectionTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {

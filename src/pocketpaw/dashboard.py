@@ -134,7 +134,8 @@ _BUILTIN_ORIGINS = [
 ]
 try:
     _custom_origins = Settings.load().api_cors_allowed_origins
-except Exception:
+except Exception as e:
+    logger.debug("Failed to load custom CORS origins: %s", e)
     _custom_origins = []
 _EXTRA_ORIGINS = list(set(_BUILTIN_ORIGINS + _custom_origins))
 
@@ -203,7 +204,7 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_EXTRA_ORIGINS,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -653,7 +654,8 @@ async def list_available_backends():
                 attr = hint.get("verify_attr")
                 if attr and not hasattr(mod, attr):
                     return False
-            except Exception:
+            except Exception as e:
+                logger.debug("Backend validation failed: %s", e)
                 return False
         # Check CLI binary if this backend needs one
         binary = _CLI_BINARY.get(info.name)
@@ -933,7 +935,7 @@ async def start_tunnel():
         url = await manager.start()
         return {"url": url, "active": True}
     except Exception as e:
-        # Error handling via JSON to frontend
+        logger.warning("Failed to start tunnel: %s", e)
         return {"error": str(e), "active": False}
 
 
@@ -1126,7 +1128,8 @@ async def save_identity(request: Request):
 
     try:
         data = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.debug("Invalid JSON payload received: %s", e)
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     identity_dir = get_config_path().parent / "identity"
@@ -1369,9 +1372,10 @@ async def get_audit_log(limit: int = 100):
                 break
             try:
                 logs.append(json.loads(line))
-            except Exception:
-                pass
-    except Exception:
+            except Exception as e:
+                logger.debug("Failed to parse log line: %s", e)
+    except Exception as e:
+        logger.warning("Failed to load logs: %s", e)
         return []
 
     return logs
@@ -1467,8 +1471,8 @@ async def get_self_audit_reports():
                     "issues": data.get("issues", 0),
                 }
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Ignoring error while generating reports: %s", e)
     return reports
 
 
@@ -1517,7 +1521,8 @@ async def get_health_errors(limit: int = 20, search: str = ""):
 
         engine = get_health_engine()
         return engine.get_recent_errors(limit=limit, search=search)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to retrieve recent errors: %s", e)
         return []
 
 
@@ -1531,6 +1536,7 @@ async def clear_health_errors():
         engine.error_store.clear()
         return {"cleared": True}
     except Exception as e:
+        logger.error("Failed to clear errors: %s", e)
         return {"cleared": False, "error": str(e)}
 
 
@@ -1547,8 +1553,8 @@ async def restart_server(request: Request):
     if request.headers.get("content-type", "").startswith("application/json"):
         try:
             body = await request.json()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Request body parsing failed: %s", e)
 
     if not body.get("confirm"):
         return JSONResponse(

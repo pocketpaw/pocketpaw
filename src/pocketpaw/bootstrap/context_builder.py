@@ -1,6 +1,7 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-03-10 - AGENTS.md injection: read project-specific constraints from target repos
 Updated: 2026-03-09 - Sanitize file_context paths before injecting into system prompt
 Updated: 2026-02-17 - Inject health state into system prompt when degraded/unhealthy
 Updated: 2026-02-07 - Semantic context injection for mem0 backend
@@ -10,12 +11,15 @@ Updated: 2026-02-10 - Channel-aware format hints
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
 from pocketpaw.bootstrap.protocol import BootstrapProviderProtocol
 from pocketpaw.bus.events import Channel
 from pocketpaw.bus.format import CHANNEL_FORMAT_HINTS
 from pocketpaw.memory.manager import MemoryManager, get_memory_manager
+
+logger = logging.getLogger(__name__)
 
 
 class AgentContextBuilder:
@@ -42,6 +46,7 @@ class AgentContextBuilder:
         sender_id: str | None = None,
         session_key: str | None = None,
         file_context: dict | None = None,
+        agents_md_dir: str | None = None,
     ) -> str:
         """Build the complete system prompt.
 
@@ -52,6 +57,7 @@ class AgentContextBuilder:
             sender_id: Sender identifier for memory scoping and identity injection.
             session_key: Current session key for session management tools.
             file_context: Optional file/directory context from the desktop client.
+            agents_md_dir: Directory to search for AGENTS.md (walks up to repo root).
         """
         # 1. Load static identity + memory context concurrently (independent I/O)
         if include_memory:
@@ -139,7 +145,18 @@ class AgentContextBuilder:
             health_block = get_health_engine().get_health_prompt_section()
             if health_block:
                 parts.append(health_block)
-        except Exception:
-            pass  # Health engine failure never breaks prompt building
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Health engine failure (non-fatal, skipping health block): %s", exc)
+
+        # 8. Inject AGENTS.md constraints from the target repo
+        if agents_md_dir:
+            try:
+                from pocketpaw.agents_md import AgentsMdLoader
+
+                agents_md = AgentsMdLoader().find_and_load(agents_md_dir)
+                if agents_md:
+                    parts.append(agents_md.constraints_block)
+            except Exception:
+                pass  # AGENTS.md failure never breaks prompt building
 
         return "\n\n".join(parts)

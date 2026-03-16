@@ -10,8 +10,9 @@ import { explorerStore } from "./explorer.svelte";
 import { kitStore } from "./kits.svelte";
 import { mcStore } from "./mission-control.svelte";
 import { projectStore } from "./projects.svelte";
+import { metricsStore } from "./metrics.svelte";
 
-export { connectionStore, chatStore, sessionStore, settingsStore, activityStore, skillStore, uiStore, platformStore, explorerStore, kitStore, mcStore, projectStore };
+export { connectionStore, chatStore, sessionStore, settingsStore, activityStore, skillStore, uiStore, platformStore, explorerStore, kitStore, mcStore, projectStore, metricsStore };
 export type { FileTypeCategory, ExplorerTab } from "./explorer.svelte";
 export type { ActivityEntry } from "./activity.svelte";
 export type { ActiveExecution, ExecutionLogEntry } from "./mission-control.svelte";
@@ -26,8 +27,8 @@ export async function initializeStores(token: string, baseUrl?: string, wsToken?
   // No bindEvents — stores no longer depend on WS for request-response flows.
   // WS is kept for push-only events (notifications, reminders, health, skills).
 
-  // Load initial data via REST in background (don't block UI)
-  Promise.allSettled([
+  // Load initial data via REST — await so UI has data before rendering
+  await Promise.allSettled([
     sessionStore.loadSessions(),
     settingsStore.load(),
   ]);

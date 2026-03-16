@@ -1,5 +1,5 @@
 ---
-title: Cron Scheduler
+title: "Cron Scheduler: Automated Recurring Tasks"
 description: "PocketPaw's built-in cron scheduler handles recurring tasks and one-time reminders with APScheduler. Tasks persist across restarts, support natural language time parsing, and auto-reschedule after execution."
 section: Advanced
 ogType: article
@@ -14,7 +14,7 @@ keywords:
 tags: ["advanced", "automation"]
 ---
 
-# Cron Scheduler
+# Cron Scheduler: Automated Recurring Tasks
 
 PocketPaw includes a built-in task scheduler for recurring reminders and scheduled actions.
 
@@ -80,3 +80,14 @@ Standard cron format: `minute hour day_of_month month day_of_week`
 | `*/30 * * * *`   | Every 30 minutes                     |
 | `0 8,17 * * 1-5` | 8 AM and 5 PM on weekdays            |
 | `0 0 1 * *`      | First day of every month at midnight |
+
+## Related
+
+<CardGroup>
+  <Card title="Autonomous Messaging" icon="lucide:send" href="/advanced/autonomous-messaging">
+    Proactive AI notifications powered by scheduled intentions.
+  </Card>
+  <Card title="Skills System" icon="lucide:puzzle" href="/advanced/skills">
+    Teach PocketPaw reusable behaviors that scheduled tasks can invoke.
+  </Card>
+</CardGroup>

@@ -46,6 +46,16 @@ async def get_channels_status():
             "autostart": _channel_autostart_enabled(ch, settings),
         }
     result["whatsapp"]["mode"] = settings.whatsapp_mode
+
+    # Discord-specific settings for the dashboard
+    result["discord"]["bot_name"] = settings.discord_bot_name
+    result["discord"]["status_type"] = settings.discord_status_type
+    result["discord"]["activity_type"] = settings.discord_activity_type
+    result["discord"]["activity_text"] = settings.discord_activity_text
+    result["discord"]["allowed_guild_ids"] = settings.discord_allowed_guild_ids
+    result["discord"]["allowed_user_ids"] = settings.discord_allowed_user_ids
+    result["discord"]["allowed_channel_ids"] = settings.discord_allowed_channel_ids
+    result["discord"]["conversation_channel_ids"] = settings.discord_conversation_channel_ids
     return result
 
 

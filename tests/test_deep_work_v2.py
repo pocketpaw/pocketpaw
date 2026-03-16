@@ -1246,26 +1246,26 @@ class TestSessionCancel:
         mock_executor.stop_all_project_tasks.assert_called_once_with(project.id)
 
     @pytest.mark.asyncio
-    async def test_cancel_on_completed_project_raises(
+    async def test_cancel_on_completed_project_returns_as_is(
         self, manager, mock_executor, mock_human_router
     ):
-        """cancel() on a COMPLETED project raises ValueError."""
+        """cancel() on a COMPLETED project returns it unchanged."""
         project = await self._make_project(manager, ProjectStatus.COMPLETED)
         session = self._make_session(manager, mock_executor, mock_human_router)
 
-        with pytest.raises(ValueError, match="Cannot cancel"):
-            await session.cancel(project.id)
+        result = await session.cancel(project.id)
+        assert result.status == ProjectStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_cancel_on_already_cancelled_raises(
+    async def test_cancel_on_already_cancelled_returns_as_is(
         self, manager, mock_executor, mock_human_router
     ):
-        """cancel() on an already CANCELLED project raises ValueError."""
+        """cancel() on an already CANCELLED project returns it unchanged."""
         project = await self._make_project(manager, ProjectStatus.CANCELLED)
         session = self._make_session(manager, mock_executor, mock_human_router)
 
-        with pytest.raises(ValueError, match="Cannot cancel"):
-            await session.cancel(project.id)
+        result = await session.cancel(project.id)
+        assert result.status == ProjectStatus.CANCELLED
 
     @pytest.mark.asyncio
     async def test_cancel_works_on_planning_project(

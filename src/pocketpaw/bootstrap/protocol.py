@@ -20,18 +20,18 @@ class BootstrapContext:
     user_profile: str = ""  # USER.md content
 
     def to_system_prompt(self) -> str:
-        """Combine fields into a coherent system prompt."""
-        parts = [
-            f"# Identity: {self.name}",
-            self.identity,
-            "\n# Core Philosophy (Soul)",
-            self.soul,
-            "\n# Communication Style",
-            self.style,
-        ]
+        """Combine fields into a coherent system prompt.
 
+        Layout: tool instructions first (background context), then the identity
+        block last — closest to the live conversation so the model pays more
+        attention to it and drifts less over long exchanges.
+        """
+        parts: list[str] = []
+
+        # 1. Tool docs / behavioural instructions go FIRST — they are long
+        #    and act as background reference material.
         if self.instructions:
-            parts.append("\n# Instructions")
+            parts.append("# Instructions")
             parts.append(self.instructions)
 
         if self.knowledge:
@@ -39,11 +39,25 @@ class BootstrapContext:
             for item in self.knowledge:
                 parts.append(f"- {item}")
 
+        # 2. Identity block goes LAST — wrapped in <identity> XML tags so the
+        #    model treats it as a high-priority structural directive and it sits
+        #    as close as possible to the actual conversation turns.
+        identity_lines: list[str] = [
+            "<identity>",
+            f"# Identity: {self.name}",
+            self.identity,
+            "\n# Core Philosophy (Soul)",
+            self.soul,
+            "\n# Communication Style",
+            self.style,
+        ]
         if self.user_profile:
-            parts.append("\n# User Profile")
-            parts.append(self.user_profile)
+            identity_lines.append("\n# User Profile")
+            identity_lines.append(self.user_profile)
+        identity_lines.append("</identity>")
+        parts.append("\n".join(identity_lines))
 
-        return "\n".join(parts)
+        return "\n\n".join(parts)
 
 
 class BootstrapProviderProtocol(Protocol):

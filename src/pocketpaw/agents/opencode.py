@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 
@@ -115,11 +115,11 @@ class OpenCodeBackend:
 
             # 3. Build request body — /session/{id}/message supports
             #    system, model, noReply, and parts directly
-            effective_system = system_prompt or ""
+            effective_system = system_prompt or _DEFAULT_IDENTITY
             try:
                 from pocketpaw.agents.tool_bridge import get_tool_instructions_compact
 
-                tool_section = get_tool_instructions_compact(self.settings)
+                tool_section = get_tool_instructions_compact(self.settings, backend="opencode")
                 if tool_section:
                     effective_system = (effective_system + "\n" + tool_section).strip()
             except ImportError:

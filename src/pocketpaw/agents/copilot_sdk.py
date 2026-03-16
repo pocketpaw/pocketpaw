@@ -15,7 +15,7 @@ import shutil
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 
@@ -44,7 +44,7 @@ class CopilotSDKBackend:
                 "web_search": "browser",
             },
             required_keys=[],
-            supported_providers=["copilot", "openai", "azure", "anthropic"],
+            supported_providers=["copilot", "openai", "azure", "anthropic", "litellm"],
             install_hint={
                 "pip_package": "github-copilot-sdk",
                 "pip_spec": "github-copilot-sdk",
@@ -107,8 +107,10 @@ class CopilotSDKBackend:
         """Build BYOK provider configuration from settings.
 
         Returns None for default Copilot provider (GitHub OAuth).
-        Returns a provider dict for openai/azure/anthropic BYOK.
+        Returns a provider dict for openai/azure/anthropic/litellm BYOK.
         """
+        from pocketpaw.llm.providers import get_adapter
+
         provider = self.settings.copilot_sdk_provider
 
         if provider == "openai":
@@ -130,10 +132,22 @@ class CopilotSDKBackend:
             return cfg
 
         if provider == "anthropic":
+            adapter = get_adapter("anthropic")
+            config = adapter.resolve_config(self.settings, backend="copilot_sdk")
             cfg = {"type": "anthropic"}
-            if self.settings.anthropic_api_key:
-                cfg["api_key"] = self.settings.anthropic_api_key
+            if config.api_key:
+                cfg["api_key"] = config.api_key
             return cfg
+
+        if provider == "litellm":
+            adapter = get_adapter("litellm")
+            config = adapter.resolve_config(self.settings, backend="copilot_sdk")
+            base = (config.base_url or "http://localhost:4000").rstrip("/")
+            return {
+                "type": "openai",
+                "base_url": f"{base}/v1",
+                "api_key": config.api_key or "not-needed",
+            }
 
         # Default: use GitHub Copilot provider (no BYOK config needed)
         return None
@@ -172,8 +186,8 @@ class CopilotSDKBackend:
 
             # Build the prompt
             prompt_parts = []
-            if system_prompt:
-                prompt_parts.append(f"[System Instructions]\n{system_prompt}\n")
+            effective_system = system_prompt or _DEFAULT_IDENTITY
+            prompt_parts.append(f"[System Instructions]\n{effective_system}\n")
             if history:
                 prompt_parts.append(self._inject_history("", history).strip())
             prompt_parts.append(message)
@@ -182,7 +196,7 @@ class CopilotSDKBackend:
             try:
                 from pocketpaw.agents.tool_bridge import get_tool_instructions_compact
 
-                tool_section = get_tool_instructions_compact(self.settings)
+                tool_section = get_tool_instructions_compact(self.settings, backend="copilot_sdk")
                 if tool_section:
                     prompt_parts.insert(-1, tool_section)
             except ImportError:
@@ -190,7 +204,15 @@ class CopilotSDKBackend:
 
             full_prompt = "\n\n".join(prompt_parts)
 
-            model = self.settings.copilot_sdk_model or "gpt-5.2"
+            from pocketpaw.llm.providers import get_adapter
+
+            provider = self.settings.copilot_sdk_provider
+            if provider == "litellm":
+                adapter = get_adapter("litellm")
+                config = adapter.resolve_config(self.settings, backend="copilot_sdk")
+                model = config.model or "gpt-5.2"
+            else:
+                model = self.settings.copilot_sdk_model or "gpt-5.2"
             provider_config = self._get_provider_config()
 
             # Create or reuse session
@@ -202,8 +224,7 @@ class CopilotSDKBackend:
                     "model": model,
                     "streaming": True,
                 }
-                if system_prompt:
-                    session_opts["system_message"] = system_prompt
+                session_opts["system_message"] = system_prompt or _DEFAULT_IDENTITY
                 if provider_config:
                     session_opts["provider"] = provider_config
 
@@ -265,6 +286,23 @@ class CopilotSDKBackend:
 
                 elif event_type == "session.idle":
                     queue.put_nowait(None)  # sentinel for done
+
+                elif event_type == "assistant.usage":
+                    input_t = getattr(data, "input_tokens", 0) or 0
+                    output_t = getattr(data, "output_tokens", 0) or 0
+                    if input_t or output_t:
+                        queue.put_nowait(
+                            AgentEvent(
+                                type="token_usage",
+                                content="",
+                                metadata={
+                                    "input_tokens": input_t,
+                                    "output_tokens": output_t,
+                                    "model": model,
+                                    "backend": "copilot_sdk",
+                                },
+                            )
+                        )
 
                 elif event_type == "error":
                     error_msg = getattr(data, "message", "Unknown Copilot SDK error")

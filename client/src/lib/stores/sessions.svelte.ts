@@ -4,15 +4,52 @@ import { connectionStore } from "./connection.svelte";
 import { chatStore } from "./chat.svelte";
 
 const STORAGE_KEY = "pocketpaw_active_session";
+const PINNED_KEY = "pocketpaw_pinned_sessions";
 
 class SessionStore {
   sessions = $state<Session[]>([]);
   activeSessionId = $state<string | null>(null);
   isLoading = $state(false);
+  isLoadingHistory = $state(false);
+  pinnedSessionIds = $state<Set<string>>(new Set());
 
   activeSession = $derived(
     this.sessions.find((s) => s.id === this.activeSessionId) ?? null,
   );
+
+  pinnedSessions = $derived(
+    this.sessions.filter((s) => this.pinnedSessionIds.has(s.id)),
+  );
+
+  constructor() {
+    try {
+      const raw = localStorage.getItem(PINNED_KEY);
+      if (raw) {
+        this.pinnedSessionIds = new Set(JSON.parse(raw));
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  togglePin(sessionId: string): void {
+    const next = new Set(this.pinnedSessionIds);
+    if (next.has(sessionId)) {
+      next.delete(sessionId);
+    } else {
+      next.add(sessionId);
+    }
+    this.pinnedSessionIds = next;
+    try {
+      localStorage.setItem(PINNED_KEY, JSON.stringify([...next]));
+    } catch {
+      // localStorage unavailable
+    }
+  }
+
+  isSessionPinned(sessionId: string): boolean {
+    return this.pinnedSessionIds.has(sessionId);
+  }
 
   /** Set the active session ID and persist to localStorage. */
   setActiveSession(id: string | null): void {
@@ -71,6 +108,7 @@ class SessionStore {
     if (sessionId === this.activeSessionId) return;
 
     this.setActiveSession(sessionId);
+    this.isLoadingHistory = true;
 
     try {
       const client = connectionStore.getClient();
@@ -78,6 +116,8 @@ class SessionStore {
       chatStore.loadHistory(history);
     } catch (err) {
       console.error("[SessionStore] Failed to load session history:", err);
+    } finally {
+      this.isLoadingHistory = false;
     }
   }
 

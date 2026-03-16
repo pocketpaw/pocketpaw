@@ -8,8 +8,9 @@
   import QuickActions from "./QuickActions.svelte";
   import ConnectionBadge from "./ConnectionBadge.svelte";
   import AgentProgressBar from "./AgentProgressBar.svelte";
+  import WorkspaceTabs from "./WorkspaceTabs.svelte";
 
-  let { onToggleSidebar }: { onToggleSidebar?: () => void } = $props();
+  let { onToggleSidebar, showTabs = true }: { onToggleSidebar?: () => void; showTabs?: boolean } = $props();
 
   let os = $state("linux");
 
@@ -25,10 +26,10 @@
 
   const headerClass = $derived(
     isMac
-      ? "relative flex w-full shrink-0 items-center  h-[38px]"
+      ? "relative flex w-full shrink-0 items-center h-[38px] border-b border-border bg-background/80"
       : os === "windows"
-        ? "relative flex w-full shrink-0 items-center h-[32px]"
-        : "relative flex w-full shrink-0 items-center h-[34px]",
+        ? "relative flex w-full shrink-0 items-center h-[32px] border-b border-border bg-background/80"
+        : "relative flex w-full shrink-0 items-center h-[34px] border-b border-border bg-background/80",
   );
 
   const leftZoneClass = $derived(
@@ -66,7 +67,7 @@
         </button>
       {/if}
     </div>
-    <WorkspaceTabs />
+    <WorkspaceTabs visible={showTabs} />
 
 
   <!-- Right zone: window controls -->

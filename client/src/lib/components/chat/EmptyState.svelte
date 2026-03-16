@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { FileText, Mail, Bug, BarChart3, Languages, Search } from "@lucide/svelte";
+  import { FileText, Code, Bug, FolderOpen, Terminal, Search } from "@lucide/svelte";
 
   let { onSuggestionClick }: { onSuggestionClick: (text: string) => void } = $props();
 
   const suggestions = [
     { text: "Summarize a file", icon: FileText },
-    { text: "Write an email", icon: Mail },
+    { text: "Write some code", icon: Code },
     { text: "Debug an error", icon: Bug },
-    { text: "Analyze data", icon: BarChart3 },
-    { text: "Translate text", icon: Languages },
+    { text: "Browse my files", icon: FolderOpen },
+    { text: "Run a command", icon: Terminal },
     { text: "Research a topic", icon: Search },
   ];
 </script>
@@ -17,6 +17,9 @@
   <div class="flex flex-col items-center gap-3">
     <span class="text-4xl">🐾</span>
     <h2 class="text-lg font-semibold text-foreground">What can I help you with?</h2>
+    <p class="max-w-sm text-xs text-muted-foreground">
+      Ask anything, drop files into chat, or explore your files from the sidebar.
+    </p>
   </div>
 
   <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">

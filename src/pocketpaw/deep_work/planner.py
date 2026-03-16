@@ -303,5 +303,5 @@ class PlannerAgent:
                 )
             except RuntimeError:
                 pass  # No event loop running
-        except Exception:
-            pass  # Bus may not be available in tests
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Broadcast dw_planning_phase failed (bus may not be available): %s", exc)

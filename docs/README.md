@@ -1,6 +1,6 @@
 # PocketPaw Documentation
 
-The official documentation for [PocketPaw](https://github.com/pocketpaw/pocketpaw) — a self-hosted AI agent controlled via Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, or a web dashboard.
+The official documentation for [PocketPaw](https://github.com/pocketpaw/pocketpaw) — a self-hosted AI agent with a native desktop app, controlled via Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, or a web dashboard.
 
 **Live site:** [pocketpaw.xyz](https://pocketpaw.xyz)
 
@@ -17,6 +17,7 @@ docs/
 ├── public/                    # Static assets (logos, OG images)
 ├── introduction/              # Welcome & overview
 ├── getting-started/           # Install, quick-start, config, project structure
+├── desktop-client/            # Desktop app overview, installation, development, API server
 ├── concepts/                  # Architecture, message bus, agent loop, memory, tools, security
 ├── channels/                  # 9+ channel guides (Telegram, Discord, Slack, WhatsApp, etc.)
 ├── backends/                  # Claude Agent SDK, OpenAI Agents, Google ADK, Codex CLI, OpenCode, Copilot SDK
@@ -27,6 +28,11 @@ docs/
 ├── advanced/                  # Model router, plan mode, scheduler, skills, Deep Work, Mission Control
 ├── deployment/                # Self-hosting, Docker, systemd
 └── api/                       # 39 REST endpoint docs + WebSocket protocol
+
+client/                        # Desktop app source (Tauri 2.0 + SvelteKit)
+├── CLAUDE.md                  # Client architecture and dev conventions
+├── src/                       # SvelteKit frontend (Svelte 5 + Tailwind CSS 4 + shadcn-svelte)
+└── src-tauri/                 # Rust backend (system tray, shortcuts, multi-window)
 ```
 
 ## Local Development

@@ -1,5 +1,5 @@
 ---
-title: Agent Loop
+title: "Agent Loop: Message Processing Pipeline"
 description: "The Agent Loop is PocketPaw's central orchestrator: it consumes messages from the bus, builds context from memory, delegates to the agent backend, and streams responses back."
 section: Core Concepts
 ogType: article
@@ -7,7 +7,7 @@ keywords: ["agent loop", "orchestrator", "message processing", "context building
 tags: ["architecture", "agent"]
 ---
 
-# Agent Loop
+# Agent Loop: Message Processing Pipeline
 
 The `AgentLoop` is the central orchestrator in PocketPaw. It consumes messages from the bus, builds context, delegates to the agent backend, and streams responses back.
 
@@ -101,6 +101,48 @@ AgentEvent(
 ```
 
 The `AgentEvent` dataclass is defined in `agents/backend.py` alongside the `AgentBackend` protocol and `Capability` flags. This ensures consistent behavior regardless of which backend is active.
+
+## Identity Drift Prevention
+
+Long conversations can cause models to gradually drift from their configured identity, tone, and communication style. PocketPaw prevents this through two mechanisms:
+
+### Structural Placement
+
+The system prompt is structured so identity stays close to the conversation:
+
+1. **Tool instructions go first** as background reference material
+2. **Identity block goes last**, wrapped in `<identity>` XML tags, positioned closest to the live conversation turns where the model pays the most attention
+
+```
+# Instructions
+[Tool documentation, knowledge base...]
+
+<identity>
+# Identity: PocketPaw
+[Personality, soul, communication style, user profile...]
+</identity>
+```
+
+### Periodic Reinforcement
+
+When a conversation reaches **20+ turns** (user and assistant messages combined), a compact identity reminder is automatically appended to the system prompt:
+
+```
+# Identity Reminder
+Regardless of conversation length, you remain the agent described in the
+<identity> block above. Maintain your defined personality, tone, and
+communication style consistently throughout this conversation.
+```
+
+This nudges the model back on character without re-injecting the full identity (which would waste context window). The reminder is applied once at the threshold and persists for the rest of the session.
+
+## Kill Command
+
+Send `/kill` or `!kill` from any channel to cancel the active agent task for the current session. The kill command is intercepted before the session lock, so it works even when the agent is mid-processing. Cancellations are logged to the audit log.
+
+## AGENTS.md Constraints
+
+When a message includes file context (e.g., from the desktop client), PocketPaw searches for an `AGENTS.md` file in the project directory tree and injects its constraints into the system prompt. See [AGENTS.md Support](/advanced/agents-md) for details.
 
 ## Concurrency
 

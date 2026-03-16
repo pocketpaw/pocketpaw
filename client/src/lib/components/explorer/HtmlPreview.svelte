@@ -193,7 +193,7 @@
           srcdoc={processedContent}
           title="HTML Preview"
           class="h-full w-full border-0"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
         ></iframe>
       </div>
     {:else}
@@ -208,7 +208,7 @@
           srcdoc={processedContent}
           title="HTML Preview"
           class="h-full w-full border-0"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
         ></iframe>
       </div>
     {/if}

@@ -14,6 +14,11 @@ REDACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         "OpenAI API Key",
         re.compile(r"\bsk-[a-zA-Z0-9]{20,}\b", re.IGNORECASE),
     ),
+    # OpenRouter API keys (sk-or-v1-...)
+    (
+        "OpenRouter API Key",
+        re.compile(r"\bsk-or-v1-[a-zA-Z0-9]{12,}\b", re.IGNORECASE),
+    ),
     # Anthropic API keys (sk-ant-...)
     (
         "Anthropic API Key",
