@@ -82,9 +82,9 @@ class TestHeadlessPermissionMode:
     def test_no_conditional_bypass_in_options_build(self):
         """Verify the options_kwargs assignment is unconditional by checking
         that 'permission_mode' appears exactly once and not inside an if block."""
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
         import inspect
+
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
         source = inspect.getsource(ClaudeSDKBackend.run)
 

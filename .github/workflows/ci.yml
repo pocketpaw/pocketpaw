@@ -1,5 +1,7 @@
 # CI — runs tests and lint on every PR targeting dev.
 # Created: 2026-02-26
+# Updated: 2026-03-11 — Added Python version matrix (3.11, 3.12, 3.13) for
+# the test job. Lint job pinned to 3.12 only.
 name: CI
 
 on:
@@ -23,6 +25,9 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Set Python version
+        run: uv python install 3.12
+
       - name: Install dependencies
         run: uv sync --dev
 
@@ -38,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
