@@ -702,10 +702,8 @@ async def list_available_backends():
 @app.post("/api/backends/install")
 async def install_backend(request: Request):
     """Auto-install a pip-installable backend SDK."""
-    import asyncio
     import importlib
     import shutil
-    import subprocess
     import sys
 
     from pocketpaw.agents.registry import get_backend_info
@@ -722,33 +720,43 @@ async def install_backend(request: Request):
     if not pip_spec or not verify_import:
         return {"error": f"Backend '{backend_name}' is not pip-installable"}
 
-    def _install() -> None:
-        in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
-        uv = shutil.which("uv")
-        if uv:
-            cmd = [uv, "pip", "install", "--python", sys.executable]
-            if not in_venv:
-                cmd.append("--system")
-            cmd.append(pip_spec)
-        else:
-            cmd = [sys.executable, "-m", "pip", "install"]
-            if not in_venv:
-                cmd.append("--user")
-            cmd.append(pip_spec)
+    in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
+    uv = shutil.which("uv")
+    if uv:
+        cmd = [uv, "pip", "install", "--python", sys.executable]
+        if not in_venv:
+            cmd.append("--system")
+        cmd.append(pip_spec)
+    else:
+        cmd = [sys.executable, "-m", "pip", "install"]
+        if not in_venv:
+            cmd.append("--user")
+        cmd.append(pip_spec)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to install {pip_spec}:\n{result.stderr.strip()}")
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
 
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        return {"error": f"Install failed: timed out while installing {pip_spec}"}
+
+    if process.returncode != 0:
+        err = stderr.decode(errors="replace").strip()
+        return {"error": f"Failed to install {pip_spec}:\n{err}"}
+
+    try:
         importlib.invalidate_caches()
         # Clear stale module entries so Python retries imports
         for key in list(sys.modules):
             if key == verify_import or key.startswith(verify_import + "."):
                 del sys.modules[key]
         importlib.import_module(verify_import)
-
-    try:
-        await asyncio.to_thread(_install)
     except RuntimeError as exc:
         return {"error": str(exc)}
     except Exception as exc:
@@ -886,10 +894,10 @@ async def get_version_info():
     from importlib.metadata import version as get_version
 
     from pocketpaw.config import get_config_dir
-    from pocketpaw.update_check import check_for_updates
+    from pocketpaw.update_check import check_for_updates_async
 
     current = get_version("pocketpaw")
-    info = check_for_updates(current, get_config_dir())
+    info = await check_for_updates_async(current, get_config_dir())
     return info or {"current": current, "latest": current, "update_available": False}
 
 
