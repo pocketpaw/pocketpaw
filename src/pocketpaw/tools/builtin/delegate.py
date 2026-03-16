@@ -53,7 +53,10 @@ class DelegateToClaudeCodeTool(BaseTool):
 
         if not ExternalAgentDelegate.is_available("claude"):
             return self._error(
-                "Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
+                "Claude Code CLI not found. Install with: "
+                "npm install -g @anthropic-ai/claude-code\n"
+                "Windows: irm https://claude.ai/install.ps1 | iex\n"
+                "macOS/Linux: curl -fsSL https://claude.ai/install.sh | bash"
             )
 
         result = await ExternalAgentDelegate.run(

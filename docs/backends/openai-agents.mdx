@@ -14,7 +14,7 @@ The OpenAI Agents SDK backend uses OpenAI's native agent framework (`openai-agen
 ## Overview
 
 - **Status**: Beta
-- **Provider support**: OpenAI, Ollama, OpenAI-compatible endpoints
+- **Provider support**: OpenAI, Ollama, OpenAI-compatible, OpenRouter, LiteLLM
 - **Built-in tools**: code_interpreter, file_search, computer_use
 - **MCP support**: No
 - **Session persistence**: SQLite-based via the SDK
@@ -30,7 +30,7 @@ export POCKETPAW_OPENAI_API_KEY="sk-..."
 
 | Setting | Env Variable | Default | Description |
 |---------|-------------|---------|-------------|
-| `openai_agents_provider` | `POCKETPAW_OPENAI_AGENTS_PROVIDER` | `""` (auto) | Provider: `openai`, `ollama`, or `openai_compatible` |
+| `openai_agents_provider` | `POCKETPAW_OPENAI_AGENTS_PROVIDER` | `""` (auto) | Provider: `openai`, `ollama`, `openai_compatible`, `openrouter`, or `litellm` |
 | `openai_agents_model` | `POCKETPAW_OPENAI_AGENTS_MODEL` | `""` (auto) | Model to use (e.g., `gpt-4o`, `gpt-4o-mini`) |
 | `openai_agents_max_turns` | `POCKETPAW_OPENAI_AGENTS_MAX_TURNS` | `0` (unlimited) | Max tool-use turns per query |
 
@@ -45,6 +45,38 @@ export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
 ```
 
 The backend wraps the Ollama model in `OpenAIChatCompletionsModel` from the SDK.
+
+### Using with OpenRouter
+
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="openrouter"
+export POCKETPAW_OPENROUTER_API_KEY="sk-or-v1-..."
+export POCKETPAW_OPENROUTER_MODEL="anthropic/claude-sonnet-4-6"
+```
+
+### Using with LiteLLM
+
+**Proxy mode** (recommended when running a LiteLLM proxy):
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_MODEL="gpt-4o"
+```
+
+**Direct SDK mode** (no proxy, LiteLLM SDK calls providers directly):
+```bash
+export POCKETPAW_AGENT_BACKEND="openai_agents"
+export POCKETPAW_OPENAI_AGENTS_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE=""
+export POCKETPAW_LITELLM_API_KEY="sk-ant-..."
+export POCKETPAW_LITELLM_MODEL="anthropic/claude-sonnet-4-6"  # must be LiteLLM-prefixed
+```
+
+<Callout type="warning">
+  In direct SDK mode (no `LITELLM_API_BASE`), model names **must** use LiteLLM's provider prefix format (e.g., `anthropic/claude-sonnet-4-6`, `openai/gpt-4o`). Without the prefix, LiteLLM cannot determine which provider to route to.
+</Callout>
 
 ## Built-in Tools
 

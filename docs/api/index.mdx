@@ -148,6 +148,13 @@ Most API endpoints require authentication. PocketPaw supports multiple auth meth
 | `POST` | [/api/webhooks/remove](/api/post-webhooks-remove) | Remove webhook slot |
 | `POST` | [/webhook/inbound/\{name\}](/api/post-webhook-inbound) | Receive webhook payload |
 
+### Agent Status
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | [/api/v1/agent/status](/api/get-agent-status) | Get current agent status |
+| `GET` | [/api/v1/agent/status/stream](/api/get-agent-status-stream) | SSE stream of status changes |
+
 ### Tunnel
 
 | Method | Endpoint | Description |

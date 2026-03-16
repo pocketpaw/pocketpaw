@@ -1,6 +1,7 @@
 import { PocketPawClient, PocketPawWebSocket, type ConnectionState } from "$lib/api";
 import { BACKEND_URL } from "$lib/api/config";
 import { toast } from "svelte-sonner";
+import { logger } from "$lib/utils/logger";
 
 /** Number of consecutive failures before suggesting the backend may be down. */
 const FAILURE_THRESHOLD = 5;
@@ -30,6 +31,8 @@ class ConnectionStore {
     this.token = token;
     this.error = null;
 
+    logger.info(`[Connection] Initializing: backend=${url}, hasWsToken=${!!wsToken}`);
+
     // Create REST client (uses OAuth token in Authorization header)
     this.client = new PocketPawClient(url, token);
 
@@ -39,8 +42,9 @@ class ConnectionStore {
     const effectiveWsToken = wsToken ?? token;
     try {
       await this.client.loginForSession(effectiveWsToken);
-    } catch {
-      // Non-fatal — WS may still connect via other auth methods
+      logger.info("[Connection] Session cookie obtained");
+    } catch (e) {
+      logger.warn("[Connection] loginForSession failed (non-fatal):", e);
     }
 
     // Create WebSocket client (no token in URL — rely on session cookie)

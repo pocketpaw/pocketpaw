@@ -1,6 +1,7 @@
 """Tests for the ``pocketpaw serve`` API-only server."""
 
-from unittest.mock import patch
+import socket
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -174,3 +175,128 @@ class TestServeCommand:
         assert args.command == "serve"
         assert args.host == "0.0.0.0"
         assert args.port == 9000
+
+
+# ---------------------------------------------------------------------------
+# Socket resource safety (issue #608)
+# ---------------------------------------------------------------------------
+
+
+class TestSocketResourceSafety:
+    """Verify the local-IP detection socket is always closed — even on error.
+
+    Regression tests for the resource leak reported in issue #608:
+    s.close() was only called on the happy path, leaving the socket open
+    whenever connect() or getsockname() raised an exception.
+    """
+
+    def _make_mock_socket(self) -> MagicMock:
+        """Return a MagicMock that looks enough like a socket.socket."""
+        sock = MagicMock(spec=socket.socket)
+        # Make it usable as a context manager (__enter__ returns itself,
+        # __exit__ calls close — same as the real socket implementation).
+        sock.__enter__ = MagicMock(return_value=sock)
+        sock.__exit__ = MagicMock(return_value=False)
+        return sock
+
+    def test_serve_socket_closed_on_success(self):
+        """Socket must be closed after successful IP detection."""
+        mock_sock = self._make_mock_socket()
+        mock_sock.getsockname.return_value = ("192.168.1.100", 0)
+
+        with (
+            patch("socket.socket", return_value=mock_sock),
+            patch("uvicorn.run"),
+        ):
+            from pocketpaw.api.serve import run_api_server
+
+            run_api_server(host="0.0.0.0", port=9999)
+
+        # __exit__ is how the context manager closes the socket
+        mock_sock.__exit__.assert_called_once()
+
+    def test_serve_socket_closed_on_connect_error(self):
+        """Socket must be closed even when connect() raises."""
+        mock_sock = self._make_mock_socket()
+        mock_sock.connect.side_effect = OSError("Network unreachable")
+
+        with (
+            patch("socket.socket", return_value=mock_sock),
+            patch("uvicorn.run"),
+        ):
+            from pocketpaw.api.serve import run_api_server
+
+            # Should not raise — falls back to placeholder IP
+            run_api_server(host="0.0.0.0", port=9999)
+
+        mock_sock.__exit__.assert_called_once()
+
+    def test_serve_socket_closed_on_getsockname_error(self):
+        """Socket must be closed even when getsockname() raises."""
+        mock_sock = self._make_mock_socket()
+        mock_sock.getsockname.side_effect = OSError("Socket error")
+
+        with (
+            patch("socket.socket", return_value=mock_sock),
+            patch("uvicorn.run"),
+        ):
+            from pocketpaw.api.serve import run_api_server
+
+            run_api_server(host="0.0.0.0", port=9999)
+
+        mock_sock.__exit__.assert_called_once()
+
+    def test_serve_fallback_ip_used_on_error(self):
+        """When socket raises, the fallback placeholder should be printed."""
+        mock_sock = self._make_mock_socket()
+        mock_sock.connect.side_effect = OSError("Network unreachable")
+
+        with (
+            patch("socket.socket", return_value=mock_sock),
+            patch("uvicorn.run"),
+            patch("builtins.print") as mock_print,
+        ):
+            from pocketpaw.api.serve import run_api_server
+
+            run_api_server(host="0.0.0.0", port=9999)
+
+        printed = " ".join(str(c) for call in mock_print.call_args_list for c in call.args)
+        assert "<your-server-ip>" in printed
+
+    def test_dashboard_socket_closed_on_connect_error(self):
+        """dashboard.py IP detection socket must be closed even when connect() raises."""
+        mock_sock = self._make_mock_socket()
+        mock_sock.connect.side_effect = OSError("Network unreachable")
+
+        mock_uv_server = MagicMock()
+        mock_uv_server.run = MagicMock()  # no-op so the loop exits
+
+        with (
+            patch("socket.socket", return_value=mock_sock),
+            patch("pocketpaw.dashboard.uvicorn.Config", return_value=MagicMock()),
+            patch("pocketpaw.dashboard.uvicorn.Server", return_value=mock_uv_server),
+        ):
+            from pocketpaw.dashboard import run_dashboard
+
+            run_dashboard(host="0.0.0.0", port=9999, open_browser=False)
+
+        mock_sock.__exit__.assert_called_once()
+
+    def test_dashboard_socket_closed_on_success(self):
+        """dashboard.py IP detection socket must be closed on the happy path."""
+        mock_sock = self._make_mock_socket()
+        mock_sock.getsockname.return_value = ("10.0.0.1", 0)
+
+        mock_uv_server = MagicMock()
+        mock_uv_server.run = MagicMock()
+
+        with (
+            patch("socket.socket", return_value=mock_sock),
+            patch("pocketpaw.dashboard.uvicorn.Config", return_value=MagicMock()),
+            patch("pocketpaw.dashboard.uvicorn.Server", return_value=mock_uv_server),
+        ):
+            from pocketpaw.dashboard import run_dashboard
+
+            run_dashboard(host="0.0.0.0", port=9999, open_browser=False)
+
+        mock_sock.__exit__.assert_called_once()

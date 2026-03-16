@@ -1,0 +1,24 @@
+services:
+  pocketpaw-discord:
+    build:
+      context: ../..
+      dockerfile: deploy/discord/Dockerfile
+    container_name: pocketpaw-discord
+    volumes:
+      - pocketpaw-discord-data:/home/pocketpaw/.pocketpaw
+      # Mount custom identity (overrides default system prompt)
+      - ./identity:/home/pocketpaw/.pocketpaw/identity
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      # resolve_backend_env() syncs POCKETPAW_* keys to SDK env vars at
+      # startup, so no manual ANTHROPIC_API_KEY / OPENAI_API_KEY mapping
+      # is needed here. Just pass POCKETPAW_* via .env.
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+volumes:
+  pocketpaw-discord-data:

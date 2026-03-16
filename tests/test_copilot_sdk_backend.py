@@ -461,14 +461,8 @@ class TestCopilotSDKCrossBackend:
 
     @pytest.mark.asyncio
     async def test_system_prompt_injected(self):
-        backend, mock_session, _ = _setup_backend_with_mock_client()
-        captured_prompt = None
+        backend, mock_session, mock_client = _setup_backend_with_mock_client()
 
-        async def capture_send(msg):
-            nonlocal captured_prompt
-            captured_prompt = msg.get("prompt", "") if isinstance(msg, dict) else msg
-
-        mock_session.send = capture_send
         _wire_events(mock_session, [_make_sdk_event("session.idle")])
 
         async for _ in backend.run(
@@ -478,9 +472,10 @@ class TestCopilotSDKCrossBackend:
         ):
             pass
 
-        assert captured_prompt is not None
-        assert "[System Instructions]" in captured_prompt
-        assert "helpful assistant" in captured_prompt
+        # System prompt is passed via system_message in create_session opts
+        mock_client.create_session.assert_called_once()
+        session_opts = mock_client.create_session.call_args[0][0]
+        assert "helpful assistant" in session_opts["system_message"]
 
     @pytest.mark.asyncio
     async def test_history_not_injected_when_empty(self):

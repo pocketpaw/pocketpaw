@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,34 @@ _TOOL_PATH_KEYS: dict[str, list[str]] = {
     "write_file": ["path", "file_path"],
     "edit_file": ["path", "file_path"],
     "str_replace_editor": ["path"],
-    "Bash": [],  # handled separately via heuristic
+    "Bash": [],  # handled separately via _extract_path_from_bash
 }
+
+# Regex to extract file paths from Bash command strings.
+# Matches absolute paths and common relative paths with an extension.
+_BASH_PATH_RE = re.compile(
+    r"(?<!\w)"  # not preceded by a word character
+    r"((?:[~/]|\./|\.\./)"  # must start with ~, /, ./ or ../
+    r"[^\s;|&<>\"'`]+)"  # followed by non-whitespace/shell-special chars
+    r"(?!\w)",  # not followed by a word character
+    re.ASCII,
+)
+
+
+def _extract_path_from_bash(command: str) -> str | None:
+    """Heuristic: extract the first plausible file path from a Bash command string.
+
+    Looks for absolute paths (starting with / or ~) and relative paths
+    starting with ./ or ../ that look like files (contain a dot in the
+    final component).  Returns the first match, or None if none found.
+    """
+    for match in _BASH_PATH_RE.finditer(command):
+        candidate = match.group(1).rstrip(".,;)")
+        p = Path(candidate).expanduser()
+        # Accept if it already exists on disk OR looks like a file (has an extension)
+        if p.exists() or "." in p.name:
+            return candidate
+    return None
 
 
 def _extract_path_from_tool(tool_name: str, tool_input: dict[str, Any]) -> str | None:
@@ -35,6 +62,14 @@ def _extract_path_from_tool(tool_name: str, tool_input: dict[str, Any]) -> str |
     keys = _TOOL_PATH_KEYS.get(tool_name)
     if keys is None:
         return None
+
+    # Bash: apply heuristic to the command string
+    if tool_name == "Bash":
+        command = tool_input.get("command") or tool_input.get("cmd") or ""
+        if isinstance(command, str) and command:
+            return _extract_path_from_bash(command)
+        return None
+
     for key in keys:
         val = tool_input.get(key)
         if val and isinstance(val, str):

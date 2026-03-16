@@ -1,6 +1,7 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-03-16: Use Literal types for whatsapp_mode, tts_provider, stt_provider (#638).
   - 2026-02-17: Added health_check_on_startup field for Health Engine.
   - 2026-02-14: Add migration warning for old ~/.pocketclaw/ config dir and POCKETCLAW_ env vars.
   - 2026-02-06: Secrets stored encrypted via CredentialStore; auto-migrate plaintext keys.
@@ -10,11 +11,14 @@ Changes:
   - 2026-02-02: claude_agent_sdk is now RECOMMENDED (uses official SDK).
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -147,7 +151,7 @@ def get_token_path() -> Path:
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]+$")
 
 
-def validate_api_keys(settings: "Settings") -> list[str]:
+def validate_api_keys(settings: Settings) -> list[str]:
     """Validate **all** API keys on a :class:`Settings` instance (batch, loose).
 
     Uses simple prefix checks (not the strict regexes in :func:`validate_api_key`)
@@ -186,14 +190,18 @@ class Settings(BaseSettings):
     agent_backend: str = Field(
         default="claude_agent_sdk",
         description=(
-            "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', or 'opencode'"
+            "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', "
+            "'codex_cli', 'opencode', or 'copilot_sdk'. "
+            "All backends support 'litellm' as a provider for open-source model access."
         ),
     )
 
     # Claude Agent SDK Settings
     claude_sdk_provider: str = Field(
         default="anthropic",
-        description="Provider for Claude SDK: 'anthropic', 'ollama', or 'openai_compatible'",
+        description=(
+            "Provider for Claude SDK: 'anthropic', 'ollama', 'openai_compatible', or 'litellm'"
+        ),
     )
     claude_sdk_model: str = Field(
         default="",
@@ -207,7 +215,9 @@ class Settings(BaseSettings):
     # OpenAI Agents SDK Settings
     openai_agents_provider: str = Field(
         default="openai",
-        description="Provider for OpenAI Agents: 'openai', 'ollama', or 'openai_compatible'",
+        description=(
+            "Provider for OpenAI Agents: 'openai', 'ollama', 'openai_compatible', or 'litellm'"
+        ),
     )
     openai_agents_model: str = Field(
         default="", description="Model for OpenAI Agents backend (empty = gpt-5.2)"
@@ -225,6 +235,10 @@ class Settings(BaseSettings):
     )
 
     # Google ADK Settings
+    google_adk_provider: str = Field(
+        default="google",
+        description="Provider for Google ADK: 'google' or 'litellm'",
+    )
     google_adk_model: str = Field(
         default="gemini-3-pro-preview", description="Model for Google ADK backend"
     )
@@ -241,7 +255,9 @@ class Settings(BaseSettings):
     # Copilot SDK Settings
     copilot_sdk_provider: str = Field(
         default="copilot",
-        description="Provider for Copilot SDK: 'copilot', 'openai', 'azure', or 'anthropic'",
+        description=(
+            "Provider for Copilot SDK: 'copilot', 'openai', 'azure', 'anthropic', or 'litellm'"
+        ),
     )
     copilot_sdk_model: str = Field(
         default="", description="Model for Copilot SDK backend (empty = gpt-5.2)"
@@ -263,11 +279,34 @@ class Settings(BaseSettings):
         default=100, description="Max turns per query in OpenCode backend (0 = unlimited)"
     )
 
+    # LiteLLM Proxy / SDK Configuration
+    litellm_api_base: str = Field(
+        default="http://localhost:4000",
+        description="LiteLLM proxy server URL (used when any backend provider is set to 'litellm')",
+    )
+    litellm_api_key: str | None = Field(
+        default=None,
+        description="API key for LiteLLM proxy (the master key configured on the proxy)",
+    )
+    litellm_model: str = Field(
+        default="",
+        description=(
+            "Default model for LiteLLM. Use provider/model format for direct mode "
+            "(e.g. 'anthropic/claude-sonnet-4-6', 'huggingface/meta-llama/Llama-3-70b') "
+            "or a model alias defined in LiteLLM proxy config.yaml"
+        ),
+    )
+    litellm_max_tokens: int = Field(
+        default=0,
+        description="Max output tokens for LiteLLM models (0 = provider default)",
+    )
+
     # LLM Configuration
     llm_provider: str = Field(
         default="auto",
         description=(
-            "LLM provider: 'auto', 'ollama', 'openai', 'anthropic', 'openai_compatible', 'gemini'"
+            "LLM provider: 'auto', 'ollama', 'openai', 'anthropic', "
+            "'openai_compatible', 'gemini', 'litellm'"
         ),
     )
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
@@ -343,13 +382,13 @@ class Settings(BaseSettings):
 
     # Session History Compaction
     compaction_recent_window: int = Field(
-        default=10, description="Number of recent messages to keep verbatim"
+        default=10, gt=0, description="Number of recent messages to keep verbatim"
     )
     compaction_char_budget: int = Field(
-        default=8000, description="Max total chars for compacted history"
+        default=8000, gt=0, description="Max total chars for compacted history"
     )
     compaction_summary_chars: int = Field(
-        default=150, description="Max chars per older message one-liner extract"
+        default=150, gt=0, description="Max chars per older message one-liner extract"
     )
     compaction_llm_summarize: bool = Field(
         default=False, description="Use Haiku to summarize older messages (opt-in)"
@@ -404,7 +443,7 @@ class Settings(BaseSettings):
     )
 
     # WhatsApp
-    whatsapp_mode: str = Field(
+    whatsapp_mode: Literal["", "personal", "business"] = Field(
         default="",
         description="WhatsApp mode: 'personal' (QR scan via neonize) or 'business' (Cloud API)",
     )
@@ -451,7 +490,9 @@ class Settings(BaseSettings):
         description="Allow unauthenticated localhost access (disable for non-CF proxies)",
     )
     session_token_ttl_hours: int = Field(
-        default=24, description="TTL in hours for HMAC session tokens issued via /api/auth/session"
+        default=24,
+        gt=0,
+        description="TTL in hours for HMAC session tokens issued via /api/auth/session",
     )
     api_cors_allowed_origins: list[str] = Field(
         default_factory=list,
@@ -459,6 +500,7 @@ class Settings(BaseSettings):
     )
     api_rate_limit_per_key: int = Field(
         default=60,
+        gt=0,
         description="Max requests per minute per API key (token-bucket capacity)",
     )
     file_jail_path: Path = Field(
@@ -558,14 +600,16 @@ class Settings(BaseSettings):
     )
 
     # Voice/TTS
-    tts_provider: str = Field(
+    tts_provider: Literal["openai", "elevenlabs", "sarvam"] = Field(
         default="openai", description="TTS provider: 'openai', 'elevenlabs', or 'sarvam'"
     )
     elevenlabs_api_key: str | None = Field(default=None, description="ElevenLabs API key for TTS")
     tts_voice: str = Field(
         default="alloy", description="TTS voice name (OpenAI: alloy/echo/fable/onyx/nova/shimmer)"
     )
-    stt_provider: str = Field(default="openai", description="STT provider: 'openai' or 'sarvam'")
+    stt_provider: Literal["openai", "sarvam"] = Field(
+        default="openai", description="STT provider: 'openai' or 'sarvam'"
+    )
     stt_model: str = Field(default="whisper-1", description="OpenAI Whisper model for STT")
 
     # OCR
@@ -662,9 +706,62 @@ class Settings(BaseSettings):
         default="",
         description="Global owner identifier (e.g. Telegram user ID). Empty = single-user mode.",
     )
+
+    # Soul Protocol
+    soul_enabled: bool = Field(
+        default=False,
+        description="Enable soul-protocol for persistent AI identity, memory, and emotion",
+    )
+    soul_name: str = Field(
+        default="Paw",
+        description="Name for the soul identity",
+    )
+    soul_archetype: str = Field(
+        default="The Helpful Assistant",
+        description="Soul archetype (e.g. 'The Coding Expert', 'The Compassionate Creator')",
+    )
+    soul_persona: str = Field(
+        default="",
+        description="Custom persona description for the soul (empty = auto-generated)",
+    )
+    # TODO: soul_values and soul_ocean are not yet exposed in the dashboard UI.
+    #  Add controls in a Soul settings tab when the UI is built out.
+    soul_values: list[str] = Field(
+        default_factory=lambda: ["helpfulness", "precision", "privacy"],
+        description="Core values for the soul identity",
+    )
+    soul_ocean: dict[str, float] = Field(
+        default_factory=lambda: {
+            "openness": 0.7,
+            "conscientiousness": 0.85,
+            "extraversion": 0.5,
+            "agreeableness": 0.8,
+            "neuroticism": 0.2,
+        },
+        description="OCEAN Big Five personality traits (0.0-1.0)",
+    )
+    soul_communication: dict[str, str] = Field(
+        default_factory=lambda: {"warmth": "medium", "verbosity": "low"},
+        description="Communication style settings for the soul",
+    )
+    soul_path: str = Field(
+        default="",
+        description="Path to .soul file (empty = ~/.pocketpaw/soul/)",
+    )
+    soul_auto_save_interval: int = Field(
+        default=300,
+        description="Auto-save soul state interval in seconds (0 = disabled)",
+    )
+
     notification_channels: list[str] = Field(
         default_factory=list,
         description="Targets for autonomous messages, e.g. ['telegram:12345', 'discord:98765']",
+    )
+
+    # Status API
+    status_api_key: str = Field(
+        default="",
+        description="Optional API key for the agent status endpoint. Leave empty to skip auth.",
     )
 
     # Media Downloads
@@ -672,7 +769,7 @@ class Settings(BaseSettings):
         default="", description="Custom media download dir (default: ~/.pocketpaw/media/)"
     )
     media_max_file_size_mb: int = Field(
-        default=50, description="Max media file size in MB (0 = unlimited)"
+        default=50, ge=0, description="Max media file size in MB (0 = unlimited)"
     )
 
     # UX
@@ -689,7 +786,7 @@ class Settings(BaseSettings):
 
     # Concurrency
     max_concurrent_conversations: int = Field(
-        default=5, description="Max parallel conversations processed simultaneously"
+        default=5, gt=0, description="Max parallel conversations processed simultaneously"
     )
 
     def save(self) -> None:
@@ -737,7 +834,7 @@ class Settings(BaseSettings):
         _chmod_safe(config_path, 0o600)
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls) -> Settings:
         """Load settings from config file + encrypted credential store."""
         from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 

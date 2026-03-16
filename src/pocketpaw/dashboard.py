@@ -1079,13 +1079,12 @@ async def get_telegram_pairing_status():
     return {"paired": paired, "user_id": user_id}
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(
+async def _handle_dashboard_ws(
     websocket: WebSocket,
-    token: str | None = Query(None),
-    resume_session: str | None = Query(None),
+    token: str | None,
+    resume_session: str | None,
 ):
-    """WebSocket endpoint — delegates to dashboard_ws.websocket_handler()."""
+    """Shared WebSocket handler for /ws and /api/v1/ws."""
     from pocketpaw.dashboard_ws import websocket_handler
 
     await websocket_handler(
@@ -1095,6 +1094,36 @@ async def websocket_endpoint(
         _is_genuine_localhost_fn=_is_genuine_localhost,
         _get_access_token_fn=get_access_token,
     )
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str | None = Query(None),
+    resume_session: str | None = Query(None),
+):
+    """WebSocket endpoint — delegates to dashboard_ws.websocket_handler()."""
+    await _handle_dashboard_ws(websocket, token, resume_session)
+
+
+@app.websocket("/api/v1/ws")
+async def websocket_v1_endpoint(
+    websocket: WebSocket,
+    token: str | None = Query(None),
+    resume_session: str | None = Query(None),
+):
+    """WebSocket v1 endpoint — matches client's API_PREFIX + /ws path."""
+    await _handle_dashboard_ws(websocket, token, resume_session)
+
+
+@app.websocket("/v1/ws")
+async def websocket_v1_short_endpoint(
+    websocket: WebSocket,
+    token: str | None = Query(None),
+    resume_session: str | None = Query(None),
+):
+    """WebSocket v1 short path — for clients using /v1/ws."""
+    await _handle_dashboard_ws(websocket, token, resume_session)
 
 
 # ==================== Transparency APIs ====================
@@ -1679,10 +1708,9 @@ def run_dashboard(
             import socket
 
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect(("8.8.8.8", 80))
+                    local_ip = s.getsockname()[0]
             except Exception:
                 local_ip = "<your-server-ip>"
             print(f"\n🌐 Open http://{local_ip}:{port} in your browser")

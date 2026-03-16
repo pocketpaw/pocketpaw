@@ -78,7 +78,13 @@ class ClaudeSDKBackend:
             ],
             tool_policy_map=ClaudeSDKBackend._TOOL_POLICY_MAP,
             required_keys=["anthropic_api_key"],
-            supported_providers=["anthropic", "ollama", "openrouter", "openai_compatible"],
+            supported_providers=[
+                "anthropic",
+                "ollama",
+                "openrouter",
+                "openai_compatible",
+                "litellm",
+            ],
         )
 
     def __init__(self, settings: Settings):
@@ -169,7 +175,8 @@ class ClaudeSDKBackend:
             else:
                 logger.warning(
                     "⚠️ Claude Code CLI not found on PATH. "
-                    "Install with: npm install -g @anthropic-ai/claude-code"
+                    "Install with: npm install -g @anthropic-ai/claude-code "
+                    "and set ANTHROPIC_API_KEY, or switch to a different backend in Settings."
                 )
 
         except ImportError as e:
@@ -482,11 +489,20 @@ class ClaudeSDKBackend:
             )
             t2 = time.monotonic()
 
+            # Respect provider max_tokens (e.g. DeepSeek caps at 8192)
+            provider = self.settings.claude_sdk_provider or "anthropic"
+            if provider == "litellm" and self.settings.litellm_max_tokens > 0:
+                fast_max_tokens = self.settings.litellm_max_tokens
+            elif provider == "openai_compatible" and self.settings.openai_compatible_max_tokens > 0:
+                fast_max_tokens = self.settings.openai_compatible_max_tokens
+            else:
+                fast_max_tokens = 1024
+
             async with client.messages.stream(
                 model=model,
                 system=system_prompt,
                 messages=api_messages,
-                max_tokens=1024,
+                max_tokens=fast_max_tokens,
             ) as stream:
                 t3 = time.monotonic()
                 logger.info("Fast-path: stream opened in %.0fms", (t3 - t2) * 1000)
@@ -578,6 +594,17 @@ class ClaudeSDKBackend:
             self._client_in_use = False
             logger.info("Persistent client disconnected")
 
+    async def _resilient_query(self, prompt: str, options):
+        """Wrap stateless _query with MessageParseError recovery."""
+        try:
+            async for event in self._query(prompt=prompt, options=options):
+                yield event
+        except Exception as exc:
+            if "MessageParseError" in type(exc).__name__:
+                logger.warning("Skipping unrecognised SDK event in stateless query: %s", exc)
+            else:
+                raise
+
     async def _resilient_receive(self, client):
         """Iterate over client messages, recovering from parse errors.
 
@@ -648,10 +675,14 @@ class ClaudeSDKBackend:
                 type="error",
                 content=(
                     "❌ Claude Code CLI not found on this machine.\n\n"
-                    "Install with: `npm install -g @anthropic-ai/claude-code`\n\n"
-                    "Or switch to **PocketPaw Native** backend in "
-                    "**Settings → General** — it uses the Anthropic API directly "
-                    "and doesn't need the CLI."
+                    "The Claude Agent SDK backend requires the CLI. To fix this:\n\n"
+                    "**Install Claude Code CLI:**\n"
+                    "- Windows: `irm https://claude.ai/install.ps1 | iex`\n"
+                    "- macOS/Linux: `curl -fsSL https://claude.ai/install.sh | bash`\n"
+                    "- Or: `npm install -g @anthropic-ai/claude-code`\n\n"
+                    "Then set your `ANTHROPIC_API_KEY` in **Settings → General**.\n\n"
+                    "Or switch to a different backend in **Settings → General** "
+                    "(OpenAI Agents, Google ADK, Codex, etc.) that doesn't need the CLI."
                 ),
             )
             return
@@ -671,10 +702,11 @@ class ClaudeSDKBackend:
             str(24 * 60 * 60 * 1000),  # 24 hours in ms
         )
 
+        _stderr_lines: list[str] = []
         try:
-            # Resolve LLM provider early — needed for routing + env.
+            # Resolve LLM provider early -- needed for routing + env.
             # Use per-backend provider setting (defaults to "anthropic").
-            # An API key is REQUIRED for Anthropic provider — OAuth tokens from
+            # An API key is REQUIRED for Anthropic provider -- OAuth tokens from
             # Claude Free/Pro/Max plans are not permitted for third-party use.
             # See: https://code.claude.com/docs/en/legal-and-compliance
             from pocketpaw.llm.client import resolve_llm_client
@@ -683,9 +715,12 @@ class ClaudeSDKBackend:
             llm = resolve_llm_client(self.settings, force_provider=provider)
 
             # ── API key check for Anthropic provider ──────────────
-            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
+            # Skip if using a non-Anthropic provider, or if the active
+            # provider is claude_code (it handles OAuth auth via its CLI).
+            is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
+            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini or llm.is_litellm):
                 has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
-                if not has_api_key:
+                if not has_api_key and not is_claude_code_provider:
                     yield AgentEvent(
                         type="error",
                         content=(
@@ -712,6 +747,7 @@ class ClaudeSDKBackend:
                 and not llm.is_ollama
                 and not llm.is_openai_compatible
                 and not llm.is_gemini
+                and not llm.is_litellm
             ):
                 from pocketpaw.agents.model_router import ModelRouter, TaskComplexity
 
@@ -813,7 +849,7 @@ class ClaudeSDKBackend:
                 os.environ.pop(_strip_key, None)
             if sdk_env:
                 options_kwargs["env"] = sdk_env
-            if llm.is_ollama or llm.is_openai_compatible or llm.is_gemini:
+            if llm.is_ollama or llm.is_openai_compatible or llm.is_gemini or llm.is_litellm:
                 options_kwargs["model"] = llm.model
 
             # ── Debug logging for troubleshooting SDK startup ──
@@ -856,7 +892,7 @@ class ClaudeSDKBackend:
             # 1. Smart routing (opt-in) — overrides with complexity-based model
             # 2. Explicit claude_sdk_model — user-chosen fixed model
             # 3. Neither set — let Claude Code CLI auto-select (recommended)
-            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini):
+            if not (llm.is_ollama or llm.is_openai_compatible or llm.is_gemini or llm.is_litellm):
                 if self.settings.smart_routing_enabled:
                     from pocketpaw.agents.model_router import ModelRouter
 
@@ -867,8 +903,6 @@ class ClaudeSDKBackend:
                     options_kwargs["model"] = self.settings.claude_sdk_model
 
             # Capture stderr for better error diagnostics
-            _stderr_lines: list[str] = []
-
             def _on_stderr(line: str) -> None:
                 _stderr_lines.append(line)
                 logger.debug("Claude CLI stderr: %s", line)
@@ -923,7 +957,7 @@ class ClaudeSDKBackend:
 
             if event_stream is None:
                 logger.info("Starting stateless query (fallback — _client_in_use was True)")
-                event_stream = self._query(prompt=message, options=options)
+                event_stream = self._resilient_query(prompt=message, options=options)
 
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False
@@ -1118,9 +1152,13 @@ class ClaudeSDKBackend:
                     type="error",
                     content=(
                         "❌ Claude Code CLI not found.\n\n"
-                        "Install with: npm install -g @anthropic-ai/claude-code\n\n"
-                        "Or switch to a different backend in "
-                        "**Settings → General**."
+                        "**Install Claude Code CLI:**\n"
+                        "- Windows: `irm https://claude.ai/install.ps1 | iex`\n"
+                        "- macOS/Linux: `curl -fsSL https://claude.ai/install.sh | bash`\n"
+                        "- Or: `npm install -g @anthropic-ai/claude-code`\n\n"
+                        "Then set your `ANTHROPIC_API_KEY` in **Settings → General**.\n\n"
+                        "Or switch to a different backend in **Settings → General** "
+                        "(OpenAI Agents, Google ADK, Codex, etc.)."
                     ),
                 )
             else:
