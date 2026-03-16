@@ -49,6 +49,8 @@ class TestCheckForUpdates:
 
         assert result is not None
         assert result["current"] == "0.4.1"
+        assert result["latest"] == "0.4.1"
+        assert result["update_available"] is False
 
     async def test_async_wrapper(self, tmp_path):
         """Async wrapper returns same shape and does not raise."""
