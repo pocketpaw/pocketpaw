@@ -2,6 +2,7 @@
 # Updated for AgentEvent-based architecture (no more dict chunks)
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -169,6 +170,120 @@ async def test_agent_loop_handles_error(
 
             await loop._process_message(msg)
             mock_bus.publish_system.assert_called()
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@pytest.mark.asyncio
+async def test_kill_audit_failure_is_logged(
+    mock_builder_cls, mock_get_memory, mock_get_bus, mock_bus, mock_memory, caplog
+):
+    """/kill should continue even if audit logging fails, while surfacing logs."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+            loop = AgentLoop()
+
+            msg = InboundMessage(
+                channel=Channel.CLI,
+                sender_id="user1",
+                chat_id="chat1",
+                content="/kill",
+            )
+
+            consume_calls = 0
+
+            async def _consume_once(timeout=1.0):
+                nonlocal consume_calls
+                consume_calls += 1
+                if consume_calls == 1:
+                    return msg
+                loop._running = False
+                return None
+
+            mock_bus.consume_inbound = AsyncMock(side_effect=_consume_once)
+
+            mock_audit_logger = MagicMock()
+            mock_audit_logger.log.side_effect = RuntimeError("audit write failed")
+
+            with patch(
+                "pocketpaw.security.audit.get_audit_logger",
+                return_value=mock_audit_logger,
+            ):
+                loop._running = True
+                with caplog.at_level(logging.ERROR):
+                    await loop._loop()
+
+            assert any(
+                "Failed to write audit log for /kill action" in rec.message
+                for rec in caplog.records
+            )
+            # Reply + stream_end should still be sent
+            assert mock_bus.publish_outbound.call_count >= 2
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_recent_file_tracker_failures_are_logged(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+    mock_router,
+    caplog,
+):
+    """Tool tracking errors should be visible in logs, not silently swallowed."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+    mock_router_cls.return_value = mock_router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.injection_scan_enabled = False
+        settings.welcome_hint_enabled = False
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+            loop = AgentLoop()
+
+            msg = InboundMessage(
+                channel=Channel.CLI,
+                sender_id="user1",
+                chat_id="chat1",
+                content="Run a tool",
+            )
+
+            tracker = MagicMock()
+            tracker.record_tool_use.side_effect = RuntimeError("tracker failed")
+
+            with patch("pocketpaw.agents.loop.get_recent_files_tracker", return_value=tracker):
+                with caplog.at_level(logging.DEBUG):
+                    await loop._process_message(msg)
+
+            assert any(
+                "Failed to record recent file tracker event for tool" in rec.message
+                for rec in caplog.records
+            )
 
 
 @patch("pocketpaw.agents.loop.get_message_bus")

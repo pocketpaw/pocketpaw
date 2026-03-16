@@ -251,7 +251,9 @@ class AgentLoop:
                         )
                     )
                 except Exception:
-                    pass
+                    logger.exception(
+                        "Failed to write audit log for /kill action",
+                    )
 
                 await self.bus.publish_outbound(
                     OutboundMessage(
@@ -482,7 +484,10 @@ class AgentLoop:
                         )
                     )
             except Exception:
-                pass  # Never let AGENTS.md discovery break the processing pipeline
+                logger.debug(
+                    "AGENTS.md discovery failed (continuing)",
+                    exc_info=True,
+                )
 
             # 2b. Emit thinking event
             # 2b. Periodic identity reinforcement for long conversations.
@@ -583,7 +588,10 @@ class AgentLoop:
                                 total_cost_usd=meta.get("total_cost_usd"),
                             )
                         except Exception:
-                            pass
+                            logger.debug(
+                                "Failed to persist token usage metrics",
+                                exc_info=True,
+                            )
 
                     elif etype == "tool_use":
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
@@ -605,7 +613,11 @@ class AgentLoop:
                                 tool_name, tool_input if isinstance(tool_input, dict) else {}
                             )
                         except Exception:
-                            pass
+                            logger.debug(
+                                "Failed to record recent file tracker event for tool '%s'",
+                                tool_name,
+                                exc_info=True,
+                            )
 
                         # AskUserQuestion — forward the question to the
                         # client so the user can see and answer it.
@@ -753,13 +765,19 @@ class AgentLoop:
                     context={"session_key": session_key},
                 )
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to persist processing error in health engine",
+                    exc_info=True,
+                )
             # Kill the backend on error
             if router is not None:
                 try:
                     await router.stop()
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Failed to stop router cleanly after processing error",
+                        exc_info=True,
+                    )
 
             # Apply output redaction to exception messages
             error_msg = redact_output(f"An error occurred: {str(e)}")
