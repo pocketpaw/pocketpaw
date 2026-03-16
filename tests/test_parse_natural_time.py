@@ -236,3 +236,39 @@ class TestParseNaturalTimeInvalidInputs:
         """Test parsing just a unit without number."""
         result = parse_natural_time("minutes")
         assert result is None
+
+
+class TestParseNaturalTimeWeeks:
+    """Tests for week/weeks support."""
+
+    def test_parse_1_week_with_in(self):
+        """Test parsing 'in 1 week' with in prefix."""
+        result = parse_natural_time("in 1 week")
+        assert result is not None
+        now = datetime.now(result.tzinfo)
+        expected = now + timedelta(weeks=1)
+        assert abs((result - expected).total_seconds()) < 1
+
+    def test_parse_2_weeks_with_in(self):
+        """Test parsing 'in 2 weeks' with in prefix."""
+        result = parse_natural_time("in 2 weeks")
+        assert result is not None
+        now = datetime.now(result.tzinfo)
+        expected = now + timedelta(weeks=2)
+        assert abs((result - expected).total_seconds()) < 1
+
+    def test_parse_3_weeks_without_in(self):
+        """Test parsing '3 weeks' without in prefix."""
+        result = parse_natural_time("3 weeks")
+        assert result is not None
+        now = datetime.now(result.tzinfo)
+        expected = now + timedelta(weeks=3)
+        assert abs((result - expected).total_seconds()) < 1
+
+    def test_parse_1_week_singular_without_in(self):
+        """Test parsing '1 week' singular without in prefix."""
+        result = parse_natural_time("1 week")
+        assert result is not None
+        now = datetime.now(result.tzinfo)
+        expected = now + timedelta(weeks=1)
+        assert abs((result - expected).total_seconds()) < 1

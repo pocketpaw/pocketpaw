@@ -62,7 +62,7 @@ def parse_natural_time(text: str) -> datetime | None:
     """Parse natural language time expressions.
 
     Supports:
-    - "in X minutes/hours/days" or "X minutes/hours/days" (with or without "in")
+    - "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (with or without "in")
     - "at HH:MM" or "at H:MM AM/PM"
     - "tomorrow at HH:MM"
     - Absolute dates/times
