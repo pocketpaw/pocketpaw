@@ -68,17 +68,18 @@ async def cookie_login(request: Request):
 
      # Reject scoped credentials (pp_* includes ppat_*) — they must use bearer auth.
     # Allowing them here would mint a master-equivalent session cookie.
-    if submitted.startswith("pp_"):       logger.warning(
+     if submitted.startswith("pp_"):
+        logger.warning(
             "Rejected scoped credential login attempt (token prefix: %s)",
             submitted[:7] if len(submitted) >= 7 else submitted,
-        )        raise HTTPException(
+        )
+        raise HTTPException(
             status_code=403,
             detail=(
                 "Scoped credentials (API keys and OAuth tokens) cannot be used "
                 "for cookie login. Use bearer authentication instead."
             ),
         )
-
     if submitted != master:
         raise HTTPException(status_code=401, detail="Invalid access token")
 
