@@ -158,3 +158,60 @@ class TestValidateApiKey:
         assert len(result) == 2
         assert isinstance(result[0], bool)
         assert isinstance(result[1], str)
+        
+class TestEnumValidation:
+    """Tests for enum validation on whatsapp_mode and tts_provider — issue #638."""
+
+    def test_valid_whatsapp_mode_personal(self):
+        """whatsapp_mode='personal' should be accepted."""
+        from pocketpaw.config import Settings
+        s = Settings(whatsapp_mode="personal")
+        assert s.whatsapp_mode == "personal"
+
+    def test_valid_whatsapp_mode_business(self):
+        """whatsapp_mode='business' should be accepted."""
+        from pocketpaw.config import Settings
+        s = Settings(whatsapp_mode="business")
+        assert s.whatsapp_mode == "business"
+
+    def test_valid_whatsapp_mode_empty(self):
+        """whatsapp_mode='' (default) should be accepted."""
+        from pocketpaw.config import Settings
+        s = Settings(whatsapp_mode="")
+        assert s.whatsapp_mode == ""
+
+    def test_invalid_whatsapp_mode_raises(self):
+        """whatsapp_mode with invalid value should raise ValidationError."""
+        import pytest
+        from pydantic import ValidationError
+
+        from pocketpaw.config import Settings
+        with pytest.raises(ValidationError):
+            Settings(whatsapp_mode="invalid_mode")
+
+    def test_valid_tts_provider_openai(self):
+        """tts_provider='openai' should be accepted."""
+        from pocketpaw.config import Settings
+        s = Settings(tts_provider="openai")
+        assert s.tts_provider == "openai"
+
+    def test_valid_tts_provider_elevenlabs(self):
+        """tts_provider='elevenlabs' should be accepted."""
+        from pocketpaw.config import Settings
+        s = Settings(tts_provider="elevenlabs")
+        assert s.tts_provider == "elevenlabs"
+
+    def test_valid_tts_provider_sarvam(self):
+        """tts_provider='sarvam' should be accepted."""
+        from pocketpaw.config import Settings
+        s = Settings(tts_provider="sarvam")
+        assert s.tts_provider == "sarvam"
+
+    def test_invalid_tts_provider_raises(self):
+        """tts_provider with invalid value should raise ValidationError."""
+        import pytest
+        from pydantic import ValidationError
+
+        from pocketpaw.config import Settings
+        with pytest.raises(ValidationError):
+            Settings(tts_provider="invalid_provider")

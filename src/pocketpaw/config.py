@@ -15,6 +15,7 @@ import logging
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -439,10 +440,10 @@ class Settings(BaseSettings):
     )
 
     # WhatsApp
-    whatsapp_mode: str = Field(
-        default="",
-        description="WhatsApp mode: 'personal' (QR scan via neonize) or 'business' (Cloud API)",
-    )
+    whatsapp_mode: Literal["", "personal", "business"] = Field(
+    default="",
+    description="WhatsApp mode: 'personal' (QR scan via neonize) or 'business' (Cloud API)",
+)
     whatsapp_neonize_db: str = Field(
         default="",
         description="Path to neonize SQLite credential store",
@@ -593,9 +594,9 @@ class Settings(BaseSettings):
     )
 
     # Voice/TTS
-    tts_provider: str = Field(
-        default="openai", description="TTS provider: 'openai', 'elevenlabs', or 'sarvam'"
-    )
+    tts_provider: Literal["openai", "elevenlabs", "sarvam"] = Field(
+    default="openai", description="TTS provider: 'openai', 'elevenlabs', or 'sarvam'"
+)
     elevenlabs_api_key: str | None = Field(default=None, description="ElevenLabs API key for TTS")
     tts_voice: str = Field(
         default="alloy", description="TTS voice name (OpenAI: alloy/echo/fable/onyx/nova/shimmer)"
