@@ -66,11 +66,12 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
-    # Reject scoped credentials (API keys and OAuth tokens) — they must use
-    # bearer authentication directly. Allowing them here would mint a
-    # master-equivalent session cookie that bypasses require_scope() checks.
-    if submitted.startswith("pp_") or submitted.startswith("ppat_"):
-        raise HTTPException(
+     # Reject scoped credentials (pp_* includes ppat_*) — they must use bearer auth.
+    # Allowing them here would mint a master-equivalent session cookie.
+    if submitted.startswith("pp_"):       logger.warning(
+            "Rejected scoped credential login attempt (token prefix: %s)",
+            submitted[:7] if len(submitted) >= 7 else submitted,
+        )        raise HTTPException(
             status_code=403,
             detail=(
                 "Scoped credentials (API keys and OAuth tokens) cannot be used "
