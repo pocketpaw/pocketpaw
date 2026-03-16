@@ -117,7 +117,12 @@ Respond with valid JSON only:
                 system=self.SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": f"Command: {command}"}],
             )
-
+            if not response.content:
+                logger.warning(
+                    "Guardian received empty response from API — defaulting to DANGEROUS"
+                )
+                return False, "Guardian received empty API response (fail-closed)"
+            
             content = response.content[0].text
             import json
 
