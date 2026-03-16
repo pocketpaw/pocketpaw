@@ -846,8 +846,11 @@ class TestCodexCLIBufferLimit:
             async for event in backend.run("test"):
                 events.append(event)
 
-        # Should not crash; the session completes without raising
-        assert len(events) >= 0  # no exception was raised
+        # Should not crash; yields error + done instead of raising
+        error_events = [e for e in events if e.type == "error"]
+        assert len(error_events) == 1
+        assert "buffer limit" in error_events[0].content
+        assert events[-1].type == "done"
 
 
 class TestCodexCLIRegistry:

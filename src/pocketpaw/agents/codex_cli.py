@@ -358,7 +358,10 @@ class CodexCLIBackend:
             yield AgentEvent(type="done", content="")
 
         except (asyncio.LimitOverrunError, asyncio.IncompleteReadError) as e:
-            logger.warning("Codex CLI output exceeded buffer limit, skipping event: %s", e)
+            logger.warning("Codex CLI session terminated: stdout buffer exceeded: %s", e)
+            self._process = None
+            yield AgentEvent(type="error", content="Codex CLI output exceeded buffer limit")
+            yield AgentEvent(type="done", content="")
         except Exception as e:
             logger.error("Codex CLI error: %s", e)
             yield AgentEvent(type="error", content=f"Codex CLI error: {e}")
