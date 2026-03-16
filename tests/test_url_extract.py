@@ -1,12 +1,17 @@
 # Tests for UrlExtractTool
 # Created: 2026-02-06
 
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from pocketpaw.tools.builtin.url_extract import UrlExtractTool
+from pocketpaw.tools.builtin.url_extract import (
+    UrlExtractTool,
+    _is_private_ip,
+    _validate_url,
+)
 
 
 @pytest.fixture
@@ -316,3 +321,102 @@ class TestUrlExtractTool:
         result = await tool.execute(urls=[])
         assert "Error" in result
         assert "No URLs" in result
+
+
+class TestSSRFHardening:
+    """Tests for SSRF protection in URL extraction."""
+
+    def test_is_private_ip_loopback_ipv4(self):
+        assert _is_private_ip("127.0.0.1") is True
+        assert _is_private_ip("127.0.0.2") is True
+
+    def test_is_private_ip_loopback_ipv6(self):
+        assert _is_private_ip("::1") is True
+
+    def test_is_private_ip_ipv4_mapped_ipv6(self):
+        assert _is_private_ip("::ffff:127.0.0.1") is True
+        assert _is_private_ip("::ffff:192.168.1.1") is True
+
+    def test_is_private_ip_rfc1918(self):
+        assert _is_private_ip("10.0.0.1") is True
+        assert _is_private_ip("172.16.0.1") is True
+        assert _is_private_ip("192.168.0.1") is True
+
+    def test_is_private_ip_link_local(self):
+        assert _is_private_ip("169.254.0.1") is True
+        assert _is_private_ip("169.254.169.254") is True  # AWS metadata
+
+    def test_is_private_ip_multicast(self):
+        assert _is_private_ip("224.0.0.1") is True
+
+    def test_is_private_ip_public(self):
+        assert _is_private_ip("8.8.8.8") is False
+        assert _is_private_ip("1.1.1.1") is False
+
+    def test_is_private_ip_invalid(self):
+        assert _is_private_ip("not-an-ip") is True
+
+    @pytest.mark.asyncio
+    async def test_validate_url_http_scheme(self):
+        await _validate_url("http://example.com")
+
+    @pytest.mark.asyncio
+    async def test_validate_url_https_scheme(self):
+        await _validate_url("https://example.com")
+
+    @pytest.mark.asyncio
+    async def test_validate_url_disallowed_scheme(self):
+        with pytest.raises(ValueError, match="not allowed"):
+            await _validate_url("ftp://example.com")
+
+    @pytest.mark.asyncio
+    async def test_validate_url_loopback_blocked(self):
+        with pytest.raises(ValueError, match="blocked"):
+            await _validate_url("http://127.0.0.1")
+
+    @pytest.mark.asyncio
+    async def test_validate_url_private_blocked(self):
+        with patch("asyncio.get_running_loop") as mock_loop:
+            loop = AsyncMock()
+            mock_loop.return_value = loop
+            loop.getaddrinfo = AsyncMock(
+                return_value=[(2, 1, 6, "", ("192.168.1.1", 80))]
+            )
+            with pytest.raises(ValueError, match="blocked"):
+                await _validate_url("http://private.local")
+
+    @pytest.mark.asyncio
+    async def test_validate_url_unresolvable(self):
+        with patch("asyncio.get_running_loop") as mock_loop:
+            loop = AsyncMock()
+            mock_loop.return_value = loop
+            loop.getaddrinfo = AsyncMock(
+                side_effect=socket.gaierror(11001, "getaddrinfo failed")
+            )
+            with pytest.raises(ValueError, match="cannot be resolved"):
+                await _validate_url("http://this-domain-does-not-exist-12345.test")
+
+    @pytest.mark.asyncio
+    async def test_validate_url_no_hostname(self):
+        with pytest.raises(ValueError, match="no hostname"):
+            await _validate_url("http://")
+
+    @pytest.mark.asyncio
+    async def test_safe_get_too_many_redirects(self):
+        with patch("asyncio.get_running_loop") as mock_loop:
+            loop = AsyncMock()
+            mock_loop.return_value = loop
+            loop.getaddrinfo = AsyncMock(
+                return_value=[(2, 1, 6, "", ("93.184.216.34", 80))]
+            )
+
+            mock_client = AsyncMock()
+            mock_resp = MagicMock()
+            mock_resp.is_redirect = True
+            mock_resp.headers = {"location": "http://example.com/next"}
+            mock_resp.url = MagicMock()
+            mock_resp.url.join = MagicMock(return_value="http://example.com/next")
+            mock_client.get = AsyncMock(return_value=mock_resp)
+
+            with pytest.raises(ValueError, match="Too many redirects"):
+                await UrlExtractTool._safe_get(mock_client, "http://example.com/1")

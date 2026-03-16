@@ -1,6 +1,7 @@
 # URL Extract tool — fetch clean content from URLs via Parallel AI or local fallback.
 # Created: 2026-02-06
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -19,11 +20,19 @@ _MAX_REDIRECTS = 5
 
 
 def _is_private_ip(addr: str) -> bool:
-    """Return True if *addr* resolves to a private/reserved IP address."""
+    """Return True if *addr* resolves to a private/reserved IP address.
+    
+    Handles IPv4-mapped IPv6 addresses (e.g., ::ffff:127.0.0.1).
+    """
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return True  # unparseable → block
+    
+    # Handle IPv4-mapped IPv6 addresses (e.g., ::ffff:127.0.0.1)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    
     return (
         ip.is_private
         or ip.is_loopback
@@ -34,11 +43,14 @@ def _is_private_ip(addr: str) -> bool:
     )
 
 
-def _validate_url(url: str) -> None:
+async def _validate_url(url: str) -> None:
     """Validate a URL against SSRF attacks.
 
     Raises ValueError if the URL targets a private/reserved IP, uses a
     disallowed scheme, or cannot be resolved.
+    
+    Uses non-blocking DNS resolution to avoid blocking the event loop.
+    Does not expose internal IP details to error messages (logged instead).
     """
     parsed = urlparse(url)
 
@@ -53,17 +65,21 @@ def _validate_url(url: str) -> None:
 
     # Resolve hostname to IPs and check every result (prevents DNS rebinding
     # where one A-record is public and another is private).
+    # Use non-blocking DNS resolution to not block the event loop.
     try:
-        addrinfos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        loop = asyncio.get_running_loop()
+        addrinfos = await loop.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise ValueError(f"Cannot resolve hostname '{hostname}': {exc}") from exc
+        logger.warning(f"DNS resolution failed for {hostname}: {exc}")
+        raise ValueError("URL cannot be resolved") from exc
 
     for family, _type, _proto, _canonname, sockaddr in addrinfos:
         ip_str = sockaddr[0]
         if _is_private_ip(ip_str):
-            raise ValueError(
-                f"URL resolves to private/reserved address ({ip_str})"
+            logger.warning(
+                f"SSRF blocked: URL {url} resolves to private/reserved address {ip_str}"
             )
+            raise ValueError("URL resolves to a blocked address")
 
 _PARALLEL_EXTRACT_URL = "https://api.parallel.ai/v1beta/extract"
 _MAX_CONTENT_CHARS = 50_000
@@ -220,9 +236,13 @@ class UrlExtractTool(BaseTool):
 
     @staticmethod
     async def _safe_get(client: httpx.AsyncClient, url: str) -> httpx.Response:
-        """GET *url* with SSRF validation, manually following redirects."""
+        """GET *url* with SSRF validation, manually following redirects.
+        
+        Validates URL and each redirect target before making the request.
+        Does not expose internal IP addresses to the user.
+        """
         for _ in range(_MAX_REDIRECTS):
-            _validate_url(url)
+            await _validate_url(url)
             resp = await client.get(url)
             if resp.is_redirect:
                 location = resp.headers.get("location")
