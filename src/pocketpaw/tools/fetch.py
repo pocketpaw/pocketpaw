@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from pydantic import BaseModel, field_validator
+
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 except ImportError:
@@ -9,11 +11,25 @@ except ImportError:
     InlineKeyboardMarkup = None
 
 
+class FetchRequest(BaseModel):
+    """Validated fetch request with security constraints."""
+
+    path: str
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def validate_path(cls, v: str) -> str:
+        """Validate that path is not empty or whitespace-only."""
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Path string cannot be empty or whitespace.")
+        return v
+
+
 def is_safe_path(path: Path, jail: Path) -> bool:
     """Check if path is within the jail directory."""
     try:
-        path = path.resolve()
-        jail = jail.resolve()
+        path = path.resolve(strict=False)
+        jail = jail.resolve(strict=False)
         return str(path).startswith(str(jail))
     except Exception:
         return False
@@ -24,7 +40,7 @@ def get_directory_keyboard(path: Path, jail: Path | None = None) -> InlineKeyboa
     if jail is None:
         jail = Path.home()
 
-    path = Path(path).resolve()
+    path = Path(path).resolve(strict=False)
 
     if not is_safe_path(path, jail):
         path = jail
@@ -75,7 +91,13 @@ def get_directory_keyboard(path: Path, jail: Path | None = None) -> InlineKeyboa
 
 async def handle_path(path_str: str, jail: Path) -> dict:
     """Handle a path selection - return directory listing or file."""
-    path = Path(path_str).resolve()
+    try:
+        # Validate path string
+        request = FetchRequest(path=path_str)
+    except ValueError as e:
+        return {"type": "error", "message": f"Validation Error: {e}"}
+
+    path = Path(request.path).resolve(strict=False)
 
     if not is_safe_path(path, jail):
         return {"type": "error", "message": "Access denied: path outside allowed directory"}
@@ -90,8 +112,14 @@ async def handle_path(path_str: str, jail: Path) -> dict:
 
 def list_directory(path_str: str, jail_str: str | None = None) -> str:
     """List directory contents as formatted string for web dashboard."""
-    path = Path(path_str).resolve()
-    jail = Path(jail_str).resolve() if jail_str else Path.home()
+    try:
+        # Validate path string
+        request = FetchRequest(path=path_str)
+    except ValueError as e:
+        return f"⛔ Validation Error: {e}"
+
+    path = Path(request.path).resolve(strict=False)
+    jail = Path(jail_str).resolve(strict=False) if jail_str else Path.home()
 
     if not is_safe_path(path, jail):
         return "⛔ Access denied: path outside allowed directory"
