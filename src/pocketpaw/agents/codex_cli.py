@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 # Only allow safe characters in model names to prevent shell injection
 _MODEL_NAME_RE = re.compile(r"^[\w\-.:]+$")
 
+# 10 MiB buffer for subprocess stdout. Codex CLI emits NDJSON events that can
+# exceed the asyncio default of 64 KiB (e.g., large MCP tool results from
+# Playwright, code completions, etc.).
+_SUBPROCESS_BUFFER_LIMIT = 10 * 1024 * 1024
+
 
 class CodexCLIBackend:
     """Codex CLI backend — subprocess wrapper for OpenAI's terminal AI agent."""
@@ -178,6 +183,7 @@ class CodexCLIBackend:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=proc_env,
+                    limit=_SUBPROCESS_BUFFER_LIMIT,
                 )
             else:
                 self._process = await asyncio.create_subprocess_exec(
@@ -187,6 +193,7 @@ class CodexCLIBackend:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=proc_env,
+                    limit=_SUBPROCESS_BUFFER_LIMIT,
                 )
 
             # Feed the prompt via stdin and close to signal EOF
@@ -350,6 +357,11 @@ class CodexCLIBackend:
             self._process = None
             yield AgentEvent(type="done", content="")
 
+        except (asyncio.LimitOverrunError, asyncio.IncompleteReadError) as e:
+            logger.warning("Codex CLI session terminated: stdout buffer exceeded: %s", e)
+            self._process = None
+            yield AgentEvent(type="error", content="Codex CLI output exceeded buffer limit")
+            yield AgentEvent(type="done", content="")
         except Exception as e:
             logger.error("Codex CLI error: %s", e)
             yield AgentEvent(type="error", content=f"Codex CLI error: {e}")

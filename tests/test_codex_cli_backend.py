@@ -763,6 +763,96 @@ class TestCodexCLIValidation:
         assert "segfault" in errors[0].content
 
 
+class TestCodexCLIBufferLimit:
+    def test_buffer_limit_constant(self):
+        from pocketpaw.agents.codex_cli import _SUBPROCESS_BUFFER_LIMIT
+
+        # Must be larger than the asyncio default of 64 KiB
+        assert _SUBPROCESS_BUFFER_LIMIT > 65536
+        assert _SUBPROCESS_BUFFER_LIMIT == 10 * 1024 * 1024
+
+    @pytest.mark.asyncio
+    @patch("shutil.which", return_value="/usr/bin/codex")
+    async def test_subprocess_receives_buffer_limit(self, mock_which):
+        """Verify create_subprocess passes the increased buffer limit."""
+        from pocketpaw.agents.codex_cli import _SUBPROCESS_BUFFER_LIMIT, CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+        captured_kwargs = {}
+
+        async def capture_exec(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return _make_mock_process([])
+
+        with patch(_SUBPROCESS_PATCH, side_effect=capture_exec):
+            async for _ in backend.run("test"):
+                pass
+
+        assert "limit" in captured_kwargs
+        assert captured_kwargs["limit"] == _SUBPROCESS_BUFFER_LIMIT
+
+    @pytest.mark.asyncio
+    @patch("shutil.which", return_value="/usr/bin/codex")
+    async def test_handles_large_mcp_output(self, mock_which):
+        """Large MCP tool results (>64 KiB) should be parsed without error."""
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+        # Simulate a large MCP tool result (100 KiB of content)
+        large_output = "x" * (100 * 1024)
+        item = {
+            "id": "item_mcp",
+            "type": "mcp_tool_call",
+            "name": "playwright_snapshot",
+            "output": large_output,
+        }
+        mock_proc = _make_mock_process(
+            [
+                _ev({"type": "item.completed", "item": item}),
+            ]
+        )
+
+        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
+            events = []
+            async for event in backend.run("browse page"):
+                events.append(event)
+
+        results = [e for e in events if e.type == "tool_result"]
+        assert len(results) == 1
+        assert results[0].metadata["name"] == "playwright_snapshot"
+
+    @pytest.mark.asyncio
+    @patch("shutil.which", return_value="/usr/bin/codex")
+    async def test_limit_overrun_recovers_gracefully(self, mock_which):
+        """When output exceeds even the increased limit, the session continues."""
+        import asyncio as _asyncio
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+
+        class _OverrunIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise _asyncio.LimitOverrunError("chunk is longer than limit", 0)
+
+        mock_proc = _make_mock_process([])
+        mock_proc.stdout = _OverrunIterator()
+
+        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
+            events = []
+            async for event in backend.run("test"):
+                events.append(event)
+
+        # Should not crash; yields error + done instead of raising
+        error_events = [e for e in events if e.type == "error"]
+        assert len(error_events) == 1
+        assert "buffer limit" in error_events[0].content
+        assert events[-1].type == "done"
+
+
 class TestCodexCLIRegistry:
     def test_registered_in_backend_registry(self):
         from pocketpaw.agents.registry import get_backend_class
