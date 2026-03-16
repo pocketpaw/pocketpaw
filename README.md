@@ -223,6 +223,19 @@ Agent-created files appear in `./workspace/` on the host. Optional profiles: `--
 
 The web dashboard opens at `http://localhost:8888`. From there you can connect Discord, Slack, WhatsApp, or Telegram.
 
+### 🔑 Setting up your first API key
+
+If the dashboard shows **UNHEALTHY** on first run, PocketPaw is usually installed correctly — it just needs at least one model provider key.
+
+1. Open **Settings → API Keys** in the dashboard.
+2. Add a key for at least one provider:
+   - Anthropic: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
+   - OpenAI: [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+   - Google Gemini: [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+3. Save settings and retry your chat.
+
+Prefer a free local option? Use Ollama instead (see [Features](#features) and [Configuration](#configuration)).
+
 ---
 
 ## Features
