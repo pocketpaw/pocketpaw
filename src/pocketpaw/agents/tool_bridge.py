@@ -65,6 +65,17 @@ def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
             tools.append(cls())
         except Exception as exc:
             logger.debug("Skipping tool %s: %s", class_name, exc)
+
+    # Inject soul tools if soul is active
+    try:
+        from pocketpaw.soul.manager import get_soul_manager
+
+        soul_mgr = get_soul_manager()
+        if soul_mgr is not None:
+            tools.extend(soul_mgr.get_tools())
+    except Exception:
+        pass  # Soul not available
+
     return tools
 
 
@@ -105,10 +116,20 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
             continue
 
         defn = tool.definition
+
+        # Sanitize JSON schema: strict providers (e.g. Groq) reject schemas
+        # where 'required' is present but 'properties' is empty or missing.
+        params_schema = dict(defn.parameters) if defn.parameters else {"type": "object"}
+        props = params_schema.get("properties")
+        if not props and "required" in params_schema:
+            params_schema.pop("required")
+        if not props and "properties" in params_schema:
+            params_schema.pop("properties")
+
         ft = FunctionTool(
             name=defn.name,
             description=defn.description,
-            params_json_schema=defn.parameters,
+            params_json_schema=params_schema,
             on_invoke_tool=_make_invoke_callback(tool),
         )
         function_tools.append(ft)

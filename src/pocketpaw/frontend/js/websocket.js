@@ -253,7 +253,12 @@ class PocketPawSocket {
             mem0_vector_store: settings.mem0VectorStore,
             mem0_ollama_base_url: settings.mem0OllamaBaseUrl,
             web_host: settings.webHost,
-            web_port: parseInt(settings.webPort) || 8888
+            web_port: parseInt(settings.webPort) || 8888,
+            soul_enabled: settings.soulEnabled,
+            soul_name: settings.soulName,
+            soul_archetype: settings.soulArchetype,
+            soul_persona: settings.soulPersona,
+            soul_auto_save_interval: settings.soulAutoSaveInterval,
         });
     }
 

@@ -51,3 +51,10 @@ class RecentFilesResponse(BaseModel):
     """List of recently accessed files."""
 
     files: list[RecentFileEntry] = []
+
+
+class WriteFileRequest(BaseModel):
+    """Request to overwrite a file's content."""
+
+    path: str
+    content: str

@@ -72,6 +72,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "RunPythonTool": (".python_exec", "RunPythonTool"),
     "InstallPackageTool": (".pip_install", "InstallPackageTool"),
     "DeliverArtifactTool": (".deliver", "DeliverArtifactTool"),
+    "DiscordCLITool": (".discord", "DiscordCLITool"),
 }
 
 

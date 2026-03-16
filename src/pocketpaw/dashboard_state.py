@@ -123,7 +123,7 @@ _CHANNEL_REQUIRED: dict[str, list[str]] = {
 
 # Maps channel name → (import_module, display_package, pip_spec)
 _CHANNEL_DEPS: dict[str, tuple[str, str, str]] = {
-    "discord": ("discord.ext.commands", "discord.py", "pocketpaw[discord]"),
+    "discord": ("discli", "discord-cli-agent", "pocketpaw[discord]"),
     "slack": ("slack_bolt", "slack-bolt", "pocketpaw[slack]"),
     "whatsapp": ("neonize", "neonize", "pocketpaw[whatsapp-personal]"),
     "telegram": ("telegram.ext", "python-telegram-bot", "pocketpaw[telegram]"),

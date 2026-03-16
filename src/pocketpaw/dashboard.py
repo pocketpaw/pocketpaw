@@ -1679,10 +1679,9 @@ def run_dashboard(
             import socket
 
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect(("8.8.8.8", 80))
+                    local_ip = s.getsockname()[0]
             except Exception:
                 local_ip = "<your-server-ip>"
             print(f"\n🌐 Open http://{local_ip}:{port} in your browser")

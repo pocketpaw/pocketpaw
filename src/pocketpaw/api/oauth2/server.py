@@ -135,7 +135,7 @@ class AuthorizationServer:
                 scope=auth_code.scope,
             )
         except Exception:
-            pass
+            logger.warning("Failed to write audit log for OAuth2 token exchange", exc_info=True)
 
         return {
             "access_token": access_token,

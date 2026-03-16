@@ -26,6 +26,7 @@ from pocketpaw.tools.builtin import (
     CreateSkillTool,
     DelegateToClaudeCodeTool,
     DeleteSessionTool,
+    DiscordCLITool,
     DocsCreateTool,
     DocsReadTool,
     DocsSearchTool,
@@ -120,6 +121,7 @@ _TOOLS = {
         ErrorLogTool(),
         ConfigDoctorTool(),
         OpenExplorerTool(),
+        DiscordCLITool(),
     ]
 }
 
