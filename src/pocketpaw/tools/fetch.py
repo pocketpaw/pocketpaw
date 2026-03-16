@@ -14,7 +14,9 @@ except ImportError:
 
 class FetchRequest(BaseModel):
     path_str: str = Field(..., description="The path to explore. Cannot be empty.")
-    jail_str: str | None = Field(None, description="The strictly enforced jail directory. If None, falls back to home.")
+    jail_str: str | None = Field(
+        None, description="The strictly enforced jail directory. If None, falls back to home."
+    )
     limit: int = Field(20, ge=1, le=100, description="Number of items to return.")
 
     @field_validator("path_str", mode="before")
@@ -101,7 +103,9 @@ def get_directory_keyboard(
     return InlineKeyboardMarkup(buttons)
 
 
-async def handle_path(path_str: str | Path, jail: str | Path | None = None, limit: int = 20) -> dict:
+async def handle_path(
+    path_str: str | Path, jail: str | Path | None = None, limit: int = 20
+) -> dict:
     """Handle a path selection - return directory listing or file."""
     try:
         req = FetchRequest(path_str=path_str, jail_str=jail, limit=limit)
@@ -129,7 +133,9 @@ async def handle_path(path_str: str | Path, jail: str | Path | None = None, limi
         return {"type": "error", "message": "Path does not exist"}
 
 
-def list_directory(path_str: str | Path, jail_str: str | Path | None = None, limit: int = 30) -> str:
+def list_directory(
+    path_str: str | Path, jail_str: str | Path | None = None, limit: int = 30
+) -> str:
     """List directory contents as formatted string for web dashboard."""
     try:
         req = FetchRequest(path_str=path_str, jail_str=jail_str, limit=limit)
