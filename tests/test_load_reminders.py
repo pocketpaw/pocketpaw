@@ -43,14 +43,15 @@ class TestLoadRemindersCorruptJSON:
         assert any("corrupted" in record.message.lower() for record in caplog.records)
 
     def test_corrupt_json_creates_bak_file(self, tmp_path):
-        """Corrupt reminders.json should be renamed to reminders.json.bak."""
+        """Corrupt reminders.json should be renamed to a timestamped .bak file."""
         reminders_file = tmp_path / "reminders.json"
         reminders_file.write_text("{bad json:")
 
         with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
             load_reminders()
 
-        assert (tmp_path / "reminders.json.bak").exists()
+        bak_files = list(tmp_path.glob("reminders.json.bak.*"))
+        assert len(bak_files) == 1
         assert not reminders_file.exists()
 
     def test_missing_file_returns_empty_list(self, tmp_path):
@@ -71,3 +72,23 @@ class TestLoadRemindersCorruptJSON:
             result = load_reminders()
 
         assert result == []
+
+    def test_second_corruption_creates_new_bak_file(self, tmp_path):
+        """Second corruption event should create a new timestamped .bak, not overwrite."""
+        import time
+
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text("{bad json:")
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            load_reminders()
+
+        time.sleep(1)
+
+        # Simulate second corruption
+        reminders_file.write_text("{bad json again:")
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            load_reminders()
+
+        bak_files = list(tmp_path.glob("reminders.json.bak.*"))
+        assert len(bak_files) == 2
