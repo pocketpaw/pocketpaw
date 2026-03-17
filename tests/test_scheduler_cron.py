@@ -196,3 +196,56 @@ class TestReminderFileCorruption:
             scheduler.start()
         assert scheduler.reminders == []
         mock_save.assert_not_called()
+
+    def test_load_reminders_quarantines_non_dict_root(self, tmp_path):
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text("[]", encoding="utf-8")
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            with pytest.raises(RemindersCorruptError):
+                load_reminders()
+
+        backups = list(tmp_path.glob("reminders.json.corrupt-*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == "[]"
+        assert not reminders_file.exists()
+
+    def test_load_reminders_quarantines_non_utf8_bytes(self, tmp_path):
+        reminders_file = tmp_path / "reminders.json"
+        raw = b"\xff\xfe\xfa"
+        reminders_file.write_bytes(raw)
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            with pytest.raises(RemindersCorruptError):
+                load_reminders()
+
+        backups = list(tmp_path.glob("reminders.json.corrupt-*"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == raw
+        assert not reminders_file.exists()
+
+    def test_load_reminders_quarantines_invalid_reminder_entry_schema(self, tmp_path):
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text(
+            json.dumps({"reminders": ["oops"], "updated_at": datetime.now().isoformat()}),
+            encoding="utf-8",
+        )
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            with pytest.raises(RemindersCorruptError):
+                load_reminders()
+
+        backups = list(tmp_path.glob("reminders.json.corrupt-*"))
+        assert len(backups) == 1
+        assert not reminders_file.exists()
+
+    def test_load_reminders_creates_unique_quarantine_files(self, tmp_path):
+        reminders_file = tmp_path / "reminders.json"
+        for _ in range(2):
+            reminders_file.write_text("{bad json", encoding="utf-8")
+            with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+                with pytest.raises(RemindersCorruptError):
+                    load_reminders()
+
+        backups = list(tmp_path.glob("reminders.json.corrupt-*"))
+        assert len(backups) == 2

@@ -45,8 +45,8 @@ def get_reminders_path() -> Path:
 
 def _quarantine_corrupt_reminders(path: Path) -> Path | None:
     """Move a corrupt reminders file aside so users can recover it manually."""
-    timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
-    backup = path.with_name(f"{path.name}.corrupt-{timestamp}")
+    timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-%f")
+    backup = path.with_name(f"{path.name}.corrupt-{timestamp}-{uuid.uuid4().hex[:8]}")
     try:
         path.replace(backup)
         return backup
@@ -55,39 +55,76 @@ def _quarantine_corrupt_reminders(path: Path) -> Path | None:
         return None
 
 
+def _signal_corrupt_reminders(path: Path, reason: str, *, cause: Exception | None = None) -> None:
+    """Quarantine a corrupt reminders file and raise a typed corruption error."""
+    backup = _quarantine_corrupt_reminders(path)
+    if backup:
+        logger.error("%s in %s; moved to %s for recovery", reason, path, backup)
+    else:
+        logger.error("%s in %s", reason, path)
+
+    msg = f"{reason} in {path}"
+    if cause is not None:
+        raise RemindersCorruptError(msg) from cause
+    raise RemindersCorruptError(msg)
+
+
+def _validate_reminder_entry_schema(reminder: object, index: int) -> str | None:
+    """Return an error message when a reminder entry is malformed."""
+    if not isinstance(reminder, dict):
+        return f"Reminder entry at index {index} is not an object"
+
+    reminder_id = reminder.get("id")
+    if not isinstance(reminder_id, str) or not reminder_id.strip():
+        return f"Reminder entry at index {index} is missing a valid 'id'"
+
+    text = reminder.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return f"Reminder entry at index {index} is missing a valid 'text'"
+
+    trigger_at = reminder.get("trigger_at")
+    if not isinstance(trigger_at, str):
+        return f"Reminder entry at index {index} is missing a valid 'trigger_at'"
+    try:
+        datetime.fromisoformat(trigger_at)
+    except (TypeError, ValueError):
+        return f"Reminder entry at index {index} has invalid 'trigger_at' format"
+
+    reminder_type = reminder.get("type", "one-shot")
+    if reminder_type not in ("one-shot", "recurring"):
+        return f"Reminder entry at index {index} has invalid 'type': {reminder_type!r}"
+
+    if reminder_type == "recurring":
+        schedule = reminder.get("schedule")
+        if not isinstance(schedule, str) or not schedule.strip():
+            return f"Recurring reminder at index {index} is missing a valid 'schedule'"
+
+    return None
+
+
 def load_reminders() -> list[dict]:
     """Load reminders from file."""
     path = get_reminders_path()
     if path.exists():
         try:
-            data = json.loads(path.read_text())
-        except json.JSONDecodeError as exc:
-            backup = _quarantine_corrupt_reminders(path)
-            if backup:
-                logger.error(
-                    "Corrupt reminders JSON at %s; moved to %s for recovery",
-                    path,
-                    backup,
-                )
-            else:
-                logger.error("Corrupt reminders JSON at %s", path)
-            raise RemindersCorruptError(f"Corrupt reminders JSON at {path}") from exc
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            _signal_corrupt_reminders(path, "Corrupt reminders JSON", cause=exc)
         except OSError:
             logger.exception("Failed to read reminders file %s", path)
             return []
 
-        reminders = data.get("reminders", []) if isinstance(data, dict) else []
+        if not isinstance(data, dict):
+            _signal_corrupt_reminders(path, "Invalid reminders payload root (expected JSON object)")
+
+        reminders = data.get("reminders", [])
         if not isinstance(reminders, list):
-            backup = _quarantine_corrupt_reminders(path)
-            if backup:
-                logger.error(
-                    "Invalid reminders payload in %s; moved to %s for recovery",
-                    path,
-                    backup,
-                )
-            else:
-                logger.error("Invalid reminders payload in %s", path)
-            raise RemindersCorruptError(f"Invalid reminders payload in {path}")
+            _signal_corrupt_reminders(path, "Invalid reminders payload (expected list)")
+
+        for index, reminder in enumerate(reminders):
+            validation_error = _validate_reminder_entry_schema(reminder, index)
+            if validation_error:
+                _signal_corrupt_reminders(path, validation_error)
         return reminders
     return []
 
