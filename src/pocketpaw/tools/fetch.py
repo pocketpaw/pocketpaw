@@ -39,10 +39,10 @@ class FetchRequest(BaseModel):
         """Resolve path and jail, checking against path traversal."""
         path_obj = Path(self.path_str).resolve(strict=False)
         jail_obj = Path(self.jail_str).resolve(strict=False)
-        
+
         if not is_safe_path(path_obj, jail_obj):
             raise ValueError("Access denied: path outside allowed directory or does not exist")
-            
+
         return path_obj, jail_obj
 
 
@@ -112,9 +112,7 @@ def get_directory_keyboard(
     return InlineKeyboardMarkup(buttons)
 
 
-async def handle_path(
-    path_str: str | Path, jail: str | Path, limit: int = 20
-) -> dict:
+async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -> dict:
     """Handle a path selection - return directory listing or file."""
     try:
         req = FetchRequest(
@@ -140,9 +138,7 @@ async def handle_path(
         return {"type": "error", "message": "Path does not exist"}
 
 
-def list_directory(
-    path_str: str | Path, jail_str: str | Path, limit: int = 20
-) -> str:
+def list_directory(path_str: str | Path, jail_str: str | Path, limit: int = 20) -> str:
     """List directory contents as formatted string for web dashboard."""
     try:
         req = FetchRequest(
