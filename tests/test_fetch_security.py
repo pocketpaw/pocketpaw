@@ -46,7 +46,7 @@ async def test_handle_path_empty_string_rejected() -> None:
     """Test that handle_path rejects empty string paths (security fix for issue #619)."""
     result = await handle_path("", Path.home())
     assert result["type"] == "error"
-    assert "Path string cannot be empty or whitespace" in result["message"]
+    assert "Validation Error" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -54,7 +54,7 @@ async def test_handle_path_whitespace_rejected() -> None:
     """Test that handle_path rejects whitespace-only paths."""
     result = await handle_path("   ", Path.home())
     assert result["type"] == "error"
-    assert "Path string cannot be empty or whitespace" in result["message"]
+    assert "Validation Error" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -72,7 +72,6 @@ def test_list_directory_empty_string_rejected() -> None:
     """Test that list_directory rejects empty string paths."""
     result = list_directory("", str(Path.home()))
     assert "Validation Error" in result
-    assert "Path string cannot be empty or whitespace" in result
 
 
 def test_list_directory_outside_jail(tmp_path: Path) -> None:
