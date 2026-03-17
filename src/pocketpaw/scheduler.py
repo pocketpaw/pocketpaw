@@ -40,14 +40,28 @@ def get_reminders_path() -> Path:
 
 
 def load_reminders() -> list[dict]:
-    """Load reminders from file."""
+    """Load reminders from file.
+
+    If the file is corrupted, logs a warning and renames it to
+    reminders.json.bak so the user can manually recover their data.
+    """
     path = get_reminders_path()
     if path.exists():
         try:
             data = json.loads(path.read_text())
             return data.get("reminders", [])
         except Exception:
-            pass
+            logger.warning(
+                "Failed to load reminders from %s - file may be corrupted. "
+                "Backing up to %s.bak and starting with empty reminders.",
+                path,
+                path,
+                exc_info=True,
+            )
+            try:
+                path.rename(path.with_suffix(".json.bak"))
+            except Exception:
+                logger.debug("Failed to back up corrupted reminders file", exc_info=True)
     return []
 
 
