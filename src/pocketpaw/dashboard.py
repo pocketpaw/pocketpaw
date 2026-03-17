@@ -99,22 +99,11 @@ from pocketpaw.deep_work.api import router as deep_work_router
 from pocketpaw.memory import MemoryType, get_memory_manager
 from pocketpaw.mission_control.api import router as mission_control_router
 from pocketpaw.security import get_audit_logger
-from pocketpaw.security.redact import redact_output
+from pocketpaw.security.redact import safe_install_error
 from pocketpaw.skills import get_skill_loader
 from pocketpaw.tunnel import get_tunnel_manager
 
 logger = logging.getLogger(__name__)
-
-_INSTALL_ERROR_MAX_LEN = 4000
-
-
-def _safe_install_error(stderr: bytes) -> str:
-    """Redact and cap installer stderr before returning to API clients."""
-    raw = stderr.decode(errors="replace").strip()
-    redacted = redact_output(raw)
-    if len(redacted) > _INSTALL_ERROR_MAX_LEN:
-        return redacted[:_INSTALL_ERROR_MAX_LEN] + "\n...[truncated]"
-    return redacted
 
 # Module-level uvicorn server reference (set by run_dashboard, read by restart_server)
 _uvicorn_server = None
@@ -752,14 +741,14 @@ async def install_backend(request: Request):
     )
 
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
     except TimeoutError:
         process.kill()
         await process.communicate()
         return {"error": f"Install failed: timed out while installing {pip_spec}"}
 
     if process.returncode != 0:
-        err = _safe_install_error(stderr)
+        err = safe_install_error(stderr)
         return {"error": f"Failed to install {pip_spec}:\n{err}"}
 
     try:

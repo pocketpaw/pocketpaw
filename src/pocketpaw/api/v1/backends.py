@@ -11,22 +11,12 @@ import shutil
 from fastapi import APIRouter, Depends, Request
 
 from pocketpaw.api.deps import require_scope
-from pocketpaw.security.redact import redact_output
+from pocketpaw.security.redact import safe_install_error
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Backends"])
 
-_INSTALL_ERROR_MAX_LEN = 4000
-
-
-def _safe_install_error(stderr: bytes) -> str:
-    """Redact and cap installer stderr before returning to API clients."""
-    raw = stderr.decode(errors="replace").strip()
-    redacted = redact_output(raw)
-    if len(redacted) > _INSTALL_ERROR_MAX_LEN:
-        return redacted[:_INSTALL_ERROR_MAX_LEN] + "\n...[truncated]"
-    return redacted
 
 _CLI_BINARY: dict[str, str] = {
     "codex_cli": "codex",
@@ -143,7 +133,7 @@ async def install_backend(request: Request):
         return {"error": f"Install failed: timed out while installing {pip_spec}"}
 
     if process.returncode != 0:
-        err = _safe_install_error(stderr)
+        err = safe_install_error(stderr)
         return {"error": f"Failed to install {pip_spec}:\n{err}"}
 
     try:

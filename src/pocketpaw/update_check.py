@@ -9,6 +9,7 @@ Cache stored in ~/.pocketpaw/.update_check so the result is shared between
 CLI launches and the dashboard API.
 """
 
+import atexit
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _HTTP_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="update-check")
+atexit.register(_HTTP_EXECUTOR.shutdown, wait=False)
 
 PYPI_URL = "https://pypi.org/pypi/pocketpaw/json"
 CACHE_FILENAME = ".update_check"
@@ -225,19 +227,6 @@ def fetch_release_notes(version: str, config_dir: Path) -> dict | None:
     except Exception:
         logger.debug("Failed to fetch release notes for v%s", version, exc_info=True)
         return None
-
-
-async def fetch_release_notes_async(version: str, config_dir: Path) -> dict | None:
-    """Async wrapper for release notes fetch to avoid blocking event loops."""
-    import asyncio
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _HTTP_EXECUTOR,
-        fetch_release_notes,
-        version,
-        config_dir,
-    )
 
 
 def get_last_seen_version(config_dir: Path) -> str | None:
