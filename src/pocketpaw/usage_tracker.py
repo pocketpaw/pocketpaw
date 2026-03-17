@@ -162,7 +162,8 @@ class UsageTracker:
             return []
         records: list[UsageRecord] = []
         try:
-            lines = self._path.read_text().strip().split("\n")
+            with self._lock:
+                lines = self._path.read_text().strip().split("\n")
             for line in reversed(lines):
                 if len(records) >= limit:
                     break
@@ -187,7 +188,9 @@ class UsageTracker:
             return []
         records: list[UsageRecord] = []
         try:
-            for line in self._path.read_text().splitlines():
+            with self._lock:
+                raw = self._path.read_text()
+            for line in raw.splitlines():
                 if not line.strip():
                     continue
                 try:

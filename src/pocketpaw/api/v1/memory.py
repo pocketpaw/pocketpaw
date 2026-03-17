@@ -96,7 +96,7 @@ async def save_memory_settings(request: Request):
             setattr(settings, settings_field, value)
 
     settings.save()
-    get_settings.cache_clear()
+    get_settings(force_reload=True)
     get_memory_manager(force_reload=True)
     return StatusResponse()
 

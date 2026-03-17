@@ -1647,7 +1647,7 @@ async def save_memory_settings(request: Request):
     # Clear settings cache so memory manager picks up new values
     from pocketpaw.config import get_settings as _get_settings
 
-    _get_settings.cache_clear()
+    _get_settings(force_reload=True)
 
     # Force reload the memory manager with fresh settings
     from pocketpaw.memory import get_memory_manager

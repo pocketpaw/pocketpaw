@@ -516,7 +516,7 @@ async def websocket_handler(
                 # Clear settings cache so memory manager picks up new values
                 from pocketpaw.config import get_settings as _get_settings
 
-                _get_settings.cache_clear()
+                _get_settings(force_reload=True)
 
                 # Reload memory manager with fresh settings
                 agent_loop.memory = get_memory_manager(force_reload=True)

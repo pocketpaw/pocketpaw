@@ -146,10 +146,13 @@ def redact_output(text: str) -> str:
     for pattern_name, pattern in REDACT_PATTERNS:
         # Check if pattern has capture groups
         if pattern.groups > 0:
-            # For patterns with capture groups, only replace the captured group
-            def replace_captured(match):
+            # For patterns with capture groups, only replace the captured group.
+            # NOTE: bind `_pattern` as a default argument to capture its value at
+            # definition time — a plain closure would close over the loop variable
+            # by *reference* and always see the last iteration's pattern.
+            def replace_captured(match, _pattern=pattern):
                 result = match.group(0)
-                for i in range(1, pattern.groups + 1):
+                for i in range(1, _pattern.groups + 1):
                     group_value = match.group(i)
                     if group_value:
                         result = result.replace(group_value, "[REDACTED]")

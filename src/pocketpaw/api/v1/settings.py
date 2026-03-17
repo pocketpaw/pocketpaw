@@ -70,7 +70,7 @@ async def update_settings(request: Request):
             if hasattr(settings, key) and not key.startswith("_"):
                 setattr(settings, key, value)
         settings.save()
-        get_settings.cache_clear()
+        get_settings(force_reload=True)
 
     # Sync user_display_name into USER.md so the agent knows the user's name
     if "user_display_name" in settings_data and settings_data["user_display_name"]:

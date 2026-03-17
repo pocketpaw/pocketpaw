@@ -31,6 +31,7 @@ _COMMANDS = frozenset(
         "/model",
         "/tools",
         "/kill",
+        "/converse",
     }
 )
 
@@ -67,6 +68,8 @@ class CommandHandler:
         self._on_settings_changed: Callable[[], None] | None = None
         # Optional agent loop for /kill (set by app startup when loop is running)
         self._agent_loop: object | None = None
+        # Per-session-key conversation mode toggle
+        self._converse_mode: dict[str, bool] = {}
 
     def set_agent_loop(self, loop: object | None) -> None:
         """Set the agent loop instance for session-scoped /kill. Pass None to clear."""
@@ -132,6 +135,8 @@ class CommandHandler:
             return self._cmd_help(message)
         elif cmd == "/kill":
             return await self._cmd_kill(message, session_key)
+        elif cmd == "/converse":
+            return self._cmd_converse(message, session_key)
         return None
 
     # ------------------------------------------------------------------
@@ -236,7 +241,8 @@ class CommandHandler:
         matches = [
             s
             for s in sessions
-            if query_lower in s["title"].lower() or query_lower in s["preview"].lower()
+            if query_lower in (s.get("title") or "").lower()
+            or query_lower in (s.get("preview") or "").lower()
         ]
 
         if not matches:
@@ -476,7 +482,7 @@ class CommandHandler:
 
         settings.agent_backend = name
         settings.save()
-        get_settings.cache_clear()
+        get_settings(force_reload=True)
         self._notify_settings_changed()
 
         return OutboundMessage(
@@ -517,7 +523,7 @@ class CommandHandler:
         new_model = args.strip()
         setattr(settings, model_field, new_model)
         settings.save()
-        get_settings.cache_clear()
+        get_settings(force_reload=True)
         self._notify_settings_changed()
 
         return OutboundMessage(
@@ -567,7 +573,7 @@ class CommandHandler:
 
         settings.tool_profile = name
         settings.save()
-        get_settings.cache_clear()
+        get_settings(force_reload=True)
         self._notify_settings_changed()
 
         return OutboundMessage(
@@ -634,6 +640,30 @@ class CommandHandler:
             chat_id=message.chat_id,
             content="No active agent run for this session.",
         )
+
+    # ------------------------------------------------------------------
+    # /converse
+    # ------------------------------------------------------------------
+
+    def _cmd_converse(self, message: InboundMessage, session_key: str) -> OutboundMessage:
+        """Toggle conversation mode for this session.
+
+        When conversation mode is ON the agent responds to every message
+        without requiring the /paw prefix.  When OFF only explicit
+        /paw <message> invocations reach the agent.
+        """
+        current = self._converse_mode.get(session_key, False)
+        self._converse_mode[session_key] = not current
+        state = "ON" if not current else "OFF"
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content=f"Conversation mode is now **{state}** for this session.",
+        )
+
+    def is_converse_mode(self, session_key: str) -> bool:
+        """Return True if conversation mode is currently enabled for *session_key*."""
+        return self._converse_mode.get(session_key, False)
 
 
 # Singleton

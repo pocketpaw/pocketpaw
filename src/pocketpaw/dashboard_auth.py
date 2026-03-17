@@ -14,7 +14,7 @@ import logging
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from pocketpaw.config import Settings, get_access_token, regenerate_token
+from pocketpaw.config import Settings, get_access_token, get_settings, regenerate_token
 from pocketpaw.dashboard_state import _LOCALHOST_ADDRS, _PROXY_HEADERS
 from pocketpaw.security.rate_limiter import api_limiter, auth_limiter
 from pocketpaw.security.session_tokens import create_session_token, verify_session_token
@@ -40,7 +40,7 @@ def _is_genuine_localhost(request_or_ws) -> bool:
     The ``localhost_auth_bypass`` setting (default True) controls whether genuine
     localhost connections skip auth.  Set to False to require tokens everywhere.
     """
-    settings = Settings.load()
+    settings = get_settings()
     if not settings.localhost_auth_bypass:
         return False
 
@@ -323,7 +323,7 @@ async def exchange_session_token(request: Request):
     if bearer != master:
         return JSONResponse(status_code=401, content={"detail": "Invalid master token"})
 
-    settings = Settings.load()
+    settings = get_settings()
     session_token = create_session_token(master, ttl_hours=settings.session_token_ttl_hours)
     return {"session_token": session_token, "expires_in_hours": settings.session_token_ttl_hours}
 

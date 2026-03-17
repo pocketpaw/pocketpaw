@@ -865,12 +865,22 @@ class Settings(BaseSettings):
         return cls()
 
 
-@lru_cache
-def get_settings(force_reload: bool = False) -> Settings:
-    """Get cached settings instance."""
-    if force_reload:
-        get_settings.cache_clear()
+@lru_cache(maxsize=1)
+def _get_settings_cached() -> Settings:
+    """Internal cached loader — use get_settings() externally."""
     return Settings.load()
+
+
+def get_settings(force_reload: bool = False) -> Settings:
+    """Get cached settings instance.
+
+    Pass ``force_reload=True`` to discard the cache and re-read settings
+    from disk.  This correctly invalidates the single shared cache entry
+    regardless of how subsequent callers invoke ``get_settings()``.
+    """
+    if force_reload:
+        _get_settings_cached.cache_clear()
+    return _get_settings_cached()
 
 
 def get_access_token() -> str:
@@ -938,6 +948,15 @@ def _migrate_plaintext_keys() -> None:
 
     if migrated_count:
         logger.info("Copied %d secret(s) from config to encrypted store.", migrated_count)
+        # Strip the now-encrypted secrets from config.json so they don't
+        # remain as plaintext on disk.
+        safe_data = {k: v for k, v in data.items() if k not in SECRET_FIELDS}
+        try:
+            config_path.write_text(json.dumps(safe_data, indent=2))
+            _chmod_safe(config_path, 0o600)
+            logger.info("Stripped %d secret(s) from config.json after migration.", migrated_count)
+        except OSError as e:
+            logger.warning("Could not rewrite config.json after migration: %s", e)
 
     _MIGRATION_DONE_PATH.write_text("1")
     _chmod_safe(_MIGRATION_DONE_PATH, 0o600)

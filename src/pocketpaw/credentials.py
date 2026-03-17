@@ -170,10 +170,12 @@ class CredentialStore:
         except (InvalidToken, json.JSONDecodeError, Exception) as exc:
             logger.warning(
                 "Failed to decrypt secrets.enc (machine changed? corrupted?): %s. "
-                "Starting with empty credential store.",
+                "Returning empty credential store for this call; will retry on next access.",
                 exc,
             )
-            self._cache = {}
+            # Do NOT set self._cache — leave it as None so subsequent calls
+            # retry the read (the file may be restored/corrected at runtime).
+            return {}
 
         return self._cache
 

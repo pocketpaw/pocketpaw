@@ -15,7 +15,6 @@ class TunnelManager:
         self.port = port
         self.process: asyncio.subprocess.Process | None = None
         self.public_url: str | None = None
-        self._shutdown_event = asyncio.Event()
 
     def is_installed(self) -> bool:
         """Check if cloudflared is installed."""
@@ -108,10 +107,11 @@ class TunnelManager:
         # Regex to find: https://[random].trycloudflare.com
         url_pattern = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 
-        start_time = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
 
         while True:
-            if asyncio.get_event_loop().time() - start_time > timeout:
+            if loop.time() - start_time > timeout:
                 raise TimeoutError("Timed out waiting for Cloudflare Tunnel URL")
 
             if self.process.returncode is not None:
