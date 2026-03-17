@@ -32,11 +32,27 @@ def _ensure_utc(dt: datetime) -> datetime:
 logger = logging.getLogger(__name__)
 
 
+class RemindersCorruptError(RuntimeError):
+    """Raised when the reminders file exists but cannot be safely parsed."""
+
+
 def get_reminders_path() -> Path:
     """Get the reminders file path."""
     config_dir = Path.home() / ".pocketpaw"
     config_dir.mkdir(exist_ok=True)
     return config_dir / "reminders.json"
+
+
+def _quarantine_corrupt_reminders(path: Path) -> Path | None:
+    """Move a corrupt reminders file aside so users can recover it manually."""
+    timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.corrupt-{timestamp}")
+    try:
+        path.replace(backup)
+        return backup
+    except OSError:
+        logger.exception("Failed to move corrupt reminders file %s", path)
+        return None
 
 
 def load_reminders() -> list[dict]:
@@ -45,9 +61,34 @@ def load_reminders() -> list[dict]:
     if path.exists():
         try:
             data = json.loads(path.read_text())
-            return data.get("reminders", [])
-        except Exception:
-            pass
+        except json.JSONDecodeError as exc:
+            backup = _quarantine_corrupt_reminders(path)
+            if backup:
+                logger.error(
+                    "Corrupt reminders JSON at %s; moved to %s for recovery",
+                    path,
+                    backup,
+                )
+            else:
+                logger.error("Corrupt reminders JSON at %s", path)
+            raise RemindersCorruptError(f"Corrupt reminders JSON at {path}") from exc
+        except OSError:
+            logger.exception("Failed to read reminders file %s", path)
+            return []
+
+        reminders = data.get("reminders", []) if isinstance(data, dict) else []
+        if not isinstance(reminders, list):
+            backup = _quarantine_corrupt_reminders(path)
+            if backup:
+                logger.error(
+                    "Invalid reminders payload in %s; moved to %s for recovery",
+                    path,
+                    backup,
+                )
+            else:
+                logger.error("Invalid reminders payload in %s", path)
+            raise RemindersCorruptError(f"Invalid reminders payload in {path}")
+        return reminders
     return []
 
 
@@ -168,7 +209,13 @@ class ReminderScheduler:
             return
 
         self.callback = callback
-        self.reminders = load_reminders()
+        load_failed = False
+        try:
+            self.reminders = load_reminders()
+        except RemindersCorruptError:
+            # Keep scheduler running, but do not overwrite the corrupt file.
+            self.reminders = []
+            load_failed = True
 
         # Schedule self-audit daemon if enabled
         self._schedule_self_audit()
@@ -192,7 +239,12 @@ class ReminderScheduler:
                     logger.info(f"Skipping past reminder: {reminder['id']}")
 
         self.reminders = active_reminders
-        save_reminders(self.reminders)
+        if load_failed:
+            logger.warning(
+                "Skipping reminders write on startup because reminders file failed to load"
+            )
+        else:
+            save_reminders(self.reminders)
 
         self.scheduler.start()
         self._started = True

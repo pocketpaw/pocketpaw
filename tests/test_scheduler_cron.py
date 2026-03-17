@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pocketpaw.scheduler import ReminderScheduler
+from pocketpaw.scheduler import ReminderScheduler, RemindersCorruptError, load_reminders
 
 
 @pytest.fixture
@@ -172,3 +172,27 @@ class TestCronExpressionSupport:
             assert len(scheduler.reminders) == 0
 
             scheduler.stop()
+
+
+class TestReminderFileCorruption:
+    def test_load_reminders_quarantines_corrupt_json(self, tmp_path):
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text("{bad json", encoding="utf-8")
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            with pytest.raises(RemindersCorruptError):
+                load_reminders()
+
+        backups = list(tmp_path.glob("reminders.json.corrupt-*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == "{bad json"
+        assert not reminders_file.exists()
+
+    @patch("pocketpaw.scheduler.save_reminders")
+    @patch("pocketpaw.scheduler.load_reminders", side_effect=RemindersCorruptError("bad json"))
+    def test_start_does_not_overwrite_when_load_is_corrupt(self, mock_load, mock_save):
+        scheduler = ReminderScheduler()
+        with patch.object(scheduler.scheduler, "start"):
+            scheduler.start()
+        assert scheduler.reminders == []
+        mock_save.assert_not_called()
