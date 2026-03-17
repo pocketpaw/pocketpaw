@@ -81,7 +81,7 @@ Respond with valid JSON only:
             is_safe, reason = self._local_safety_check(command)
             severity = AuditSeverity.INFO if is_safe else AuditSeverity.ALERT
             logger.warning(
-                "Guardian LLM unavailable (no API key). Local safety check: %s — %s",
+                "Guardian LLM unavailable (no API key). Local safety check: %s - %s",
                 "allow" if is_safe else "block",
                 reason,
             )
@@ -122,7 +122,21 @@ Respond with valid JSON only:
                     "Guardian received empty response from API — defaulting to DANGEROUS"
                 )
                 return False, "Guardian received empty API response (fail-closed)"
-            
+
+            if not response.content:
+                self._audit.log(
+                    AuditEvent.create(
+                        severity=AuditSeverity.ALERT,
+                        actor="guardian",
+                        action="scan_result",
+                        target="shell",
+                        status="block",
+                        reason="Empty safety response",
+                        command=command,
+                    )
+                )
+                return False, "Guardian received empty response from API, defaulting to block"
+
             content = response.content[0].text
             import json
 

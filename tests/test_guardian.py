@@ -9,8 +9,10 @@ from pocketpaw.security.guardian import GuardianAgent
 
 @pytest.fixture
 def guardian():
-    with patch("pocketpaw.security.guardian.get_settings"), \
-         patch("pocketpaw.security.guardian.get_audit_logger"):
+    with (
+        patch("pocketpaw.security.guardian.get_settings"),
+        patch("pocketpaw.security.guardian.get_audit_logger"),
+    ):
         agent = GuardianAgent()
         agent.client = MagicMock()
         return agent
