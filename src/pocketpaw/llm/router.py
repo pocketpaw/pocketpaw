@@ -139,6 +139,9 @@ class LLMRouter:
             ],
         )
 
+        if not response.choices:
+            logger.warning("OpenAI returned empty choices — returning fallback")
+            return "I'm sorry, I received an empty response. Please try again."
         return response.choices[0].message.content
 
     async def _chat_anthropic(self, message: str) -> str:
@@ -157,6 +160,9 @@ class LLMRouter:
             messages=self.conversation_history,
         )
 
+        if not response.content:
+            logger.warning("Anthropic returned empty content — returning fallback")
+            return "I'm sorry, I received an empty response. Please try again."
         return response.content[0].text
 
     def clear_history(self) -> None:
