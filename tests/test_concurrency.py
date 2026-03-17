@@ -315,6 +315,41 @@ async def test_file_memory_store_session_lock(tmp_path):
     assert contents == {f"message {i}" for i in range(10)}
 
 
+async def test_file_memory_store_permission_error_retry(tmp_path):
+    """Session save retries replace on transient PermissionError and succeeds."""
+    from pocketpaw.memory.file_store import FileMemoryStore
+    from pocketpaw.memory.protocol import MemoryEntry, MemoryType
+
+    store = FileMemoryStore(base_path=tmp_path)
+    session_key = "retry_session"
+    session_file = store._get_session_file(session_key)
+
+    original_replace = type(session_file).replace
+    call_count = {"n": 0}
+
+    def flaky_replace(self, target):
+        if self == session_file.with_suffix(".tmp") and call_count["n"] == 0:
+            call_count["n"] += 1
+            raise PermissionError("file busy")
+        return original_replace(self, target)
+
+    entry = MemoryEntry(
+        id="entry-retry",
+        type=MemoryType.SESSION,
+        content="retry me",
+        role="user",
+        session_key=session_key,
+    )
+
+    with patch.object(type(session_file), "replace", new=flaky_replace):
+        await store._save_session_entry(entry)
+
+    data = json.loads(session_file.read_text(encoding="utf-8"))
+    assert len(data) == 1
+    assert data[0]["content"] == "retry me"
+    assert call_count["n"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 7. Config — max_concurrent_conversations field
 # ---------------------------------------------------------------------------
