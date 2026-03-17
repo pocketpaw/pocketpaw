@@ -118,12 +118,6 @@ Respond with valid JSON only:
                 messages=[{"role": "user", "content": f"Command: {command}"}],
             )
             if not response.content:
-                logger.warning(
-                    "Guardian received empty response from API — defaulting to DANGEROUS"
-                )
-                return False, "Guardian received empty API response (fail-closed)"
-
-            if not response.content:
                 self._audit.log(
                     AuditEvent.create(
                         severity=AuditSeverity.ALERT,
@@ -134,6 +128,9 @@ Respond with valid JSON only:
                         reason="Empty safety response",
                         command=command,
                     )
+                )
+                logger.warning(
+                    "Guardian received empty response from API - defaulting to DANGEROUS"
                 )
                 return False, "Guardian received empty response from API, defaulting to block"
 

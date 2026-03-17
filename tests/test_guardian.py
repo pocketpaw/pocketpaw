@@ -1,4 +1,4 @@
-"""Tests for GuardianAgent — security/guardian.py"""
+"""Tests for GuardianAgent - security/guardian.py"""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,7 +19,7 @@ def guardian():
 
 
 class TestGuardianEmptyResponse:
-    """Tests for fix: issue #636 — empty API response causes IndexError."""
+    """Tests for fix: issue #636 - empty API response causes IndexError."""
 
     @pytest.mark.asyncio
     async def test_empty_content_returns_dangerous(self, guardian):
