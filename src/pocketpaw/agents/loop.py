@@ -765,7 +765,7 @@ class AgentLoop:
                     context={"session_key": session_key},
                 )
             except Exception:
-                logger.debug(
+                logger.warning(
                     "Failed to persist processing error in health engine",
                     exc_info=True,
                 )
@@ -774,7 +774,7 @@ class AgentLoop:
                 try:
                     await router.stop()
                 except Exception:
-                    logger.debug(
+                    logger.warning(
                         "Failed to stop router cleanly after processing error",
                         exc_info=True,
                     )

@@ -735,3 +735,282 @@ async def test_stop_cancels_gc_task():
         await loop.stop()
 
         assert loop._lock_gc_task is None, "stop() must clear _lock_gc_task"
+
+
+# ---------------------------------------------------------------------------
+# PR #658 reviewer suggestions: surface swallowed exceptions
+# ---------------------------------------------------------------------------
+
+
+def _make_loop_with_settings(mock_get_bus, mock_get_memory, mock_builder_cls):
+    """Helper to build an AgentLoop with standard mock settings."""
+    from pocketpaw.agents.loop import AgentLoop
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_get_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_get_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+        return AgentLoop()
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_agents_md_discovery_failure_is_silently_logged(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+    mock_router,
+    caplog,
+):
+    """AGENTS.md discovery failure must be caught and logged at DEBUG, not crash the loop."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+    mock_router_cls.return_value = mock_router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+        patch(
+            "pocketpaw.agents_md.AgentsMdLoader.find_and_load",
+            side_effect=RuntimeError("disk error"),
+        ),
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+        msg = InboundMessage(
+            channel=Channel.CLI,
+            sender_id="user1",
+            chat_id="chat1",
+            content="Hello",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="pocketpaw.agents.loop"):
+            await loop._process_message(msg)
+
+    # The loop must complete (publish stream-end) despite the AGENTS.md error.
+    outbound_calls = [str(c) for c in mock_bus.publish_outbound.call_args_list]
+    assert any("is_stream_end" in c for c in outbound_calls), (
+        "Loop must still publish stream-end even when AGENTS.md discovery raises"
+    )
+    assert any(
+        "AGENTS.md discovery failed" in r.message for r in caplog.records
+    ), "AGENTS.md failure must be logged"
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_token_metrics_persist_failure_is_logged_at_debug(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+    caplog,
+):
+    """A crash inside the usage-tracker record() path must be caught and logged, not re-raised."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    token_router = MagicMock()
+
+    async def mock_run_with_token_usage(
+        message, *, system_prompt=None, history=None, session_key=None
+    ):
+        yield AgentEvent(
+            type="token_usage",
+            content="",
+            metadata={
+                "backend": "claude_agent_sdk",
+                "model": "claude-3-haiku",
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cached_input_tokens": 0,
+                "total_cost_usd": 0.001,
+            },
+        )
+        yield AgentEvent(type="done", content="")
+
+    token_router.run = mock_run_with_token_usage
+    token_router.stop = AsyncMock()
+    mock_router_cls.return_value = token_router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+        patch(
+            "pocketpaw.usage_tracker.get_usage_tracker",
+            side_effect=RuntimeError("tracker unavailable"),
+        ),
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+        msg = InboundMessage(
+            channel=Channel.CLI,
+            sender_id="user1",
+            chat_id="chat1",
+            content="Tokens please",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="pocketpaw.agents.loop"):
+            await loop._process_message(msg)
+
+    # Loop must still complete.
+    outbound_calls = [str(c) for c in mock_bus.publish_outbound.call_args_list]
+    assert any("is_stream_end" in c for c in outbound_calls), (
+        "Loop must publish stream-end even when usage tracker raises"
+    )
+    assert any(
+        "token usage metrics" in r.message for r in caplog.records
+    ), "Token metrics failure must be logged"
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_health_engine_persist_failure_logged_as_warning(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+    caplog,
+):
+    """When the health engine itself raises, the failure must be logged at WARNING level."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    # Router that raises an exception, triggering the health engine path.
+    boom_router = MagicMock()
+
+    async def mock_run_boom(message, *, system_prompt=None, history=None, session_key=None):
+        raise RuntimeError("simulated router crash")
+        yield  # make it an async generator
+
+    boom_router.run = mock_run_boom
+    boom_router.stop = AsyncMock()
+    mock_router_cls.return_value = boom_router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+        patch(
+            "pocketpaw.health.get_health_engine",
+            side_effect=RuntimeError("health engine down"),
+        ),
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+        msg = InboundMessage(
+            channel=Channel.CLI,
+            sender_id="user1",
+            chat_id="chat1",
+            content="Crash me",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.agents.loop"):
+            await loop._process_message(msg)
+
+    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("health engine" in m for m in warning_messages), (
+        "Health engine persist failure must be logged at WARNING"
+    )
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_router_stop_failure_logged_as_warning(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+    caplog,
+):
+    """router.stop() failure during error handling must be logged at WARNING, not swallowed."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    flaky_router = MagicMock()
+
+    async def mock_run_boom(message, *, system_prompt=None, history=None, session_key=None):
+        raise RuntimeError("router processing error")
+        yield  # make it an async generator
+
+    flaky_router.run = mock_run_boom
+    flaky_router.stop = AsyncMock(side_effect=OSError("stop failed"))
+    mock_router_cls.return_value = flaky_router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+        msg = InboundMessage(
+            channel=Channel.CLI,
+            sender_id="user1",
+            chat_id="chat1",
+            content="Crash me",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.agents.loop"):
+            await loop._process_message(msg)
+
+    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("router" in m.lower() or "stop" in m.lower() for m in warning_messages), (
+        "router.stop() failure must be logged at WARNING level"
+    )
