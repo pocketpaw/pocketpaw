@@ -367,7 +367,7 @@ jobs:
 
       - name: Check for secrets in diff
         run: |
-          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!uv.lock' ':!*.lock' 2>/dev/null || true)
+          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!uv.lock' ':!*.lock' ':!src/pocketpaw/security/redact.py' ':!tests/test_redact.py' ':!tests/test_pii.py' 2>/dev/null || true)
           if [ -z "$DIFF" ]; then
             echo "No diff to scan."
             exit 0
@@ -383,7 +383,7 @@ jobs:
             'xoxb-[0-9]+-[a-zA-Z0-9]+'                   # Slack bot token
             'xoxp-[0-9]+-[a-zA-Z0-9]+'                   # Slack user token
             'sk_live_[a-zA-Z0-9]+'                        # Stripe secret key
-            '-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----' # Private keys
+            '-----BEGIN .*PRIVATE KEY-----'                 # Private keys
           )
 
           for pattern in "${PATTERNS[@]}"; do

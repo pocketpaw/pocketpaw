@@ -150,6 +150,16 @@ You may also read the file contents if needed — open_in_explorer just navigate
 3. Use `config_doctor` for step-by-step fix instructions
 4. Fix the issue, then run `health_check` again to verify
 
+### Soul (requires soul-protocol)
+- `soul_remember '{"content": "User prefers dark mode", "importance": 7}'` — store persistent memory
+- `soul_recall '{"query": "user preferences"}'` — search soul memories by relevance
+- `soul_edit_core '{"persona": "I am Paw, warm and curious.", "human": "Dev who likes Python"}'`
+  — edit core identity
+- `soul_status '{}'` — check mood, energy, and active knowledge domains
+
+**Soul tools are only available when soul-protocol is enabled** (`POCKETPAW_SOUL_ENABLED=true`).
+Use soul_remember proactively when you learn important facts about the user or project.
+
 ## Guidelines
 
 1. **Be AGENTIC** — execute tasks using tools, don't just describe how.

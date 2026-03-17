@@ -1,5 +1,6 @@
-# Filesystem tools.
+# Filesystem tools - ReadFileTool, WriteFileTool, ListDirTool, EditFileTool.
 # Created: 2026-02-02
+# Modified: 2026-03-12 - Added EditFileTool for find-and-replace file editing
 
 
 from pathlib import Path
@@ -179,5 +180,97 @@ class ListDirTool(BaseTool):
 
             return "\n".join(items)
 
+        except Exception as e:
+            return self._error(str(e))
+
+
+class EditFileTool(BaseTool):
+    """Edit a file by replacing an exact string match with new content."""
+
+    @property
+    def name(self) -> str:
+        return "edit_file"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Edit a file by replacing an exact string match with new content. "
+            "The old_string must appear exactly once in the file for the edit to succeed, "
+            "unless replace_all is set to true."
+        )
+
+    @property
+    def trust_level(self) -> str:
+        return "standard"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "The exact text to find and replace",
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "The replacement text",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace all occurrences instead of requiring uniqueness",
+                    "default": False,
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
+        }
+
+    async def execute(
+        self,
+        path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> str:
+        """Edit a file by replacing old_string with new_string."""
+        try:
+            file_path = Path(path).expanduser().resolve()
+
+            # Security: check file jail
+            jail = get_settings().file_jail_path.resolve()
+            if not is_safe_path(file_path, jail):
+                return self._error(f"Access denied: {path} is outside allowed directory")
+
+            if not file_path.exists():
+                return self._error(f"File not found: {path}")
+
+            if not file_path.is_file():
+                return self._error(f"Not a file: {path}")
+
+            content = file_path.read_text(encoding="utf-8")
+
+            count = content.count(old_string)
+
+            if count == 0:
+                return self._error("old_string not found in file")
+
+            if not replace_all and count > 1:
+                return self._error(
+                    f"old_string appears {count} times. Provide more context to make it "
+                    f"unique, or set replace_all=true"
+                )
+
+            new_content = content.replace(old_string, new_string)
+            file_path.write_text(new_content, encoding="utf-8")
+
+            replacements = count if replace_all else 1
+            return f"Successfully made {replacements} replacement(s) in {path}"
+
+        except UnicodeDecodeError:
+            return self._error(f"Cannot read {path}: not a text file or wrong encoding")
         except Exception as e:
             return self._error(str(e))

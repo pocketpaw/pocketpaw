@@ -44,7 +44,7 @@ async def _start_channel_adapter(channel: str, settings: Settings | None = None)
     if channel == "discord":
         if not settings.discord_bot_token:
             return False
-        from pocketpaw.bus.adapters.discord_adapter import DiscordAdapter
+        from pocketpaw.bus.adapters.discord_adapter import DiscliAdapter as DiscordAdapter
 
         adapter = DiscordAdapter(
             token=settings.discord_bot_token,
@@ -600,12 +600,44 @@ async def toggle_channel(request: Request):
             return {"error": f"{channel} is already running"}
         if not _channel_is_configured(channel, settings):
             return {"error": f"{channel} is not configured — save tokens first"}
+
+        # Some adapters (like Discord/discli) take a long time to connect.
+        # Start those in the background so the HTTP response returns fast.
+        _SLOW_START_CHANNELS = {"discord"}
+
+        if channel in _SLOW_START_CHANNELS:
+            # Check for missing deps before launching background task
+            dep = _CHANNEL_DEPS.get(channel)
+            if dep:
+                import_mod, package, pip_spec = dep
+                if not _is_module_importable(import_mod):
+                    return {
+                        "missing_dep": True,
+                        "channel": channel,
+                        "package": package,
+                        "pip_spec": pip_spec,
+                    }
+
+            async def _bg_start():
+                try:
+                    await _start_channel_adapter(channel, settings)
+                    logger.info(f"{channel.title()} adapter started via dashboard")
+                except Exception as e:
+                    logger.error(f"Failed to start {channel}: {e}")
+
+            asyncio.create_task(_bg_start())
+
+            return {
+                "channel": channel,
+                "starting": True,
+                "configured": _channel_is_configured(channel, settings),
+                "running": False,
+            }
+
         try:
             await _start_channel_adapter(channel, settings)
             logger.info(f"{channel.title()} adapter started via dashboard")
         except ImportError:
-            # Missing optional dependency — return structured response so the
-            # frontend can show the install modal instead of a generic error.
             dep = _CHANNEL_DEPS.get(channel)
             if dep:
                 _mod, package, pip_spec = dep

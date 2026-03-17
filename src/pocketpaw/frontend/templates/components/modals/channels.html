@@ -15,7 +15,7 @@
   x-transition.opacity
   @click.self="showChannels = false"
 >
-<div class="w-full max-w-[720px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" style="height: min(600px, 85vh);" @click.stop>
+<div class="relative w-full max-w-[720px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" style="height: min(600px, 85vh);" @click.stop>
 
     <!-- Header -->
     <div class="flex items-center justify-between px-5 py-3.5 border-b border-[var(--glass-border)] shrink-0">
@@ -178,7 +178,7 @@
                         <div class="flex flex-col gap-2">
                             <div class="flex items-center gap-2">
                                 <label class="text-[13px] font-medium text-[var(--text-secondary)]">Access Control</label>
-                                <span class="text-[11px] text-white/30">(also via /allowchannel, /allowuser)</span>
+                                <span class="text-[11px] text-white/30">(comma-separated Discord IDs)</span>
                             </div>
                             <div class="flex flex-col gap-3 p-3 bg-black/20 rounded-[12px] border border-white/[0.06]">
                                 <div class="flex flex-col gap-1">
@@ -620,4 +620,46 @@
         </div>
     </div>
 </div>
+</div>
+
+<!-- Confirm Dialog Modal (replaces native confirm()) -->
+<div
+    class="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-md p-4"
+    x-show="confirmDialog !== null"
+    x-transition.opacity
+    @click.self="dismissConfirmDialog()"
+    @keydown.escape.window="dismissConfirmDialog()"
+>
+    <div
+        class="w-full max-w-[400px] flex flex-col bg-[#1c1c1e]/98 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.2s_ease-out] overflow-hidden"
+        @click.stop
+    >
+        <!-- Header -->
+        <div class="flex items-center gap-3 px-6 pt-6 pb-3">
+            <div class="w-9 h-9 rounded-full bg-[var(--warning-color)]/15 flex items-center justify-center shrink-0">
+                <i data-lucide="alert-triangle" class="w-5 h-5 text-[var(--warning-color)]"></i>
+            </div>
+            <h3 class="text-[16px] font-semibold" x-text="confirmDialog?.title ?? 'Confirm'"></h3>
+        </div>
+        <!-- Body -->
+        <p
+            class="px-6 pb-6 text-[13px] text-[var(--text-secondary)] leading-relaxed whitespace-pre-line"
+            x-text="confirmDialog?.message ?? ''"
+        ></p>
+        <!-- Actions -->
+        <div class="flex gap-2 px-6 pb-6">
+            <button
+                class="flex-1 py-2.5 rounded-[10px] bg-white/8 hover:bg-white/12 text-[13px] font-medium transition-all active:scale-95 text-white/70"
+                @click="dismissConfirmDialog()"
+            >
+                Cancel
+            </button>
+            <button
+                class="flex-1 py-2.5 rounded-[10px] bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-[13px] font-medium transition-all active:scale-95 text-white"
+                @click="confirmDialogAction()"
+            >
+                Confirm
+            </button>
+        </div>
+    </div>
 </div>

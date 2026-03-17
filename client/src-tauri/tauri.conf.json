@@ -54,7 +54,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: asset: https://tauri.localhost; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://tauri.localhost data:",
+      "csp": "default-src 'self' tauri: asset: https://tauri.localhost; connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://tauri.localhost data:",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPDATA/**", "$RESOURCE/**"]

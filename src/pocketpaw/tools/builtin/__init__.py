@@ -7,6 +7,7 @@
 #   - 2026-02-09: Added STT, Drive, Docs, Spotify, OCR, Reddit tools
 #   - 2026-02-09: Converted to lazy __getattr__ to avoid ImportError when optional deps missing
 #   - 2026-02-17: Added HealthCheckTool, ErrorLogTool, ConfigDoctorTool for health engine
+#   - 2026-03-12: Added EditFileTool, RunPythonTool, InstallPackageTool (issue #581)
 
 import importlib as _importlib
 
@@ -16,6 +17,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ReadFileTool": (".filesystem", "ReadFileTool"),
     "WriteFileTool": (".filesystem", "WriteFileTool"),
     "ListDirTool": (".filesystem", "ListDirTool"),
+    "EditFileTool": (".filesystem", "EditFileTool"),
     "BrowserTool": (".browser", "BrowserTool"),
     "RememberTool": (".memory", "RememberTool"),
     "RecallTool": (".memory", "RecallTool"),
@@ -67,6 +69,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "OpenExplorerTool": (".explorer", "OpenExplorerTool"),
     "DirectoryTreeTool": (".tree", "DirectoryTreeTool"),
     "SystemInfoTool": (".sysinfo", "SystemInfoTool"),
+    "RunPythonTool": (".python_exec", "RunPythonTool"),
+    "InstallPackageTool": (".pip_install", "InstallPackageTool"),
+    "DeliverArtifactTool": (".deliver", "DeliverArtifactTool"),
+    "DiscordCLITool": (".discord", "DiscordCLITool"),
 }
 
 
