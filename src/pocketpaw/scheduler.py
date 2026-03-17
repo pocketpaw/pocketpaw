@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -55,7 +56,9 @@ def _quarantine_corrupt_reminders(path: Path) -> Path | None:
         return None
 
 
-def _signal_corrupt_reminders(path: Path, reason: str, *, cause: Exception | None = None) -> None:
+def _signal_corrupt_reminders(
+    path: Path, reason: str, *, cause: Exception | None = None
+) -> NoReturn:
     """Quarantine a corrupt reminders file and raise a typed corruption error."""
     backup = _quarantine_corrupt_reminders(path)
     if backup:
@@ -92,7 +95,12 @@ def _validate_reminder_entry_schema(reminder: object, index: int) -> str | None:
 
     reminder_type = reminder.get("type", "one-shot")
     if reminder_type not in ("one-shot", "recurring"):
-        return f"Reminder entry at index {index} has invalid 'type': {reminder_type!r}"
+        # Unknown types may be valid in future versions — warn and treat as one-shot.
+        logger.warning(
+            "Reminder entry at index %d has unrecognised 'type': %r — treating as one-shot",
+            index,
+            reminder_type,
+        )
 
     if reminder_type == "recurring":
         schedule = reminder.get("schedule")
@@ -121,11 +129,27 @@ def load_reminders() -> list[dict]:
         if not isinstance(reminders, list):
             _signal_corrupt_reminders(path, "Invalid reminders payload (expected list)")
 
+        valid_reminders: list[dict] = []
         for index, reminder in enumerate(reminders):
             validation_error = _validate_reminder_entry_schema(reminder, index)
             if validation_error:
-                _signal_corrupt_reminders(path, validation_error)
-        return reminders
+                logger.warning(
+                    "Skipping malformed reminder entry at index %d: %s", index, validation_error
+                )
+            else:
+                valid_reminders.append(reminder)
+
+        skipped = len(reminders) - len(valid_reminders)
+        if skipped:
+            logger.warning(
+                "Loaded %d valid reminder(s) from %s; skipped %d malformed entr%s",
+                len(valid_reminders),
+                path,
+                skipped,
+                "y" if skipped == 1 else "ies",
+            )
+
+        return valid_reminders
     return []
 
 
@@ -133,7 +157,7 @@ def save_reminders(reminders: list[dict]) -> None:
     """Save reminders to file."""
     path = get_reminders_path()
     data = {"reminders": reminders, "updated_at": datetime.now(tz=UTC).isoformat()}
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def parse_natural_time(text: str) -> datetime | None:

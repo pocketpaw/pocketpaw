@@ -225,19 +225,104 @@ class TestReminderFileCorruption:
         assert not reminders_file.exists()
 
     def test_load_reminders_quarantines_invalid_reminder_entry_schema(self, tmp_path):
+        """A fully-corrupt list root (a bare string) still quarantines."""
         reminders_file = tmp_path / "reminders.json"
         reminders_file.write_text(
             json.dumps({"reminders": ["oops"], "updated_at": datetime.now().isoformat()}),
             encoding="utf-8",
         )
 
+        # "oops" is not a dict — malformed entry is skipped, file is NOT quarantined
         with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
-            with pytest.raises(RemindersCorruptError):
-                load_reminders()
+            result = load_reminders()
 
+        assert result == []
+        # File should still be present (not quarantined — partial corruption only skips entries)
+        assert reminders_file.exists()
         backups = list(tmp_path.glob("reminders.json.corrupt-*"))
-        assert len(backups) == 1
-        assert not reminders_file.exists()
+        assert len(backups) == 0
+
+    def test_load_reminders_partial_corruption_keeps_valid_entries(self, tmp_path):
+        """Valid entries are kept when only some entries are malformed."""
+        good_entry = {
+            "id": "good-1",
+            "text": "Valid reminder",
+            "trigger_at": "2099-01-01T09:00:00",
+            "type": "one-shot",
+        }
+        bad_entry = {"id": "", "text": ""}  # missing valid id and text
+
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text(
+            json.dumps(
+                {"reminders": [good_entry, bad_entry], "updated_at": datetime.now().isoformat()}
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            result = load_reminders()
+
+        assert len(result) == 1
+        assert result[0]["id"] == "good-1"
+        assert reminders_file.exists()
+
+    def test_load_reminders_oserror_returns_empty_list(self, tmp_path):
+        """OSError on read returns an empty list without raising."""
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text("{}", encoding="utf-8")
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            with patch.object(
+                reminders_file.__class__, "read_text", side_effect=OSError("disk error")
+            ):
+                result = load_reminders()
+
+        assert result == []
+
+    def test_load_reminders_quarantine_failure_still_raises(self, tmp_path):
+        """Even if the quarantine move fails, RemindersCorruptError is still raised."""
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text("{bad json", encoding="utf-8")
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            with patch("pocketpaw.scheduler._quarantine_corrupt_reminders", return_value=None):
+                with pytest.raises(RemindersCorruptError):
+                    load_reminders()
+
+    def test_load_reminders_skips_recurring_missing_schedule(self, tmp_path):
+        """Recurring reminder missing 'schedule' is skipped, not quarantined."""
+        bad_recurring = {
+            "id": "bad-recurring",
+            "text": "No schedule",
+            "trigger_at": "2099-01-01T09:00:00",
+            "type": "recurring",
+            # 'schedule' field intentionally omitted
+        }
+        good_entry = {
+            "id": "good-1",
+            "text": "Valid reminder",
+            "trigger_at": "2099-01-01T09:00:00",
+            "type": "one-shot",
+        }
+
+        reminders_file = tmp_path / "reminders.json"
+        reminders_file.write_text(
+            json.dumps(
+                {
+                    "reminders": [bad_recurring, good_entry],
+                    "updated_at": datetime.now().isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("pocketpaw.scheduler.get_reminders_path", return_value=reminders_file):
+            result = load_reminders()
+
+        assert len(result) == 1
+        assert result[0]["id"] == "good-1"
+        assert reminders_file.exists()
 
     def test_load_reminders_creates_unique_quarantine_files(self, tmp_path):
         reminders_file = tmp_path / "reminders.json"
