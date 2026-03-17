@@ -15,8 +15,11 @@ import logging
 import httpx
 
 from pocketpaw.config import Settings
+from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 
 logger = logging.getLogger(__name__)
+
+_FALLBACK = "I'm sorry, I received an empty response. Please try again."
 
 
 class LLMRouter:
@@ -26,6 +29,24 @@ class LLMRouter:
     (claude_agent_sdk, pocketpaw_native, open_interpreter) have their own
     LLM clients. Use this for lightweight one-off completions.
     """
+
+    def _empty_response_fallback(self, provider: str) -> str:
+        """Log and return fallback for empty LLM responses."""
+        logger.warning(
+            "LLM router received empty response from %s, returning fallback",
+            provider,
+        )
+        audit = get_audit_logger()
+        audit.log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor="llm_router",
+                action="empty_response",
+                target=provider,
+                status="error",
+            )
+        )
+        return _FALLBACK
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -140,9 +161,11 @@ class LLMRouter:
         )
 
         if not response.choices:
-            logger.warning("OpenAI returned empty choices — returning fallback")
-            return "I'm sorry, I received an empty response. Please try again."
-        return response.choices[0].message.content
+            return self._empty_response_fallback("openai")
+        content = response.choices[0].message.content
+        if content is None:
+            return self._empty_response_fallback("openai")
+        return content
 
     async def _chat_anthropic(self, message: str) -> str:
         """Chat via Anthropic."""
@@ -161,8 +184,7 @@ class LLMRouter:
         )
 
         if not response.content:
-            logger.warning("Anthropic returned empty content — returning fallback")
-            return "I'm sorry, I received an empty response. Please try again."
+            return self._empty_response_fallback("anthropic")
         return response.content[0].text
 
     def clear_history(self) -> None:
