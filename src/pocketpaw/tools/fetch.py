@@ -46,27 +46,12 @@ class FetchRequest(BaseModel):
         return path_obj, jail_obj
 
 
-def get_directory_keyboard(
-    path: Path | str, jail: Path | str, limit: int = 20
+def _get_directory_keyboard_resolved(
+    path_obj: Path, jail_obj: Path, limit: int = 20
 ) -> "InlineKeyboardMarkup | None":
-    """Generate inline keyboard for directory contents."""
+    """Internal: generate inline keyboard from already-validated Path objects."""
     if InlineKeyboardMarkup is None:
         return None
-
-    try:
-        req = FetchRequest(
-            path_str=str(path),
-            jail_str=str(jail),
-            limit=limit,
-        )
-        path_obj, jail_obj = req.resolve_paths()
-    except ValidationError:
-        return InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⛔ Invalid parameters", callback_data="noop")]]
-        )
-    except ValueError:
-        path_obj = Path(str(jail)).resolve(strict=False)
-        jail_obj = path_obj
 
     buttons = []
 
@@ -81,7 +66,7 @@ def get_directory_keyboard(
             key=lambda x: (not x.is_dir(), x.name.lower()),
         )
 
-        for item in items[: req.limit]:
+        for item in items[:limit]:
             if item.is_dir():
                 buttons.append(
                     [InlineKeyboardButton(f"📁 {item.name}/", callback_data=f"fetch:{item}")]
@@ -112,6 +97,31 @@ def get_directory_keyboard(
     return InlineKeyboardMarkup(buttons)
 
 
+def get_directory_keyboard(
+    path: Path | str, jail: Path | str, limit: int = 20
+) -> "InlineKeyboardMarkup | None":
+    """Generate inline keyboard for directory contents (public API, validates inputs)."""
+    if InlineKeyboardMarkup is None:
+        return None
+
+    try:
+        req = FetchRequest(
+            path_str=str(path),
+            jail_str=str(jail),
+            limit=limit,
+        )
+        path_obj, jail_obj = req.resolve_paths()
+    except ValidationError:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⛔ Invalid parameters", callback_data="noop")]]
+        )
+    except ValueError:
+        path_obj = Path(str(jail)).resolve(strict=False)
+        jail_obj = path_obj
+
+    return _get_directory_keyboard_resolved(path_obj, jail_obj, limit=req.limit)
+
+
 async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -> dict:
     """Handle a path selection - return directory listing or file."""
     try:
@@ -128,7 +138,7 @@ async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -
 
     if path_obj.is_dir():
         result = {"type": "directory"}
-        keyboard = get_directory_keyboard(path_obj, jail_obj, limit=req.limit)
+        keyboard = _get_directory_keyboard_resolved(path_obj, jail_obj, limit=req.limit)
         if keyboard is not None:
             result["keyboard"] = keyboard
         return result
