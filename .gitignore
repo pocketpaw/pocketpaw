@@ -76,3 +76,4 @@ private.key
 # Backups and secrets
 .env.bak
 *.bak
+.env.bak
