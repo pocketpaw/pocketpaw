@@ -257,3 +257,32 @@ class TestAuditLogging:
             await router._chat_openai("hello")
 
         mock_audit.log.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Guardian empty-response handling
+# ---------------------------------------------------------------------------
+
+
+class TestGuardianEmptyResponse:
+    """Guardian must return (False, ...) on empty API response."""
+
+    async def test_empty_response_returns_block(self):
+        from pocketpaw.security.guardian import GuardianAgent
+
+        guardian = GuardianAgent.__new__(GuardianAgent)
+        guardian._audit = MagicMock()
+
+        mock_response = MagicMock()
+        mock_response.content = []
+
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        guardian.client = mock_client
+        guardian.settings = MagicMock()
+
+        is_safe, reason = await guardian.check_command("rm -rf /")
+
+        assert is_safe is False
+        assert "empty response" in reason.lower() or "block" in reason.lower()
+        guardian._audit.log.assert_called()

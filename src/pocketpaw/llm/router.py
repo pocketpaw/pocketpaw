@@ -175,7 +175,8 @@ class LLMRouter:
         """Clear conversation history."""
         self.conversation_history = []
 
-    def _empty_response_fallback(self, provider: str) -> str:
+    @staticmethod
+    def _empty_response_fallback(provider: str) -> str:
         """Log and return fallback for empty LLM responses."""
         logger.warning(
             "LLM router received empty response from %s, returning fallback",
