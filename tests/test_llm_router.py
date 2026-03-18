@@ -200,3 +200,60 @@ class TestChatFallbackIntegration:
             result = await router.chat("ping")
 
         assert result == FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# None content handling (OpenAI can return choices with content=None)
+# ---------------------------------------------------------------------------
+
+
+class TestNoneContentHandling:
+    """OpenAI can return choices with message.content=None."""
+
+    async def test_openai_none_content_returns_fallback(self):
+        router = _make_router("openai")
+        router._available_backend = "openai"
+
+        mock_message = MagicMock()
+        mock_message.content = None
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            result = await router._chat_openai("hello")
+
+        assert result == FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# Audit logging
+# ---------------------------------------------------------------------------
+
+
+class TestAuditLogging:
+    """Empty responses should produce an audit event."""
+
+    async def test_empty_response_triggers_audit_log(self):
+        router = _make_router("openai")
+        router._available_backend = "openai"
+
+        mock_response = MagicMock()
+        mock_response.choices = []
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        mock_audit = MagicMock()
+
+        with (
+            patch("openai.AsyncOpenAI", return_value=mock_client),
+            patch("pocketpaw.llm.router.get_audit_logger", return_value=mock_audit),
+        ):
+            await router._chat_openai("hello")
+
+        mock_audit.log.assert_called_once()
