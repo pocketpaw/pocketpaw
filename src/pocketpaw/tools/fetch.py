@@ -12,14 +12,22 @@ except ImportError:
     InlineKeyboardMarkup = None
 
 
+def is_safe_path(path: Path, jail: Path) -> bool:
+    """Check if path is strictly within the jail directory."""
+    try:
+        resolved_path = path.resolve()
+        resolved_jail = jail.resolve()
+        return resolved_path.is_relative_to(resolved_jail)
+    except (ValueError, OSError):
+        return False
+
+
 class FetchRequest(BaseModel):
     path_str: str = Field(..., description="The path to explore. Cannot be empty.")
-    jail_str: str | None = Field(
-        None, description="The strictly enforced jail directory. If None, falls back to home."
-    )
+    jail_str: str = Field(..., description="The strictly enforced jail directory.")
     limit: int = Field(20, ge=1, le=100, description="Number of items to return.")
 
-    @field_validator("path_str", mode="before")
+    @field_validator("path_str", "jail_str", mode="before")
     @classmethod
     def prevent_empty(cls, v: Any) -> str:
         target = str(v) if v is not None else ""
@@ -27,19 +35,19 @@ class FetchRequest(BaseModel):
             raise ValueError("Path string cannot be empty or whitespace.")
         return target
 
+    def resolve_paths(self) -> tuple[Path, Path]:
+        """Resolve path and jail, checking against path traversal."""
+        path_obj = Path(self.path_str).resolve(strict=False)
+        jail_obj = Path(self.jail_str).resolve(strict=False)
 
-def is_safe_path(path: Path, jail: Path) -> bool:
-    """Check if path is strictly within the jail directory."""
-    try:
-        resolved_path = path.resolve()
-        resolved_jail = jail.resolve()
-        return resolved_path.is_relative_to(resolved_jail)
-    except (ValueError, FileNotFoundError):
-        return False
+        if not is_safe_path(path_obj, jail_obj):
+            raise ValueError("Access denied: path outside allowed directory or does not exist")
+
+        return path_obj, jail_obj
 
 
 def get_directory_keyboard(
-    path: Path | str, jail: Path | str | None = None, limit: int = 20
+    path: Path | str, jail: Path | str, limit: int = 20
 ) -> "InlineKeyboardMarkup | None":
     """Generate inline keyboard for directory contents."""
     if InlineKeyboardMarkup is None:
@@ -48,20 +56,17 @@ def get_directory_keyboard(
     try:
         req = FetchRequest(
             path_str=str(path),
-            jail_str=str(jail) if jail is not None else None,
+            jail_str=str(jail),
             limit=limit,
         )
+        path_obj, jail_obj = req.resolve_paths()
     except ValidationError:
         return InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⛔ Invalid path or jail", callback_data="noop")]]
+            [[InlineKeyboardButton("⛔ Invalid parameters", callback_data="noop")]]
         )
-
-    path_obj = Path(req.path_str).resolve()
-    jail_target = req.jail_str if req.jail_str is not None else str(Path.home())
-    jail_obj = Path(jail_target).resolve()
-
-    if not is_safe_path(path_obj, jail_obj):
-        path_obj = jail_obj
+    except ValueError:
+        path_obj = Path(str(jail)).resolve(strict=False)
+        jail_obj = path_obj
 
     buttons = []
 
@@ -107,59 +112,45 @@ def get_directory_keyboard(
     return InlineKeyboardMarkup(buttons)
 
 
-async def handle_path(
-    path_str: str | Path, jail: str | Path | None = None, limit: int = 20
-) -> dict:
+async def handle_path(path_str: str | Path, jail: str | Path, limit: int = 20) -> dict:
     """Handle a path selection - return directory listing or file."""
     try:
         req = FetchRequest(
             path_str=str(path_str),
-            jail_str=str(jail) if jail is not None else None,
+            jail_str=str(jail),
             limit=limit,
         )
-    except ValidationError as e:
-        return {"type": "error", "message": f"Validation Error: {e.errors()[0]['msg']}"}
-
-    path_obj = Path(req.path_str).resolve()
-    jail_target = req.jail_str if req.jail_str is not None else str(Path.home())
-    jail_obj = Path(jail_target).resolve()
-
-    if not is_safe_path(path_obj, jail_obj):
-        return {
-            "type": "error",
-            "message": "Access denied: path outside allowed directory or does not exist",
-        }
+        path_obj, jail_obj = req.resolve_paths()
+    except ValidationError:
+        return {"type": "error", "message": "Validation Error: invalid input parameters."}
+    except ValueError as e:
+        return {"type": "error", "message": str(e)}
 
     if path_obj.is_dir():
-        return {
-            "type": "directory",
-            "keyboard": get_directory_keyboard(path_obj, jail_obj, limit=req.limit),
-        }
+        result = {"type": "directory"}
+        keyboard = get_directory_keyboard(path_obj, jail_obj, limit=req.limit)
+        if keyboard is not None:
+            result["keyboard"] = keyboard
+        return result
     elif path_obj.is_file():
         return {"type": "file", "path": path_obj, "filename": path_obj.name}
     else:
         return {"type": "error", "message": "Path does not exist"}
 
 
-def list_directory(
-    path_str: str | Path, jail_str: str | Path | None = None, limit: int = 30
-) -> str:
+def list_directory(path_str: str | Path, jail_str: str | Path, limit: int = 20) -> str:
     """List directory contents as formatted string for web dashboard."""
     try:
         req = FetchRequest(
             path_str=str(path_str),
-            jail_str=str(jail_str) if jail_str is not None else None,
+            jail_str=str(jail_str),
             limit=limit,
         )
-    except ValidationError as e:
-        return f"⛔ Validation Error: {e.errors()[0]['msg']}"
-
-    path_obj = Path(req.path_str).resolve()
-    jail_target = req.jail_str if req.jail_str is not None else str(Path.home())
-    jail_obj = Path(jail_target).resolve()
-
-    if not is_safe_path(path_obj, jail_obj):
-        return "⛔ Access denied: path outside allowed directory or does not exist"
+        path_obj, jail_obj = req.resolve_paths()
+    except ValidationError:
+        return "⛔ Validation Error: invalid input parameters."
+    except ValueError as e:
+        return f"⛔ {e}"
 
     if not path_obj.is_dir():
         return f"📄 {path_obj.name} - File selected"

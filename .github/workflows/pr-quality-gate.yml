@@ -9,8 +9,6 @@ on:
 permissions:
   pull-requests: write
   issues: write
-  contents: read
-  metadata: read
 
 jobs:
   check-quality:
@@ -206,26 +204,35 @@ jobs:
             }
 
             // ── Find existing bot comment ───────────────────────────────
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-            });
-            const botComment = comments.find(
-              c => c.user.type === 'Bot' && c.body.includes(MARKER)
-            );
+            let botComment;
+            try {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+              });
+              botComment = comments.find(
+                c => c.user.type === 'Bot' && c.body.includes(MARKER)
+              );
+            } catch (e) {
+              console.log('Could not list comments (likely permission issue)');
+            }
 
             if (issues.length > 0 || warnings.length > 0) {
               let message = `${MARKER}\n`;
 
               if (issues.length > 0) {
                 // Add needs-work label
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  labels: ['needs-work']
-                });
+                try {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    labels: ['needs-work']
+                  });
+                } catch (e) {
+                  console.log('Could not add label (permission issue)');
+                }
 
                 message += `### Issues (must fix)\n\n${issues.join('\n')}\n\n`;
               }
@@ -236,20 +243,24 @@ jobs:
 
               message += `Please update your PR to address these points. PRs that don't meet contribution standards will be closed after 7 days.`;
 
-              if (botComment) {
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: botComment.id,
-                  body: message
-                });
-              } else {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  body: message
-                });
+              try {
+                if (botComment) {
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: botComment.id,
+                    body: message
+                  });
+                } else {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    body: message
+                  });
+                }
+              } catch (e) {
+                console.log('Could not post/update comment (permission issue)');
               }
             } else {
               // All checks pass
@@ -260,15 +271,21 @@ jobs:
                   issue_number: pr.number,
                   name: 'needs-work'
                 });
-              } catch (e) { /* label wasn't present */ }
+              } catch (e) {
+                /* label wasn't present or no permission */
+              }
 
-              if (botComment) {
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: botComment.id,
-                  body: `${MARKER}\nAll quality checks passed. Thanks for the clean PR!`
-                });
+              try {
+                if (botComment) {
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: botComment.id,
+                    body: `${MARKER}\nAll quality checks passed. Thanks for the clean PR!`
+                  });
+                }
+              } catch (e) {
+                console.log('Could not update success comment (permission issue)');
               }
             }
 
