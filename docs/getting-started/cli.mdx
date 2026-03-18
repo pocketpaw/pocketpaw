@@ -1,0 +1,244 @@
+---
+title: "CLI Reference: All PocketPaw Commands"
+description: "Complete reference for the PocketPaw CLI. Manage your local AI agent from the terminal: health checks, channels, skills, sessions, memory, config, errors, logs, and more."
+section: Getting Started
+ogType: article
+keywords: ["cli", "commands", "terminal", "pocketpaw cli", "command line", "subcommands"]
+tags: ["cli", "reference", "getting-started"]
+---
+
+# CLI Reference
+
+PocketPaw ships with a full set of CLI commands for managing your local AI agent without the web dashboard. Every command supports `--json` for scripting and automation.
+
+## Starting PocketPaw
+
+```bash
+# Web dashboard (default, opens browser)
+pocketpaw
+
+# API-only server (no dashboard UI)
+pocketpaw serve
+
+# Development mode (auto-reload on file changes)
+pocketpaw --dev
+
+# Custom host and port
+pocketpaw --host 0.0.0.0 --port 9000
+```
+
+## Headless Channel Modes
+
+Run PocketPaw as a headless bot on one or more channels:
+
+```bash
+pocketpaw --telegram          # Telegram-only mode
+pocketpaw --discord           # Discord bot
+pocketpaw --slack             # Slack bot (Socket Mode)
+pocketpaw --whatsapp          # WhatsApp webhook server
+pocketpaw --discord --slack   # Multiple channels simultaneously
+```
+
+## Agent Status
+
+```bash
+# Show current agent status
+pocketpaw status
+
+# JSON output for scripting
+pocketpaw status --json
+
+# Live monitoring (refresh every 2 seconds)
+pocketpaw status --watch
+
+# Custom refresh interval
+pocketpaw status --watch 5
+```
+
+## Health and Diagnostics
+
+```bash
+# Quick health check (startup checks only, no network calls)
+pocketpaw health
+
+# Full diagnostics (config + connectivity + version check)
+pocketpaw doctor
+
+# JSON output
+pocketpaw health --json
+pocketpaw doctor --json
+```
+
+`health` runs fast, offline checks (config exists, API key format, disk space, etc.). `doctor` additionally tests network connectivity to your configured LLM provider.
+
+## Channels
+
+```bash
+# List all channels with configured/autostart status
+pocketpaw channels
+
+# Start a channel adapter (requires a running PocketPaw instance)
+pocketpaw channels start discord
+
+# Stop a channel adapter
+pocketpaw channels stop slack
+
+# JSON output
+pocketpaw channels --json
+```
+
+<Callout type="info">
+  `channels start` and `channels stop` communicate with a running PocketPaw instance via its REST API. The dashboard or `pocketpaw serve` must be running first.
+</Callout>
+
+## Skills
+
+```bash
+# List all available skills
+pocketpaw skills
+
+# JSON output
+pocketpaw skills --json
+```
+
+Skills are loaded from three directories (in priority order):
+- `~/.agents/skills/` (AgentSkills ecosystem)
+- `~/.claude/skills/` (Claude Code / SDK standard)
+- `~/.pocketpaw/skills/` (PocketPaw-specific)
+
+## Sessions
+
+```bash
+# List recent chat sessions
+pocketpaw sessions
+
+# Search session content
+pocketpaw sessions search "deployment script"
+
+# Delete a session
+pocketpaw sessions delete <session-key>
+
+# Limit results
+pocketpaw sessions --limit 50
+
+# JSON output
+pocketpaw sessions --json
+```
+
+## Memory
+
+```bash
+# Show memory stats (long-term entries, daily notes, session count)
+pocketpaw memory
+
+# Search long-term memories
+pocketpaw memory search "API integration"
+
+# Limit search results
+pocketpaw memory search "project" --limit 20
+
+# JSON output
+pocketpaw memory --json
+```
+
+## Configuration
+
+```bash
+# Show current config (sensitive values masked)
+pocketpaw config
+
+# Set a config value
+pocketpaw config set agent_backend openai_agents
+pocketpaw config set web_port 9000
+
+# Validate API keys and settings
+pocketpaw config validate
+
+# Print config file path
+pocketpaw config path
+
+# JSON output
+pocketpaw config --json
+pocketpaw config validate --json
+```
+
+Config values are automatically coerced to the correct type (boolean, integer, list, etc.).
+
+## Errors
+
+```bash
+# Show last 20 errors
+pocketpaw errors
+
+# Show more errors
+pocketpaw errors --limit 50
+
+# Filter errors
+pocketpaw errors --search "timeout"
+
+# JSON output
+pocketpaw errors --json
+```
+
+Errors are sourced from the health engine's persistent error store.
+
+## Audit Logs
+
+```bash
+# Show last 50 audit log entries
+pocketpaw logs
+
+# Tail the audit log in real time
+pocketpaw logs --follow
+
+# Show fewer entries
+pocketpaw logs --limit 10
+
+# JSON output
+pocketpaw logs --json
+```
+
+The audit log is stored at `~/.pocketpaw/audit.jsonl`.
+
+## Provider Diagnostics
+
+```bash
+# Test Ollama connectivity, model availability, and tool calling
+pocketpaw --check-ollama
+
+# Test OpenAI-compatible endpoint
+pocketpaw --check-openai-compatible
+```
+
+## Security
+
+```bash
+# Run security audit
+pocketpaw --security-audit
+
+# Auto-fix issues found by audit
+pocketpaw --security-audit --fix
+
+# Scan memory files for PII
+pocketpaw --pii-scan
+```
+
+## Update
+
+```bash
+# Check for updates and install via uv
+pocketpaw update
+```
+
+## Global Flags
+
+| Flag | Description |
+|---|---|
+| `--json` | Output as JSON (works with most subcommands) |
+| `--limit N` | Limit number of results |
+| `--follow` | Tail mode (for `logs`) |
+| `--watch [N]` | Live refresh every N seconds (for `status`, default: 2) |
+| `--host HOST` | Bind web server to specific host |
+| `--port PORT` | Web server port (default: 8888) |
+| `--dev` | Development mode with auto-reload |
+| `--version` | Show version |

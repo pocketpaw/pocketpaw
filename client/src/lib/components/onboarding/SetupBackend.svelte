@@ -84,6 +84,7 @@
     if (lower.includes("installing python") || lower.includes("python 3.")) return "Installing Python...";
     if (lower.includes("installing pocketpaw") || lower.includes("pip install")) return "Installing PocketPaw...";
     if (lower.includes("creating") && lower.includes("config")) return "Creating config...";
+    if (lower.includes("claude code cli")) return "Installing Claude Code CLI...";
     if (lower.includes("complete") || lower.includes("success")) return "Finishing up...";
     if (lower.includes("download")) return "Downloading...";
     return installStep; // keep previous step if no match
@@ -160,7 +161,7 @@
             clearInterval(pollInterval!);
             pollInterval = null;
             stopTimer();
-            error = "Backend did not start within 30 seconds. Try starting it manually: pocketpaw serve";
+            error = "Backend did not start within 30 seconds. Open a terminal and run: pocketpaw serve --port 8888\nIf that command is not found, try: python -m pocketpaw serve --port 8888\nor: uv run pocketpaw serve --port 8888";
             currentState = "backend_stopped";
           }
         } catch {
@@ -175,7 +176,8 @@
       }, 1000);
     } catch (e: any) {
       stopTimer();
-      error = e?.message ?? "Failed to start backend.";
+      const msg = typeof e === "string" ? e : e?.message ?? "Failed to start backend.";
+      error = msg + "\n\nTry running manually in a terminal:\n  pocketpaw serve --port 8888\n  python -m pocketpaw serve --port 8888";
       currentState = "backend_stopped";
     }
   }
@@ -336,7 +338,7 @@
       <div class="flex w-full items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-left">
         <AlertCircle class="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <div class="flex flex-col gap-2">
-          <p class="text-xs text-destructive">{error}</p>
+          <p class="whitespace-pre-line text-xs text-destructive">{error}</p>
           <button
             onclick={retry}
             class="self-start text-xs font-medium text-primary transition-opacity hover:opacity-80"

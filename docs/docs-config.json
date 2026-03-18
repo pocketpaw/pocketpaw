@@ -160,6 +160,11 @@
             "icon": "lucide:rocket"
           },
           {
+            "label": "CLI Reference",
+            "href": "/getting-started/cli",
+            "icon": "lucide:terminal"
+          },
+          {
             "label": "Configuration",
             "href": "/getting-started/configuration",
             "icon": "lucide:settings"
@@ -764,6 +769,13 @@
               { "label": "Create Task", "href": "/api/post-mc-task", "method": "POST" },
               { "label": "Run Task", "href": "/api/post-mc-run-task", "method": "POST" },
               { "label": "Get Standup", "href": "/api/get-mc-standup", "method": "GET" }
+            ]
+          },
+          {
+            "label": "Agent Status",
+            "items": [
+              { "label": "Get Agent Status", "href": "/api/get-agent-status", "method": "GET" },
+              { "label": "Agent Status Stream", "href": "/api/get-agent-status-stream", "method": "GET" }
             ]
           },
           {

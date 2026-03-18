@@ -33,6 +33,27 @@ uv run pocketpaw --discord --slack
 # Run in development mode (auto-reload on file changes)
 uv run pocketpaw --dev
 
+# CLI management commands (all support --json for scripting)
+uv run pocketpaw status                     # Show agent status (--watch for live)
+uv run pocketpaw health                     # Quick startup health check
+uv run pocketpaw doctor                     # Full diagnostics with connectivity
+uv run pocketpaw channels                   # List channel configured/autostart status
+uv run pocketpaw channels start discord     # Start a channel adapter (needs running dashboard)
+uv run pocketpaw channels stop slack        # Stop a channel adapter
+uv run pocketpaw skills                     # List available skills
+uv run pocketpaw sessions                   # List chat sessions
+uv run pocketpaw sessions search <query>    # Search session content
+uv run pocketpaw sessions delete <key>      # Delete a session
+uv run pocketpaw memory                     # Show memory stats
+uv run pocketpaw memory search <query>      # Search long-term memories
+uv run pocketpaw config                     # Show config (secrets masked)
+uv run pocketpaw config set <key> <value>   # Set a config value
+uv run pocketpaw config validate            # Validate API keys
+uv run pocketpaw config path                # Print config file path
+uv run pocketpaw errors                     # Show recent errors (--limit, --search)
+uv run pocketpaw logs                       # Show audit log (--follow to tail)
+uv run pocketpaw update                     # Update to latest version via uv
+
 # Run all tests (excluding E2E tests)
 uv run pytest --ignore=tests/e2e
 
@@ -98,7 +119,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 
 - `TelegramAdapter` — python-telegram-bot
 - `WebSocketAdapter` — FastAPI WebSockets
-- `DiscordAdapter` — discord.py (optional dep `pocketpaw[discord]`). Slash command `/paw` + DM/mention support. Stream buffering with edit-in-place (1.5s rate limit).
+- `DiscliAdapter` — `discord-cli-agent` subprocess wrapper (optional dep `pocketpaw[discord]`). Slash command `/paw` + DM/mention support. Stream buffering with edit-in-place (1.5s rate limit). Auto-registers a `pocketpaw-discord` MCP server on startup exposing Discord operations to all MCP-capable backends. Admin commands (`/converse`, `/setstatus`, etc.) require Administrator or Manage Server permission.
 - `SlackAdapter` — slack-bolt Socket Mode (optional dep `pocketpaw[slack]`). Handles `app_mention` + DM events. No public URL needed. Thread support via `thread_ts` metadata.
 - `WhatsAppAdapter` — WhatsApp Business Cloud API via `httpx` (core dep). No streaming; accumulates chunks and sends on `stream_end`. Dashboard exposes `/webhook/whatsapp` routes; standalone mode runs its own FastAPI server.
 
@@ -112,6 +133,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 - **Tools** (`tools/`) — `ToolProtocol` with `ToolDefinition` supporting both Anthropic and OpenAI schema export. Built-in tools in `tools/builtin/`
 - **Bootstrap** (`bootstrap/`) — `AgentContextBuilder` assembles the system prompt from identity, memory, and current state
 - **Config** (`config.py`) — Pydantic Settings with `POCKETPAW_` env prefix, JSON config at `~/.pocketpaw/config.json`. Channel-specific config: `discord_bot_token`, `discord_allowed_guild_ids`, `discord_allowed_user_ids`, `slack_bot_token`, `slack_app_token`, `slack_allowed_channel_ids`, `whatsapp_access_token`, `whatsapp_phone_number_id`, `whatsapp_verify_token`, `whatsapp_allowed_phone_numbers`
+- **Soul** (`soul/`) -- Optional soul-protocol integration for persistent AI identity, psychology-informed memory, OCEAN personality, emotional state, and portable `.soul` files. Enable via `soul_enabled=true`. SoulManager handles lifecycle (birth/awaken/save), auto-saves periodically, recovers from corrupt files, and wires SoulBootstrapProvider into the system prompt. Soul tools (`soul_remember`, `soul_recall`, `soul_edit_core`, `soul_status`) auto-register with all backends when active. Can be toggled at runtime via the dashboard settings.
 
 ### Frontend
 
@@ -122,6 +144,7 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Async everywhere**: All agent, bus, memory, and tool interfaces are async. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`
 - **Protocol-oriented**: Core interfaces (`AgentProtocol`, `ToolProtocol`, `MemoryStoreProtocol`, `BaseChannelAdapter`) are Python `Protocol` classes for swappable implementations
 - **Env vars**: All settings use `POCKETPAW_` prefix (e.g., `POCKETPAW_ANTHROPIC_API_KEY`)
+- **Soul config**: `POCKETPAW_SOUL_ENABLED=true`, `POCKETPAW_SOUL_NAME`, `POCKETPAW_SOUL_ARCHETYPE`, `POCKETPAW_SOUL_PATH`, `POCKETPAW_SOUL_AUTO_SAVE_INTERVAL`
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP
 - **Entry point**: `pocketpaw.__main__:main`

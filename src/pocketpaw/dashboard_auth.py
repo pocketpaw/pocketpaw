@@ -254,7 +254,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
                     is_valid = True
                     request.state.api_key = record
             except Exception:
-                pass
+                logger.warning("API key validation raised an unexpected error", exc_info=True)
 
     # 5. Check OAuth2 access token (ppat_* prefix)
     if not is_valid:
@@ -279,7 +279,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
                     is_valid = True
                     request.state.oauth_token = oauth_token
             except Exception:
-                pass
+                logger.warning("OAuth2 token validation raised an unexpected error", exc_info=True)
 
     # 6. Allow genuine localhost (not tunneled proxies)
     if not is_valid and _is_genuine_localhost(request):

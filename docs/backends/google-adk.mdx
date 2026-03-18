@@ -14,9 +14,9 @@ The Google ADK backend uses Google's **Agent Development Kit** (`google-adk` pac
 ## Overview
 
 - **Status**: Beta
-- **Provider support**: Google (Gemini models)
+- **Provider support**: Google (Gemini models), LiteLLM
 - **Built-in tools**: google_search, code_execution
-- **MCP support**: Yes (native via `McpToolset` — stdio, SSE, HTTP transports)
+- **MCP support**: Yes (native via `McpToolset` -- stdio, SSE, HTTP transports)
 - **Session management**: InMemoryRunner with per-session state
 
 ## Configuration
@@ -32,8 +32,20 @@ The backend also reads `GOOGLE_API_KEY` from the environment.
 
 | Setting | Env Variable | Default | Description |
 |---------|-------------|---------|-------------|
+| `google_adk_provider` | `POCKETPAW_GOOGLE_ADK_PROVIDER` | `google` | Provider: `google` or `litellm` |
 | `google_adk_model` | `POCKETPAW_GOOGLE_ADK_MODEL` | `""` (auto) | Gemini model to use |
 | `google_adk_max_turns` | `POCKETPAW_GOOGLE_ADK_MAX_TURNS` | `0` (unlimited) | Max tool-use turns per query |
+
+### Using with LiteLLM
+
+LiteLLM support lets you use non-Gemini models with Google ADK's tooling and MCP integration:
+
+```bash
+export POCKETPAW_AGENT_BACKEND="google_adk"
+export POCKETPAW_GOOGLE_ADK_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_MODEL="openai/gpt-4o"
+```
 
 ## Built-in Tools
 

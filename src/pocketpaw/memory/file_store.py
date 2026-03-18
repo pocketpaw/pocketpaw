@@ -624,7 +624,7 @@ class FileMemoryStore:
             session_file = self._get_session_file(entry.session_key)
 
             # Run blocking file I/O in a thread to avoid freezing the event loop
-            def _read_and_append():
+            def _read_and_append_once() -> list[dict[str, object]]:
                 session_data = []
                 if session_file.exists():
                     try:
@@ -644,20 +644,22 @@ class FileMemoryStore:
                 tmp = session_file.with_suffix(".tmp")
                 tmp.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
                 # On Windows, os.replace can fail with PermissionError if another
-                # process briefly holds the file handle. Retry a few times.
-                import time as _time
-
-                for _attempt in range(5):
-                    try:
-                        tmp.replace(session_file)
-                        break
-                    except PermissionError:
-                        if _attempt == 4:
-                            raise
-                        _time.sleep(0.01 * (2**_attempt))
+                # process briefly holds the file handle.
+                tmp.replace(session_file)
                 return session_data
 
-            session_data = await asyncio.to_thread(_read_and_append)
+            session_data: list[dict[str, object]] | None = None
+            for _attempt in range(5):
+                try:
+                    session_data = await asyncio.to_thread(_read_and_append_once)
+                    break
+                except PermissionError:
+                    if _attempt == 4:
+                        raise
+                    await asyncio.sleep(0.01 * (2**_attempt))
+
+            if session_data is None:
+                return
 
             # Update session index
             await self._update_session_index(entry.session_key, entry, session_data)

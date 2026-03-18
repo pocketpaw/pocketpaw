@@ -320,7 +320,7 @@ class TestHeadlessChannelToolAccess:
         permission_line = None
         for line in lines:
             stripped = line.strip()
-            if all(k in stripped for k in ('permission_mode', '=', 'bypassPermissions')):
+            if all(k in stripped for k in ("permission_mode", "=", "bypassPermissions")):
                 permission_line = stripped
                 break
 
@@ -333,7 +333,7 @@ class TestHeadlessChannelToolAccess:
         # A conditional guard would look like: `if ...:` on the previous non-empty line
         permission_line_idx = None
         for i, line in enumerate(lines):
-            if 'permission_mode' in line and 'bypassPermissions' in line:
+            if "permission_mode" in line and "bypassPermissions" in line:
                 permission_line_idx = i
                 break
 
@@ -370,8 +370,7 @@ class TestHeadlessChannelToolAccess:
         )
         # The unconditional assignment must be present
         assert '"bypassPermissions"' in source or "'bypassPermissions'" in source, (
-            "bypassPermissions string not found in run() source — "
-            "permission mode is not being set."
+            "bypassPermissions string not found in run() source — permission mode is not being set."
         )
 
     @pytest.mark.parametrize(
@@ -466,7 +465,7 @@ class TestToolExecutionTimeout:
             )
 
         assert result is not None, "RememberTool returned None"
-        assert isinstance(result, (dict, str)), f"Unexpected result type: {type(result)}"
+        assert isinstance(result, dict | str), f"Unexpected result type: {type(result)}"
 
     @pytest.mark.asyncio
     async def test_recall_tool_completes_within_timeout(self, tmp_path):

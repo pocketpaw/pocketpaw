@@ -15,6 +15,7 @@ from pocketpaw.update_check import (
     RELEASE_NOTES_CACHE_DIR,
     _parse_version,
     check_for_updates,
+    check_for_updates_async,
     fetch_release_notes,
     get_last_seen_version,
     mark_version_seen,
@@ -49,6 +50,20 @@ class TestCheckForUpdates:
         assert result["current"] == "0.4.1"
         assert result["latest"] == "0.4.1"
         assert result["update_available"] is False
+
+    async def test_async_wrapper(self, tmp_path):
+        """Async wrapper returns same shape and does not raise."""
+        pypi_response = json.dumps({"info": {"version": "0.5.0"}}).encode()
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = lambda s: s
+            mock_urlopen.return_value.__exit__ = lambda s, *a: None
+            mock_urlopen.return_value.read.return_value = pypi_response
+
+            result = await check_for_updates_async("0.4.1", tmp_path)
+
+        assert result is not None
+        assert result["update_available"] is True
+        assert result["latest"] == "0.5.0"
 
     def test_returns_update_when_behind(self, tmp_path):
         """When PyPI has newer version, update_available is True."""

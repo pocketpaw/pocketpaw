@@ -77,9 +77,16 @@ export POCKETPAW_CLAUDE_SDK_MAX_TURNS=50
   **Smart Model Routing conflict:** PocketPaw's Smart Model Router (in Settings → Behavior) is disabled by default because it conflicts with Claude Code's built-in routing. Enabling it will override Claude Code's model selection, which may produce worse results.
 </Callout>
 
-### Using with Ollama
+### Provider Support
 
-The Claude Agent SDK also works with local models via Ollama:
+| Provider | How |
+|----------|-----|
+| Anthropic | Native (default) |
+| Ollama | Ollama v0.14+ Anthropic API support |
+| LiteLLM | Routes through proxy via `ANTHROPIC_BASE_URL` |
+| OpenAI-Compatible | Only if endpoint speaks Anthropic format |
+
+### Using with Ollama
 
 ```bash
 export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"
@@ -88,6 +95,17 @@ export POCKETPAW_OLLAMA_MODEL="qwen2.5:7b"
 ```
 
 See [Ollama (Local LLMs)](/backends/ollama) for full setup instructions.
+
+### Using with LiteLLM
+
+```bash
+export POCKETPAW_AGENT_BACKEND="claude_agent_sdk"
+export POCKETPAW_CLAUDE_SDK_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_MODEL="gpt-4o"
+```
+
+The adapter sets `ANTHROPIC_BASE_URL` to point at the LiteLLM proxy, so the Claude SDK sends Anthropic-format requests to the proxy which translates them for the target provider.
 
 ## Built-in Tools
 

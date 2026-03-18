@@ -29,10 +29,17 @@ window.PocketPaw.FileBrowser = {
             showFileViewer: false,
             viewerFileName: '',
             viewerFilePath: '',
-            viewerFileType: 'unknown', // 'pdf', 'image', 'text', 'unknown'
+            viewerFileType: 'unknown', // 'pdf', 'image', 'text', 'markdown', 'unknown', 'error'
             viewerContentUrl: '',
             viewerTextContent: '',
+            viewerHighlightedHtml: '', // hljs-processed HTML for code files
+            viewerMarkdownHtml: '',    // DOMPurify-sanitised rendered markdown
             viewerLoading: false,
+            // Inline editing
+            viewerEditMode: false,
+            viewerEditContent: '',
+            viewerOriginalContent: '',
+            viewerShowDiff: false,
         };
     },
 
@@ -155,15 +162,42 @@ window.PocketPaw.FileBrowser = {
             _detectFileType(filename) {
                 const ext = (filename.split('.').pop() || '').toLowerCase();
                 if (ext === 'pdf') return 'pdf';
-                if (['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico'].includes(ext)) return 'image';
-                if ([
+                const imageExts = [
+                    'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico',
+                ];
+                if (imageExts.includes(ext)) return 'image';
+                const textExts = [
                     'txt', 'md', 'py', 'js', 'ts', 'json', 'html', 'css',
                     'yaml', 'yml', 'toml', 'cfg', 'ini', 'log', 'sh', 'bat',
                     'xml', 'csv', 'env', 'rs', 'go', 'java', 'c', 'cpp', 'h',
                     'jsx', 'tsx', 'svelte', 'vue', 'rb', 'php', 'sql', 'r',
                     'swift', 'kt', 'lua', 'pl', 'dockerfile', 'makefile',
-                ].includes(ext)) return 'text';
+                ];
+                if (textExts.includes(ext)) return 'text';
                 return 'unknown';
+            },
+
+            /**
+             * Apply syntax highlighting or markdown rendering to the
+             * current viewerTextContent based on the file extension.
+             * Shared by openFileViewer() and saveFileEdits().
+             */
+            _applyHighlighting() {
+                const ext = (this.viewerFileName.split('.').pop() || '')
+                    .toLowerCase();
+                const isMarkdown = ext === 'md' || ext === 'markdown';
+                if (isMarkdown) {
+                    this.viewerMarkdownHtml = DOMPurify.sanitize(
+                        marked.parse(this.viewerTextContent),
+                    );
+                    this.viewerFileType = 'markdown';
+                } else if (window.hljs) {
+                    const lang = hljs.getLanguage(ext)
+                        ? ext : 'plaintext';
+                    this.viewerHighlightedHtml = hljs.highlight(
+                        this.viewerTextContent, { language: lang },
+                    ).value;
+                }
             },
 
             /**
@@ -179,8 +213,14 @@ window.PocketPaw.FileBrowser = {
                 this.viewerFileType = fileType;
                 this.viewerContentUrl = contentUrl;
                 this.viewerTextContent = '';
+                this.viewerHighlightedHtml = '';
+                this.viewerMarkdownHtml = '';
                 this.viewerLoading = true;
                 this.showFileViewer = true;
+                this.viewerEditMode = false;
+                this.viewerEditContent = '';
+                this.viewerOriginalContent = '';
+                this.viewerShowDiff = false;
 
                 if (fileType === 'text') {
                     try {
@@ -191,6 +231,7 @@ window.PocketPaw.FileBrowser = {
                             this.viewerFileType = 'error';
                         } else {
                             this.viewerTextContent = await resp.text();
+                            this._applyHighlighting();
                         }
                     } catch (e) {
                         this.viewerTextContent = `Error loading file: ${e.message}`;
@@ -208,7 +249,137 @@ window.PocketPaw.FileBrowser = {
             closeFileViewer() {
                 this.showFileViewer = false;
                 this.viewerTextContent = '';
+                this.viewerHighlightedHtml = '';
+                this.viewerMarkdownHtml = '';
                 this.viewerContentUrl = '';
+                this.viewerEditMode = false;
+                this.viewerEditContent = '';
+                this.viewerOriginalContent = '';
+                this.viewerShowDiff = false;
+            },
+
+            /**
+             * Close the viewer and insert a reference to the file into the chat input.
+             * Navigates to the chat view if the hash router is active.
+             */
+            addFileToChat() {
+                const path = this.viewerFilePath;
+                const prefix = `Please read the file at ${path} and `;
+                this.inputText = prefix;
+                this.closeFileViewer();
+                this.showFileBrowser = false;
+                // Navigate to chat view via hash router if available
+                if (typeof window.navigateToView === 'function') {
+                    window.navigateToView('chat');
+                }
+                // Focus the chat input on the next tick so the view has rendered
+                this.$nextTick(() => {
+                    const input = this.$refs.chatInput;
+                    if (input) {
+                        input.focus();
+                        // Move cursor to end
+                        input.setSelectionRange(input.value.length, input.value.length);
+                    }
+                });
+            },
+
+            /**
+             * Trigger a browser download for a single file
+             */
+            downloadFile(filePath) {
+                const a = document.createElement('a');
+                a.href = `/api/v1/files/download?path=${encodeURIComponent(filePath)}`;
+                a.download = '';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            },
+
+            /**
+             * Trigger a zip download for a directory
+             */
+            downloadDirAsZip(dirPath) {
+                const a = document.createElement('a');
+                a.href = `/api/v1/files/download-zip?path=${encodeURIComponent(dirPath)}`;
+                a.download = '';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            },
+
+            /**
+             * Toggle inline editor mode for text files
+             */
+            toggleEditMode() {
+                if (!this.viewerEditMode) {
+                    this.viewerEditContent = this.viewerTextContent;
+                    this.viewerOriginalContent = this.viewerTextContent;
+                    this.viewerShowDiff = false;
+                }
+                this.viewerEditMode = !this.viewerEditMode;
+            },
+
+            /**
+             * Save edited file content back to the server
+             */
+            async saveFileEdits() {
+                try {
+                    const res = await fetch('/api/v1/files/write', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path: this.viewerFilePath,
+                            content: this.viewerEditContent,
+                        }),
+                    });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        this.showToast(err.detail || 'Save failed', 'error');
+                        return;
+                    }
+                    this.viewerTextContent = this.viewerEditContent;
+                    this.viewerOriginalContent = this.viewerEditContent;
+                    // Re-apply highlighting after save
+                    this._applyHighlighting();
+                    this.viewerEditMode = false;
+                    this.viewerShowDiff = false;
+                    this.showToast('File saved', 'success');
+                } catch (e) {
+                    this.showToast('Save failed: ' + e.message, 'error');
+                }
+            },
+
+            /**
+             * Toggle diff view (original vs edited)
+             */
+            toggleDiffView() {
+                this.viewerShowDiff = !this.viewerShowDiff;
+            },
+
+            /**
+             * Compute a simple line-by-line diff between original and modified text.
+             * Returns an array of { type: 'same'|'added'|'removed', line: string, num: number }.
+             */
+            _computeDiff(original, modified) {
+                const origLines = original.split('\n');
+                const modLines = modified.split('\n');
+                const result = [];
+                const maxLen = Math.max(origLines.length, modLines.length);
+                for (let i = 0; i < maxLen; i++) {
+                    const o = origLines[i];
+                    const m = modLines[i];
+                    if (o === m) {
+                        result.push({ type: 'same', line: m ?? '', num: i + 1 });
+                    } else if (o === undefined) {
+                        result.push({ type: 'added', line: m, num: i + 1 });
+                    } else if (m === undefined) {
+                        result.push({ type: 'removed', line: o, num: i + 1 });
+                    } else {
+                        result.push({ type: 'removed', line: o, num: i + 1 });
+                        result.push({ type: 'added', line: m, num: i + 1 });
+                    }
+                }
+                return result;
             }
         };
     }

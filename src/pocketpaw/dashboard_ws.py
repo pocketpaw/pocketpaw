@@ -23,6 +23,7 @@ from pocketpaw.dashboard_state import (
     agent_loop,
     ws_adapter,
 )
+from pocketpaw.llm.client import resolve_backend_env
 from pocketpaw.memory import get_memory_manager
 from pocketpaw.scheduler import get_scheduler
 from pocketpaw.security.rate_limiter import ws_limiter
@@ -347,6 +348,8 @@ async def websocket_handler(
                         if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.openai_agents_max_turns = int(val)
                     # Google ADK
+                    if data.get("google_adk_provider"):
+                        settings.google_adk_provider = data["google_adk_provider"]
                     if "google_adk_model" in data:
                         settings.google_adk_model = data["google_adk_model"]
                     if "google_adk_max_turns" in data:
@@ -397,6 +400,17 @@ async def websocket_handler(
                             settings.openai_compatible_max_tokens = int(val)
                     if data.get("gemini_model"):
                         settings.gemini_model = data["gemini_model"]
+                    # LiteLLM
+                    if data.get("litellm_api_base") is not None:
+                        settings.litellm_api_base = data["litellm_api_base"]
+                    if data.get("litellm_api_key") is not None:
+                        settings.litellm_api_key = data["litellm_api_key"]
+                    if data.get("litellm_model") is not None:
+                        settings.litellm_model = data["litellm_model"]
+                    if "litellm_max_tokens" in data:
+                        val = data["litellm_max_tokens"]
+                        if isinstance(val, int | float) and 0 <= val <= 1000000:
+                            settings.litellm_max_tokens = int(val)
                     if "bypass_permissions" in data:
                         settings.bypass_permissions = bool(data.get("bypass_permissions"))
                     if data.get("web_search_provider"):
@@ -477,8 +491,24 @@ async def websocket_handler(
                         val = data["web_port"]
                         if isinstance(val, int | float) and 1 <= val <= 65535:
                             settings.web_port = int(val)
+                    # Soul Protocol
+                    if "soul_enabled" in data:
+                        settings.soul_enabled = bool(data["soul_enabled"])
+                    if data.get("soul_name"):
+                        settings.soul_name = data["soul_name"]
+                    if data.get("soul_archetype"):
+                        settings.soul_archetype = data["soul_archetype"]
+                    if "soul_persona" in data:
+                        settings.soul_persona = data.get("soul_persona", "")
+                    if "soul_auto_save_interval" in data:
+                        val = data["soul_auto_save_interval"]
+                        if isinstance(val, int | float) and 0 <= val <= 3600:
+                            settings.soul_auto_save_interval = int(val)
                     warnings = validate_api_keys(settings)
                     settings.save()
+
+                # Sync env vars so running backends see updated keys
+                resolve_backend_env(settings, force=True)
 
                 # Reset the agent loop's router to pick up new settings
                 agent_loop.reset_router()
@@ -491,6 +521,17 @@ async def websocket_handler(
                 # Reload memory manager with fresh settings
                 agent_loop.memory = get_memory_manager(force_reload=True)
                 agent_loop.context_builder.memory = agent_loop.memory
+
+                # Re-run health checks so status reflects new settings
+                # (e.g. switching provider to litellm clears the "no API key" warning)
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    engine.run_startup_checks()
+                    await websocket.send_json({"type": "health_update", "data": engine.summary})
+                except Exception:
+                    pass  # health refresh is best-effort
 
                 await websocket.send_json(
                     {
@@ -535,6 +576,7 @@ async def websocket_handler(
                     if provider == "anthropic" and key:
                         settings.anthropic_api_key = key
                         settings.save()
+                        resolve_backend_env(settings, force=True)
                         agent_loop.reset_router()
                         await websocket.send_json(
                             _api_key_response(
@@ -545,6 +587,7 @@ async def websocket_handler(
                     elif provider == "openai" and key:
                         settings.openai_api_key = key
                         settings.save()
+                        resolve_backend_env(settings, force=True)
                         agent_loop.reset_router()
                         await websocket.send_json(
                             _api_key_response(
@@ -555,6 +598,7 @@ async def websocket_handler(
                     elif provider == "google" and key:
                         settings.google_api_key = key
                         settings.save()
+                        resolve_backend_env(settings, force=True)
                         agent_loop.reset_router()
                         await websocket.send_json(_api_key_response("\u2705 Google API key saved!"))
                     elif provider == "tavily" and key:
@@ -632,6 +676,7 @@ async def websocket_handler(
                             "openaiAgentsProvider": settings.openai_agents_provider,
                             "openaiAgentsModel": settings.openai_agents_model,
                             "openaiAgentsMaxTurns": settings.openai_agents_max_turns,
+                            "googleAdkProvider": settings.google_adk_provider,
                             "googleAdkModel": settings.google_adk_model,
                             "googleAdkMaxTurns": settings.google_adk_max_turns,
                             "codexCliModel": settings.codex_cli_model,
@@ -651,6 +696,10 @@ async def websocket_handler(
                             "openaiCompatibleMaxTokens": settings.openai_compatible_max_tokens,
                             "hasOpenaiCompatibleKey": bool(settings.openai_compatible_api_key),
                             "geminiModel": settings.gemini_model,
+                            "litellmApiBase": settings.litellm_api_base,
+                            "litellmModel": settings.litellm_model,
+                            "litellmMaxTokens": settings.litellm_max_tokens,
+                            "hasLitellmKey": bool(settings.litellm_api_key),
                             "hasGoogleApiKey": bool(settings.google_api_key),
                             "bypassPermissions": settings.bypass_permissions,
                             "hasAnthropicKey": bool(settings.anthropic_api_key),
@@ -698,6 +747,12 @@ async def websocket_handler(
                             "hasSarvamKey": bool(settings.sarvam_api_key),
                             "webHost": settings.web_host,
                             "webPort": settings.web_port,
+                            # Soul Protocol
+                            "soulEnabled": settings.soul_enabled,
+                            "soulName": settings.soul_name,
+                            "soulArchetype": settings.soul_archetype,
+                            "soulPersona": settings.soul_persona,
+                            "soulAutoSaveInterval": settings.soul_auto_save_interval,
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },

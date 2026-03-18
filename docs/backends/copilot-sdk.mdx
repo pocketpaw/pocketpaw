@@ -14,7 +14,7 @@ The Copilot SDK backend wraps GitHub's **Copilot SDK** (`github-copilot-sdk`), p
 ## Overview
 
 - **Status**: Beta
-- **Provider support**: Copilot, OpenAI, Azure, Anthropic
+- **Provider support**: Copilot, OpenAI, Azure, Anthropic, LiteLLM
 - **Built-in tools**: shell, file_ops, git, web_search
 - **MCP support**: No
 - **Architecture**: Python SDK wrapper with CopilotClient singleton
@@ -39,17 +39,17 @@ export POCKETPAW_AGENT_BACKEND="copilot_sdk"
 
 | Setting | Env Variable | Default | Description |
 |---------|-------------|---------|-------------|
-| `copilot_sdk_provider` | `POCKETPAW_COPILOT_SDK_PROVIDER` | `"copilot"` | Provider: `copilot`, `openai`, `azure`, `anthropic` |
+| `copilot_sdk_provider` | `POCKETPAW_COPILOT_SDK_PROVIDER` | `"copilot"` | Provider: `copilot`, `openai`, `azure`, `anthropic`, `litellm` |
 | `copilot_sdk_model` | `POCKETPAW_COPILOT_SDK_MODEL` | `""` (auto) | Model to use |
 | `copilot_sdk_max_turns` | `POCKETPAW_COPILOT_SDK_MAX_TURNS` | `0` (unlimited) | Max turns per query |
 
 ### Provider Configuration
 
-<Tabs items={["Copilot (default)", "OpenAI", "Azure", "Anthropic"]}>
+<Tabs items={["Copilot (default)", "OpenAI", "Azure", "Anthropic", "LiteLLM"]}>
   <Tab title="Copilot (default)">
     ```bash
     export POCKETPAW_COPILOT_SDK_PROVIDER="copilot"
-    # Uses your GitHub Copilot subscription — no separate API key needed
+    # Uses your GitHub Copilot subscription, no separate API key needed
     ```
   </Tab>
   <Tab title="OpenAI">
@@ -68,6 +68,13 @@ export POCKETPAW_AGENT_BACKEND="copilot_sdk"
     ```bash
     export POCKETPAW_COPILOT_SDK_PROVIDER="anthropic"
     export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."
+    ```
+  </Tab>
+  <Tab title="LiteLLM">
+    ```bash
+    export POCKETPAW_COPILOT_SDK_PROVIDER="litellm"
+    export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+    export POCKETPAW_LITELLM_MODEL="gpt-4o"
     ```
   </Tab>
 </Tabs>

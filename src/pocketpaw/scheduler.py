@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -32,6 +33,10 @@ def _ensure_utc(dt: datetime) -> datetime:
 logger = logging.getLogger(__name__)
 
 
+class RemindersCorruptError(RuntimeError):
+    """Raised when the reminders file exists but cannot be safely parsed."""
+
+
 def get_reminders_path() -> Path:
     """Get the reminders file path."""
     config_dir = Path.home() / ".pocketpaw"
@@ -39,15 +44,112 @@ def get_reminders_path() -> Path:
     return config_dir / "reminders.json"
 
 
+def _quarantine_corrupt_reminders(path: Path) -> Path | None:
+    """Move a corrupt reminders file aside so users can recover it manually."""
+    timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-%f")
+    backup = path.with_name(f"{path.name}.corrupt-{timestamp}-{uuid.uuid4().hex[:8]}")
+    try:
+        path.replace(backup)
+        return backup
+    except OSError:
+        logger.exception("Failed to move corrupt reminders file %s", path)
+        return None
+
+
+def _signal_corrupt_reminders(
+    path: Path, reason: str, *, cause: Exception | None = None
+) -> NoReturn:
+    """Quarantine a corrupt reminders file and raise a typed corruption error."""
+    backup = _quarantine_corrupt_reminders(path)
+    if backup:
+        logger.error("%s in %s; moved to %s for recovery", reason, path, backup)
+    else:
+        logger.error("%s in %s", reason, path)
+
+    msg = f"{reason} in {path}"
+    if cause is not None:
+        raise RemindersCorruptError(msg) from cause
+    raise RemindersCorruptError(msg)
+
+
+def _validate_reminder_entry_schema(reminder: object, index: int) -> str | None:
+    """Return an error message when a reminder entry is malformed."""
+    if not isinstance(reminder, dict):
+        return f"Reminder entry at index {index} is not an object"
+
+    reminder_id = reminder.get("id")
+    if not isinstance(reminder_id, str) or not reminder_id.strip():
+        return f"Reminder entry at index {index} is missing a valid 'id'"
+
+    text = reminder.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return f"Reminder entry at index {index} is missing a valid 'text'"
+
+    trigger_at = reminder.get("trigger_at")
+    if not isinstance(trigger_at, str):
+        return f"Reminder entry at index {index} is missing a valid 'trigger_at'"
+    try:
+        datetime.fromisoformat(trigger_at)
+    except (TypeError, ValueError):
+        return f"Reminder entry at index {index} has invalid 'trigger_at' format"
+
+    reminder_type = reminder.get("type", "one-shot")
+    if reminder_type not in ("one-shot", "recurring"):
+        # Unknown types may be valid in future versions — warn and treat as one-shot.
+        logger.warning(
+            "Reminder entry at index %d has unrecognised 'type': %r — treating as one-shot",
+            index,
+            reminder_type,
+        )
+
+    if reminder_type == "recurring":
+        schedule = reminder.get("schedule")
+        if not isinstance(schedule, str) or not schedule.strip():
+            return f"Recurring reminder at index {index} is missing a valid 'schedule'"
+
+    return None
+
+
 def load_reminders() -> list[dict]:
     """Load reminders from file."""
     path = get_reminders_path()
     if path.exists():
         try:
-            data = json.loads(path.read_text())
-            return data.get("reminders", [])
-        except Exception:
-            pass
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            _signal_corrupt_reminders(path, "Corrupt reminders JSON", cause=exc)
+        except OSError:
+            logger.exception("Failed to read reminders file %s", path)
+            return []
+
+        if not isinstance(data, dict):
+            _signal_corrupt_reminders(path, "Invalid reminders payload root (expected JSON object)")
+
+        reminders = data.get("reminders", [])
+        if not isinstance(reminders, list):
+            _signal_corrupt_reminders(path, "Invalid reminders payload (expected list)")
+
+        valid_reminders: list[dict] = []
+        for index, reminder in enumerate(reminders):
+            validation_error = _validate_reminder_entry_schema(reminder, index)
+            if validation_error:
+                logger.warning(
+                    "Skipping malformed reminder entry at index %d: %s", index, validation_error
+                )
+            else:
+                valid_reminders.append(reminder)
+
+        skipped = len(reminders) - len(valid_reminders)
+        if skipped:
+            logger.warning(
+                "Loaded %d valid reminder(s) from %s; skipped %d malformed entr%s",
+                len(valid_reminders),
+                path,
+                skipped,
+                "y" if skipped == 1 else "ies",
+            )
+
+        return valid_reminders
     return []
 
 
@@ -55,14 +157,14 @@ def save_reminders(reminders: list[dict]) -> None:
     """Save reminders to file."""
     path = get_reminders_path()
     data = {"reminders": reminders, "updated_at": datetime.now(tz=UTC).isoformat()}
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def parse_natural_time(text: str) -> datetime | None:
     """Parse natural language time expressions.
 
     Supports:
-    - "in X minutes/hours/days" or "X minutes/hours/days" (with or without "in")
+    - "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (with or without "in")
     - "at HH:MM" or "at H:MM AM/PM"
     - "tomorrow at HH:MM"
     - Absolute dates/times
@@ -70,8 +172,10 @@ def parse_natural_time(text: str) -> datetime | None:
     text = text.lower().strip()
     now = datetime.now(tz=UTC)
 
-    # Pattern: "in X minutes/hours/days" or "X minutes/hours/days" (in is optional)
-    relative_match = re.search(r"(?:in\s+)?(\d+)\s*(minute|min|hour|hr|day|second|sec)s?\b", text)
+    # Pattern: "in X minutes/hours/days/weeks" or "X minutes/hours/days/weeks" (in is optional)
+    pattern = r"(?:in\s+)?(\d+)\s*(minute|min|hour|hr|day|week|second|sec)s?\b"
+    relative_match = re.search(pattern, text)
+
     if relative_match:
         amount = int(relative_match.group(1))
         unit = relative_match.group(2)
@@ -82,6 +186,8 @@ def parse_natural_time(text: str) -> datetime | None:
             return now + timedelta(hours=amount)
         elif unit == "day":
             return now + timedelta(days=amount)
+        elif unit == "week":
+            return now + timedelta(weeks=amount)
         elif unit in ("second", "sec"):
             return now + timedelta(seconds=amount)
 
@@ -133,7 +239,7 @@ def extract_reminder_text(message: str) -> str:
     # Remove common patterns
     patterns = [
         r"^remind\s+me\s+",
-        r"in\s+\d+\s*(minute|min|hour|hr|day|second|sec)s?\s*",
+        r"in\s+\d+\s*(minute|min|hour|hr|day|week|second|sec)s?\s*",
         r"at\s+\d{1,2}:?\d{0,2}\s*(am|pm)?\s*",
         r"tomorrow\s*",
         r"^to\s+",
@@ -168,7 +274,13 @@ class ReminderScheduler:
             return
 
         self.callback = callback
-        self.reminders = load_reminders()
+        load_failed = False
+        try:
+            self.reminders = load_reminders()
+        except RemindersCorruptError:
+            # Keep scheduler running, but do not overwrite the corrupt file.
+            self.reminders = []
+            load_failed = True
 
         # Schedule self-audit daemon if enabled
         self._schedule_self_audit()
@@ -192,7 +304,12 @@ class ReminderScheduler:
                     logger.info(f"Skipping past reminder: {reminder['id']}")
 
         self.reminders = active_reminders
-        save_reminders(self.reminders)
+        if load_failed:
+            logger.warning(
+                "Skipping reminders write on startup because reminders file failed to load"
+            )
+        else:
+            save_reminders(self.reminders)
 
         self.scheduler.start()
         self._started = True

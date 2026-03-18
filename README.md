@@ -17,9 +17,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
-  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.AppImage"><img src="https://img.shields.io/badge/Linux-Download_.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-Download_.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-Download_.dmg-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
+  <a href="https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_amd64.AppImage"><img src="https://img.shields.io/badge/Linux-Download_.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
 </p>
 
 <p align="center">
@@ -43,11 +43,11 @@ Download the native desktop app. It bundles the backend installer and provides a
 
 | Platform | Download |
 | --- | --- |
-| **Windows** | [PocketPaw_0.1.2_x64-setup.exe](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64-setup.exe) |
-| **macOS (Apple Silicon)** | [PocketPaw_0.1.2_aarch64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_aarch64.dmg) |
-| **macOS (Intel)** | [PocketPaw_0.1.2_x64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_x64.dmg) |
-| **Linux (.deb)** | [PocketPaw_0.1.2_amd64.deb](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.deb) |
-| **Linux (.AppImage)** | [PocketPaw_0.1.2_amd64.AppImage](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.2/PocketPaw_0.1.2_amd64.AppImage) |
+| **Windows** | [PocketPaw_0.1.3_x64-setup.exe](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_x64-setup.exe) |
+| **macOS (Apple Silicon)** | [PocketPaw_0.1.3_aarch64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_aarch64.dmg) |
+| **macOS (Intel)** | [PocketPaw_0.1.3_x64.dmg](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_x64.dmg) |
+| **Linux (.deb)** | [PocketPaw_0.1.3_amd64.deb](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_amd64.deb) |
+| **Linux (.AppImage)** | [PocketPaw_0.1.3_amd64.AppImage](https://github.com/pocketpaw/pocketpaw/releases/download/client-v0.1.3/PocketPaw_0.1.3_amd64.AppImage) |
 
 ### Install via Terminal
 
@@ -182,7 +182,7 @@ python -m pocketpaw
 ```
 
 > [!TIP]
-> **First Run:** After opening the dashboard, the system health may show **UNHEALTHY** — this is expected if no API key is configured. The app itself is running correctly; only AI features are disabled. Go to **Settings > API Keys** to add your key, or [use Ollama for free local inference](#features).
+> **First Run:** After opening the dashboard, the system health may show **UNHEALTHY**. This is expected until at least one model provider is configured. The app itself is running correctly; only AI features are disabled. See [Setting up your first API key](#api-key-setup), or [use Ollama for free local inference](#features).
 
 > **Note:** Some features (browser automation, shell tools) work best under WSL2. Native Windows support covers the web dashboard and all LLM chat features.
 
@@ -222,6 +222,24 @@ Agent-created files appear in `./workspace/` on the host. Optional profiles: `--
 </details>
 
 The web dashboard opens at `http://localhost:8888`. From there you can connect Discord, Slack, WhatsApp, or Telegram.
+
+<a id="api-key-setup"></a>
+
+### 🔑 Setting up your first API key
+
+If the dashboard shows **UNHEALTHY** on first run, PocketPaw is usually installed correctly. You just need to configure at least one model provider (API key or local provider).
+
+1. Open **Settings > API Keys** in the dashboard.
+2. Add a key for at least one provider:
+   - Anthropic: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
+   - OpenAI: [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+   - Google Gemini: [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+3. Save settings and retry your chat.
+
+> [!TIP]
+> **Power users / Docker / headless:** You can also set API keys via environment variables instead of the dashboard. Use `POCKETPAW_ANTHROPIC_API_KEY`, `POCKETPAW_OPENAI_API_KEY`, or `POCKETPAW_GOOGLE_API_KEY`. See [Configuration](#configuration) for the full list.
+
+Prefer a free local option? Use Ollama instead (see [Features](#features) and [Configuration](#configuration)).
 
 ---
 
