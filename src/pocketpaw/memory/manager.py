@@ -284,6 +284,10 @@ class MemoryManager:
         """Search all memories."""
         return await self._store.search(query=query, limit=limit)
 
+    async def delete(self, entry_id: str) -> bool:
+        """Delete a memory entry by ID."""
+        return await self._store.delete(entry_id)
+
     async def get_context_for_agent(
         self,
         max_chars: int = 8000,

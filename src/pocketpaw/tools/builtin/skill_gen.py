@@ -135,6 +135,25 @@ class CreateSkillTool(BaseTool):
         except Exception as e:
             logger.warning("Could not reload skill loader: %s", e)
 
+        # Persist to long-term memory so the agent remembers across conversations
+        try:
+            from pocketpaw.memory.manager import get_memory_manager
+
+            mm = get_memory_manager()
+            # Remove stale entry for this skill (if recreated with different description)
+            existing = await mm.search(f"Skill: {skill_name}", limit=5)
+            for entry in existing:
+                if entry.metadata.get("header") == f"Skill: {skill_name}":
+                    await mm.delete(entry.id)
+            await mm.remember(
+                f"Created skill '{skill_name}': {description}. "
+                f"Saved at {skill_file}. User invocable: {user_invocable}.",
+                tags=["skill", skill_name],
+                header=f"Skill: {skill_name}",
+            )
+        except Exception as e:
+            logger.warning("Could not persist skill to memory: %s", e)
+
         logger.info("Created skill '%s' at %s", skill_name, skill_file)
         return (
             f"Skill '{skill_name}' created successfully.\n"

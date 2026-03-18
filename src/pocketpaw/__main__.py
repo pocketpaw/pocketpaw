@@ -1,6 +1,8 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-03-18: Added CLI subcommands: doctor, health, channels, skills,
+                sessions, memory, config, errors, logs.
   - 2026-02-20: Extracted diagnostics to diagnostics.py, headless runners to headless.py.
   - 2026-02-18: Added --doctor CLI flag (runs all health checks + version check, prints report).
   - 2026-02-18: Styled update notice (ANSI box on stderr, suppressed in CI/non-TTY).
@@ -72,27 +74,146 @@ def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = Fal
     )
 
 
-def main() -> None:
-    """Main entry point."""
+# ── Subcommands that exit early (no settings/health needed) ─────────────
+
+_EARLY_COMMANDS = {
+    "update",
+    "doctor",
+    "health",
+    "skills",
+    "memory",
+    "sessions",
+    "config",
+    "errors",
+    "logs",
+}
+
+
+def _handle_early_command(args) -> int | None:
+    """Handle subcommands that don't need settings/health/env setup.
+
+    Returns exit code, or None if the command is not an early command.
+    """
+    cmd = args.command
+
+    if cmd == "update":
+        from pocketpaw.cli.update import run_update
+
+        return run_update(get_version("pocketpaw"))
+
+    if cmd == "doctor":
+        from pocketpaw.cli.doctor import run_doctor_cmd
+
+        return _run_async(run_doctor_cmd(as_json=getattr(args, "json", False)))
+
+    if cmd == "health":
+        from pocketpaw.cli.health import run_health_cmd
+
+        return run_health_cmd(as_json=getattr(args, "json", False))
+
+    if cmd == "skills":
+        from pocketpaw.cli.skills import run_skills_cmd
+
+        return run_skills_cmd(
+            search=getattr(args, "search", None),
+            as_json=getattr(args, "json", False),
+        )
+
+    if cmd == "memory":
+        from pocketpaw.cli.memory import run_memory_cmd
+
+        return run_memory_cmd(
+            action=getattr(args, "subaction", None),
+            query=getattr(args, "query", None),
+            limit=getattr(args, "limit", 10),
+            as_json=getattr(args, "json", False),
+        )
+
+    if cmd == "sessions":
+        from pocketpaw.cli.sessions import run_sessions_cmd
+
+        return run_sessions_cmd(
+            action=getattr(args, "subaction", None),
+            query=getattr(args, "query", None),
+            limit=getattr(args, "limit", 20),
+            as_json=getattr(args, "json", False),
+        )
+
+    if cmd == "config":
+        from pocketpaw.cli.config_cmd import run_config_cmd
+
+        return run_config_cmd(
+            action=getattr(args, "subaction", None),
+            key=getattr(args, "key", None),
+            value=getattr(args, "value", None),
+            as_json=getattr(args, "json", False),
+        )
+
+    if cmd == "errors":
+        from pocketpaw.cli.errors import run_errors_cmd
+
+        return run_errors_cmd(
+            limit=getattr(args, "limit", 20),
+            search=getattr(args, "search", None),
+            as_json=getattr(args, "json", False),
+        )
+
+    if cmd == "logs":
+        from pocketpaw.cli.logs import run_logs_cmd
+
+        return run_logs_cmd(
+            limit=getattr(args, "limit", 50),
+            follow=getattr(args, "follow", False),
+            as_json=getattr(args, "json", False),
+        )
+
+    return None
+
+
+# ── Argument parser ─────────────────────────────────────────────────────
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="🐾 PocketPaw (Beta) - The AI agent that runs on your laptop",
+        description="PocketPaw - The AI agent that runs on your laptop",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  pocketpaw                          Start web dashboard (default)
-  pocketpaw serve                    Start API-only server (no dashboard)
-  pocketpaw --telegram               Start in Telegram-only mode
-  pocketpaw --discord                Start headless Discord bot
-  pocketpaw --slack                  Start headless Slack bot (Socket Mode)
-  pocketpaw --whatsapp               Start headless WhatsApp webhook server
-  pocketpaw --discord --slack        Run Discord + Slack simultaneously
-  pocketpaw --dev                    Start dashboard with auto-reload (dev mode)
-  pocketpaw status                    Show agent status
-  pocketpaw status --json             Show agent status as JSON
-  pocketpaw status --watch            Monitor status (refresh every 2s)
+  pocketpaw                            Start web dashboard (default)
+  pocketpaw serve                      Start API-only server (no dashboard)
+  pocketpaw status                     Show agent status
+  pocketpaw status --json --watch      Monitor status as JSON
+
+  pocketpaw doctor                     Full diagnostics (config + connectivity)
+  pocketpaw health                     Quick health check (no network)
+  pocketpaw errors                     Show recent errors
+  pocketpaw logs --follow              Tail audit log
+
+  pocketpaw channels                   List channel status
+  pocketpaw channels start discord     Start Discord adapter
+  pocketpaw channels stop slack        Stop Slack adapter
+
+  pocketpaw skills                     List available skills
+  pocketpaw sessions                   List chat sessions
+  pocketpaw sessions delete <key>      Delete a session
+  pocketpaw sessions search <query>    Search session content
+
+  pocketpaw memory                     Show memory stats
+  pocketpaw memory search <query>      Search long-term memories
+
+  pocketpaw config                     Show config (secrets masked)
+  pocketpaw config set <key> <value>   Set a config value
+  pocketpaw config validate            Validate API keys
+  pocketpaw config path                Print config file path
+
+  pocketpaw update                     Update to latest version
+
+  pocketpaw --telegram                 Start Telegram-only mode
+  pocketpaw --discord --slack          Run multiple channels headless
 """,
     )
 
+    # ── Global flags ────────────────────────────────────────────────────
     parser.add_argument(
         "--web",
         "-w",
@@ -105,11 +226,7 @@ Examples:
         help="Run Telegram-only mode (legacy pairing flow)",
     )
     parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
-    parser.add_argument(
-        "--slack",
-        action="store_true",
-        help="Run headless Slack bot (Socket Mode)",
-    )
+    parser.add_argument("--slack", action="store_true", help="Run headless Slack bot (Socket Mode)")
     parser.add_argument(
         "--whatsapp",
         action="store_true",
@@ -161,7 +278,7 @@ Examples:
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="Run diagnostics: check config, connectivity, updates, and print a health report",
+        help="(deprecated: use 'pocketpaw doctor') Run diagnostics",
     )
     parser.add_argument(
         "--version",
@@ -172,7 +289,7 @@ Examples:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Output as JSON (used with 'status' command)",
+        help="Output as JSON (works with most subcommands)",
     )
     parser.add_argument(
         "--watch",
@@ -182,14 +299,122 @@ Examples:
         default=0,
         help="Watch mode: refresh status every N seconds (default: 2)",
     )
+
+    # ── Subcommand (positional) ─────────────────────────────────────────
+    # We use a single positional with nargs="*" to support:
+    #   pocketpaw channels start discord  (command=channels, rest=[start, discord])
+    #   pocketpaw config set key value    (command=config, rest=[set, key, value])
+    #   pocketpaw memory search foo       (command=memory, rest=[search, foo])
     parser.add_argument(
         "command",
         nargs="?",
         default=None,
-        help="Subcommand: 'serve' or 'status'",
+        choices=[
+            "serve",
+            "status",
+            "update",
+            "doctor",
+            "health",
+            "channels",
+            "skills",
+            "sessions",
+            "memory",
+            "config",
+            "errors",
+            "logs",
+        ],
+        help="Subcommand to run",
+    )
+    parser.add_argument(
+        "subargs",
+        nargs="*",
+        default=[],
+        help=argparse.SUPPRESS,
     )
 
+    # ── Flags for subcommands (shared namespace) ────────────────────────
+    parser.add_argument("--search", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit number of results (for errors, logs, sessions, memory)",
+    )
+    parser.add_argument("--follow", action="store_true", help="Tail mode (for logs)")
+
+    return parser
+
+
+def _resolve_subargs(args) -> None:
+    """Parse positional subargs into named attributes based on the command.
+
+    Transforms: pocketpaw channels start discord
+    Into: args.subaction="start", args.query="discord"
+    """
+    subargs = args.subargs or []
+    args.subaction = None
+    args.query = None
+    args.key = None
+    args.value = None
+
+    cmd = args.command
+
+    if cmd == "channels" and subargs:
+        args.subaction = subargs[0]  # start / stop
+        if len(subargs) > 1:
+            args.query = subargs[1]  # channel name
+
+    elif cmd == "sessions" and subargs:
+        args.subaction = subargs[0]  # delete / search
+        if len(subargs) > 1:
+            args.query = subargs[1]
+
+    elif cmd == "memory" and subargs:
+        args.subaction = subargs[0]  # search
+        if len(subargs) > 1:
+            args.query = subargs[1]
+
+    elif cmd == "config" and subargs:
+        args.subaction = subargs[0]  # set / validate / path
+        if len(subargs) > 1:
+            args.key = subargs[1]
+        if len(subargs) > 2:
+            args.value = subargs[2]
+
+    # Apply default limits per command
+    if args.limit is None:
+        defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}
+        args.limit = defaults.get(cmd, 20)
+
+
+def main() -> None:
+    """Main entry point."""
+    parser = _build_parser()
     args = parser.parse_args()
+    _resolve_subargs(args)
+
+    # ── Early-exit commands (no settings, health, or env setup needed) ──
+    if args.command in _EARLY_COMMANDS:
+        exit_code = _handle_early_command(args)
+        if exit_code is not None:
+            raise SystemExit(exit_code)
+
+    # ── Channels subcommand (needs settings for list, API for start/stop) ──
+    if args.command == "channels":
+        from pocketpaw.cli.channels import run_channels_cmd
+
+        exit_code = run_channels_cmd(
+            action=args.subaction,
+            channel=args.query,
+            port=args.port,
+            as_json=args.json,
+        )
+        raise SystemExit(exit_code)
+
+    # ── Legacy --doctor flag ──
+    if args.doctor:
+        exit_code = _run_async(run_doctor())
+        raise SystemExit(exit_code)
 
     # Fail fast if optional deps are missing for the chosen mode
     _check_extras_installed(args)
@@ -287,9 +512,6 @@ Examples:
             raise SystemExit(exit_code)
         elif args.check_openai_compatible:
             exit_code = _run_async(check_openai_compatible(settings))
-            raise SystemExit(exit_code)
-        elif args.doctor:
-            exit_code = _run_async(run_doctor())
             raise SystemExit(exit_code)
         elif args.security_audit:
             from pocketpaw.security.audit_cli import run_security_audit

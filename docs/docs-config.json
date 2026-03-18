@@ -160,6 +160,11 @@
             "icon": "lucide:rocket"
           },
           {
+            "label": "CLI Reference",
+            "href": "/getting-started/cli",
+            "icon": "lucide:terminal"
+          },
+          {
             "label": "Configuration",
             "href": "/getting-started/configuration",
             "icon": "lucide:settings"

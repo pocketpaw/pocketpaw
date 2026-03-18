@@ -1,7 +1,7 @@
-# Updated: 2026-03-11 — Hotfix 0.4.9: fix tool permissions hanging on messaging channels.
+# Updated: 2026-03-17 — Release 0.4.10: Soul Protocol, agent primitives, Discord overhaul, LiteLLM.
 [project]
 name = "pocketpaw"
-version = "0.4.9"
+version = "0.4.10"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"

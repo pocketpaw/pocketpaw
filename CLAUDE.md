@@ -33,6 +33,27 @@ uv run pocketpaw --discord --slack
 # Run in development mode (auto-reload on file changes)
 uv run pocketpaw --dev
 
+# CLI management commands (all support --json for scripting)
+uv run pocketpaw status                     # Show agent status (--watch for live)
+uv run pocketpaw health                     # Quick startup health check
+uv run pocketpaw doctor                     # Full diagnostics with connectivity
+uv run pocketpaw channels                   # List channel configured/autostart status
+uv run pocketpaw channels start discord     # Start a channel adapter (needs running dashboard)
+uv run pocketpaw channels stop slack        # Stop a channel adapter
+uv run pocketpaw skills                     # List available skills
+uv run pocketpaw sessions                   # List chat sessions
+uv run pocketpaw sessions search <query>    # Search session content
+uv run pocketpaw sessions delete <key>      # Delete a session
+uv run pocketpaw memory                     # Show memory stats
+uv run pocketpaw memory search <query>      # Search long-term memories
+uv run pocketpaw config                     # Show config (secrets masked)
+uv run pocketpaw config set <key> <value>   # Set a config value
+uv run pocketpaw config validate            # Validate API keys
+uv run pocketpaw config path                # Print config file path
+uv run pocketpaw errors                     # Show recent errors (--limit, --search)
+uv run pocketpaw logs                       # Show audit log (--follow to tail)
+uv run pocketpaw update                     # Update to latest version via uv
+
 # Run all tests (excluding E2E tests)
 uv run pytest --ignore=tests/e2e
 

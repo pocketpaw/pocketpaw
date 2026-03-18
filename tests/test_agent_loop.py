@@ -811,9 +811,9 @@ async def test_agents_md_discovery_failure_is_silently_logged(
     assert any("is_stream_end" in c for c in outbound_calls), (
         "Loop must still publish stream-end even when AGENTS.md discovery raises"
     )
-    assert any(
-        "AGENTS.md discovery failed" in r.message for r in caplog.records
-    ), "AGENTS.md failure must be logged"
+    assert any("AGENTS.md discovery failed" in r.message for r in caplog.records), (
+        "AGENTS.md failure must be logged"
+    )
 
 
 @patch("pocketpaw.agents.loop.get_message_bus")
@@ -890,9 +890,9 @@ async def test_token_metrics_persist_failure_is_logged_at_debug(
     assert any("is_stream_end" in c for c in outbound_calls), (
         "Loop must publish stream-end even when usage tracker raises"
     )
-    assert any(
-        "token usage metrics" in r.message for r in caplog.records
-    ), "Token metrics failure must be logged"
+    assert any("token usage metrics" in r.message for r in caplog.records), (
+        "Token metrics failure must be logged"
+    )
 
 
 @patch("pocketpaw.agents.loop.get_message_bus")

@@ -168,7 +168,29 @@ class AgentContextBuilder:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Health engine failure (non-fatal, skipping health block): %s", exc)
 
-        # 8. Inject AGENTS.md constraints from the target repo
+        # 8. Inject available skills so the agent knows what exists
+        try:
+            from pocketpaw.skills import get_skill_loader
+
+            loader = get_skill_loader()
+            skills = loader.get_all()
+            if skills:
+                skill_lines = []
+                for s in skills.values():
+                    invocable = " (user-invocable)" if s.user_invocable else ""
+                    skill_lines.append(f"- **{s.name}**: {s.description}{invocable}")
+                search_dirs = ", ".join(str(p) for p in loader.paths)
+                parts.append(
+                    "\n# Available Skills\n"
+                    "The following skills have been created and are available. "
+                    "Do NOT recreate them or forget they exist.\n"
+                    + "\n".join(skill_lines)
+                    + f"\n\nSkills directories: {search_dirs}"
+                )
+        except Exception as exc:
+            logger.debug("Skill injection skipped: %s", exc)
+
+        # 9. Inject AGENTS.md constraints from the target repo
         if agents_md_dir:
             try:
                 from pocketpaw.agents_md import AgentsMdLoader
