@@ -95,7 +95,7 @@ class TestSecurityRegressions:
         assert result["type"] == "error"
         assert "Validation Error" in result["message"]
 
-    def test_path_resolve_with_empty_string_not_called(self) -> None:
+    def test_path_resolve_with_empty_string_not_called(self, tmp_path: Path) -> None:
         """Verify that validation catches empty strings preventing bypasses."""
         with pytest.raises(ValueError, match="Path string cannot be empty or whitespace"):
-            FetchRequest(path_str="")
+            FetchRequest(path_str="", jail_str=str(tmp_path))
