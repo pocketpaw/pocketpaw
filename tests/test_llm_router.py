@@ -229,6 +229,26 @@ class TestNoneContentHandling:
 
         assert result == FALLBACK
 
+    async def test_anthropic_none_content_returns_fallback(self):
+        router = _make_router("anthropic")
+        router._available_backend = "anthropic"
+
+        mock_block = MagicMock()
+        mock_block.text = None
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_anthropic_client = AsyncMock()
+        mock_anthropic_client.messages.create = AsyncMock(return_value=mock_response)
+
+        mock_llm = MagicMock()
+        mock_llm.create_anthropic_client.return_value = mock_anthropic_client
+
+        with patch("pocketpaw.llm.client.resolve_llm_client", return_value=mock_llm):
+            result = await router._chat_anthropic("hello")
+
+        assert result == FALLBACK
+
 
 # ---------------------------------------------------------------------------
 # Audit logging

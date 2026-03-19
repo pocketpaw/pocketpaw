@@ -169,7 +169,10 @@ class LLMRouter:
 
         if not response.content:
             return self._empty_response_fallback("anthropic")
-        return response.content[0].text
+        content = response.content[0].text
+        if content is None:
+            return self._empty_response_fallback("anthropic")
+        return content
 
     def clear_history(self) -> None:
         """Clear conversation history."""
@@ -189,7 +192,7 @@ class LLMRouter:
                 actor="llm_router",
                 action="empty_response",
                 target=provider,
-                status="block",
+                status="fallback",
             )
         )
         return _FALLBACK
