@@ -77,6 +77,12 @@ python3 -m pip install --upgrade pip
 python3 -m venv pocketpaw-env
 source pocketpaw-env/bin/activate
 
+# On Linux/macOS:
+source pocketpaw-env/bin/activate
+
+# On Windows:
+pocketpaw-env\Scripts\activate
+
 # 4. Install PocketPaw
 pip install pocketpaw
 
