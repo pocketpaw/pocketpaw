@@ -110,13 +110,13 @@ class TestMCPConfig:
 
     def test_load_corrupt_json(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pocketpaw.mcp.config.get_config_dir", lambda: tmp_path)
-        (tmp_path / "mcp_servers.json").write_text("not json")
+        (tmp_path / "mcp_servers.json").write_text("not json", encoding="utf-8")
         result = load_mcp_config()
         assert result == []
 
     def test_load_missing_servers_key(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pocketpaw.mcp.config.get_config_dir", lambda: tmp_path)
-        (tmp_path / "mcp_servers.json").write_text(json.dumps({"other": 1}))
+        (tmp_path / "mcp_servers.json").write_text(json.dumps({"other": 1}), encoding="utf-8")
         result = load_mcp_config()
         assert result == []
 

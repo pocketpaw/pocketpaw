@@ -93,8 +93,8 @@ class TestFileBrowseHiddenFileBug:
             (tmp_path / name).mkdir()
 
         # Create 2 visible files
-        (tmp_path / "readme.txt").write_text("hello")
-        (tmp_path / "notes.md").write_text("notes")
+        (tmp_path / "readme.txt").write_text("hello", encoding="utf-8")
+        (tmp_path / "notes.md").write_text("notes", encoding="utf-8")
 
         await handle_file_browse(mock_websocket, str(tmp_path), mock_settings)
 
@@ -114,10 +114,10 @@ class TestFileBrowseHiddenFileBug:
         """Verify hidden files are always filtered out of results."""
         from pocketpaw.dashboard import handle_file_browse
 
-        (tmp_path / ".gitconfig").write_text("config")
+        (tmp_path / ".gitconfig").write_text("config", encoding="utf-8")
         (tmp_path / ".ssh").mkdir()
         (tmp_path / "Documents").mkdir()
-        (tmp_path / "visible_file.txt").write_text("data")
+        (tmp_path / "visible_file.txt").write_text("data", encoding="utf-8")
 
         await handle_file_browse(mock_websocket, str(tmp_path), mock_settings)
 

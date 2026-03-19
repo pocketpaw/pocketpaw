@@ -83,7 +83,7 @@ class TestCheckForUpdates:
     def test_uses_fresh_cache(self, tmp_path):
         """When cache is fresh, doesn't hit PyPI."""
         cache_file = tmp_path / CACHE_FILENAME
-        cache_file.write_text(json.dumps({"ts": time.time(), "latest": "0.5.0"}))
+        cache_file.write_text(json.dumps({"ts": time.time(), "latest": "0.5.0"}), encoding="utf-8")
 
         # No mock needed — if it tries to hit PyPI it would fail
         result = check_for_updates("0.4.1", tmp_path)
@@ -96,7 +96,7 @@ class TestCheckForUpdates:
         """When cache is older than TTL, re-fetches from PyPI."""
         cache_file = tmp_path / CACHE_FILENAME
         stale_ts = time.time() - CACHE_TTL - 100
-        cache_file.write_text(json.dumps({"ts": stale_ts, "latest": "0.3.0"}))
+        cache_file.write_text(json.dumps({"ts": stale_ts, "latest": "0.3.0"}), encoding="utf-8")
 
         pypi_response = json.dumps({"info": {"version": "0.4.1"}}).encode()
         with patch("urllib.request.urlopen") as mock_urlopen:
@@ -119,7 +119,7 @@ class TestCheckForUpdates:
     def test_handles_corrupted_cache(self, tmp_path):
         """Corrupted cache file doesn't crash, re-fetches."""
         cache_file = tmp_path / CACHE_FILENAME
-        cache_file.write_text("not json{{{")
+        cache_file.write_text("not json{{{", encoding="utf-8")
 
         pypi_response = json.dumps({"info": {"version": "0.4.1"}}).encode()
         with patch("urllib.request.urlopen") as mock_urlopen:
@@ -242,7 +242,7 @@ class TestFetchReleaseNotes:
                 "name": "v0.4.2",
             },
         }
-        (cache_dir / "v0.4.2.json").write_text(json.dumps(cached))
+        (cache_dir / "v0.4.2.json").write_text(json.dumps(cached), encoding="utf-8")
 
         # No mock — would fail if it tried to fetch
         result = fetch_release_notes("0.4.2", tmp_path)
@@ -270,7 +270,7 @@ class TestVersionSeen:
     def test_preserves_existing_cache(self, tmp_path):
         """Marking version seen doesn't destroy existing cache fields."""
         cache_file = tmp_path / CACHE_FILENAME
-        cache_file.write_text(json.dumps({"ts": 12345, "latest": "0.5.0"}))
+        cache_file.write_text(json.dumps({"ts": 12345, "latest": "0.5.0"}), encoding="utf-8")
 
         mark_version_seen("0.4.2", tmp_path)
 

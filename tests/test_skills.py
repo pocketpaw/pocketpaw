@@ -30,7 +30,7 @@ description: A test skill for unit testing
 This is the skill content.
 
 Use it like this: `/test-skill arg1 arg2`
-""")
+""", encoding="utf-8")
 
         skill = parse_skill_md(skill_md)
 
@@ -53,7 +53,7 @@ argument-hint: "[filename]"
 ---
 
 Advanced content here.
-""")
+""", encoding="utf-8")
 
         skill = parse_skill_md(skill_md)
 
@@ -67,7 +67,7 @@ Advanced content here.
         """Test parsing skill without frontmatter returns None."""
         skill_md = tmp_path / "bad-skill" / "SKILL.md"
         skill_md.parent.mkdir(parents=True)
-        skill_md.write_text("Just content, no frontmatter")
+        skill_md.write_text("Just content, no frontmatter", encoding="utf-8")
 
         skill = parse_skill_md(skill_md)
 
@@ -82,7 +82,7 @@ description: Skill without name field
 ---
 
 Content here.
-""")
+""", encoding="utf-8")
 
         skill = parse_skill_md(skill_md)
 
@@ -151,7 +151,7 @@ description: Test skill
 ---
 
 Test content.
-""")
+""", encoding="utf-8")
 
         return SkillLoader(extra_paths=[skills_dir])
 
@@ -206,7 +206,7 @@ description: New skill added
 ---
 
 New content.
-""")
+""", encoding="utf-8")
 
         # Reload
         skills = loader.reload()

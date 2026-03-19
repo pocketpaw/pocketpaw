@@ -55,7 +55,7 @@ class TestScanPrompt:
 class TestHeuristicScanReadme:
     @pytest.mark.asyncio
     async def test_readme_md_content_stored_in_soul(self, tmp_path, mock_soul):
-        (tmp_path / "README.md").write_text("# MyProject\nAwesome project.")
+        (tmp_path / "README.md").write_text("# MyProject\nAwesome project.", encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -64,7 +64,7 @@ class TestHeuristicScanReadme:
 
     @pytest.mark.asyncio
     async def test_readme_rst_fallback(self, tmp_path, mock_soul):
-        (tmp_path / "README.rst").write_text("MyRstProject docs")
+        (tmp_path / "README.rst").write_text("MyRstProject docs", encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -73,8 +73,8 @@ class TestHeuristicScanReadme:
 
     @pytest.mark.asyncio
     async def test_readme_md_takes_precedence_over_rst(self, tmp_path, mock_soul):
-        (tmp_path / "README.md").write_text("MD content")
-        (tmp_path / "README.rst").write_text("RST content")
+        (tmp_path / "README.md").write_text("MD content", encoding="utf-8")
+        (tmp_path / "README.rst").write_text("RST content", encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -93,7 +93,7 @@ class TestHeuristicScanReadme:
 
     @pytest.mark.asyncio
     async def test_readme_stored_with_high_importance(self, tmp_path, mock_soul):
-        (tmp_path / "README.md").write_text("# Project")
+        (tmp_path / "README.md").write_text("# Project", encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -116,7 +116,7 @@ class TestHeuristicScanReadme:
 class TestHeuristicScanPyproject:
     @pytest.mark.asyncio
     async def test_pyproject_content_stored(self, tmp_path, mock_soul):
-        (tmp_path / "pyproject.toml").write_text('[project]\nname = "coolapp"\n')
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "coolapp"\n', encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -125,7 +125,7 @@ class TestHeuristicScanPyproject:
 
     @pytest.mark.asyncio
     async def test_pyproject_label_in_stored_fact(self, tmp_path, mock_soul):
-        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -141,7 +141,7 @@ class TestHeuristicScanPyproject:
 class TestHeuristicScanPackageJson:
     @pytest.mark.asyncio
     async def test_package_json_content_stored(self, tmp_path, mock_soul):
-        (tmp_path / "package.json").write_text('{"name": "my-app", "version": "1.0.0"}')
+        (tmp_path / "package.json").write_text('{"name": "my-app", "version": "1.0.0"}', encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -150,7 +150,7 @@ class TestHeuristicScanPackageJson:
 
     @pytest.mark.asyncio
     async def test_package_json_label_in_stored_fact(self, tmp_path, mock_soul):
-        (tmp_path / "package.json").write_text('{"name": "x"}')
+        (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -167,7 +167,8 @@ class TestHeuristicScanEnvExample:
     @pytest.mark.asyncio
     async def test_env_var_names_extracted(self, tmp_path, mock_soul):
         (tmp_path / ".env.example").write_text(
-            "OPENAI_API_KEY=your-key-here\nDATABASE_URL=postgres://...\n"
+            "OPENAI_API_KEY=your-key-here\nDATABASE_URL=postgres://...\n",
+            encoding="utf-8"
         )
 
         await heuristic_scan(tmp_path, mock_soul)
@@ -178,7 +179,7 @@ class TestHeuristicScanEnvExample:
 
     @pytest.mark.asyncio
     async def test_commented_env_vars_ignored(self, tmp_path, mock_soul):
-        (tmp_path / ".env.example").write_text("# This is a comment\nACTIVE_KEY=value\n")
+        (tmp_path / ".env.example").write_text("# This is a comment\nACTIVE_KEY=value\n", encoding="utf-8")
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -221,7 +222,7 @@ class TestHeuristicScanDirectoryStructure:
 
     @pytest.mark.asyncio
     async def test_soul_remember_failure_does_not_raise(self, tmp_path, mock_soul):
-        (tmp_path / "README.md").write_text("Test")
+        (tmp_path / "README.md").write_text("Test", encoding="utf-8")
         mock_soul.remember = AsyncMock(side_effect=RuntimeError("storage error"))
 
         # Should complete without raising even if remember fails

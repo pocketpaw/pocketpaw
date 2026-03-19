@@ -56,9 +56,9 @@ class TestUninstall:
         (tmp_path / "uv").mkdir()
         (tmp_path / "logs").mkdir()
         (tmp_path / "memory").mkdir()
-        (tmp_path / "config.json").write_text("{}")
-        (tmp_path / "audit.jsonl").write_text("")
-        (tmp_path / "launcher.pid").write_text("12345")
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "audit.jsonl").write_text("", encoding="utf-8")
+        (tmp_path / "launcher.pid").write_text("12345", encoding="utf-8")
         return tmp_path
 
     def test_removes_venv_and_uv(self, setup_home):

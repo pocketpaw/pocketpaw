@@ -24,7 +24,7 @@ def tool():
 async def test_deliver_basic(tool, mock_settings, tmp_path):
     """Deliver an existing file returns media tag."""
     f = tmp_path / "output.txt"
-    f.write_text("hello")
+    f.write_text("hello", encoding="utf-8")
     result = await tool.execute(path=str(f))
     assert f"<!-- media:{f} -->" in result
     assert "output.txt" in result
@@ -81,7 +81,7 @@ async def test_deliver_file_jail(tool, mock_settings, tmp_path):
 async def test_deliver_size_info(tool, mock_settings, tmp_path):
     """Result includes file size information."""
     f = tmp_path / "data.csv"
-    f.write_text("a,b,c\n" * 500)
+    f.write_text("a,b,c\n" * 500, encoding="utf-8")
     result = await tool.execute(path=str(f))
     assert "KB" in result or "MB" in result
     assert "data.csv" in result

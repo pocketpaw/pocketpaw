@@ -41,14 +41,14 @@ class TestPawConfigFromYaml:
     """PawConfig.load() reading a valid paw.yaml."""
 
     def test_loads_soul_name(self, tmp_path):
-        (tmp_path / "paw.yaml").write_text("soul_name: Buddy\nprovider: openai\n")
+        (tmp_path / "paw.yaml").write_text("soul_name: Buddy\nprovider: openai\n", encoding="utf-8")
 
         config = PawConfig.load(tmp_path)
 
         assert config.soul_name == "Buddy"
 
     def test_loads_provider(self, tmp_path):
-        (tmp_path / "paw.yaml").write_text("provider: openai\n")
+        (tmp_path / "paw.yaml").write_text("provider: openai\n", encoding="utf-8")
 
         config = PawConfig.load(tmp_path)
 
@@ -56,7 +56,7 @@ class TestPawConfigFromYaml:
 
     def test_loads_soul_path(self, tmp_path):
         soul_file = tmp_path / "my.soul"
-        (tmp_path / "paw.yaml").write_text(f"soul_path: {soul_file}\n")
+        (tmp_path / "paw.yaml").write_text(f"soul_path: {soul_file}\n", encoding="utf-8")
 
         config = PawConfig.load(tmp_path)
 
@@ -64,14 +64,14 @@ class TestPawConfigFromYaml:
 
     def test_name_alias_for_soul_name(self, tmp_path):
         # Some configs use 'name' instead of 'soul_name'
-        (tmp_path / "paw.yaml").write_text("name: Rex\n")
+        (tmp_path / "paw.yaml").write_text("name: Rex\n", encoding="utf-8")
 
         config = PawConfig.load(tmp_path)
 
         assert config.soul_name == "Rex"
 
     def test_empty_yaml_gives_defaults(self, tmp_path):
-        (tmp_path / "paw.yaml").write_text("")
+        (tmp_path / "paw.yaml").write_text("", encoding="utf-8")
 
         config = PawConfig.load(tmp_path)
 
@@ -83,7 +83,7 @@ class TestPawConfigEnvOverrides:
     """Env vars PAW_PROVIDER and PAW_SOUL_PATH override yaml and defaults."""
 
     def test_paw_provider_overrides_yaml(self, tmp_path, monkeypatch):
-        (tmp_path / "paw.yaml").write_text("provider: openai\n")
+        (tmp_path / "paw.yaml").write_text("provider: openai\n", encoding="utf-8")
         monkeypatch.setenv("PAW_PROVIDER", "ollama")
 
         config = PawConfig.load(tmp_path)
@@ -99,7 +99,7 @@ class TestPawConfigEnvOverrides:
 
     def test_paw_soul_path_overrides_yaml(self, tmp_path, monkeypatch):
         soul_from_yaml = tmp_path / "yaml.soul"
-        (tmp_path / "paw.yaml").write_text(f"soul_path: {soul_from_yaml}\n")
+        (tmp_path / "paw.yaml").write_text(f"soul_path: {soul_from_yaml}\n", encoding="utf-8")
 
         env_soul = tmp_path / "env.soul"
         monkeypatch.setenv("PAW_SOUL_PATH", str(env_soul))

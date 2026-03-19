@@ -447,7 +447,7 @@ class TestSarvamOCR:
         img.write_bytes(b"\x89PNG" + b"\x00" * 100)
 
         # Pre-create output markdown that the SDK "downloads"
-        (ocr_out / "page_1.md").write_text("# Title\n\nExtracted text here.")
+        (ocr_out / "page_1.md").write_text("# Title\n\nExtracted text here.", encoding="utf-8")
 
         tool = self._make_tool()
 
@@ -478,7 +478,7 @@ class TestSarvamOCR:
         pdf = tmp_path / "document.pdf"
         pdf.write_bytes(b"%PDF-1.4" + b"\x00" * 100)
 
-        (ocr_out / "page_1.md").write_text("PDF text content")
+        (ocr_out / "page_1.md").write_text("PDF text content", encoding="utf-8")
 
         tool = self._make_tool()
 

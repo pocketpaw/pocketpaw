@@ -42,7 +42,7 @@ class TestConfigPermissions:
 
     def test_secure_permissions(self, temp_config_dir):
         config = temp_config_dir / "config.json"
-        config.write_text("{}")
+        config.write_text("{}", encoding="utf-8")
         os.chmod(config, stat.S_IRUSR | stat.S_IWUSR)
 
         with patch("pocketpaw.security.audit_cli.get_config_path", return_value=config):
@@ -52,7 +52,7 @@ class TestConfigPermissions:
     @pytest.mark.skipif(sys.platform == "win32", reason="NTFS doesn't support Unix permissions")
     def test_world_readable(self, temp_config_dir):
         config = temp_config_dir / "config.json"
-        config.write_text("{}")
+        config.write_text("{}", encoding="utf-8")
         os.chmod(config, stat.S_IRUSR | stat.S_IWUSR | stat.S_IROTH)
 
         with patch("pocketpaw.security.audit_cli.get_config_path", return_value=config):
@@ -63,7 +63,7 @@ class TestConfigPermissions:
     @pytest.mark.skipif(sys.platform == "win32", reason="NTFS doesn't support Unix permissions")
     def test_fix_permissions(self, temp_config_dir):
         config = temp_config_dir / "config.json"
-        config.write_text("{}")
+        config.write_text("{}", encoding="utf-8")
         os.chmod(config, stat.S_IRUSR | stat.S_IWUSR | stat.S_IROTH)
 
         with patch("pocketpaw.security.audit_cli.get_config_path", return_value=config):
@@ -75,7 +75,7 @@ class TestConfigPermissions:
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
     def test_windows_skips_permission_check(self, temp_config_dir):
         config = temp_config_dir / "config.json"
-        config.write_text("{}")
+        config.write_text("{}", encoding="utf-8")
 
         with patch("pocketpaw.security.audit_cli.get_config_path", return_value=config):
             ok, msg, fixable = _check_config_permissions()
@@ -94,7 +94,7 @@ class TestPlaintextApiKeys:
 
     def test_no_keys_in_config(self, temp_config_dir):
         config = temp_config_dir / "config.json"
-        config.write_text(json.dumps({"agent_backend": "claude_agent_sdk"}))
+        config.write_text(json.dumps({"agent_backend": "claude_agent_sdk"}), encoding="utf-8")
 
         with patch("pocketpaw.security.audit_cli.get_config_path", return_value=config):
             ok, msg, fixable = _check_plaintext_api_keys()
@@ -102,7 +102,7 @@ class TestPlaintextApiKeys:
 
     def test_keys_in_config(self, temp_config_dir):
         config = temp_config_dir / "config.json"
-        config.write_text(json.dumps({"anthropic_api_key": "sk-ant-123"}))
+        config.write_text(json.dumps({"anthropic_api_key": "sk-ant-123"}), encoding="utf-8")
 
         with patch("pocketpaw.security.audit_cli.get_config_path", return_value=config):
             ok, msg, fixable = _check_plaintext_api_keys()

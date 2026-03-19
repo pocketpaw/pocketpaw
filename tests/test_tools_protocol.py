@@ -167,7 +167,7 @@ class TestFilesystemTools:
         outside_prefix_dir = temp_jail.parent / f"{temp_jail.name}_outside"
         outside_prefix_dir.mkdir(exist_ok=True)
         outside_prefix_file = outside_prefix_dir / "secret.txt"
-        outside_prefix_file.write_text("secret")
+        outside_prefix_file.write_text("secret", encoding="utf-8")
 
         read_result = await read_tool.execute(path=str(outside_prefix_file))
         write_result = await write_tool.execute(path=str(outside_prefix_file), content="overwrite")

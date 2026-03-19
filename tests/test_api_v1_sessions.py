@@ -154,10 +154,10 @@ class TestSearchSessions:
         with tempfile.TemporaryDirectory() as tmpdir:
             sessions_path = Path(tmpdir)
             (sessions_path / "sess1.json").write_text(
-                json.dumps([{"content": "Hello world", "role": "user"}])
+                json.dumps([{"content": "Hello world", "role": "user"}]), encoding="utf-8"
             )
             (sessions_path / "sess2.json").write_text(
-                json.dumps([{"content": "Goodbye world", "role": "assistant"}])
+                json.dumps([{"content": "Goodbye world", "role": "assistant"}]), encoding="utf-8"
             )
             store = MagicMock()
             store.sessions_path = sessions_path

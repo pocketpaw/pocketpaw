@@ -216,7 +216,7 @@ class TestConfigSecretSeparation:
         cfg._MIGRATION_DONE_PATH = None
 
         # Mark migration as done so it doesn't interfere
-        (tmp_path / ".secrets_migrated").write_text("1")
+        (tmp_path / ".secrets_migrated").write_text("1", encoding="utf-8")
 
         with patch.object(creds, "get_credential_store", return_value=test_store):
             yield {
@@ -410,7 +410,7 @@ class TestPlaintextMigration:
             "agent_backend": "claude_agent_sdk",
             "allowed_user_id": 99999,
         }
-        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config))
+        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config), encoding="utf-8")
 
         # Load triggers migration
         Settings.load()
@@ -430,7 +430,7 @@ class TestPlaintextMigration:
             "anthropic_api_key": "sk-ant-old",
             "agent_backend": "claude_agent_sdk",
         }
-        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config))
+        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config), encoding="utf-8")
 
         Settings.load()
 
@@ -444,7 +444,7 @@ class TestPlaintextMigration:
         """Migration creates a .secrets_migrated flag file."""
         from pocketpaw.config import Settings
 
-        (env["tmp_path"] / "config.json").write_text(json.dumps({"agent_backend": "test"}))
+        (env["tmp_path"] / "config.json").write_text(json.dumps({"agent_backend": "test"}), encoding="utf-8")
         Settings.load()
         assert (env["tmp_path"] / ".secrets_migrated").exists()
 
@@ -455,10 +455,10 @@ class TestPlaintextMigration:
 
         # Write config with plaintext key
         old_config = {"anthropic_api_key": "sk-ant-should-not-migrate"}
-        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config))
+        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config), encoding="utf-8")
 
         # Pre-set the flag
-        (env["tmp_path"] / ".secrets_migrated").write_text("1")
+        (env["tmp_path"] / ".secrets_migrated").write_text("1", encoding="utf-8")
         cfg._MIGRATION_DONE_PATH = env["tmp_path"] / ".secrets_migrated"
 
         Settings.load()
@@ -484,7 +484,7 @@ class TestPlaintextMigration:
             "agent_backend": "claude_agent_sdk",
             "llm_provider": "anthropic",
         }
-        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config))
+        (env["tmp_path"] / "config.json").write_text(json.dumps(old_config), encoding="utf-8")
 
         loaded = Settings.load()
         assert loaded.anthropic_api_key == "sk-ant-migrated"

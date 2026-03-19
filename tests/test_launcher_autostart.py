@@ -58,7 +58,7 @@ class TestMacOSAutoStart:
     def test_disable_removes_plist(self):
         # Create the plist first
         self.plist_path.parent.mkdir(parents=True, exist_ok=True)
-        self.plist_path.write_text("test")
+        self.plist_path.write_text("test", encoding="utf-8")
 
         with patch("installer.launcher.autostart.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
@@ -143,7 +143,7 @@ class TestLinuxAutoStart:
 
     def test_disable_removes_desktop_file(self):
         self.desktop_path.parent.mkdir(parents=True, exist_ok=True)
-        self.desktop_path.write_text("test")
+        self.desktop_path.write_text("test", encoding="utf-8")
 
         assert self.mgr.disable()
         assert not self.desktop_path.exists()

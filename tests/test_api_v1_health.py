@@ -190,7 +190,7 @@ class TestSelfAuditReports:
             reports = Path(tmpdir) / "audit_reports"
             reports.mkdir()
             (reports / "2026-02-20.json").write_text(
-                json.dumps({"total_checks": 10, "passed": 9, "issues": 1})
+                json.dumps({"total_checks": 10, "passed": 9, "issues": 1}), encoding="utf-8"
             )
             mock_dir.return_value = Path(tmpdir)
             resp = client.get("/api/v1/self-audit/reports")
@@ -205,7 +205,7 @@ class TestSelfAuditReports:
             reports = Path(tmpdir) / "audit_reports"
             reports.mkdir()
             report_data = {"total_checks": 5, "passed": 4, "issues": 1}
-            (reports / "2026-02-20.json").write_text(json.dumps(report_data))
+            (reports / "2026-02-20.json").write_text(json.dumps(report_data), encoding="utf-8")
             mock_dir.return_value = Path(tmpdir)
             resp = client.get("/api/v1/self-audit/reports/2026-02-20")
             assert resp.status_code == 200

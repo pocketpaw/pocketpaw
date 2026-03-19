@@ -52,7 +52,7 @@ class TestUserProfile:
 
     async def test_user_md_not_overwritten(self, temp_identity_path):
         # Pre-create USER.md with custom content
-        (temp_identity_path / "USER.md").write_text("Name: Bob")
+        (temp_identity_path / "USER.md").write_text("Name: Bob", encoding="utf-8")
         DefaultBootstrapProvider(base_path=temp_identity_path)
         content = (temp_identity_path / "USER.md").read_text(encoding="utf-8")
         assert content == "Name: Bob"
@@ -60,13 +60,13 @@ class TestUserProfile:
     async def test_user_profile_loaded_into_context(self, temp_identity_path):
         provider = DefaultBootstrapProvider(base_path=temp_identity_path)
         # Overwrite with custom profile
-        (temp_identity_path / "USER.md").write_text("Name: Charlie\nTimezone: UTC+5")
+        (temp_identity_path / "USER.md").write_text("Name: Charlie\nTimezone: UTC+5", encoding="utf-8")
         ctx = await provider.get_context()
         assert ctx.user_profile == "Name: Charlie\nTimezone: UTC+5"
 
     async def test_user_profile_in_system_prompt(self, temp_identity_path):
         provider = DefaultBootstrapProvider(base_path=temp_identity_path)
-        (temp_identity_path / "USER.md").write_text("Name: Charlie")
+        (temp_identity_path / "USER.md").write_text("Name: Charlie", encoding="utf-8")
         ctx = await provider.get_context()
         prompt = ctx.to_system_prompt()
         assert "# User Profile" in prompt

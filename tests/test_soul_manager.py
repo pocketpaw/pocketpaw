@@ -84,7 +84,7 @@ class TestSoulManager:
         from pocketpaw.soul.manager import SoulManager
 
         soul_file = tmp_path / "test.soul"
-        soul_file.write_text("this is not a valid soul file")
+        soul_file.write_text("this is not a valid soul file", encoding="utf-8")
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -154,7 +154,7 @@ class TestSoulManager:
             "name: YamlSoul\n"
             "archetype: The Yaml Expert\n"
             "values: [clarity, speed]\n"
-            "persona: I was born from YAML.\n"
+            "persona: I was born from YAML.\n", encoding="utf-8"
         )
 
         mgr = SoulManager(soul_settings)
@@ -178,7 +178,7 @@ class TestSoulManager:
                     "archetype": "The Json Expert",
                     "persona": "I was born from JSON.",
                 }
-            )
+            ), encoding="utf-8"
         )
 
         mgr = SoulManager(soul_settings)
@@ -225,7 +225,7 @@ class TestSoulManager:
         await mgr.initialize()
 
         bad_file = tmp_path / "config.txt"
-        bad_file.write_text("not supported")
+        bad_file.write_text("not supported", encoding="utf-8")
 
         with pytest.raises(ValueError, match="Unsupported file format"):
             await mgr.import_from_file(bad_file)

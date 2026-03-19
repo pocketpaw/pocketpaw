@@ -105,7 +105,7 @@ class TestAgentsMdLoaderFind:
         _cache.clear()
 
     def test_finds_agents_md_in_start_dir(self, tmp_path):
-        (tmp_path / "AGENTS.md").write_text("## Rules\n- Rule 1")
+        (tmp_path / "AGENTS.md").write_text("## Rules\n- Rule 1", encoding="utf-8")
         loader = AgentsMdLoader()
         result = loader.find_and_load(tmp_path)
         assert result is not None
@@ -121,7 +121,7 @@ class TestAgentsMdLoaderFind:
         parent = tmp_path
         child = tmp_path / "subdir" / "deeper"
         child.mkdir(parents=True)
-        (parent / "AGENTS.md").write_text("Parent rules")
+        (parent / "AGENTS.md").write_text("Parent rules", encoding="utf-8")
         loader = AgentsMdLoader()
         result = loader.find_and_load(child)
         assert result is not None
@@ -132,8 +132,8 @@ class TestAgentsMdLoaderFind:
         parent = tmp_path
         child = tmp_path / "sub"
         child.mkdir()
-        (parent / "AGENTS.md").write_text("Parent rules")
-        (child / "AGENTS.md").write_text("Child rules")
+        (parent / "AGENTS.md").write_text("Parent rules", encoding="utf-8")
+        (child / "AGENTS.md").write_text("Child rules", encoding="utf-8")
         loader = AgentsMdLoader()
         result = loader.find_and_load(child)
         assert result is not None
@@ -145,7 +145,7 @@ class TestAgentsMdLoaderFind:
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
         above = tmp_path
-        (above / "AGENTS.md").write_text("Above-repo rules")
+        (above / "AGENTS.md").write_text("Above-repo rules", encoding="utf-8")
         (repo_root / ".git").mkdir()
         work_dir = repo_root / "src"
         work_dir.mkdir()
@@ -159,7 +159,7 @@ class TestAgentsMdLoaderFind:
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
         (repo_root / ".git").mkdir()
-        (repo_root / "AGENTS.md").write_text("Repo rules")
+        (repo_root / "AGENTS.md").write_text("Repo rules", encoding="utf-8")
         work_dir = repo_root / "src"
         work_dir.mkdir()
 
@@ -169,7 +169,7 @@ class TestAgentsMdLoaderFind:
         assert "Repo rules" in result.raw_content
 
     def test_sections_parsed(self, tmp_path):
-        (tmp_path / "AGENTS.md").write_text("# Capabilities\nDo A\n# Forbidden\nDon't B")
+        (tmp_path / "AGENTS.md").write_text("# Capabilities\nDo A\n# Forbidden\nDon't B", encoding="utf-8")
         loader = AgentsMdLoader()
         result = loader.find_and_load(tmp_path)
         assert result is not None
@@ -188,7 +188,7 @@ class TestAgentsMdLoaderCache:
 
     def test_mtime_cache_hit(self, tmp_path):
         agents_file = tmp_path / "AGENTS.md"
-        agents_file.write_text("Cached content")
+        agents_file.write_text("Cached content", encoding="utf-8")
         loader = AgentsMdLoader()
 
         result1 = loader.find_and_load(tmp_path)
@@ -207,11 +207,11 @@ class TestAgentsMdLoaderCache:
 
     def test_cache_invalidates_on_mtime_change(self, tmp_path):
         agents_file = tmp_path / "AGENTS.md"
-        agents_file.write_text("Original")
+        agents_file.write_text("Original", encoding="utf-8")
         loader = AgentsMdLoader()
         loader.find_and_load(tmp_path)
 
-        agents_file.write_text("Updated")
+        agents_file.write_text("Updated", encoding="utf-8")
         future = time.time() + 10
         os.utime(agents_file, (future, future))
 
@@ -235,7 +235,7 @@ class TestAgentsMdLoaderCache:
 
 class TestContextBuilderAgentsMd:
     async def test_agents_md_injected_when_present(self, tmp_path):
-        (tmp_path / "AGENTS.md").write_text("## Project Rules\n- No deleting prod DB")
+        (tmp_path / "AGENTS.md").write_text("## Project Rules\n- No deleting prod DB", encoding="utf-8")
         _cache.clear()
         builder = _make_builder()
         prompt = await builder.build_system_prompt(agents_md_dir=str(tmp_path))
@@ -275,7 +275,7 @@ class TestAgentLoopAgentsMdEvent:
         """AgentLoop emits agents_md_loaded SystemEvent when file is found."""
         from pocketpaw.bus.events import SystemEvent
 
-        (tmp_path / "AGENTS.md").write_text("## Rules\n- Be helpful")
+        (tmp_path / "AGENTS.md").write_text("## Rules\n- Be helpful", encoding="utf-8")
         _cache.clear()
 
         # We test the AGENTS.md discovery logic that runs inside

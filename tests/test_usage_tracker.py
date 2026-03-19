@@ -113,7 +113,7 @@ class TestSummaryCoversAllRecords:
                     }
                 )
             )
-        path.write_text("\n".join(lines) + "\n")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def test_summary_counts_all_records_beyond_default_limit(self, tmp_path):
         """With 150 records, summary request_count must be 150, not 100."""
@@ -177,7 +177,7 @@ class TestSummaryCoversAllRecords:
             )
             for _ in range(5)
         ]
-        path.write_text("\n".join(old + new) + "\n")
+        path.write_text("\n".join(old + new) + "\n", encoding="utf-8")
         tracker = UsageTracker(path=path)
         summary = tracker.get_summary(since="2026-01-01T00:00:00+00:00")
         assert summary["request_count"] == 5

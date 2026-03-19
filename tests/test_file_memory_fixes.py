@@ -248,7 +248,7 @@ class TestDailyFileIndexing:
         """Memories in yesterday's daily file are available after restart."""
         yesterday = date.today() - timedelta(days=1)
         daily_file = tmp_path / f"{yesterday.isoformat()}.md"
-        daily_file.write_text("## 10:30\n\nHad meeting with Alice\n")
+        daily_file.write_text("## 10:30\n\nHad meeting with Alice\n", encoding="utf-8")
 
         store = FileMemoryStore(base_path=tmp_path)
         daily_entries = await store.get_by_type(MemoryType.DAILY)
@@ -260,7 +260,7 @@ class TestDailyFileIndexing:
         for i in range(3):
             d = date.today() - timedelta(days=i)
             f = tmp_path / f"{d.isoformat()}.md"
-            f.write_text(f"## Note\n\nDay {i} note\n")
+            f.write_text(f"## Note\n\nDay {i} note\n", encoding="utf-8")
 
         # Create sessions dir (needed by constructor)
         (tmp_path / "sessions").mkdir(exist_ok=True)

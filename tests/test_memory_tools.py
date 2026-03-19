@@ -272,8 +272,8 @@ class TestSessionListAPI:
             {"id": "5", "role": "user", "content": "Thanks!", "timestamp": "2026-02-05T11:02:00"},
         ]
 
-        (sessions_dir / "websocket_session1.json").write_text(json.dumps(session1))
-        (sessions_dir / "websocket_session2.json").write_text(json.dumps(session2))
+        (sessions_dir / "websocket_session1.json").write_text(json.dumps(session1), encoding="utf-8")
+        (sessions_dir / "websocket_session2.json").write_text(json.dumps(session2), encoding="utf-8")
 
         return sessions_dir
 
@@ -329,13 +329,13 @@ class TestSessionListAPI:
         sessions_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a malformed file
-        (sessions_dir / "bad_session.json").write_text("not valid json {")
+        (sessions_dir / "bad_session.json").write_text("not valid json {", encoding="utf-8")
 
         # Create a valid file
         valid_session = [
             {"id": "1", "role": "user", "content": "Test", "timestamp": "2026-02-05T10:00:00"}
         ]
-        (sessions_dir / "good_session.json").write_text(json.dumps(valid_session))
+        (sessions_dir / "good_session.json").write_text(json.dumps(valid_session), encoding="utf-8")
 
         # Simulate API logic
         sessions = []

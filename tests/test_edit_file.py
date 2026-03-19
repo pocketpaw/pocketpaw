@@ -27,7 +27,7 @@ def mock_settings(jail):
 async def test_edit_file_basic(jail, mock_settings):
     """Replace one occurrence, content should change."""
     f = jail / "hello.txt"
-    f.write_text("Hello World")
+    f.write_text("Hello World", encoding="utf-8")
 
     tool = EditFileTool()
     result = await tool.execute(path=str(f), old_string="World", new_string="PocketPaw")
@@ -54,7 +54,7 @@ async def test_edit_file_not_found(jail, mock_settings):
 async def test_edit_file_old_string_missing(jail, mock_settings):
     """old_string not in file returns an error."""
     f = jail / "content.txt"
-    f.write_text("The quick brown fox")
+    f.write_text("The quick brown fox", encoding="utf-8")
 
     tool = EditFileTool()
     result = await tool.execute(path=str(f), old_string="lazy dog", new_string="cat")
@@ -67,7 +67,7 @@ async def test_edit_file_old_string_missing(jail, mock_settings):
 async def test_edit_file_ambiguous(jail, mock_settings):
     """old_string appearing 3 times with replace_all=False returns an error mentioning the count."""
     f = jail / "repeat.txt"
-    f.write_text("foo bar foo baz foo")
+    f.write_text("foo bar foo baz foo", encoding="utf-8")
 
     tool = EditFileTool()
     result = await tool.execute(path=str(f), old_string="foo", new_string="qux", replace_all=False)
@@ -80,7 +80,7 @@ async def test_edit_file_ambiguous(jail, mock_settings):
 async def test_edit_file_replace_all(jail, mock_settings):
     """replace_all=True replaces every occurrence."""
     f = jail / "repeat.txt"
-    f.write_text("foo bar foo baz foo")
+    f.write_text("foo bar foo baz foo", encoding="utf-8")
 
     tool = EditFileTool()
     result = await tool.execute(path=str(f), old_string="foo", new_string="qux", replace_all=True)
@@ -95,7 +95,7 @@ async def test_edit_file_multiline(jail, mock_settings):
     """Replace a multi-line block."""
     original = "line one\nline two\nline three\n"
     f = jail / "multi.txt"
-    f.write_text(original)
+    f.write_text(original, encoding="utf-8")
 
     tool = EditFileTool()
     result = await tool.execute(
@@ -112,7 +112,7 @@ async def test_edit_file_multiline(jail, mock_settings):
 async def test_edit_file_empty_new_string(jail, mock_settings):
     """Replace with empty string effectively deletes the matched text."""
     f = jail / "delete.txt"
-    f.write_text("keep this DELETE that")
+    f.write_text("keep this DELETE that", encoding="utf-8")
 
     tool = EditFileTool()
     result = await tool.execute(path=str(f), old_string=" DELETE", new_string="")
@@ -125,7 +125,7 @@ async def test_edit_file_empty_new_string(jail, mock_settings):
 async def test_edit_file_file_jail(jail, mock_settings):
     """Paths outside the jail are denied."""
     outside = jail.parent / "outside_secret.txt"
-    outside.write_text("sensitive data")
+    outside.write_text("sensitive data", encoding="utf-8")
 
     tool = EditFileTool()
     result = await tool.execute(
@@ -143,7 +143,7 @@ async def test_edit_file_file_jail(jail, mock_settings):
 async def test_edit_file_preserves_rest(jail, mock_settings):
     """Editing one part of a file leaves the rest of the content intact."""
     f = jail / "partial.txt"
-    f.write_text("alpha beta gamma delta")
+    f.write_text("alpha beta gamma delta", encoding="utf-8")
 
     tool = EditFileTool()
     await tool.execute(path=str(f), old_string="beta", new_string="BETA")

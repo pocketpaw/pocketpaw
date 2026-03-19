@@ -28,11 +28,11 @@ class TestGetIdentity:
             base = Path(tmpdir)
             provider = DefaultBootstrapProvider(base_path=base)
             # Write known content
-            (base / "IDENTITY.md").write_text("I am PocketPaw")
-            (base / "SOUL.md").write_text("I value privacy")
-            (base / "STYLE.md").write_text("Be concise")
-            (base / "INSTRUCTIONS.md").write_text("Be agentic")
-            (base / "USER.md").write_text("Name: Alice")
+            (base / "IDENTITY.md").write_text("I am PocketPaw", encoding="utf-8")
+            (base / "SOUL.md").write_text("I value privacy", encoding="utf-8")
+            (base / "STYLE.md").write_text("Be concise", encoding="utf-8")
+            (base / "INSTRUCTIONS.md").write_text("Be agentic", encoding="utf-8")
+            (base / "USER.md").write_text("Name: Alice", encoding="utf-8")
 
             with (
                 patch("pocketpaw.dashboard.get_config_path") as mock_path,
@@ -147,8 +147,8 @@ class TestSaveIdentity:
             base = Path(tmpdir)
             identity_dir = base / "identity"
             identity_dir.mkdir()
-            (identity_dir / "IDENTITY.md").write_text("Original identity")
-            (identity_dir / "USER.md").write_text("Name: Old")
+            (identity_dir / "IDENTITY.md").write_text("Original identity", encoding="utf-8")
+            (identity_dir / "USER.md").write_text("Name: Old", encoding="utf-8")
 
             request = MagicMock()
             request.json = AsyncMock(
@@ -262,7 +262,7 @@ class TestIdentityAgentIntegration:
             assert "(your name)" in ctx.user_profile
 
             # Simulate saving via API (write directly)
-            (base / "USER.md").write_text("Name: Charlie\nTimezone: UTC+5")
+            (base / "USER.md").write_text("Name: Charlie\nTimezone: UTC+5", encoding="utf-8")
 
             # Next call picks up the change
             ctx2 = await provider.get_context()
@@ -275,7 +275,7 @@ class TestIdentityAgentIntegration:
             base = Path(tmpdir)
             provider = DefaultBootstrapProvider(base_path=base)
 
-            (base / "IDENTITY.md").write_text("I am a custom agent named Luna.")
+            (base / "IDENTITY.md").write_text("I am a custom agent named Luna.", encoding="utf-8")
 
             ctx = await provider.get_context()
             assert ctx.identity == "I am a custom agent named Luna."
@@ -287,11 +287,11 @@ class TestIdentityAgentIntegration:
             base = Path(tmpdir)
             provider = DefaultBootstrapProvider(base_path=base)
 
-            (base / "IDENTITY.md").write_text("CUSTOM_IDENTITY")
-            (base / "SOUL.md").write_text("CUSTOM_SOUL")
-            (base / "STYLE.md").write_text("CUSTOM_STYLE")
-            (base / "INSTRUCTIONS.md").write_text("CUSTOM_INSTRUCTIONS")
-            (base / "USER.md").write_text("CUSTOM_USER")
+            (base / "IDENTITY.md").write_text("CUSTOM_IDENTITY", encoding="utf-8")
+            (base / "SOUL.md").write_text("CUSTOM_SOUL", encoding="utf-8")
+            (base / "STYLE.md").write_text("CUSTOM_STYLE", encoding="utf-8")
+            (base / "INSTRUCTIONS.md").write_text("CUSTOM_INSTRUCTIONS", encoding="utf-8")
+            (base / "USER.md").write_text("CUSTOM_USER", encoding="utf-8")
 
             ctx = await provider.get_context()
             prompt = ctx.to_system_prompt()
@@ -308,9 +308,9 @@ class TestIdentityAgentIntegration:
             base = Path(tmpdir)
             provider = DefaultBootstrapProvider(base_path=base)
 
-            (base / "INSTRUCTIONS.md").write_text("INSTR_MARKER")
-            (base / "STYLE.md").write_text("STYLE_MARKER")
-            (base / "USER.md").write_text("USER_MARKER")
+            (base / "INSTRUCTIONS.md").write_text("INSTR_MARKER", encoding="utf-8")
+            (base / "STYLE.md").write_text("STYLE_MARKER", encoding="utf-8")
+            (base / "USER.md").write_text("USER_MARKER", encoding="utf-8")
 
             ctx = await provider.get_context()
             prompt = ctx.to_system_prompt()
@@ -331,7 +331,7 @@ class TestIdentityAgentIntegration:
             assert "PocketPaw Tools" in ctx.instructions
 
             # Simulate saving via API (write directly)
-            (base / "INSTRUCTIONS.md").write_text("Custom tool instructions here")
+            (base / "INSTRUCTIONS.md").write_text("Custom tool instructions here", encoding="utf-8")
 
             # Next call picks up the change
             ctx2 = await provider.get_context()

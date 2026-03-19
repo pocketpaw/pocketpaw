@@ -65,7 +65,7 @@ class TestConfigReading:
     def test_read_port_from_config(self, tmp_path: Path):
         """Should read port from config.json."""
         config_path = tmp_path / "config.json"
-        config_path.write_text(json.dumps({"web_port": 9999}))
+        config_path.write_text(json.dumps({"web_port": 9999}), encoding="utf-8")
 
         with patch("installer.launcher.server.POCKETPAW_HOME", tmp_path):
             mgr = ServerManager()
@@ -80,7 +80,7 @@ class TestConfigReading:
     def test_read_port_invalid_json(self, tmp_path: Path):
         """Should return None on invalid JSON."""
         config_path = tmp_path / "config.json"
-        config_path.write_text("not json")
+        config_path.write_text("not json", encoding="utf-8")
 
         with patch("installer.launcher.server.POCKETPAW_HOME", tmp_path):
             mgr = ServerManager()
@@ -89,7 +89,7 @@ class TestConfigReading:
     def test_read_port_no_port_key(self, tmp_path: Path):
         """Should return None when port key is missing."""
         config_path = tmp_path / "config.json"
-        config_path.write_text(json.dumps({"agent_backend": "claude_agent_sdk"}))
+        config_path.write_text(json.dumps({"agent_backend": "claude_agent_sdk"}), encoding="utf-8")
 
         with patch("installer.launcher.server.POCKETPAW_HOME", tmp_path):
             mgr = ServerManager()
@@ -127,7 +127,7 @@ class TestPidManagement:
     def test_is_running_stale_pid_file(self, tmp_path: Path):
         """Should clean up stale PID file."""
         pid_file = tmp_path / "launcher.pid"
-        pid_file.write_text("99999999")  # Presumably dead PID
+        pid_file.write_text("99999999", encoding="utf-8")  # Presumably dead PID
 
         with (
             patch("installer.launcher.server.PID_FILE", pid_file),
@@ -189,7 +189,7 @@ class TestStartStop:
     def test_stop_cleans_pid(self, tmp_path: Path):
         """Stop should remove PID file."""
         pid_file = tmp_path / "launcher.pid"
-        pid_file.write_text("12345")
+        pid_file.write_text("12345", encoding="utf-8")
 
         with (
             patch("installer.launcher.server.PID_FILE", pid_file),

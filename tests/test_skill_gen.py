@@ -123,7 +123,7 @@ class TestCreateSkillTool:
         # Pre-create the skill
         skill_dir = temp_skills_dir / "existing-skill"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("existing content")
+        (skill_dir / "SKILL.md").write_text("existing content", encoding="utf-8")
 
         result = await tool.execute(
             skill_name="existing-skill",

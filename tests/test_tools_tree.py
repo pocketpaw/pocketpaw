@@ -31,15 +31,15 @@ def tree_tool():
 def _make_structure(root: Path) -> None:
     """Create a sample directory structure for tests."""
     (root / "src").mkdir()
-    (root / "src" / "main.py").write_text("print('hello')")
+    (root / "src" / "main.py").write_text("print('hello')", encoding="utf-8")
     (root / "src" / "utils").mkdir()
-    (root / "src" / "utils" / "helpers.py").write_text("# helpers")
+    (root / "src" / "utils" / "helpers.py").write_text("# helpers", encoding="utf-8")
     (root / "docs").mkdir()
-    (root / "docs" / "readme.md").write_text("# docs")
-    (root / "README.md").write_text("# project")
-    (root / ".hidden").write_text("secret")
+    (root / "docs" / "readme.md").write_text("# docs", encoding="utf-8")
+    (root / "README.md").write_text("# project", encoding="utf-8")
+    (root / ".hidden").write_text("secret", encoding="utf-8")
     (root / ".config").mkdir()
-    (root / ".config" / "settings.json").write_text("{}")
+    (root / ".config" / "settings.json").write_text("{}", encoding="utf-8")
 
 
 class TestDirectoryTreeBasic:
@@ -144,7 +144,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_file_not_directory(self, temp_jail, mock_settings, tree_tool):
         f = temp_jail / "file.txt"
-        f.write_text("hi")
+        f.write_text("hi", encoding="utf-8")
         result = await tree_tool.execute(path=str(f))
 
         assert "Error" in result
@@ -163,7 +163,7 @@ class TestSecurity:
     async def test_startswith_bypass_blocked(self, temp_jail, mock_settings, tree_tool):
         outside_prefix = temp_jail.parent / f"{temp_jail.name}_outside"
         outside_prefix.mkdir(exist_ok=True)
-        (outside_prefix / "file.txt").write_text("outside")
+        (outside_prefix / "file.txt").write_text("outside", encoding="utf-8")
 
         result = await tree_tool.execute(path=str(outside_prefix))
 
@@ -173,7 +173,7 @@ class TestSecurity:
     async def test_symlink_is_skipped(self, temp_jail, mock_settings, tree_tool):
         target = temp_jail / "target"
         target.mkdir()
-        (target / "data.txt").write_text("ok")
+        (target / "data.txt").write_text("ok", encoding="utf-8")
 
         link = temp_jail / "link_to_target"
         try:
@@ -195,7 +195,7 @@ class TestTruncation:
         big_dir = temp_jail / "big"
         big_dir.mkdir()
         for i in range(600):
-            (big_dir / f"file_{i:04d}.txt").write_text(f"{i}")
+            (big_dir / f"file_{i:04d}.txt").write_text(f"{i}", encoding="utf-8")
 
         result = await tree_tool.execute(path=str(big_dir), max_depth=1)
 

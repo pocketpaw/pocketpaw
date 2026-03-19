@@ -122,7 +122,7 @@ class TestDefaultBootstrapProvider:
         provider = DefaultBootstrapProvider(base_path=temp_identity_path)
 
         # Modify files
-        (temp_identity_path / "IDENTITY.md").write_text("I am CustomAgent")
+        (temp_identity_path / "IDENTITY.md").write_text("I am CustomAgent", encoding="utf-8")
 
         # Reload
         ctx = await provider.get_context()

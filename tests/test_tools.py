@@ -92,7 +92,7 @@ class TestFetchTool:
         from pocketpaw.tools.fetch import handle_path
 
         test_file = tmp_path / "test.txt"
-        test_file.write_text("content")
+        test_file.write_text("content", encoding="utf-8")
 
         result = await handle_path(str(test_file), tmp_path)
 

@@ -637,7 +637,7 @@ class TestMemorySettings:
 
         # Temporarily override config path
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
 
         with patch("pocketpaw.config.get_config_path", return_value=config_path):
             settings.save()

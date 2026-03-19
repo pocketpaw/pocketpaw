@@ -99,7 +99,7 @@ class TestMCPTokenStorage:
         """Corrupted JSON should return None, not raise."""
         path = tmp_path / "mcp_oauth" / "test-server.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("not json{{{")
+        path.write_text("not json{{{", encoding="utf-8")
 
         result = await storage.get_tokens()
         assert result is None

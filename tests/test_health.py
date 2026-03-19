@@ -198,7 +198,7 @@ class TestErrorStore:
     def test_rotate_shifts_existing(self, tmp_path):
         store = ErrorStore(path=tmp_path / "errors.jsonl")
         # Create pre-existing rotated file
-        (tmp_path / "errors.jsonl.1").write_text("old data\n")
+        (tmp_path / "errors.jsonl.1").write_text("old data\n", encoding="utf-8")
 
         # Write enough to trigger rotation
         for i in range(100):
@@ -238,7 +238,7 @@ class TestErrorStore:
 class TestCheckConfigExists:
     def test_config_exists(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
         with patch(_P_CONFIG_PATH, return_value=config_path):
             r = check_config_exists()
             assert r.status == "ok"
@@ -254,14 +254,14 @@ class TestCheckConfigExists:
 class TestCheckConfigValidJson:
     def test_valid_json(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text('{"key": "value"}')
+        config_path.write_text('{"key": "value"}', encoding="utf-8")
         with patch(_P_CONFIG_PATH, return_value=config_path):
             r = check_config_valid_json()
             assert r.status == "ok"
 
     def test_invalid_json(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text("{broken json")
+        config_path.write_text("{broken json", encoding="utf-8")
         with patch(_P_CONFIG_PATH, return_value=config_path):
             r = check_config_valid_json()
             assert r.status == "critical"
@@ -277,7 +277,7 @@ class TestCheckConfigValidJson:
 class TestCheckConfigPermissions:
     def test_permissions_ok(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
         config_path.chmod(0o600)
         with patch(_P_CONFIG_PATH, return_value=config_path):
             r = check_config_permissions()
@@ -289,7 +289,7 @@ class TestCheckConfigPermissions:
     )
     def test_permissions_too_open(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
         config_path.chmod(0o644)
         with patch(_P_CONFIG_PATH, return_value=config_path):
             r = check_config_permissions()
@@ -474,7 +474,7 @@ class TestCheckSecretsEncrypted:
     def test_plaintext_json_secrets(self, tmp_path):
         """If secrets.enc accidentally contains plaintext JSON, warn about it."""
         secrets = tmp_path / "secrets.enc"
-        secrets.write_text(json.dumps({"key": "value"}))
+        secrets.write_text(json.dumps({"key": "value"}), encoding="utf-8")
         with patch(_P_CONFIG_DIR, return_value=tmp_path):
             r = check_secrets_encrypted()
             assert r.status == "warning"
@@ -495,7 +495,7 @@ class TestCheckSecretsEncrypted:
 
 class TestCheckDiskSpace:
     def test_small_directory(self, tmp_path):
-        (tmp_path / "config.json").write_text("{}")
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
         with patch(_P_CONFIG_DIR, return_value=tmp_path):
             r = check_disk_space()
             assert r.status == "ok"
@@ -505,7 +505,7 @@ class TestCheckDiskSpace:
 class TestCheckAuditLogWritable:
     def test_audit_exists_writable(self, tmp_path):
         audit = tmp_path / "audit.jsonl"
-        audit.write_text("")
+        audit.write_text("", encoding="utf-8")
         with patch(_P_CONFIG_DIR, return_value=tmp_path):
             r = check_audit_log_writable()
             assert r.status == "ok"
@@ -667,7 +667,7 @@ class TestHealthEngine:
 
     def test_run_startup_checks(self, engine, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text('{"agent_backend": "claude_agent_sdk"}')
+        config_path.write_text('{"agent_backend": "claude_agent_sdk"}', encoding="utf-8")
         config_path.chmod(0o600)
 
         settings = MagicMock()
@@ -694,7 +694,7 @@ class TestHealthEngine:
     def test_missing_api_key_degraded_with_onboarding_message(self, engine, tmp_path):
         """When API key is missing, health is DEGRADED and summary contains onboarding guidance."""
         config_path = tmp_path / "config.json"
-        config_path.write_text('{"agent_backend": "claude_agent_sdk"}')
+        config_path.write_text('{"agent_backend": "claude_agent_sdk"}', encoding="utf-8")
         config_path.chmod(0o600)
 
         settings = MagicMock()
@@ -846,7 +846,7 @@ class TestHealthEngine:
     @pytest.mark.asyncio
     async def test_run_all_checks(self, engine, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
 
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
@@ -912,7 +912,7 @@ class TestPlaybooks:
 
     def test_diagnose_config_all(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text( "{}", encoding="utf-8")
 
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
@@ -934,7 +934,7 @@ class TestPlaybooks:
 
     def test_diagnose_config_section_api_keys(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
 
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
@@ -1016,7 +1016,7 @@ class TestHealthCheckTool:
         from pocketpaw.tools.builtin.health import HealthCheckTool
 
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
 
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"
@@ -1105,7 +1105,7 @@ class TestConfigDoctorTool:
         from pocketpaw.tools.builtin.health import ConfigDoctorTool
 
         config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
+        config_path.write_text("{}", encoding="utf-8")
 
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"

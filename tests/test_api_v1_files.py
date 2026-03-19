@@ -33,7 +33,7 @@ class TestBrowseFiles:
         mock_settings.return_value = settings
 
         # Create test files
-        (tmp_path / "file.txt").write_text("hello")
+        (tmp_path / "file.txt").write_text("hello", encoding="utf-8")
         (tmp_path / "subdir").mkdir()
 
         with patch("pocketpaw.api.v1.files.Path.home", return_value=tmp_path):
@@ -82,7 +82,7 @@ class TestBrowseFiles:
         mock_settings.return_value = settings
 
         (tmp_path / ".hidden").mkdir()
-        (tmp_path / "visible.txt").write_text("hi")
+        (tmp_path / "visible.txt").write_text("hi", encoding="utf-8")
 
         with patch("pocketpaw.api.v1.files.Path.home", return_value=tmp_path):
             resp = client.get("/api/v1/files/browse", params={"path": str(tmp_path)})
@@ -98,7 +98,7 @@ class TestBrowseFiles:
         settings.file_jail_path = tmp_path
         mock_settings.return_value = settings
 
-        (tmp_path / "small.txt").write_text("x" * 100)
+        (tmp_path / "small.txt").write_text("x" * 100, encoding="utf-8")
 
         with patch("pocketpaw.api.v1.files.Path.home", return_value=tmp_path):
             resp = client.get("/api/v1/files/browse", params={"path": str(tmp_path)})
@@ -115,7 +115,7 @@ class TestBrowseFiles:
         settings.file_jail_path = tmp_path
         mock_settings.return_value = settings
 
-        (tmp_path / "zzz_file.txt").write_text("x")
+        (tmp_path / "zzz_file.txt").write_text("x", encoding="utf-8")
         (tmp_path / "aaa_dir").mkdir()
 
         with patch("pocketpaw.api.v1.files.Path.home", return_value=tmp_path):
@@ -137,7 +137,7 @@ class TestDownloadFile:
         settings.file_jail_path = tmp_path
         mock_settings.return_value = settings
 
-        (tmp_path / "hello.txt").write_text("world")
+        (tmp_path / "hello.txt").write_text("world", encoding="utf-8")
 
         resp = client.get(
             "/api/v1/files/download",
@@ -198,7 +198,7 @@ class TestDownloadFile:
         mock_settings.return_value = settings
 
         name = "café report.txt"
-        (tmp_path / name).write_text("data")
+        (tmp_path / name).write_text("data", encoding="utf-8")
 
         resp = client.get(
             "/api/v1/files/download",
@@ -223,8 +223,8 @@ class TestDownloadZip:
 
         d = tmp_path / "project"
         d.mkdir()
-        (d / "a.txt").write_text("aaa")
-        (d / "b.txt").write_text("bbb")
+        (d / "a.txt").write_text("aaa", encoding="utf-8")
+        (d / "b.txt").write_text("bbb", encoding="utf-8")
 
         resp = client.get(
             "/api/v1/files/download-zip",
@@ -261,7 +261,7 @@ class TestDownloadZip:
         settings.file_jail_path = tmp_path
         mock_settings.return_value = settings
 
-        (tmp_path / "file.txt").write_text("hi")
+        (tmp_path / "file.txt").write_text("hi", encoding="utf-8")
 
         resp = client.get(
             "/api/v1/files/download-zip",
@@ -281,7 +281,7 @@ class TestDownloadZip:
         # We don't actually create 10k files — patch the constant
         with patch("pocketpaw.api.v1.files._ZIP_MAX_FILES", 2):
             for i in range(3):
-                (d / f"f{i}.txt").write_text("x")
+                (d / f"f{i}.txt").write_text("x", encoding="utf-8")
             resp = client.get(
                 "/api/v1/files/download-zip",
                 params={"path": str(d)},
@@ -298,7 +298,7 @@ class TestDownloadZip:
 
         d = tmp_path / "heavy"
         d.mkdir()
-        (d / "a.txt").write_text("data")
+        (d / "a.txt").write_text("data", encoding="utf-8")
         # Cap at 1 byte so the first real file exceeds the limit
         with patch("pocketpaw.api.v1.files._ZIP_MAX_BYTES", 1):
             resp = client.get(
@@ -320,7 +320,7 @@ class TestWriteFile:
         mock_settings.return_value = settings
 
         target = tmp_path / "edit.txt"
-        target.write_text("old")
+        target.write_text("old", encoding="utf-8")
 
         resp = client.post(
             "/api/v1/files/write",

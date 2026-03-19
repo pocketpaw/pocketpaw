@@ -51,7 +51,7 @@ def populated_store(store):
             },
         ]
         session_file = store.sessions_path / f"{safe_key}.json"
-        session_file.write_text(json.dumps(data, indent=2))
+        session_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
         sessions[safe_key] = {"session_key": session_key, "data": data}
 
     return store, sessions
@@ -84,7 +84,7 @@ class TestLoadSaveSessionIndex:
         assert store._index_path.exists()
 
     def test_load_corrupt_json(self, store):
-        store._index_path.write_text("not json {{{")
+        store._index_path.write_text("not json {{{", encoding="utf-8")
         index = store._load_session_index()
         assert index == {}
 
@@ -108,19 +108,20 @@ class TestRebuildSessionIndex:
 
     def test_rebuild_skips_index_and_compaction(self, store):
         # Create _index.json and a compaction file — should be skipped
-        (store.sessions_path / "_index.json").write_text("{}")
-        (store.sessions_path / "test_compaction.json").write_text("{}")
+        (store.sessions_path / "_index.json").write_text("{}", encoding="utf-8")
+        (store.sessions_path / "test_compaction.json").write_text("{}", encoding="utf-8")
         (store.sessions_path / "websocket_abc.json").write_text(
             json.dumps(
                 [{"id": "1", "role": "user", "content": "hi", "timestamp": "2026-01-01T00:00:00"}]
-            )
+            ),
+            encoding="utf-8"
         )
         index = store.rebuild_session_index()
         assert len(index) == 1
         assert "websocket_abc" in index
 
     def test_rebuild_skips_empty_files(self, store):
-        (store.sessions_path / "websocket_empty.json").write_text("[]")
+        (store.sessions_path / "websocket_empty.json").write_text("[]", encoding="utf-8")
         index = store.rebuild_session_index()
         assert len(index) == 0
 
@@ -202,9 +203,10 @@ class TestDeleteSession:
         session_file = store.sessions_path / f"{safe_key}.json"
         compaction_file = store.sessions_path / f"{safe_key}_compaction.json"
         session_file.write_text(
-            '[{"id":"1","role":"user","content":"hi","timestamp":"2026-01-01"}]'
+            '[{"id":"1","role":"user","content":"hi","timestamp":"2026-01-01"}]',
+            encoding="utf-8"
         )
-        compaction_file.write_text('{"watermark":1,"summary":"test"}')
+        compaction_file.write_text('{"watermark":1,"summary":"test"}', encoding="utf-8")
 
         await store.delete_session(safe_key)
         assert not session_file.exists()
@@ -273,7 +275,7 @@ class TestIndexMigration:
         data = [
             {"id": "1", "role": "user", "content": "Test msg", "timestamp": "2026-01-01T00:00:00"}
         ]
-        (sessions_path / "websocket_migration.json").write_text(json.dumps(data))
+        (sessions_path / "websocket_migration.json").write_text(json.dumps(data), encoding="utf-8")
 
         # Create store — should trigger rebuild
         store = FileMemoryStore(base_path=tmp_path)
@@ -425,7 +427,7 @@ class TestWebSocketSessionSwitching:
                 "metadata": {},
             }
         ]
-        session_file.write_text(json.dumps(data))
+        session_file.write_text(json.dumps(data), encoding="utf-8")
 
         try:
             with client.websocket_connect(self._ws_url(f"resume_session={safe_key}")) as ws:
@@ -466,7 +468,7 @@ class TestWebSocketSessionSwitching:
                         "timestamp": "2026-01-01T00:00:00",
                     }
                 ]
-            )
+            ), encoding="utf-8"
         )
 
         traversal_key = "websocket_x/../../escaped"
@@ -504,7 +506,7 @@ class TestWebSocketSessionSwitching:
                         "timestamp": "2026-01-01T00:00:00",
                     }
                 ]
-            )
+            ), encoding="utf-8"
         )
 
         traversal_key = "websocket_x/../../escaped"
@@ -536,15 +538,15 @@ class TestSearchSessions:
 
         # Session 1: contains "hello world"
         (sessions / "sess_one.json").write_text(
-            json.dumps([{"role": "user", "content": "hello world"}])
+            json.dumps([{"role": "user", "content": "hello world"}]), encoding="utf-8"
         )
         # Session 2: contains "goodbye mars"
         (sessions / "sess_two.json").write_text(
-            json.dumps([{"role": "assistant", "content": "goodbye mars"}])
+            json.dumps([{"role": "assistant", "content": "goodbye mars"}]), encoding="utf-8"
         )
         # Session 3: contains "Hello Again" (case variant)
         (sessions / "sess_three.json").write_text(
-            json.dumps([{"role": "user", "content": "Hello Again"}])
+            json.dumps([{"role": "user", "content": "Hello Again"}]), encoding="utf-8"
         )
         # Index metadata
         index = {
@@ -564,7 +566,7 @@ class TestSearchSessions:
                 "last_activity": "2026-02-20T12:00:00",
             },
         }
-        (sessions / "_index.json").write_text(json.dumps(index))
+        (sessions / "_index.json").write_text(json.dumps(index), encoding="utf-8")
         return store
 
     async def test_empty_query_returns_empty(self, search_store):
@@ -607,12 +609,12 @@ class TestSearchSessions:
         sessions = tmp_path / "sessions"
         sessions.mkdir(exist_ok=True)
         # These should be ignored
-        (sessions / "_index.json").write_text("{}")
+        (sessions / "_index.json").write_text("{}", encoding="utf-8")
         (sessions / "sess_a_compaction.json").write_text(
-            json.dumps([{"role": "user", "content": "secret"}])
+            json.dumps([{"role": "user", "content": "secret"}]), encoding="utf-8"
         )
         # This is the only real session
-        (sessions / "sess_a.json").write_text(json.dumps([{"role": "user", "content": "secret"}]))
+        (sessions / "sess_a.json").write_text(json.dumps([{"role": "user", "content": "secret"}]), encoding="utf-8")
         results = await store.search_sessions("secret")
         assert len(results) == 1
         assert results[0]["id"] == "sess_a"
@@ -623,7 +625,7 @@ class TestSearchSessions:
         sessions.mkdir(exist_ok=True)
         long_content = "x" * 500
         (sessions / "sess_long.json").write_text(
-            json.dumps([{"role": "user", "content": long_content}])
+            json.dumps([{"role": "user", "content": long_content}]), encoding="utf-8"
         )
         results = await store.search_sessions("xxx")
         assert len(results) == 1
@@ -643,7 +645,7 @@ class TestMemoryManagerSearchSessions:
         sessions = tmp_path / "sessions"
         sessions.mkdir(exist_ok=True)
         (sessions / "s1.json").write_text(
-            json.dumps([{"role": "user", "content": "delegate test"}])
+            json.dumps([{"role": "user", "content": "delegate test"}]), encoding="utf-8"
         )
 
         from pocketpaw.memory.manager import MemoryManager

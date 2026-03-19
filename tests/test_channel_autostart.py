@@ -171,7 +171,7 @@ def test_round_trip_save_load(tmp_path):
 
     # Manually build the save dict and write it
     save_dict = {"channel_autostart": settings.channel_autostart}
-    config_path.write_text(json.dumps(save_dict))
+    config_path.write_text(json.dumps(save_dict), encoding="utf-8")
 
     # Load back
     data = json.loads(config_path.read_text(encoding="utf-8"))

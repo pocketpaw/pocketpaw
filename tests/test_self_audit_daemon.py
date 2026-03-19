@@ -27,7 +27,7 @@ class TestStaleSessions:
     def test_no_stale_sessions(self, tmp_path):
         sessions = tmp_path / "memory" / "sessions"
         sessions.mkdir(parents=True)
-        (sessions / "recent.json").write_text("{}")
+        (sessions / "recent.json").write_text("{}", encoding="utf-8")
         with patch("pocketpaw.daemon.self_audit.get_config_dir", return_value=tmp_path):
             ok, msg = _check_stale_sessions()
             assert ok is True
@@ -76,7 +76,7 @@ class TestConfigConflicts:
 
 class TestDiskUsage:
     def test_small_directory(self, tmp_path):
-        (tmp_path / "test.txt").write_text("hello")
+        (tmp_path / "test.txt").write_text("hello", encoding="utf-8")
         with patch("pocketpaw.daemon.self_audit.get_config_dir", return_value=tmp_path):
             ok, msg = _check_disk_usage()
             assert ok is True
@@ -95,7 +95,7 @@ class TestAuditLogSize:
             assert ok is True
 
     def test_small_audit_log(self, tmp_path):
-        (tmp_path / "audit.jsonl").write_text("{}\n" * 100)
+        (tmp_path / "audit.jsonl").write_text("{}\n" * 100, encoding="utf-8")
         with patch("pocketpaw.daemon.self_audit.get_config_dir", return_value=tmp_path):
             ok, msg = _check_audit_log_size()
             assert ok is True
@@ -115,7 +115,7 @@ class TestOAuthTokens:
     def test_with_tokens(self, tmp_path):
         oauth_dir = tmp_path / "oauth"
         oauth_dir.mkdir()
-        (oauth_dir / "google_gmail.json").write_text("{}")
+        (oauth_dir / "google_gmail.json").write_text("{}", encoding="utf-8")
         with patch("pocketpaw.daemon.self_audit.get_config_dir", return_value=tmp_path):
             ok, msg = _check_orphan_oauth_tokens()
             assert ok is True
@@ -139,8 +139,8 @@ async def test_run_self_audit(tmp_path):
 
     config_dir = tmp_path / ".pocketpaw"
     config_dir.mkdir()
-    (config_dir / "config.json").write_text("{}")
-    (config_dir / "audit.jsonl").write_text("")
+    (config_dir / "config.json").write_text("{}", encoding="utf-8")
+    (config_dir / "audit.jsonl").write_text("", encoding="utf-8")
 
     with (
         patch("pocketpaw.daemon.self_audit.get_config_dir", return_value=config_dir),

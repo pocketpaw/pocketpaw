@@ -195,7 +195,7 @@ class TestTier2LLMSummary:
         # Write cache with matching watermark
         cache_file = tmp_path / "test_compaction.json"
         cache_file.write_text(
-            json.dumps({"watermark": 15, "summary": "Cached summary.", "older_count": 5})
+            json.dumps({"watermark": 15, "summary": "Cached summary.", "older_count": 5}), encoding="utf-8"
         )
 
         mgr = MemoryManager(store=store)
@@ -215,7 +215,7 @@ class TestTier2LLMSummary:
         # Write stale cache
         cache_file = tmp_path / "test_compaction.json"
         cache_file.write_text(
-            json.dumps({"watermark": 15, "summary": "Old summary.", "older_count": 5})
+            json.dumps({"watermark": 15, "summary": "Old summary.", "older_count": 5}), encoding="utf-8"
         )
 
         mock_response = MagicMock()
