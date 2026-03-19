@@ -194,11 +194,20 @@ class TestUrlExtractTool:
         mock_resp.raise_for_status = MagicMock()
         mock_resp.headers = {"content-type": "text/html; charset=utf-8"}
         mock_resp.text = "<html><title>Local Test</title><body>Hello</body></html>"
+        mock_resp.is_redirect = False
 
         with (
             patch("httpx.AsyncClient") as mock_client_cls,
             patch.dict("sys.modules", {"html2text": mock_html2text}),
+            patch("asyncio.get_running_loop") as mock_loop,
         ):
+            # Mock DNS resolution
+            loop = AsyncMock()
+            mock_loop.return_value = loop
+            loop.getaddrinfo = AsyncMock(
+                return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]
+            )
+            
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_resp
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -225,11 +234,20 @@ class TestUrlExtractTool:
         mock_resp.raise_for_status = MagicMock()
         mock_resp.headers = {"content-type": "text/html"}
         mock_resp.text = "<html><title>Hello World</title><body><h1>Hello</h1></body></html>"
+        mock_resp.is_redirect = False
 
         with (
             patch("httpx.AsyncClient") as mock_client_cls,
             patch.dict("sys.modules", {"html2text": mock_html2text}),
+            patch("asyncio.get_running_loop") as mock_loop,
         ):
+            # Mock DNS resolution
+            loop = AsyncMock()
+            mock_loop.return_value = loop
+            loop.getaddrinfo = AsyncMock(
+                return_value=[(2, 1, 6, "", ("93.184.216.34", 80))]
+            )
+            
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_resp
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -279,6 +297,7 @@ class TestUrlExtractTool:
         good_resp.raise_for_status = MagicMock()
         good_resp.headers = {"content-type": "text/html"}
         good_resp.text = "<html><title>Good</title><body>OK</body></html>"
+        good_resp.is_redirect = False
 
         bad_resp = MagicMock()
         bad_resp.status_code = 404
@@ -288,15 +307,31 @@ class TestUrlExtractTool:
             response=MagicMock(status_code=404),
         )
 
-        async def mock_get(url):
-            if "good" in url:
+        async def mock_get(url, **kwargs):
+            # Check the Host header to determine which response to return
+            headers = kwargs.get("headers", {})
+            host = headers.get("Host", "")
+            if "good" in host:
                 return good_resp
             return bad_resp
 
         with (
             patch("httpx.AsyncClient") as mock_client_cls,
             patch.dict("sys.modules", {"html2text": mock_html2text}),
+            patch("asyncio.get_running_loop") as mock_loop,
         ):
+            # Mock DNS resolution for both URLs
+            loop = AsyncMock()
+            mock_loop.return_value = loop
+            
+            async def mock_getaddrinfo(host, port, **kwargs):
+                if "good" in host:
+                    return [(2, 1, 6, "", ("93.184.216.34", port))]
+                else:
+                    return [(2, 1, 6, "", ("93.184.216.35", port))]
+            
+            loop.getaddrinfo = AsyncMock(side_effect=mock_getaddrinfo)
+            
             mock_client = AsyncMock()
             mock_client.get.side_effect = mock_get
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -414,9 +449,43 @@ class TestSSRFHardening:
             mock_resp = MagicMock()
             mock_resp.is_redirect = True
             mock_resp.headers = {"location": "http://example.com/next"}
-            mock_resp.url = MagicMock()
-            mock_resp.url.join = MagicMock(return_value="http://example.com/next")
             mock_client.get = AsyncMock(return_value=mock_resp)
 
             with pytest.raises(ValueError, match="Too many redirects"):
                 await UrlExtractTool._safe_get(mock_client, "http://example.com/1")
+
+    @pytest.mark.asyncio
+    async def test_safe_get_uses_resolved_ip_toctou_fix(self):
+        """Verify DNS TOCTOU fix: uses pre-resolved IP, not re-resolving."""
+        with patch("asyncio.get_running_loop") as mock_loop:
+            loop = AsyncMock()
+            mock_loop.return_value = loop
+            # Return a safe public IP on DNS resolution
+            loop.getaddrinfo = AsyncMock(
+                return_value=[(2, 1, 6, "", ("93.184.216.34", 80))]
+            )
+
+            mock_client = AsyncMock()
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.is_redirect = False
+            mock_resp.raise_for_status = MagicMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+
+            await UrlExtractTool._safe_get(mock_client, "http://example.com/page")
+
+            # Verify client.get was called with the resolved IP, not the hostname
+            mock_client.get.assert_called_once()
+            call_args = mock_client.get.call_args
+            
+            # The first argument should be the URL with the resolved IP
+            url_used = call_args[0][0]
+            assert "93.184.216.34" in url_used, f"Expected resolved IP in request URL, got: {url_used}"
+            
+            # Verify Host header is set to the original hostname
+            headers = call_args[1].get("headers", {})
+            assert headers.get("Host") == "example.com", f"Expected Host header set to hostname, got: {headers}"
+            
+            # Verify DNS was only queried once (not re-queried on request)
+            loop.getaddrinfo.assert_called_once()
+
