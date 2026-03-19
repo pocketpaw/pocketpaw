@@ -154,7 +154,8 @@ class TestSoulManager:
             "name: YamlSoul\n"
             "archetype: The Yaml Expert\n"
             "values: [clarity, speed]\n"
-            "persona: I was born from YAML.\n", encoding="utf-8"
+            "persona: I was born from YAML.\n",
+            encoding="utf-8",
         )
 
         mgr = SoulManager(soul_settings)
@@ -178,7 +179,8 @@ class TestSoulManager:
                     "archetype": "The Json Expert",
                     "persona": "I was born from JSON.",
                 }
-            ), encoding="utf-8"
+            ),
+            encoding="utf-8",
         )
 
         mgr = SoulManager(soul_settings)

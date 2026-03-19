@@ -912,7 +912,7 @@ class TestPlaybooks:
 
     def test_diagnose_config_all(self, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text( "{}", encoding="utf-8")
+        config_path.write_text("{}", encoding="utf-8")
 
         settings = MagicMock()
         settings.agent_backend = "claude_agent_sdk"

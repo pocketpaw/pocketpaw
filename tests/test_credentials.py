@@ -444,7 +444,9 @@ class TestPlaintextMigration:
         """Migration creates a .secrets_migrated flag file."""
         from pocketpaw.config import Settings
 
-        (env["tmp_path"] / "config.json").write_text(json.dumps({"agent_backend": "test"}), encoding="utf-8")
+        (env["tmp_path"] / "config.json").write_text(
+            json.dumps({"agent_backend": "test"}), encoding="utf-8"
+        )
         Settings.load()
         assert (env["tmp_path"] / ".secrets_migrated").exists()
 

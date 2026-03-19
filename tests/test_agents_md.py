@@ -169,7 +169,9 @@ class TestAgentsMdLoaderFind:
         assert "Repo rules" in result.raw_content
 
     def test_sections_parsed(self, tmp_path):
-        (tmp_path / "AGENTS.md").write_text("# Capabilities\nDo A\n# Forbidden\nDon't B", encoding="utf-8")
+        (tmp_path / "AGENTS.md").write_text(
+            "# Capabilities\nDo A\n# Forbidden\nDon't B", encoding="utf-8"
+        )
         loader = AgentsMdLoader()
         result = loader.find_and_load(tmp_path)
         assert result is not None
@@ -235,7 +237,9 @@ class TestAgentsMdLoaderCache:
 
 class TestContextBuilderAgentsMd:
     async def test_agents_md_injected_when_present(self, tmp_path):
-        (tmp_path / "AGENTS.md").write_text("## Project Rules\n- No deleting prod DB", encoding="utf-8")
+        (tmp_path / "AGENTS.md").write_text(
+            "## Project Rules\n- No deleting prod DB", encoding="utf-8"
+        )
         _cache.clear()
         builder = _make_builder()
         prompt = await builder.build_system_prompt(agents_md_dir=str(tmp_path))

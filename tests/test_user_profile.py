@@ -60,7 +60,9 @@ class TestUserProfile:
     async def test_user_profile_loaded_into_context(self, temp_identity_path):
         provider = DefaultBootstrapProvider(base_path=temp_identity_path)
         # Overwrite with custom profile
-        (temp_identity_path / "USER.md").write_text("Name: Charlie\nTimezone: UTC+5", encoding="utf-8")
+        (temp_identity_path / "USER.md").write_text(
+            "Name: Charlie\nTimezone: UTC+5", encoding="utf-8"
+        )
         ctx = await provider.get_context()
         assert ctx.user_profile == "Name: Charlie\nTimezone: UTC+5"
 

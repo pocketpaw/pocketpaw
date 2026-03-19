@@ -348,7 +348,9 @@ class TestSkillsRESTEndpoints:
             # Create a fake installed skill
             skill_dir = Path(fake_home) / ".agents" / "skills" / "old-skill"
             skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text("---\nname: old-skill\n---\nContent", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: old-skill\n---\nContent", encoding="utf-8"
+            )
 
             from pocketpaw.dashboard import remove_skill
 

@@ -114,7 +114,7 @@ class TestRebuildSessionIndex:
             json.dumps(
                 [{"id": "1", "role": "user", "content": "hi", "timestamp": "2026-01-01T00:00:00"}]
             ),
-            encoding="utf-8"
+            encoding="utf-8",
         )
         index = store.rebuild_session_index()
         assert len(index) == 1
@@ -203,8 +203,7 @@ class TestDeleteSession:
         session_file = store.sessions_path / f"{safe_key}.json"
         compaction_file = store.sessions_path / f"{safe_key}_compaction.json"
         session_file.write_text(
-            '[{"id":"1","role":"user","content":"hi","timestamp":"2026-01-01"}]',
-            encoding="utf-8"
+            '[{"id":"1","role":"user","content":"hi","timestamp":"2026-01-01"}]', encoding="utf-8"
         )
         compaction_file.write_text('{"watermark":1,"summary":"test"}', encoding="utf-8")
 
@@ -468,7 +467,8 @@ class TestWebSocketSessionSwitching:
                         "timestamp": "2026-01-01T00:00:00",
                     }
                 ]
-            ), encoding="utf-8"
+            ),
+            encoding="utf-8",
         )
 
         traversal_key = "websocket_x/../../escaped"
@@ -506,7 +506,8 @@ class TestWebSocketSessionSwitching:
                         "timestamp": "2026-01-01T00:00:00",
                     }
                 ]
-            ), encoding="utf-8"
+            ),
+            encoding="utf-8",
         )
 
         traversal_key = "websocket_x/../../escaped"
@@ -614,7 +615,9 @@ class TestSearchSessions:
             json.dumps([{"role": "user", "content": "secret"}]), encoding="utf-8"
         )
         # This is the only real session
-        (sessions / "sess_a.json").write_text(json.dumps([{"role": "user", "content": "secret"}]), encoding="utf-8")
+        (sessions / "sess_a.json").write_text(
+            json.dumps([{"role": "user", "content": "secret"}]), encoding="utf-8"
+        )
         results = await store.search_sessions("secret")
         assert len(results) == 1
         assert results[0]["id"] == "sess_a"

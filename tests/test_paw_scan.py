@@ -141,7 +141,9 @@ class TestHeuristicScanPyproject:
 class TestHeuristicScanPackageJson:
     @pytest.mark.asyncio
     async def test_package_json_content_stored(self, tmp_path, mock_soul):
-        (tmp_path / "package.json").write_text('{"name": "my-app", "version": "1.0.0"}', encoding="utf-8")
+        (tmp_path / "package.json").write_text(
+            '{"name": "my-app", "version": "1.0.0"}', encoding="utf-8"
+        )
 
         await heuristic_scan(tmp_path, mock_soul)
 
@@ -167,8 +169,7 @@ class TestHeuristicScanEnvExample:
     @pytest.mark.asyncio
     async def test_env_var_names_extracted(self, tmp_path, mock_soul):
         (tmp_path / ".env.example").write_text(
-            "OPENAI_API_KEY=your-key-here\nDATABASE_URL=postgres://...\n",
-            encoding="utf-8"
+            "OPENAI_API_KEY=your-key-here\nDATABASE_URL=postgres://...\n", encoding="utf-8"
         )
 
         await heuristic_scan(tmp_path, mock_soul)
@@ -179,7 +180,9 @@ class TestHeuristicScanEnvExample:
 
     @pytest.mark.asyncio
     async def test_commented_env_vars_ignored(self, tmp_path, mock_soul):
-        (tmp_path / ".env.example").write_text("# This is a comment\nACTIVE_KEY=value\n", encoding="utf-8")
+        (tmp_path / ".env.example").write_text(
+            "# This is a comment\nACTIVE_KEY=value\n", encoding="utf-8"
+        )
 
         await heuristic_scan(tmp_path, mock_soul)
 

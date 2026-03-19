@@ -272,8 +272,12 @@ class TestSessionListAPI:
             {"id": "5", "role": "user", "content": "Thanks!", "timestamp": "2026-02-05T11:02:00"},
         ]
 
-        (sessions_dir / "websocket_session1.json").write_text(json.dumps(session1), encoding="utf-8")
-        (sessions_dir / "websocket_session2.json").write_text(json.dumps(session2), encoding="utf-8")
+        (sessions_dir / "websocket_session1.json").write_text(
+            json.dumps(session1), encoding="utf-8"
+        )
+        (sessions_dir / "websocket_session2.json").write_text(
+            json.dumps(session2), encoding="utf-8"
+        )
 
         return sessions_dir
 

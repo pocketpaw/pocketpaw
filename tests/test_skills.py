@@ -20,7 +20,8 @@ class TestSkillParsing:
         """Test parsing a basic SKILL.md file."""
         skill_md = tmp_path / "test-skill" / "SKILL.md"
         skill_md.parent.mkdir(parents=True)
-        skill_md.write_text("""---
+        skill_md.write_text(
+            """---
 name: test-skill
 description: A test skill for unit testing
 ---
@@ -30,7 +31,9 @@ description: A test skill for unit testing
 This is the skill content.
 
 Use it like this: `/test-skill arg1 arg2`
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         skill = parse_skill_md(skill_md)
 
@@ -44,7 +47,8 @@ Use it like this: `/test-skill arg1 arg2`
         """Test parsing skill with optional frontmatter fields."""
         skill_md = tmp_path / "advanced-skill" / "SKILL.md"
         skill_md.parent.mkdir(parents=True)
-        skill_md.write_text("""---
+        skill_md.write_text(
+            """---
 name: advanced-skill
 description: An advanced skill
 user-invocable: false
@@ -53,7 +57,9 @@ argument-hint: "[filename]"
 ---
 
 Advanced content here.
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         skill = parse_skill_md(skill_md)
 
@@ -77,12 +83,15 @@ Advanced content here.
         """Test skill name falls back to directory name."""
         skill_md = tmp_path / "my-custom-skill" / "SKILL.md"
         skill_md.parent.mkdir(parents=True)
-        skill_md.write_text("""---
+        skill_md.write_text(
+            """---
 description: Skill without name field
 ---
 
 Content here.
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         skill = parse_skill_md(skill_md)
 
@@ -145,13 +154,16 @@ class TestSkillLoader:
         # Create a test skill
         skill_dir = skills_dir / "test-skill"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("""---
+        (skill_dir / "SKILL.md").write_text(
+            """---
 name: test-skill
 description: Test skill
 ---
 
 Test content.
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         return SkillLoader(extra_paths=[skills_dir])
 
@@ -200,13 +212,16 @@ Test content.
         skills_dir = tmp_path / "skills"
         new_skill_dir = skills_dir / "new-skill"
         new_skill_dir.mkdir()
-        (new_skill_dir / "SKILL.md").write_text("""---
+        (new_skill_dir / "SKILL.md").write_text(
+            """---
 name: new-skill
 description: New skill added
 ---
 
 New content.
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         # Reload
         skills = loader.reload()
