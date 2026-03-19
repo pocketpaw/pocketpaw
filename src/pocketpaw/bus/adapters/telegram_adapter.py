@@ -5,6 +5,7 @@ Created: 2026-02-02
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 try:
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 _TYPING_REFRESH_INTERVAL = 4.0
 # Stream buffer update interval (rate limiting for message edits)
 _BUFFER_UPDATE_INTERVAL = 1.5
+# Voice media hint TTL (seconds) - hints older than this are evicted
+_VOICE_MEDIA_HINT_TTL = 3600  # 1 hour
 
 
 class TelegramAdapter(BaseChannelAdapter):
@@ -49,6 +52,10 @@ class TelegramAdapter(BaseChannelAdapter):
         self.app: Application | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing refresh task
         self._buffers: dict[str, Any] = {}
+        self._voice_media_hints: dict[tuple[str, str], bool] = {}
+        self._voice_media_hints_ts: dict[
+            tuple[str, str], float
+        ] = {}  # (chat_id, path) -> timestamp
 
     @property
     def channel(self) -> Channel:
@@ -179,6 +186,10 @@ class TelegramAdapter(BaseChannelAdapter):
                 await self._flush_stream_buffer(message.chat_id)
                 # Send any attached media files
                 for path in message.media or []:
+                    hint_key = (message.chat_id, path)
+                    self._voice_media_hints[hint_key] = self._is_voice_media(path, message.metadata)
+                    self._voice_media_hints_ts[hint_key] = time.time()
+                    self._cleanup_voice_media_hints()
                     await self._send_media_file(message.chat_id, path)
                 return
 
@@ -296,6 +307,38 @@ class TelegramAdapter(BaseChannelAdapter):
 
     # --- Media sending ---
 
+    def _cleanup_voice_media_hints(self) -> None:
+        """Remove voice media hints that have exceeded TTL."""
+        now = time.time()
+        expired_keys = [
+            key
+            for key, ts in self._voice_media_hints_ts.items()
+            if now - ts > _VOICE_MEDIA_HINT_TTL
+        ]
+        for key in expired_keys:
+            self._voice_media_hints.pop(key, None)
+            self._voice_media_hints_ts.pop(key, None)
+
+    @staticmethod
+    def _is_voice_media(file_path: str, metadata: dict[str, Any] | None) -> bool:
+        """Determine whether an audio file should be sent as a Telegram voice note.
+
+        Preferred metadata shape:
+        - ``{"is_voice": true}`` to mark all audio files as voice notes
+        - ``{"voice_media_paths": ["/abs/path/file.mp3", ...]}`` for per-file control
+        """
+        if not metadata:
+            return False
+
+        if bool(metadata.get("is_voice")):
+            return True
+
+        voice_paths = metadata.get("voice_media_paths")
+        if isinstance(voice_paths, list):
+            return file_path in voice_paths
+
+        return False
+
     async def _send_media_file(self, chat_id: str, file_path: str) -> None:
         """Send a media file (audio/image/document) to a Telegram chat."""
         import os
@@ -306,6 +349,9 @@ class TelegramAdapter(BaseChannelAdapter):
         from pocketpaw.bus.adapters import guess_media_type
 
         media_type = guess_media_type(file_path)
+        hint_key = (chat_id, file_path)
+        is_voice = self._voice_media_hints.pop(hint_key, False)
+        self._voice_media_hints_ts.pop(hint_key, None)  # Clean up timestamp
         real_chat_id, topic_id = self._parse_chat_id(chat_id)
         kwargs: dict[str, Any] = {"chat_id": real_chat_id}
         if topic_id is not None:
@@ -314,7 +360,17 @@ class TelegramAdapter(BaseChannelAdapter):
         try:
             with open(file_path, "rb") as f:
                 if media_type == "audio":
-                    await self.app.bot.send_audio(**kwargs, audio=f)
+                    # Voice-note behavior is driven by OutboundMessage metadata,
+                    # not by adapter-local filesystem path assumptions.
+                    if is_voice:
+                        try:
+                            await self.app.bot.send_voice(**kwargs, voice=f)
+                        except Exception:
+                            # Fallback: re-open and send as regular audio
+                            with open(file_path, "rb") as f2:
+                                await self.app.bot.send_audio(**kwargs, audio=f2)
+                    else:
+                        await self.app.bot.send_audio(**kwargs, audio=f)
                 elif media_type == "image":
                     await self.app.bot.send_photo(**kwargs, photo=f)
                 else:

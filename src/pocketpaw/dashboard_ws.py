@@ -491,6 +491,24 @@ async def websocket_handler(
                         val = data["web_port"]
                         if isinstance(val, int | float) and 1 <= val <= 65535:
                             settings.web_port = int(val)
+                    # A2A Protocol
+                    if "a2a_enabled" in data:
+                        settings.a2a_enabled = bool(data["a2a_enabled"])
+                    if data.get("a2a_agent_name"):
+                        settings.a2a_agent_name = data["a2a_agent_name"]
+                    if "a2a_agent_description" in data:
+                        settings.a2a_agent_description = data.get("a2a_agent_description", "")
+                    if "a2a_task_timeout" in data:
+                        val = data["a2a_task_timeout"]
+                        if isinstance(val, int | float) and 10 <= val <= 600:
+                            settings.a2a_task_timeout = int(val)
+                    if "a2a_trusted_agents" in data:
+                        val = data["a2a_trusted_agents"]
+                        if isinstance(val, list):
+                            settings.a2a_trusted_agents = [
+                                s.strip() for s in val if isinstance(s, str) and s.strip()
+                            ]
+
                     # Soul Protocol
                     if "soul_enabled" in data:
                         settings.soul_enabled = bool(data["soul_enabled"])
@@ -747,6 +765,12 @@ async def websocket_handler(
                             "hasSarvamKey": bool(settings.sarvam_api_key),
                             "webHost": settings.web_host,
                             "webPort": settings.web_port,
+                            # A2A Protocol
+                            "a2aEnabled": settings.a2a_enabled,
+                            "a2aAgentName": settings.a2a_agent_name,
+                            "a2aAgentDescription": settings.a2a_agent_description,
+                            "a2aTaskTimeout": settings.a2a_task_timeout,
+                            "a2aTrustedAgents": settings.a2a_trusted_agents,
                             # Soul Protocol
                             "soulEnabled": settings.soul_enabled,
                             "soulName": settings.soul_name,

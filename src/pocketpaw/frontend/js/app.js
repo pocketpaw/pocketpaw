@@ -132,6 +132,11 @@ function app() {
             mem0OllamaBaseUrl: 'http://localhost:11434',
             webHost: '127.0.0.1',
             webPort: 8888,
+            a2aEnabled: false,
+            a2aAgentName: 'PocketPaw',
+            a2aAgentDescription: '',
+            a2aTaskTimeout: 120,
+            a2aTrustedAgents: '',
             soulEnabled: false,
             soulName: 'Paw',
             soulArchetype: 'The Helpful Assistant',
@@ -514,10 +519,15 @@ function app() {
                 'memoryBackend', 'mem0AutoLearn', 'mem0LlmProvider',
                 'mem0LlmModel', 'mem0EmbedderProvider', 'mem0EmbedderModel',
                 'mem0VectorStore', 'mem0OllamaBaseUrl',
-                'webHost', 'webPort'
+                'webHost', 'webPort',
+                'a2aEnabled', 'a2aAgentName', 'a2aAgentDescription', 'a2aTaskTimeout'
             ];
             for (const key of SETTINGS_MAP) {
                 if (s[key] !== undefined) this.settings[key] = s[key];
+            }
+            // Trusted agents list: server sends array, UI uses newline-separated string
+            if (Array.isArray(s.a2aTrustedAgents)) {
+                this.settings.a2aTrustedAgents = s.a2aTrustedAgents.join('\n');
             }
 
             // API key availability flags
@@ -961,6 +971,7 @@ function app() {
             { section: 'services', sectionLabel: 'Search & Services', label: 'TTS Provider', hint: 'voice openai elevenlabs sarvam' },
             { section: 'services', sectionLabel: 'Search & Services', label: 'OCR Provider', hint: 'vision tesseract' },
             { section: 'system', sectionLabel: 'System', label: 'Self-Audit Daemon', hint: 'audit schedule' },
+            { section: 'system', sectionLabel: 'System', label: 'A2A Protocol', hint: 'a2a agent delegation task multi-agent interop' },
             { section: 'soul', sectionLabel: 'Soul', label: 'Enable Soul Protocol', hint: 'soul identity personality memory emotion' },
             { section: 'soul', sectionLabel: 'Soul', label: 'Soul Name', hint: 'soul name identity' },
             { section: 'soul', sectionLabel: 'Soul', label: 'Archetype', hint: 'soul archetype personality role' },

@@ -7,7 +7,7 @@ Created: 2026-03-06
 
 import asyncio
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -344,3 +344,39 @@ class TestMessageUpdate:
 
         call_kwargs = adapter_with_app.app.bot.edit_message_text.call_args[1]
         assert call_kwargs["chat_id"] == "-100123"
+
+
+class TestVoiceMediaRouting:
+    def test_is_voice_media_false_without_metadata(self):
+        assert TelegramAdapter._is_voice_media("/tmp/reply.mp3", None) is False
+
+    def test_is_voice_media_true_for_is_voice_flag(self):
+        assert TelegramAdapter._is_voice_media("/tmp/reply.mp3", {"is_voice": True}) is True
+
+    def test_is_voice_media_true_for_voice_media_paths_match(self):
+        path = "/tmp/reply.mp3"
+        metadata = {"voice_media_paths": [path]}
+        assert TelegramAdapter._is_voice_media(path, metadata) is True
+
+    async def test_send_media_file_voice_falls_back_to_audio(self, adapter, tmp_path):
+        media_file = tmp_path / "reply.mp3"
+        media_file.write_bytes(b"fake-audio")
+
+        mock_bot = AsyncMock()
+        mock_bot.send_voice = AsyncMock(side_effect=Exception("voice send failed"))
+        mock_bot.send_audio = AsyncMock()
+
+        adapter.app = MagicMock()
+        adapter.app.bot = mock_bot
+
+        chat_id = "12345"
+        file_path = str(media_file)
+        hint_key = (chat_id, file_path)
+        adapter._voice_media_hints[hint_key] = True
+        adapter._voice_media_hints_ts[hint_key] = asyncio.get_running_loop().time()
+
+        with patch("pocketpaw.bus.adapters.guess_media_type", return_value="audio"):
+            await adapter._send_media_file(chat_id, file_path)
+
+        mock_bot.send_voice.assert_called_once()
+        mock_bot.send_audio.assert_called_once()

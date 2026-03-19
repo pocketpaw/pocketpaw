@@ -11,6 +11,7 @@ import asyncio
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from pocketpaw.agents.router import AgentRouter
@@ -55,6 +56,24 @@ def _extract_media_paths(text: str) -> list[str]:
 def _extract_generated_paths(text: str) -> list[str]:
     """Fallback: extract file paths under ~/.pocketpaw/generated/ from agent text."""
     return _GENERATED_PATH_RE.findall(text)
+
+
+# Strip markdown links to generated audio files that the LLM may insert after calling tts tool.
+_AUDIO_LINK_RE = re.compile(
+    r"\[(?:[^\]]*?)\]\([^)]*generated[/\\]audio[/\\][^)]*\)\n?",
+    re.IGNORECASE,
+)
+
+# Audio file extensions for voice message detection
+_AUDIO_EXTS = {".ogg", ".oga", ".mp3", ".wav", ".m4a", ".opus", ".aac", ".flac"}
+
+
+def _strip_tts_links(text: str) -> str:
+    """Remove generated-audio markdown links and bare media tags from LLM text output."""
+    text = _AUDIO_LINK_RE.sub("", text)
+    text = re.sub(r"<!-- media:[^>]+-->", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 class AgentLoop:
@@ -433,6 +452,10 @@ class AgentLoop:
             )
 
             # 1b. Inject inbound media file paths so the agent can use them
+            # Also detect whether this is a voice message so we can auto-TTS the reply.
+            is_voice_message = any(
+                Path(p).suffix.lower() in _AUDIO_EXTS for p in (message.media or [])
+            )
             if message.media:
                 paths_info = ", ".join(message.media)
                 content += f"\n[Media files on disk: {paths_info}]"
@@ -689,9 +712,35 @@ class AgentLoop:
             if not media_paths and full_response:
                 media_paths.extend(_extract_generated_paths(full_response))
 
+            # 4b. Auto-TTS: if the inbound message was a voice note and the agent
+            # didn't already call text_to_speech (no audio in media_paths), synthesize
+            # the full response as a voice reply now.
+            already_has_audio = any(Path(p).suffix.lower() in _AUDIO_EXTS for p in media_paths)
+            voice_media_paths: list[str] = []
+            if (
+                is_voice_message
+                and not already_has_audio
+                and not cancelled
+                and full_response
+                and self.settings.voice_reply_enabled
+            ):
+                try:
+                    from pocketpaw.tools.builtin.voice import synthesize_speech
+
+                    tts_path = await synthesize_speech(full_response)
+                    if tts_path:
+                        logger.info("Auto-TTS voice reply: %s", tts_path)
+                        media_paths.append(tts_path)
+                        voice_media_paths.append(tts_path)
+                except Exception as _tts_err:
+                    logger.warning("Auto-TTS failed: %s", _tts_err)
+
             # Deduplicate while preserving order
             seen: set[str] = set()
             media_paths = [p for p in media_paths if not (p in seen or seen.add(p))]
+            metadata_out: dict[str, Any] = {}
+            if voice_media_paths:
+                metadata_out["voice_media_paths"] = voice_media_paths
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=message.channel,
@@ -699,10 +748,14 @@ class AgentLoop:
                     content="",
                     is_stream_end=True,
                     media=media_paths,
+                    metadata=metadata_out,
                 )
             )
 
             # 5. Store assistant response in memory
+            # Strip TTS links from full_response before storing (keep memory clean)
+            if full_response:
+                full_response = _strip_tts_links(full_response)
             if cancelled and full_response:
                 full_response += "\n\n[Response interrupted]"
             if full_response:

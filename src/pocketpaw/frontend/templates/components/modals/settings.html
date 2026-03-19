@@ -2024,6 +2024,7 @@
               >
                 <option value="openai">OpenAI Whisper</option>
                 <option value="sarvam">Sarvam AI Saaras (Indian Languages)</option>
+                <option value="elevenlabs">ElevenLabs</option>
               </select>
               <div
                 class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50"
@@ -2043,12 +2044,14 @@
               type="text"
               x-model="settings.sttModel"
               @change="saveSettings()"
-              :placeholder="settings.sttProvider === 'sarvam' ? 'saaras:v3' : 'whisper-1'"
+              :placeholder="settings.sttProvider === 'sarvam' ? 'saaras:v3' : settings.sttProvider === 'elevenlabs' ? 'scribe_v1' : 'whisper-1'"
               class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
             />
-            <small class="text-white/50 text-[11px]"
-              >OpenAI Whisper model for speech-to-text transcription</small
-            >
+            <small class="text-white/50 text-[11px]" x-text="
+              settings.sttProvider === 'elevenlabs' ? 'ElevenLabs Scribe model (e.g. scribe_v1)' :
+              settings.sttProvider === 'sarvam' ? 'Sarvam Saaras model (e.g. saaras:v3)' :
+              'OpenAI Whisper model (e.g. whisper-1)'
+            "></small>
           </div>
 
           <!-- OCR Provider -->
@@ -2330,6 +2333,76 @@
                   </div>
                 </div>
               </template>
+            </div>
+          </div>
+
+          <div class="border-t border-[var(--glass-border)]"></div>
+
+          <!-- A2A Protocol -->
+          <div>
+            <label class="flex items-start gap-2.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                x-model="settings.a2aEnabled"
+                @change="saveSettings()"
+                class="mt-0.5 accent-[var(--accent-color)] w-4 h-4"
+              />
+              <div class="flex flex-col">
+                <span class="text-[13px] font-medium group-hover:text-white transition-colors">A2A Protocol</span>
+                <span class="text-[11px] text-white/50 mt-0.5">Expose PocketPaw as a remote A2A agent and delegate tasks to external agents</span>
+              </div>
+            </label>
+          </div>
+
+          <!-- A2A sub-settings -->
+          <div x-show="settings.a2aEnabled" x-transition class="pl-7 border-l-2 border-[var(--glass-border)] space-y-3">
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Agent Name</label>
+              <input
+                type="text"
+                x-model="settings.a2aAgentName"
+                @change="saveSettings()"
+                placeholder="PocketPaw"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+              <span class="text-[11px] text-white/40">Name advertised in the Agent Card to other agents</span>
+            </div>
+
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Agent Description</label>
+              <textarea
+                x-model="settings.a2aAgentDescription"
+                @change="saveSettings()"
+                placeholder="Leave empty for default description"
+                rows="2"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40 resize-y"
+              ></textarea>
+            </div>
+
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Task Timeout (seconds)</label>
+              <input
+                type="number"
+                x-model.number="settings.a2aTaskTimeout"
+                @change="saveSettings()"
+                min="10"
+                max="600"
+                placeholder="120"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+              <span class="text-[11px] text-white/40">Maximum time to wait for an agent response before failing the task</span>
+            </div>
+
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Trusted Agents</label>
+              <textarea
+                x-model="settings.a2aTrustedAgents"
+                @change="saveSettings()"
+                placeholder="http://agent-b:8001&#10;http://agent-c:8002"
+                rows="3"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40 resize-y font-mono"
+              ></textarea>
+              <span class="text-[11px] text-white/40">One URL per line. Only these agents can be used for outbound delegation (SSRF protection)</span>
             </div>
           </div>
         </div>

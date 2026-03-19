@@ -128,6 +128,7 @@ class TestToolExecutionInSubprocess:
                 **dict(__import__("os").environ),
                 "HOME": str(tmp_path),  # Isolate from real config
                 "USERPROFILE": str(tmp_path),  # Windows compat
+                "PYTHONIOENCODING": "utf-8",
             },
         )
 
@@ -140,6 +141,7 @@ class TestToolExecutionInSubprocess:
             **dict(__import__("os").environ),
             "HOME": str(tmp_path),
             "USERPROFILE": str(tmp_path),
+            "PYTHONIOENCODING": "utf-8",
         }
 
         # Save
@@ -195,6 +197,7 @@ class TestToolExecutionInSubprocess:
                     **dict(__import__("os").environ),
                     "HOME": str(tmp_path),
                     "USERPROFILE": str(tmp_path),
+                    "PYTHONIOENCODING": "utf-8",
                 },
             )
             # Should complete without timeout

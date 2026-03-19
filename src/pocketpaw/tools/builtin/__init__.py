@@ -41,6 +41,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SpeechToTextTool": (".stt", "SpeechToTextTool"),
     "ResearchTool": (".research", "ResearchTool"),
     "DelegateToClaudeCodeTool": (".delegate", "DelegateToClaudeCodeTool"),
+    "A2ADelegateTool": (".a2a_delegate", "A2ADelegateTool"),
     "DriveListTool": (".gdrive", "DriveListTool"),
     "DriveDownloadTool": (".gdrive", "DriveDownloadTool"),
     "DriveUploadTool": (".gdrive", "DriveUploadTool"),

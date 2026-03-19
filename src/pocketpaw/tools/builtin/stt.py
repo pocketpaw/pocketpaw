@@ -1,4 +1,4 @@
-# Speech-to-Text tool — transcribe audio via OpenAI Whisper API.
+# Speech-to-Text tool — transcribe audio via OpenAI, ElevenLabs, or Sarvam APIs.
 # Created: 2026-02-09
 # Part of Phase 4 Media Integrations
 
@@ -23,7 +23,7 @@ def _get_transcripts_dir() -> Path:
 
 
 class SpeechToTextTool(BaseTool):
-    """Transcribe audio files to text using OpenAI Whisper API."""
+    """Transcribe audio files to text using configurable STT providers."""
 
     @property
     def name(self) -> str:
@@ -90,10 +90,14 @@ class SpeechToTextTool(BaseTool):
 
         if provider == "sarvam":
             return await self._stt_sarvam(audio_path, language, mode)
+        elif provider == "elevenlabs":
+            return await self._stt_elevenlabs(audio_path, language)
         elif provider == "openai":
             return await self._stt_openai(audio_path, language)
         else:
-            return self._error(f"Unknown STT provider: {provider}. Use 'openai' or 'sarvam'.")
+            return self._error(
+                f"Unknown STT provider: {provider!r}. Choose 'openai', 'elevenlabs', or 'sarvam'."
+            )
 
     async def _stt_openai(self, audio_path: Path, language: str | None) -> str:
         """Transcribe via OpenAI Whisper API."""
@@ -135,6 +139,48 @@ class SpeechToTextTool(BaseTool):
             return self._error(f"Whisper API error: {e.response.status_code}")
         except Exception as e:
             return self._error(f"Transcription failed: {e}")
+
+    async def _stt_elevenlabs(self, audio_path: Path, language: str | None) -> str:
+        """Transcribe via ElevenLabs STT API."""
+
+        settings = get_settings()
+        api_key = settings.elevenlabs_api_key
+        if not api_key:
+            return self._error(
+                "ElevenLabs API key not configured. Set POCKETPAW_ELEVENLABS_API_KEY."
+            )
+
+        # stt_model is the frontend-controlled generic field; fall back to the dedicated field
+        model = settings.stt_model
+        try:
+            data = {"model_id": model}
+            if language:
+                data["language"] = language
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                with open(audio_path, "rb") as f:
+                    resp = await client.post(
+                        "https://api.elevenlabs.io/v1/speech-to-text",
+                        headers={"xi-api-key": api_key},
+                        data=data,
+                        files={"file": (audio_path.name, f, "audio/mpeg")},
+                    )
+                    resp.raise_for_status()
+            result = resp.json()
+            text = result.get("text", "")
+
+            if not text.strip():
+                return "Transcription completed but no speech was detected in the audio."
+
+            filename = f"stt_{uuid.uuid4().hex[:8]}.txt"
+            output_path = _get_transcripts_dir() / filename
+            output_path.write_text(text, encoding="utf-8")
+            return f"Transcription ({audio_path.name}):\n\n{text}\n\nSaved to: {output_path}"
+
+        except httpx.HTTPStatusError as e:
+            return self._error(f"ElevenLabs STT API error: {e.response.status_code}")
+        except Exception as e:
+            return self._error(f"ElevenLabs transcription failed: {e}")
 
     async def _stt_sarvam(self, audio_path: Path, language: str | None, mode: str | None) -> str:
         """Transcribe via Sarvam AI Saaras STT API."""

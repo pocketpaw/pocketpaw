@@ -518,6 +518,11 @@
             "label": "MCP Servers",
             "href": "/integrations/mcp-servers",
             "icon": "lucide:server"
+          },
+          {
+            "label": "A2A Protocol",
+            "href": "/integrations/a2a-protocol",
+            "icon": "lucide:network"
           }
         ]
       },

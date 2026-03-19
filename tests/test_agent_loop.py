@@ -738,6 +738,276 @@ async def test_stop_cancels_gc_task():
 
 
 # ---------------------------------------------------------------------------
+# Auto-TTS tests (voice reply feature)
+# ---------------------------------------------------------------------------
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_auto_tts_triggered_by_voice_message(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Test that voice inbound message triggers auto-TTS and attaches audio."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    # Mock router yields text response without calling text_to_speech tool
+    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+        yield AgentEvent(type="message", content="I heard your voice message!")
+        yield AgentEvent(type="done", content="")
+
+    router = MagicMock()
+    router.run = mock_run
+    router.stop = AsyncMock()
+    mock_router_cls.return_value = router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.voice_reply_enabled = True
+        settings.injection_scan_enabled = False
+        settings.pii_scan_enabled = False
+        settings.welcome_hint_enabled = False
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            # Mock synthesize_speech to return a fake audio path
+            mock_tts = AsyncMock(return_value="/tmp/tts_12345678.mp3")
+            with patch("pocketpaw.tools.builtin.voice.synthesize_speech", mock_tts):
+                loop = AgentLoop()
+
+                # Send voice message (has .ogg media attachment)
+                msg = InboundMessage(
+                    channel=Channel.CLI,
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="[voice message]",
+                    media=["/tmp/voice_input.ogg"],
+                )
+
+                await loop._process_message(msg)
+
+                # Verify synthesize_speech was called with the agent's response
+                mock_tts.assert_called_once_with("I heard your voice message!")
+
+                # Verify Out boundMessage stream_end includes the generated audio
+                outbound_calls = mock_bus.publish_outbound.call_args_list
+                stream_end_call = [c for c in outbound_calls if c[0][0].is_stream_end]
+                assert len(stream_end_call) == 1
+                stream_end_msg = stream_end_call[0][0][0]
+                assert "/tmp/tts_12345678.mp3" in stream_end_msg.media
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_auto_tts_skipped_when_agent_already_sent_audio(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Test that auto-TTS is skipped when agent already called text_to_speech tool."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    # Mock router yields tool_result with media tag (agent already generated audio)
+    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+        yield AgentEvent(type="message", content="Here's my voice reply")
+        yield AgentEvent(
+            type="tool_result",
+            content="<!-- media:/tmp/agent_tts.mp3 -->",
+            metadata={"name": "text_to_speech"},
+        )
+        yield AgentEvent(type="done", content="")
+
+    router = MagicMock()
+    router.run = mock_run
+    router.stop = AsyncMock()
+    mock_router_cls.return_value = router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.voice_reply_enabled = True
+        settings.injection_scan_enabled = False
+        settings.pii_scan_enabled = False
+        settings.welcome_hint_enabled = False
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            mock_tts = AsyncMock()
+            with patch("pocketpaw.tools.builtin.voice.synthesize_speech", mock_tts):
+                loop = AgentLoop()
+
+                msg = InboundMessage(
+                    channel=Channel.CLI,
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="[voice]",
+                    media=["/tmp/voice.ogg"],
+                )
+
+                await loop._process_message(msg)
+
+                # synthesize_speech should NOT be called (agent already provided audio)
+                mock_tts.assert_not_called()
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_auto_tts_disabled_by_setting(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Test that auto-TTS is skipped when voice_reply_enabled=False."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+        yield AgentEvent(type="message", content="Response")
+        yield AgentEvent(type="done", content="")
+
+    router = MagicMock()
+    router.run = mock_run
+    router.stop = AsyncMock()
+    mock_router_cls.return_value = router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.voice_reply_enabled = False  # Disabled
+        settings.injection_scan_enabled = False
+        settings.pii_scan_enabled = False
+        settings.welcome_hint_enabled = False
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            mock_tts = AsyncMock()
+            with patch("pocketpaw.tools.builtin.voice.synthesize_speech", mock_tts):
+                loop = AgentLoop()
+
+                msg = InboundMessage(
+                    channel=Channel.CLI,
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="[voice]",
+                    media=["/tmp/voice.ogg"],
+                )
+
+                await loop._process_message(msg)
+
+                # synthesize_speech should NOT be called (feature disabled)
+                mock_tts.assert_not_called()
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_auto_tts_handles_synthesis_failure_gracefully(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Test that auto-TTS failure doesn't crash the agent loop."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+        yield AgentEvent(type="message", content="Response text")
+        yield AgentEvent(type="done", content="")
+
+    router = MagicMock()
+    router.run = mock_run
+    router.stop = AsyncMock()
+    mock_router_cls.return_value = router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.voice_reply_enabled = True
+        settings.injection_scan_enabled = False
+        settings.pii_scan_enabled = False
+        settings.welcome_hint_enabled = False
+        mock_settings.return_value = settings
+
+        with patch("pocketpaw.agents.loop.Settings") as mock_settings_cls:
+            mock_settings_cls.load.return_value = settings
+
+            # Mock synthesize_speech to raise an exception
+            mock_tts = AsyncMock(side_effect=RuntimeError("TTS service unavailable"))
+            with patch("pocketpaw.tools.builtin.voice.synthesize_speech", mock_tts):
+                loop = AgentLoop()
+
+                msg = InboundMessage(
+                    channel=Channel.CLI,
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="[voice]",
+                    media=["/tmp/voice.wav"],
+                )
+
+                # Should not raise — failure is logged and swallowed
+                await loop._process_message(msg)
+
+                mock_tts.assert_called_once()
+
+                # Verify stream_end was still sent (no audio attached)
+                outbound_calls = mock_bus.publish_outbound.call_args_list
+                stream_end_call = [c for c in outbound_calls if c[0][0].is_stream_end]
+                assert len(stream_end_call) == 1
+                # No audio in media list (synthesis failed)
+                stream_end_msg = stream_end_call[0][0][0]
+                assert len(stream_end_msg.media) == 0
+
+
+# ---------------------------------------------------------------------------
 # PR #658 reviewer suggestions: surface swallowed exceptions
 # ---------------------------------------------------------------------------
 

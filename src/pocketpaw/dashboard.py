@@ -192,6 +192,14 @@ app.include_router(deep_work_router, prefix="/api/deep-work")
 # Mount API v1 routers at /api/v1/ (canonical) — see api/v1/__init__.py
 mount_v1_routers(app)
 
+# Mount A2A Protocol routers (agent card + task endpoints) — see a2a/server.py
+try:
+    from pocketpaw.a2a.server import register_routes as _a2a_register_routes
+
+    _a2a_register_routes(app)
+except Exception as _a2a_exc:
+    logger.warning("A2A Protocol unavailable — skipping router mount: %s", _a2a_exc)
+
 # Mount channel management router (webhooks, extras, channel status/toggle)
 app.include_router(channels_router)
 

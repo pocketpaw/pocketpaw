@@ -23,6 +23,7 @@ class Channel(StrEnum):
     TEAMS = "teams"
     GOOGLE_CHAT = "google_chat"
     WEBHOOK = "webhook"
+    A2A = "a2a"
     SYSTEM = "system"  # Internal (subagents, intentions)
 
 

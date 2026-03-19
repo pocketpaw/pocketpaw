@@ -34,7 +34,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "group:calendar": ["calendar_list", "calendar_create", "calendar_prep"],
     "group:voice": ["text_to_speech", "speech_to_text"],
     "group:research": ["research"],
-    "group:delegation": ["delegate_claude_code"],
+    "group:delegation": ["delegate_claude_code", "delegate_to_a2a_agent"],
     "group:drive": ["drive_list", "drive_download", "drive_upload", "drive_share"],
     "group:docs": ["docs_read", "docs_create", "docs_search"],
     "group:spotify": [
