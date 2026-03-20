@@ -166,11 +166,22 @@ class CredentialStore:
             decrypted = fernet.decrypt(encrypted)
             self._cache = json.loads(decrypted)
         except (InvalidToken, json.JSONDecodeError, Exception) as exc:
-            logger.warning(
-                "Failed to decrypt secrets.enc (machine changed? corrupted?): %s. "
-                "Starting with empty credential store.",
-                exc,
-            )
+            backup_path = self._secrets_path.with_name(self._secrets_path.name + ".bak")
+            try:
+                self._secrets_path.replace(backup_path)
+                logger.warning(
+                    "Failed to decrypt secrets.enc (did your machine name or username change?).\n"
+                    "Your previous credentials have been locked to protect them and safely backed up to:\n"
+                    "  %s\n"
+                    "If you restore your previous machine identity (hostname/username), you can "
+                    "rename this backup file back to 'secrets.enc' to recover your secrets.\n"
+                    "Starting with a new, empty credential store. Error: %s",
+                    backup_path, exc
+                )
+            except OSError as mv_exc:
+                logger.error("Failed to back up unreadable secrets.enc: %s", mv_exc)
+                logger.warning("Starting with empty credential store.")
+            
             self._cache = {}
 
         return self._cache
