@@ -28,7 +28,7 @@ class RunPythonTool(BaseTool):
 
     @property
     def trust_level(self) -> str:
-        return "elevated"
+        return "critical"
 
     @property
     def parameters(self) -> dict[str, Any]:

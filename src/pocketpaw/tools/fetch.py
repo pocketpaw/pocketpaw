@@ -21,6 +21,9 @@ def is_safe_path(path: Path, jail: Path) -> bool:
 
 def get_directory_keyboard(path: Path, jail: Path | None = None) -> InlineKeyboardMarkup:
     """Generate inline keyboard for directory contents."""
+    if InlineKeyboardMarkup is None:
+        return None
+
     if jail is None:
         jail = Path.home()
 
