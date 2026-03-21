@@ -7,6 +7,7 @@ from pocketpaw.security.pii import (
     PIIType,
     get_pii_scanner,
 )
+from pocketpaw.security.url_validation import is_url_safe, validate_url
 
 __all__ = [
     "AuditLogger",
@@ -20,4 +21,6 @@ __all__ = [
     "PIIScanResult",
     "PIIType",
     "get_pii_scanner",
+    "is_url_safe",
+    "validate_url",
 ]

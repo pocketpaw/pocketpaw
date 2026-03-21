@@ -53,6 +53,19 @@ class UrlExtractTool(BaseTool):
         if not urls:
             return self._error("No URLs provided.")
 
+        from pocketpaw.security.url_validation import validate_url
+
+        safe_urls: list[str] = []
+        for u in urls:
+            try:
+                validate_url(u)
+                safe_urls.append(u)
+            except ValueError as exc:
+                logger.warning("Blocked unsafe URL in url_extract: %s", exc)
+        if not safe_urls:
+            return self._error("All provided URLs were rejected by safety checks.")
+        urls = safe_urls
+
         settings = get_settings()
         provider = settings.url_extract_provider
 

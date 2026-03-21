@@ -204,6 +204,10 @@ class BrowserDriver:
         Returns:
             NavigationResult with snapshot text and refmap
         """
+        from pocketpaw.security.url_validation import validate_url
+
+        validate_url(url)
+
         page = self._require_page()
 
         await page.goto(url, wait_until="domcontentloaded")

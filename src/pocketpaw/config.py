@@ -20,7 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -286,6 +286,27 @@ class Settings(BaseSettings):
         default="http://localhost:4096",
         description="OpenCode server URL",
     )
+
+    @field_validator(
+        "opencode_base_url",
+        "litellm_api_base",
+        "ollama_host",
+        "openai_compatible_base_url",
+        "mem0_ollama_base_url",
+        "signal_api_url",
+        "matrix_homeserver",
+        "mcp_client_metadata_url",
+        mode="before",
+    )
+    @classmethod
+    def _validate_url_fields(cls, v: str | None) -> str | None:
+        """Reject URLs with non-http(s) schemes or targeting private/reserved IPs."""
+        if not v:
+            return v
+        from pocketpaw.security.url_validation import validate_url
+
+        return validate_url(str(v), allow_localhost=True)
+
     opencode_model: str = Field(
         default="",
         description="Model for OpenCode (provider/model format, e.g. anthropic/claude-sonnet-4-6)",
