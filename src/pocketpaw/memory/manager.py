@@ -154,7 +154,6 @@ class MemoryManager:
         if store:
             self._store = store
         else:
-
             self._store = create_memory_store(
                 backend=backend,
                 base_path=base_path,

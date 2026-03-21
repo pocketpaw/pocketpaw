@@ -1,4 +1,3 @@
-
 from pocketpaw.config import Settings
 from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 from pocketpaw.vectordb.chroma_adapter import ChromaAdapter
