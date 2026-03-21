@@ -1,9 +1,12 @@
 import asyncio
 
+import pytest
+
 from pocketpaw.memory.manager import create_memory_store
 from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
 
+@pytest.mark.asyncio
 async def test_vector_backend():
     print("🚀 Starting Vector Memory Test...")
     
