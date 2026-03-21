@@ -38,7 +38,7 @@
     <link rel="stylesheet" href="/static/css/styles.css?v={{ v }}" />
 
     <!-- UnoCSS Runtime (utilities alongside custom CSS) -->
-    <script>
+    <script nonce="{{ request.state.csp_nonce }}">
       window.__unocss = {
         theme: {
           colors: {
@@ -312,7 +312,7 @@
     <script src="/static/js/app.js?v={{ v }}"></script>
 
     <!-- Initialize Lucide icons + dismiss preloader -->
-    <script>
+    <script nonce="{{ request.state.csp_nonce }}">
       // Initial render
       document.addEventListener('DOMContentLoaded', () => {
         lucide.createIcons();
