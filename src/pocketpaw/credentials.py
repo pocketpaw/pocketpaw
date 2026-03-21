@@ -51,6 +51,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "gchat_service_account_key",
         "sarvam_api_key",
         "litellm_api_key",
+        "github_api_token",
     }
 )
 

@@ -508,6 +508,7 @@ class Settings(BaseSettings):
     tavily_api_key: str | None = Field(default=None, description="Tavily search API key")
     brave_search_api_key: str | None = Field(default=None, description="Brave Search API key")
     parallel_api_key: str | None = Field(default=None, description="Parallel AI API key")
+    github_api_token: str | None = Field(default=None, description="GitHub Personal Access Token")
     url_extract_provider: str = Field(
         default="auto", description="URL extract provider: 'auto', 'parallel', or 'local'"
     )
