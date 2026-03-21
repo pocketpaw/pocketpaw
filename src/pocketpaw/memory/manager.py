@@ -20,6 +20,7 @@ def create_memory_store(
     backend: str = "file",
     base_path: Path | None = None,
     user_id: str = "default",
+    settings: Any = None,
     use_inference: bool = True,
     llm_provider: str = "anthropic",
     llm_model: str = "claude-haiku-4-5-20251001",
@@ -78,6 +79,21 @@ def create_memory_store(
                 "Install with: pip install pocketpaw[memory]"
             )
             return FileMemoryStore(base_path)
+    elif backend == "vector":
+        try:
+            # Step 1: Lazy import your new VectorMemory class
+            from pocketpaw.config import get_settings
+            from pocketpaw.memory.vector.vector_store import VectorMemory
+
+            logger.info("Using Vector-based memory backend (ChromaDB)")
+            # Step 2: Initialize it using the settings
+            return VectorMemory(settings=get_settings())
+        except ImportError:
+            logger.warning(
+                "Vector memory dependencies not installed. Falling back to file backend."
+            )
+            return FileMemoryStore(base_path)
+
     else:
         logger.info("Using file-based memory backend")
         return FileMemoryStore(base_path)
@@ -138,6 +154,7 @@ class MemoryManager:
         if store:
             self._store = store
         else:
+
             self._store = create_memory_store(
                 backend=backend,
                 base_path=base_path,
