@@ -7,7 +7,17 @@
 # Run with: pytest tests/e2e/ -v --headed (to see browser)
 # Run headless: pytest tests/e2e/ -v
 
+import pytest
+import os
+
+# Skip entire module BEFORE anything else
+if not os.environ.get("RUN_E2E"):
+    pytest.skip("E2E tests require full environment setup", allow_module_level=True)
+
+pytest.importorskip("playwright.sync_api")
+
 from playwright.sync_api import Page, expect
+
 
 
 class TestDashboardLoads:

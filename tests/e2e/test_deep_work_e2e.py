@@ -15,12 +15,17 @@
 #   6. Output chaining: task output stored on task.output field
 #   7. Cancel rejection: completed/cancelled projects can't be cancelled again
 #   8. PawKit YAML round-trip through real file system
+import pytest
+import os
+
+# Skip entire module unless explicitly enabled
+if not os.environ.get("RUN_E2E"):
+    pytest.skip("E2E tests require full environment setup", allow_module_level=True)
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
 from fastapi import FastAPI
 
 from pocketpaw.deep_work.api import router as deep_work_router

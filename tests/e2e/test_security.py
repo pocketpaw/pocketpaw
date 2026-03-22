@@ -10,8 +10,16 @@
 # Run with: pytest tests/e2e/test_security.py -v --headed
 
 
-from playwright.sync_api import Page, expect
+import pytest
+import os
 
+# Skip entire module BEFORE anything else
+if not os.environ.get("RUN_E2E"):
+    pytest.skip("E2E tests require full environment setup", allow_module_level=True)
+
+pytest.importorskip("playwright.sync_api")
+
+from playwright.sync_api import Page, expect
 
 class TestWebSocketAuth:
     """Tests for WebSocket authentication via first message."""
