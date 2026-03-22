@@ -582,8 +582,11 @@ async def _validate_channel_tokens(channel: str, config: dict) -> str | None:
 
     elif channel == "telegram":
         bot_token = config.get("bot_token", "")
-        if bot_token and ":" not in bot_token:
-            return "Invalid Telegram bot token. It should be in the format '123456:ABC-DEF...'."
+        if bot_token:
+            # Telegram tokens: numeric_id:alphanumeric_secret format
+            telegram_token_pattern = re.compile(r'^\d+:[A-Za-z0-9_-]+$')
+            if not telegram_token_pattern.match(bot_token):
+                return "Invalid Telegram bot token. Expected format: numeric_id:alphanumeric_secret"
 
     return None
 
