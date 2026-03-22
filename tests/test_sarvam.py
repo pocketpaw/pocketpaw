@@ -1,6 +1,10 @@
 # Tests for Sarvam AI integrations: TTS, STT, OCR, Translate.
 # Created: 2026-02-16
 
+import pytest
+
+pytest.importorskip("sarvamai")
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------------------------

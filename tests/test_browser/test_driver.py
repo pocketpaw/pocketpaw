@@ -2,6 +2,9 @@
 # Changes: Initial creation with comprehensive Playwright driver tests
 # Fixed mocking for async_playwright().start() pattern
 """Tests for browser driver module."""
+import pytest
+
+pytest.importorskip("playwright")
 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch

@@ -1,8 +1,9 @@
 """
 Tests for the Proactive Daemon module.
 """
-
 import pytest
+
+pytest.importorskip("psutil")
 
 from pocketpaw.daemon import (
     ContextHub,

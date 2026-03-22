@@ -1,9 +1,10 @@
 """Unit tests for PocketPaw tools."""
+import pytest
 
+pytest.importorskip("psutil")
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 
 class TestStatusTool:
