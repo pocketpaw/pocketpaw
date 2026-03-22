@@ -607,6 +607,11 @@ export class PocketPawClient {
     return this.get<string[]>(`/backends/ollama-models${params}`);
   }
 
+  async fetchLmstudioModels(host?: string): Promise<string[]> {
+    const params = host ? `?host=${encodeURIComponent(host)}` : "";
+    return this.get<string[]>(`/backends/lmstudio-models${params}`);
+  }
+
   // ---------------------------------------------------------------------------
   // Health
   // ---------------------------------------------------------------------------

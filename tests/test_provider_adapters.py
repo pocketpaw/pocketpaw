@@ -16,6 +16,8 @@ def _mock_settings(**overrides):
         "anthropic_model": "claude-sonnet-4-6",
         "ollama_host": "http://localhost:11434",
         "ollama_model": "llama3.2",
+        "lmstudio_host": "http://localhost:1234",
+        "lmstudio_model": "test-lms",
         "openai_api_key": "sk-test",
         "openai_model": "gpt-5.2",
         "openai_compatible_base_url": "http://local:8080/v1",
@@ -43,7 +45,15 @@ def _mock_settings(**overrides):
 
 class TestRegistry:
     def test_known_providers(self):
-        for name in ("anthropic", "ollama", "openai_compatible", "openrouter", "gemini", "litellm"):
+        for name in (
+            "anthropic",
+            "ollama",
+            "lmstudio",
+            "openai_compatible",
+            "openrouter",
+            "gemini",
+            "litellm",
+        ):
             adapter = get_adapter(name)
             assert adapter.name == name
 
@@ -142,6 +152,34 @@ class TestOllamaAdapter:
         config = ProviderConfig(provider="ollama", model="x", base_url="http://localhost:11434")
         msg = adapter.format_error(config, Exception("connection refused"))
         assert "Cannot connect" in msg
+
+
+# -- LmStudioAdapter --
+
+
+class TestLmStudioAdapter:
+    def test_resolve_config(self):
+        adapter = get_adapter("lmstudio")
+        config = adapter.resolve_config(_mock_settings(), "claude_agent_sdk")
+        assert config.provider == "lmstudio"
+        assert config.base_url == "http://localhost:1234"
+
+    def test_build_env_dict(self):
+        adapter = get_adapter("lmstudio")
+        config = ProviderConfig(
+            provider="lmstudio", model="x", base_url="http://127.0.0.1:1234"
+        )
+        env = adapter.build_env_dict(config)
+        assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1234"
+        assert env["ANTHROPIC_API_KEY"] == "lmstudio"
+
+    def test_build_openai_client_appends_v1(self):
+        adapter = get_adapter("lmstudio")
+        config = ProviderConfig(provider="lmstudio", model="x", base_url="http://localhost:1234")
+        with patch("openai.AsyncOpenAI") as mock_cls:
+            adapter.build_openai_client(config)
+            mock_cls.assert_called_once()
+            assert mock_cls.call_args.kwargs["base_url"] == "http://localhost:1234/v1"
 
 
 # -- OpenRouterAdapter --

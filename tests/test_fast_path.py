@@ -29,6 +29,7 @@ def _make_settings(**overrides):
     """Create a minimal Settings-like object for tests."""
     defaults = {
         "agent_backend": "claude_agent_sdk",
+        "claude_sdk_provider": "anthropic",
         "tool_profile": "full",
         "tools_allow": [],
         "tools_deny": [],

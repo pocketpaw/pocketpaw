@@ -348,11 +348,12 @@
               <div class="relative">
                 <select
                   x-model="settings.claudeSdkProvider"
-                  @change="saveSettings()"
+                  @change="saveSettings(); maybeRefreshLmstudioModels()"
                   class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
                 >
                   <option value="anthropic">Anthropic (Recommended)</option>
                   <option value="ollama">Ollama (Local)</option>
+                  <option value="lmstudio">LM Studio (Local)</option>
                   <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
                   <option value="litellm">LiteLLM (100+ Providers)</option>
@@ -366,6 +367,9 @@
               </small>
               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'ollama'">
                 Runs via Ollama's Anthropic Messages API compatibility (Claude Code v0.14.0+).
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'lmstudio'">
+                LM Studio local server (Anthropic-compatible API). Start the server in LM Studio, then set host and loaded model id below.
               </small>
               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openrouter'">
                 Use any model on OpenRouter with full CLI tool access via their Anthropic-compatible API.
@@ -393,6 +397,61 @@
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
                 <small class="text-white/50 text-[11px]">Run <code>ollama list</code> to see available models.</small>
+              </div>
+            </div>
+            <div x-show="settings.claudeSdkProvider === 'lmstudio'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LM Studio server URL</label>
+                <input type="text" x-model="settings.lmstudioHost" @change="saveSettings(); maybeRefreshLmstudioModels()"
+                  placeholder="http://localhost:1234"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model id</label>
+                <div class="flex flex-col gap-2">
+                  <div class="flex gap-2 items-center">
+                    <template x-if="lmstudioModels.length > 0">
+                      <select
+                        x-model="settings.lmstudioModel"
+                        @change="saveSettings()"
+                        class="flex-1 min-w-0 appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                      >
+                        <option value="">— Select model —</option>
+                        <template x-for="id in lmstudioModels" :key="id">
+                          <option :value="id" x-text="id"></option>
+                        </template>
+                      </select>
+                    </template>
+                    <input
+                      type="text"
+                      x-show="lmstudioModels.length === 0"
+                      x-model="settings.lmstudioModel"
+                      @change="saveSettings()"
+                      placeholder="Type model id or click Refresh"
+                      class="flex-1 min-w-0 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                    />
+                    <button
+                      type="button"
+                      @click="refreshLmstudioModels()"
+                      :disabled="lmstudioModelsLoading"
+                      class="shrink-0 px-3 py-2 rounded-[10px] text-[12px] font-medium bg-black/40 border border-[var(--glass-border)] text-white hover:border-[var(--accent-color)] disabled:opacity-50"
+                      title="Load models from LM Studio"
+                    >
+                      <span x-show="!lmstudioModelsLoading">Refresh</span>
+                      <span x-show="lmstudioModelsLoading">…</span>
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    x-show="lmstudioModels.length > 0"
+                    x-model="settings.lmstudioModel"
+                    @change="saveSettings()"
+                    placeholder="Or enter model id manually"
+                    class="w-full bg-black/20 border border-white/10 rounded-lg py-1.5 px-2 text-[12px] text-white placeholder-white/40"
+                  />
+                </div>
+                <small class="text-white/50 text-[11px]">Refresh scans <code class="rounded bg-white/10 px-1">/v1/models</code>. Start the server in LM Studio first.</small>
               </div>
             </div>
             <!-- OpenRouter config (inline, shown when provider=openrouter) -->
@@ -520,11 +579,12 @@
               <div class="relative">
                 <select
                   x-model="settings.openaiAgentsProvider"
-                  @change="saveSettings()"
+                  @change="saveSettings(); maybeRefreshLmstudioModels()"
                   class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
                 >
                   <option value="openai">OpenAI (Recommended)</option>
                   <option value="ollama">Ollama (Local)</option>
+                  <option value="lmstudio">LM Studio (Local)</option>
                   <option value="openrouter">OpenRouter</option>
                   <option value="openai_compatible">OpenAI-Compatible</option>
                   <option value="litellm">LiteLLM (100+ Providers)</option>
@@ -535,6 +595,9 @@
               </div>
               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'ollama'">
                 Uses Ollama's OpenAI-compatible API. No API key needed.
+              </small>
+              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'lmstudio'">
+                Uses LM Studio OpenAI-compatible API at /v1. No API key needed.
               </small>
               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openrouter'">
                 Use any model on OpenRouter. Free and paid models available.
@@ -561,6 +624,61 @@
                   placeholder="llama3.2"
                   class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
                 />
+              </div>
+            </div>
+            <div x-show="settings.openaiAgentsProvider === 'lmstudio'" x-transition class="flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LM Studio server URL</label>
+                <input type="text" x-model="settings.lmstudioHost" @change="saveSettings(); maybeRefreshLmstudioModels()"
+                  placeholder="http://localhost:1234"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model id</label>
+                <div class="flex flex-col gap-2">
+                  <div class="flex gap-2 items-center">
+                    <template x-if="lmstudioModels.length > 0">
+                      <select
+                        x-model="settings.lmstudioModel"
+                        @change="saveSettings()"
+                        class="flex-1 min-w-0 appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                      >
+                        <option value="">— Select model —</option>
+                        <template x-for="id in lmstudioModels" :key="id">
+                          <option :value="id" x-text="id"></option>
+                        </template>
+                      </select>
+                    </template>
+                    <input
+                      type="text"
+                      x-show="lmstudioModels.length === 0"
+                      x-model="settings.lmstudioModel"
+                      @change="saveSettings()"
+                      placeholder="Type model id or click Refresh"
+                      class="flex-1 min-w-0 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                    />
+                    <button
+                      type="button"
+                      @click="refreshLmstudioModels()"
+                      :disabled="lmstudioModelsLoading"
+                      class="shrink-0 px-3 py-2 rounded-[10px] text-[12px] font-medium bg-black/40 border border-[var(--glass-border)] text-white hover:border-[var(--accent-color)] disabled:opacity-50"
+                      title="Load models from LM Studio"
+                    >
+                      <span x-show="!lmstudioModelsLoading">Refresh</span>
+                      <span x-show="lmstudioModelsLoading">…</span>
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    x-show="lmstudioModels.length > 0"
+                    x-model="settings.lmstudioModel"
+                    @change="saveSettings()"
+                    placeholder="Or enter model id manually"
+                    class="w-full bg-black/20 border border-white/10 rounded-lg py-1.5 px-2 text-[12px] text-white placeholder-white/40"
+                  />
+                </div>
+                <small class="text-white/50 text-[11px]">Refresh scans <code class="rounded bg-white/10 px-1">/v1/models</code>. Start the server in LM Studio first.</small>
               </div>
             </div>
             <!-- OpenRouter config (inline, for openai_agents) -->

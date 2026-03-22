@@ -540,6 +540,8 @@ class TestSecretFieldsList:
             "llm_provider",
             "ollama_host",
             "ollama_model",
+            "lmstudio_host",
+            "lmstudio_model",
             "openai_model",
             "anthropic_model",
             "memory_backend",

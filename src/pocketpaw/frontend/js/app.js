@@ -91,6 +91,8 @@ function app() {
             llmProvider: 'auto',
             ollamaHost: 'http://localhost:11434',
             ollamaModel: 'llama3.2',
+            lmstudioHost: 'http://localhost:1234',
+            lmstudioModel: '',
             anthropicModel: 'claude-sonnet-4-6',
             openaiCompatibleBaseUrl: '',
             openaiCompatibleApiKey: '',
@@ -181,6 +183,9 @@ function app() {
         _backendsData: [],
         backendInstallLoading: false,
         serverRestarting: false,
+
+        lmstudioModels: [],
+        lmstudioModelsLoading: false,
 
         // Spread feature states
         ...featureStates,
@@ -505,7 +510,8 @@ function app() {
                 'copilotSdkProvider', 'copilotSdkModel', 'copilotSdkMaxTurns',
                 'deepAgentsModel', 'deepAgentsMaxTurns',
                 'opencodeBaseUrl', 'opencodeModel', 'opencodeMaxTurns',
-                'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
+                'llmProvider', 'ollamaHost', 'ollamaModel', 'lmstudioHost', 'lmstudioModel',
+                'anthropicModel',
                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
                 'geminiModel', 'litellmApiBase', 'litellmModel', 'litellmMaxTokens',
                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
@@ -557,6 +563,8 @@ function app() {
             if (this.isBackendUnconfigured() && !localStorage.getItem('pocketpaw_setup_dismissed')) {
                 this.showWelcome = true;
             }
+
+            queueMicrotask(() => this.maybeRefreshLmstudioModels());
         },
 
         /**
@@ -610,6 +618,39 @@ function app() {
             this.settingsSearchResults = [];
             this.settingsValidationWarnings = [];
             this.showSettings = true;
+            queueMicrotask(() => this.maybeRefreshLmstudioModels());
+        },
+
+        async refreshLmstudioModels() {
+            this.lmstudioModelsLoading = true;
+            try {
+                const q = encodeURIComponent(this.settings.lmstudioHost || 'http://localhost:1234');
+                const r = await fetch(`/api/v1/backends/lmstudio-models?host=${q}`, {
+                    credentials: 'same-origin',
+                });
+                let list = [];
+                if (r.ok) {
+                    const data = await r.json();
+                    list = Array.isArray(data) ? data : [];
+                }
+                const cur = (this.settings.lmstudioModel || '').trim();
+                if (cur && !list.includes(cur)) {
+                    list = [cur, ...list];
+                }
+                this.lmstudioModels = list;
+            } catch (e) {
+                this.lmstudioModels = [];
+            } finally {
+                this.lmstudioModelsLoading = false;
+            }
+        },
+
+        maybeRefreshLmstudioModels() {
+            const a = this.settings.claudeSdkProvider || '';
+            const b = this.settings.openaiAgentsProvider || '';
+            if (a === 'lmstudio' || b === 'lmstudio') {
+                this.refreshLmstudioModels();
+            }
         },
 
         /**
@@ -902,7 +943,7 @@ function app() {
             else if (backend === 'deep_agents') return false;
 
             // Ollama and openai_compatible don't need top-level API keys
-            if (provider === 'ollama' || provider === 'openai_compatible') return false;
+            if (provider === 'ollama' || provider === 'lmstudio' || provider === 'openai_compatible') return false;
 
             // Map backend+provider to required key
             const keyMap = {
@@ -926,7 +967,7 @@ function app() {
             else if (backend === 'codex_cli') provider = 'openai';
             else return false; // opencode, copilot_sdk, deep_agents don't need keys
 
-            if (provider === 'ollama' || provider === 'openai_compatible') return false;
+            if (provider === 'ollama' || provider === 'lmstudio' || provider === 'openai_compatible') return false;
 
             const needsMap = {
                 'claude_agent_sdk:anthropic': 'hasAnthropicKey',

@@ -320,12 +320,17 @@ class Settings(BaseSettings):
     llm_provider: str = Field(
         default="auto",
         description=(
-            "LLM provider: 'auto', 'ollama', 'openai', 'anthropic', "
+            "LLM provider: 'auto', 'ollama', 'lmstudio', 'openai', 'anthropic', "
             "'openai_compatible', 'gemini', 'litellm'"
         ),
     )
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
     ollama_model: str = Field(default="llama3.2", description="Ollama model to use")
+    lmstudio_host: str = Field(
+        default="http://localhost:1234",
+        description="LM Studio local server URL (Anthropic-compatible API root)",
+    )
+    lmstudio_model: str = Field(default="", description="LM Studio model id (OpenAI /v1/models id)")
     openai_compatible_base_url: str = Field(
         default="",
         description="Base URL for OpenAI-compatible endpoint (LiteLLM, OpenRouter, vLLM, etc.)",

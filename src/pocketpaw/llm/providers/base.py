@@ -24,6 +24,7 @@ class ProviderConfig:
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
     "ollama": "llama3.2",
+    "lmstudio": "",
     "openai": "gpt-5.2",
     "openai_compatible": "",
     "openrouter": "",
@@ -46,6 +47,7 @@ _BACKEND_MODEL_ATTR: dict[str, str] = {
 _PROVIDER_MODEL_ATTR: dict[str, str] = {
     "anthropic": "anthropic_model",
     "ollama": "ollama_model",
+    "lmstudio": "lmstudio_model",
     "openai": "openai_model",
     "openai_compatible": "openai_compatible_model",
     "openrouter": "openrouter_model",

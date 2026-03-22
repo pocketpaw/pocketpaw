@@ -84,6 +84,7 @@ class ClaudeSDKBackend:
             supported_providers=[
                 "anthropic",
                 "ollama",
+                "lmstudio",
                 "openrouter",
                 "openai_compatible",
                 "litellm",
@@ -478,6 +479,112 @@ class ClaudeSDKBackend:
                 merged.append(msg.copy())
         return merged
 
+    def _resolve_sdk_provider(self) -> str:
+        p = (self.settings.claude_sdk_provider or "").strip()
+        g = (self.settings.llm_provider or "").strip()
+        if g == "auto":
+            g = ""
+        if p == "anthropic" and g in (
+            "lmstudio",
+            "ollama",
+            "openrouter",
+            "openai_compatible",
+            "litellm",
+        ):
+            return g
+        if p and p != "auto":
+            return p
+        if g:
+            return g
+        return "anthropic"
+
+    async def _lmstudio_openai_direct(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None,
+        history: list[dict] | None,
+    ) -> AsyncIterator[AgentEvent]:
+        from pocketpaw.llm.client import resolve_llm_client
+
+        llm = resolve_llm_client(
+            self.settings, force_provider=self._resolve_sdk_provider()
+        )
+        try:
+            client = llm.create_openai_client(timeout=120.0)
+            sys = system_prompt or _DEFAULT_IDENTITY
+            msgs: list[dict] = [{"role": "system", "content": sys}]
+            if history:
+                for msg in history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role in ("user", "assistant") and content:
+                        msgs.append({"role": role, "content": content})
+            msgs.append({"role": "user", "content": message})
+            msgs = self._merge_consecutive_roles(msgs)
+            stream = await client.chat.completions.create(
+                model=llm.model,
+                messages=msgs,
+                stream=True,
+            )
+            async for chunk in stream:
+                if self._stop_flag:
+                    break
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta and getattr(delta, "content", None):
+                    yield AgentEvent(type="message", content=delta.content)
+            yield AgentEvent(type="done", content="")
+        except Exception as e:
+            logger.error("LM Studio direct chat error: %s", e, exc_info=True)
+            yield AgentEvent(type="error", content=llm.format_api_error(e))
+
+    async def _ollama_direct_chat(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None,
+        history: list[dict] | None,
+    ) -> AsyncIterator[AgentEvent]:
+        import httpx
+
+        from pocketpaw.llm.client import resolve_llm_client
+
+        llm = resolve_llm_client(
+            self.settings, force_provider=self._resolve_sdk_provider()
+        )
+        try:
+            sys = system_prompt or _DEFAULT_IDENTITY
+            msgs: list[dict] = [{"role": "system", "content": sys}]
+            if history:
+                for msg in history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role in ("user", "assistant") and content:
+                        msgs.append({"role": role, "content": content})
+            msgs.append({"role": "user", "content": message})
+            msgs = self._merge_consecutive_roles(msgs)
+            host = (self.settings.ollama_host or "http://localhost:11434").rstrip("/")
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{host}/api/chat",
+                    json={
+                        "model": llm.model,
+                        "messages": msgs,
+                        "stream": False,
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                text = data.get("message", {}).get("content", "")
+                if text:
+                    yield AgentEvent(type="message", content=text)
+            yield AgentEvent(type="done", content="")
+        except Exception as e:
+            logger.error("Ollama direct chat error: %s", e, exc_info=True)
+            yield AgentEvent(type="error", content=llm.format_api_error(e))
+
     async def _fast_chat(
         self,
         message: str,
@@ -498,7 +605,9 @@ class ClaudeSDKBackend:
             from pocketpaw.llm.client import resolve_llm_client
 
             t0 = time.monotonic()
-            llm = resolve_llm_client(self.settings)
+            llm = resolve_llm_client(
+                self.settings, force_provider=self._resolve_sdk_provider()
+            )
             client = llm.create_anthropic_client()
             t1 = time.monotonic()
             logger.info("Fast-path: client created in %.0fms", (t1 - t0) * 1000)
@@ -525,7 +634,7 @@ class ClaudeSDKBackend:
             t2 = time.monotonic()
 
             # Respect provider max_tokens (e.g. DeepSeek caps at 8192)
-            provider = self.settings.claude_sdk_provider or "anthropic"
+            provider = self._resolve_sdk_provider()
             if provider == "litellm" and self.settings.litellm_max_tokens > 0:
                 fast_max_tokens = self.settings.litellm_max_tokens
             elif provider == "openai_compatible" and self.settings.openai_compatible_max_tokens > 0:
@@ -578,7 +687,9 @@ class ClaudeSDKBackend:
         except Exception as e:
             from pocketpaw.llm.client import resolve_llm_client
 
-            llm = resolve_llm_client(self.settings)
+            llm = resolve_llm_client(
+                self.settings, force_provider=self._resolve_sdk_provider()
+            )
             logger.error("Fast-path API error: %s", e)
             yield AgentEvent(type="error", content=llm.format_api_error(e))
 
@@ -705,6 +816,42 @@ class ClaudeSDKBackend:
             )
             return
 
+        from pocketpaw.llm.client import resolve_llm_client
+
+        provider = self._resolve_sdk_provider()
+        llm_pre = resolve_llm_client(self.settings, force_provider=provider)
+
+        if llm_pre.provider == "lmstudio":
+            if not (llm_pre.model or "").strip():
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        "Select an LM Studio model in Settings (load a model in LM Studio "
+                        "and pick its id in PocketPaw)."
+                    ),
+                )
+                return
+            async for event in self._lmstudio_openai_direct(
+                message, system_prompt=system_prompt, history=history
+            ):
+                yield event
+            return
+
+        if llm_pre.provider == "ollama" and not self._cli_available:
+            if not (llm_pre.model or "").strip():
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        "Select an Ollama model in Settings (e.g. llama3.2)."
+                    ),
+                )
+                return
+            async for event in self._ollama_direct_chat(
+                message, system_prompt=system_prompt, history=history
+            ):
+                yield event
+            return
+
         if not self._cli_available:
             yield AgentEvent(
                 type="error",
@@ -744,21 +891,20 @@ class ClaudeSDKBackend:
             # An API key is REQUIRED for Anthropic provider -- OAuth tokens from
             # Claude Free/Pro/Max plans are not permitted for third-party use.
             # See: https://code.claude.com/docs/en/legal-and-compliance
-            from pocketpaw.llm.client import resolve_llm_client
-
-            provider = self.settings.claude_sdk_provider or "anthropic"
-            llm = resolve_llm_client(self.settings, force_provider=provider)
+            provider = self._resolve_sdk_provider()
+            llm = llm_pre
 
             # ── API key check for Anthropic provider ──────────────
             # Skip if using a non-Anthropic provider, or if the active
             # provider is claude_code (it handles OAuth auth via its CLI).
             is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
-            is_non_anthropic = (
-                llm.is_ollama
-                or llm.is_openai_compatible
-                or llm.is_gemini
-                or llm.is_litellm
-                or llm.is_openrouter
+            prov = getattr(llm, "provider", "") or ""
+            is_non_anthropic = prov in (
+                "ollama",
+                "lmstudio",
+                "openai_compatible",
+                "gemini",
+                "litellm",
             )
             if not is_non_anthropic:
                 has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
@@ -1263,9 +1409,21 @@ class ClaudeSDKBackend:
         await self.cleanup()
         logger.info("🛑 Claude Agent SDK stop requested")
 
+    def _can_chat_without_cli(self) -> bool:
+        from pocketpaw.llm.client import resolve_llm_client
+
+        llm = resolve_llm_client(self.settings, force_provider=self._resolve_sdk_provider())
+        if llm.provider == "lmstudio":
+            return bool((llm.model or "").strip())
+        if llm.provider == "ollama" and not self._cli_available:
+            return bool((llm.model or "").strip())
+        return False
+
     async def get_status(self) -> dict:
         """Get current agent status."""
-        ready = self._sdk_available and self._cli_available
+        ready = self._sdk_available and (
+            self._cli_available or self._can_chat_without_cli()
+        )
         return {
             "backend": "claude_agent_sdk",
             "available": ready,

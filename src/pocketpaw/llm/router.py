@@ -43,6 +43,15 @@ class LLMRouter:
         except Exception:
             return False
 
+    async def _check_lmstudio(self) -> bool:
+        try:
+            host = getattr(self.settings, "lmstudio_host", "http://localhost:1234").rstrip("/")
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{host}/v1/models")
+                return response.status_code == 200
+        except Exception:
+            return False
+
     async def _detect_backend(self) -> str | None:
         """Detect available LLM backend based on settings."""
         provider = self.settings.llm_provider
@@ -50,6 +59,11 @@ class LLMRouter:
         if provider == "ollama":
             if await self._check_ollama():
                 return "ollama"
+            return None
+
+        if provider == "lmstudio":
+            if await self._check_lmstudio():
+                return "lmstudio"
             return None
 
         if provider == "openai":
@@ -62,10 +76,12 @@ class LLMRouter:
                 return "anthropic"
             return None
 
-        # Auto mode - try in order: Ollama → OpenAI → Anthropic
+        # Auto mode - try in order: Ollama → LM Studio → OpenAI → Anthropic
         if provider == "auto":
             if await self._check_ollama():
                 return "ollama"
+            if await self._check_lmstudio():
+                return "lmstudio"
             if self.settings.openai_api_key:
                 return "openai"
             if self.settings.anthropic_api_key:
@@ -92,6 +108,8 @@ class LLMRouter:
         try:
             if self._available_backend == "ollama":
                 response = await self._chat_ollama(message)
+            elif self._available_backend == "lmstudio":
+                response = await self._chat_lmstudio(message)
             elif self._available_backend == "openai":
                 response = await self._chat_openai(message)
             elif self._available_backend == "anthropic":
@@ -105,6 +123,29 @@ class LLMRouter:
         except Exception as e:
             logger.error(f"LLM error: {e}")
             return f"❌ LLM Error: {str(e)}"
+
+    async def _chat_lmstudio(self, message: str) -> str:
+        from openai import AsyncOpenAI
+
+        host = getattr(self.settings, "lmstudio_host", "http://localhost:1234").rstrip("/")
+        model = getattr(self.settings, "lmstudio_model", "") or ""
+        client = AsyncOpenAI(base_url=f"{host}/v1", api_key="lmstudio")
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are PocketPaw, a helpful AI assistant"
+                        " running locally on the user's machine."
+                    ),
+                },
+                *self.conversation_history,
+            ],
+        )
+        if not response.choices:
+            return "I'm sorry, I received an empty response. Please try again."
+        return response.choices[0].message.content or ""
 
     async def _chat_ollama(self, message: str) -> str:
         """Chat via Ollama."""

@@ -8,7 +8,7 @@ import importlib
 import logging
 import shutil
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from pocketpaw.api.deps import require_scope
 from pocketpaw.security.redact import safe_install_error
@@ -152,3 +152,47 @@ async def install_backend(request: Request):
         return {"error": f"Install failed: {exc}"}
 
     return {"status": "ok"}
+
+
+@router.get("/backends/ollama-models")
+async def list_ollama_model_names(host: str | None = Query(None)):
+    import httpx
+
+    from pocketpaw.config import Settings
+
+    settings = Settings.load()
+    base = (host or settings.ollama_host or "http://localhost:11434").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{base}/api/tags")
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        models = data.get("models") or []
+        return [m.get("name", "") for m in models if m.get("name")]
+    except Exception:
+        logger.debug("ollama-models fetch failed", exc_info=True)
+        return []
+
+
+@router.get("/backends/lmstudio-models")
+async def list_lmstudio_model_names(host: str | None = Query(None)):
+    import httpx
+
+    from pocketpaw.config import Settings
+
+    settings = Settings.load()
+    base = (host or settings.lmstudio_host or "http://localhost:1234").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{base}/v1/models")
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return []
+        return [str(x.get("id", "")) for x in items if x.get("id")]
+    except Exception:
+        logger.debug("lmstudio-models fetch failed", exc_info=True)
+        return []

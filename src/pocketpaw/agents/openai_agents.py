@@ -45,7 +45,14 @@ class OpenAIAgentsBackend:
                 "computer_use": "shell",
             },
             required_keys=["openai_api_key"],
-            supported_providers=["openai", "ollama", "openrouter", "openai_compatible", "litellm"],
+            supported_providers=[
+                "openai",
+                "ollama",
+                "lmstudio",
+                "openrouter",
+                "openai_compatible",
+                "litellm",
+            ],
             install_hint={
                 "pip_package": "openai-agents",
                 "pip_spec": "pocketpaw[openai-agents]",

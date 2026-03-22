@@ -78,6 +78,8 @@ export interface Settings {
   llm_provider?: string;
   ollama_host?: string;
   ollama_model?: string;
+  lmstudio_host?: string;
+  lmstudio_model?: string;
   anthropic_model?: string;
   openai_model?: string;
   openai_compatible_base_url?: string;

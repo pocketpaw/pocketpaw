@@ -211,6 +211,8 @@ class PocketPawSocket {
             llm_provider: settings.llmProvider,
             ollama_host: settings.ollamaHost,
             ollama_model: settings.ollamaModel,
+            lmstudio_host: settings.lmstudioHost,
+            lmstudio_model: settings.lmstudioModel,
             anthropic_model: settings.anthropicModel,
             openai_compatible_base_url: settings.openaiCompatibleBaseUrl,
             openai_compatible_api_key: settings.openaiCompatibleApiKey,

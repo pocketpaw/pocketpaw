@@ -118,3 +118,23 @@ class TestInstallBackend:
         assert payload["error"].startswith("Failed to install demo-pkg:\n")
         assert "[REDACTED]" in payload["error"]
         assert raw_secret not in payload["error"]
+
+
+class TestLmstudioModels:
+    @patch("httpx.AsyncClient")
+    def test_lmstudio_models_returns_ids(self, mock_ac):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"id": "a/b"}, {"id": "c"}]}
+        client_cm = MagicMock()
+        client_cm.get = AsyncMock(return_value=mock_resp)
+        client_cm.__aenter__ = AsyncMock(return_value=client_cm)
+        client_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_ac.return_value = client_cm
+
+        client = _client()
+        resp = client.get("/api/v1/backends/lmstudio-models?host=http://127.0.0.1:1234")
+        assert resp.status_code == 200
+        assert resp.json() == ["a/b", "c"]
+        client_cm.get.assert_called_once()
+        assert "127.0.0.1:1234/v1/models" in client_cm.get.call_args[0][0]

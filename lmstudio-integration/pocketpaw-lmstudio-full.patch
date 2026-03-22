@@ -1,0 +1,1485 @@
+diff --git a/client/src/lib/api/client.ts b/client/src/lib/api/client.ts
+index 1afcdaf..bc9ed62 100644
+--- a/client/src/lib/api/client.ts
++++ b/client/src/lib/api/client.ts
+@@ -607,6 +607,11 @@ export class PocketPawClient {
+     return this.get<string[]>(`/backends/ollama-models${params}`);
+   }
+ 
++  async fetchLmstudioModels(host?: string): Promise<string[]> {
++    const params = host ? `?host=${encodeURIComponent(host)}` : "";
++    return this.get<string[]>(`/backends/lmstudio-models${params}`);
++  }
++
+   // ---------------------------------------------------------------------------
+   // Health
+   // ---------------------------------------------------------------------------
+diff --git a/client/src/lib/api/types.ts b/client/src/lib/api/types.ts
+index 20525ae..f143d9c 100644
+--- a/client/src/lib/api/types.ts
++++ b/client/src/lib/api/types.ts
+@@ -78,6 +78,8 @@ export interface Settings {
+   llm_provider?: string;
+   ollama_host?: string;
+   ollama_model?: string;
++  lmstudio_host?: string;
++  lmstudio_model?: string;
+   anthropic_model?: string;
+   openai_model?: string;
+   openai_compatible_base_url?: string;
+diff --git a/client/src/lib/components/settings/TabAIModel.svelte b/client/src/lib/components/settings/TabAIModel.svelte
+index c47979c..3e47850 100644
+--- a/client/src/lib/components/settings/TabAIModel.svelte
++++ b/client/src/lib/components/settings/TabAIModel.svelte
+@@ -30,6 +30,9 @@
+   let ollamaHost = $state("http://localhost:11434");
+   let ollamaModels = $state<string[]>([]);
+   let ollamaFetching = $state(false);
++  let lmstudioHost = $state("http://localhost:1234");
++  let lmstudioModels = $state<string[]>([]);
++  let lmstudioFetching = $state(false);
+   let openaiCompatBaseUrl = $state("");
+   let opencodeBaseUrl = $state("");
+   let apiKeyInput = $state("");
+@@ -44,6 +47,7 @@
+     openai: ["gpt-5.2", "gpt-4o", "gpt-4o-mini", "o1-preview"],
+     google: ["gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro"],
+     ollama: ["llama3.2", "mistral", "codellama", "gemma2", "phi3"],
++    lmstudio: [],
+     openrouter: [], // 300+ models; user types the slug directly
+     openai_compatible: [],
+     copilot: [],
+@@ -55,6 +59,7 @@
+     openai: "OpenAI",
+     google: "Google",
+     ollama: "Ollama (Local)",
++    lmstudio: "LM Studio (Local)",
+     openrouter: "OpenRouter",
+     openai_compatible: "OpenAI Compatible",
+     copilot: "GitHub Copilot",
+@@ -71,7 +76,7 @@
+   };
+ 
+   // Providers that don't require an API key
+-  const NO_KEY_PROVIDERS = new Set(["ollama", "copilot"]);
++  const NO_KEY_PROVIDERS = new Set(["ollama", "lmstudio", "copilot"]);
+ 
+   // Per-backend field mapping
+   type BackendFields = {
+@@ -124,6 +129,9 @@
+     if (selectedProvider === "ollama" && ollamaModels.length > 0) {
+       return ollamaModels;
+     }
++    if (selectedProvider === "lmstudio" && lmstudioModels.length > 0) {
++      return lmstudioModels;
++    }
+     return PROVIDER_MODELS[selectedProvider] ?? [];
+   });
+   let effectiveModel = $derived(customModel || selectedModel);
+@@ -133,7 +141,8 @@
+     if (!currentBackend) return [];
+     return currentBackend.requiredKeys.filter((k) => {
+       // Check if we might be missing this key based on provider
+-      if (selectedProvider === "ollama" || selectedProvider === "copilot") return false;
++      if (selectedProvider === "ollama" || selectedProvider === "lmstudio" || selectedProvider === "copilot")
++        return false;
+       return true;
+     });
+   });
+@@ -146,6 +155,7 @@
+     selectedBackend = s.agent_backend ?? "";
+     smartRouting = s.smart_routing_enabled ?? false;
+     ollamaHost = (s.ollama_host as string) ?? "http://localhost:11434";
++    lmstudioHost = (s.lmstudio_host as string) ?? "http://localhost:1234";
+     openaiCompatBaseUrl = (s.openai_compatible_base_url as string) ?? "";
+     opencodeBaseUrl = (s.opencode_base_url as string) ?? "";
+ 
+@@ -206,6 +216,12 @@
+     }
+   });
+ 
++  $effect(() => {
++    if (selectedProvider !== "lmstudio") return;
++    void lmstudioHost;
++    fetchLmstudioModels();
++  });
++
+   async function loadBackends() {
+     try {
+       const client = connectionStore.getClient();
+@@ -230,6 +246,24 @@
+     }
+   }
+ 
++  async function fetchLmstudioModels() {
++    lmstudioFetching = true;
++    try {
++      const client = connectionStore.getClient();
++      const models = await client.fetchLmstudioModels(lmstudioHost);
++      let list = [...models];
++      const cur = (customModel || selectedModel || "").trim();
++      if (cur && !list.includes(cur)) {
++        list = [cur, ...list];
++      }
++      lmstudioModels = list;
++    } catch {
++      lmstudioModels = [];
++    } finally {
++      lmstudioFetching = false;
++    }
++  }
++
+   // Reset model when provider changes (after initial sync)
+   let prevProvider = $state("");
+   $effect(() => {
+@@ -299,6 +333,11 @@
+         patch.ollama_model = effectiveModel;
+       }
+ 
++      if (selectedProvider === "lmstudio") {
++        patch.lmstudio_host = lmstudioHost;
++        patch.lmstudio_model = effectiveModel;
++      }
++
+       if (selectedProvider === "openrouter") {
+         patch.openrouter_model = effectiveModel;
+       }
+@@ -481,6 +520,31 @@
+     {/if}
+ 
+     <!-- Ollama Host + Fetch -->
++    {#if selectedProvider === "lmstudio"}
++      <div class="flex flex-col gap-1.5">
++        <label for="lmstudio-host" class="text-xs font-medium text-muted-foreground">
++          LM Studio server URL
++        </label>
++        <div class="flex gap-2">
++          <input
++            id="lmstudio-host"
++            bind:value={lmstudioHost}
++            type="text"
++            placeholder="http://localhost:1234"
++            class="h-9 flex-1 rounded-lg border border-border bg-muted/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
++          />
++          <button
++            onclick={fetchLmstudioModels}
++            disabled={lmstudioFetching}
++            class="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary hover:text-foreground disabled:opacity-40"
++          >
++            <RefreshCw class={lmstudioFetching ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
++            Fetch Models
++          </button>
++        </div>
++      </div>
++    {/if}
++
+     {#if selectedProvider === "ollama"}
+       <div class="flex flex-col gap-1.5">
+         <label for="ollama-host" class="text-xs font-medium text-muted-foreground">
+@@ -614,6 +678,15 @@
+               <RefreshCw class={ollamaFetching ? "h-2.5 w-2.5 animate-spin" : "h-2.5 w-2.5"} />
+               Refresh
+             </button>
++          {:else if selectedProvider === "lmstudio"}
++            <button
++              onclick={fetchLmstudioModels}
++              disabled={lmstudioFetching}
++              class="inline-flex items-center gap-1 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
++            >
++              <RefreshCw class={lmstudioFetching ? "h-2.5 w-2.5 animate-spin" : "h-2.5 w-2.5"} />
++              Refresh
++            </button>
+           {/if}
+         </div>
+         {#if models.length > 0}
+@@ -631,6 +704,10 @@
+           <p class="text-[10px] text-muted-foreground">
+             No models found — pull one with <code class="rounded bg-muted px-1">ollama pull llama3.2</code>
+           </p>
++        {:else if selectedProvider === "lmstudio"}
++          <p class="text-[10px] text-muted-foreground">
++            No models in list — load a model in LM Studio or type the model id manually below.
++          </p>
+         {/if}
+         <input
+           bind:value={customModel}
+diff --git a/lmstudio-integration/README-APPLY.txt b/lmstudio-integration/README-APPLY.txt
+new file mode 100644
+index 0000000..fe91e0f
+--- /dev/null
++++ b/lmstudio-integration/README-APPLY.txt
+@@ -0,0 +1,25 @@
++PocketPaw — патч интеграции LM Studio (все правки в одном файле)
++
++Файл: pocketpaw-lmstudio-full.patch
++
++Как применить после git pull / обновления исходников:
++
++1) Откройте терминал в корне репозитория pocketpaw (рядом с папкой lmstudio-integration).
++
++2) Выполните одно из:
++   git apply --whitespace=fix lmstudio-integration/pocketpaw-lmstudio-full.patch
++   или дважды щёлкните: lmstudio-integration\apply-patch.bat
++
++3) Если конфликты:
++   git apply --reject --whitespace=fix lmstudio-integration/pocketpaw-lmstudio-full.patch
++   рядом с файлами появятся *.rej — разберите вручную.
++
++4) После применения при необходимости:
++   uv tool install --force --editable .
++   или установите зависимости проекта по README upstream.
++
++5) Настройка конфига под LM Studio (опционально):
++   lmstudio-integration\run-lmstudio-integration.bat
++   или: py -3 lmstudio-integration\apply_lmstudio_config.py --model YOUR_MODEL_ID
++
++Патч сформирован как diff к origin/main и включает новые файлы (lmstudio.py, скрипты в lmstudio-integration) и изменения во всех затронутых путях репозитория.
+diff --git a/lmstudio-integration/apply-patch.bat b/lmstudio-integration/apply-patch.bat
+new file mode 100644
+index 0000000..0b7c477
+--- /dev/null
++++ b/lmstudio-integration/apply-patch.bat
+@@ -0,0 +1,14 @@
++@echo off
++setlocal
++cd /d "%~dp0\.."
++if not exist ".git" (
++  echo Run this from pocketpaw repo root. Current: %CD%
++  exit /b 1
++)
++git apply --whitespace=fix "lmstudio-integration\pocketpaw-lmstudio-full.patch"
++if errorlevel 1 (
++  echo If apply failed: repo may already contain changes, or use: git apply --reject
++  exit /b 1
++)
++echo Patch applied.
++endlocal
+diff --git a/lmstudio-integration/apply_lmstudio_config.py b/lmstudio-integration/apply_lmstudio_config.py
+new file mode 100644
+index 0000000..729f48f
+--- /dev/null
++++ b/lmstudio-integration/apply_lmstudio_config.py
+@@ -0,0 +1,69 @@
++import argparse
++import json
++import sys
++from pathlib import Path
++
++
++def config_path() -> Path:
++    return Path.home() / ".pocketpaw" / "config.json"
++
++
++def main() -> int:
++    try:
++        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
++    except Exception:
++        pass
++    parser = argparse.ArgumentParser(description="Merge LM Studio defaults into PocketPaw config.json")
++    parser.add_argument(
++        "--host",
++        default="http://127.0.0.1:1234",
++        help="LM Studio server URL",
++    )
++    parser.add_argument(
++        "--model",
++        default="",
++        help="Model id (OpenAI /v1/models id). Empty = provider and host only",
++    )
++    parser.add_argument(
++        "--dry-run",
++        action="store_true",
++        help="Print merged JSON, do not write",
++    )
++    args = parser.parse_args()
++    host = args.host.rstrip("/")
++    model = args.model.strip()
++    dry = args.dry_run
++
++    path = config_path()
++    data: dict = {}
++    if path.exists():
++        try:
++            data = json.loads(path.read_text(encoding="utf-8"))
++        except (json.JSONDecodeError, OSError) as e:
++            print(f"Error reading {path}: {e}", file=sys.stderr)
++            return 1
++
++    patch = {
++        "agent_backend": "claude_agent_sdk",
++        "llm_provider": "lmstudio",
++        "claude_sdk_provider": "lmstudio",
++        "lmstudio_host": host,
++    }
++    if model:
++        patch["lmstudio_model"] = model
++        patch["claude_sdk_model"] = model
++
++    merged = {**data, **patch}
++
++    if dry:
++        print(json.dumps(merged, indent=2, ensure_ascii=False))
++        return 0
++
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
++    print(f"Updated {path}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/lmstudio-integration/run-lmstudio-integration.bat b/lmstudio-integration/run-lmstudio-integration.bat
+new file mode 100644
+index 0000000..e3f43d9
+--- /dev/null
++++ b/lmstudio-integration/run-lmstudio-integration.bat
+@@ -0,0 +1,33 @@
++@echo off
++setlocal EnableDelayedExpansion
++cd /d "%~dp0"
++
++set "HOST=http://127.0.0.1:1234"
++set "MODEL="
++
++if not "%~1"=="" set "HOST=%~1"
++if not "%~2"=="" set "MODEL=%~2"
++
++where py >nul 2>&1
++if %errorlevel% equ 0 (
++  py -3 apply_lmstudio_config.py --host "!HOST!" --model "!MODEL!"
++  goto :end
++)
++
++where python >nul 2>&1
++if %errorlevel% equ 0 (
++  python apply_lmstudio_config.py --host "!HOST!" --model "!MODEL!"
++  goto :end
++)
++
++where python3 >nul 2>&1
++if %errorlevel% equ 0 (
++  python3 apply_lmstudio_config.py --host "!HOST!" --model "!MODEL!"
++  goto :end
++)
++
++echo Python not found. Install Python 3 or add py launcher to PATH.
++exit /b 1
++
++:end
++endlocal
+diff --git a/src/pocketpaw/agents/claude_sdk.py b/src/pocketpaw/agents/claude_sdk.py
+index 5981aa3..7cdacd2 100644
+--- a/src/pocketpaw/agents/claude_sdk.py
++++ b/src/pocketpaw/agents/claude_sdk.py
+@@ -84,6 +84,7 @@ class ClaudeSDKBackend:
+             supported_providers=[
+                 "anthropic",
+                 "ollama",
++                "lmstudio",
+                 "openrouter",
+                 "openai_compatible",
+                 "litellm",
+@@ -478,6 +479,112 @@ class ClaudeSDKBackend:
+                 merged.append(msg.copy())
+         return merged
+ 
++    def _resolve_sdk_provider(self) -> str:
++        p = (self.settings.claude_sdk_provider or "").strip()
++        g = (self.settings.llm_provider or "").strip()
++        if g == "auto":
++            g = ""
++        if p == "anthropic" and g in (
++            "lmstudio",
++            "ollama",
++            "openrouter",
++            "openai_compatible",
++            "litellm",
++        ):
++            return g
++        if p and p != "auto":
++            return p
++        if g:
++            return g
++        return "anthropic"
++
++    async def _lmstudio_openai_direct(
++        self,
++        message: str,
++        *,
++        system_prompt: str | None,
++        history: list[dict] | None,
++    ) -> AsyncIterator[AgentEvent]:
++        from pocketpaw.llm.client import resolve_llm_client
++
++        llm = resolve_llm_client(
++            self.settings, force_provider=self._resolve_sdk_provider()
++        )
++        try:
++            client = llm.create_openai_client(timeout=120.0)
++            sys = system_prompt or _DEFAULT_IDENTITY
++            msgs: list[dict] = [{"role": "system", "content": sys}]
++            if history:
++                for msg in history:
++                    role = msg.get("role", "user")
++                    content = msg.get("content", "")
++                    if role in ("user", "assistant") and content:
++                        msgs.append({"role": role, "content": content})
++            msgs.append({"role": "user", "content": message})
++            msgs = self._merge_consecutive_roles(msgs)
++            stream = await client.chat.completions.create(
++                model=llm.model,
++                messages=msgs,
++                stream=True,
++            )
++            async for chunk in stream:
++                if self._stop_flag:
++                    break
++                if not chunk.choices:
++                    continue
++                delta = chunk.choices[0].delta
++                if delta and getattr(delta, "content", None):
++                    yield AgentEvent(type="message", content=delta.content)
++            yield AgentEvent(type="done", content="")
++        except Exception as e:
++            logger.error("LM Studio direct chat error: %s", e, exc_info=True)
++            yield AgentEvent(type="error", content=llm.format_api_error(e))
++
++    async def _ollama_direct_chat(
++        self,
++        message: str,
++        *,
++        system_prompt: str | None,
++        history: list[dict] | None,
++    ) -> AsyncIterator[AgentEvent]:
++        import httpx
++
++        from pocketpaw.llm.client import resolve_llm_client
++
++        llm = resolve_llm_client(
++            self.settings, force_provider=self._resolve_sdk_provider()
++        )
++        try:
++            sys = system_prompt or _DEFAULT_IDENTITY
++            msgs: list[dict] = [{"role": "system", "content": sys}]
++            if history:
++                for msg in history:
++                    role = msg.get("role", "user")
++                    content = msg.get("content", "")
++                    if role in ("user", "assistant") and content:
++                        msgs.append({"role": role, "content": content})
++            msgs.append({"role": "user", "content": message})
++            msgs = self._merge_consecutive_roles(msgs)
++            host = (self.settings.ollama_host or "http://localhost:11434").rstrip("/")
++            async with httpx.AsyncClient(timeout=120.0) as client:
++                response = await client.post(
++                    f"{host}/api/chat",
++                    json={
++                        "model": llm.model,
++                        "messages": msgs,
++                        "stream": False,
++                    },
++                )
++                response.raise_for_status()
++                data = response.json()
++                text = data.get("message", {}).get("content", "")
++                if text:
++                    yield AgentEvent(type="message", content=text)
++            yield AgentEvent(type="done", content="")
++        except Exception as e:
++            logger.error("Ollama direct chat error: %s", e, exc_info=True)
++            yield AgentEvent(type="error", content=llm.format_api_error(e))
++
+     async def _fast_chat(
+         self,
+         message: str,
+@@ -498,7 +605,9 @@ class ClaudeSDKBackend:
+             from pocketpaw.llm.client import resolve_llm_client
+ 
+             t0 = time.monotonic()
+-            llm = resolve_llm_client(self.settings)
++            llm = resolve_llm_client(
++                self.settings, force_provider=self._resolve_sdk_provider()
++            )
+             client = llm.create_anthropic_client()
+             t1 = time.monotonic()
+             logger.info("Fast-path: client created in %.0fms", (t1 - t0) * 1000)
+@@ -525,7 +634,7 @@ class ClaudeSDKBackend:
+             t2 = time.monotonic()
+ 
+             # Respect provider max_tokens (e.g. DeepSeek caps at 8192)
+-            provider = self.settings.claude_sdk_provider or "anthropic"
++            provider = self._resolve_sdk_provider()
+             if provider == "litellm" and self.settings.litellm_max_tokens > 0:
+                 fast_max_tokens = self.settings.litellm_max_tokens
+             elif provider == "openai_compatible" and self.settings.openai_compatible_max_tokens > 0:
+@@ -578,7 +687,9 @@ class ClaudeSDKBackend:
+         except Exception as e:
+             from pocketpaw.llm.client import resolve_llm_client
+ 
+-            llm = resolve_llm_client(self.settings)
++            llm = resolve_llm_client(
++                self.settings, force_provider=self._resolve_sdk_provider()
++            )
+             logger.error("Fast-path API error: %s", e)
+             yield AgentEvent(type="error", content=llm.format_api_error(e))
+ 
+@@ -705,6 +816,42 @@ class ClaudeSDKBackend:
+             )
+             return
+ 
++        from pocketpaw.llm.client import resolve_llm_client
++
++        provider = self._resolve_sdk_provider()
++        llm_pre = resolve_llm_client(self.settings, force_provider=provider)
++
++        if llm_pre.provider == "lmstudio":
++            if not (llm_pre.model or "").strip():
++                yield AgentEvent(
++                    type="error",
++                    content=(
++                        "Select an LM Studio model in Settings (load a model in LM Studio "
++                        "and pick its id in PocketPaw)."
++                    ),
++                )
++                return
++            async for event in self._lmstudio_openai_direct(
++                message, system_prompt=system_prompt, history=history
++            ):
++                yield event
++            return
++
++        if llm_pre.provider == "ollama" and not self._cli_available:
++            if not (llm_pre.model or "").strip():
++                yield AgentEvent(
++                    type="error",
++                    content=(
++                        "Select an Ollama model in Settings (e.g. llama3.2)."
++                    ),
++                )
++                return
++            async for event in self._ollama_direct_chat(
++                message, system_prompt=system_prompt, history=history
++            ):
++                yield event
++            return
++
+         if not self._cli_available:
+             yield AgentEvent(
+                 type="error",
+@@ -744,21 +891,20 @@ class ClaudeSDKBackend:
+             # An API key is REQUIRED for Anthropic provider -- OAuth tokens from
+             # Claude Free/Pro/Max plans are not permitted for third-party use.
+             # See: https://code.claude.com/docs/en/legal-and-compliance
+-            from pocketpaw.llm.client import resolve_llm_client
+-
+-            provider = self.settings.claude_sdk_provider or "anthropic"
+-            llm = resolve_llm_client(self.settings, force_provider=provider)
++            provider = self._resolve_sdk_provider()
++            llm = llm_pre
+ 
+             # ── API key check for Anthropic provider ──────────────
+             # Skip if using a non-Anthropic provider, or if the active
+             # provider is claude_code (it handles OAuth auth via its CLI).
+             is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
+-            is_non_anthropic = (
+-                llm.is_ollama
+-                or llm.is_openai_compatible
+-                or llm.is_gemini
+-                or llm.is_litellm
+-                or llm.is_openrouter
++            prov = getattr(llm, "provider", "") or ""
++            is_non_anthropic = prov in (
++                "ollama",
++                "lmstudio",
++                "openai_compatible",
++                "gemini",
++                "litellm",
+             )
+             if not is_non_anthropic:
+                 has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
+@@ -1263,9 +1409,21 @@ class ClaudeSDKBackend:
+         await self.cleanup()
+         logger.info("🛑 Claude Agent SDK stop requested")
+ 
++    def _can_chat_without_cli(self) -> bool:
++        from pocketpaw.llm.client import resolve_llm_client
++
++        llm = resolve_llm_client(self.settings, force_provider=self._resolve_sdk_provider())
++        if llm.provider == "lmstudio":
++            return bool((llm.model or "").strip())
++        if llm.provider == "ollama" and not self._cli_available:
++            return bool((llm.model or "").strip())
++        return False
++
+     async def get_status(self) -> dict:
+         """Get current agent status."""
+-        ready = self._sdk_available and self._cli_available
++        ready = self._sdk_available and (
++            self._cli_available or self._can_chat_without_cli()
++        )
+         return {
+             "backend": "claude_agent_sdk",
+             "available": ready,
+diff --git a/src/pocketpaw/agents/deep_agents.py b/src/pocketpaw/agents/deep_agents.py
+index 22b0532..9549926 100644
+--- a/src/pocketpaw/agents/deep_agents.py
++++ b/src/pocketpaw/agents/deep_agents.py
+@@ -88,6 +88,7 @@ class DeepAgentsBackend:
+                 "openai",
+                 "google",
+                 "ollama",
++                "lmstudio",
+                 "openrouter",
+                 "openai_compatible",
+                 "litellm",
+@@ -255,6 +256,16 @@ class DeepAgentsBackend:
+             if not model:
+                 model = self.settings.ollama_model or "llama3.2"
+ 
++        elif provider == "lmstudio":
++            host = (getattr(self.settings, "lmstudio_host", None) or "http://localhost:1234").rstrip(
++                "/"
++            )
++            kwargs["base_url"] = f"{host}/v1"
++            kwargs["api_key"] = "lmstudio"
++            if not model:
++                model = getattr(self.settings, "lmstudio_model", "") or ""
++            provider = "openai"
++
+         elif provider == "openrouter":
+             kwargs["base_url"] = "https://openrouter.ai/api/v1"
+             api_key = self.settings.openrouter_api_key or self.settings.openai_compatible_api_key
+diff --git a/src/pocketpaw/agents/openai_agents.py b/src/pocketpaw/agents/openai_agents.py
+index f15108d..2e86f83 100644
+--- a/src/pocketpaw/agents/openai_agents.py
++++ b/src/pocketpaw/agents/openai_agents.py
+@@ -45,7 +45,14 @@ class OpenAIAgentsBackend:
+                 "computer_use": "shell",
+             },
+             required_keys=["openai_api_key"],
+-            supported_providers=["openai", "ollama", "openrouter", "openai_compatible", "litellm"],
++            supported_providers=[
++                "openai",
++                "ollama",
++                "lmstudio",
++                "openrouter",
++                "openai_compatible",
++                "litellm",
++            ],
+             install_hint={
+                 "pip_package": "openai-agents",
+                 "pip_spec": "pocketpaw[openai-agents]",
+diff --git a/src/pocketpaw/api/v1/backends.py b/src/pocketpaw/api/v1/backends.py
+index 38672a5..ff3fddd 100644
+--- a/src/pocketpaw/api/v1/backends.py
++++ b/src/pocketpaw/api/v1/backends.py
+@@ -8,7 +8,7 @@ import importlib
+ import logging
+ import shutil
+ 
+-from fastapi import APIRouter, Depends, Request
++from fastapi import APIRouter, Depends, Query, Request
+ 
+ from pocketpaw.api.deps import require_scope
+ from pocketpaw.security.redact import safe_install_error
+@@ -152,3 +152,47 @@ async def install_backend(request: Request):
+         return {"error": f"Install failed: {exc}"}
+ 
+     return {"status": "ok"}
++
++
++@router.get("/backends/ollama-models")
++async def list_ollama_model_names(host: str | None = Query(None)):
++    import httpx
++
++    from pocketpaw.config import Settings
++
++    settings = Settings.load()
++    base = (host or settings.ollama_host or "http://localhost:11434").rstrip("/")
++    try:
++        async with httpx.AsyncClient(timeout=15.0) as client:
++            resp = await client.get(f"{base}/api/tags")
++        if resp.status_code != 200:
++            return []
++        data = resp.json()
++        models = data.get("models") or []
++        return [m.get("name", "") for m in models if m.get("name")]
++    except Exception:
++        logger.debug("ollama-models fetch failed", exc_info=True)
++        return []
++
++
++@router.get("/backends/lmstudio-models")
++async def list_lmstudio_model_names(host: str | None = Query(None)):
++    import httpx
++
++    from pocketpaw.config import Settings
++
++    settings = Settings.load()
++    base = (host or settings.lmstudio_host or "http://localhost:1234").rstrip("/")
++    try:
++        async with httpx.AsyncClient(timeout=15.0) as client:
++            resp = await client.get(f"{base}/v1/models")
++        if resp.status_code != 200:
++            return []
++        data = resp.json()
++        items = data.get("data") if isinstance(data, dict) else None
++        if not isinstance(items, list):
++            return []
++        return [str(x.get("id", "")) for x in items if x.get("id")]
++    except Exception:
++        logger.debug("lmstudio-models fetch failed", exc_info=True)
++        return []
+diff --git a/src/pocketpaw/config.py b/src/pocketpaw/config.py
+index f205b74..d1042fb 100644
+--- a/src/pocketpaw/config.py
++++ b/src/pocketpaw/config.py
+@@ -320,12 +320,17 @@ class Settings(BaseSettings):
+     llm_provider: str = Field(
+         default="auto",
+         description=(
+-            "LLM provider: 'auto', 'ollama', 'openai', 'anthropic', "
++            "LLM provider: 'auto', 'ollama', 'lmstudio', 'openai', 'anthropic', "
+             "'openai_compatible', 'gemini', 'litellm'"
+         ),
+     )
+     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
+     ollama_model: str = Field(default="llama3.2", description="Ollama model to use")
++    lmstudio_host: str = Field(
++        default="http://localhost:1234",
++        description="LM Studio local server URL (Anthropic-compatible API root)",
++    )
++    lmstudio_model: str = Field(default="", description="LM Studio model id (OpenAI /v1/models id)")
+     openai_compatible_base_url: str = Field(
+         default="",
+         description="Base URL for OpenAI-compatible endpoint (LiteLLM, OpenRouter, vLLM, etc.)",
+diff --git a/src/pocketpaw/dashboard.py b/src/pocketpaw/dashboard.py
+index 3c049b2..dca404a 100644
+--- a/src/pocketpaw/dashboard.py
++++ b/src/pocketpaw/dashboard.py
+@@ -916,8 +916,9 @@ async def index(request: Request):
+     from importlib.metadata import version as get_version
+ 
+     return templates.TemplateResponse(
++        request,
+         "base.html",
+-        {"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
++        {"v": _static_version(), "app_version": get_version("pocketpaw")},
+     )
+ 
+ 
+diff --git a/src/pocketpaw/dashboard_ws.py b/src/pocketpaw/dashboard_ws.py
+index 3f4447d..53f6fc0 100644
+--- a/src/pocketpaw/dashboard_ws.py
++++ b/src/pocketpaw/dashboard_ws.py
+@@ -393,6 +393,10 @@ async def websocket_handler(
+                         settings.ollama_host = data["ollama_host"]
+                     if data.get("ollama_model"):
+                         settings.ollama_model = data["ollama_model"]
++                    if data.get("lmstudio_host"):
++                        settings.lmstudio_host = data["lmstudio_host"]
++                    if data.get("lmstudio_model"):
++                        settings.lmstudio_model = data["lmstudio_model"]
+                     if data.get("anthropic_model"):
+                         settings.anthropic_model = data.get("anthropic_model")
+                     if data.get("openai_compatible_base_url") is not None:
+@@ -735,6 +739,8 @@ async def websocket_handler(
+                             "llmProvider": settings.llm_provider,
+                             "ollamaHost": settings.ollama_host,
+                             "ollamaModel": settings.ollama_model,
++                            "lmstudioHost": settings.lmstudio_host,
++                            "lmstudioModel": settings.lmstudio_model,
+                             "anthropicModel": settings.anthropic_model,
+                             "openaiCompatibleBaseUrl": settings.openai_compatible_base_url,
+                             "openaiCompatibleModel": settings.openai_compatible_model,
+diff --git a/src/pocketpaw/frontend/js/app.js b/src/pocketpaw/frontend/js/app.js
+index ee17438..589acc0 100644
+--- a/src/pocketpaw/frontend/js/app.js
++++ b/src/pocketpaw/frontend/js/app.js
+@@ -91,6 +91,8 @@ function app() {
+             llmProvider: 'auto',
+             ollamaHost: 'http://localhost:11434',
+             ollamaModel: 'llama3.2',
++            lmstudioHost: 'http://localhost:1234',
++            lmstudioModel: '',
+             anthropicModel: 'claude-sonnet-4-6',
+             openaiCompatibleBaseUrl: '',
+             openaiCompatibleApiKey: '',
+@@ -182,6 +184,9 @@ function app() {
+         backendInstallLoading: false,
+         serverRestarting: false,
+ 
++        lmstudioModels: [],
++        lmstudioModelsLoading: false,
++
+         // Spread feature states
+         ...featureStates,
+ 
+@@ -505,7 +510,8 @@ function app() {
+                 'copilotSdkProvider', 'copilotSdkModel', 'copilotSdkMaxTurns',
+                 'deepAgentsModel', 'deepAgentsMaxTurns',
+                 'opencodeBaseUrl', 'opencodeModel', 'opencodeMaxTurns',
+-                'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
++                'llmProvider', 'ollamaHost', 'ollamaModel', 'lmstudioHost', 'lmstudioModel',
++                'anthropicModel',
+                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
+                 'geminiModel', 'litellmApiBase', 'litellmModel', 'litellmMaxTokens',
+                 'bypassPermissions', 'webSearchProvider', 'urlExtractProvider',
+@@ -557,6 +563,8 @@ function app() {
+             if (this.isBackendUnconfigured() && !localStorage.getItem('pocketpaw_setup_dismissed')) {
+                 this.showWelcome = true;
+             }
++
++            queueMicrotask(() => this.maybeRefreshLmstudioModels());
+         },
+ 
+         /**
+@@ -610,6 +618,39 @@ function app() {
+             this.settingsSearchResults = [];
+             this.settingsValidationWarnings = [];
+             this.showSettings = true;
++            queueMicrotask(() => this.maybeRefreshLmstudioModels());
++        },
++
++        async refreshLmstudioModels() {
++            this.lmstudioModelsLoading = true;
++            try {
++                const q = encodeURIComponent(this.settings.lmstudioHost || 'http://localhost:1234');
++                const r = await fetch(`/api/v1/backends/lmstudio-models?host=${q}`, {
++                    credentials: 'same-origin',
++                });
++                let list = [];
++                if (r.ok) {
++                    const data = await r.json();
++                    list = Array.isArray(data) ? data : [];
++                }
++                const cur = (this.settings.lmstudioModel || '').trim();
++                if (cur && !list.includes(cur)) {
++                    list = [cur, ...list];
++                }
++                this.lmstudioModels = list;
++            } catch (e) {
++                this.lmstudioModels = [];
++            } finally {
++                this.lmstudioModelsLoading = false;
++            }
++        },
++
++        maybeRefreshLmstudioModels() {
++            const a = this.settings.claudeSdkProvider || '';
++            const b = this.settings.openaiAgentsProvider || '';
++            if (a === 'lmstudio' || b === 'lmstudio') {
++                this.refreshLmstudioModels();
++            }
+         },
+ 
+         /**
+@@ -902,7 +943,7 @@ function app() {
+             else if (backend === 'deep_agents') return false;
+ 
+             // Ollama and openai_compatible don't need top-level API keys
+-            if (provider === 'ollama' || provider === 'openai_compatible') return false;
++            if (provider === 'ollama' || provider === 'lmstudio' || provider === 'openai_compatible') return false;
+ 
+             // Map backend+provider to required key
+             const keyMap = {
+@@ -926,7 +967,7 @@ function app() {
+             else if (backend === 'codex_cli') provider = 'openai';
+             else return false; // opencode, copilot_sdk, deep_agents don't need keys
+ 
+-            if (provider === 'ollama' || provider === 'openai_compatible') return false;
++            if (provider === 'ollama' || provider === 'lmstudio' || provider === 'openai_compatible') return false;
+ 
+             const needsMap = {
+                 'claude_agent_sdk:anthropic': 'hasAnthropicKey',
+diff --git a/src/pocketpaw/frontend/js/websocket.js b/src/pocketpaw/frontend/js/websocket.js
+index c2539e5..73dc59e 100644
+--- a/src/pocketpaw/frontend/js/websocket.js
++++ b/src/pocketpaw/frontend/js/websocket.js
+@@ -211,6 +211,8 @@ class PocketPawSocket {
+             llm_provider: settings.llmProvider,
+             ollama_host: settings.ollamaHost,
+             ollama_model: settings.ollamaModel,
++            lmstudio_host: settings.lmstudioHost,
++            lmstudio_model: settings.lmstudioModel,
+             anthropic_model: settings.anthropicModel,
+             openai_compatible_base_url: settings.openaiCompatibleBaseUrl,
+             openai_compatible_api_key: settings.openaiCompatibleApiKey,
+diff --git a/src/pocketpaw/frontend/templates/components/modals/settings.html b/src/pocketpaw/frontend/templates/components/modals/settings.html
+index 27d9c7b..e71c4c9 100644
+--- a/src/pocketpaw/frontend/templates/components/modals/settings.html
++++ b/src/pocketpaw/frontend/templates/components/modals/settings.html
+@@ -348,11 +348,12 @@
+               <div class="relative">
+                 <select
+                   x-model="settings.claudeSdkProvider"
+-                  @change="saveSettings()"
++                  @change="saveSettings(); maybeRefreshLmstudioModels()"
+                   class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                 >
+                   <option value="anthropic">Anthropic (Recommended)</option>
+                   <option value="ollama">Ollama (Local)</option>
++                  <option value="lmstudio">LM Studio (Local)</option>
+                   <option value="openrouter">OpenRouter</option>
+                   <option value="openai_compatible">OpenAI-Compatible</option>
+                   <option value="litellm">LiteLLM (100+ Providers)</option>
+@@ -367,6 +368,9 @@
+               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'ollama'">
+                 Runs via Ollama's Anthropic Messages API compatibility (Claude Code v0.14.0+).
+               </small>
++              <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'lmstudio'">
++                LM Studio local server (Anthropic-compatible API). Start the server in LM Studio, then set host and loaded model id below.
++              </small>
+               <small class="text-white/50 text-[11px]" x-show="settings.claudeSdkProvider === 'openrouter'">
+                 Use any model on OpenRouter with full CLI tool access via their Anthropic-compatible API.
+               </small>
+@@ -395,6 +399,61 @@
+                 <small class="text-white/50 text-[11px]">Run <code>ollama list</code> to see available models.</small>
+               </div>
+             </div>
++            <div x-show="settings.claudeSdkProvider === 'lmstudio'" x-transition class="flex flex-col gap-2">
++              <div class="flex flex-col gap-1">
++                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LM Studio server URL</label>
++                <input type="text" x-model="settings.lmstudioHost" @change="saveSettings(); maybeRefreshLmstudioModels()"
++                  placeholder="http://localhost:1234"
++                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
++                />
++              </div>
++              <div class="flex flex-col gap-1">
++                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model id</label>
++                <div class="flex flex-col gap-2">
++                  <div class="flex gap-2 items-center">
++                    <template x-if="lmstudioModels.length > 0">
++                      <select
++                        x-model="settings.lmstudioModel"
++                        @change="saveSettings()"
++                        class="flex-1 min-w-0 appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
++                      >
++                        <option value="">— Select model —</option>
++                        <template x-for="id in lmstudioModels" :key="id">
++                          <option :value="id" x-text="id"></option>
++                        </template>
++                      </select>
++                    </template>
++                    <input
++                      type="text"
++                      x-show="lmstudioModels.length === 0"
++                      x-model="settings.lmstudioModel"
++                      @change="saveSettings()"
++                      placeholder="Type model id or click Refresh"
++                      class="flex-1 min-w-0 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
++                    />
++                    <button
++                      type="button"
++                      @click="refreshLmstudioModels()"
++                      :disabled="lmstudioModelsLoading"
++                      class="shrink-0 px-3 py-2 rounded-[10px] text-[12px] font-medium bg-black/40 border border-[var(--glass-border)] text-white hover:border-[var(--accent-color)] disabled:opacity-50"
++                      title="Load models from LM Studio"
++                    >
++                      <span x-show="!lmstudioModelsLoading">Refresh</span>
++                      <span x-show="lmstudioModelsLoading">…</span>
++                    </button>
++                  </div>
++                  <input
++                    type="text"
++                    x-show="lmstudioModels.length > 0"
++                    x-model="settings.lmstudioModel"
++                    @change="saveSettings()"
++                    placeholder="Or enter model id manually"
++                    class="w-full bg-black/20 border border-white/10 rounded-lg py-1.5 px-2 text-[12px] text-white placeholder-white/40"
++                  />
++                </div>
++                <small class="text-white/50 text-[11px]">Refresh scans <code class="rounded bg-white/10 px-1">/v1/models</code>. Start the server in LM Studio first.</small>
++              </div>
++            </div>
+             <!-- OpenRouter config (inline, shown when provider=openrouter) -->
+             <div x-show="settings.claudeSdkProvider === 'openrouter'" x-transition class="flex flex-col gap-2">
+               <div class="flex flex-col gap-1">
+@@ -520,11 +579,12 @@
+               <div class="relative">
+                 <select
+                   x-model="settings.openaiAgentsProvider"
+-                  @change="saveSettings()"
++                  @change="saveSettings(); maybeRefreshLmstudioModels()"
+                   class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                 >
+                   <option value="openai">OpenAI (Recommended)</option>
+                   <option value="ollama">Ollama (Local)</option>
++                  <option value="lmstudio">LM Studio (Local)</option>
+                   <option value="openrouter">OpenRouter</option>
+                   <option value="openai_compatible">OpenAI-Compatible</option>
+                   <option value="litellm">LiteLLM (100+ Providers)</option>
+@@ -536,6 +596,9 @@
+               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'ollama'">
+                 Uses Ollama's OpenAI-compatible API. No API key needed.
+               </small>
++              <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'lmstudio'">
++                Uses LM Studio OpenAI-compatible API at /v1. No API key needed.
++              </small>
+               <small class="text-white/50 text-[11px]" x-show="settings.openaiAgentsProvider === 'openrouter'">
+                 Use any model on OpenRouter. Free and paid models available.
+               </small>
+@@ -563,6 +626,61 @@
+                 />
+               </div>
+             </div>
++            <div x-show="settings.openaiAgentsProvider === 'lmstudio'" x-transition class="flex flex-col gap-2">
++              <div class="flex flex-col gap-1">
++                <label class="text-[12px] font-medium text-[var(--text-secondary)]">LM Studio server URL</label>
++                <input type="text" x-model="settings.lmstudioHost" @change="saveSettings(); maybeRefreshLmstudioModels()"
++                  placeholder="http://localhost:1234"
++                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
++                />
++              </div>
++              <div class="flex flex-col gap-1">
++                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model id</label>
++                <div class="flex flex-col gap-2">
++                  <div class="flex gap-2 items-center">
++                    <template x-if="lmstudioModels.length > 0">
++                      <select
++                        x-model="settings.lmstudioModel"
++                        @change="saveSettings()"
++                        class="flex-1 min-w-0 appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
++                      >
++                        <option value="">— Select model —</option>
++                        <template x-for="id in lmstudioModels" :key="id">
++                          <option :value="id" x-text="id"></option>
++                        </template>
++                      </select>
++                    </template>
++                    <input
++                      type="text"
++                      x-show="lmstudioModels.length === 0"
++                      x-model="settings.lmstudioModel"
++                      @change="saveSettings()"
++                      placeholder="Type model id or click Refresh"
++                      class="flex-1 min-w-0 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
++                    />
++                    <button
++                      type="button"
++                      @click="refreshLmstudioModels()"
++                      :disabled="lmstudioModelsLoading"
++                      class="shrink-0 px-3 py-2 rounded-[10px] text-[12px] font-medium bg-black/40 border border-[var(--glass-border)] text-white hover:border-[var(--accent-color)] disabled:opacity-50"
++                      title="Load models from LM Studio"
++                    >
++                      <span x-show="!lmstudioModelsLoading">Refresh</span>
++                      <span x-show="lmstudioModelsLoading">…</span>
++                    </button>
++                  </div>
++                  <input
++                    type="text"
++                    x-show="lmstudioModels.length > 0"
++                    x-model="settings.lmstudioModel"
++                    @change="saveSettings()"
++                    placeholder="Or enter model id manually"
++                    class="w-full bg-black/20 border border-white/10 rounded-lg py-1.5 px-2 text-[12px] text-white placeholder-white/40"
++                  />
++                </div>
++                <small class="text-white/50 text-[11px]">Refresh scans <code class="rounded bg-white/10 px-1">/v1/models</code>. Start the server in LM Studio first.</small>
++              </div>
++            </div>
+             <!-- OpenRouter config (inline, for openai_agents) -->
+             <div x-show="settings.openaiAgentsProvider === 'openrouter'" x-transition class="flex flex-col gap-2">
+               <div class="flex flex-col gap-1">
+diff --git a/src/pocketpaw/health/checks/connectivity.py b/src/pocketpaw/health/checks/connectivity.py
+index 89e14f3..3b352e8 100644
+--- a/src/pocketpaw/health/checks/connectivity.py
++++ b/src/pocketpaw/health/checks/connectivity.py
+@@ -54,6 +54,8 @@ async def _check_alt_provider_reachable(settings, provider: str) -> HealthCheckR
+     """Connectivity check for non-default providers (OpenRouter, LiteLLM, Ollama, etc.)."""
+     if provider == "ollama":
+         return await _check_ollama_reachable(settings)
++    elif provider == "lmstudio":
++        return await _check_lmstudio_reachable(settings)
+     elif provider == "openrouter":
+         return await _check_openrouter_reachable(settings)
+     elif provider == "litellm":
+@@ -71,6 +73,44 @@ async def _check_alt_provider_reachable(settings, provider: str) -> HealthCheckR
+     )
+ 
+ 
++async def _check_lmstudio_reachable(settings) -> HealthCheckResult:
++    import httpx
++
++    host = getattr(settings, "lmstudio_host", "http://localhost:1234").rstrip("/")
++    try:
++        async with httpx.AsyncClient(timeout=5.0) as client:
++            resp = await client.get(f"{host}/v1/models")
++        if resp.status_code == 200:
++            data = resp.json()
++            raw = data.get("data") if isinstance(data, dict) else None
++            model_count = len(raw) if isinstance(raw, list) else 0
++            return HealthCheckResult(
++                check_id="llm_reachable",
++                name="LLM Reachable",
++                category="connectivity",
++                status="ok",
++                message=f"LM Studio is reachable at {host} ({model_count} models listed)",
++                fix_hint="",
++            )
++        return HealthCheckResult(
++            check_id="llm_reachable",
++            name="LLM Reachable",
++            category="connectivity",
++            status="warning",
++            message=f"LM Studio returned HTTP {resp.status_code}",
++            fix_hint=f"Check that the server is running in LM Studio at {host}",
++        )
++    except Exception as exc:
++        return HealthCheckResult(
++            check_id="llm_reachable",
++            name="LLM Reachable",
++            category="connectivity",
++            status="error",
++            message=f"Cannot reach LM Studio at {host}: {exc}",
++            fix_hint="Start the local server in LM Studio (Developer → Start Server).",
++        )
++
++
+ async def _check_ollama_reachable(settings) -> HealthCheckResult:
+     """Ping the Ollama server at its configured host."""
+     import httpx
+diff --git a/src/pocketpaw/health/checks/constants.py b/src/pocketpaw/health/checks/constants.py
+index 195a35b..4649a2d 100644
+--- a/src/pocketpaw/health/checks/constants.py
++++ b/src/pocketpaw/health/checks/constants.py
+@@ -3,7 +3,7 @@
+ from __future__ import annotations
+ 
+ # Providers that do NOT require an Anthropic API key.
+-NON_ANTHROPIC_PROVIDERS = ("ollama", "openai_compatible", "gemini", "litellm", "openrouter")
++NON_ANTHROPIC_PROVIDERS = ("ollama", "lmstudio", "openai_compatible", "gemini", "litellm", "openrouter")
+ 
+ # Providers that do NOT require an OpenAI API key.
+-NON_OPENAI_PROVIDERS = ("ollama", "openai_compatible", "litellm", "openrouter")
++NON_OPENAI_PROVIDERS = ("ollama", "lmstudio", "openai_compatible", "litellm", "openrouter")
+diff --git a/src/pocketpaw/llm/client.py b/src/pocketpaw/llm/client.py
+index 2e757e9..b465776 100644
+--- a/src/pocketpaw/llm/client.py
++++ b/src/pocketpaw/llm/client.py
+@@ -40,6 +40,10 @@ class LLMClient:
+     def is_ollama(self) -> bool:
+         return self.provider == "ollama"
+ 
++    @property
++    def is_lmstudio(self) -> bool:
++        return self.provider == "lmstudio"
++
+     @property
+     def is_anthropic(self) -> bool:
+         return self.provider == "anthropic"
+diff --git a/src/pocketpaw/llm/providers/base.py b/src/pocketpaw/llm/providers/base.py
+index 7f19656..82d5a2e 100644
+--- a/src/pocketpaw/llm/providers/base.py
++++ b/src/pocketpaw/llm/providers/base.py
+@@ -24,6 +24,7 @@ class ProviderConfig:
+ PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+     "anthropic": "claude-sonnet-4-6",
+     "ollama": "llama3.2",
++    "lmstudio": "",
+     "openai": "gpt-5.2",
+     "openai_compatible": "",
+     "openrouter": "",
+@@ -46,6 +47,7 @@ _BACKEND_MODEL_ATTR: dict[str, str] = {
+ _PROVIDER_MODEL_ATTR: dict[str, str] = {
+     "anthropic": "anthropic_model",
+     "ollama": "ollama_model",
++    "lmstudio": "lmstudio_model",
+     "openai": "openai_model",
+     "openai_compatible": "openai_compatible_model",
+     "openrouter": "openrouter_model",
+diff --git a/src/pocketpaw/llm/providers/lmstudio.py b/src/pocketpaw/llm/providers/lmstudio.py
+new file mode 100644
+index 0000000..94aa702
+--- /dev/null
++++ b/src/pocketpaw/llm/providers/lmstudio.py
+@@ -0,0 +1,65 @@
++from __future__ import annotations
++
++from typing import Any
++
++from pocketpaw.config import Settings
++from pocketpaw.llm.providers.base import ProviderConfig, resolve_model
++
++
++class LmStudioAdapter:
++    name = "lmstudio"
++
++    def resolve_config(self, settings: Settings, backend: str) -> ProviderConfig:
++        host = (getattr(settings, "lmstudio_host", None) or "http://localhost:1234").rstrip("/")
++        return ProviderConfig(
++            provider=self.name,
++            model=resolve_model(settings, backend, self.name),
++            api_key=None,
++            base_url=host,
++        )
++
++    def build_env_dict(self, config: ProviderConfig) -> dict[str, str]:
++        base = (config.base_url or "http://localhost:1234").rstrip("/")
++        return {
++            "ANTHROPIC_BASE_URL": base,
++            "ANTHROPIC_API_KEY": "lmstudio",
++        }
++
++    def build_openai_client(self, config: ProviderConfig, **kwargs: Any) -> Any:
++        from openai import AsyncOpenAI
++
++        base = (config.base_url or "http://localhost:1234").rstrip("/")
++        return AsyncOpenAI(
++            base_url=f"{base}/v1",
++            api_key="lmstudio",
++            timeout=kwargs.get("timeout", 120.0),
++            max_retries=kwargs.get("max_retries", 1),
++        )
++
++    def build_anthropic_client(self, config: ProviderConfig, **kwargs: Any) -> Any:
++        from anthropic import AsyncAnthropic
++
++        base = config.base_url or "http://localhost:1234"
++        return AsyncAnthropic(
++            base_url=base.rstrip("/"),
++            api_key="lmstudio",
++            timeout=kwargs.get("timeout", 120.0),
++            max_retries=kwargs.get("max_retries", 1),
++        )
++
++    def format_error(self, config: ProviderConfig, error: Exception, stderr: str = "") -> str:
++        full = f"{error}\n{stderr}".lower()
++        host = config.base_url or "http://localhost:1234"
++        if "not_found" in str(error) or "not found" in full or "issue with the selected model" in full:
++            return (
++                f"Model '{config.model}' is not available in LM Studio.\n\n"
++                "Load the model in LM Studio and pick it in **Settings → AI Model**, "
++                "or type the exact model id from **Server → Available Models**."
++            )
++        if "connection" in full or "refused" in full:
++            return (
++                f"Cannot connect to LM Studio at `{host}`.\n\n"
++                "Start the local server in LM Studio (Developer → Start Server) "
++                "and ensure the port matches **LM Studio Host**."
++            )
++        return f"LM Studio error: {error}\n\nServer: `{host}`"
+diff --git a/src/pocketpaw/llm/providers/registry.py b/src/pocketpaw/llm/providers/registry.py
+index 5aad2e5..6d4828c 100644
+--- a/src/pocketpaw/llm/providers/registry.py
++++ b/src/pocketpaw/llm/providers/registry.py
+@@ -6,6 +6,7 @@ from pocketpaw.llm.providers.anthropic import AnthropicAdapter
+ from pocketpaw.llm.providers.base import ProviderAdapter, ProviderConfig, resolve_model
+ from pocketpaw.llm.providers.gemini import GeminiAdapter
+ from pocketpaw.llm.providers.litellm import LiteLLMAdapter
++from pocketpaw.llm.providers.lmstudio import LmStudioAdapter
+ from pocketpaw.llm.providers.ollama import OllamaAdapter
+ from pocketpaw.llm.providers.openai_compat import OpenAICompatibleAdapter
+ from pocketpaw.llm.providers.openrouter import OpenRouterAdapter
+@@ -13,6 +14,7 @@ from pocketpaw.llm.providers.openrouter import OpenRouterAdapter
+ _ADAPTER_REGISTRY: dict[str, ProviderAdapter] = {
+     "anthropic": AnthropicAdapter(),
+     "ollama": OllamaAdapter(),
++    "lmstudio": LmStudioAdapter(),
+     "openai_compatible": OpenAICompatibleAdapter(),
+     "openrouter": OpenRouterAdapter(),
+     "gemini": GeminiAdapter(),
+diff --git a/src/pocketpaw/llm/router.py b/src/pocketpaw/llm/router.py
+index ca8ccde..55223e7 100644
+--- a/src/pocketpaw/llm/router.py
++++ b/src/pocketpaw/llm/router.py
+@@ -43,6 +43,15 @@ class LLMRouter:
+         except Exception:
+             return False
+ 
++    async def _check_lmstudio(self) -> bool:
++        try:
++            host = getattr(self.settings, "lmstudio_host", "http://localhost:1234").rstrip("/")
++            async with httpx.AsyncClient(timeout=2.0) as client:
++                response = await client.get(f"{host}/v1/models")
++                return response.status_code == 200
++        except Exception:
++            return False
++
+     async def _detect_backend(self) -> str | None:
+         """Detect available LLM backend based on settings."""
+         provider = self.settings.llm_provider
+@@ -52,6 +61,11 @@ class LLMRouter:
+                 return "ollama"
+             return None
+ 
++        if provider == "lmstudio":
++            if await self._check_lmstudio():
++                return "lmstudio"
++            return None
++
+         if provider == "openai":
+             if self.settings.openai_api_key:
+                 return "openai"
+@@ -62,10 +76,12 @@ class LLMRouter:
+                 return "anthropic"
+             return None
+ 
+-        # Auto mode - try in order: Ollama → OpenAI → Anthropic
++        # Auto mode - try in order: Ollama → LM Studio → OpenAI → Anthropic
+         if provider == "auto":
+             if await self._check_ollama():
+                 return "ollama"
++            if await self._check_lmstudio():
++                return "lmstudio"
+             if self.settings.openai_api_key:
+                 return "openai"
+             if self.settings.anthropic_api_key:
+@@ -92,6 +108,8 @@ class LLMRouter:
+         try:
+             if self._available_backend == "ollama":
+                 response = await self._chat_ollama(message)
++            elif self._available_backend == "lmstudio":
++                response = await self._chat_lmstudio(message)
+             elif self._available_backend == "openai":
+                 response = await self._chat_openai(message)
+             elif self._available_backend == "anthropic":
+@@ -106,6 +124,29 @@ class LLMRouter:
+             logger.error(f"LLM error: {e}")
+             return f"❌ LLM Error: {str(e)}"
+ 
++    async def _chat_lmstudio(self, message: str) -> str:
++        from openai import AsyncOpenAI
++
++        host = getattr(self.settings, "lmstudio_host", "http://localhost:1234").rstrip("/")
++        model = getattr(self.settings, "lmstudio_model", "") or ""
++        client = AsyncOpenAI(base_url=f"{host}/v1", api_key="lmstudio")
++        response = await client.chat.completions.create(
++            model=model,
++            messages=[
++                {
++                    "role": "system",
++                    "content": (
++                        "You are PocketPaw, a helpful AI assistant"
++                        " running locally on the user's machine."
++                    ),
++                },
++                *self.conversation_history,
++            ],
++        )
++        if not response.choices:
++            return "I'm sorry, I received an empty response. Please try again."
++        return response.choices[0].message.content or ""
++
+     async def _chat_ollama(self, message: str) -> str:
+         """Chat via Ollama."""
+         async with httpx.AsyncClient(timeout=120.0) as client:
+diff --git a/tests/test_api_v1_backends.py b/tests/test_api_v1_backends.py
+index a97323d..b39e1f7 100644
+--- a/tests/test_api_v1_backends.py
++++ b/tests/test_api_v1_backends.py
+@@ -118,3 +118,23 @@ class TestInstallBackend:
+         assert payload["error"].startswith("Failed to install demo-pkg:\n")
+         assert "[REDACTED]" in payload["error"]
+         assert raw_secret not in payload["error"]
++
++
++class TestLmstudioModels:
++    @patch("httpx.AsyncClient")
++    def test_lmstudio_models_returns_ids(self, mock_ac):
++        mock_resp = MagicMock()
++        mock_resp.status_code = 200
++        mock_resp.json.return_value = {"data": [{"id": "a/b"}, {"id": "c"}]}
++        client_cm = MagicMock()
++        client_cm.get = AsyncMock(return_value=mock_resp)
++        client_cm.__aenter__ = AsyncMock(return_value=client_cm)
++        client_cm.__aexit__ = AsyncMock(return_value=None)
++        mock_ac.return_value = client_cm
++
++        client = _client()
++        resp = client.get("/api/v1/backends/lmstudio-models?host=http://127.0.0.1:1234")
++        assert resp.status_code == 200
++        assert resp.json() == ["a/b", "c"]
++        client_cm.get.assert_called_once()
++        assert "127.0.0.1:1234/v1/models" in client_cm.get.call_args[0][0]
+diff --git a/tests/test_credentials.py b/tests/test_credentials.py
+index fa68896..4372280 100644
+--- a/tests/test_credentials.py
++++ b/tests/test_credentials.py
+@@ -540,6 +540,8 @@ class TestSecretFieldsList:
+             "llm_provider",
+             "ollama_host",
+             "ollama_model",
++            "lmstudio_host",
++            "lmstudio_model",
+             "openai_model",
+             "anthropic_model",
+             "memory_backend",
+diff --git a/tests/test_fast_path.py b/tests/test_fast_path.py
+index 5e035cf..0bac29d 100644
+--- a/tests/test_fast_path.py
++++ b/tests/test_fast_path.py
+@@ -29,6 +29,7 @@ def _make_settings(**overrides):
+     """Create a minimal Settings-like object for tests."""
+     defaults = {
+         "agent_backend": "claude_agent_sdk",
++        "claude_sdk_provider": "anthropic",
+         "tool_profile": "full",
+         "tools_allow": [],
+         "tools_deny": [],
+diff --git a/tests/test_provider_adapters.py b/tests/test_provider_adapters.py
+index 4e0b17d..9c82546 100644
+--- a/tests/test_provider_adapters.py
++++ b/tests/test_provider_adapters.py
+@@ -16,6 +16,8 @@ def _mock_settings(**overrides):
+         "anthropic_model": "claude-sonnet-4-6",
+         "ollama_host": "http://localhost:11434",
+         "ollama_model": "llama3.2",
++        "lmstudio_host": "http://localhost:1234",
++        "lmstudio_model": "test-lms",
+         "openai_api_key": "sk-test",
+         "openai_model": "gpt-5.2",
+         "openai_compatible_base_url": "http://local:8080/v1",
+@@ -43,7 +45,15 @@ def _mock_settings(**overrides):
+ 
+ class TestRegistry:
+     def test_known_providers(self):
+-        for name in ("anthropic", "ollama", "openai_compatible", "openrouter", "gemini", "litellm"):
++        for name in (
++            "anthropic",
++            "ollama",
++            "lmstudio",
++            "openai_compatible",
++            "openrouter",
++            "gemini",
++            "litellm",
++        ):
+             adapter = get_adapter(name)
+             assert adapter.name == name
+ 
+@@ -144,6 +154,34 @@ class TestOllamaAdapter:
+         assert "Cannot connect" in msg
+ 
+ 
++# -- LmStudioAdapter --
++
++
++class TestLmStudioAdapter:
++    def test_resolve_config(self):
++        adapter = get_adapter("lmstudio")
++        config = adapter.resolve_config(_mock_settings(), "claude_agent_sdk")
++        assert config.provider == "lmstudio"
++        assert config.base_url == "http://localhost:1234"
++
++    def test_build_env_dict(self):
++        adapter = get_adapter("lmstudio")
++        config = ProviderConfig(
++            provider="lmstudio", model="x", base_url="http://127.0.0.1:1234"
++        )
++        env = adapter.build_env_dict(config)
++        assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1234"
++        assert env["ANTHROPIC_API_KEY"] == "lmstudio"
++
++    def test_build_openai_client_appends_v1(self):
++        adapter = get_adapter("lmstudio")
++        config = ProviderConfig(provider="lmstudio", model="x", base_url="http://localhost:1234")
++        with patch("openai.AsyncOpenAI") as mock_cls:
++            adapter.build_openai_client(config)
++            mock_cls.assert_called_once()
++            assert mock_cls.call_args.kwargs["base_url"] == "http://localhost:1234/v1"
++
++
+ # -- OpenRouterAdapter --
+ 
+ 

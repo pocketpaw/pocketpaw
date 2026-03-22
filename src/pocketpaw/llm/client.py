@@ -41,6 +41,10 @@ class LLMClient:
         return self.provider == "ollama"
 
     @property
+    def is_lmstudio(self) -> bool:
+        return self.provider == "lmstudio"
+
+    @property
     def is_anthropic(self) -> bool:
         return self.provider == "anthropic"
 

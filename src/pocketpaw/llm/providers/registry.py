@@ -6,6 +6,7 @@ from pocketpaw.llm.providers.anthropic import AnthropicAdapter
 from pocketpaw.llm.providers.base import ProviderAdapter, ProviderConfig, resolve_model
 from pocketpaw.llm.providers.gemini import GeminiAdapter
 from pocketpaw.llm.providers.litellm import LiteLLMAdapter
+from pocketpaw.llm.providers.lmstudio import LmStudioAdapter
 from pocketpaw.llm.providers.ollama import OllamaAdapter
 from pocketpaw.llm.providers.openai_compat import OpenAICompatibleAdapter
 from pocketpaw.llm.providers.openrouter import OpenRouterAdapter
@@ -13,6 +14,7 @@ from pocketpaw.llm.providers.openrouter import OpenRouterAdapter
 _ADAPTER_REGISTRY: dict[str, ProviderAdapter] = {
     "anthropic": AnthropicAdapter(),
     "ollama": OllamaAdapter(),
+    "lmstudio": LmStudioAdapter(),
     "openai_compatible": OpenAICompatibleAdapter(),
     "openrouter": OpenRouterAdapter(),
     "gemini": GeminiAdapter(),

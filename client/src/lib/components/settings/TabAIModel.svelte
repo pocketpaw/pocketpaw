@@ -30,6 +30,9 @@
   let ollamaHost = $state("http://localhost:11434");
   let ollamaModels = $state<string[]>([]);
   let ollamaFetching = $state(false);
+  let lmstudioHost = $state("http://localhost:1234");
+  let lmstudioModels = $state<string[]>([]);
+  let lmstudioFetching = $state(false);
   let openaiCompatBaseUrl = $state("");
   let opencodeBaseUrl = $state("");
   let apiKeyInput = $state("");
@@ -44,6 +47,7 @@
     openai: ["gpt-5.2", "gpt-4o", "gpt-4o-mini", "o1-preview"],
     google: ["gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro"],
     ollama: ["llama3.2", "mistral", "codellama", "gemma2", "phi3"],
+    lmstudio: [],
     openrouter: [], // 300+ models; user types the slug directly
     openai_compatible: [],
     copilot: [],
@@ -55,6 +59,7 @@
     openai: "OpenAI",
     google: "Google",
     ollama: "Ollama (Local)",
+    lmstudio: "LM Studio (Local)",
     openrouter: "OpenRouter",
     openai_compatible: "OpenAI Compatible",
     copilot: "GitHub Copilot",
@@ -71,7 +76,7 @@
   };
 
   // Providers that don't require an API key
-  const NO_KEY_PROVIDERS = new Set(["ollama", "copilot"]);
+  const NO_KEY_PROVIDERS = new Set(["ollama", "lmstudio", "copilot"]);
 
   // Per-backend field mapping
   type BackendFields = {
@@ -124,6 +129,9 @@
     if (selectedProvider === "ollama" && ollamaModels.length > 0) {
       return ollamaModels;
     }
+    if (selectedProvider === "lmstudio" && lmstudioModels.length > 0) {
+      return lmstudioModels;
+    }
     return PROVIDER_MODELS[selectedProvider] ?? [];
   });
   let effectiveModel = $derived(customModel || selectedModel);
@@ -133,7 +141,8 @@
     if (!currentBackend) return [];
     return currentBackend.requiredKeys.filter((k) => {
       // Check if we might be missing this key based on provider
-      if (selectedProvider === "ollama" || selectedProvider === "copilot") return false;
+      if (selectedProvider === "ollama" || selectedProvider === "lmstudio" || selectedProvider === "copilot")
+        return false;
       return true;
     });
   });
@@ -146,6 +155,7 @@
     selectedBackend = s.agent_backend ?? "";
     smartRouting = s.smart_routing_enabled ?? false;
     ollamaHost = (s.ollama_host as string) ?? "http://localhost:11434";
+    lmstudioHost = (s.lmstudio_host as string) ?? "http://localhost:1234";
     openaiCompatBaseUrl = (s.openai_compatible_base_url as string) ?? "";
     opencodeBaseUrl = (s.opencode_base_url as string) ?? "";
 
@@ -206,6 +216,12 @@
     }
   });
 
+  $effect(() => {
+    if (selectedProvider !== "lmstudio") return;
+    void lmstudioHost;
+    fetchLmstudioModels();
+  });
+
   async function loadBackends() {
     try {
       const client = connectionStore.getClient();
@@ -227,6 +243,24 @@
       ollamaModels = [];
     } finally {
       ollamaFetching = false;
+    }
+  }
+
+  async function fetchLmstudioModels() {
+    lmstudioFetching = true;
+    try {
+      const client = connectionStore.getClient();
+      const models = await client.fetchLmstudioModels(lmstudioHost);
+      let list = [...models];
+      const cur = (customModel || selectedModel || "").trim();
+      if (cur && !list.includes(cur)) {
+        list = [cur, ...list];
+      }
+      lmstudioModels = list;
+    } catch {
+      lmstudioModels = [];
+    } finally {
+      lmstudioFetching = false;
     }
   }
 
@@ -297,6 +331,11 @@
       if (selectedProvider === "ollama") {
         patch.ollama_host = ollamaHost;
         patch.ollama_model = effectiveModel;
+      }
+
+      if (selectedProvider === "lmstudio") {
+        patch.lmstudio_host = lmstudioHost;
+        patch.lmstudio_model = effectiveModel;
       }
 
       if (selectedProvider === "openrouter") {
@@ -481,6 +520,31 @@
     {/if}
 
     <!-- Ollama Host + Fetch -->
+    {#if selectedProvider === "lmstudio"}
+      <div class="flex flex-col gap-1.5">
+        <label for="lmstudio-host" class="text-xs font-medium text-muted-foreground">
+          LM Studio server URL
+        </label>
+        <div class="flex gap-2">
+          <input
+            id="lmstudio-host"
+            bind:value={lmstudioHost}
+            type="text"
+            placeholder="http://localhost:1234"
+            class="h-9 flex-1 rounded-lg border border-border bg-muted/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+          />
+          <button
+            onclick={fetchLmstudioModels}
+            disabled={lmstudioFetching}
+            class="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary hover:text-foreground disabled:opacity-40"
+          >
+            <RefreshCw class={lmstudioFetching ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
+            Fetch Models
+          </button>
+        </div>
+      </div>
+    {/if}
+
     {#if selectedProvider === "ollama"}
       <div class="flex flex-col gap-1.5">
         <label for="ollama-host" class="text-xs font-medium text-muted-foreground">
@@ -614,6 +678,15 @@
               <RefreshCw class={ollamaFetching ? "h-2.5 w-2.5 animate-spin" : "h-2.5 w-2.5"} />
               Refresh
             </button>
+          {:else if selectedProvider === "lmstudio"}
+            <button
+              onclick={fetchLmstudioModels}
+              disabled={lmstudioFetching}
+              class="inline-flex items-center gap-1 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <RefreshCw class={lmstudioFetching ? "h-2.5 w-2.5 animate-spin" : "h-2.5 w-2.5"} />
+              Refresh
+            </button>
           {/if}
         </div>
         {#if models.length > 0}
@@ -630,6 +703,10 @@
         {:else if selectedProvider === "ollama"}
           <p class="text-[10px] text-muted-foreground">
             No models found — pull one with <code class="rounded bg-muted px-1">ollama pull llama3.2</code>
+          </p>
+        {:else if selectedProvider === "lmstudio"}
+          <p class="text-[10px] text-muted-foreground">
+            No models in list — load a model in LM Studio or type the model id manually below.
           </p>
         {/if}
         <input

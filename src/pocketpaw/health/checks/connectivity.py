@@ -54,6 +54,8 @@ async def _check_alt_provider_reachable(settings, provider: str) -> HealthCheckR
     """Connectivity check for non-default providers (OpenRouter, LiteLLM, Ollama, etc.)."""
     if provider == "ollama":
         return await _check_ollama_reachable(settings)
+    elif provider == "lmstudio":
+        return await _check_lmstudio_reachable(settings)
     elif provider == "openrouter":
         return await _check_openrouter_reachable(settings)
     elif provider == "litellm":
@@ -69,6 +71,44 @@ async def _check_alt_provider_reachable(settings, provider: str) -> HealthCheckR
         message=f"Connectivity check not implemented for provider '{provider}'",
         fix_hint="",
     )
+
+
+async def _check_lmstudio_reachable(settings) -> HealthCheckResult:
+    import httpx
+
+    host = getattr(settings, "lmstudio_host", "http://localhost:1234").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{host}/v1/models")
+        if resp.status_code == 200:
+            data = resp.json()
+            raw = data.get("data") if isinstance(data, dict) else None
+            model_count = len(raw) if isinstance(raw, list) else 0
+            return HealthCheckResult(
+                check_id="llm_reachable",
+                name="LLM Reachable",
+                category="connectivity",
+                status="ok",
+                message=f"LM Studio is reachable at {host} ({model_count} models listed)",
+                fix_hint="",
+            )
+        return HealthCheckResult(
+            check_id="llm_reachable",
+            name="LLM Reachable",
+            category="connectivity",
+            status="warning",
+            message=f"LM Studio returned HTTP {resp.status_code}",
+            fix_hint=f"Check that the server is running in LM Studio at {host}",
+        )
+    except Exception as exc:
+        return HealthCheckResult(
+            check_id="llm_reachable",
+            name="LLM Reachable",
+            category="connectivity",
+            status="error",
+            message=f"Cannot reach LM Studio at {host}: {exc}",
+            fix_hint="Start the local server in LM Studio (Developer → Start Server).",
+        )
 
 
 async def _check_ollama_reachable(settings) -> HealthCheckResult:

@@ -88,6 +88,7 @@ class DeepAgentsBackend:
                 "openai",
                 "google",
                 "ollama",
+                "lmstudio",
                 "openrouter",
                 "openai_compatible",
                 "litellm",
@@ -254,6 +255,16 @@ class DeepAgentsBackend:
             kwargs["base_url"] = host
             if not model:
                 model = self.settings.ollama_model or "llama3.2"
+
+        elif provider == "lmstudio":
+            host = (getattr(self.settings, "lmstudio_host", None) or "http://localhost:1234").rstrip(
+                "/"
+            )
+            kwargs["base_url"] = f"{host}/v1"
+            kwargs["api_key"] = "lmstudio"
+            if not model:
+                model = getattr(self.settings, "lmstudio_model", "") or ""
+            provider = "openai"
 
         elif provider == "openrouter":
             kwargs["base_url"] = "https://openrouter.ai/api/v1"

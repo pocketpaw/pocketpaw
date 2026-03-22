@@ -393,6 +393,10 @@ async def websocket_handler(
                         settings.ollama_host = data["ollama_host"]
                     if data.get("ollama_model"):
                         settings.ollama_model = data["ollama_model"]
+                    if data.get("lmstudio_host"):
+                        settings.lmstudio_host = data["lmstudio_host"]
+                    if data.get("lmstudio_model"):
+                        settings.lmstudio_model = data["lmstudio_model"]
                     if data.get("anthropic_model"):
                         settings.anthropic_model = data.get("anthropic_model")
                     if data.get("openai_compatible_base_url") is not None:
@@ -735,6 +739,8 @@ async def websocket_handler(
                             "llmProvider": settings.llm_provider,
                             "ollamaHost": settings.ollama_host,
                             "ollamaModel": settings.ollama_model,
+                            "lmstudioHost": settings.lmstudio_host,
+                            "lmstudioModel": settings.lmstudio_model,
                             "anthropicModel": settings.anthropic_model,
                             "openaiCompatibleBaseUrl": settings.openai_compatible_base_url,
                             "openaiCompatibleModel": settings.openai_compatible_model,
