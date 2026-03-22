@@ -1258,13 +1258,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=["claude_agent_sdk", "pocketpaw_native", "open_interpreter"],
+        choices=list(BACKENDS.keys()),
         default=None,
         help="Agent backend (non-interactive)",
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["anthropic", "openai", "ollama", "auto"],
+        choices=list(LLM_PROVIDERS.keys()),
         default=None,
         help="LLM provider (non-interactive)",
     )
