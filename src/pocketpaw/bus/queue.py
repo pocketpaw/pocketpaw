@@ -4,8 +4,11 @@ Created: 2026-02-02
 """
 
 import asyncio
+import copy
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
 
 from pocketpaw.bus.events import Channel, InboundMessage, OutboundMessage, SystemEvent
 
@@ -85,42 +88,42 @@ class MessageBus:
             except ValueError:
                 pass
 
-    async def publish_outbound(self, message: OutboundMessage) -> None:
-        """Publish a message to channel subscribers."""
-        subscribers = self._outbound_subscribers.get(message.channel, [])
-
-        if not subscribers:
-            logger.warning(f"⚠️ No subscribers for {message.channel.value}")
+    async def publish_outbound(self, msg: OutboundMessage) -> None:
+        """Publish message to all subscribers of the given channel."""
+        subs = self._outbound_subscribers.get(msg.channel, [])
+        if not subs:
+            logger.warning(f"⚠️ No subscribers for {msg.channel.value}")
             return
 
-        # Fan out to all subscribers
-        tasks = [sub(message) for sub in subscribers]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(
-                    "Outbound subscriber %d for %s failed: %s",
-                    i,
-                    message.channel.value,
-                    result,
+        # Fan-out to all subscribers concurrently with deep isolation.
+        # Each subscriber gets a deep copy of metadata and media to prevent leakage.
+        async def _safe_publish(callback):
+            try:
+                # Isolate mutable data
+                isolated_msg = replace(
+                    msg,
+                    metadata=copy.deepcopy(msg.metadata),
+                    media=[copy.deepcopy(m) for m in msg.media],
                 )
+                await callback(isolated_msg)
+            except Exception as e:
+                logger.error(f"Error in subscriber {callback}: {e}")
 
-    async def broadcast_outbound(
-        self, message: OutboundMessage, exclude: Channel | None = None
-    ) -> None:
-        """Broadcast to all channels (except excluded)."""
-        for channel, subscribers in self._outbound_subscribers.items():
+        await asyncio.gather(*[_safe_publish(sub) for sub in subs])
+
+    async def broadcast_outbound(self, msg: OutboundMessage, exclude: Channel | None = None) -> None:
+        """Broadcast an outbound message to ALL registered channels."""
+        # This is used for multi-channel announcements.
+        tasks = []
+        for channel in self._outbound_subscribers.keys():
             if channel == exclude:
                 continue
-            msg = OutboundMessage(
-                channel=channel,
-                chat_id=message.chat_id,
-                content=message.content,
-                media=message.media,
-                metadata=message.metadata,
-            )
-            for sub in subscribers:
-                await sub(msg)
+            # Create a clone for each channel
+            channel_msg = replace(msg, channel=channel)
+            tasks.append(self.publish_outbound(channel_msg))
+
+        if tasks:
+            await asyncio.gather(*tasks)
 
     # =========================================================================
     # System Events (Internal)
