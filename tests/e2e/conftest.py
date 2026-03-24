@@ -103,3 +103,4 @@ def browser_context_args(browser_context_args):
 def dashboard_url(dashboard_server: str) -> str:
     """Alias for dashboard_server URL."""
     return dashboard_server
+
