@@ -37,6 +37,7 @@ classifiers = [
 dependencies = [
     # Config
     "pydantic>=2.10.0",
+    "chromadb>=0.4.0",
     "pydantic-settings>=2.1.0",
     # HTTP client (used everywhere)
     "httpx>=0.26.0",
