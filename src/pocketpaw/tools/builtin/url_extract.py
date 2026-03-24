@@ -1,6 +1,7 @@
 # URL Extract tool — fetch clean content from URLs via Parallel AI or local fallback.
 # Created: 2026-02-06
 
+import asyncio
 import logging
 from typing import Any
 
@@ -131,6 +132,16 @@ class UrlExtractTool(BaseTool):
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             for url in urls:
                 try:
+                    safe, reason = await _is_safe_url(url)
+                    if not safe:
+                        results.append(
+                            {
+                                "url": url,
+                                "title": url,
+                                "full_content": f"Blocked: {reason}",
+                            }
+                        )
+                        continue
                     resp = await client.get(url)
                     resp.raise_for_status()
 
@@ -189,3 +200,50 @@ def _extract_title(html: str) -> str:
     if match:
         return match.group(1).strip()
     return "Untitled"
+
+
+_SAFE_SCHEMES = {"http", "https"}
+
+
+async def _is_safe_url(url: str) -> tuple[bool, str]:
+    """Check if a URL is safe to fetch (blocks SSRF targets)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+
+        if parsed.scheme not in _SAFE_SCHEMES:
+            return False, f"Scheme '{parsed.scheme}' is not allowed"
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "URL has no hostname"
+
+        try:
+            ip_str = await asyncio.get_event_loop().run_in_executor(
+                None, socket.gethostbyname, hostname
+            )
+        except socket.gaierror:
+            return False, f"Could not resolve hostname '{hostname}'"
+
+        ip = ipaddress.ip_address(ip_str)
+
+        if ip.is_loopback:
+            return False, f"Loopback address '{ip}' is not allowed"
+        if ip.is_private:
+            return False, f"Private address '{ip}' is not allowed"
+        if ip.is_link_local:
+            return False, f"Link-local address '{ip}' is not allowed"
+        if ip.is_multicast:
+            return False, f"Multicast address '{ip}' is not allowed"
+        if ip.is_reserved:
+            return False, f"Reserved address '{ip}' is not allowed"
+        if ip.is_unspecified:
+            return False, f"Unspecified address '{ip}' is not allowed"
+
+        return True, "OK"
+
+    except Exception as e:
+        return False, f"Validation error: {e}"
