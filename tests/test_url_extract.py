@@ -288,9 +288,13 @@ class TestUrlExtractTool:
                 return good_resp
             return bad_resp
 
+        async def mock_is_safe_url(url):
+            return True, "OK"
+
         with (
             patch("httpx.AsyncClient") as mock_client_cls,
             patch.dict("sys.modules", {"html2text": mock_html2text}),
+            patch("pocketpaw.tools.builtin.url_extract._is_safe_url", side_effect=mock_is_safe_url),
         ):
             mock_client = AsyncMock()
             mock_client.get.side_effect = mock_get
