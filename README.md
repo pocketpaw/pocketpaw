@@ -127,6 +127,8 @@ powershell -NoExit -Command "iwr -useb https://pocketpaw.xyz/install.ps1 | iex"
    python -m venv pocketpaw-env
    .\pocketpaw-env\Scripts\Activate.ps1
    ```
+   # Alternative activation command (Command Prompt)
+venv\Scripts\activate
 
 4. Install PocketPaw:
 
