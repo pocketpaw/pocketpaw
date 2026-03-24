@@ -7,57 +7,55 @@ from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
 
 @pytest.mark.asyncio
-async def test_vector_backend():
-    print("🚀 Starting Vector Memory Test...")
-
-    # Force the backend to vector for this test
+async def test_vector_backend_lifecycle():
+    """
+    Tests the full lifecycle of VectorMemory using proper assertions.
+    Reflects changes requested by DevRohit06.
+    """
+    # 1. Setup
     backend = "vector"
+    store = create_memory_store(backend=backend)
+    
+    # Ensure we got the right store class
+    assert store.__class__.__name__ == "VectorMemory"
 
-    try:
-        # 2. Initialize the Store via your new Manager logic
-        store = create_memory_store(backend=backend)
-        print(f"✅ Store initialized: {type(store).__name__}")
+    test_id = "pytest-123"
+    test_entry = MemoryEntry(
+        id=test_id,
+        content="PocketPaw uses ChromaDB for semantic vector search.",
+        type=MemoryType.LONG_TERM,
+        session_key="test-session",
+        tags=["unit-test"]
+    )
 
-        # 3. Create a fake memory entry
-        test_entry = MemoryEntry(
-            id="test-123",
-            content="PocketPaw is a powerful AI assistant with vector memory.",
-            type=MemoryType.LONG_TERM,
-            session_key="test-session",
-        )
+    # 2. Test Save
+    # We don't use try-except; if it fails, pytest will report it correctly.
+    saved_id = await store.save(test_entry)
+    assert saved_id == test_id
 
-        # 4. Test SAVING
-        print("💾 Saving memory...")
-        await store.save(test_entry)
-        print("✅ Save successful!")
+    # 3. Wait for indexing
+    # ChromaDB indexing is usually fast but needs a small breather in local tests
+    await asyncio.sleep(1)
 
-        print("⏳ Waiting for ChromaDB to index (2 seconds)...")
-        await asyncio.sleep(2)
+    # 4. Test Search (Semantic)
+    # Searching for a keyword that is not exact but semantically close
+    results = await store.search(query="semantic vector", limit=1)
+    
+    assert len(results) > 0, "Search should return at least one result"
+    assert "PocketPaw" in results[0].content
+    assert results[0].id == test_id
+    assert results[0].type == MemoryType.LONG_TERM
 
-        # 5. Test SEARCHING (Semantic)
-        print("🔍 Searching for 'AI assistant'...")
-        results = await store.search("AI assistant", limit=1)
+    # 5. Test Get by ID
+    retrieved = await store.get(test_id)
+    assert retrieved is not None
+    assert retrieved.content == test_entry.content
 
-        if results and "PocketPaw" in results[0].content:
-            print(f"🎉 SUCCESS! Found memory: {results[0].content}")
-        else:
-            if not results:
-                print("❌ Search failed: No results returned.")
-            else:
-                print(f"❌ Search failed: Expected 'PocketPaw' but got '{results[0].content}'")
+    # 6. Test Delete
+    success = await store.delete(test_id)
+    assert success is True
 
-        # 6. Test DELETING
-        print("🗑️ Deleting memory...")
-        success = await store.delete("test-123")
-        if success:
-            print("✅ Delete successful!")
-
-    except Exception as e:
-        print(f"💥 TEST FAILED with error: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-
-if __name__ == "__main__":
-    asyncio.run(test_vector_backend())
+    # 7. Verify Deletion
+    # After delete, searching or getting should not return the entry
+    after_delete = await store.get(test_id)
+    assert after_delete is None

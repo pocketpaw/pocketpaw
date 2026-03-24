@@ -1,6 +1,9 @@
 import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 # Use TYPE_CHECKING to avoid circular imports with Settings
 if TYPE_CHECKING:
@@ -49,27 +52,43 @@ class ChromaAdapter:
             metadatas=[metadata] if metadata else None,
         )
 
-    async def search(self, query: str, limit: int = 5) -> list[str]:
+    async def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Searches for similar documents and returns them with IDs and metadata."""
         results = await asyncio.to_thread(
             self.collection.query,
             query_texts=[query],
             n_results=limit,
         )
+        
+        formatted_results = []
+        if results and results.get("documents"):
+            # Chroma returns lists within lists, so we iterate through the first query result
+            docs = results["documents"][0]
+            ids = results["ids"][0]
+            metadatas = results["metadatas"][0] if results.get("metadatas") else [None] * len(docs)
+            
+            for i in range(len(docs)):
+                formatted_results.append({
+                    "text": docs[i],
+                    "id": ids[i],
+                    "metadata": metadatas[i] or {}
+                })
+        return formatted_results
 
-        # Safe check for search results
-        if results and results.get("documents") and len(results["documents"]) > 0:
-            return results["documents"][0]
-        return []
+    async def delete(self, doc_id: str) -> bool:
+        """Deletes a document by its ID and returns True if successful."""
+        try:
+            await asyncio.to_thread(
+                self.collection.delete,
+                ids=[doc_id],
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete document {doc_id}: {e}")
+            return False
 
-    async def delete(self, doc_id: str) -> None:
-        """Deletes a document by its ID."""
-        await asyncio.to_thread(
-            self.collection.delete,
-            ids=[doc_id],
-        )
-
-    async def get_by_id(self, doc_id: str) -> str | None:
-        """FIX: get_by_id crash prevention logic."""
+    async def get_by_id(self, doc_id: str) -> dict[str, Any] | None:
+        """Retrieves a document by its ID with its metadata."""
         results = await asyncio.to_thread(
             self.collection.get,
             ids=[doc_id],
@@ -78,6 +97,10 @@ class ChromaAdapter:
         # Safely checks if documents key exists, has items, and the first item isn't None
         docs = results.get("documents")
         if docs and len(docs) > 0 and docs[0] is not None:
-            return docs[0]
+            return {
+                "text": docs[0],
+                "id": results["ids"][0],
+                "metadata": results["metadatas"][0] if results.get("metadatas") else {}
+            }
 
         return None

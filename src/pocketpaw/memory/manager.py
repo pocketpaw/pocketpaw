@@ -84,10 +84,16 @@ def create_memory_store(
             # Step 1: Lazy import your new VectorMemory class
             from pocketpaw.config import get_settings
             from pocketpaw.memory.vector.vector_store import VectorMemory
+            from pocketpaw.vectordb.chroma_adapter import ChromaAdapter
+
+            # Use passed settings if available
+            current_settings = settings or get_settings()
 
             logger.info("Using Vector-based memory backend (ChromaDB)")
-            # Step 2: Initialize it using the settings
-            return VectorMemory(settings=get_settings())
+
+            adapter = ChromaAdapter.from_settings(current_settings)
+            return VectorMemory(adapter=adapter)
+
         except ImportError:
             logger.warning(
                 "Vector memory dependencies not installed. Falling back to file backend."
