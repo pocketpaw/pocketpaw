@@ -541,6 +541,31 @@ class AgentLoop:
             full_response = ""
             media_paths: list[str] = []
             cancelled = False
+            elif etype == "token_usage":
+                # Store latest usage
+                last_usage = meta.copy()
+
+                await self.bus.publish_system(
+                    SystemEvent(
+                        event_type="token_usage",
+                        data={**meta, "session_key": session_key},
+                    )
+                )
+
+                try:
+                    from pocketpaw.usage_tracker import get_usage_tracker
+
+                    get_usage_tracker().record(
+                        backend=meta.get("backend", "unknown"),
+                        model=meta.get("model", ""),
+                        input_tokens=meta.get("input_tokens", 0),
+                        output_tokens=meta.get("output_tokens", 0),
+                        cached_input_tokens=meta.get("cached_input_tokens", 0),
+                        session_id=session_key or "",
+                        total_cost_usd=meta.get("total_cost_usd"),
+                    )
+                except Exception:
+                    logger.debug("Failed to persist token usage metrics", exc_info=True)
             # Streaming redaction: accumulate raw content and track what has
             # already been sent (redacted) so secrets split across chunk
             # boundaries are still caught.
@@ -739,6 +764,17 @@ class AgentLoop:
             seen: set[str] = set()
             media_paths = [p for p in media_paths if not (p in seen or seen.add(p))]
             metadata_out: dict[str, Any] = {}
+
+            # Attach usage if available
+            if last_usage:
+                metadata_out["usage"] = {
+                    "input_tokens": last_usage.get("input_tokens", 0),
+                    "output_tokens": last_usage.get("output_tokens", 0),
+                    "cached_input_tokens": last_usage.get("cached_input_tokens", 0),
+                    "total_cost_usd": last_usage.get("total_cost_usd"),
+                    "model": last_usage.get("model"),
+                    "backend": last_usage.get("backend"),
+                }
             if voice_media_paths:
                 metadata_out["voice_media_paths"] = voice_media_paths
             await self.bus.publish_outbound(
