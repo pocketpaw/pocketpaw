@@ -189,7 +189,9 @@ class GmailListLabelsTool(BaseTool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {"type": "object", "properties": {}}
+        # OpenAI tool schema validation expects an object schema to include `properties`.
+        # This tool takes no arguments, so `properties` is intentionally empty.
+        return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self) -> str:
         from pocketpaw.integrations.gmail import GmailClient

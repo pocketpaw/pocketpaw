@@ -126,14 +126,21 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
 
         defn = tool.definition
 
-        # Sanitize JSON schema: strict providers (e.g. Groq) reject schemas
-        # where 'required' is present but 'properties' is empty or missing.
+        # Sanitize JSON schema for OpenAI Agents SDK.
+        #
+        # OpenAI requires `{"type":"object"}` schemas to include a `properties` key,
+        # even when the tool takes no arguments (so we must keep `properties: {}`).
+        #
+        # Some strict providers reject schemas where `required` is present but empty
+        # while `properties` is empty/missing. For compatibility we only remove
+        # empty `required`, but we never remove `properties`.
         params_schema = dict(defn.parameters) if defn.parameters else {"type": "object"}
-        props = params_schema.get("properties")
-        if not props and "required" in params_schema:
+        params_schema.setdefault("type", "object")
+        params_schema.setdefault("properties", {})
+
+        # If `required` exists but is empty, remove it (tool takes no required args).
+        if "required" in params_schema and not params_schema.get("required"):
             params_schema.pop("required")
-        if not props and "properties" in params_schema:
-            params_schema.pop("properties")
 
         ft = FunctionTool(
             name=defn.name,
