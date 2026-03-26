@@ -29,6 +29,10 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass
 
+# Warn for unsupported Python versions
+if sys.version_info >= (3, 13):
+    print("⚠️ Warning: Python 3.13+ may not be fully supported. Recommended version is 3.11 or 3.12.\n")
+
 import argparse
 import asyncio
 import logging
