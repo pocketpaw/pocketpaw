@@ -2,6 +2,7 @@
 # Created: 2026-02-02
 
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -225,3 +226,42 @@ async def test_broadcast_excludes_new_channels():
     assert sub_discord.call_count == 1
     assert sub_slack.call_count == 0  # Excluded
     assert sub_whatsapp.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_outbound_message_isolation():
+    """Verify that subscribers receive isolated copies of mutable metadata/media."""
+    bus = MessageBus()
+
+    # Track what each subscriber received
+    received_messages = []
+
+    async def sub1(msg):
+        # Mutate the metadata in the first subscriber's copy
+        # This tests that the deepcopy in MessageBus works.
+        msg.metadata["leaked"] = "yes"
+        received_messages.append(msg)
+
+    async def sub2(msg):
+        # Wait a bit to ensure sub1 runs first (although gather is concurrent)
+        await asyncio.sleep(0.05)
+        received_messages.append(msg)
+
+    bus.subscribe_outbound(Channel.TELEGRAM, sub1)
+    bus.subscribe_outbound(Channel.TELEGRAM, sub2)
+
+    test_msg = OutboundMessage(
+        channel=Channel.TELEGRAM,
+        chat_id="test_chat",
+        content="Hello",
+        metadata={"original": "value"},
+    )
+
+    await bus.publish_outbound(test_msg)
+
+    assert len(received_messages) == 2
+    # sub1 should have the modification
+    assert received_messages[0].metadata.get("leaked") == "yes"
+    # sub2 should NOT have the modification
+    assert "leaked" not in received_messages[1].metadata
+    assert received_messages[1].metadata["original"] == "value"

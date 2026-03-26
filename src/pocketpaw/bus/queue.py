@@ -6,9 +6,8 @@ Created: 2026-02-02
 import asyncio
 import copy
 import logging
-import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 
 from pocketpaw.bus.events import Channel, InboundMessage, OutboundMessage, SystemEvent
 
@@ -97,7 +96,7 @@ class MessageBus:
 
         # Fan-out to all subscribers concurrently with deep isolation.
         # Each subscriber gets a deep copy of metadata and media to prevent leakage.
-        async def _safe_publish(callback):
+        async def _safe_publish(idx, callback):
             try:
                 # Isolate mutable data
                 isolated_msg = replace(
@@ -107,11 +106,15 @@ class MessageBus:
                 )
                 await callback(isolated_msg)
             except Exception as e:
-                logger.error(f"Error in subscriber {callback}: {e}")
+                logger.error(
+                    f"Error in {msg.channel.value} subscriber {idx} ({callback}): {e}"
+                )
 
-        await asyncio.gather(*[_safe_publish(sub) for sub in subs])
+        await asyncio.gather(*[_safe_publish(i, sub) for i, sub in enumerate(subs)])
 
-    async def broadcast_outbound(self, msg: OutboundMessage, exclude: Channel | None = None) -> None:
+    async def broadcast_outbound(
+        self, msg: OutboundMessage, exclude: Channel | None = None
+    ) -> None:
         """Broadcast an outbound message to ALL registered channels."""
         # This is used for multi-channel announcements.
         tasks = []
