@@ -345,6 +345,53 @@ class TestMessageUpdate:
         call_kwargs = adapter_with_app.app.bot.edit_message_text.call_args[1]
         assert call_kwargs["chat_id"] == "-100123"
 
+ 
+class TestTelegramCommands:
+    async def test_handle_paw_forwards_message_body(self, adapter):
+        adapter._publish_inbound = AsyncMock()
+        adapter._send_typing_indicator = AsyncMock()
+
+        update = MagicMock()
+        update.effective_user.id = 12345
+        update.effective_user.username = "alice"
+        update.effective_chat.id = 67890
+        update.message = MagicMock()
+        update.message.message_thread_id = None
+        update.message.reply_text = AsyncMock()
+
+        context = MagicMock()
+        context.args = ["hello", "there"]
+
+        await adapter._handle_paw(update, context)
+
+        adapter._send_typing_indicator.assert_awaited_once_with("67890")
+        update.message.reply_text.assert_not_called()
+
+        published = adapter._publish_inbound.await_args.args[0]
+        assert published.channel == Channel.TELEGRAM
+        assert published.sender_id == "12345"
+        assert published.chat_id == "67890"
+        assert published.content == "hello there"
+        assert published.metadata["username"] == "alice"
+
+    async def test_handle_paw_requires_message_body(self, adapter):
+        adapter._publish_inbound = AsyncMock()
+        adapter._send_typing_indicator = AsyncMock()
+
+        update = MagicMock()
+        update.effective_user.id = 12345
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+
+        context = MagicMock()
+        context.args = []
+
+        await adapter._handle_paw(update, context)
+
+        adapter._send_typing_indicator.assert_not_called()
+        adapter._publish_inbound.assert_not_called()
+        update.message.reply_text.assert_awaited_once_with("Usage: /paw <message>")
+
 
 class TestVoiceMediaRouting:
     def test_is_voice_media_false_without_metadata(self):

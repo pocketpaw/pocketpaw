@@ -72,6 +72,7 @@ class TelegramAdapter(BaseChannelAdapter):
         # Add Handlers
         self.app.add_handler(CommandHandler("start", self._handle_start))
         _cmds = (
+            "paw",
             "new",
             "sessions",
             "resume",
@@ -87,7 +88,8 @@ class TelegramAdapter(BaseChannelAdapter):
             "kill",
         )
         for cmd_name in _cmds:
-            self.app.add_handler(CommandHandler(cmd_name, self._handle_command))
+            handler = self._handle_paw if cmd_name == "paw" else self._handle_command
+            self.app.add_handler(CommandHandler(cmd_name, handler))
         media_filter = (
             filters.PHOTO
             | filters.Document.ALL
@@ -113,6 +115,7 @@ class TelegramAdapter(BaseChannelAdapter):
 
             await self.app.bot.set_my_commands(
                 [
+                    BotCommand("paw", "Send a message to PocketPaw"),
                     BotCommand("new", "Start a fresh conversation"),
                     BotCommand("sessions", "List your conversation sessions"),
                     BotCommand("resume", "Resume a previous session"),
@@ -421,6 +424,35 @@ class TelegramAdapter(BaseChannelAdapter):
             sender_id=str(user_id),
             chat_id=chat_id,
             content=text,
+            metadata={"username": update.effective_user.username},
+        )
+        await self._publish_inbound(msg)
+
+    async def _handle_paw(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /paw by forwarding only its message body to the agent."""
+        if not update.effective_user or not update.message:
+            return
+
+        user_id = update.effective_user.id
+        if self.allowed_user_id and user_id != self.allowed_user_id:
+            return
+
+        content = " ".join(getattr(context, "args", [])).strip()
+        if not content:
+            await update.message.reply_text("Usage: /paw <message>")
+            return
+
+        base_chat_id = str(update.effective_chat.id)
+        topic_id = getattr(update.message, "message_thread_id", None)
+        chat_id = f"{base_chat_id}:topic:{topic_id}" if topic_id else base_chat_id
+
+        await self._send_typing_indicator(chat_id)
+
+        msg = InboundMessage(
+            channel=Channel.TELEGRAM,
+            sender_id=str(user_id),
+            chat_id=chat_id,
+            content=content,
             metadata={"username": update.effective_user.username},
         )
         await self._publish_inbound(msg)
