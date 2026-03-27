@@ -6,6 +6,7 @@ backends if the primary backend fails.
 """
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -101,6 +102,10 @@ class AgentRouter:
 
         # Primary backend (streaming, no buffering, no error-event fallback)
         if self._backend is not None:
+            backend_name = self._active_backend_name or "unknown"
+            logger.info("Starting primary backend: %s", backend_name, 
+                        extra={"event": "backend_start", "backend": backend_name, "is_primary": True})
+            start_time = time.perf_counter()
             try:
                 async for event in self._backend.run(
                     message,
@@ -111,14 +116,21 @@ class AgentRouter:
                     yield event
 
                     if event.type == "done":
+                        latency_ms = (time.perf_counter() - start_time) * 1000
+                        logger.info("Primary backend '%s' completed successfully", backend_name,
+                                    extra={"event": "backend_success", "backend": backend_name, 
+                                           "latency_ms": latency_ms, "is_primary": True})
                         return
 
             except Exception as exc:
+                latency_ms = (time.perf_counter() - start_time) * 1000
                 last_error = str(exc)
                 logger.warning(
                     "Primary backend '%s' failed: %s",
-                    self._active_backend_name,
+                    backend_name,
                     exc,
+                    extra={"event": "backend_failure", "backend": backend_name, 
+                           "error": last_error, "latency_ms": latency_ms, "is_primary": True}
                 )
 
         # Fallback backends
@@ -126,10 +138,13 @@ class AgentRouter:
             backend = self._get_fallback_backend(backend_name)
 
             if backend is None:
-                logger.warning("Fallback backend '%s' unavailable", backend_name)
+                logger.warning("Fallback backend '%s' unavailable", backend_name,
+                               extra={"event": "backend_unavailable", "backend": backend_name})
                 continue
 
-            logger.info("Attempting fallback backend: %s", backend_name)
+            logger.info("Attempting fallback backend: %s", backend_name,
+                        extra={"event": "backend_start", "backend": backend_name, "is_primary": False})
+            start_time = time.perf_counter()
 
             try:
                 async for event in backend.run(
@@ -141,14 +156,21 @@ class AgentRouter:
                     yield event
 
                     if event.type == "done":
+                        latency_ms = (time.perf_counter() - start_time) * 1000
+                        logger.info("Fallback backend '%s' completed successfully", backend_name,
+                                    extra={"event": "backend_success", "backend": backend_name, 
+                                           "latency_ms": latency_ms, "is_primary": False})
                         return
 
             except Exception as exc:
+                latency_ms = (time.perf_counter() - start_time) * 1000
                 last_error = str(exc)
                 logger.warning(
                     "Fallback backend '%s' failed: %s",
                     backend_name,
                     exc,
+                    extra={"event": "backend_failure", "backend": backend_name, 
+                           "error": last_error, "latency_ms": latency_ms, "is_primary": False}
                 )
 
         # All backends failed
