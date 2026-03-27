@@ -201,6 +201,26 @@ class Settings(BaseSettings):
         description=("Ordered list of fallback backends to try if the primary backend fails"),
     )
 
+    # Advanced Reliability Layer
+    agent_max_retries: int = Field(
+        default=3, ge=0, le=10, description="Max transient-error retries per backend. 0 = disable retry."
+    )
+    agent_retry_base_delay: float = Field(
+        default=1.0, ge=0.0, description="Base delay in seconds for AWS Full Jitter exponential backoff."
+    )
+    agent_retry_max_delay: float = Field(
+        default=30.0, ge=0.0, description="Maximum delay cap in seconds for a single backoff attempt."
+    )
+    agent_max_total_retry_time: float = Field(
+        default=60.0, ge=0.0, description="Global budget (seconds) bounding total retry latency before fast-failing."
+    )
+    agent_circuit_breaker_threshold: int = Field(
+        default=5, ge=1, description="Number of consecutive definitive failures before a backend trips OPEN."
+    )
+    agent_circuit_breaker_timeout: float = Field(
+        default=60.0, ge=0.0, description="Seconds to wait before transitioning an OPEN circuit to HALF-OPEN for probing."
+    )
+
     # Claude Agent SDK Settings
     claude_sdk_provider: str = Field(
         default="anthropic",

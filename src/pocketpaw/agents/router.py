@@ -2,7 +2,8 @@
 
 Uses the backend registry to lazily discover and instantiate the
 configured agent backend. Supports optional user-configured fallback
-backends if the primary backend fails.
+backends if the primary backend fails. Integrates Circuit Breakers
+and distributed retry policies.
 """
 
 import logging
@@ -12,6 +13,8 @@ from typing import Any
 from pocketpaw.agents.backend import BackendInfo
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.registry import get_backend_class
+from pocketpaw.agents.retry import with_retry
+from pocketpaw.agents.circuit_breaker import CircuitBreaker, CircuitOpenException
 from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -29,11 +32,24 @@ class AgentRouter:
 
         # Cache for fallback backend instances
         self._fallback_instances: dict[str, Any] = {}
+        
+        # Protects individual backends from retry storms
+        self._circuit_breakers: dict[str, CircuitBreaker] = {}
 
         # Optional fallback backends
         self._fallback_backends: list[str] = settings.fallback_backends
 
         self._initialize_backend()
+
+    def _get_circuit_breaker(self, backend_name: str) -> CircuitBreaker:
+        """Get or create the circuit breaker for a given backend."""
+        if backend_name not in self._circuit_breakers:
+            self._circuit_breakers[backend_name] = CircuitBreaker(
+                backend_name=backend_name,
+                failure_threshold=getattr(self.settings, "agent_circuit_breaker_threshold", 5),
+                recovery_timeout=getattr(self.settings, "agent_circuit_breaker_timeout", 60.0),
+            )
+        return self._circuit_breakers[backend_name]
 
     def _initialize_backend(self) -> None:
         """Initialize the primary backend."""
@@ -87,6 +103,33 @@ class AgentRouter:
             )
             return None
 
+    def _wrap_backend_execution(self, backend: Any, backend_name: str, message: str, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        """Wrap backend execution with Distributed Retry + Circuit Breaker layers."""
+        cb = self._get_circuit_breaker(backend_name)
+
+        # Retry config mapping (using getattr for safety if user forgot to config_patch)
+        max_retries = getattr(self.settings, "agent_max_retries", 3)
+        base_delay = getattr(self.settings, "agent_retry_base_delay", 1.0)
+        max_delay = getattr(self.settings, "agent_retry_max_delay", 30.0)
+        max_total_retry_time = getattr(self.settings, "agent_max_total_retry_time", 60.0)
+
+        # 1. Innermost layer: Retry wrapper catches transient errors locally.
+        retriable_gen = with_retry(
+            backend.run, 
+            message,
+            retry_safe=True,  # Default LLM chats are safe to retry
+            max_retries=max_retries,
+            base_delay=base_delay,
+            max_delay=max_delay,
+            max_total_retry_time=max_total_retry_time,
+            backend_name_for_logs=backend_name,
+            **kwargs
+        )
+
+        # 2. Outermost layer: Circuit Breaker tracks definitive wins/losses 
+        #    after retries. Rejects instantly if OPEN.
+        return cb.wrap_generator(retriable_gen)
+
     async def run(
         self,
         message: str,
@@ -95,63 +138,52 @@ class AgentRouter:
         history: list[dict] | None = None,
         session_key: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        """Run the agent with optional fallback backends."""
+        """Run the agent through primary backend -> fallback backends until success."""
 
         last_error: str | None = None
+        run_kwargs = {
+            "system_prompt": system_prompt,
+            "history": history,
+            "session_key": session_key
+        }
 
-        # Primary backend (streaming, no buffering, no error-event fallback)
-        if self._backend is not None:
+        # Iteration sequence: [primary] + [fallbacks]
+        backends_to_try = []
+        if self._backend and self._active_backend_name:
+            backends_to_try.append((self._active_backend_name, self._backend))
+        
+        for name in self._fallback_backends:
+            fallback_backend = self._get_fallback_backend(name)
+            if fallback_backend:
+                backends_to_try.append((name, fallback_backend))
+
+        # Core Routing Pipeline
+        for backend_name, backend in backends_to_try:
             try:
-                async for event in self._backend.run(
-                    message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
-                ):
+                # Returns fully wrapped generator representing this backend's execution.
+                gen = self._wrap_backend_execution(backend, backend_name, message, **run_kwargs)
+                
+                async for event in gen:
                     yield event
-
                     if event.type == "done":
-                        return
+                        return  # Success, terminate
 
-            except Exception as exc:
-                last_error = str(exc)
-                logger.warning(
-                    "Primary backend '%s' failed: %s",
-                    self._active_backend_name,
-                    exc,
-                )
-
-        # Fallback backends
-        for backend_name in self._fallback_backends:
-            backend = self._get_fallback_backend(backend_name)
-
-            if backend is None:
-                logger.warning("Fallback backend '%s' unavailable", backend_name)
+            except CircuitOpenException:
+                # Fast fallback: logged by CircuitBreaker already.
+                last_error = f"Circuit breaker OPEN for {backend_name}. Skipping."
+                logger.info(last_error)
                 continue
 
-            logger.info("Attempting fallback backend: %s", backend_name)
-
-            try:
-                async for event in backend.run(
-                    message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
-                ):
-                    yield event
-
-                    if event.type == "done":
-                        return
-
             except Exception as exc:
-                last_error = str(exc)
+                # Final failure after retries were exhausted (or unretriable error).
+                last_error = f"[{backend_name}] Failed definitively: {exc}"
                 logger.warning(
-                    "Fallback backend '%s' failed: %s",
-                    backend_name,
-                    exc,
+                    "Backend '%s' failed in router pipeline: %s", 
+                    backend_name, exc,
+                    extra={"event": "router_pipeline_failure", "backend": backend_name}
                 )
 
-        # All backends failed
+        # If we reach here, all configured backends failed or skipped.
         yield AgentEvent(
             type="error",
             content=last_error or "All configured backends failed",
