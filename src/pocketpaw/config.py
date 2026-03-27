@@ -200,6 +200,11 @@ class Settings(BaseSettings):
         default_factory=list,
         description=("Ordered list of fallback backends to try if the primary backend fails"),
     )
+    agent_execution_timeout_seconds: int = Field(
+        default=300,
+        gt=0,
+        description="Global timeout in seconds for a single agent execution (run) call.",
+    )
 
     # Claude Agent SDK Settings
     claude_sdk_provider: str = Field(

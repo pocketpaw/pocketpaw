@@ -5,6 +5,7 @@ configured agent backend. Supports optional user-configured fallback
 backends if the primary backend fails.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -99,57 +100,68 @@ class AgentRouter:
 
         last_error: str | None = None
 
-        # Primary backend (streaming, no buffering, no error-event fallback)
-        if self._backend is not None:
-            try:
-                async for event in self._backend.run(
-                    message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
-                ):
-                    yield event
+        # Core routing loop with global execution timeout
+        try:
+            async with asyncio.timeout(self.settings.agent_execution_timeout_seconds):
+                # Primary backend (streaming, no buffering, no error-event fallback)
+                if self._backend is not None:
+                    try:
+                        async for event in self._backend.run(
+                            message,
+                            system_prompt=system_prompt,
+                            history=history,
+                            session_key=session_key,
+                        ):
+                            yield event
 
-                    if event.type == "done":
-                        return
+                            if event.type == "done":
+                                return
 
-            except Exception as exc:
-                last_error = str(exc)
-                logger.warning(
-                    "Primary backend '%s' failed: %s",
-                    self._active_backend_name,
-                    exc,
-                )
+                    except Exception as exc:
+                        last_error = str(exc)
+                        logger.warning(
+                            "Primary backend '%s' failed: %s",
+                            self._active_backend_name,
+                            exc,
+                        )
 
-        # Fallback backends
-        for backend_name in self._fallback_backends:
-            backend = self._get_fallback_backend(backend_name)
+                # Fallback backends
+                for backend_name in self._fallback_backends:
+                    backend = self._get_fallback_backend(backend_name)
 
-            if backend is None:
-                logger.warning("Fallback backend '%s' unavailable", backend_name)
-                continue
+                    if backend is None:
+                        logger.warning("Fallback backend '%s' unavailable", backend_name)
+                        continue
 
-            logger.info("Attempting fallback backend: %s", backend_name)
+                    logger.info("Attempting fallback backend: %s", backend_name)
 
-            try:
-                async for event in backend.run(
-                    message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
-                ):
-                    yield event
+                    try:
+                        async for event in backend.run(
+                            message,
+                            system_prompt=system_prompt,
+                            history=history,
+                            session_key=session_key,
+                        ):
+                            yield event
 
-                    if event.type == "done":
-                        return
+                            if event.type == "done":
+                                return
 
-            except Exception as exc:
-                last_error = str(exc)
-                logger.warning(
-                    "Fallback backend '%s' failed: %s",
-                    backend_name,
-                    exc,
-                )
+                    except Exception as exc:
+                        last_error = str(exc)
+                        logger.warning(
+                            "Fallback backend '%s' failed: %s",
+                            backend_name,
+                            exc,
+                        )
+        except TimeoutError:
+            logger.warning("Agent execution timed out after %ds",
+                           self.settings.agent_execution_timeout_seconds)
+            yield AgentEvent(
+                type="error",
+                content=f"Agent execution timed out after {self.settings.agent_execution_timeout_seconds} seconds."
+            )
+            return
 
         # All backends failed
         yield AgentEvent(
