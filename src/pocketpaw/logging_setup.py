@@ -44,34 +44,55 @@ class SecretFilter(logging.Filter):
         return True
 
 
+class CorrelationIdFilter(logging.Filter):
+    """Inject the current correlation ID into log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from pocketpaw.context import get_correlation_id
+
+        corrid = get_correlation_id()
+        record.correlation_id = corrid if corrid else "-"
+        return True
+
+
 def setup_logging(level: str = "INFO") -> None:
     """Configure beautiful logging with Rich.
 
     Args:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
     """
+    # Define our standard trace format
+    log_format = "[%(correlation_id)s] %(message)s"
+
+    # Create filters
+    corrid_filter = CorrelationIdFilter()
+    secret_filter = SecretFilter()
+
     try:
         from rich.console import Console
         from rich.logging import RichHandler
 
         # Create console for rich output
         console = Console(stderr=True)
+        
+        # Create Rich handler
+        rich_handler = RichHandler(
+            console=console,
+            show_time=True,
+            show_path=False,  # Cleaner output
+            rich_tracebacks=True,
+            tracebacks_show_locals=False,
+            markup=True,
+        )
+        rich_handler.addFilter(corrid_filter)
+        rich_handler.addFilter(secret_filter)
 
         # Configure root logger with Rich handler
         logging.basicConfig(
             level=getattr(logging, level.upper(), logging.INFO),
-            format="%(message)s",
+            format=log_format,
             datefmt="[%X]",
-            handlers=[
-                RichHandler(
-                    console=console,
-                    show_time=True,
-                    show_path=False,  # Cleaner output
-                    rich_tracebacks=True,
-                    tracebacks_show_locals=False,
-                    markup=True,
-                )
-            ],
+            handlers=[rich_handler],
         )
 
         # Reduce noise from third-party libraries
@@ -83,15 +104,21 @@ def setup_logging(level: str = "INFO") -> None:
 
     except ImportError:
         # Fallback to basic logging if rich not installed
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.addFilter(corrid_filter)
+        stream_handler.addFilter(secret_filter)
+        
         logging.basicConfig(
             level=getattr(logging, level.upper(), logging.INFO),
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            handlers=[logging.StreamHandler(sys.stderr)],
+            format=f"%(asctime)s - %(name)s - %(levelname)s - {log_format}",
+            handlers=[stream_handler],
         )
         logging.warning("Rich not installed, using basic logging")
 
-    # Attach secret scrubbing filter to root logger
-    logging.getLogger().addFilter(SecretFilter())
+    # Also attach to root logger for good measure
+    root_logger = logging.getLogger()
+    root_logger.addFilter(corrid_filter)
+    root_logger.addFilter(secret_filter)
 
     # Attach PII scrubbing filter if enabled
     try:

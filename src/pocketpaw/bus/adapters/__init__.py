@@ -174,6 +174,29 @@ class BaseChannelAdapter(ABC):
         ...
 
     async def _publish_inbound(self, message: InboundMessage) -> None:
-        """Helper to publish inbound messages."""
+        """Helper to publish inbound messages.
+        
+        Injects a correlation_id if it's missing to ensure traceability.
+        """
+        from pocketpaw.context import generate_correlation_id, set_correlation_id
+
         if self._bus:
+            # If the adapter didn't already set a correlation_id, generate one now.
+            if message.correlation_id == "unset":
+                corrid = generate_correlation_id()
+                # Reconstruct the frozen dataclass with the ID
+                message = InboundMessage(
+                    channel=message.channel,
+                    sender_id=message.sender_id,
+                    chat_id=message.chat_id,
+                    content=message.content,
+                    correlation_id=corrid,
+                    timestamp=message.timestamp,
+                    media=message.media,
+                    metadata=message.metadata,
+                )
+            
+            # Set the ID in the current async context for this task's logging
+            set_correlation_id(message.correlation_id)
+            
             await self._bus.publish_inbound(message)

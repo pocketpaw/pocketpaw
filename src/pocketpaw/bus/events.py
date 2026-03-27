@@ -39,6 +39,7 @@ class InboundMessage:
     sender_id: str
     chat_id: str
     content: str
+    correlation_id: str = field(default_factory=lambda: "unset")
     timestamp: datetime = field(default_factory=datetime.now)
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -55,6 +56,7 @@ class InboundMessage:
             sender_id=self.sender_id,
             chat_id=self.chat_id,
             content=new_content,
+            correlation_id=self.correlation_id,
             timestamp=self.timestamp,
             media=self.media,
             metadata=self.metadata,
@@ -68,6 +70,7 @@ class OutboundMessage:
     channel: Channel
     chat_id: str
     content: str
+    correlation_id: str = field(default_factory=lambda: "unset")
     reply_to: str | None = None
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -82,5 +85,6 @@ class SystemEvent:
     """Internal system events (tool execution, errors, etc.)."""
 
     event_type: str  # "tool_start", "tool_end", "error", "agent_start", "agent_end"
+    correlation_id: str = field(default_factory=lambda: "unset")
     data: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
