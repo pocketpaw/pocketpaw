@@ -387,26 +387,27 @@ def _resolve_subargs(args) -> None:
         args.limit = defaults.get(cmd, 20)
 
 
-def main() -> None:
-    """Main entry point."""
+def main():
     parser = _build_parser()
     args = parser.parse_args()
-    channel_flags = [
-    args.discord,
-    args.slack,
-    args.whatsapp,
-    args.signal,
-    args.matrix,
-    args.teams,
-    args.gchat,
-]
 
-if args.telegram and any(channel_flags):
-    parser.error("--telegram cannot be combined with other channel flags")
-
-# Fail fast if optional deps are missing for the chosen mode
-_check_extras_installed(args)
     
+    channel_flags = [
+        getattr(args, "discord", False),
+        getattr(args, "slack", False),
+        getattr(args, "whatsapp", False),
+        getattr(args, "signal", False),
+        getattr(args, "matrix", False),
+        getattr(args, "teams", False),
+        getattr(args, "gchat", False),
+    ]
+
+    if getattr(args, "telegram", False) and any(channel_flags):
+        parser.error("--telegram cannot be combined with other channel flags")
+
+    
+    _check_extras_installed(args)
+
     _resolve_subargs(args)
 
     # ── Early-exit commands (no settings, health, or env setup needed) ──
@@ -431,9 +432,6 @@ _check_extras_installed(args)
     if args.doctor:
         exit_code = _run_async(run_doctor())
         raise SystemExit(exit_code)
-
-    # Fail fast if optional deps are missing for the chosen mode
-    _check_extras_installed(args)
 
     settings = get_settings()
 
