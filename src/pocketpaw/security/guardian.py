@@ -112,7 +112,7 @@ Respond with valid JSON only:
 
         try:
             response = await self.client.messages.create(
-                model=self.settings.anthropic_model,  # Use same model or faster one
+                model="claude-haiku-4-5-20251001",  # Hardcoded fast/cheap model for quick scans
                 max_tokens=100,
                 system=self.SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": f"Command: {command}"}],

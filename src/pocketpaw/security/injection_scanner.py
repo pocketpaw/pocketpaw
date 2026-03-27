@@ -133,6 +133,10 @@ class InjectionScanner:
     Tier 2: Optional LLM deep scan (Haiku classifier) for suspicious content.
     """
 
+    def __init__(self):
+        # Keep track of recent deep scans per source (timestamps)
+        self._rate_limits: dict[str, list[float]] = {}
+
     @staticmethod
     def _normalize(text: str) -> str:
         """Normalize Unicode to defeat homoglyph and encoding obfuscation.
@@ -208,6 +212,20 @@ class InjectionScanner:
         # Only deep scan if heuristic flagged something
         if result.threat_level == ThreatLevel.NONE:
             return result
+
+        import time
+
+        now = time.monotonic()
+        history = self._rate_limits.setdefault(source, [])
+        # Prune older than 60s
+        self._rate_limits[source] = [ts for ts in history if now - ts < 60.0]
+        
+        # Max 10 deep scans per minute per source
+        if len(self._rate_limits[source]) >= 10:
+            logger.warning("Deep scan rate limit exceeded for source %s, using heuristic fallback", source)
+            return result
+        
+        self._rate_limits[source].append(now)
 
         try:
             from pocketpaw.config import get_settings

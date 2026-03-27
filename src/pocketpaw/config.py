@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -44,8 +43,8 @@ _API_KEY_PATTERNS = {
         "name": "OpenRouter API key",
     },
     "telegram_bot_token": {
-        "pattern": re.compile(r"^\d+:AA[A-Za-z0-9_-]{30,}$"),
-        "example": "123456789:AAH...",
+        "pattern": re.compile(r"^\d+:[A-Za-z0-9_-]+$"),
+        "example": "123456789:ABCdef...",
         "name": "Telegram bot token",
     },
 }
@@ -113,8 +112,7 @@ def _warn_old_config() -> None:
         logger.warning(
             "Found old config directory at ~/.pocketclaw/. "
             "PocketPaw now uses ~/.pocketpaw/. "
-            "To keep your settings, run:\n"
-            "  cp -r ~/.pocketclaw/* ~/.pocketpaw/\n"
+            "To keep your settings, copy the contents of the old directory to the new directory. "
             "Then remove the old directory when you're satisfied everything works."
         )
 
@@ -900,8 +898,8 @@ class Settings(BaseSettings):
         if config_path.exists():
             try:
                 existing = json.loads(config_path.read_text())
-            except (json.JSONDecodeError, Exception):
-                pass
+            except Exception as exc:
+                logger.warning("Error reading existing config.json during save: %s", exc)
 
         # Dump all fields with JSON-mode serialization (converts Path→str, etc.)
         all_fields = self.model_dump(mode="json")
@@ -936,8 +934,10 @@ class Settings(BaseSettings):
         if config_path.exists():
             try:
                 data = json.loads(config_path.read_text())
-            except (json.JSONDecodeError, Exception):
-                pass
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse config.json (%s). Starting with default settings.", exc)
+            except Exception as exc:
+                logger.warning("Error reading config.json (%s).", exc)
 
         # Overlay secrets from encrypted store (falls back to config.json values)
         store = get_credential_store()
@@ -955,12 +955,15 @@ class Settings(BaseSettings):
         return cls()
 
 
-@lru_cache
+_settings_cache: Settings | None = None
+
+
 def get_settings(force_reload: bool = False) -> Settings:
     """Get cached settings instance."""
-    if force_reload:
-        get_settings.cache_clear()
-    return Settings.load()
+    global _settings_cache
+    if force_reload or _settings_cache is None:
+        _settings_cache = Settings.load()
+    return _settings_cache
 
 
 def get_access_token() -> str:

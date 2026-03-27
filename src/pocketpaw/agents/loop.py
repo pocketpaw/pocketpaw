@@ -85,8 +85,11 @@ class AgentLoop:
     openai_agents, google_adk, codex_cli, opencode, or copilot_sdk).
     """
 
+    @property
+    def settings(self):
+        return get_settings()
+
     def __init__(self):
-        self.settings = get_settings()
         self.bus = get_message_bus()
         self.memory = get_memory_manager()
         self.context_builder = AgentContextBuilder(memory_manager=self.memory)

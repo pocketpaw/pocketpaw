@@ -246,7 +246,7 @@ def create_app(settings: Settings) -> FastAPI:
 </head>
 <body>
     <div class="container">
-        <div class="logo">🦀</div>
+        <div class="logo">🐾</div>
         <h1>PocketPaw Setup</h1>
         <p class="tagline">Your AI agent, on your machine</p>
         

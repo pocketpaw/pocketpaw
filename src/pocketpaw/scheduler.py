@@ -491,8 +491,15 @@ class ReminderScheduler:
 
     def format_time_remaining(self, reminder: dict) -> str:
         """Format the time remaining for a reminder."""
-        trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
-        delta = trigger_time - datetime.now(tz=UTC)
+        if reminder.get("type", "one-shot") == "recurring":
+            job = self.scheduler.get_job(reminder["id"])
+            if job and job.next_run_time:
+                delta = job.next_run_time - datetime.now(tz=UTC)
+            else:
+                return "scheduled"
+        else:
+            trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
+            delta = trigger_time - datetime.now(tz=UTC)
 
         if delta.total_seconds() < 0:
             return "past"

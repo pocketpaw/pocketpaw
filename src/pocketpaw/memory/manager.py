@@ -405,8 +405,9 @@ class MemoryManager:
 
         # Drop from oldest until within budget
         result = list(messages)
-        while len(result) > 1 and sum(len(m["content"]) for m in result) > char_budget:
-            result.pop(0)
+        while len(result) > 1 and total > char_budget:
+            dropped = result.pop(0)
+            total -= len(dropped["content"])
 
         # If single remaining message still exceeds budget, truncate it
         if result and len(result[0]["content"]) > char_budget:
