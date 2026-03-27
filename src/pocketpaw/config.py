@@ -18,9 +18,8 @@ import logging
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
-
-from pydantic import Field
+from typing import Literal, Self
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -878,6 +877,34 @@ class Settings(BaseSettings):
     max_concurrent_conversations: int = Field(
         default=5, gt=0, description="Max parallel conversations processed simultaneously"
     )
+
+    @model_validator(mode="after")
+    def validate_backend_auth(self) -> Self:
+        """Validate that the selected agent backend has necessary authentication."""
+        backend = self.agent_backend
+
+        if backend == "claude_agent_sdk":
+            if self.claude_sdk_provider == "anthropic" and not (
+                self.anthropic_api_key or self.claude_code_oauth_token
+            ):
+                raise ValueError(
+                    "claude_agent_sdk (anthropic) requires either anthropic_api_key "
+                    "or claude_code_oauth_token."
+                )
+        elif backend == "openai_agents":
+            if self.openai_agents_provider == "openai" and not self.openai_api_key:
+                raise ValueError("openai_agents requires openai_api_key.")
+        elif backend == "google_adk":
+            if self.google_adk_provider == "google" and not self.google_api_key:
+                raise ValueError("google_adk requires google_api_key.")
+        elif backend == "codex_cli" and not self.openai_api_key:
+            raise ValueError("codex_cli requires openai_api_key.")
+        elif backend == "copilot_sdk":
+            if self.copilot_sdk_provider == "copilot" and not self.openai_api_key:
+                # Copilot SDK often uses openai_api_key as its proxy/auth if configured
+                pass
+        
+        return self
 
     def save(self) -> None:
         """Save settings to config file.
