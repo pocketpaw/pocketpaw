@@ -83,7 +83,7 @@ class TestValidateApiKey:
         assert "Telegram bot token" in warning
 
     def test_valid_telegram_token_no_aa_prefix(self):
-        """Telegram token without AA prefix after colon should pass (as per updated relaxed pattern)."""
+        """Telegram token without AA prefix should pass."""
         is_valid, warning = validate_api_key(
             "telegram_bot_token", "123456789:XYH1234567890abcdefghijklmnopqrstuv"
         )
