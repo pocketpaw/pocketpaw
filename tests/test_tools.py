@@ -1,7 +1,7 @@
 """Unit tests for PocketPaw tools."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -117,24 +117,38 @@ class TestFetchTool:
 class TestScreenshotTool:
     """Tests for screenshot tool."""
 
-    def test_take_screenshot_returns_bytes_or_none(self):
-        """Screenshot should return bytes or None."""
+    def test_take_screenshot_returns_bytes_or_str(self):
+        """Screenshot should return bytes on success, or an error string on failure."""
         from pocketpaw.tools import screenshot
 
         result = screenshot.take_screenshot()
 
-        # Should be bytes or None (depending on display availability)
-        assert result is None or isinstance(result, bytes)
+        # Should be bytes (success) or str (error message — e.g. on headless CI)
+        assert isinstance(result, bytes | str)
 
     @patch("pocketpaw.tools.screenshot.PYAUTOGUI_AVAILABLE", False)
     def test_take_screenshot_without_pyautogui(self):
-        """Should return None when pyautogui unavailable."""
+        """Should return a descriptive error string when pyautogui is unavailable."""
         from pocketpaw.tools import screenshot
 
-        # Force reimport to pick up patched value
         with patch.object(screenshot, "PYAUTOGUI_AVAILABLE", False):
             result = screenshot.take_screenshot()
-            assert result is None
+            assert isinstance(result, str)
+            assert "pyautogui" in result.lower()
+
+    def test_take_screenshot_handles_exception(self):
+        """Should return a descriptive error string when pyautogui raises."""
+        from pocketpaw.tools import screenshot
+
+        mock_pyautogui = MagicMock()
+        mock_pyautogui.screenshot.side_effect = OSError("No display")
+        with (
+            patch.object(screenshot, "PYAUTOGUI_AVAILABLE", True),
+            patch.object(screenshot, "pyautogui", mock_pyautogui),
+        ):
+            result = screenshot.take_screenshot()
+            assert isinstance(result, str)
+            assert "Screenshot failed" in result
 
 
 class TestConfig:

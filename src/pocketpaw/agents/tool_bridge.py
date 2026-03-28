@@ -23,7 +23,7 @@ import logging
 from typing import Any
 
 from pocketpaw.tools.policy import ToolPolicy
-from pocketpaw.tools.protocol import BaseTool
+from pocketpaw.tools.protocol import BaseTool, normalize_schema
 from pocketpaw.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -126,14 +126,8 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
 
         defn = tool.definition
 
-        # Sanitize JSON schema: strict providers (e.g. Groq) reject schemas
-        # where 'required' is present but 'properties' is empty or missing.
-        params_schema = dict(defn.parameters) if defn.parameters else {"type": "object"}
-        props = params_schema.get("properties")
-        if not props and "required" in params_schema:
-            params_schema.pop("required")
-        if not props and "properties" in params_schema:
-            params_schema.pop("properties")
+        # Reuse the shared schema normalizer so zero-arg tools survive strict OpenAI validation.
+        params_schema = normalize_schema(defn.parameters or {"type": "object"})
 
         ft = FunctionTool(
             name=defn.name,

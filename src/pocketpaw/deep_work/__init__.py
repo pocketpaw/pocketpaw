@@ -4,6 +4,7 @@
 #   Added PawKitConfig export. Retry/timeout/output fields propagated through.
 # Updated: 2026-02-18 — Added GoalParser and GoalAnalysis exports.
 # Updated: 2026-02-12 — Added executor integration, public API functions.
+# Updated: 2026-03-26 — Added SimulationClock and TickSnapshot exports (issue #633).
 #
 # Provides a singleton DeepWorkSession and convenience functions for
 # starting and managing Deep Work projects.
@@ -20,6 +21,7 @@
 
 import logging
 
+from pocketpaw.deep_work.clock import SimulationClock, TickSnapshot
 from pocketpaw.deep_work.goal_parser import GoalAnalysis, GoalParser
 from pocketpaw.deep_work.models import (
     AgentSpec,
@@ -38,7 +40,9 @@ __all__ = [
     "PlannerResult",
     "Project",
     "ProjectStatus",
+    "SimulationClock",
     "TaskSpec",
+    "TickSnapshot",
     "get_deep_work_session",
     "reset_deep_work_session",
     "parse_goal",

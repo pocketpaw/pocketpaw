@@ -147,6 +147,30 @@ class TestBuildOpenAIFunctionTools:
             # Only remember and recall should pass minimal profile
             assert len(result) == 2
 
+    @patch("pocketpaw.agents.tool_bridge._instantiate_all_tools")
+    def test_normalizes_empty_object_schema_for_openai_tools(self, mock_instantiate):
+        """Zero-arg tools keep an explicit empty object schema for strict providers."""
+        mock_tool = MagicMock()
+        mock_tool.name = "gmail_list_labels"
+        mock_tool.definition.name = "gmail_list_labels"
+        mock_tool.definition.description = "List Gmail labels"
+        mock_tool.definition.parameters = {"type": "object", "properties": {}}
+        mock_instantiate.return_value = [mock_tool]
+
+        mock_ft_cls = MagicMock()
+        with patch.dict("sys.modules", {"agents": MagicMock(FunctionTool=mock_ft_cls)}):
+            from pocketpaw.agents.tool_bridge import build_openai_function_tools
+
+            build_openai_function_tools(Settings())
+
+        kwargs = mock_ft_cls.call_args.kwargs
+        # The bridge should preserve an explicit empty object schema for zero-arg tools.
+        assert kwargs["params_json_schema"] == {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+
 
 class TestMakeInvokeCallback:
     @pytest.mark.asyncio

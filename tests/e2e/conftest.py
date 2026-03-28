@@ -14,14 +14,33 @@
 # Run headed (see browser): pytest tests/e2e/ -v --headed
 #
 # If you see "fixture 'page' not found", it means Playwright browsers are not installed.
-
 import os
+import pathlib
 import socket
 import time
 from contextlib import closing
 from multiprocessing import Process
 
 import pytest
+
+
+def _playwright_browsers_installed() -> bool:
+    """Check if Playwright browsers are installed."""
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser_path = p.chromium.executable_path
+            return pathlib.Path(browser_path).exists()
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="session", autouse=True)
+def require_playwright_browsers():
+    """Skip all e2e tests if Playwright browsers are not installed."""
+    if not _playwright_browsers_installed():
+        pytest.skip("Playwright Chromium not installed, skipping e2e tests")
 
 
 def find_free_port() -> int:
@@ -63,26 +82,15 @@ def dashboard_port() -> int:
 
 @pytest.fixture(scope="session")
 def dashboard_server(dashboard_port: int):
-    """Start the dashboard server for the test session.
-
-    Yields the base URL for the dashboard.
-    """
-    # Set test environment
+    """Start the dashboard server for the test session."""
     os.environ["POCKETPAW_TEST_MODE"] = "1"
-
-    # Start server in subprocess
     process = Process(target=run_dashboard, args=(dashboard_port,))
     process.start()
-
-    # Wait for server to be ready
     if not wait_for_server(dashboard_port):
         process.terminate()
         process.join(timeout=5)
         pytest.fail(f"Dashboard server failed to start on port {dashboard_port}")
-
     yield f"http://127.0.0.1:{dashboard_port}"
-
-    # Cleanup
     process.terminate()
     process.join(timeout=5)
     if process.is_alive():

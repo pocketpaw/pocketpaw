@@ -3,18 +3,27 @@
 # Updated: 2026-02-12 — Treat SKIPPED status same as DONE for blocker resolution
 #   and project completion checks.
 #   Optimized: use get_project_tasks (no 100-limit), concurrent dispatch.
+# Updated: 2026-03-26 — Added optional SimulationClock integration for tick-synchronized
+#   dispatch mode (issue #633).
 #
 # Key features:
 # - get_ready_tasks: finds tasks with all blockers satisfied (DONE or SKIPPED)
 # - on_task_completed: auto-dispatches newly unblocked tasks
 # - validate_graph: cycle detection via Kahn's algorithm (works with Task and TaskSpec)
 # - get_execution_order: groups tasks by dependency level (works with Task and TaskSpec)
+# - run_tick_synchronized: dispatch all ready tasks per tick, wait, then advance clock
+
+from __future__ import annotations
 
 import asyncio
 import logging
 from collections import deque
+from typing import TYPE_CHECKING
 
 from pocketpaw.mission_control.models import Task, TaskStatus, now_iso
+
+if TYPE_CHECKING:
+    from pocketpaw.deep_work.clock import SimulationClock, TickSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +49,19 @@ class DependencyScheduler:
     is responsible for wiring on_task_completed to the appropriate bus events.
     """
 
-    def __init__(self, manager, executor, human_router=None):
+    def __init__(self, manager, executor, human_router=None, clock: SimulationClock | None = None):
         """Initialize the scheduler.
 
         Args:
             manager: MissionControlManager instance (list_tasks, get_task, etc.)
             executor: MCTaskExecutor instance (execute_task_background)
             human_router: Optional human notification router (notify_human_task, notify_review_task)
+            clock: Optional SimulationClock for tick-synchronized dispatch mode.
         """
         self.manager = manager
         self.executor = executor
         self.human_router = human_router
+        self.clock = clock
 
     async def get_ready_tasks(self, project_id: str) -> list[Task]:
         """Return tasks in project where all blockers are satisfied.
@@ -273,3 +284,69 @@ class DependencyScheduler:
             current_level = next_level
 
         return levels
+
+    # ------------------------------------------------------------------
+    # Tick-synchronized dispatch (SimulationClock integration, issue #633)
+    # ------------------------------------------------------------------
+
+    async def run_tick_synchronized(self, project_id: str) -> list[TickSnapshot]:
+        """Execute a project in tick-synchronized mode.
+
+        Each tick:
+        1. Gather all ready (unblocked) tasks.
+        2. Inject ``current_tick`` into each task's metadata.
+        3. Dispatch them concurrently and wait for all to complete.
+        4. Record a :class:`TickSnapshot` of task states.
+        5. Advance the clock.
+
+        Repeats until no more tasks are ready (project complete or blocked).
+
+        Requires ``self.clock`` to be set.
+
+        Args:
+            project_id: The project to execute.
+
+        Returns:
+            List of :class:`TickSnapshot` objects recorded during execution.
+
+        Raises:
+            RuntimeError: If no SimulationClock is attached.
+        """
+        if self.clock is None:
+            raise RuntimeError(
+                "run_tick_synchronized requires a SimulationClock — "
+                "pass clock= to DependencyScheduler.__init__"
+            )
+
+        from pocketpaw.deep_work.clock import TickSnapshot
+
+        while True:
+            ready = await self.get_ready_tasks(project_id)
+            if not ready:
+                break
+
+            # Stamp each task with the current tick
+            for task in ready:
+                task.metadata["simulation_tick"] = self.clock.current_tick
+                await self.manager.save_task(task)
+
+            # Dispatch all ready tasks and wait for completion
+            await asyncio.gather(*(self._dispatch_task(t) for t in ready))
+
+            # Record snapshot
+            project_tasks = await self.manager.get_project_tasks(project_id)
+            snapshot = TickSnapshot(
+                tick=self.clock.current_tick,
+                task_states={t.id: t.status.value for t in project_tasks},
+            )
+            self.clock.record_snapshot(snapshot)
+
+            # Advance clock
+            await self.clock.advance()
+
+            # Check project completion
+            done = await self.check_project_completion(project_id)
+            if done:
+                break
+
+        return self.clock.get_snapshots()
