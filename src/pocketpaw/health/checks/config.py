@@ -77,7 +77,7 @@ def check_config_permissions() -> HealthCheckResult:
             check_id="config_permissions",
             name="Config Permissions",
             category="config",
-            status="ok",
+            status="warning",
             message="Permission check skipped on Windows",
             fix_hint="",
         )
