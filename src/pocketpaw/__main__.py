@@ -386,12 +386,10 @@ def _resolve_subargs(args) -> None:
         defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}
         args.limit = defaults.get(cmd, 20)
 
-
-def main():
+def main() -> None:
+    """Main entry point."""
     parser = _build_parser()
     args = parser.parse_args()
-
-    
     channel_flags = [
         getattr(args, "discord", False),
         getattr(args, "slack", False),
@@ -401,13 +399,9 @@ def main():
         getattr(args, "teams", False),
         getattr(args, "gchat", False),
     ]
-
     if getattr(args, "telegram", False) and any(channel_flags):
         parser.error("--telegram cannot be combined with other channel flags")
-
-    
     _check_extras_installed(args)
-
     _resolve_subargs(args)
 
     # ── Early-exit commands (no settings, health, or env setup needed) ──
