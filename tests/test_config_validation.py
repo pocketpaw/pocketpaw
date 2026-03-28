@@ -64,10 +64,17 @@ class TestValidateApiKey:
 
     def test_invalid_telegram_token_wrong_format(self):
         """Telegram token with wrong format should fail."""
-        is_valid, warning = validate_api_key("telegram_bot_token", "123456789:invalid")
+        is_valid, warning = validate_api_key("telegram_bot_token", "123456789:invalid!@#")
         assert is_valid is False
         assert "Telegram bot token" in warning
-        assert "expected format: 123456789:AAH..." in warning
+        assert "expected format: 123456789:ABCdef" in warning
+
+    def test_invalid_telegram_token_too_short(self):
+        """Telegram token shorter than 20 characters after colon should fail."""
+        is_valid, warning = validate_api_key("telegram_bot_token", "123456789:short123")
+        assert is_valid is False
+        assert "Telegram bot token" in warning
+        assert "expected format: 123456789:ABCdef" in warning
 
     def test_invalid_telegram_token_missing_colon(self):
         """Telegram token without colon separator should fail."""
@@ -75,13 +82,13 @@ class TestValidateApiKey:
         assert is_valid is False
         assert "Telegram bot token" in warning
 
-    def test_invalid_telegram_token_no_aa_prefix(self):
-        """Telegram token without AA prefix after colon should fail."""
+    def test_valid_telegram_token_no_aa_prefix(self):
+        """Telegram token without AA prefix after colon should pass (as per updated relaxed pattern)."""
         is_valid, warning = validate_api_key(
             "telegram_bot_token", "123456789:XYH1234567890abcdefghijklmnopqrstuv"
         )
-        assert is_valid is False
-        assert "Telegram bot token" in warning
+        assert is_valid is True
+        assert warning == ""
 
     # ==================== Empty Values ====================
 

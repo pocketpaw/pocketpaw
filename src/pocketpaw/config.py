@@ -44,8 +44,8 @@ _API_KEY_PATTERNS = {
         "name": "OpenRouter API key",
     },
     "telegram_bot_token": {
-        "pattern": re.compile(r"^\d+:AA[A-Za-z0-9_-]{30,}$"),
-        "example": "123456789:AAH...",
+        "pattern": re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$"),
+        "example": "123456789:ABCdef...",
         "name": "Telegram bot token",
     },
 }
@@ -148,12 +148,12 @@ def get_token_path() -> Path:
 
 
 # Telegram bot token format: numeric id + colon + alphanumeric secret
-_TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]+$")
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$")
 
 
 def validate_api_keys(settings: Settings) -> list[str]:
     """Validate **all** API keys on a :class:`Settings` instance (batch, loose).
-
+j
     Uses simple prefix checks (not the strict regexes in :func:`validate_api_key`)
     and returns a list of human-readable warnings.  Designed for advisory use
     (e.g. ``Settings.save()`` logs warnings) — callers must **never** block a
