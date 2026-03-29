@@ -260,7 +260,6 @@ class NeonizeAdapter(BaseChannelAdapter):
             except Exception as e:
                 logger.debug(f"Neonize disconnect: {e}")
 
-            # Restore: Cancel any pending connection attempt
             if self._connect_future:
                 self._connect_future.cancel()
 
@@ -332,9 +331,3 @@ class NeonizeAdapter(BaseChannelAdapter):
                 await self._client.send_message(jid, text)
         except Exception as e:
             logger.error(f"Neonize send error: {e}")
-
-
-
-
-
-
