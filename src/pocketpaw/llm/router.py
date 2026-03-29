@@ -33,6 +33,7 @@ class LLMRouter:
         self.settings = settings
         self.conversation_history: list[dict] = []
         self._available_backend: str | None = None
+        self._llm_client = None
 
     async def _check_ollama(self) -> bool:
         """Check if Ollama is available."""
@@ -45,31 +46,46 @@ class LLMRouter:
 
     async def _detect_backend(self) -> str | None:
         """Detect available LLM backend based on settings."""
+        from pocketpaw.llm.client import resolve_llm_client
+
         provider = self.settings.llm_provider
 
-        if provider == "ollama":
-            if await self._check_ollama():
-                return "ollama"
-            return None
-
-        if provider == "openai":
-            if self.settings.openai_api_key:
-                return "openai"
-            return None
-
-        if provider == "anthropic":
-            if self.settings.anthropic_api_key:
-                return "anthropic"
-            return None
-
-        # Auto mode - try in order: Ollama → OpenAI → Anthropic
         if provider == "auto":
-            if await self._check_ollama():
-                return "ollama"
-            if self.settings.openai_api_key:
-                return "openai"
-            if self.settings.anthropic_api_key:
-                return "anthropic"
+            llm_client = resolve_llm_client(self.settings)
+            if llm_client.provider == "ollama" and not await self._check_ollama():
+                return None
+            self._llm_client = llm_client
+            return llm_client.provider
+
+        if provider == "ollama":
+            if not await self._check_ollama():
+                return None
+            self._llm_client = resolve_llm_client(self.settings, force_provider="ollama")
+            return "ollama"
+
+        available_providers = {
+            "openai",
+            "openai_compatible",
+            "openrouter",
+            "gemini",
+            "litellm",
+            "anthropic",
+        }
+
+        if provider in available_providers:
+            if provider == "openai" and not self.settings.openai_api_key:
+                return None
+            if provider == "anthropic" and not self.settings.anthropic_api_key:
+                return None
+            if provider == "openai_compatible" and not self.settings.openai_compatible_base_url:
+                return None
+            if provider == "gemini" and not self.settings.google_api_key:
+                return None
+            if provider == "litellm" and not self.settings.litellm_api_key:
+                return None
+
+            self._llm_client = resolve_llm_client(self.settings, force_provider=provider)
+            return provider
 
         return None
 
@@ -92,7 +108,13 @@ class LLMRouter:
         try:
             if self._available_backend == "ollama":
                 response = await self._chat_ollama(message)
-            elif self._available_backend == "openai":
+            elif self._available_backend in (
+                "openai",
+                "openai_compatible",
+                "openrouter",
+                "gemini",
+                "litellm",
+            ):
                 response = await self._chat_openai(message)
             elif self._available_backend == "anthropic":
                 response = await self._chat_anthropic(message)
@@ -122,45 +144,69 @@ class LLMRouter:
             return data.get("message", {}).get("content", "No response")
 
     async def _chat_openai(self, message: str) -> str:
-        """Chat via OpenAI."""
-        from openai import AsyncOpenAI
+        """Chat via OpenAI/OpenAI-compatible endpoints."""
 
-        client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+        # Prefer LLM client adapter when available (openai_compatible, gemini, litellm,
+        # openrouter), but keep native OpenAI as fallback.
+        if self._llm_client and self._llm_client.provider != "openai":
+            client = self._llm_client.create_openai_client(timeout=120.0)
+            model = self._llm_client.model
+        else:
+            from openai import AsyncOpenAI
 
-        response = await client.chat.completions.create(
-            model=self.settings.openai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are PocketPaw, a helpful AI assistant"
-                        " running locally on the user's machine."
-                    ),
-                },
-                *self.conversation_history,
-            ],
-        )
+            client = AsyncOpenAI(api_key=self.settings.openai_api_key, timeout=120.0)
+            model = self.settings.openai_model
+
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are PocketPaw, a helpful AI assistant"
+                            " running locally on the user's machine."
+                        ),
+                    },
+                    *self.conversation_history,
+                ],
+            )
+        finally:
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                await close()
 
         if not response.choices:
             logger.warning("OpenAI returned an empty choices list; returning fallback response")
             return "I'm sorry, I received an empty response. Please try again."
+
         return response.choices[0].message.content
 
     async def _chat_anthropic(self, message: str) -> str:
-        """Chat via Anthropic."""
-        from pocketpaw.llm.client import resolve_llm_client
+        """Chat via Anthropic-compatible endpoints."""
+        if self._llm_client:
+            client = self._llm_client.create_anthropic_client(timeout=120.0)
+            model = self._llm_client.model
+        else:
+            from pocketpaw.llm.client import resolve_llm_client
 
-        llm = resolve_llm_client(self.settings, force_provider="anthropic")
-        client = llm.create_anthropic_client()
+            llm = resolve_llm_client(self.settings, force_provider="anthropic")
+            client = llm.create_anthropic_client(timeout=120.0)
+            model = self.settings.anthropic_model
 
-        response = await client.messages.create(
-            model=self.settings.anthropic_model,
-            max_tokens=4096,
-            system=(
-                "You are PocketPaw, a helpful AI assistant running locally on the user's machine."
-            ),
-            messages=self.conversation_history,
-        )
+        try:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=4096,
+                system=(
+                    "You are PocketPaw, a helpful AI assistant running locally on the user's machine."
+                ),
+                messages=self.conversation_history,
+            )
+        finally:
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                await close()
 
         if not response.content:
             logger.warning("Anthropic returned an empty content list; returning fallback response")

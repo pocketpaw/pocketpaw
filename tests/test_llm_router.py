@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pocketpaw.config import Settings
+from pocketpaw.llm.client import LLMClient
 from pocketpaw.llm.router import LLMRouter
 
 # ---------------------------------------------------------------------------
@@ -158,6 +159,55 @@ class TestChatAnthropicEmptyResponse:
             result = await router._chat_anthropic("hello")
 
         assert result == "Hi there!"
+
+
+class TestLLMRouterProviderSelection:
+    async def test_openai_compatible_selects_backend(self):
+        settings = Settings(
+            llm_provider="openai_compatible",
+            openai_compatible_api_key="sk-compat-test",
+            openai_compatible_base_url="https://api.example.com",
+            openai_compatible_model="oai-1",
+        )
+        router = LLMRouter(settings)
+
+        llm_client = LLMClient(
+            provider="openai_compatible",
+            model="oai-1",
+            api_key="sk-compat-test",
+            ollama_host=settings.ollama_host,
+            openai_compatible_base_url=settings.openai_compatible_base_url,
+        )
+
+        with patch("pocketpaw.llm.client.resolve_llm_client", return_value=llm_client):
+            backend = await router._detect_backend()
+
+        assert backend == "openai_compatible"
+        assert router._llm_client is llm_client
+
+    async def test_auto_uses_resolved_provider_from_llm_client(self):
+        settings = Settings(
+            llm_provider="auto",
+            openai_api_key="sk-test",
+            anthropic_api_key="sk-ant-test",
+        )
+        router = LLMRouter(settings)
+
+        llm_client = LLMClient(
+            provider="anthropic",
+            model="claude-instant",
+            api_key="sk-ant-test",
+            ollama_host=settings.ollama_host,
+        )
+
+        with patch("pocketpaw.llm.client.resolve_llm_client", return_value=llm_client), patch.object(
+            LLMRouter,
+            "_chat_anthropic",
+            AsyncMock(return_value="resolved anthropic"),
+        ):
+            result = await router.chat("hi")
+
+        assert result == "resolved anthropic"
 
 
 # ---------------------------------------------------------------------------
