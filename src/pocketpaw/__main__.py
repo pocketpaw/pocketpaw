@@ -20,6 +20,7 @@ Changes:
 # Force UTF-8 encoding on Windows before any imports that might produce output
 import os
 import sys
+import socket
 
 if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -169,6 +170,17 @@ def _handle_early_command(args) -> int | None:
 
     return None
 
+def find_free_port(start=8000,end=9000):
+    for port in range (start,end):
+        try:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1",port))
+                return port 
+        except OSError:
+            continue
+    raise RuntimeError("No Free Ports ,Try later ")
+
+
 
 # ── Argument parser ─────────────────────────────────────────────────────
 
@@ -257,13 +269,7 @@ Examples:
         default=None,
         help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
     )
-    parser.add_argument(
-        "--port",
-        "-p",
-        type=int,
-        default=8888,
-        help="Port for web server (default: 8888)",
-    )
+    
     parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
         "--check-ollama",
@@ -330,6 +336,14 @@ Examples:
         nargs="*",
         default=[],
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=find_free_port(),
+        help="Port for web server(default:auto detect a free port starting from 8000)"
+        
     )
 
     # ── Flags for subcommands (shared namespace) ────────────────────────
@@ -492,6 +506,10 @@ def main() -> None:
         or args.teams
         or args.gchat
     )
+    new_port = find_free_port(start=args.port)
+    if new_port != args.port:
+        print(f"  [WARN] Port {args.port} is busy — switching to port {new_port}")
+    args.port = new_port
 
     try:
         if args.command == "serve":
@@ -548,3 +566,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
