@@ -914,10 +914,9 @@ async def get_version_info():
 async def index(request: Request):
     """Serve the main dashboard page."""
     from importlib.metadata import version as get_version
-
     return templates.TemplateResponse(
-        "base.html",
-        {"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
+        name="base.html",
+        request={"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
     )
 
 
