@@ -1,6 +1,7 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-03-29: Auto-detect free port in range 8000-9000 if requested port is busy.
   - 2026-03-18: Added CLI subcommands: doctor, health, channels, skills,
                 sessions, memory, config, errors, logs.
   - 2026-02-20: Extracted diagnostics to diagnostics.py, headless runners to headless.py.
@@ -19,8 +20,8 @@ Changes:
 
 # Force UTF-8 encoding on Windows before any imports that might produce output
 import os
-import sys
 import socket
+import sys
 
 if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -170,16 +171,16 @@ def _handle_early_command(args) -> int | None:
 
     return None
 
-def find_free_port(start=8000,end=9000):
-    for port in range (start,end):
+
+def find_free_port(start=8000, end=9000):
+    for port in range(start, end):
         try:
             with socket.socket() as s:
-                s.bind(("127.0.0.1",port))
-                return port 
+                s.bind(("127.0.0.1", port))
+                return port
         except OSError:
             continue
-    raise RuntimeError("No Free Ports ,Try later ")
-
+    raise RuntimeError("No free ports available. Please free up a port and try again.")
 
 
 # ── Argument parser ─────────────────────────────────────────────────────
@@ -269,7 +270,7 @@ Examples:
         default=None,
         help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
     )
-    
+
     parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
         "--check-ollama",
@@ -342,8 +343,7 @@ Examples:
         "-p",
         type=int,
         default=find_free_port(),
-        help="Port for web server(default:auto detect a free port starting from 8000)"
-        
+        help="Port for web server(default:auto detect a free port starting from 8000)",
     )
 
     # ── Flags for subcommands (shared namespace) ────────────────────────
@@ -566,4 +566,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
