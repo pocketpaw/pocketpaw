@@ -294,6 +294,7 @@ async def test_bus_integration(bus):
 
 async def test_preflight_check_passes_when_reachable():
     """Preflight check succeeds when the host is reachable."""
-    with patch("pocketpaw.bus.adapters.neonize_adapter._tcp_probe", return_value=None):
+    with patch("pocketpaw.bus.adapters.neonize_adapter._tcp_probe", new_callable=AsyncMock):
+
         # Should not raise
         await NeonizeAdapter._preflight_connectivity_check()
