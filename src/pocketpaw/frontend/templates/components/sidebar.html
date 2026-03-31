@@ -392,15 +392,15 @@
       <div class="grid grid-cols-4 gap-1 mt-2 px-1 py-2 bg-black/20 rounded-lg">
         <div class="text-center">
           <div class="text-[10px] text-white/30">CPU</div>
-          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.cpu === 'number' ? status.cpu + '%' : status.cpu"></div>
+          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.cpu === 'number' ? status.cpu + '%' : '—'"></div>
         </div>
         <div class="text-center">
           <div class="text-[10px] text-white/30">RAM</div>
-          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.ram === 'number' ? status.ram + '%' : status.ram"></div>
+          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.ram === 'number' ? status.ram + '%' : '—'"></div>
         </div>
         <div class="text-center">
           <div class="text-[10px] text-white/30">Disk</div>
-          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.disk === 'number' ? status.disk + '%' : status.disk"></div>
+          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.disk === 'number' ? status.disk + '%' : '—'"></div>
         </div>
         <div class="text-center">
           <div class="text-[10px] text-white/30">Bat</div>
