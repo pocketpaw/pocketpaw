@@ -41,9 +41,9 @@ async def check_llm_reachable() -> HealthCheckResult:
         check_id="llm_reachable",
         name="LLM Reachable",
         category="connectivity",
-        status="ok",
+        status="warning",
         message=f"Connectivity check not implemented for {backend}",
-        fix_hint="",
+        fix_hint="Connectivity is not automatically verified. Run a test prompt to confirm.",
     )
 
 
@@ -65,9 +65,9 @@ async def _check_alt_provider_reachable(settings, provider: str) -> HealthCheckR
         check_id="llm_reachable",
         name="LLM Reachable",
         category="connectivity",
-        status="ok",
+        status="warning",
         message=f"Connectivity check not implemented for provider '{provider}'",
-        fix_hint="",
+        fix_hint="Connectivity is not automatically verified. Run a test prompt to confirm.",
     )
 
 

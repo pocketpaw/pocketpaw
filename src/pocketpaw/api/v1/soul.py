@@ -1,4 +1,9 @@
-"""Soul Protocol API endpoints."""
+"""Soul Protocol API endpoints.
+
+Updated: 2026-03-29 — v0.2.8: Enriched /soul/status with did, focus, memory_count,
+bond, core_memory. Added: GET/PATCH /soul/core-memory, POST /soul/remember,
+POST /soul/recall, POST /soul/forget.
+"""
 
 from __future__ import annotations
 
@@ -25,11 +30,29 @@ async def get_soul_status():
     result: dict = {
         "enabled": True,
         "name": soul.name,
+        "did": soul.did if hasattr(soul, "did") else None,
         "mood": getattr(state, "mood", None),
         "energy": getattr(state, "energy", None),
         "social_battery": getattr(state, "social_battery", None),
+        "focus": getattr(state, "focus", None),
+        "memory_count": soul.memory_count if hasattr(soul, "memory_count") else 0,
         "observe_count": mgr.observe_count,
     }
+
+    # v0.2.8+: Include bond state
+    if hasattr(soul, "bond") and soul.bond:
+        try:
+            result["bond"] = soul.bond.model_dump() if hasattr(soul.bond, "model_dump") else None
+        except Exception:
+            pass
+
+    # v0.2.8+: Include core memory summary
+    if hasattr(soul, "get_core_memory"):
+        try:
+            cm = soul.get_core_memory()
+            result["core_memory"] = cm.model_dump() if hasattr(cm, "model_dump") else {}
+        except Exception:
+            pass
 
     if hasattr(soul, "self_model") and soul.self_model:
         try:
@@ -40,6 +63,86 @@ async def get_soul_status():
         except Exception:
             pass
 
+    return result
+
+
+@router.get("/soul/core-memory")
+async def get_core_memory():
+    """Return the soul's core memory (persona and human description)."""
+    from pocketpaw.soul.manager import get_soul_manager
+    mgr = get_soul_manager()
+    if mgr is None or mgr.soul is None:
+        return {"error": "Soul not available"}
+    if not hasattr(mgr.soul, "get_core_memory"):
+        return {"error": "Requires soul-protocol >= 0.2.8."}
+    try:
+        cm = mgr.soul.get_core_memory()
+        return cm.model_dump() if hasattr(cm, "model_dump") else {}
+    except Exception as exc:
+        return {"error": f"Failed: {exc}"}
+
+
+@router.patch("/soul/core-memory")
+async def edit_core_memory(body: dict):
+    """Edit core memory. Body: {"persona": "...", "human": "..."}"""
+    from pocketpaw.soul.manager import get_soul_manager
+    mgr = get_soul_manager()
+    if mgr is None or mgr.soul is None:
+        return {"error": "Soul not available"}
+    try:
+        kwargs = {k: v for k, v in body.items() if k in ("persona", "human") and v}
+        if not kwargs:
+            return {"error": "Provide 'persona' or 'human'."}
+        await mgr.soul.edit_core_memory(**kwargs)
+        mgr._dirty = True
+        return {"ok": True, "updated": list(kwargs.keys())}
+    except Exception as exc:
+        return {"error": f"Failed: {exc}"}
+
+
+@router.post("/soul/remember")
+async def soul_remember(body: dict):
+    """Store a memory. Body: {"content": "...", "importance": 5}"""
+    from pocketpaw.soul.manager import get_soul_manager
+    mgr = get_soul_manager()
+    if mgr is None or mgr.soul is None:
+        return {"error": "Soul not available"}
+    content = body.get("content", "")
+    if not content:
+        return {"error": "Missing 'content'"}
+    try:
+        importance = max(1, min(10, body.get("importance", 5)))
+        mid = await mgr.soul.remember(content, importance=importance)
+        mgr._dirty = True
+        return {"ok": True, "memory_id": mid}
+    except Exception as exc:
+        return {"error": f"Failed: {exc}"}
+
+
+@router.post("/soul/recall")
+async def soul_recall(body: dict):
+    """Search memories. Body: {"query": "...", "limit": 10}"""
+    from pocketpaw.soul.manager import get_soul_manager
+    mgr = get_soul_manager()
+    if mgr is None or mgr.soul is None:
+        return {"error": "Soul not available"}
+    try:
+        memories = await mgr.soul.recall(body.get("query", ""), limit=body.get("limit", 10))
+        return [m.model_dump() if hasattr(m, "model_dump") else {"content": str(m)} for m in memories]
+    except Exception as exc:
+        return {"error": f"Failed: {exc}"}
+
+
+@router.post("/soul/forget")
+async def soul_forget(body: dict):
+    """Forget memories matching query. Body: {"query": "..."}"""
+    from pocketpaw.soul.manager import get_soul_manager
+    mgr = get_soul_manager()
+    if mgr is None or mgr.soul is None:
+        return {"error": "Soul not available"}
+    if not body.get("query"):
+        return {"error": "Missing 'query'"}
+    result = await mgr.forget(body["query"])
     return result
 
 

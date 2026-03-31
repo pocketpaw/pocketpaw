@@ -552,13 +552,35 @@ class TestCheckLlmReachable:
 
     @pytest.mark.asyncio
     async def test_unknown_backend_fallback(self):
-        """Unknown/legacy backends hit the fallback 'not implemented' path."""
+        """Unknown/unimplemented backends return warning, not ok (issue #746)."""
         settings = MagicMock()
         settings.agent_backend = "some_unknown_backend"
         with patch(_P_SETTINGS, return_value=settings):
             r = await check_llm_reachable()
-            assert r.status == "ok"
+            assert r.status == "warning"
             assert "not implemented" in r.message
+
+    @pytest.mark.asyncio
+    async def test_known_unimplemented_backends_return_warning(self):
+        """Backends without connectivity checks (copilot_sdk, deep_agents, opencode, codex_cli)
+        must return warning so doctor output is not misleading (issue #746)."""
+        for backend in ("copilot_sdk", "deep_agents", "opencode", "codex_cli"):
+            settings = MagicMock()
+            settings.agent_backend = backend
+            with patch(_P_SETTINGS, return_value=settings):
+                r = await check_llm_reachable()
+                assert r.status == "warning", f"Expected warning for {backend}, got {r.status}"
+                assert "not implemented" in r.message
+
+    @pytest.mark.asyncio
+    async def test_unknown_provider_fallback(self):
+        """Unknown providers inside _check_alt_provider_reachable return warning, not ok."""
+        from pocketpaw.health.checks.connectivity import _check_alt_provider_reachable
+
+        settings = MagicMock()
+        r = await _check_alt_provider_reachable(settings, "some_unsupported_provider")
+        assert r.status == "warning"
+        assert "not implemented" in r.message
 
 
 # =============================================================================

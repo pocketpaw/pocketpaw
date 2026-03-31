@@ -1090,7 +1090,8 @@ async def handle_tool(websocket: WebSocket, tool: str, settings: Settings, data:
                 {"type": "screenshot", "image": base64.b64encode(result).decode()}
             )
         else:
-            await websocket.send_json({"type": "error", "content": result})
+            error_msg = result if isinstance(result, str) else "Screenshot capture failed"
+            await websocket.send_json({"type": "error", "content": error_msg})
 
     elif tool == "fetch":
         from pocketpaw.tools.fetch import list_directory
