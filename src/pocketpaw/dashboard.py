@@ -916,7 +916,8 @@ async def index(request: Request):
     from importlib.metadata import version as get_version
     return templates.TemplateResponse(
         name="base.html",
-        request={"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
+        request=request, 
+        context = {"v": _static_version(), "app_version": get_version("pocketpaw")},
     )
 
 
