@@ -62,7 +62,28 @@ class LLMRouter:
                 return "anthropic"
             return None
 
-        # Auto mode - try in order: Ollama → OpenAI → Anthropic
+        if provider == "gemini":
+            if self.settings.google_api_key:
+                return "gemini"
+            return None
+
+        if provider == "openrouter":
+            if self.settings.openrouter_api_key:
+                return "openrouter"
+            return None
+
+        if provider in ("openai_compatible", "openai-compatible"):
+            if self.settings.openai_compatible_base_url:
+                return "openai_compatible"
+            return None
+
+        if provider == "litellm":
+            if self.settings.litellm_api_base:
+                return "litellm"
+            return None
+
+        # Auto mode - try in order: Ollama → OpenAI → Anthropic → Gemini → OpenRouter
+        # → OpenAI-compatible → LiteLLM
         if provider == "auto":
             if await self._check_ollama():
                 return "ollama"
@@ -70,6 +91,14 @@ class LLMRouter:
                 return "openai"
             if self.settings.anthropic_api_key:
                 return "anthropic"
+            if self.settings.google_api_key:
+                return "gemini"
+            if self.settings.openrouter_api_key:
+                return "openrouter"
+            if self.settings.openai_compatible_base_url:
+                return "openai_compatible"
+            if self.settings.litellm_api_base:
+                return "litellm"
 
         return None
 
@@ -96,6 +125,30 @@ class LLMRouter:
                 response = await self._chat_openai(message)
             elif self._available_backend == "anthropic":
                 response = await self._chat_anthropic(message)
+            elif self._available_backend == "gemini":
+                response = await self._chat_openai_compat(
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                    api_key=self.settings.google_api_key or "",
+                    model=self.settings.gemini_model,
+                )
+            elif self._available_backend == "openrouter":
+                response = await self._chat_openai_compat(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=self.settings.openrouter_api_key or "",
+                    model=self.settings.openrouter_model or self.settings.openai_compatible_model,
+                )
+            elif self._available_backend == "openai_compatible":
+                response = await self._chat_openai_compat(
+                    base_url=self.settings.openai_compatible_base_url,
+                    api_key=self.settings.openai_compatible_api_key or "",
+                    model=self.settings.openai_compatible_model,
+                )
+            elif self._available_backend == "litellm":
+                response = await self._chat_openai_compat(
+                    base_url=self.settings.litellm_api_base,
+                    api_key=self.settings.litellm_api_key or "",
+                    model=self.settings.litellm_model,
+                )
             else:
                 response = "Unknown backend"
 
@@ -166,6 +219,33 @@ class LLMRouter:
             logger.warning("Anthropic returned an empty content list; returning fallback response")
             return "I'm sorry, I received an empty response. Please try again."
         return response.content[0].text
+
+    async def _chat_openai_compat(self, base_url: str, api_key: str, model: str) -> str:
+        """Chat via any OpenAI-compatible API (Gemini, OpenRouter, LiteLLM proxy, etc.)."""
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key or "not-needed")
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are PocketPaw, a helpful AI assistant"
+                        " running locally on the user's machine."
+                    ),
+                },
+                *self.conversation_history,
+            ],
+        )
+
+        if not response.choices:
+            logger.warning(
+                "OpenAI-compat endpoint %s returned empty choices; returning fallback", base_url
+            )
+            return "I'm sorry, I received an empty response. Please try again."
+        return response.choices[0].message.content
 
     def clear_history(self) -> None:
         """Clear conversation history."""
