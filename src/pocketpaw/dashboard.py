@@ -29,6 +29,7 @@ import base64
 import io
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 try:
@@ -118,6 +119,13 @@ TEMPLATES_DIR = FRONTEND_DIR / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 # Create FastAPI app
+@asynccontextmanager
+async def _lifespan(app: "FastAPI"):
+    await _startup_event(_start_channel_adapter_fn=_start_channel_adapter)
+    yield
+    await _shutdown_event(_stop_channel_adapter_fn=_stop_channel_adapter)
+
+
 app = FastAPI(
     title="PocketPaw API",
     description="Self-hosted AI agent — REST API for external clients and the web dashboard.",
@@ -125,6 +133,7 @@ app = FastAPI(
     docs_url="/api/v1/docs",
     redoc_url="/api/v1/redoc",
     openapi_url="/api/v1/openapi.json",
+    lifespan=_lifespan,
 )
 
 # CORS — localhost + Cloudflare tunnel + Tauri desktop + custom origins from config
@@ -218,16 +227,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup_event():
-    await _startup_event(_start_channel_adapter_fn=_start_channel_adapter)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await _shutdown_event(_stop_channel_adapter_fn=_stop_channel_adapter)
 
 
 # ==================== MCP Server API ====================

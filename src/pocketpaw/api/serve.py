@@ -16,11 +16,21 @@ logger = logging.getLogger(__name__)
 
 def create_api_app():
     """Build a FastAPI application with v1 API routers and WebSocket."""
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI, Query, WebSocket
     from fastapi.middleware.cors import CORSMiddleware
 
     from pocketpaw.api.v1 import mount_v1_routers
     from pocketpaw.config import Settings, get_access_token
+
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        from pocketpaw.dashboard_lifecycle import shutdown_event, startup_event
+
+        await startup_event()
+        yield
+        await shutdown_event()
 
     app = FastAPI(
         title="PocketPaw API",
@@ -29,6 +39,7 @@ def create_api_app():
         docs_url="/api/v1/docs",
         redoc_url="/api/v1/redoc",
         openapi_url="/api/v1/openapi.json",
+        lifespan=_lifespan,
     )
 
     # --- Middleware (order matters: last added = outermost = runs first) --
@@ -113,19 +124,6 @@ def create_api_app():
     ):
         """WebSocket v1 short path — for clients using /v1/ws."""
         await _handle_ws(websocket, token, resume_session)
-
-    # --- Lifecycle events -----------------------------------------------
-    @app.on_event("startup")
-    async def startup():
-        from pocketpaw.dashboard_lifecycle import startup_event
-
-        await startup_event()
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        from pocketpaw.dashboard_lifecycle import shutdown_event
-
-        await shutdown_event()
 
     return app
 
