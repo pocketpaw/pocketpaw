@@ -115,7 +115,13 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 TEMPLATES_DIR = FRONTEND_DIR / "templates"
 
 # Initialize Templates
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+from jinja2 import Environment, FileSystemLoader
+jinja_env = Environment(
+    loader=FileSystemLoader(str(TEMPLATES_DIR)),
+    cache_size=0,  # Disable template caching for development; set to a positive int for production)
+    )
+templates = Jinja2Templates(env=jinja_env)
+templates.env.globals.clear() # Clear default globals to prevent accidental access to unsafe functions like `open`
 
 # Create FastAPI app
 app = FastAPI(
@@ -909,16 +915,16 @@ async def get_version_info():
     info = await check_for_updates_async(current, get_config_dir())
     return info or {"current": current, "latest": current, "update_available": False}
 
-
+from fastapi import HTMLResponse
 @app.get("/")
 async def index(request: Request):
     """Serve the main dashboard page."""
     from importlib.metadata import version as get_version
 
-    return templates.TemplateResponse(
-        "base.html",
-        {"request": request, "v": _static_version(), "app_version": get_version("pocketpaw")},
-    )
+    template = templates.get_template("base.html")
+    html = template.render(request=request, v=str(_static_version()), app_version=str(get_version("pocketpaw"))) 
+    return HTMLResponse(content=html, status_code=200)
+    
 
 
 # NOTE: Session token exchange, cookie login/logout, QR code, and token

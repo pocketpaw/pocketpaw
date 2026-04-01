@@ -24,6 +24,7 @@ wheels/
 .venv/
 venv/
 ENV/
+pocketpaw-env
 
 # UV
 .uv/

@@ -122,7 +122,7 @@
       }
     </style>
   </head>
-  <body class="loading flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]" x-data="{ ...app(), sidebarOpen: false }" x-init="init()">
+  <body class="loading flex h-screen overflow-hidden bg-(--bg-color) text-(--text-primary)" x-data="Object.assign({}, app(), { sidebarOpen: false })" x-init="init()">
 
     <!-- Preloader (visible immediately, hidden once app is ready) -->
     <div id="preloader">

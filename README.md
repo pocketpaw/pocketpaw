@@ -84,6 +84,23 @@ pip install pocketpaw
 pocketpaw
 ```
 
+### ⚠️ Virtual Environment Issue (Important)
+
+In some environments, running PocketPaw inside a virtual environment may result in a runtime error:
+
+
+This is likely caused by incompatible versions of dependencies (e.g., Jinja2 / Starlette) being installed inside the virtual environment.
+
+#### ✅ Workarounds:
+
+- Run PocketPaw using system Python instead of a virtual environment:
+  ```bash
+  pip install pocketpaw
+  pocketpaw
+
+  Or ensure compatible dependency versions:
+  pip install "jinja2>=3.1.2,<3.2" "starlette>=0.27,<0.28"
+
 **Or use the automated install script:**
 
 ```bash
