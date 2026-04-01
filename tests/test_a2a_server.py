@@ -636,7 +636,7 @@ class TestTasksSend:
         await _load()
 
         params = _make_send_params()
-        resp = await client.post("/a2a/tasks/send", content=params.model_dump_json())
+        resp = await client.post("/a2a/tasks/send", json=params.model_dump(mode='json'))
         assert resp.status_code == 200
         data = resp.json()
         assert data["id"] == "test-task-001"
@@ -661,7 +661,7 @@ class TestTasksSend:
         await _load()
 
         params = _make_send_params(task_id="artifact-test")
-        resp = await client.post("/a2a/tasks/send", content=params.model_dump_json())
+        resp = await client.post("/a2a/tasks/send", json=params.model_dump(mode='json'))
         data = resp.json()
         assert len(data["artifacts"]) == 1
         assert data["artifacts"][0]["name"] == "response"
@@ -684,7 +684,7 @@ class TestTasksSend:
         await _load()
 
         params = _make_send_params()
-        resp = await client.post("/a2a/tasks/send", content=params.model_dump_json())
+        resp = await client.post("/a2a/tasks/send", json=params.model_dump(mode='json'))
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"]["state"] == TaskState.FAILED
@@ -712,7 +712,7 @@ class TestTasksSend:
         await _load()
 
         params = _make_send_params()
-        resp = await client.post("/a2a/tasks/send", content=params.model_dump_json())
+        resp = await client.post("/a2a/tasks/send", json=params.model_dump(mode='json'))
         data = resp.json()
         assert len(data["history"]) >= 2
         assert data["history"][0]["role"] == "user"
@@ -822,7 +822,7 @@ class TestTasksSendStream:
         params = _make_send_params(task_id="stream-task")
 
         async with client.stream(
-            "POST", "/a2a/tasks/send/stream", content=params.model_dump_json()
+            "POST", "/a2a/tasks/send/stream", json=params.model_dump(mode='json')
         ) as resp:
             assert resp.status_code == 200
             assert "text/event-stream" in resp.headers.get("content-type", "")
@@ -846,7 +846,7 @@ class TestTasksSendStream:
         await _load()
         params = _make_send_params(task_id="sse-val")
         async with client.stream(
-            "POST", "/a2a/tasks/send/stream", content=params.model_dump_json()
+            "POST", "/a2a/tasks/send/stream", json=params.model_dump(mode='json')
         ) as resp:
             raw = await resp.aread()
             raw = raw.decode()
@@ -885,7 +885,7 @@ class TestTasksSendStream:
         await _load()
         params = _make_send_params(task_id="final-test")
         async with client.stream(
-            "POST", "/a2a/tasks/send/stream", content=params.model_dump_json()
+            "POST", "/a2a/tasks/send/stream", json=params.model_dump(mode='json')
         ) as resp:
             raw = await resp.aread()
             raw = raw.decode()
@@ -916,7 +916,7 @@ class TestTasksSendStream:
         await _load()
         params = _make_send_params(task_id="artifact-stream")
         async with client.stream(
-            "POST", "/a2a/tasks/send/stream", content=params.model_dump_json()
+            "POST", "/a2a/tasks/send/stream", json=params.model_dump(mode='json')
         ) as resp:
             raw = await resp.aread()
             raw = raw.decode()
