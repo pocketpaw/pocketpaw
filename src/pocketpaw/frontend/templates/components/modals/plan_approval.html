@@ -11,10 +11,10 @@
     </div>
 
     <div class="modal-footer" style="display:flex;gap:10px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--border-color, #333)">
-      <button onclick="PlanMode.reject()" class="btn btn-secondary" style="padding:8px 20px">
+      <button @click="PlanMode.reject()" class="btn btn-secondary" style="padding:8px 20px">
         Reject
       </button>
-      <button onclick="PlanMode.approve()" class="btn btn-primary" style="padding:8px 20px;background:var(--accent-color, #4CAF50);color:#fff;border:none;border-radius:6px;cursor:pointer">
+      <button @click="PlanMode.approve()" class="btn btn-primary" style="padding:8px 20px;background:var(--accent-color, #4CAF50);color:#fff;border:none;border-radius:6px;cursor:pointer">
         Approve
       </button>
     </div>
