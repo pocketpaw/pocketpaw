@@ -705,6 +705,38 @@ async def test_gc_skips_acquired_locks():
 
 
 @pytest.mark.asyncio
+async def test_process_message_cleans_up_lock_on_inner_exception():
+    """_process_message must remove session lock even when inner processing fails."""
+    from pocketpaw.agents.loop import AgentLoop
+
+    with (
+        patch("pocketpaw.agents.loop.get_message_bus"),
+        patch("pocketpaw.agents.loop.get_memory_manager"),
+        patch("pocketpaw.agents.loop.AgentContextBuilder"),
+        patch("pocketpaw.agents.loop.get_settings") as mock_get_settings,
+    ):
+        settings = MagicMock()
+        settings.max_concurrent_conversations = 5
+        settings.agent_backend = "claude_agent_sdk"
+        mock_get_settings.return_value = settings
+
+        loop = AgentLoop()
+        msg = InboundMessage(
+            channel=Channel.CLI,
+            sender_id="user1",
+            chat_id="chat1",
+            content="Hello",
+        )
+
+        with patch.object(loop, "_process_message_inner", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                await loop._process_message(msg)
+
+        assert msg.session_key not in loop._session_locks
+        assert msg.session_key not in loop._session_lock_last_used
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_gc_task():
     """
     stop() must cancel the GC background task so it does not outlive the loop.

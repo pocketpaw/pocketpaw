@@ -8,6 +8,7 @@ PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_mem
 """
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -74,6 +75,13 @@ def _strip_tts_links(text: str) -> str:
     text = re.sub(r"<!-- media:[^>]+-->", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await async collaborators but also accept sync test doubles."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class AgentLoop:
@@ -313,8 +321,9 @@ class AgentLoop:
         logger.info(f"⚡ Processing message from {session_key}")
 
         # Resolve alias so two chats aliased to the same session serialize correctly
-        resolved_key = await self.memory.resolve_session_key(session_key)
+        resolved_key = await _maybe_await(self.memory.resolve_session_key(session_key))
 
+        lock = None
         try:
             # Global concurrency limit — blocks until a slot is available
             async with self._global_semaphore:
@@ -332,17 +341,16 @@ class AgentLoop:
                         logger.info("Session lock acquired for %s", resolved_key)
                     await self._process_message_inner(message, resolved_key)
 
-                # Eager cleanup: remove the lock immediately when no further
-                # coroutines are waiting on it.  The GC task is a safety net
-                # for the cases where this eager path is skipped (e.g. after
-                # an exception propagates past this block).
-                if not lock.locked():
-                    self._session_locks.pop(resolved_key, None)
-                    self._session_lock_last_used.pop(resolved_key, None)
                 logger.info("Message processing complete for %s", session_key)
         except asyncio.CancelledError:
             logger.info("Processing cancelled for session %s", session_key)
             raise
+        finally:
+            # Eager cleanup: remove the lock immediately when no further
+            # coroutines are waiting on it. The GC task is a safety net.
+            if lock is not None and not lock.locked():
+                self._session_locks.pop(resolved_key, None)
+                self._session_lock_last_used.pop(resolved_key, None)
 
     _WELCOME_EXCLUDED = frozenset({Channel.WEBSOCKET, Channel.CLI, Channel.SYSTEM, Channel.DISCORD})
 
