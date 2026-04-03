@@ -390,6 +390,8 @@ def main() -> None:
     """Main entry point."""
     parser = _build_parser()
     args = parser.parse_args()
+
+    # ✅ Telegram conflict validation
     channel_flags = [
         getattr(args, "discord", False),
         getattr(args, "slack", False),
@@ -401,18 +403,20 @@ def main() -> None:
     ]
     if getattr(args, "telegram", False) and any(channel_flags):
         parser.error("--telegram cannot be combined with other channel flags")
-    
 
-    # ── Early-exit commands (no settings, health, or env setup needed) ──
+    # ── Early-exit commands ──
     if args.command in _EARLY_COMMANDS:
         exit_code = _handle_early_command(args)
         if exit_code is not None:
             raise SystemExit(exit_code)
-    _check_extras_installed(args)
 
+    
     _resolve_subargs(args)
 
-    # ── Channels subcommand (needs settings for list, API for start/stop) ──
+    
+    _check_extras_installed(args)
+
+    # ── Channels subcommand ──
     if args.command == "channels":
         from pocketpaw.cli.channels import run_channels_cmd
 
@@ -423,7 +427,6 @@ def main() -> None:
             as_json=args.json,
         )
         raise SystemExit(exit_code)
-
     # ── Legacy --doctor flag ──
     if args.doctor:
         exit_code = _run_async(run_doctor())
