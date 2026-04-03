@@ -13,7 +13,16 @@
   --glass-bg: rgba(28, 28, 30, 0.65);
   --glass-border: rgba(255, 255, 255, 0.12);
   --card-bg: rgba(44, 44, 46, 0.6);
-  
+  /* Component Library Variables (bits-ui / shadcn) */
+  --popover: 28 28 30;
+  --popover-foreground: 255 255 255;
+  --background: 0 0 0;
+  --foreground: 255 255 255;
+  --border: 255 255 255;
+  --input: 44 44 46;
+  --ring: 10 132 255;
+  --muted: 44 44 46;
+  --muted-foreground: 235 235 245;
   /* Text */
   --text-primary: #FFFFFF;
   --text-secondary: rgba(235, 235, 245, 0.6);
@@ -434,4 +443,23 @@ body {
   background: var(--accent-color, #4CAF50);
   border-color: var(--accent-color, #4CAF50);
   color: #fff;
+}
+[data-slot="select-content"] {
+  background-color: rgb(28, 28, 30) !important;
+  color: #ffffff !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+select option {
+  background-color: rgb(28, 28, 30);
+  color: #ffffff;
+}
+select {
+  background-color: rgb(28, 28, 30) !important;
+  color: #ffffff !important;
+  color-scheme: dark;
+}
+
+select option {
+  background-color: rgb(28, 28, 30) !important;
+  color: #ffffff !important;
 }
