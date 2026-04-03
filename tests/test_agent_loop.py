@@ -711,7 +711,7 @@ async def test_process_message_cleans_up_lock_on_inner_exception():
 
     with (
         patch("pocketpaw.agents.loop.get_message_bus"),
-        patch("pocketpaw.agents.loop.get_memory_manager"),
+        patch("pocketpaw.agents.loop.get_memory_manager") as mock_get_memory_manager,
         patch("pocketpaw.agents.loop.AgentContextBuilder"),
         patch("pocketpaw.agents.loop.get_settings") as mock_get_settings,
     ):
@@ -719,6 +719,10 @@ async def test_process_message_cleans_up_lock_on_inner_exception():
         settings.max_concurrent_conversations = 5
         settings.agent_backend = "claude_agent_sdk"
         mock_get_settings.return_value = settings
+        memory = MagicMock()
+        resolved_key = "resolved:chat1:user1"
+        memory.resolve_session_key = AsyncMock(return_value=resolved_key)
+        mock_get_memory_manager.return_value = memory
 
         loop = AgentLoop()
         msg = InboundMessage(
@@ -732,8 +736,8 @@ async def test_process_message_cleans_up_lock_on_inner_exception():
             with pytest.raises(RuntimeError):
                 await loop._process_message(msg)
 
-        assert msg.session_key not in loop._session_locks
-        assert msg.session_key not in loop._session_lock_last_used
+        assert resolved_key not in loop._session_locks
+        assert resolved_key not in loop._session_lock_last_used
 
 
 @pytest.mark.asyncio

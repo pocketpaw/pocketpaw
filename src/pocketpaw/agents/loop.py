@@ -8,7 +8,6 @@ PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_mem
 """
 
 import asyncio
-import inspect
 import logging
 import re
 import time
@@ -75,13 +74,6 @@ def _strip_tts_links(text: str) -> str:
     text = re.sub(r"<!-- media:[^>]+-->", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-
-async def _maybe_await(value: Any) -> Any:
-    """Await async collaborators but also accept sync test doubles."""
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 class AgentLoop:
@@ -321,7 +313,7 @@ class AgentLoop:
         logger.info(f"⚡ Processing message from {session_key}")
 
         # Resolve alias so two chats aliased to the same session serialize correctly
-        resolved_key = await _maybe_await(self.memory.resolve_session_key(session_key))
+        resolved_key = await self.memory.resolve_session_key(session_key)
 
         lock = None
         try:
