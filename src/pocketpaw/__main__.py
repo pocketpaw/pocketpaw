@@ -401,14 +401,16 @@ def main() -> None:
     ]
     if getattr(args, "telegram", False) and any(channel_flags):
         parser.error("--telegram cannot be combined with other channel flags")
-    _check_extras_installed(args)
-    _resolve_subargs(args)
+    
 
     # ── Early-exit commands (no settings, health, or env setup needed) ──
     if args.command in _EARLY_COMMANDS:
         exit_code = _handle_early_command(args)
         if exit_code is not None:
             raise SystemExit(exit_code)
+    _check_extras_installed(args)
+
+    _resolve_subargs(args)
 
     # ── Channels subcommand (needs settings for list, API for start/stop) ──
     if args.command == "channels":
