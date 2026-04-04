@@ -183,6 +183,25 @@ def find_free_port(start=8000, end=9000):
     raise RuntimeError("No free ports available. Please free up a port and try again.")
 
 
+def _resolve_port_for_server(requested_port: int) -> int:
+    """
+    Resolve the actual port to bind: try requested first, fallback to 8000-9000 if busy.
+
+    Only call this when starting a server (not for CLI subcommands).
+    Minimizes TOCTOU by checking immediately before bind.
+    """
+    # Try the requested port first
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", requested_port))
+        return requested_port  # Free → use it
+    except OSError:
+        # Busy → find fallback in range
+        fallback = find_free_port(start=8000, end=9000)
+        if fallback != requested_port:
+            print(f"\n  [WARN] Port {requested_port} is busy — switching to port {fallback}\n")
+        return fallback
+
 # ── Argument parser ─────────────────────────────────────────────────────
 
 
@@ -338,15 +357,15 @@ Examples:
         default=[],
         help=argparse.SUPPRESS,
     )
+
+    # ── Flags for subcommands (shared namespace) ────────────────────────
     parser.add_argument(
         "--port",
         "-p",
         type=int,
-        default=find_free_port(),
-        help="Port for web server(default:auto detect a free port starting from 8000)",
+        default=8888,  # ✅ Stable default for integrations
+        help="Port for web server (default: 8888; auto-falls back if busy)",
     )
-
-    # ── Flags for subcommands (shared namespace) ────────────────────────
     parser.add_argument("--search", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--limit",
@@ -506,16 +525,24 @@ def main() -> None:
         or args.teams
         or args.gchat
     )
-    new_port = find_free_port(start=args.port)
-    if new_port != args.port:
-        print(f"  [WARN] Port {args.port} is busy — switching to port {new_port}")
-    args.port = new_port
 
+    # Determine if we're actually starting a server (not just running a CLI subcommand)
+    is_starting_server = (
+        args.command in (None, "serve")  # None = default dashboard mode
+        or args.telegram
+        or has_channel_flag
+    )
+
+    # Only resolve/fallback if a server will actually bind to a port
+    if is_starting_server:
+        effective_port = _resolve_port_for_server(args.port)
+    else:
+        effective_port = args.port  # ✅ CLI commands don't bind
     try:
         if args.command == "serve":
             from pocketpaw.api.serve import run_api_server
 
-            run_api_server(host=host, port=args.port, dev=args.dev)
+            run_api_server(host=host, port=effective_port, dev=args.dev)
         elif args.command == "status":
             from pocketpaw.cli.status import run_status
 
@@ -547,8 +574,7 @@ def main() -> None:
             _run_async(run_multi_channel_mode(settings, args))
         else:
             # Default: web dashboard (also handles --web flag)
-            run_dashboard_mode(settings, host, args.port, dev=args.dev)
-    except KeyboardInterrupt:
+            run_dashboard_mode(settings, host, effective_port, dev=args.dev)
         logger.info("PocketPaw stopped.")
     finally:
         # Coordinated singleton shutdown
