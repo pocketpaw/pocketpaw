@@ -451,12 +451,16 @@ window.PocketPaw.Transparency = {
                         const rawSnippet = data.data.content.substring(0, 120);
                         const ellipsis = data.data.content.length > 120 ? '...' : '';
                         const snippet = rawSnippet.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                        message = `<span class="text-white/40 italic">${snippet}${ellipsis}</span>`;
+                        message = `💭 <span class="text-white/40 italic">${snippet}${ellipsis}</span>`;
                     } else {
-                        message = `<span class="text-accent animate-pulse">Thinking...</span>`;
+                        message = `💭 <span class="text-accent animate-pulse">Thinking...</span>`;
                     }
                 } else if (eventType === 'thinking_done') {
                     message = `<span class="text-white/40">Thinking complete</span>`;
+                } else if (eventType === 'agent_start') {
+                    message = `🧠 Agent started`;
+                } else if (eventType === 'agent_end') {
+                    message = `✅ Agent finished`;
                 } else if (eventType === 'tool_start') {
                     const toolName = (data.data.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
                     const toolParams = JSON.stringify(data.data.params || {}).replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -468,7 +472,7 @@ window.PocketPaw.Transparency = {
                     const rName = (data.data.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
                     const rStr = String(data.data.result || '').substring(0, 50).replace(/&/g, '&amp;').replace(/</g, '&lt;');
                     const rMore = String(data.data.result || '').length > 50 ? '...' : '';
-                    message = `${isError ? '❌' : '✅'} <b>${rName}</b> result: <span class="text-white/50">${rStr}${rMore}</span>`;
+                    message = `${isError ? '❌' : '📦'} <b>${rName}</b> result: <span class="text-white/50">${rStr}${rMore}</span>`;
                 } else if (eventType === 'token_usage') {
                     const d = data.data || {};
                     const inp = d.input_tokens || 0;
