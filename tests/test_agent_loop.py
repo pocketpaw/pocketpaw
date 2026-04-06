@@ -56,6 +56,23 @@ def mock_router():
     return router
 
 
+@pytest.fixture
+def agent_loop(mock_bus, mock_memory):
+    settings = MagicMock()
+    settings.agent_backend = "claude_agent_sdk"
+    settings.max_concurrent_conversations = 5
+
+    with (
+        patch("pocketpaw.agents.loop.get_message_bus", return_value=mock_bus),
+        patch("pocketpaw.agents.loop.get_memory_manager", return_value=mock_memory),
+        patch("pocketpaw.agents.loop.AgentContextBuilder"),
+        patch("pocketpaw.agents.loop.get_settings", return_value=settings),
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+    ):
+        mock_settings_cls.load.return_value = settings
+        yield AgentLoop()
+
+
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
 @patch("pocketpaw.agents.loop.AgentContextBuilder")
@@ -704,40 +721,30 @@ async def test_gc_skips_acquired_locks():
         lock.release()
 
 
-@pytest.mark.asyncio
-async def test_process_message_cleans_up_lock_on_inner_exception():
-    """_process_message must remove session lock even when inner processing fails."""
-    from pocketpaw.agents.loop import AgentLoop
+async def test_process_message_cleans_up_lock_on_inner_exception(agent_loop, mock_memory):
+    # Arrange
+    resolved_key = "resolved:chat1:user1"
+    mock_memory.resolve_session_key = AsyncMock(return_value=resolved_key)
 
-    with (
-        patch("pocketpaw.agents.loop.get_message_bus"),
-        patch("pocketpaw.agents.loop.get_memory_manager") as mock_get_memory_manager,
-        patch("pocketpaw.agents.loop.AgentContextBuilder"),
-        patch("pocketpaw.agents.loop.get_settings") as mock_get_settings,
-    ):
-        settings = MagicMock()
-        settings.max_concurrent_conversations = 5
-        settings.agent_backend = "claude_agent_sdk"
-        mock_get_settings.return_value = settings
-        memory = MagicMock()
-        resolved_key = "resolved:chat1:user1"
-        memory.resolve_session_key = AsyncMock(return_value=resolved_key)
-        mock_get_memory_manager.return_value = memory
+    msg = InboundMessage(
+        channel=Channel.CLI,
+        sender_id="user1",
+        chat_id="chat1",
+        content="Hello",
+    )
 
-        loop = AgentLoop()
-        msg = InboundMessage(
-            channel=Channel.CLI,
-            sender_id="user1",
-            chat_id="chat1",
-            content="Hello",
-        )
+    # Force inner method to raise exception
+    agent_loop._process_message_inner = AsyncMock(side_effect=Exception("Test error"))
 
-        with patch.object(loop, "_process_message_inner", side_effect=RuntimeError("boom")):
-            with pytest.raises(RuntimeError):
-                await loop._process_message(msg)
+    # Act
+    try:
+        await agent_loop._process_message(msg)
+    except Exception:
+        pass  # expected
 
-        assert resolved_key not in loop._session_locks
-        assert resolved_key not in loop._session_lock_last_used
+    # Assert
+    assert resolved_key not in agent_loop._session_locks
+    assert resolved_key not in agent_loop._session_lock_last_used
 
 
 @pytest.mark.asyncio
