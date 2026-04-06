@@ -195,6 +195,31 @@ class AgentContextBuilder:
             )
             blocks.append(("current_pocket", _Priority.HIGH, pocket_tag))
 
+        # 4e. Inject KB context — search the knowledge base for articles
+        # relevant to the current message/task and inject as background knowledge.
+        # This bridges the standalone KB with the agent's system prompt.
+        if user_query:
+            try:
+                from knowledge_base import KnowledgeEngine
+
+                pocket_id = (metadata or {}).get("pocket_context", {}).get("id")
+                scope = f"pocket:{pocket_id}" if pocket_id else "paw-cloud"
+
+                kb = KnowledgeEngine(scope=scope)
+                if kb.stats().get("articles", 0) > 0:
+                    kb_context = await kb.search_context(user_query, limit=2, max_chars=3000)
+                    if kb_context:
+                        kb_block = (
+                            "\n# Knowledge Base Context\n"
+                            "Relevant articles from the project knowledge base:\n\n"
+                            + kb_context
+                        )
+                        blocks.append(("kb_context", _Priority.LOW, kb_block))
+            except ImportError:
+                pass  # knowledge-base package not installed
+            except Exception:
+                pass  # KB not available, skip silently
+
         # 5. Inject session key for session management tools
         if session_key:
             session_block = (
