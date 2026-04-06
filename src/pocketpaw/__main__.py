@@ -39,8 +39,6 @@ def check_python_version() -> None:
         )
 
 
-check_python_version()
-
 import argparse
 import asyncio
 import logging
@@ -401,6 +399,8 @@ def _resolve_subargs(args) -> None:
 
 def main() -> None:
     """Main entry point."""
+    check_python_version()
+
     parser = _build_parser()
     args = parser.parse_args()
     _resolve_subargs(args)
@@ -560,3 +560,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    

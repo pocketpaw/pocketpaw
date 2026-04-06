@@ -1,0 +1,42 @@
+[1mdiff --git a/src/pocketpaw/__main__.py b/src/pocketpaw/__main__.py[m
+[1mindex fe53b0c..6c628be 100644[m
+[1m--- a/src/pocketpaw/__main__.py[m
+[1m+++ b/src/pocketpaw/__main__.py[m
+[36m@@ -39,8 +39,6 @@[m [mdef check_python_version() -> None:[m
+         )[m
+ [m
+ [m
+[31m-check_python_version()[m
+[31m-[m
+ import argparse[m
+ import asyncio[m
+ import logging[m
+[36m@@ -401,6 +399,8 @@[m [mdef _resolve_subargs(args) -> None:[m
+ [m
+ def main() -> None:[m
+     """Main entry point."""[m
+[32m+[m[32m    check_python_version()[m
+[32m+[m
+     parser = _build_parser()[m
+     args = parser.parse_args()[m
+     _resolve_subargs(args)[m
+[36m@@ -559,4 +559,5 @@[m [mdef main() -> None:[m
+ [m
+ [m
+ if __name__ == "__main__":[m
+[31m-    main()[m
+\ No newline at end of file[m
+[32m+[m[32m    main()[m
+[41m+    [m
+[1mdiff --git a/tests/test_version_check.py b/tests/test_version_check.py[m
+[1mindex 383ae60..87f1892 100644[m
+[1m--- a/tests/test_version_check.py[m
+[1m+++ b/tests/test_version_check.py[m
+[36m@@ -30,4 +30,5 @@[m [mdef test_warning_on_315():[m
+     with patch.object(sys, "version_info", (3, 15, 0, "final", 0)):[m
+         with patch("sys.stderr", buf):[m
+             check_python_version()[m
+[31m-    assert "3.14+" in buf.getvalue()[m
+\ No newline at end of file[m
+[32m+[m[32m    assert "3.14+" in buf.getvalue()[m
+[41m+    [m

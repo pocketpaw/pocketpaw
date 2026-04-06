@@ -31,3 +31,4 @@ def test_warning_on_315():
         with patch("sys.stderr", buf):
             check_python_version()
     assert "3.14+" in buf.getvalue()
+    
