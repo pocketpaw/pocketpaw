@@ -1,0 +1,273 @@
+---
+title: "Discord Docker Deployment"
+description: "Deploy PocketPaw as a headless Discord bot in Docker with multi-stage builds, Claude Code OAuth token support, LiteLLM proxy, and Coolify-compatible configuration."
+section: Deployment
+ogType: article
+keywords: ["discord docker", "discord bot docker", "coolify", "claude code oauth", "headless discord bot", "docker compose discord"]
+tags: ["deployment", "docker", "discord"]
+---
+
+# Discord Docker Deployment
+
+PocketPaw ships with a dedicated Discord deployment setup in `deploy/discord/`. This runs the bot headless (no web dashboard) in a lightweight container with all agent backends and tools pre-installed.
+
+## Quick Start
+
+```bash
+cd deploy/discord
+cp .env.example .env
+# Edit .env with your bot token and LLM provider
+docker compose up -d
+```
+
+<Callout type="info">
+  This deployment runs `pocketpaw --discord` in headless mode. For the full web dashboard with Discord as one of many channels, use the main [Docker deployment](/deployment/docker) instead.
+</Callout>
+
+## LLM Provider Options
+
+The `.env.example` file includes six provider options. Uncomment the one that fits your setup.
+
+<Tabs items={["LiteLLM Proxy", "Anthropic API", "Claude Code OAuth", "Claude Code CLI Login", "OpenAI-Compatible", "OpenAI Agents"]}>
+  <Tab title="LiteLLM Proxy">
+    Route through a [LiteLLM](https://docs.litellm.ai/) proxy to access 100+ providers (Anthropic, OpenAI, Azure, Bedrock, etc.) via a single endpoint:
+
+    ```bash
+    POCKETPAW_AGENT_BACKEND=claude_agent_sdk
+    POCKETPAW_CLAUDE_SDK_PROVIDER=litellm
+    POCKETPAW_LITELLM_API_BASE=http://host.docker.internal:4000
+    POCKETPAW_LITELLM_API_KEY=your-litellm-master-key
+    POCKETPAW_LITELLM_MODEL=anthropic/claude-sonnet-4-6
+    ```
+
+    Use `host.docker.internal` to reach a LiteLLM instance running on the host machine.
+  </Tab>
+  <Tab title="Anthropic API">
+    Direct Anthropic API access with your own API key:
+
+    ```bash
+    POCKETPAW_AGENT_BACKEND=claude_agent_sdk
+    POCKETPAW_CLAUDE_SDK_PROVIDER=anthropic
+    POCKETPAW_ANTHROPIC_API_KEY=sk-ant-...
+    ```
+  </Tab>
+  <Tab title="Claude Code OAuth">
+    Use your Claude Max or Pro plan without a separate API key. Generate a long-lived OAuth token (~1 year) on your local machine, then paste it into the env file. No volume mount needed.
+
+    ```bash
+    # On your local machine first:
+    claude setup-token
+
+    # Then in .env:
+    POCKETPAW_AGENT_BACKEND=claude_agent_sdk
+    POCKETPAW_CLAUDE_SDK_PROVIDER=claude_code
+    POCKETPAW_CLAUDE_CODE_OAUTH_TOKEN={"accessToken":"sk-ant-oat01-...","refreshToken":"sk-ant-ort01-...","expiresAt":"2027-..."}
+    ```
+
+    <Callout type="tip">
+      This is the easiest option for Coolify and remote servers. No interactive login needed after the initial token generation.
+    </Callout>
+  </Tab>
+  <Tab title="Claude Code CLI Login">
+    Interactive OAuth login persisted in a Docker volume. Requires a one-time login inside the container:
+
+    ```bash
+    POCKETPAW_AGENT_BACKEND=claude_agent_sdk
+    POCKETPAW_CLAUDE_SDK_PROVIDER=claude_code
+    ```
+
+    First-time setup:
+    1. Deploy with these settings
+    2. Exec into the container: `docker exec -it pocketpaw-discord bash`
+    3. Run `claude` and complete the OAuth login in your browser
+    4. Exit and restart the container
+
+    On Coolify, use the "Execute Command" feature in the container terminal.
+
+    <Callout type="info">
+      The `claude-auth` volume persists your login across container restarts and redeployments.
+    </Callout>
+  </Tab>
+  <Tab title="OpenAI-Compatible">
+    Connect to any OpenAI-compatible endpoint (vLLM, Ollama, local servers):
+
+    ```bash
+    POCKETPAW_AGENT_BACKEND=claude_agent_sdk
+    POCKETPAW_CLAUDE_SDK_PROVIDER=openai_compatible
+    POCKETPAW_OPENAI_COMPATIBLE_BASE_URL=http://host.docker.internal:8080/v1
+    POCKETPAW_OPENAI_COMPATIBLE_API_KEY=your-api-key
+    POCKETPAW_OPENAI_COMPATIBLE_MODEL=your-model
+    ```
+  </Tab>
+  <Tab title="OpenAI Agents">
+    Use the OpenAI Agents backend with LiteLLM:
+
+    ```bash
+    POCKETPAW_AGENT_BACKEND=openai_agents
+    POCKETPAW_OPENAI_AGENTS_PROVIDER=litellm
+    POCKETPAW_LITELLM_API_BASE=http://host.docker.internal:4000
+    POCKETPAW_LITELLM_API_KEY=your-litellm-master-key
+    POCKETPAW_LITELLM_MODEL=openai/gpt-5.2
+    ```
+  </Tab>
+</Tabs>
+
+## Dockerfile
+
+The Discord Dockerfile uses a multi-stage build optimized for headless operation (no Playwright/Chromium):
+
+**Node stage** (`node:22-slim`):
+- Installs Claude Code CLI and Codex CLI globally
+
+**Builder stage** (`python:3.12-slim`):
+- Creates a virtual environment and installs `pocketpaw[all]`
+
+**Runtime stage** (`python:3.12-slim`):
+- Copies Node.js, CLI tools, and the Python venv
+- Installs only runtime deps (git, tesseract)
+- Creates a non-root `pocketpaw` user
+- Pre-creates `~/.claude.json` marker file (prevents Claude Code onboarding prompt)
+- Runs `pocketpaw --discord` as the entrypoint
+
+<Callout type="tip">
+  The Discord image is significantly smaller than the main Docker image because it skips Playwright and Chromium shared libraries.
+</Callout>
+
+## Docker Compose
+
+The `docker-compose.yaml` defines a single `pocketpaw-discord` service with four volume mounts:
+
+```yaml
+volumes:
+  # PocketPaw config, memory, sessions, audit logs
+  - pocketpaw-discord-data:/home/pocketpaw/.pocketpaw
+
+  # Custom identity / system prompt (optional)
+  - ./identity:/home/pocketpaw/.pocketpaw/identity
+
+  # Agent-created files (accessible on the host)
+  - ./workspace:/home/pocketpaw/workspace
+
+  # Claude Code OAuth credentials
+  - claude-auth:/home/pocketpaw/.claude
+```
+
+### Claude Auth Volume
+
+The `claude-auth` volume stores Claude Code OAuth credentials. Two options:
+
+**Named volume** (for Coolify and remote servers):
+```yaml
+- claude-auth:/home/pocketpaw/.claude
+```
+Exec into the container once to run `claude` and complete the login, or use the OAuth token approach.
+
+**Host bind mount** (reuse your local Claude Code login):
+```yaml
+- ${CLAUDE_CONFIG_DIR:-~/.claude}:/home/pocketpaw/.claude
+```
+
+### Resource Limits
+
+The compose file sets resource limits to prevent runaway usage:
+
+| Resource | Limit | Reservation |
+|----------|-------|-------------|
+| Memory | 8 GB | 2 GB |
+| CPUs | 4 | 2 |
+
+Adjust these in the `deploy.resources` section based on your server.
+
+## Discord Configuration
+
+### Required
+
+```bash
+POCKETPAW_DISCORD_BOT_TOKEN=your-bot-token-here
+```
+
+### Access Control
+
+```bash
+# Lock to specific servers
+POCKETPAW_DISCORD_ALLOWED_GUILD_IDS=[123456789012345678]
+
+# Restrict to specific channels
+POCKETPAW_DISCORD_ALLOWED_CHANNEL_IDS=[123456789012345678]
+
+# Restrict to specific users
+POCKETPAW_DISCORD_ALLOWED_USER_IDS=[123456789012345678]
+```
+
+### Server-Wide Conversation Mode
+
+Enable conversation mode across all channels without needing the `/converse` command:
+
+```bash
+POCKETPAW_DISCORD_CONVERSATION_ALL_CHANNELS=true
+
+# Exclude channels like announcements or rules
+POCKETPAW_DISCORD_CONVERSATION_EXCLUDE_CHANNEL_IDS=[123456789,987654321]
+```
+
+### Bot Presence
+
+```bash
+POCKETPAW_DISCORD_BOT_NAME=CodeReviewer
+POCKETPAW_DISCORD_STATUS_TYPE=online          # online, idle, dnd, invisible
+POCKETPAW_DISCORD_ACTIVITY_TYPE=watching      # playing, streaming, listening, watching
+POCKETPAW_DISCORD_ACTIVITY_TEXT=your code
+```
+
+### Soul (Persistent Identity)
+
+Give your bot a persistent personality that evolves over time:
+
+```bash
+POCKETPAW_SOUL_ENABLED=true
+POCKETPAW_SOUL_NAME=Paw
+POCKETPAW_SOUL_ARCHETYPE=The Helpful Assistant
+POCKETPAW_SOUL_AUTO_SAVE_INTERVAL=300
+```
+
+## Managing the Container
+
+```bash
+# View logs
+docker compose logs -f pocketpaw-discord
+
+# Restart
+docker compose restart pocketpaw-discord
+
+# Stop
+docker compose down
+
+# Rebuild after updates
+docker compose build && docker compose up -d
+```
+
+## Coolify Deployment
+
+For [Coolify](https://coolify.io/) users:
+
+1. Point to the `deploy/discord/` directory in your repo
+2. Set the Dockerfile path to `deploy/discord/Dockerfile` and build context to the repo root
+3. Add all env vars from `.env.example` in the Coolify environment settings
+4. For Claude Code auth, use the OAuth token option (`POCKETPAW_CLAUDE_CODE_OAUTH_TOKEN`) to avoid interactive login, or use the container terminal to run `claude` once
+
+## Related
+
+<CardGroup>
+  <Card title="Discord Bot Setup" icon="lucide:gamepad-2" href="/channels/discord">
+    Full Discord feature reference: slash commands, conversation mode, MCP server.
+  </Card>
+  <Card title="Main Docker Deployment" icon="lucide:container" href="/deployment/docker">
+    Full-stack Docker setup with web dashboard, Ollama, and Qdrant profiles.
+  </Card>
+  <Card title="Discord AI Bot Guide" icon="lucide:book-open" href="/guides/discord-ai-bot">
+    Step-by-step tutorial for adding an AI assistant to your Discord server.
+  </Card>
+  <Card title="Self-Hosting" icon="lucide:server" href="/deployment/self-hosting">
+    Reverse proxy, SSL, and production hardening.
+  </Card>
+</CardGroup>

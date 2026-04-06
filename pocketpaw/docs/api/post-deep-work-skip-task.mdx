@@ -1,0 +1,82 @@
+---
+title: Skip Deep Work Task
+description: "Skip a task in a Deep Work project without executing it. The task is marked as SKIPPED, its dependents are unblocked, and project progress is recalculated to reflect the change."
+api: POST /api/deep-work/projects/{project_id}/tasks/{task_id}/skip
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["skip task", "bypass task", "unblock dependents"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Skips a task without running it. The task is marked as `SKIPPED` and dependent tasks are unblocked, allowing execution to continue.
+
+## Path Parameters
+
+<ResponseField name="project_id" type="string" required>
+  The project ID.
+</ResponseField>
+
+<ResponseField name="task_id" type="string" required>
+  The task ID to skip. Must belong to the project and not already be done, skipped, or in progress.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the task was skipped.
+</ResponseField>
+
+<ResponseField name="task" type="object">
+  The updated task with `status: "skipped"`.
+</ResponseField>
+
+<ResponseField name="progress" type="object">
+  Updated project progress after the skip.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/projects/PROJECT_ID/tasks/TASK_ID/skip \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "400"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "task": {
+    "id": "task-3",
+    "title": "Write unit tests",
+    "status": "skipped",
+    "completed_at": "2024-01-15T15:00:00Z"
+  },
+  "progress": {
+    "total": 8,
+    "completed": 3,
+    "skipped": 1,
+    "percent": 50
+  }
+}
+```
+  </Tab>
+  <Tab title="400">
+```json
+{
+  "detail": "Task is already done or in progress"
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

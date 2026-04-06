@@ -1,0 +1,105 @@
+<!--
+  PocketPaw Dashboard - File Browser Modal
+
+  Changes (2026-02-03):
+  - Extracted from monolithic index.html
+  - Path breadcrumb navigation, file/folder listing
+  - Loading and error states
+-->
+<!-- File Browser Modal -->
+<div
+class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+x-show="showFileBrowser"
+x-transition.opacity
+@click.self="showFileBrowser = false"
+>
+<div class="w-full max-w-[700px] max-h-[80vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+    <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+    <h2 class="text-[17px] font-semibold">Files</h2>
+    <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showFileBrowser = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div class="p-6 overflow-y-auto flex-1 flex flex-col min-h-0">
+    <div class="flex flex-col gap-4 flex-1 min-h-0">
+
+        <!-- Path bar -->
+        <div class="flex items-center gap-1.5 p-3 bg-black/30 rounded-[10px] text-[13px] font-mono text-[var(--text-secondary)] overflow-x-auto whitespace-nowrap scrollbar-hide">
+        <span class="flex items-center gap-1 text-[var(--accent-color)] hover:underline cursor-pointer" @click="navigateTo('~')">
+            <i data-lucide="home" class="w-4 h-4"></i>
+        </span>
+        <template x-for="(segment, i) in filePath.split('/').filter(s => s)" :key="i">
+            <span class="flex items-center shrink-0">
+            <span class="text-white/30 mx-1">/</span>
+            <span
+                class="cursor-pointer hover:text-[var(--accent-color)] transition-colors"
+                @click="navigateToSegment(i)"
+                x-text="segment"
+            ></span>
+            </span>
+        </template>
+        </div>
+
+        <!-- Loading State -->
+        <template x-if="fileLoading">
+        <div class="flex-1 flex flex-col items-center justify-center p-8 text-white/60 gap-3">
+            <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
+            <span class="text-sm">Loading...</span>
+        </div>
+        </template>
+
+        <!-- Error State -->
+        <template x-if="!fileLoading && fileError">
+        <div class="p-4 text-center text-[var(--danger-color)] bg-[var(--danger-color)]/10 rounded-lg text-sm" x-text="fileError"></div>
+        </template>
+
+        <!-- File List (only when loaded and no error) -->
+        <template x-if="!fileLoading && !fileError">
+        <div class="flex-1 overflow-y-auto border border-[var(--glass-border)] rounded-xl bg-black/20 min-h-0">
+            <!-- Parent Directory -->
+            <template x-if="filePath && filePath !== '~' && filePath !== '.'">
+            <div class="flex items-center gap-3 p-3.5 border-b border-[var(--glass-border)] hover:bg-white/5 cursor-pointer text-[var(--accent-color)] transition-colors" @click="navigateUp()">
+                <i data-lucide="corner-left-up" class="w-5 h-5"></i>
+                <span class="flex-1 font-medium text-sm">..</span>
+            </div>
+            </template>
+
+            <!-- Files & Folders -->
+            <template x-for="item in files" :key="item.name">
+            <div class="flex items-center gap-3 p-3.5 border-b border-[var(--glass-border)] hover:bg-white/5 cursor-pointer transition-colors last:border-b-0" @click="selectFile(item)">
+                <svg x-show="item.isDir" class="w-5 h-5 text-white/60 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                <svg x-show="!item.isDir" class="w-5 h-5 text-white/60 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+                <span class="flex-1 font-medium text-sm truncate" x-text="item.name + (item.isDir ? '/' : '')"></span>
+                <span class="text-xs text-white/30 font-mono shrink-0" x-show="!item.isDir" x-text="item.size"></span>
+                <!-- Download file -->
+                <button
+                    x-show="!item.isDir"
+                    class="shrink-0 p-1.5 text-white/30 hover:text-[var(--accent-color)] hover:bg-white/10 rounded-lg transition-colors"
+                    @click.stop="downloadFile(filePath === '~' ? item.name : filePath + '/' + item.name)"
+                    title="Download file"
+                >
+                    <i data-lucide="download" class="w-4 h-4"></i>
+                </button>
+                <!-- Download directory as zip -->
+                <button
+                    x-show="item.isDir"
+                    class="shrink-0 p-1.5 text-white/30 hover:text-[var(--accent-color)] hover:bg-white/10 rounded-lg transition-colors"
+                    @click.stop="downloadDirAsZip(filePath === '~' ? item.name : filePath + '/' + item.name)"
+                    title="Download as zip"
+                >
+                    <i data-lucide="archive" class="w-4 h-4"></i>
+                </button>
+            </div>
+            </template>
+
+            <!-- Empty State -->
+            <template x-if="files.length === 0">
+            <div class="flex-1 flex flex-col items-center justify-center p-12 text-white/40 gap-3">
+                <i data-lucide="folder-open" class="w-10 h-10 opacity-50"></i>
+                <span class="font-medium">Empty directory</span>
+            </div>
+            </template>
+        </div>
+        </template>
+    </div>
+    </div>
+</div>
+</div>

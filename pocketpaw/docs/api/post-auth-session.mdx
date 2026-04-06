@@ -1,0 +1,74 @@
+---
+title: Create Session Token
+description: "Exchange a master access token for a time-limited session token. Session tokens provide temporary authenticated access to the PocketPaw dashboard API with automatic expiration."
+api: POST /api/auth/session
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["session token", "authentication", "token exchange"]
+tags: ["api", "authentication"]
+---
+
+## Overview
+
+Exchanges the master access token for a time-limited session token. Session tokens are useful for browser-based access where storing the master token is undesirable.
+
+## Request Headers
+
+<ParamTable type="header">
+  <Param name="Authorization" type="string" required>
+    `Bearer {master_token}` — the master access token.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="session_token" type="string">A time-limited HMAC-signed session token</ResponseField>
+<ResponseField name="expires_in_hours" type="integer">Token validity period in hours</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/auth/session" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/auth/session", {
+      method: "POST",
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/auth/session",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "session_token": "session:1705312200:a1b2c3d4e5f6...",
+      "expires_in_hours": 24
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

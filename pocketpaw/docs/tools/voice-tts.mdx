@@ -1,0 +1,78 @@
+---
+title: "Voice & TTS: Text-to-Speech with ElevenLabs"
+description: "Convert text to speech with PocketPaw using OpenAI TTS or ElevenLabs voices. Choose from multiple voice models and providers. Audio files are saved and delivered to your chat channel."
+section: Tools
+ogType: article
+keywords: ["text to speech", "tts", "openai tts", "elevenlabs", "voice synthesis"]
+tags: ["tools", "media", "voice"]
+---
+
+# Voice & TTS: Text-to-Speech with ElevenLabs
+
+PocketPaw can convert text to speech using OpenAI's TTS API or ElevenLabs.
+
+## Providers
+
+### OpenAI TTS
+
+```bash
+export POCKETPAW_OPENAI_API_KEY="sk-..."
+export POCKETPAW_TTS_PROVIDER="openai"
+export POCKETPAW_TTS_VOICE="alloy"  # alloy, echo, fable, onyx, nova, shimmer
+```
+
+### ElevenLabs
+
+```bash
+export POCKETPAW_ELEVENLABS_API_KEY="your-key"
+export POCKETPAW_TTS_PROVIDER="elevenlabs"
+export POCKETPAW_TTS_VOICE="your-voice-id"
+```
+
+## Usage
+
+```
+User: Read this article aloud: [article text]
+Agent: [uses voice tool] → [audio file]
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "voice",
+  "description": "Convert text to speech audio",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Text to convert to speech"
+      },
+      "voice": {
+        "type": "string",
+        "description": "Voice to use (optional)"
+      }
+    },
+    "required": ["text"]
+  }
+}
+```
+
+## Policy Group
+
+Belongs to `group:voice`. Also included in `group:media`.
+
+## Related
+
+<CardGroup>
+  <Card title="Speech to Text" icon="lucide:mic" href="/tools/speech-to-text">
+    Transcribe audio files to text with OpenAI Whisper.
+  </Card>
+  <Card title="Image Generation" icon="lucide:image" href="/tools/image-generation">
+    Generate images with Google Gemini models.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

@@ -1,0 +1,82 @@
+---
+title: List Webhooks
+description: "List all configured inbound webhook slots in PocketPaw. Each webhook has a unique ID, auto-generated secret for authentication, and a URL for receiving external payloads."
+api: GET /api/webhooks
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["list webhooks", "inbound webhooks", "webhook slots"]
+tags: ["api", "webhooks"]
+---
+
+## Overview
+
+Returns all configured inbound webhook slots. Each webhook slot provides a unique URL and secret for receiving external payloads that are forwarded to the agent.
+
+## Response
+
+<ResponseField name="webhooks" type="array">
+  Array of webhook slot objects.
+  <ResponseField name="name" type="string">Webhook slot name (URL slug)</ResponseField>
+  <ResponseField name="description" type="string">Human-readable description</ResponseField>
+  <ResponseField name="secret" type="string">Webhook verification secret</ResponseField>
+  <ResponseField name="url" type="string">Full webhook URL</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/webhooks" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/webhooks", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/webhooks",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "webhooks": [
+        {
+          "name": "github-events",
+          "description": "GitHub repository webhooks",
+          "secret": "whsec_a1b2c3d4e5f6...",
+          "url": "http://localhost:8000/webhook/inbound/github-events"
+        },
+        {
+          "name": "stripe-payments",
+          "description": "Stripe payment notifications",
+          "secret": "whsec_x7y8z9w0...",
+          "url": "http://localhost:8000/webhook/inbound/stripe-payments"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

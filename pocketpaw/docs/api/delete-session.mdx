@@ -1,0 +1,79 @@
+---
+title: Delete Session
+description: "Permanently delete a PocketPaw chat session and all its associated messages. This action is irreversible and removes the session from the index and storage."
+api: DELETE /api/sessions/{session_id}
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["delete session", "remove conversation", "permanent delete"]
+tags: ["api", "sessions"]
+---
+
+## Overview
+
+Permanently deletes a session and all its associated messages from the file store. This action cannot be undone.
+
+## Parameters
+
+<ParamTable type="path">
+  <Param name="session_id" type="string" required>
+    The unique identifier of the session to delete.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">
+  `"ok"` on successful deletion.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X DELETE "http://localhost:8000/api/sessions/session_abc123" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const sessionId = "session_abc123";
+    const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    session_id = "session_abc123"
+    response = requests.delete(
+        f"http://localhost:8000/api/sessions/{session_id}",
+        headers={"Authorization": "Bearer <token>"},
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "404"]}>
+  <Tab title="200">
+    ```json
+    { "status": "ok" }
+    ```
+  </Tab>
+  <Tab title="404">
+    ```json
+    { "detail": "Session not found" }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

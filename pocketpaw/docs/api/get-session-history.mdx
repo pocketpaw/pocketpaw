@@ -1,0 +1,96 @@
+---
+title: Get Session History
+description: "Retrieve the complete message history for a specific PocketPaw session. Returns all user and agent messages in chronological order with timestamps and metadata."
+api: GET /api/memory/session
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["session history", "message history", "chat log"]
+tags: ["api", "sessions"]
+---
+
+## Overview
+
+Returns the message history for a specific session. Messages are returned in chronological order with role, content, and timestamp.
+
+## Parameters
+
+<ParamTable type="query">
+  <Param name="id" type="string" required>
+    The session identifier to retrieve messages for.
+  </Param>
+  <Param name="limit" type="integer" default="50">
+    Maximum number of messages to return.
+  </Param>
+</ParamTable>
+
+## Response
+
+Returns an array of message objects:
+
+<ResponseField name="role" type="string">
+  Message role: `user` or `assistant`.
+</ResponseField>
+
+<ResponseField name="content" type="string">
+  The message content (may contain markdown).
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp when the message was recorded.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/memory/session?id=session_abc123" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/memory/session?id=session_abc123", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/memory/session",
+        params={"id": "session_abc123"},
+        headers={"Authorization": "Bearer <token>"},
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    [
+      {
+        "role": "user",
+        "content": "How do I check if a number is prime in Python?",
+        "timestamp": "2024-01-15T10:30:00Z"
+      },
+      {
+        "role": "assistant",
+        "content": "Here's a function to check if a number is prime...",
+        "timestamp": "2024-01-15T10:30:05Z"
+      }
+    ]
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

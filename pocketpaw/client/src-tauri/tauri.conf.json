@@ -1,0 +1,83 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PocketPaw",
+  "version": "0.1.4",
+  "identifier": "com.pocketpaw.client",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "PocketPaw",
+        "label": "main",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 480,
+        "minHeight": 400,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "transparent": true
+      },
+      {
+        "title": "PocketPaw",
+        "label": "sidepanel",
+        "url": "/sidepanel",
+        "width": 340,
+        "height": 600,
+        "minWidth": 48,
+        "minHeight": 400,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": true
+      },
+      {
+        "title": "Quick Ask",
+        "label": "quickask",
+        "url": "/quickask",
+        "width": 600,
+        "height": 120,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' tauri: asset: https://tauri.localhost; connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://tauri.localhost data:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**", "$RESOURCE/**"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/pocketpaw/pocketpaw/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFCQUZENUIwMkUwOTREQUQKUldTdFRRa3VzTld2RzEwMzMydy96bWRFWlZiRXFxRWQvZkdJL3dScGV3eXdiSXN1NkRTTXh6ZzEK"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

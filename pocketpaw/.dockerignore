@@ -1,0 +1,57 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+*.egg
+.eggs
+build
+dist
+sdist
+wheels
+
+# Virtual environments
+.venv
+venv
+ENV
+
+# Testing
+tests
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.nox
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs & internal
+docs
+idocs
+.claude
+
+# Environment files (secrets — pass via docker compose env_file)
+.env
+.env.local
+.env.*
+!.env.example
+
+# UV / Ruff caches
+.uv
+.ruff_cache
+
+# Logs
+*.log
+temp

@@ -1,0 +1,28 @@
+<!--
+  PocketPaw Dashboard - Screenshot Modal
+
+  Changes (2026-02-03):
+  - Extracted from monolithic index.html
+  - Displays captured screenshots in a responsive container
+-->
+<!-- Screenshot Modal -->
+<div
+class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+x-show="showScreenshot"
+x-transition.opacity
+@click.self="showScreenshot = false"
+>
+<div class="w-full max-w-[800px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+    <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+    <h2 class="text-[17px] font-semibold">Screenshot</h2>
+    <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showScreenshot = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div class="p-6 overflow-y-auto">
+    <img
+        :src="screenshotSrc"
+        alt="Screenshot"
+        class="w-full h-auto rounded-lg border border-[var(--glass-border)]"
+    />
+    </div>
+</div>
+</div>

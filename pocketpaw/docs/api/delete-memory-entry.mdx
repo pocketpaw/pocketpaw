@@ -1,0 +1,85 @@
+---
+title: Delete Memory Entry
+description: "Delete a specific long-term memory entry from PocketPaw's memory store. Use this to remove outdated or incorrect facts that the auto-learn system extracted from conversations."
+api: DELETE /api/memory/long_term/{entry_id}
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["delete memory", "remove fact", "memory management"]
+tags: ["api", "memory"]
+---
+
+## Overview
+
+Permanently deletes a long-term memory entry. This is useful for removing outdated or incorrect learned facts.
+
+## Parameters
+
+<ParamTable type="path">
+  <Param name="entry_id" type="string" required>
+    The unique identifier of the memory entry to delete.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="ok" type="boolean">`true` on successful deletion</ResponseField>
+
+## Error Responses
+
+| Status | Description |
+|--------|-------------|
+| 404 | Memory entry not found |
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X DELETE "http://localhost:8000/api/memory/long_term/mem_001" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/memory/long_term/mem_001", {
+      method: "DELETE",
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.delete(
+        "http://localhost:8000/api/memory/long_term/mem_001",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "404"]}>
+  <Tab title="200">
+    ```json
+    {
+      "ok": true
+    }
+    ```
+  </Tab>
+  <Tab title="404">
+    ```json
+    {
+      "detail": "Memory entry not found"
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -1,0 +1,226 @@
+---
+title: "Desktop Client Development: Build and Contribute"
+description: "Set up the PocketPaw desktop client development environment. Tauri 2.0, SvelteKit, Svelte 5, Tailwind CSS 4, and shadcn-svelte."
+section: Desktop Client
+ogType: article
+keywords: ["pocketpaw development", "tauri development", "sveltekit app", "desktop client build"]
+tags: ["desktop", "development", "contributing"]
+---
+
+# Desktop Client Development
+
+The desktop client source lives in `client/` at the repository root. It's a **Tauri 2.0** app with a **SvelteKit** frontend.
+
+## Prerequisites
+
+- **[Bun](https://bun.sh/)** for package management (not npm or yarn)
+- **[Rust](https://rustup.rs/)** toolchain for the Tauri backend
+- **Python backend** running on `localhost:8888`
+
+### Platform-Specific Requirements
+
+**Windows:**
+- Visual Studio C++ Build Tools
+- WebView2 (included in Windows 10 1803+)
+
+**macOS:**
+- Xcode Command Line Tools (`xcode-select --install`)
+
+**Linux:**
+- `build-essential`, `libwebkit2gtk-4.1-dev`, `libssl-dev`, `libayatana-appindicator3-dev`
+
+## Getting Started
+
+<Steps>
+  <Step>
+    **Clone the repository and install dependencies:**
+
+    ```bash
+    git clone https://github.com/pocketpaw/pocketpaw.git
+    cd pocketpaw/client
+    bun install
+    ```
+  </Step>
+  <Step>
+    **Start the Python backend** (in a separate terminal):
+
+    ```bash
+    # From the repo root
+    uv run pocketpaw
+    ```
+  </Step>
+  <Step>
+    **Run the desktop app in development mode:**
+
+    ```bash
+    cd client
+    bun run tauri dev
+    ```
+
+    This starts both the Vite dev server (port 1420) and the Tauri shell with hot reload.
+  </Step>
+</Steps>
+
+## Development Commands
+
+```bash
+cd client
+
+# Frontend only (no Tauri shell)
+bun run dev                    # Vite dev server at http://localhost:1420
+
+# Full desktop app
+bun run tauri dev              # Frontend + Tauri shell with hot reload
+
+# Type checking
+bun run check                  # svelte-kit sync + svelte-check
+bun run check:watch            # Watch mode
+
+# Production builds
+bun run build                  # Frontend build only
+bun run tauri build            # Full desktop app installer
+
+# Mobile (experimental)
+bun run tauri:android          # Android dev
+bun run tauri:ios              # iOS dev
+```
+
+## Project Structure
+
+```
+client/
+  src/                         # SvelteKit frontend
+    routes/                    # SPA routes
+      +layout.svelte           # App entry point (auth + store init)
+      +page.svelte             # Chat view (main route)
+      settings/                # Settings page
+      onboarding/              # First-run wizard
+      sidepanel/               # Side panel window
+      quickask/                # Quick ask popup window
+      oauth-callback/          # OAuth redirect handler
+    lib/
+      api/
+        client.ts              # REST client with 401 auto-refresh
+        websocket.ts           # WebSocket with auto-reconnect
+        config.ts              # Backend URL + API prefix
+      stores/                  # Svelte 5 rune-based stores
+        connection.svelte.ts   # REST + WebSocket lifecycle
+        chat.svelte.ts         # Messages, streaming, abort
+        session.svelte.ts      # Session list, active session
+        settings.svelte.ts     # Backend settings
+        activity.svelte.ts     # Activity log
+        ui.svelte.ts           # Sidebar, search, UI state
+      components/
+        ui/                    # shadcn-svelte components
+      auth/                    # OAuth2 PKCE flow
+    styles/
+      global.css               # Design tokens (oklch CSS vars)
+  src-tauri/                   # Rust backend
+    src/
+      lib.rs                   # Tauri entry point
+      commands.rs              # IPC commands (read_access_token, etc.)
+      tray.rs                  # System tray menu
+      side_panel.rs            # Side panel window management
+      quick_ask.rs             # Quick ask window management
+      oauth.rs                 # OAuth token CRUD
+    capabilities/
+      default.json             # Desktop permissions
+      mobile.json              # Mobile permissions
+    tauri.conf.json            # Tauri configuration
+```
+
+## Key Conventions
+
+### Svelte 5 Runes
+
+The client uses Svelte 5 runes exclusively:
+
+```svelte
+<script>
+  // Props — always use let, not const
+  let { title, count = 0 } = $props();
+
+  // Reactive state
+  let messages = $state([]);
+
+  // Derived values
+  let total = $derived(messages.length);
+
+  // Derived with function body (note: .by())
+  let filtered = $derived.by(() => {
+    return messages.filter(m => m.visible);
+  });
+</script>
+```
+
+### Tailwind CSS 4
+
+Never use string interpolation in class attributes:
+
+```svelte
+<!-- Wrong — breaks Tailwind 4 -->
+<div class="p-4 {isActive ? 'bg-blue-500' : ''}">
+
+<!-- Correct -->
+<div class={cn("p-4", isActive && "bg-blue-500")}>
+```
+
+### State Management
+
+Stores are singleton class instances using `$state` and `$derived`:
+
+```typescript
+// src/lib/stores/example.svelte.ts
+class ExampleStore {
+  items = $state<Item[]>([]);
+  loading = $state(false);
+  count = $derived(this.items.length);
+
+  async load() {
+    this.loading = true;
+    this.items = await api.getItems();
+    this.loading = false;
+  }
+}
+
+export const exampleStore = new ExampleStore();
+```
+
+### API Layer
+
+The REST client handles authentication and retries:
+
+```typescript
+import { client } from '$lib/api/client';
+
+// GET request
+const sessions = await client.get('/sessions');
+
+// POST with body
+const result = await client.post('/chat', { message: 'Hello' });
+
+// Streaming via SSE
+const stream = client.stream('/chat/stream', { message: 'Hello' });
+for await (const event of stream) {
+  // handle chunks
+}
+```
+
+## Contributing
+
+1. Create a feature branch off `dev`
+2. Make your changes in `client/`
+3. Run `bun run check` to verify type safety
+4. Test with `bun run tauri dev`
+5. Open a PR targeting `dev`
+
+See the [Contributing Guide](https://github.com/pocketpaw/pocketpaw/blob/dev/CONTRIBUTING.md) for full details.
+
+<CardGroup>
+  <Card title="Desktop Client Overview" icon="lucide:monitor" href="/desktop-client">
+    Architecture and feature overview.
+  </Card>
+  <Card title="API Reference" icon="lucide:server" href="/api">
+    REST and WebSocket API documentation.
+  </Card>
+</CardGroup>

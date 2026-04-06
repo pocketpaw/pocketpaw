@@ -1,0 +1,75 @@
+---
+title: "OCR Tool: Extract Text from Images"
+description: "Extract text from images using PocketPaw's OCR tool. Primary engine is GPT-4o Vision for high accuracy; falls back to pytesseract for offline use. Supports screenshots, photos, and scanned documents."
+section: Tools
+ogType: article
+keywords: ["ocr", "image text extraction", "gpt-4o vision", "pytesseract", "optical character recognition"]
+tags: ["tools", "media"]
+---
+
+# OCR Tool: Extract Text from Images
+
+The OCR tool extracts text from images using a two-tier approach: GPT-4o Vision as the primary engine with pytesseract as a fallback.
+
+## How It Works
+
+1. **Primary**: Sends the image to GPT-4o Vision for intelligent text extraction
+2. **Fallback**: If GPT-4o is unavailable, falls back to pytesseract (local OCR)
+
+GPT-4o Vision produces superior results for complex layouts, handwriting, and non-standard text. Pytesseract works offline but is limited to printed text.
+
+## Setup
+
+```bash
+# For GPT-4o Vision (primary)
+export POCKETPAW_OPENAI_API_KEY="sk-..."
+
+# For pytesseract fallback (optional)
+# Install tesseract-ocr system package
+sudo apt install tesseract-ocr  # Ubuntu/Debian
+brew install tesseract           # macOS
+```
+
+## Usage
+
+```
+User: What does this image say? /path/to/screenshot.png
+Agent: [uses ocr tool] → "The image contains the following text..."
+```
+
+## Tool Schema
+
+```json
+{
+  "name": "ocr",
+  "description": "Extract text from an image file",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "image_path": {
+        "type": "string",
+        "description": "Path to the image file"
+      }
+    },
+    "required": ["image_path"]
+  }
+}
+```
+
+## Policy Group
+
+Belongs to `group:media`.
+
+## Related
+
+<CardGroup>
+  <Card title="Image Generation" icon="lucide:image" href="/tools/image-generation">
+    Generate images with Google Gemini models.
+  </Card>
+  <Card title="Desktop Automation" icon="lucide:monitor" href="/tools/desktop">
+    Capture screenshots and monitor system resources.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

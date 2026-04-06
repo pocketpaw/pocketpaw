@@ -1,0 +1,348 @@
+# Updated: 2026-03-17 — Release 0.4.10: Soul Protocol, agent primitives, Discord overhaul, LiteLLM.
+[project]
+name = "pocketpaw"
+version = "0.4.15"
+description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+keywords = [
+    "ai", "agent", "telegram", "assistant", "automation",
+    "browser", "llm", "ollama", "openai", "anthropic",
+    "self-hosted", "local-first", "privacy"
+]
+authors = [
+    { name = "PocketPaw Team", email = "hello@pocketpaw.ai" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    # Config
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.1.0",
+    # HTTP client (used everywhere)
+    "httpx>=0.26.0",
+    # LLM Clients
+    "openai>=1.60.0",
+    "anthropic>=0.45.0",
+    # Agent Backend (recommended default)
+    "claude-agent-sdk>=0.1.30",
+    # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.31.1",
+    "jinja2>=3.1.0",
+    "qrcode[pil]>=7.4",
+    "python-multipart>=0.0.22",
+    # Logging & CLI
+    "rich>=13.0.0",
+    "click>=8.0",
+    # Scheduling
+    "apscheduler>=3.10.0",
+    "python-dateutil>=2.8.0",
+    # Credential Encryption
+    "cryptography>=42.0",
+    # Image basics
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+# --- Feature extras ---
+vector = ["chromadb"]
+dashboard = [
+    # Kept for backward compat — dashboard deps are now in core.
+    # Users with `pip install pocketpaw[dashboard]` in scripts won't break.
+]
+telegram = [
+    "python-telegram-bot>=21.0",
+]
+browser = [
+    "playwright>=1.50.0",
+]
+desktop = [
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+]
+openai-agents = [
+    "openai-agents>=0.2.0",
+]
+google-adk = [
+    "google-adk>=1.0.0",
+]
+copilot-sdk = [
+    "github-copilot-sdk>=0.1.0",
+]
+deep-agents = [
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
+]
+litellm = [
+    "litellm>=1.40.0",
+]
+memory = [
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+]
+soul = [
+    "soul-protocol[engine]>=0.2.4",
+]
+
+# --- Channel extras ---
+discord = [
+    "discord-cli-agent>=0.6.0",
+]
+slack = [
+    "slack-bolt>=1.20.0",
+]
+whatsapp-personal = [
+    "neonize>=0.3.14",
+]
+matrix = [
+    "matrix-nio>=0.24.0",
+]
+teams = [
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+]
+gchat = [
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+]
+
+# --- Tool extras ---
+image = [
+    "google-genai>=1.0.0",
+]
+extract = [
+    "html2text>=2020.1.16",
+]
+voice = [
+    "elevenlabs>=1.0.0",
+]
+ocr = [
+    "pytesseract>=0.3.10",
+]
+sarvam = [
+    "sarvamai>=0.1.25",
+]
+mcp = [
+    "mcp>=1.0.0",
+]
+# --- Composite extras (flattened — no recursive self-references) ---
+recommended = [
+    # browser
+    "playwright>=1.50.0",
+    # memory
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    # desktop
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+]
+channels = [
+    # telegram
+    "python-telegram-bot>=21.0",
+    # discord
+    "discord-cli-agent>=0.6.0",
+    # slack
+    "slack-bolt>=1.20.0",
+]
+all-channels = [
+    # telegram
+    "python-telegram-bot>=21.0",
+    # discord
+    "discord-cli-agent>=0.6.0",
+    # slack
+    "slack-bolt>=1.20.0",
+    # whatsapp-personal
+    "neonize>=0.3.14",
+    # matrix
+    "matrix-nio>=0.24.0",
+    # teams
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    # gchat
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+]
+all-tools = [
+    # browser
+    "playwright>=1.50.0",
+    # desktop
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    # image
+    "google-genai>=1.0.0",
+    # extract
+    "html2text>=2020.1.16",
+    # voice
+    "elevenlabs>=1.0.0",
+    # ocr
+    "pytesseract>=0.3.10",
+    # sarvam
+    "sarvamai>=0.1.25",
+    # mcp
+    "mcp>=1.0.0",
+    # memory
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    # soul
+    "soul-protocol[engine]>=0.2.4",
+]
+all-backends = [
+    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
+]
+all = [
+    # browser
+    "playwright>=1.50.0",
+    # memory
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    # desktop
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    # channels
+    "python-telegram-bot>=21.0",
+    "discord-cli-agent>=0.6.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    # tools
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    # soul
+    "soul-protocol[engine]>=0.2.4",
+    # backends
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
+]
+dev = [
+    # all deps (flattened from [all])
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "python-telegram-bot>=21.0",
+    "discord-cli-agent>=0.6.0",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
+    # dev tools
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-playwright>=0.4.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+]
+
+[project.scripts]
+pocketpaw = "pocketpaw.__main__:main"
+
+[project.urls]
+Homepage = "https://pocketpaw.xyz"
+Repository = "https://github.com/pocketpaw/pocketpaw"
+Issues = "https://github.com/pocketpaw/pocketpaw/issues"
+Documentation = "https://pocketpaw.xyz/introduction"
+Discord = "https://discord.gg/asRrtm95Zc"
+Twitter = "https://twitter.com/prakashd88"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src/pocketpaw"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[dependency-groups]
+dev = [
+    # all deps (flattened from [all])
+    "playwright>=1.50.0",
+    "mem0ai>=0.1.115",
+    "ollama>=0.6.1",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "python-telegram-bot>=21.0",
+    "discord-cli-agent>=0.6.4",
+    "slack-bolt>=1.20.0",
+    "neonize>=0.3.14",
+    "matrix-nio>=0.24.0",
+    "botbuilder-core>=4.16.0",
+    "botbuilder-integration-aiohttp>=4.16.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "html2text>=2020.1.16",
+    "elevenlabs>=1.0.0",
+    "pytesseract>=0.3.10",
+    "sarvamai>=0.1.25",
+    "mcp>=1.0.0",
+    "openai-agents>=0.2.0",
+    "google-adk>=1.0.0",
+    "github-copilot-sdk>=0.1.0",
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
+    # dev tools
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+    "pytest-playwright>=0.7.2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

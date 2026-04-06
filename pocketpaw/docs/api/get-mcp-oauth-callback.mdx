@@ -1,0 +1,63 @@
+---
+title: MCP OAuth Callback
+description: "OAuth redirect callback endpoint for MCP server authentication. Receives the authorization code from the OAuth provider after user authenticates in a browser popup."
+api: GET /api/mcp/oauth/callback
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: none
+section: API Reference
+ogType: article
+keywords: ["mcp oauth", "oauth callback", "mcp authentication"]
+tags: ["api", "mcp", "oauth"]
+---
+
+## Overview
+
+OAuth callback endpoint that receives the authorization code from an OAuth provider (GitHub, Notion, etc.) after the user authenticates in a browser popup. This endpoint is auth-exempt because it's the redirect target for the OAuth provider.
+
+The flow works as follows:
+
+1. PocketPaw opens a browser popup with the OAuth provider's authorization URL
+2. The user authenticates and grants permissions
+3. The OAuth provider redirects back to this endpoint with `code` and `state` parameters
+4. PocketPaw resolves the pending OAuth flow and completes the MCP server connection
+
+## Query Parameters
+
+<ResponseField name="code" type="string">Authorization code from the OAuth provider</ResponseField>
+<ResponseField name="state" type="string">OAuth state parameter for CSRF protection and flow matching</ResponseField>
+
+## Response
+
+Returns an HTML page. On success, the page auto-closes the browser popup tab.
+
+<RequestExample>
+<Tabs items={["Browser Redirect"]}>
+  <Tab title="Browser Redirect">
+    ```
+    GET /api/mcp/oauth/callback?code=abc123&state=xyz789
+    ```
+    This endpoint is not called directly — it's the redirect target configured in the OAuth flow.
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "400"]}>
+  <Tab title="200">
+    ```html
+    <html><body>
+    <h3>Authenticated! You can close this tab.</h3>
+    <script>window.close()</script>
+    </body></html>
+    ```
+  </Tab>
+  <Tab title="400">
+    ```html
+    <html><body>
+    <h3>OAuth flow expired or not found.</h3>
+    </body></html>
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

@@ -1,0 +1,40 @@
+services:
+  pocketpaw-discord:
+    build:
+      context: ../..
+      dockerfile: deploy/discord/Dockerfile
+    container_name: pocketpaw-discord
+    volumes:
+      - pocketpaw-discord-data:/home/pocketpaw/.pocketpaw
+      # Mount custom identity (overrides default system prompt)
+      - ./identity:/home/pocketpaw/.pocketpaw/identity
+      # Agent-created files (via Write/Bash tools)
+      - ./workspace:/home/pocketpaw/workspace
+      # Claude Code OAuth credentials (persists login across redeployments)
+      # Option 1: Named volume (for Coolify / remote servers — exec into container to login once)
+      - claude-auth:/home/pocketpaw/.claude
+      # Option 2: Host bind mount (for local Docker — reuse your host's `claude` CLI login)
+      # - ${CLAUDE_CONFIG_DIR:-~/.claude}:/home/pocketpaw/.claude
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      # resolve_backend_env() syncs POCKETPAW_* keys to SDK env vars at
+      # startup, so no manual ANTHROPIC_API_KEY / OPENAI_API_KEY mapping
+      # is needed here. Just pass POCKETPAW_* via .env.
+      - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "4"
+        reservations:
+          memory: 2G
+          cpus: "2"
+    restart: unless-stopped
+
+volumes:
+  pocketpaw-discord-data:
+  claude-auth:

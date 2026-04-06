@@ -1,0 +1,108 @@
+---
+title: Agent Status Stream (SSE)
+description: "Server-Sent Events stream of real-time agent state changes. Receives a full snapshot on connect and on every meaningful state transition."
+api: GET /api/v1/agent/status/stream
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: none
+section: API Reference
+ogType: article
+keywords: ["agent status", "sse", "server-sent events", "real-time", "streaming"]
+tags: ["api", "status", "streaming"]
+---
+
+## Overview
+
+Opens a Server-Sent Events (SSE) connection that pushes agent status snapshots in real time. The stream sends an initial snapshot on connect, then sends updates only when the agent state meaningfully changes (e.g. idle to active, tool switches, sessions starting or ending).
+
+Events are debounced at 1 second to avoid flooding during rapid tool sequences. A keepalive comment is sent every 30 seconds when idle.
+
+<Callout type="info">
+If `POCKETPAW_STATUS_API_KEY` is set, requests must include the key via the `X-Status-Key` header or `?key=` query parameter.
+</Callout>
+
+## Event Format
+
+The stream uses the standard SSE protocol. Each event has the type `status` with a JSON data payload matching the [GET /api/v1/agent/status](/api/get-agent-status) response schema.
+
+```
+event: status
+data: {"global":{"state":"active","active_sessions":1,...},"sessions":[...]}
+
+event: status
+data: {"global":{"state":"idle","active_sessions":0,...},"sessions":[]}
+
+: keepalive
+```
+
+## Deduplication
+
+The stream only sends events when the agent state actually changes. Repeated snapshots with the same global state, session states, and tool names are suppressed. Timing fields like `duration_seconds` and `uptime_seconds` do not trigger new events on their own.
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -N http://localhost:8000/api/v1/agent/status/stream \
+      -H "X-Status-Key: your-key"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const evtSource = new EventSource(
+      "http://localhost:8000/api/v1/agent/status/stream?key=your-key"
+    );
+
+    evtSource.addEventListener("status", (event) => {
+      const status = JSON.parse(event.data);
+      console.log(status.global.state);
+
+      for (const session of status.sessions) {
+        console.log(`${session.channel}: ${session.state}`);
+        if (session.tool_name) {
+          console.log(`  Running: ${session.tool_name}`);
+        }
+      }
+    });
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import json
+    import httpx
+
+    with httpx.stream(
+        "GET",
+        "http://localhost:8000/api/v1/agent/status/stream",
+        headers={"X-Status-Key": "your-key"},
+    ) as response:
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                status = json.loads(line[6:])
+                print(status["global"]["state"])
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["SSE Stream"]}>
+  <Tab title="SSE Stream">
+    ```
+    event: status
+    data: {"global":{"state":"idle","active_sessions":0,"max_concurrent":5,"uptime_seconds":120},"sessions":[]}
+
+    event: status
+    data: {"global":{"state":"active","active_sessions":1,"max_concurrent":5,"uptime_seconds":125},"sessions":[{"session_key":"websocket:abc123","session_id":"abc123","channel":"websocket","title":null,"state":"thinking","tool_name":null,"duration_seconds":0.5,"token_usage":null,"error_message":null}]}
+
+    event: status
+    data: {"global":{"state":"active","active_sessions":1,"max_concurrent":5,"uptime_seconds":128},"sessions":[{"session_key":"websocket:abc123","session_id":"abc123","channel":"websocket","title":null,"state":"tool_running","tool_name":"bash","duration_seconds":1.2,"token_usage":{"input":500,"output":100},"error_message":null}]}
+
+    : keepalive
+
+    event: status
+    data: {"global":{"state":"idle","active_sessions":0,"max_concurrent":5,"uptime_seconds":140},"sessions":[]}
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

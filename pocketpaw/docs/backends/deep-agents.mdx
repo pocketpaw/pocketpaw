@@ -1,0 +1,230 @@
+---
+title: "Deep Agents: LangChain/LangGraph Backend"
+description: "The Deep Agents backend uses LangChain's Deep Agents SDK with LangGraph runtime for built-in planning, subagent delegation, and multi-provider LLM support."
+section: Agent Backends
+ogType: article
+keywords: ["deep agents", "langchain", "langgraph", "agent framework", "litellm", "multi-provider"]
+tags: ["backends", "langchain", "langgraph"]
+---
+
+# Deep Agents: LangChain/LangGraph Backend
+
+The Deep Agents backend uses LangChain's [Deep Agents SDK](https://docs.langchain.com/oss/python/deepagents/overview) (`deepagents` package) with the LangGraph runtime. It provides built-in planning, subagent delegation, filesystem tools, and access to any LLM provider supported by LangChain.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: Anthropic, OpenAI, Google, Ollama, OpenRouter, OpenAI-compatible, LiteLLM
+- **Built-in tools**: write_todos, read_todos, task (subagents), ls, read_file, write_file
+- **MCP support**: Yes (via `.mcp.json` file discovery, supports stdio/SSE/HTTP transports)
+- **ACP support**: Yes (Agent Communication Protocol for IDE integration via `deepagents-acp`)
+- **Session persistence**: History injection (LangGraph checkpointing planned)
+
+## Configuration
+
+```bash
+export POCKETPAW_AGENT_BACKEND="deep_agents"
+export POCKETPAW_DEEP_AGENTS_MODEL="anthropic:claude-sonnet-4-6"
+```
+
+### Backend-Specific Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `deep_agents_model` | `POCKETPAW_DEEP_AGENTS_MODEL` | `anthropic:claude-sonnet-4-6` | Model in `provider:model` format |
+| `deep_agents_max_turns` | `POCKETPAW_DEEP_AGENTS_MAX_TURNS` | `100` | Max tool-use turns per query (maps to LangGraph recursion limit) |
+
+### Model Format
+
+Deep Agents uses LangChain's `init_chat_model()` which accepts a `provider:model` string. Set the model in the dashboard or via environment variable:
+
+```bash
+# Anthropic
+export POCKETPAW_DEEP_AGENTS_MODEL="anthropic:claude-sonnet-4-6"
+
+# OpenAI
+export POCKETPAW_DEEP_AGENTS_MODEL="openai:gpt-4o"
+
+# Google Gemini
+export POCKETPAW_DEEP_AGENTS_MODEL="google_genai:gemini-2.0-flash"
+
+# Ollama (local)
+export POCKETPAW_DEEP_AGENTS_MODEL="ollama:llama3.2"
+```
+
+### Using with Ollama
+
+For free local inference, point to your Ollama instance:
+
+```bash
+export POCKETPAW_AGENT_BACKEND="deep_agents"
+export POCKETPAW_DEEP_AGENTS_MODEL="ollama:llama3.2"
+export POCKETPAW_OLLAMA_HOST="http://localhost:11434"  # default
+```
+
+The backend passes the Ollama host as `base_url` to the LangChain model. Any model available in your Ollama instance can be used.
+
+### Using with OpenRouter
+
+Access 100+ models through OpenRouter's API:
+
+```bash
+export POCKETPAW_AGENT_BACKEND="deep_agents"
+export POCKETPAW_DEEP_AGENTS_MODEL="openrouter:anthropic/claude-sonnet-4-6"
+export POCKETPAW_OPENROUTER_API_KEY="sk-or-v1-..."
+```
+
+The backend routes OpenRouter through the OpenAI-compatible API with `https://openrouter.ai/api/v1` as the base URL.
+
+### Using with LiteLLM
+
+Route through a LiteLLM proxy for access to 100+ providers:
+
+```bash
+export POCKETPAW_AGENT_BACKEND="deep_agents"
+export POCKETPAW_DEEP_AGENTS_MODEL="litellm:anthropic/claude-sonnet-4-6"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_API_KEY="your-proxy-key"  # optional
+```
+
+The backend routes LiteLLM through the OpenAI-compatible API pointed at your proxy URL. Use the `provider/model` format after `litellm:` (e.g., `litellm:openai/gpt-4o`, `litellm:huggingface/meta-llama/Llama-3-70b`).
+
+<Callout type="info">
+  In the dashboard, when you type `litellm:`, `ollama:`, or `openrouter:` in the Model field, the relevant config fields (proxy URL, API key, host) appear inline automatically.
+</Callout>
+
+### Using with OpenAI-Compatible Endpoints
+
+Point to any OpenAI-compatible API:
+
+```bash
+export POCKETPAW_AGENT_BACKEND="deep_agents"
+export POCKETPAW_DEEP_AGENTS_MODEL="openai_compatible:your-model-name"
+export POCKETPAW_OPENAI_COMPATIBLE_BASE_URL="https://your-endpoint.com/v1"
+export POCKETPAW_OPENAI_COMPATIBLE_API_KEY="your-key"
+```
+
+## Built-in Tools
+
+Deep Agents includes its own planning and filesystem tools alongside PocketPaw's 50+ custom tools:
+
+| Deep Agents Tool | Description | Policy Mapping |
+|-----------------|-------------|---------------|
+| `write_todos` | Task planning and decomposition | -- |
+| `read_todos` | Read current task list | -- |
+| `task` | Spawn subagents for isolated work | `shell` |
+| `ls` | List directory contents | `read_file` |
+| `read_file` | Read file contents | `read_file` |
+| `write_file` | Write/create files | `write_file` |
+
+PocketPaw's custom tools (web_search, image_gen, memory, etc.) are registered as LangChain `StructuredTool` wrappers via the tool bridge.
+
+## MCP Tools
+
+Deep Agents supports [MCP (Model Context Protocol)](https://docs.langchain.com/oss/python/deepagents/cli/mcp-tools) servers via `.mcp.json` configuration files. This lets the agent access external tools like file systems, APIs, and databases.
+
+### Configuration Files
+
+The SDK discovers `.mcp.json` files at three locations (highest precedence last):
+
+1. `~/.deepagents/.mcp.json` -- user-level (global defaults)
+2. `<project>/.deepagents/.mcp.json` -- project subdirectory
+3. `<project>/.mcp.json` -- project root (Claude Code compatible)
+
+### Supported Transports
+
+**stdio** (spawns server as child process):
+```json
+{
+  "servers": {
+    "my-server": {
+      "command": "/path/to/server",
+      "args": ["--arg1", "value"],
+      "env": { "API_KEY": "..." }
+    }
+  }
+}
+```
+
+**SSE** (remote server):
+```json
+{
+  "servers": {
+    "remote-sse": {
+      "type": "sse",
+      "url": "https://example.com/sse",
+      "headers": { "Authorization": "Bearer token" }
+    }
+  }
+}
+```
+
+**HTTP** (remote server):
+```json
+{
+  "servers": {
+    "remote-http": {
+      "type": "http",
+      "url": "https://example.com/api",
+      "headers": { "Authorization": "Bearer token" }
+    }
+  }
+}
+```
+
+<Callout type="info">
+  The `.mcp.json` format at the project root is compatible with Claude Code's MCP config, so existing MCP server configs carry over automatically.
+</Callout>
+
+### Trust and Security
+
+- **Project-level stdio servers**: default-deny policy. The CLI prompts for approval using SHA-256 fingerprinting. In non-interactive mode, use `--trust-project-mcp`.
+- **Remote servers** (SSE/HTTP): always allowed since they don't execute local code.
+
+<Callout type="warning">
+  MCP support in Deep Agents currently works via file-based discovery (`.mcp.json`), not as a programmatic parameter to `create_deep_agent()`. PocketPaw's MCP servers configured in the dashboard are not automatically passed to the Deep Agents backend. To use MCP with Deep Agents, configure servers in a `.mcp.json` file in your project root.
+</Callout>
+
+## ACP (Agent Communication Protocol)
+
+Deep Agents supports [ACP](https://docs.langchain.com/oss/python/deepagents/acp) for IDE integration (Zed, JetBrains, VS Code). ACP standardizes communication between coding agents and editors, allowing editors to provide project context while receiving rich updates.
+
+```bash
+pip install deepagents-acp
+```
+
+This is separate from PocketPaw's integration and is primarily useful when running Deep Agents directly from an IDE.
+
+## How It Works
+
+1. PocketPaw calls `create_deep_agent()` with the LLM model, system prompt, and tools
+2. Messages stream via LangGraph's `astream()` with `stream_mode=["updates", "messages"]`
+3. `messages` chunks yield token-by-token text to the chat
+4. `updates` chunks surface tool calls and results to the Activity panel
+5. The compiled LangGraph agent is cached across calls for performance
+6. Conversation history is injected as message context for multi-turn support
+
+## Installation
+
+```bash
+pip install pocketpaw[deep-agents]
+```
+
+This installs the `deepagents` package and its LangChain/LangGraph dependencies.
+
+## Related
+
+<CardGroup>
+  <Card title="All Agent Backends" icon="lucide:layers" href="/backends">
+    Compare all backends side by side with capability badges.
+  </Card>
+  <Card title="Ollama: Free Local Models" icon="lucide:hard-drive" href="/backends/ollama">
+    Run Deep Agents with local models via Ollama.
+  </Card>
+  <Card title="LLM Providers" icon="lucide:globe" href="/concepts/llm-providers">
+    Detailed configuration for all supported LLM providers.
+  </Card>
+  <Card title="Tool Policy" icon="lucide:shield" href="/tools/tool-policy">
+    Control which tools are available to the agent.
+  </Card>
+</CardGroup>

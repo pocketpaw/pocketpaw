@@ -1,0 +1,89 @@
+---
+title: Run Security Audit
+description: "Execute PocketPaw's 7 built-in security audit checks on demand and return detailed results. Detects misconfigurations in permissions, tokens, API keys, and security settings."
+api: POST /api/security-audit
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["run security audit", "security checks", "misconfiguration detection"]
+tags: ["api", "security"]
+---
+
+## Overview
+
+Runs the 7 built-in security audit checks against the current configuration and returns detailed results. This is the API equivalent of `pocketpaw --security-audit`.
+
+## Response
+
+<ResponseField name="total" type="integer">Total number of checks executed</ResponseField>
+<ResponseField name="passed" type="integer">Number of checks that passed</ResponseField>
+<ResponseField name="issues" type="integer">Number of checks that found issues</ResponseField>
+<ResponseField name="results" type="array">
+  Detailed results for each check.
+  <ResponseField name="check" type="string">Check name (e.g., `file_permissions`, `api_key_exposure`)</ResponseField>
+  <ResponseField name="passed" type="boolean">Whether the check passed</ResponseField>
+  <ResponseField name="message" type="string">Description of what was found</ResponseField>
+  <ResponseField name="fixable" type="boolean">Whether the issue can be auto-fixed with `--fix`</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/security-audit" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/security-audit", {
+      method: "POST",
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/security-audit",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "total": 7,
+      "passed": 5,
+      "issues": 2,
+      "results": [
+        {
+          "check": "file_permissions",
+          "passed": true,
+          "message": "Config directory permissions are correct (700)",
+          "fixable": false
+        },
+        {
+          "check": "api_key_exposure",
+          "passed": false,
+          "message": "API key found in environment variable without restricted permissions",
+          "fixable": true
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

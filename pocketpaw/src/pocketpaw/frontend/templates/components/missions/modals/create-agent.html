@@ -1,0 +1,68 @@
+<!--
+  PocketPaw - Create Agent Modal Component
+
+  Created: 2026-02-05
+  Extracted from missions.html as part of template componentization.
+
+  Features:
+  - Agent name input
+  - Role input
+  - Description textarea
+  - Specialties input (comma-separated)
+-->
+
+<!-- Create Agent Modal -->
+<div
+    x-show="missionControl.showCreateAgent"
+    x-transition.opacity
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+    @click.self="missionControl.showCreateAgent = false"
+>
+    <div
+        class="w-full max-w-lg bg-[#1c1c1e] border border-white/10 rounded-2xl shadow-2xl"
+        x-transition:enter="transition ease-out duration-200"
+        x-transition:enter-start="scale-95 opacity-0"
+        x-transition:enter-end="scale-100 opacity-100"
+        @click.stop
+    >
+        <div class="flex items-center justify-between px-6 py-4 border-b border-white/5">
+            <h3 class="text-base font-semibold text-white">New Agent</h3>
+            <button class="p-2 text-white/50 hover:text-white hover:bg-white/10 rounded-lg" @click="missionControl.showCreateAgent = false">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div class="p-6 space-y-4">
+            <input
+                type="text"
+                x-model="missionControl.agentForm.name"
+                placeholder="Agent name (e.g., Jarvis)"
+                class="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white focus:outline-none focus:border-accent placeholder-white/30"
+            >
+            <input
+                type="text"
+                x-model="missionControl.agentForm.role"
+                placeholder="Role (e.g., Research Lead)"
+                class="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white focus:outline-none focus:border-accent placeholder-white/30"
+            >
+            <textarea
+                x-model="missionControl.agentForm.description"
+                placeholder="What does this agent do?"
+                rows="2"
+                class="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white focus:outline-none focus:border-accent placeholder-white/30 resize-none"
+            ></textarea>
+            <input
+                type="text"
+                x-model="missionControl.agentForm.specialties"
+                placeholder="Specialties (comma-separated)"
+                class="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white focus:outline-none focus:border-accent placeholder-white/30"
+            >
+            <button
+                class="w-full py-3 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                @click="createMCAgent()"
+                :disabled="!missionControl.agentForm.name || !missionControl.agentForm.role"
+            >
+                Create Agent
+            </button>
+        </div>
+    </div>
+</div>

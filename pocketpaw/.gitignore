@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# UV
+.uv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Internal drafts
+idocs/
+.claude 
+
+# Config (contains secrets)
+.env
+.env.local
+
+# Logs
+*.log
+
+# Build artifacts
+*.pyc
+*.pyo
+
+temp
+
+# Client (Tauri + SvelteKit)
+node_modules/
+.svelte-kit/
+client/build/
+client/src-tauri/target/
+client/src-tauri/gen/
+client/bun.lock
+
+private.key
+
+# Backups and secrets
+.env.bak
+*.bak
+

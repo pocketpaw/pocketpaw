@@ -1,0 +1,132 @@
+---
+title: "PII Detection and Masking"
+description: "PocketPaw can detect and mask personally identifiable information (PII) like SSNs, emails, phone numbers, and credit cards before storing data in memory or audit logs."
+section: Security
+ogType: article
+keywords: ["pii", "data masking", "privacy", "personal data", "redaction", "gdpr"]
+tags: ["security", "privacy"]
+---
+
+# PII Detection and Masking
+
+PocketPaw includes an opt-in PII detection and masking system that scans text for sensitive personal information and applies configurable actions before data is stored in memory, audit logs, or application logs.
+
+## Overview
+
+When enabled, the PII scanner runs on:
+
+- **User messages** before saving to session memory
+- **Assistant responses** before saving to session memory
+- **Audit log entries** before writing to `~/.pocketpaw/audit.jsonl`
+- **Application logs** via an optional log filter
+
+The scanner is regex-based with pre-compiled patterns for performance. It runs on every matching text block and deduplicates overlapping matches.
+
+## Detected PII Types
+
+| Type | Pattern | Example |
+|------|---------|---------|
+| SSN | Dashed format only | `123-45-6789` |
+| Email | Standard email addresses | `john@example.com` |
+| US Phone | Multiple formats | `(555) 123-4567`, `+1 555-123-4567` |
+| International Phone | Country code + number | `+44 7911 123456` |
+| Credit Card (Visa) | Starts with 4, 16 digits | `4111-1111-1111-1111` |
+| Credit Card (MasterCard) | Starts with 51-55 | `5500-0000-0000-0004` |
+| Credit Card (Amex) | Starts with 34/37, 15 digits | `3734-567890-12345` |
+| Credit Card (Discover) | Starts with 6011/65 | `6011-1111-1111-1111` |
+| IPv4 Address | Standard notation | `192.168.1.100` |
+| Date of Birth | Context-aware (needs "born", "dob", etc.) | `Born on 03/15/1990` |
+
+<Callout type="info">
+  SSN detection uses dashed format only (`XXX-XX-XXXX`) to avoid false positives on bare 9-digit numbers. Date of birth detection requires proximity to keywords like "born", "dob", or "birthday" within 20 characters.
+</Callout>
+
+## Actions
+
+When PII is detected, one of three actions is applied:
+
+| Action | Behavior | Example Output |
+|--------|----------|----------------|
+| `mask` | Replace with type label | `[REDACTED-EMAIL]` |
+| `hash` | Replace with partial SHA-256 | `[PII-SSN:a7f3e9c1d2b8]` |
+| `log` | Flag in audit only, text unchanged | Original text preserved |
+
+You can set a default action and override per PII type.
+
+## Configuration
+
+### Environment Variables
+
+```bash
+POCKETPAW_PII_SCAN_ENABLED=true        # Enable PII scanning (default: false)
+POCKETPAW_PII_DEFAULT_ACTION=mask       # Default action: mask, hash, or log
+POCKETPAW_PII_SCAN_MEMORY=true          # Scan before writing to memory
+POCKETPAW_PII_SCAN_AUDIT=true           # Scan audit log entries
+POCKETPAW_PII_SCAN_LOGS=true            # Extend log scrubber with PII patterns
+```
+
+### Config File (`~/.pocketpaw/config.json`)
+
+```json
+{
+  "pii_scan_enabled": true,
+  "pii_default_action": "mask",
+  "pii_type_actions": {
+    "ssn": "hash",
+    "email": "mask",
+    "phone": "log"
+  },
+  "pii_scan_memory": true,
+  "pii_scan_audit": true,
+  "pii_scan_logs": true
+}
+```
+
+### Web Dashboard
+
+Toggle PII scanning and configure actions from **Settings > Security** in the web dashboard.
+
+## Per-Type Action Overrides
+
+Use `pii_type_actions` to set different actions for each PII type:
+
+```json
+{
+  "pii_type_actions": {
+    "ssn": "hash",
+    "email": "mask",
+    "phone": "log",
+    "credit_card": "mask",
+    "ip_address": "log"
+  }
+}
+```
+
+With this config:
+- SSN `123-45-6789` becomes `[PII-SSN:a7f3e9c1d2b8]`
+- Email `john@example.com` becomes `[REDACTED-EMAIL]`
+- Phone `555-123-4567` is logged but text stays unchanged
+
+## Scanning Existing Memory
+
+Use the audit CLI to scan stored memory files for PII:
+
+```bash
+pocketpaw --audit --pii-scan
+```
+
+This scans all markdown files in `~/.pocketpaw/memory/` and session JSON files in `~/.pocketpaw/memory/sessions/`, reporting findings without modifying the files.
+
+## Related
+
+<CardGroup>
+  <Card title="Streaming Redaction" icon="lucide:eye-off" href="/security/streaming-redaction">
+    Automatic secret redaction in agent streaming output.
+  </Card>
+  <Card title="Audit Log" icon="lucide:file-check" href="/security/audit-log">
+    Append-only action recording with PII filtering support.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    PocketPaw's full multi-layered security architecture.
+  </Card>
+</CardGroup>

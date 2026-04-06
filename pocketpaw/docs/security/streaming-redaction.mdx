@@ -1,0 +1,70 @@
+---
+title: "Streaming Redaction"
+description: "PocketPaw automatically redacts API keys, tokens, and credentials from agent streaming output using buffer-based pattern matching that catches secrets spanning chunk boundaries."
+section: Security
+ogType: article
+keywords: ["secret redaction", "api key protection", "credential leak prevention", "streaming security"]
+tags: ["security", "redaction"]
+---
+
+# Streaming Redaction
+
+PocketPaw automatically scans agent output for API keys, tokens, and credentials, replacing them with `[REDACTED]` before they reach the user. This operates at the message bus level, making it backend-agnostic.
+
+## How It Works
+
+Agent backends stream responses in small chunks. A secret like `sk-ant-api03-abc123...` could be split across two chunks, making per-chunk scanning unreliable.
+
+PocketPaw uses **buffer-based redaction**:
+
+1. Raw chunks are accumulated into a streaming buffer
+2. The full buffer is scanned for secret patterns on every chunk
+3. Only the newly safe portion (delta from last publish) is sent to the user
+4. This catches secrets that span chunk boundaries
+
+## Detected Patterns
+
+The redaction engine covers 19 secret patterns:
+
+| Pattern | Example |
+|---------|---------|
+| OpenAI API Key | `sk-abc123def456...` |
+| Anthropic API Key | `sk-ant-api03-...` |
+| AWS Access Key | `AKIAIOSFODNN7EXAMPLE` |
+| AWS Secret Key | `AWS_SECRET_ACCESS_KEY=wJalr...` |
+| GitHub Token | `ghp_abcdefghijklmnop...` |
+| Google API Key | `AIzaSyDaGmWKa4JsXZ...` |
+| Stripe API Key | `sk_live_XXXXXXXX...` |
+| Slack Token | `xoxb-0000000000-...` |
+| Bearer Token | `Bearer eyJhbGciOi...` |
+| JWT Token | `eyJhbGciOi...eyJ...eyJ...` |
+| Private Key Header | `-----BEGIN RSA PRIVATE KEY-----` |
+| Generic API Key | `api_key=abcdef123456...` |
+| Generic Token | `access_token=longtoken...` |
+| Env Var Secret | `PASSWORD=SuperSecret...` |
+| Basic Auth URL | `postgresql://user:pass@host` |
+| PocketPaw API Key | `pp_abc123...` |
+| PocketPaw OAuth Access | `ppat_abc123...` |
+| PocketPaw OAuth Refresh | `pprt_abc123...` |
+
+## Always On
+
+Streaming redaction is enabled by default and cannot be disabled. It runs on all agent output regardless of backend or channel.
+
+<Callout type="info">
+  Streaming redaction protects against accidental leaks in agent output (e.g., when the agent reads a `.env` file or echoes a config). It does not replace proper secret management. Store API keys in PocketPaw's encrypted credential store, not in plain text files.
+</Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="PII Detection" icon="lucide:user-x" href="/security/pii-masking">
+    Detect and mask personal information like SSNs, emails, and credit cards.
+  </Card>
+  <Card title="Guardian AI" icon="lucide:shield-alert" href="/security/guardian-ai">
+    Secondary LLM safety check on every incoming message.
+  </Card>
+  <Card title="Security Overview" icon="lucide:shield" href="/security">
+    PocketPaw's full multi-layered security architecture.
+  </Card>
+</CardGroup>

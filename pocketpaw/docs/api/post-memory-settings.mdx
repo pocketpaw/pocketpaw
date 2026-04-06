@@ -1,0 +1,124 @@
+---
+title: Update Memory Settings
+description: "Update PocketPaw's memory backend configuration: switch between file store and Mem0, configure LLM and embedder providers, set vector store options, and toggle auto-learning."
+api: POST /api/memory/settings
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["update memory settings", "memory configuration", "backend switch"]
+tags: ["api", "memory"]
+---
+
+## Overview
+
+Updates the memory backend configuration. Changes take effect immediately — the memory manager is reloaded with the new settings.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="memory_backend" type="string" enum={["file", "mem0"]}>
+    Memory backend to use. `file` is the default file-based store, `mem0` enables semantic memory with auto-learn.
+  </Param>
+  <Param name="mem0_llm_provider" type="string" enum={["ollama", "openai", "anthropic"]}>
+    LLM provider for mem0's extraction and summarization.
+  </Param>
+  <Param name="mem0_llm_model" type="string">
+    LLM model name (e.g., `llama3.2`, `gpt-4o-mini`).
+  </Param>
+  <Param name="mem0_embedder_provider" type="string" enum={["ollama", "openai"]}>
+    Embedding provider for semantic search.
+  </Param>
+  <Param name="mem0_embedder_model" type="string">
+    Embedding model name (e.g., `nomic-embed-text`, `text-embedding-3-small`).
+  </Param>
+  <Param name="mem0_vector_store" type="string" enum={["qdrant"]}>
+    Vector store backend.
+  </Param>
+  <Param name="mem0_ollama_base_url" type="string">
+    Ollama server URL (default: `http://localhost:11434`).
+  </Param>
+  <Param name="mem0_auto_learn" type="boolean">
+    Enable automatic memory extraction from conversations.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="status" type="string">`"ok"` on success</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/memory/settings" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "memory_backend": "mem0",
+        "mem0_llm_provider": "ollama",
+        "mem0_llm_model": "llama3.2",
+        "mem0_embedder_provider": "ollama",
+        "mem0_embedder_model": "nomic-embed-text",
+        "mem0_vector_store": "qdrant",
+        "mem0_auto_learn": true
+      }'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/memory/settings", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        memory_backend: "mem0",
+        mem0_llm_provider: "ollama",
+        mem0_llm_model: "llama3.2",
+        mem0_embedder_provider: "ollama",
+        mem0_embedder_model: "nomic-embed-text",
+        mem0_vector_store: "qdrant",
+        mem0_auto_learn: true
+      })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/memory/settings",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "memory_backend": "mem0",
+            "mem0_llm_provider": "ollama",
+            "mem0_llm_model": "llama3.2",
+            "mem0_embedder_provider": "ollama",
+            "mem0_embedder_model": "nomic-embed-text",
+            "mem0_vector_store": "qdrant",
+            "mem0_auto_learn": True
+        }
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "status": "ok"
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

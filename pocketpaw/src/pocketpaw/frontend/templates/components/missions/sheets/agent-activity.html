@@ -1,0 +1,122 @@
+<!--
+  PocketPaw - Agent Activity Sheet Component
+
+  Created: 2026-02-05
+  Extracted from missions.html as part of template componentization.
+
+  Features:
+  - Full-height right-sliding panel
+  - Agent avatar with working indicator
+  - Stop task button
+  - Real-time streaming output display
+  - Footer with elapsed time and output stats
+-->
+
+<!-- Agent Activity Sheet (Slide-out Panel) -->
+<div
+    x-show="missionControl.showAgentActivitySheet"
+    x-transition:enter="transition ease-out duration-300"
+    x-transition:enter-start="opacity-0"
+    x-transition:enter-end="opacity-100"
+    x-transition:leave="transition ease-in duration-200"
+    x-transition:leave-start="opacity-100"
+    x-transition:leave-end="opacity-0"
+    class="fixed inset-0 z-50"
+    @click.self="closeAgentActivitySheet()"
+>
+    <!-- Backdrop -->
+    <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
+
+    <!-- Panel -->
+    <div
+        x-show="missionControl.showAgentActivitySheet"
+        x-transition:enter="transition ease-out duration-300"
+        x-transition:enter-start="translate-x-full"
+        x-transition:enter-end="translate-x-0"
+        x-transition:leave="transition ease-in duration-200"
+        x-transition:leave-start="translate-x-0"
+        x-transition:leave-end="translate-x-full"
+        class="fixed top-0 right-0 h-full w-full sm:w-[600px] lg:w-[700px] bg-[#1c1c1e] border-l border-white/10 shadow-2xl flex flex-col"
+        @click.stop
+    >
+        <!-- Header -->
+        <div class="flex items-center justify-between px-6 py-4 border-b border-white/10 bg-gradient-to-r from-green-600/20 to-emerald-500/10">
+            <div class="flex items-center gap-4">
+                <!-- Agent Avatar -->
+                <div class="relative">
+                    <div class="w-12 h-12 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center text-white font-bold text-xl shadow-lg ring-2 ring-green-500/50">
+                        <span x-text="missionControl.activeAgentTask?.agentName?.charAt(0) || 'A'"></span>
+                    </div>
+                    <div class="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-green-500 rounded-full flex items-center justify-center shadow-lg ring-2 ring-[#1c1c1e]">
+                        <div class="w-2 h-2 bg-white rounded-full animate-pulse"></div>
+                    </div>
+                </div>
+
+                <!-- Agent & Task Info -->
+                <div class="flex flex-col">
+                    <div class="flex items-center gap-2">
+                        <span class="text-white font-semibold text-lg" x-text="missionControl.activeAgentTask?.agentName"></span>
+                        <span class="px-2 py-0.5 text-xs font-medium bg-green-500/20 text-green-400 rounded-full animate-pulse">Working</span>
+                    </div>
+                    <span class="text-white/60 text-sm truncate max-w-md" x-text="missionControl.activeAgentTask?.taskTitle"></span>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-2">
+                <!-- Stop Button -->
+                <button
+                    x-show="isMCTaskRunning(missionControl.activeAgentTask?.taskId)"
+                    class="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-medium transition-all"
+                    @click="stopMCTask(missionControl.activeAgentTask?.taskId)"
+                >
+                    <i data-lucide="square" class="w-4 h-4"></i>
+                    Stop
+                </button>
+                <!-- Close Button -->
+                <button
+                    class="p-2 text-white/50 hover:text-white hover:bg-white/10 rounded-lg transition-all"
+                    @click="closeAgentActivitySheet()"
+                >
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Body: Live Streaming Output -->
+        <div class="flex-1 overflow-hidden flex flex-col">
+            <div class="flex items-center gap-2 px-6 py-3 border-b border-white/5 bg-black/20">
+                <div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                <span class="text-xs text-white/40 uppercase tracking-wider font-semibold">Live Output</span>
+            </div>
+            <div
+                x-ref="agentActivityOutput"
+                class="flex-1 overflow-y-auto p-6 font-mono text-sm text-white/80 whitespace-pre-wrap leading-relaxed bg-black/30"
+            >
+                <template x-if="missionControl.activeAgentTask">
+                    <div>
+                        <span x-text="getAgentActivityOutput(missionControl.activeAgentTask.taskId)"></span>
+                        <span x-show="isMCTaskRunning(missionControl.activeAgentTask?.taskId)" class="inline-block w-2 h-5 bg-green-500 animate-pulse ml-0.5"></span>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <!-- Footer: Stats -->
+        <div class="flex items-center justify-between px-6 py-3 border-t border-white/10 bg-black/20">
+            <div class="flex items-center gap-4 text-xs text-white/40">
+                <span class="flex items-center gap-1.5">
+                    <i data-lucide="clock" class="w-3.5 h-3.5"></i>
+                    Started <span x-text="formatMCDate(missionControl.activeAgentTask?.startedAt)"></span>
+                </span>
+                <span class="text-white/20">·</span>
+                <span class="flex items-center gap-1.5">
+                    <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+                    <span x-text="missionControl.runningTasks[missionControl.activeAgentTask?.taskId]?.output?.length || 0"></span> chunks
+                </span>
+            </div>
+            <div class="text-xs text-white/40">
+                Elapsed: <span class="text-white/60 font-mono" x-text="formatElapsedTime(missionControl.activeAgentTask?.startedAt)"></span>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,152 @@
+---
+title: "Build a Telegram AI Bot in 5 Minutes"
+description: "Create a personal AI assistant on Telegram using PocketPaw. Supports text, voice messages, files, persistent memory, and 50+ tools. Self-hosted and private."
+section: Guides
+ogType: article
+keywords: ["telegram ai bot", "telegram ai assistant", "build telegram bot python", "self-hosted telegram bot", "ai chatbot telegram"]
+tags: ["guide", "telegram", "bot", "messaging"]
+---
+
+# Build a Telegram AI Bot in 5 Minutes
+
+Telegram bots are useful for quick access to an AI assistant from your phone. But most Telegram bot tutorials wire up a basic GPT wrapper with no memory, no tools, and no real capabilities.
+
+This guide sets up a Telegram bot backed by PocketPaw, a full AI agent that can search the web, manage files, generate images, remember past conversations, and run 50+ tools. All self-hosted on your machine.
+
+## What You'll Build
+
+A Telegram bot that:
+
+- Responds to text messages with AI-powered answers
+- Handles voice messages (speech-to-text, then responds)
+- Accepts file uploads and can read/analyze them
+- Remembers conversations across sessions
+- Can search the web, generate images, manage your calendar, and more
+- Runs on your machine with your choice of AI model
+
+## Prerequisites
+
+- **PocketPaw installed** (follow the [installation guide](/getting-started/installation) if you haven't)
+- **Telegram account** (you need one to create a bot)
+- **An AI provider**: Anthropic API key or [Ollama for free local models](/guides/local-llm-agent)
+
+## Creating Your Bot
+
+<Steps>
+  <Step title="Get a bot token from BotFather">
+    1. Open Telegram and search for `@BotFather`
+    2. Send `/newbot`
+    3. Choose a name (e.g., "My AI Assistant")
+    4. Choose a username (e.g., `my_ai_paw_bot`)
+    5. BotFather will give you a token like `7123456789:AAF...`
+
+    Copy that token. You'll need it next.
+
+    <Callout type="tip">
+      Send `/setdescription` to BotFather to add a description that appears when users open your bot for the first time.
+    </Callout>
+  </Step>
+
+  <Step title="Install the Telegram extra">
+    ```bash
+    pip install pocketpaw[telegram]
+    ```
+  </Step>
+
+  <Step title="Configure the bot token">
+    ```bash
+    export POCKETPAW_TELEGRAM_BOT_TOKEN="7123456789:AAF..."
+    export POCKETPAW_ANTHROPIC_API_KEY="sk-ant-..."  # or use Ollama
+    ```
+
+    To restrict who can use the bot (recommended):
+    ```bash
+    # Your Telegram user ID (get it from @userinfobot)
+    export POCKETPAW_ALLOWED_USER_ID="123456789"
+    ```
+  </Step>
+
+  <Step title="Start PocketPaw">
+    **Option A: With web dashboard (recommended)**
+    ```bash
+    pocketpaw
+    ```
+    This starts the dashboard at localhost:8888 AND your Telegram bot simultaneously. Manage both from the dashboard.
+
+    **Option B: Telegram-only (headless)**
+    ```bash
+    pocketpaw --telegram
+    ```
+  </Step>
+
+  <Step title="Test your bot">
+    Open Telegram, find your bot, and send a message. Try:
+
+    - "What's the weather like?" (triggers web search)
+    - Send a voice message (auto-transcribed and answered)
+    - Send a photo (analyzed with vision)
+    - "Remember that my favorite color is blue" (stored in memory)
+    - "What's my favorite color?" (recalled from memory)
+  </Step>
+</Steps>
+
+## Features That Work Out of the Box
+
+| Feature | How it works |
+|---------|-------------|
+| **Text messages** | Processed through the full agent pipeline with tool access |
+| **Voice messages** | Auto-transcribed via speech-to-text, then processed as text |
+| **Photos & files** | Analyzed with vision models or read as documents |
+| **Streaming** | Responses appear progressively via edit-in-place |
+| **Topic support** | Each forum topic gets its own conversation thread |
+| **Memory** | Conversations persist. Your bot remembers across sessions |
+| **Inline keyboards** | Confirmation prompts for sensitive actions |
+
+## Securing Your Bot
+
+By default, anyone who finds your bot can message it. Lock it down:
+
+```bash
+# Only allow a specific Telegram user ID
+export POCKETPAW_ALLOWED_USER_ID="123456789"
+```
+
+Get your user ID by messaging `@userinfobot` on Telegram.
+
+PocketPaw also has built-in security features:
+- **Injection scanning**: blocks prompt injection attempts
+- **Guardian AI**: secondary LLM checks for dangerous requests
+- **Audit logging**: every tool execution is logged
+
+## Running Your Bot 24/7
+
+Your bot only works when PocketPaw is running. For always-on access:
+
+**Option 1: systemd (Linux servers)**
+```bash
+sudo systemctl enable pocketpaw
+sudo systemctl start pocketpaw
+```
+
+**Option 2: Docker**
+```bash
+docker compose up -d
+```
+
+**Option 3: Keep your laptop open** (works for personal use)
+
+See the [deployment guide](/deployment/self-hosting) for production setups.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Add Discord Too" icon="lucide:gamepad-2" href="/guides/discord-ai-bot">
+    Same agent, now on Discord. One PocketPaw instance handles both.
+  </Card>
+  <Card title="Telegram Channel Docs" icon="lucide:book-open" href="/channels/telegram">
+    Full reference for Telegram-specific features and configuration.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ tools available to your Telegram bot.
+  </Card>
+</CardGroup>

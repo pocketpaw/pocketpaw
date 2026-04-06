@@ -1,0 +1,90 @@
+---
+title: "Signal Messenger: Private AI Agent Channel"
+description: "Connect PocketPaw to Signal for privacy-focused AI assistance. Uses signal-cli REST API with HTTP polling every 2 seconds. End-to-end encrypted messaging with your AI agent."
+section: Channels
+ogType: article
+keywords: ["signal bot", "signal-cli", "privacy", "encrypted messaging", "e2ee"]
+tags: ["channels", "signal"]
+---
+
+# Signal Messenger: Private AI Agent Channel
+
+PocketPaw connects to Signal via the `signal-cli` REST API. Signal is ideal for users who prioritize privacy and end-to-end encryption.
+
+## Prerequisites
+
+You need a running [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) instance. This provides the HTTP API that PocketPaw communicates with.
+
+```bash
+# Run signal-cli REST API via Docker
+docker run -d --name signal-api \
+  -p 8080:8080 \
+  -v ./signal-cli:/home/.local/share/signal-cli \
+  bbernhard/signal-cli-rest-api
+```
+
+Register your phone number with signal-cli before using it with PocketPaw.
+
+## Setup
+
+<Steps>
+  <Step title="Start signal-cli REST API">
+    Ensure signal-cli-rest-api is running and your number is registered.
+  </Step>
+  <Step title="Configure">
+    ```bash
+    export POCKETPAW_SIGNAL_API_URL="http://localhost:8080"
+    export POCKETPAW_SIGNAL_PHONE_NUMBER="+1234567890"
+    ```
+  </Step>
+  <Step title="Start">
+    ```bash
+    pocketpaw --signal
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+| Setting | Env Variable | Description |
+|---------|-------------|-------------|
+| API URL | `POCKETPAW_SIGNAL_API_URL` | signal-cli REST API URL |
+| Phone number | `POCKETPAW_SIGNAL_PHONE_NUMBER` | Your registered Signal number |
+| Allowed numbers | `POCKETPAW_SIGNAL_ALLOWED_NUMBERS` | Comma-separated allowed numbers |
+
+## How It Works
+
+The Signal adapter uses HTTP polling:
+
+1. Every 2 seconds, it sends `GET /v1/receive/{number}` to the signal-cli API
+2. New messages are converted to `InboundMessage` events
+3. Responses are sent via `POST /v2/send` to the signal-cli API
+
+### No Streaming
+
+Signal doesn't support message editing, so responses are accumulated and sent as a complete message.
+
+## Installation
+
+Signal support uses `httpx` (a core dependency), so no extra installation is needed:
+
+```bash
+curl -fsSL https://pocketpaw.xyz/install.sh | sh
+```
+
+## Related
+
+<CardGroup>
+  <Card title="WhatsApp Integration" icon="lucide:message-circle" href="/channels/whatsapp">
+    Connect via Business API or Personal QR pairing with no Meta account needed.
+  </Card>
+  <Card title="Matrix Protocol" icon="lucide:grid-3x3" href="/channels/matrix">
+    Decentralized, federated AI messaging with matrix-nio.
+  </Card>
+  <Card title="Self-Hosting Guide" icon="lucide:server" href="/deployment/self-hosting">
+    Deploy PocketPaw on your own server for full privacy control.
+  </Card>
+  <Card title="All Channels" icon="lucide:radio" href="/channels">
+    Compare all 9+ supported messaging platforms.
+  </Card>
+</CardGroup>

@@ -1,0 +1,125 @@
+---
+title: Test MCP Server
+description: "Test an MCP server connection by starting it temporarily and listing its available tools. Returns the tool count and tool names to verify the server is working correctly."
+api: POST /api/mcp/test
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["test mcp", "server connection test", "tool discovery"]
+tags: ["api", "mcp"]
+---
+
+## Overview
+
+Tests connectivity to an MCP server without persisting it to configuration. Useful for validating server settings before adding them. Returns the connection status and list of available tools.
+
+## Request Body
+
+<ParamTable type="body">
+  <Param name="name" type="string" required>
+    A temporary name for the test connection.
+  </Param>
+  <Param name="transport" type="string" required enum={["stdio", "http"]}>
+    Transport protocol to test.
+  </Param>
+  <Param name="command" type="string">
+    Command for `stdio` transport.
+  </Param>
+  <Param name="args" type="array">
+    Arguments for `stdio` transport.
+  </Param>
+  <Param name="url" type="string">
+    Server URL for `http` transport.
+  </Param>
+  <Param name="env" type="object">
+    Environment variables to pass.
+  </Param>
+</ParamTable>
+
+## Response
+
+<ResponseField name="connected" type="boolean">Whether the connection succeeded</ResponseField>
+<ResponseField name="error" type="string" nullable>Error message if connection failed</ResponseField>
+<ResponseField name="tools" type="array">List of tool names discovered from the server</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST "http://localhost:8000/api/mcp/test" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "filesystem",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+        "env": {}
+      }'
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/mcp/test", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer <token>",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "filesystem",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+        env: {}
+      })
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.post(
+        "http://localhost:8000/api/mcp/test",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "name": "filesystem",
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+            "env": {}
+        }
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200 (Success)", "200 (Failure)"]}>
+  <Tab title="200 (Success)">
+    ```json
+    {
+      "connected": true,
+      "error": null,
+      "tools": ["read_file", "write_file", "list_directory", "search_files"]
+    }
+    ```
+  </Tab>
+  <Tab title="200 (Failure)">
+    ```json
+    {
+      "connected": false,
+      "error": "Connection timed out after 10s",
+      "tools": []
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

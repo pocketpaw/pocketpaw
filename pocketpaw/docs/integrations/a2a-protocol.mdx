@@ -1,0 +1,425 @@
+---
+title: "A2A Protocol: Agent-to-Agent Communication"
+description: "PocketPaw implements the A2A (Agent-to-Agent) protocol v0.2.5 for inter-agent communication. Expose PocketPaw as a remote agent, delegate tasks to external agents, and build multi-agent workflows."
+section: Integrations
+ogType: article
+keywords: ["a2a protocol", "agent to agent", "multi-agent", "agent interoperability", "task delegation", "json-rpc", "sse streaming"]
+tags: ["integrations", "a2a", "multi-agent"]
+---
+
+# A2A Protocol: Agent-to-Agent Communication
+
+PocketPaw implements the [A2A (Agent-to-Agent) protocol](https://a2a-protocol.org) v0.2.5, an open standard created by Google for communication between independent AI agent systems. This allows PocketPaw to both **expose itself as a remote agent** and **delegate tasks to other A2A-compatible agents**.
+
+## What is A2A?
+
+A2A is a protocol that lets AI agents discover each other's capabilities, negotiate interaction modes, and exchange tasks over HTTP using JSON-RPC 2.0. Think of it as a universal language for agents to collaborate, regardless of which framework built them.
+
+Key capabilities:
+
+- **Agent discovery** via a well-known Agent Card endpoint
+- **Task submission** with blocking or streaming responses
+- **Multi-turn conversations** with conversation history
+- **Structured content** supporting text, files, and data parts
+- **Artifacts** for delivering generated outputs
+
+## Quick Start
+
+### 1. Enable A2A
+
+A2A is disabled by default. Enable it via config or environment variable:
+
+```bash
+# Environment variable
+export POCKETPAW_A2A_ENABLED=true
+
+# Or via CLI
+uv run pocketpaw config set a2a_enabled true
+
+# Or in ~/.pocketpaw/config.json
+{
+  "a2a_enabled": true
+}
+```
+
+### 2. Start PocketPaw
+
+```bash
+uv run pocketpaw
+```
+
+### 3. Verify the Agent Card
+
+```bash
+curl http://localhost:8888/.well-known/agent.json | jq .
+```
+
+You should see PocketPaw's capability manifest with its name, skills, and supported features.
+
+## Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `a2a_enabled` | `false` | Master switch for A2A endpoints |
+| `a2a_agent_name` | `"PocketPaw"` | Agent name in the Agent Card |
+| `a2a_agent_description` | auto | Description advertised to other agents |
+| `a2a_agent_version` | auto | Version (auto-detected from package) |
+| `a2a_task_timeout` | `120` | Timeout in seconds for task processing |
+| `a2a_trusted_agents` | `[]` | Allowlist of trusted agent URLs for outbound delegation |
+
+All settings use the `POCKETPAW_` env prefix (e.g., `POCKETPAW_A2A_TASK_TIMEOUT=60`).
+
+## Architecture
+
+PocketPaw's A2A implementation has three layers:
+
+### Server (Phase 1)
+
+Exposes PocketPaw as a remote A2A agent. Other agents can discover PocketPaw's capabilities and submit tasks to it. Tasks are routed through the internal AgentLoop via the message bus, the same path as the web dashboard and REST API.
+
+### Client (Phase 2)
+
+An async HTTP client for calling external A2A agents. Used by the `delegate_to_a2a_agent` tool to dispatch subtasks to other agents on the network.
+
+### Delegate Tool (Phase 2)
+
+A built-in tool (`delegate_to_a2a_agent`) that the LLM can invoke to delegate work to any A2A-compatible agent. Includes SSRF protection, capability discovery, and multi-turn support.
+
+## Endpoints
+
+When A2A is enabled, the following endpoints are available:
+
+### Agent Card
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/.well-known/agent.json` | GET | Agent Card capability manifest |
+| `/.well-known/agent-card.json` | GET | Alias (some implementations use this path) |
+
+### JSON-RPC 2.0
+
+All A2A operations are available via the unified JSON-RPC endpoint:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/a2a` | POST | JSON-RPC 2.0 dispatcher (all methods) |
+
+Supported JSON-RPC methods:
+
+| Method | Type | Description |
+|--------|------|-------------|
+| `message/send` | Blocking | Submit a task and wait for completion |
+| `message/stream` | SSE | Submit a task and receive streaming updates |
+| `tasks/get` | Blocking | Poll task status (supports `history_length`) |
+| `tasks/cancel` | Blocking | Request task cancellation |
+| `tasks/resubscribe` | SSE | Reconnect to an active task's stream |
+
+### REST (Convenience)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/a2a/tasks/send` | POST | Submit a task (blocking) |
+| `/a2a/tasks/send/stream` | POST | Submit a task (SSE streaming) |
+| `/a2a/tasks/{task_id}` | GET | Poll task status |
+| `/a2a/tasks/{task_id}/cancel` | POST | Cancel a task |
+
+## Usage Examples
+
+### Submit a Task (JSON-RPC)
+
+```bash
+curl -X POST http://localhost:8888/a2a \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{"type": "text", "text": "What is the weather in Tokyo?"}]
+      }
+    }
+  }'
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "id": "a1b2c3d4",
+    "status": {
+      "state": "completed",
+      "message": {
+        "role": "agent",
+        "parts": [{"type": "text", "text": "The current weather in Tokyo is..."}]
+      }
+    },
+    "history": [...],
+    "artifacts": [...]
+  }
+}
+```
+
+### Stream a Task (SSE)
+
+```bash
+curl -N -X POST http://localhost:8888/a2a \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/stream",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{"type": "text", "text": "Write a haiku about code"}]
+      }
+    }
+  }'
+```
+
+The server responds with an SSE stream:
+
+```
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"task_id":"...","status":{"state":"submitted"},"final":false}}
+
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"task_id":"...","status":{"state":"working"},"final":false}}
+
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"task_id":"...","artifact":{"parts":[{"type":"text","text":"Silent..."}]},"append":true}}
+
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"task_id":"...","status":{"state":"completed"},"final":true}}
+```
+
+### Poll a Task
+
+```bash
+# Full history
+curl http://localhost:8888/a2a/tasks/a1b2c3d4
+
+# Last 2 messages only
+curl "http://localhost:8888/a2a/tasks/a1b2c3d4?history_length=2"
+
+# No history (status only)
+curl "http://localhost:8888/a2a/tasks/a1b2c3d4?history_length=0"
+```
+
+### Output Mode Negotiation
+
+Specify which output formats your client can handle:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "message/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"type": "text", "text": "Generate a report"}]
+    },
+    "configuration": {
+      "accepted_output_modes": ["text/plain", "application/json"]
+    }
+  }
+}
+```
+
+PocketPaw currently supports `text/plain` output. Requesting only unsupported modes returns error code `-32005`.
+
+## Task Lifecycle
+
+Tasks follow a strict state machine:
+
+```
+submitted --> working --> completed (terminal)
+                 |   \--> failed    (terminal)
+                 |   \--> canceled  (terminal)
+                 |   \--> rejected  (terminal)
+                 |
+                 v
+          input_required --> working --> ...
+```
+
+Terminal states are immutable. Sending a new message to a completed, failed, canceled, or rejected task returns error code `-32003` (TASK_NOT_MODIFIABLE).
+
+## Delegating to External Agents
+
+PocketPaw can delegate tasks to other A2A-compatible agents on the network using the `delegate_to_a2a_agent` tool.
+
+### Setup
+
+Add trusted agent URLs to the allowlist:
+
+```bash
+export POCKETPAW_A2A_TRUSTED_AGENTS='["http://agent-b:8001", "http://agent-c:8002"]'
+```
+
+Or in `~/.pocketpaw/config.json`:
+
+```json
+{
+  "a2a_trusted_agents": [
+    "http://agent-b:8001",
+    "http://agent-c:8002"
+  ]
+}
+```
+
+### How It Works
+
+1. The LLM decides to delegate based on the task description
+2. PocketPaw fetches the remote agent's Agent Card to discover capabilities
+3. The task is submitted via `message/send`
+4. The response (including any artifacts) is returned to the LLM
+5. For multi-turn conversations, `task_id` is passed to continue the dialogue
+
+### SSRF Protection
+
+The delegate tool includes multiple layers of protection against Server-Side Request Forgery:
+
+- **Allowlist** (primary defense): Only URLs in `a2a_trusted_agents` bypass checks
+- **Scheme validation**: Only `http://` and `https://` are allowed
+- **DNS resolution check**: All resolved IPs are validated against private, loopback, link-local, multicast, and reserved ranges
+- **Elevated trust level**: The tool is marked as "elevated" in the tool policy system
+
+<Callout type="warning">
+  For production deployments, always configure `a2a_trusted_agents` explicitly. The DNS-based check has a small TOCTOU (time-of-check-time-of-use) window where a DNS rebinding attack could theoretically bypass it. The allowlist closes this gap completely.
+</Callout>
+
+### Authentication
+
+The A2A client supports auth headers for secured remote agents:
+
+```python
+from pocketpaw.a2a.client import A2AClient
+
+async with A2AClient(auth_headers={"Authorization": "Bearer token"}) as client:
+    card = await client.get_agent_card("https://secure-agent.example.com")
+    task = await client.send_task("https://secure-agent.example.com", params)
+```
+
+## Agent Card
+
+PocketPaw's Agent Card is served at `/.well-known/agent.json` and includes:
+
+```json
+{
+  "name": "PocketPaw",
+  "description": "Self-hosted, modular AI agent...",
+  "url": "http://localhost:8888",
+  "version": "0.5.0",
+  "protocol_version": "0.2.5",
+  "capabilities": {
+    "streaming": true,
+    "push_notifications": false,
+    "state_transition_history": true
+  },
+  "skills": [
+    {
+      "id": "web_search",
+      "name": "web_search",
+      "description": "Search the web...",
+      "input_modes": ["text/plain"],
+      "output_modes": ["text/plain"]
+    }
+  ],
+  "supported_interfaces": [
+    {
+      "url": "http://localhost:8888/a2a",
+      "protocol_binding": "jsonrpc-over-https",
+      "protocol_version": "0.2.5"
+    }
+  ]
+}
+```
+
+Skills are auto-populated from PocketPaw's tool registry. The card is cached for 30 seconds to avoid rebuilding the skill list on every request.
+
+## Error Codes
+
+| Code | Name | Description |
+|------|------|-------------|
+| -32700 | Parse Error | Invalid JSON |
+| -32600 | Invalid Request | Missing `jsonrpc` or `method` field |
+| -32601 | Method Not Found | Unknown JSON-RPC method |
+| -32602 | Invalid Params | Missing or invalid parameters |
+| -32603 | Internal Error | Unexpected server error |
+| -32001 | Task Not Found | Task ID does not exist |
+| -32002 | Task Not Cancelable | Task is in a non-cancelable state |
+| -32003 | Task Not Modifiable | Task is in a terminal state |
+| -32004 | Unsupported Operation | Feature not supported (e.g., push notifications) |
+| -32005 | Incompatible Output Modes | No overlap between requested and supported modes |
+
+## Content Types
+
+A2A messages support three part types:
+
+### TextPart
+
+```json
+{"type": "text", "text": "Hello, world!"}
+```
+
+### FilePart
+
+```json
+{"type": "file", "name": "report.csv", "uri": "https://example.com/report.csv"}
+```
+
+Or with embedded data:
+
+```json
+{"type": "file", "name": "image.png", "bytes_data": "base64..."}
+```
+
+### DataPart
+
+```json
+{"type": "data", "data": {"key": "value", "count": 42}}
+```
+
+PocketPaw extracts meaningful text from all part types when processing inbound messages. FileParts include the filename and URI, DataParts are serialized as JSON.
+
+## Smoke Testing
+
+PocketPaw includes a live smoke test script that validates all A2A endpoints:
+
+```bash
+# Start PocketPaw with A2A enabled, then in another terminal:
+uv run python scripts/test_a2a_live.py
+
+# Custom port
+uv run python scripts/test_a2a_live.py http://localhost:9000
+```
+
+The script tests agent card discovery, task submission, streaming, error handling, terminal state guards, output mode validation, and more.
+
+## Limitations
+
+- **Push notifications** are not supported (capability advertised as `false`)
+- **Output modes** are limited to `text/plain` (file and data parts are accepted as input but output is always text)
+- **Task persistence** is in-memory only; tasks are lost on restart
+- **Rate limiting** is not currently enforced on A2A endpoints
+- Tasks have an in-memory store capped at 1,000 entries with LRU eviction
+
+## Related
+
+<CardGroup>
+  <Card title="MCP Servers" icon="lucide:server" href="/integrations/mcp-servers">
+    Extend PocketPaw with Model Context Protocol servers for additional tool capabilities.
+  </Card>
+  <Card title="Delegation Tool" icon="lucide:git-branch" href="/tools/delegation">
+    Learn about PocketPaw's delegation tools including Claude Code and A2A delegation.
+  </Card>
+  <Card title="Architecture" icon="lucide:layers" href="/concepts/architecture">
+    Understand the message bus pattern that powers A2A task processing.
+  </Card>
+</CardGroup>

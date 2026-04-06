@@ -1,0 +1,73 @@
+---
+title: Run Mission Control Task
+description: "Execute a Mission Control task with a specified AI agent in the background. The agent receives the task description, project context, and upstream deliverables. Output streams via WebSocket events."
+api: POST /api/mission-control/tasks/{task_id}/run
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["run task", "execute task", "agent execution"]
+tags: ["api", "mission-control"]
+---
+
+## Overview
+
+Starts background execution of a task with a specified agent. The agent receives the task description, project context, and upstream deliverables as its prompt. Output streams via WebSocket events (`mc_task_output`).
+
+Up to 5 tasks can run concurrently.
+
+## Path Parameters
+
+<ResponseField name="task_id" type="string" required>
+  The task ID to execute.
+</ResponseField>
+
+## Request Body
+
+<ResponseField name="agent_id" type="string" required>
+  The agent ID to execute the task. Must be a valid UUID.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the task was launched.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Status message.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/mission-control/tasks/TASK_ID/run \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "AGENT_UUID"}'
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200", "429"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "message": "Task execution started"
+}
+```
+  </Tab>
+  <Tab title="429">
+```json
+{
+  "detail": "Maximum concurrent tasks (5) reached"
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

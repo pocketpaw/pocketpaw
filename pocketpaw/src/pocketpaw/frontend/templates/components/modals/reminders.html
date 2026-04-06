@@ -1,0 +1,89 @@
+<!--
+  PocketPaw Dashboard - Reminders Modal
+
+  Changes (2026-02-03):
+  - Extracted from monolithic index.html
+  - Natural language reminder input with add/delete functionality
+-->
+<!-- Reminders Modal -->
+<div
+class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+x-show="showReminders"
+x-transition.opacity
+@click.self="closeReminders()"
+>
+<div class="w-full max-w-[600px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+    <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+    <h2 class="text-[17px] font-semibold">Reminders</h2>
+    <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="closeReminders()"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div class="p-6">
+    <div class="flex flex-col gap-5">
+        <!-- Add Reminder Input -->
+        <div class="flex flex-col gap-2">
+            <form class="flex gap-2" @submit.prevent="addReminder()">
+            <input
+                type="text"
+                class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+                x-model="reminderInput"
+                placeholder="Remind me in 30 minutes to..."
+                :disabled="reminderLoading"
+            />
+            <button
+                type="submit"
+                class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[10px] flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                :disabled="!reminderInput.trim() || reminderLoading"
+            >
+                <i data-lucide="plus" class="w-5 h-5"></i>
+            </button>
+            </form>
+            <p class="text-[12px] text-white/40 pl-1">
+            Try: "in 5 minutes", "at 3pm", "tomorrow at 9am"
+            </p>
+        </div>
+
+        <!-- Loading State -->
+        <template x-if="reminderLoading && reminders.length === 0">
+        <div class="p-8 text-center text-white/60 flex flex-col items-center gap-3">
+            <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
+            <span>Loading...</span>
+        </div>
+        </template>
+
+        <!-- Reminders List -->
+        <template x-if="!reminderLoading || reminders.length > 0">
+        <div class="flex flex-col max-h-[300px] overflow-y-auto border border-[var(--glass-border)] rounded-xl bg-black/20">
+            <template x-for="reminder in reminders" :key="reminder.id">
+            <div class="flex items-start gap-3 p-3.5 border-b border-[var(--glass-border)] hover:bg-white/5 transition-colors last:border-b-0 group">
+                <i data-lucide="bell" class="w-5 h-5 text-[var(--accent-color)] mt-0.5 shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                <p class="font-medium text-[14px] truncate" x-text="reminder.text"></p>
+                <p class="text-xs text-white/50 mt-0.5">
+                    <span x-text="formatReminderTime(reminder)"></span>
+                    <span class="text-[var(--accent-color)] ml-2" x-text="calculateTimeRemaining(reminder)"></span>
+                </p>
+                </div>
+                <button
+                class="text-white/30 hover:text-[var(--danger-color)] hover:bg-white/10 p-1.5 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                @click="deleteReminder(reminder.id)"
+                title="Delete reminder"
+                >
+                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                </button>
+            </div>
+            </template>
+
+            <!-- Empty State -->
+            <template x-if="reminders.length === 0">
+            <div class="p-8 text-center text-white/40 flex flex-col items-center gap-3">
+                <i data-lucide="bell-off" class="w-10 h-10 opacity-50"></i>
+                <span class="font-medium">No reminders set</span>
+                <span class="text-xs">Add one above to get started</span>
+            </div>
+            </template>
+        </div>
+        </template>
+    </div>
+    </div>
+</div>
+</div>

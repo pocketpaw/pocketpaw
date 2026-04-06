@@ -1,0 +1,192 @@
+<!--
+  PocketPaw Dashboard - Remote Access Modal
+
+  Changes (2026-02-04):
+  - Added tabbed interface: QR Code / Telegram
+  - Telegram setup tab for first-time configuration
+  - Shows connection status when Telegram is configured
+-->
+<!-- Remote Access Modal -->
+<div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showRemote" x-transition.opacity @click.self="showRemote = false">
+    <div class="w-full max-w-[420px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+            <h2 class="text-[17px] font-semibold">Take Paw With You</h2>
+            <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showRemote = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+
+        <!-- Tab Buttons -->
+        <div class="flex border-b border-[var(--glass-border)]">
+            <button
+                class="flex-1 py-3 text-[13px] font-medium transition-all flex items-center justify-center gap-2"
+                :class="remoteTab === 'qr' ? 'text-[var(--accent-color)] border-b-2 border-[var(--accent-color)] bg-white/5' : 'text-white/50 hover:text-white/70 hover:bg-white/5'"
+                @click="remoteTab = 'qr'">
+                <i data-lucide="qr-code" class="w-4 h-4"></i>
+                QR Code
+            </button>
+            <button
+                class="flex-1 py-3 text-[13px] font-medium transition-all flex items-center justify-center gap-2"
+                :class="remoteTab === 'telegram' ? 'text-[var(--accent-color)] border-b-2 border-[var(--accent-color)] bg-white/5' : 'text-white/50 hover:text-white/70 hover:bg-white/5'"
+                @click="remoteTab = 'telegram'; getTelegramStatus()">
+                <i data-lucide="send" class="w-4 h-4"></i>
+                Telegram
+                <span x-show="telegramStatus.configured" class="w-2 h-2 rounded-full bg-[var(--success-color)]"></span>
+            </button>
+        </div>
+
+        <div class="p-6">
+            <!-- QR Code Tab -->
+            <div x-show="remoteTab === 'qr'" x-transition.opacity>
+                <div class="flex flex-col gap-6 items-center text-center">
+
+                    <!-- QR Code -->
+                    <div class="bg-white p-3 rounded-2xl shadow-lg">
+                        <img :src="'/api/qr?t=' + Date.now()" alt="Scan to Login" class="w-48 h-48 block" />
+                    </div>
+
+                    <p class="text-white/60 text-[13px] leading-relaxed max-w-[260px]">
+                        Scan with your phone to access PocketPaw remotely via browser.
+                    </p>
+
+                    <!-- Tunnel Controls -->
+                    <div class="w-full bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col gap-3">
+                        <div class="flex justify-between items-center">
+                            <span class="text-[13px] font-medium text-white/90">Cloudflare Tunnel</span>
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border"
+                                    :class="remoteStatus.active ? 'bg-[var(--success-color)]/20 text-white border-[var(--success-color)]/30' : 'bg-white/5 text-white/40 border-white/10'"
+                                    x-text="remoteStatus.active ? 'ONLINE' : 'OFFLINE'">
+                            </span>
+                        </div>
+
+                        <div x-show="remoteStatus.active" class="text-[11px] text-[var(--accent-color)] break-all bg-black/40 p-2.5 rounded-lg border border-white/5 font-mono text-left">
+                            <a :href="remoteStatus.url" target="_blank" class="hover:underline" x-text="remoteStatus.url"></a>
+                        </div>
+
+                        <div class="flex gap-2 mt-1">
+                            <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2 rounded-[8px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    x-show="!remoteStatus.active"
+                                    @click="toggleTunnel()"
+                                    :disabled="tunnelLoading">
+                                <i x-show="tunnelLoading" data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>
+                                Start Tunnel
+                            </button>
+
+                            <button class="w-full bg-[var(--danger-color)] hover:bg-red-600 text-white py-2 rounded-[8px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    x-show="remoteStatus.active"
+                                    @click="toggleTunnel()"
+                                    :disabled="tunnelLoading">
+                                <i x-show="tunnelLoading" data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>
+                                Stop Tunnel
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Token Reset -->
+                    <div class="w-full border-t border-[var(--glass-border)] pt-4">
+                        <button class="text-[12px] text-white/40 hover:text-[var(--accent-color)] transition-colors flex items-center justify-center gap-1.5 mx-auto" @click="regenerateToken()">
+                            <i data-lucide="refresh-cw" class="w-3 h-3"></i>
+                            Regenerate Access Token
+                        </button>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- Telegram Tab -->
+            <div x-show="remoteTab === 'telegram'" x-transition.opacity>
+                <div class="flex flex-col gap-5">
+
+                    <!-- Connected State -->
+                    <div x-show="telegramStatus.configured" class="flex flex-col gap-4">
+                        <div class="bg-[var(--success-color)]/10 border border-[var(--success-color)]/20 rounded-xl p-4 flex items-start gap-3">
+                            <i data-lucide="check-circle" class="w-5 h-5 text-[var(--success-color)] shrink-0 mt-0.5"></i>
+                            <div>
+                                <p class="text-[14px] font-medium text-white">Telegram Connected</p>
+                                <p class="text-[12px] text-white/60 mt-1">
+                                    User ID: <span class="font-mono text-white/80" x-text="telegramStatus.user_id || 'Unknown'"></span>
+                                </p>
+                            </div>
+                        </div>
+
+                        <p class="text-[13px] text-white/60 text-center">
+                            You can control PocketPaw from Telegram. Just send a message to your bot!
+                        </p>
+
+                        <button
+                            class="w-full bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 py-2.5 rounded-[10px] text-[13px] font-medium transition-all"
+                            @click="telegramStatus.configured = false">
+                            <i data-lucide="settings" class="w-4 h-4 inline mr-1"></i>
+                            Reconfigure
+                        </button>
+                    </div>
+
+                    <!-- Setup Form -->
+                    <div x-show="!telegramStatus.configured" class="flex flex-col gap-4">
+
+                        <!-- Step 1: Bot Token -->
+                        <div class="flex flex-col gap-2">
+                            <div class="flex items-center gap-2">
+                                <span class="w-6 h-6 rounded-full bg-[var(--accent-color)] text-white text-[12px] font-bold flex items-center justify-center">1</span>
+                                <label class="text-[13px] font-medium text-white/90">Create a Telegram Bot</label>
+                            </div>
+                            <p class="text-[12px] text-white/50 ml-8">
+                                Open <a href="https://t.me/BotFather" target="_blank" class="text-[var(--accent-color)] hover:underline">@BotFather</a> and send <code class="bg-white/10 px-1.5 py-0.5 rounded text-[11px]">/newbot</code>
+                            </p>
+                            <input
+                                type="text"
+                                x-model="telegramForm.botToken"
+                                placeholder="Paste your bot token here..."
+                                class="ml-8 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                            />
+                        </div>
+
+                        <!-- Step 2: Generate QR -->
+                        <div class="flex flex-col gap-2">
+                            <div class="flex items-center gap-2">
+                                <span class="w-6 h-6 rounded-full bg-white/20 text-white/70 text-[12px] font-bold flex items-center justify-center" :class="telegramForm.botToken ? 'bg-[var(--accent-color)] text-white' : ''">2</span>
+                                <label class="text-[13px] font-medium" :class="telegramForm.botToken ? 'text-white/90' : 'text-white/40'">Connect Your Account</label>
+                            </div>
+
+                            <div x-show="!telegramForm.botToken" class="ml-8 text-[12px] text-white/40">
+                                Enter your bot token above to continue
+                            </div>
+
+                            <div x-show="telegramForm.botToken && !telegramForm.qrCode" class="ml-8">
+                                <button
+                                    class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
+                                    @click="startTelegramPairing()"
+                                    :disabled="telegramLoading">
+                                    <i x-show="telegramLoading" data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>
+                                    <i x-show="!telegramLoading" data-lucide="qr-code" class="w-4 h-4"></i>
+                                    Generate Pairing QR
+                                </button>
+                            </div>
+
+                            <!-- QR Code for Telegram -->
+                            <div x-show="telegramForm.qrCode" class="ml-8 flex flex-col items-center gap-3">
+                                <div class="bg-white p-3 rounded-2xl shadow-lg">
+                                    <img :src="telegramForm.qrCode" alt="Scan with Telegram" class="w-40 h-40 block" />
+                                </div>
+                                <p class="text-[12px] text-white/50 text-center">
+                                    Scan with your phone camera to open in Telegram
+                                </p>
+                                <div class="flex items-center gap-2 text-[12px] text-[var(--accent-color)]">
+                                    <i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>
+                                    Waiting for connection...
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Error Message -->
+                        <div x-show="telegramForm.error" class="bg-[var(--danger-color)]/10 border border-[var(--danger-color)]/20 rounded-lg p-3 text-[12px] text-[var(--danger-color)]">
+                            <i data-lucide="alert-circle" class="w-4 h-4 inline mr-1"></i>
+                            <span x-text="telegramForm.error"></span>
+                        </div>
+
+                    </div>
+
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>

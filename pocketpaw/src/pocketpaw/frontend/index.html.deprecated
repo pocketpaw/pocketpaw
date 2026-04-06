@@ -1,0 +1,1123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PocketPaw</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%230A84FF'/><g transform='translate(4,4)' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='4' r='2'/><circle cx='3' cy='7' r='2'/><circle cx='19' cy='7' r='2'/><circle cx='7' cy='19' r='2'/><circle cx='15' cy='19' r='2'/><path d='M8 14v.5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V14a4 4 0 0 0-6 0z'/></g></svg>"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/css/styles.css" />
+
+    <!-- UnoCSS Runtime (utilities alongside custom CSS) -->
+    <script>
+      window.__unocss = {
+        theme: {
+          colors: {
+            accent: '#0A84FF',
+            success: '#30D158',
+            danger: '#FF453A',
+            warning: '#FF9F0A',
+          }
+        },
+        shortcuts: {
+          'glass': 'bg-white/10 backdrop-blur-xl border border-white/12 rounded-2xl',
+          'glass-dark': 'bg-black/30 backdrop-blur-xl border border-white/12 rounded-2xl',
+          'nav-item': 'group flex items-center gap-3.5 px-3.5 py-2.5 rounded-xl transition-all text-sm font-medium w-full text-left bg-transparent text-[var(--text-secondary)] hover:text-white hover:bg-white/10 cursor-pointer border-none',
+        }
+      }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@unocss/runtime"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.3/dist/cdn.min.js"
+    ></script>
+  </head>
+  <body x-data="{ ...app(), sidebarOpen: false }" x-init="init()" class="flex h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--text-primary)]">
+    
+    <!-- Mobile Sidebar Overlay -->
+    <div 
+        x-show="sidebarOpen" 
+        x-transition.opacity 
+        class="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
+        @click="sidebarOpen = false"
+    ></div>
+
+    <!-- Sidebar (Desktop: Static, Mobile: Slide-over) -->
+    <aside 
+        class="fixed inset-y-0 left-0 z-50 w-72 flex flex-col gap-8 px-5 py-6 bg-[var(--glass-bg)] backdrop-blur-xl border-r border-[var(--glass-border)] transition-transform duration-300 md:relative md:translate-x-0"
+        :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
+    >
+      <div class="logo flex items-center gap-3 pl-2">
+        <i data-lucide="paw-print" class="w-6 h-6 text-accent"></i>
+        <span class="text-xl font-semibold tracking-tight">PocketPaw</span>
+        <button class="ml-auto md:hidden" @click="sidebarOpen = false">
+            <i data-lucide="x" class="w-5 h-5 text-white/50"></i>
+        </button>
+      </div>
+
+      <!-- Tools Section -->
+      <nav class="flex flex-col gap-1.5">
+        <h3 class="nav-title text-[11px] uppercase tracking-wider text-[var(--text-secondary)] font-semibold mb-2.5 pl-3">Tools</h3>
+        <button class="nav-item" @click="runTool('fetch'); sidebarOpen = false">
+          <i data-lucide="folder" class="w-5 h-5"></i>
+          <span>Files</span>
+        </button>
+        <button class="nav-item" @click="runTool('screenshot'); sidebarOpen = false">
+          <i data-lucide="camera" class="w-5 h-5"></i>
+          <span>Screenshot</span>
+        </button>
+        <button class="nav-item" @click="openReminders(); sidebarOpen = false">
+          <i data-lucide="bell" class="w-5 h-5"></i>
+          <span>Reminders</span>
+          <span
+            x-show="reminders.length > 0"
+            class="ml-auto bg-accent/20 text-accent text-xs px-2 py-0.5 rounded-full"
+            x-text="reminders.length"
+          ></span>
+        </button>
+        <button class="nav-item" @click="openIntentions(); sidebarOpen = false">
+          <i data-lucide="target" class="w-5 h-5"></i>
+          <span>Intentions</span>
+          <span
+            x-show="intentions.filter(i => i.enabled).length > 0"
+            class="ml-auto bg-success/20 text-success text-xs px-2 py-0.5 rounded-full"
+            x-text="intentions.filter(i => i.enabled).length"
+          ></span>
+        </button>
+        <button class="nav-item" @click="openSkills(); sidebarOpen = false">
+          <i data-lucide="wand-2" class="w-5 h-5"></i>
+          <span>Skills</span>
+          <span
+            x-show="skills.length > 0"
+            class="ml-auto bg-warning/20 text-warning text-xs px-2 py-0.5 rounded-full"
+            x-text="skills.length"
+          ></span>
+        </button>
+        <button class="nav-item !text-[var(--danger-color)] hover:!bg-[var(--danger-color)]/10" @click="runTool('panic'); sidebarOpen = false">
+          <i data-lucide="octagon-x" class="w-5 h-5"></i>
+          <span>Panic</span>
+        </button>
+      </nav>
+
+      <!-- Transparency Section -->
+      <nav class="flex flex-col gap-1.5">
+        <h3 class="nav-title text-[11px] uppercase tracking-wider text-[var(--text-secondary)] font-semibold mb-2.5 pl-3">Brain</h3>
+        <button class="nav-item" @click="openIdentity(); sidebarOpen = false">
+          <i data-lucide="fingerprint" class="w-5 h-5"></i>
+          <span>Identity</span>
+        </button>
+        <button class="nav-item" @click="openMemory(); sidebarOpen = false">
+          <i data-lucide="brain-circuit" class="w-5 h-5"></i>
+          <span>Memory</span>
+        </button>
+        <button class="nav-item" @click="openAudit(); sidebarOpen = false">
+          <i data-lucide="shield-check" class="w-5 h-5"></i>
+          <span>Audit Log</span>
+        </button>
+      </nav>
+
+      <!-- Config Section -->
+      <nav class="flex flex-col gap-1.5">
+        <h3 class="nav-title text-[11px] uppercase tracking-wider text-[var(--text-secondary)] font-semibold mb-2.5 pl-3">Config</h3>
+        <button class="nav-item" @click="showSettings = true; sidebarOpen = false">
+          <i data-lucide="settings" class="w-5 h-5"></i>
+          <span>Settings</span>
+        </button>
+      </nav>
+
+      <!-- System Status Widget -->
+      <div class="mt-auto p-4 bg-black/30 backdrop-blur-xl border border-white/10 rounded-2xl">
+        <div class="grid grid-cols-2 gap-4">
+          <div class="flex items-center gap-2">
+            <i data-lucide="cpu" class="w-4 h-4 text-white/40"></i>
+            <div class="flex flex-col">
+              <span class="text-xs text-white/50">CPU</span>
+              <span class="text-sm font-mono" x-text="typeof status.cpu === 'number' ? status.cpu + '%' : status.cpu"></span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <i data-lucide="memory-stick" class="w-4 h-4 text-white/40"></i>
+            <div class="flex flex-col">
+              <span class="text-xs text-white/50">RAM</span>
+              <span class="text-sm font-mono" x-text="typeof status.ram === 'number' ? status.ram + '%' : status.ram"></span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <i data-lucide="hard-drive" class="w-4 h-4 text-white/40"></i>
+            <div class="flex flex-col">
+              <span class="text-xs text-white/50">Disk</span>
+              <span class="text-sm font-mono" x-text="typeof status.disk === 'number' ? status.disk + '%' : status.disk"></span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <i data-lucide="battery-medium" class="w-4 h-4 text-white/40"></i>
+            <div class="flex flex-col">
+              <span class="text-xs text-white/50">Bat</span>
+              <span class="text-sm font-mono" x-text="typeof status.battery === 'number' ? status.battery + '%' : status.battery"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col relative bg-[radial-gradient(circle_at_50%_30%,#1c1c1e_0%,#000000_100%)] overflow-hidden w-full">
+      <!-- Top Bar -->
+      <header class="absolute top-0 left-0 right-0 z-10 flex justify-between items-center px-4 md:px-8 py-4 bg-gradient-to-b from-black/40 to-transparent pointer-events-none">
+        
+        <!-- Left: Mobile Toggle & View Switcher -->
+        <div class="flex items-center gap-3 pointer-events-auto">
+            <button 
+                class="md:hidden p-2 -ml-2 rounded-lg text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+                @click="sidebarOpen = true"
+            >
+                <i data-lucide="menu" class="w-6 h-6"></i>
+            </button>
+
+            <div class="flex bg-black/20 rounded-[9px] p-0.5 pointer-events-auto backdrop-blur-md border border-white/5">
+            <button
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
+                :class="view === 'chat' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+                @click="view = 'chat'"
+            >
+                Chat
+            </button>
+            <button
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all"
+                :class="view === 'activity' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+                @click="view = 'activity'"
+            >
+                Activity
+            </button>
+            <button
+                class="px-4 md:px-6 py-1.5 rounded-[7px] text-[13px] font-medium transition-all hidden sm:block"
+                :class="view === 'terminal' ? 'bg-[#636366]/80 text-white shadow-sm' : 'text-[var(--text-secondary)] hover:text-white'"
+                @click="view = 'terminal'"
+            >
+                Terminal
+            </button>
+            </div>
+        </div>
+
+        <!-- Center: Remote Button (Hidden on Mobile) -->
+        <div class="flex-1 flex justify-center pointer-events-auto hidden md:flex">
+            <button 
+                class="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-1.5 rounded-full transition-all hover:scale-105 active:scale-95" 
+                @click="openRemote()"
+            >
+                <i data-lucide="smartphone" class="w-4 h-4 text-accent"></i>
+                <span class="text-sm font-medium text-white/90">Take Your Paw With You</span>
+            </button>
+        </div>
+
+        <!-- Right: Agent Toggle -->
+        <div class="flex items-center gap-3 pointer-events-auto">
+          <span class="text-[13px] font-medium text-[var(--text-secondary)] hidden sm:inline">Agent Mode</span>
+          <label class="relative w-[51px] h-[31px]">
+            <input
+              type="checkbox"
+              x-model="agentActive"
+              @change="toggleAgent()"
+              class="opacity-0 w-0 h-0 peer"
+            />
+            <span class="absolute inset-0 bg-[#787880]/30 rounded-full transition-colors duration-300 peer-checked:bg-[var(--success-color)]"></span>
+            <span class="absolute left-0.5 bottom-0.5 w-[27px] h-[27px] bg-white rounded-full shadow-[0_3px_8px_rgba(0,0,0,0.15)] transition-transform duration-300 peer-checked:translate-x-[20px]"></span>
+          </label>
+          <!-- Agent Mode Badge -->
+          <span
+            x-show="agentActive"
+            class="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 bg-white/10 border border-[var(--glass-border)] rounded-xl text-[11px] font-medium text-[var(--text-secondary)] animate-[badgeFadeIn_0.3s_ease-out]"
+            x-text="getAgentModeLabel()"
+          ></span>
+        </div>
+      </header>
+
+      <!-- Chat View -->
+      <!-- Added explicit min-height-0 to allow flex child to shrink properly -->
+      <div class="flex-1 flex flex-col pt-20 overflow-hidden min-h-0" x-show="view === 'chat'">
+        <div class="messages flex-1 flex flex-col gap-6 overflow-y-auto p-4 md:p-8 min-h-0" x-ref="messages">
+          <template x-for="(msg, index) in messages" :key="index">
+            <!-- Message Item -->
+            <div class="flex flex-col gap-1.5 max-w-[85%] md:max-w-[70%] animate-[messageSlide_0.3s_ease-out]" :class="msg.role === 'user' ? 'self-end items-end' : 'self-start items-start'">
+              <div
+                class="px-4 py-3 md:px-5 md:py-3.5 rounded-2xl text-[14px] md:text-[15px] leading-relaxed shadow-sm relative break-words message-content-wrapper"
+                :class="msg.role === 'user' ? 'bg-[var(--accent-color)] text-white rounded-br-sm' : 'bg-[var(--card-bg)] border border-[var(--glass-border)] rounded-bl-sm'"
+                x-html="formatMessage(msg.content)"
+              ></div>
+              <div class="flex gap-2 items-center px-1 opacity-70" :class="msg.role === 'user' ? 'flex-row-reverse' : ''">
+                <span
+                  class="text-[11px] md:text-xs font-semibold text-[var(--text-secondary)]"
+                  x-text="msg.role === 'user' ? '' : 'PocketPaw'"
+                  x-show="msg.role !== 'user'"
+                ></span>
+                <span class="text-[10px] md:text-[11px] text-[var(--text-tertiary)]" x-text="msg.time"></span>
+              </div>
+            </div>
+          </template>
+ 
+          <!-- Streaming indicator -->
+          <div class="flex flex-col gap-1.5 max-w-[85%] md:max-w-[70%] self-start items-start" x-show="isStreaming">
+            <div class="px-4 py-3 md:px-5 md:py-3.5 rounded-2xl text-[14px] md:text-[15px] leading-relaxed shadow-sm relative bg-[var(--card-bg)] border border-[var(--glass-border)] rounded-bl-sm">
+              <span x-text="streamingContent"></span>
+              <span class="animate-pulse font-bold">▌</span>
+            </div>
+            <div class="flex gap-2 items-center px-1 opacity-70">
+              <span class="text-[11px] md:text-xs font-semibold text-[var(--text-secondary)]">PocketPaw</span>
+              <span class="text-[10px] md:text-[11px] text-[var(--text-tertiary)]" x-text="currentTime()"></span>
+            </div>
+          </div>
+          
+          <!-- Spacer for fixed input area -->
+          <div class="h-20"></div>
+        </div>
+ 
+        <!-- Floating Input Area -->
+        <div class="absolute bottom-4 left-3 right-3 md:bottom-8 md:left-[10%] md:right-[10%] z-20">
+            <form class="relative flex items-center bg-[#2c2c2e]/90 backdrop-blur-xl border border-[var(--glass-border)] rounded-[24px] shadow-2xl transition-all focus-within:ring-1 focus-within:ring-white/20 focus-within:bg-[#323234]" @submit.prevent="sendMessage()">
+            <input
+                type="text"
+                class="w-full bg-transparent border-none text-[15px] text-white placeholder-white/30 px-5 py-4 pr-14 rounded-[24px] focus:outline-none focus:ring-0"
+                placeholder="Type a message..."
+                x-model="inputText"
+                :disabled="isStreaming"
+            />
+            <button
+                type="submit"
+                class="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 md:w-9 md:h-9 bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white rounded-full flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-[0_0_15px_rgba(10,132,255,0.4)] hover:scale-105 active:scale-95"
+                :disabled="!inputText.trim() || isStreaming"
+            >
+                <i data-lucide="arrow-up" class="w-4 h-4 md:w-5 md:h-5"></i>
+            </button>
+            </form>
+        </div>
+      </div>
+ 
+       <!-- Activity View -->
+       <div class="flex-1 flex flex-col pt-24 px-4 md:px-8 pb-8 overflow-hidden bg-black font-mono" x-show="view === 'activity'">
+         <div class="terminal-output text-[12px] md:text-[13px] text-[#BBB] leading-relaxed space-y-1" x-ref="activityLog">
+           <template x-for="(log, index) in activityLog" :key="index">
+             <div class="flex gap-3" :class="'term-' + log.level">
+               <span class="text-[#555] whitespace-nowrap" x-text="log.time"></span>
+               <span x-html="log.message" class="break-words"></span>
+             </div>
+           </template>
+         </div>
+       </div>
+ 
+       <!-- Terminal View -->
+       <div class="flex-1 flex flex-col pt-24 px-4 md:px-8 pb-8 overflow-hidden bg-black font-mono" x-show="view === 'terminal'">
+         <div class="terminal-output text-[12px] md:text-[13px] text-[#BBB] leading-relaxed space-y-1" x-ref="terminal">
+           <template x-for="(log, index) in logs" :key="index">
+             <div class="flex gap-3" :class="'term-' + log.level">
+               <span class="text-[#555] whitespace-nowrap" x-text="log.time"></span>
+               <span x-text="log.message" class="break-words"></span>
+             </div>
+           </template>
+         </div>
+       </div>
+     </main>
+ 
+     <!-- Settings Modal -->
+     <div
+       class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+       x-show="showSettings"
+       x-transition.opacity
+       @click.self="showSettings = false"
+     >
+       <div class="w-full max-w-[600px] bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+         <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)]">
+           <h2 class="text-[17px] font-semibold">Settings</h2>
+           <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showSettings = false">
+             <i data-lucide="x" class="w-5 h-5"></i>
+           </button>
+         </div>
+         
+         <div class="p-6 space-y-5">
+           <!-- Form Group: Agent Backend -->
+           <div class="flex flex-col gap-2">
+             <label class="text-[13px] font-medium text-[var(--text-secondary)]">Agent Backend</label>
+             <div class="relative">
+                <select 
+                    x-model="settings.agentBackend" 
+                    @change="saveSettings()"
+                    class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+               <option value="claude_agent_sdk">Claude Agent SDK (Recommended)</option>
+               <option value="pocketpaw_native">PocketPaw Native</option>
+               <option value="open_interpreter">Open Interpreter</option>
+             </select>
+             <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                 <i data-lucide="chevron-down" class="w-4 h-4"></i>
+             </div>
+             </div>
+             <small class="text-white/40 text-xs" x-text="getBackendDescription(settings.agentBackend)"></small>
+           </div>
+ 
+           <!-- Form Group: LLM Provider -->
+           <div class="flex flex-col gap-2">
+             <label class="text-[13px] font-medium text-[var(--text-secondary)]">LLM Provider</label>
+             <div class="relative">
+                <select 
+                    x-model="settings.llmProvider" 
+                    @change="saveSettings()"
+                    class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+               <option value="auto">Auto</option>
+               <option value="anthropic">Anthropic</option>
+               <option value="openai">OpenAI</option>
+               <option value="ollama">Ollama</option>
+             </select>
+             <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                 <i data-lucide="chevron-down" class="w-4 h-4"></i>
+             </div>
+             </div>
+           </div>
+ 
+           <!-- Form Group: Anthropic Model -->
+           <div class="flex flex-col gap-2" x-show="settings.llmProvider === 'anthropic' || settings.llmProvider === 'auto'">
+             <label class="text-[13px] font-medium text-[var(--text-secondary)]">Anthropic Model</label>
+             <div class="relative">
+                <select 
+                    x-model="settings.anthropicModel" 
+                    @change="saveSettings()"
+                    class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+               <optgroup label="Claude 4.5 (Latest)">
+                 <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5 (Recommended)</option>
+                 <option value="claude-opus-4-5-20250929">Claude Opus 4.5</option>
+                 <option value="claude-haiku-4-5-20250929">Claude Haiku 4.5</option>
+               </optgroup>
+               <optgroup label="Claude 4">
+                 <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                 <option value="claude-opus-4-20250514">Claude Opus 4</option>
+               </optgroup>
+             </select>
+             <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                 <i data-lucide="chevron-down" class="w-4 h-4"></i>
+             </div>
+             </div>
+           </div>
+ 
+           <!-- Form Group: Permission Bypass -->
+           <div class="flex flex-col gap-2">
+             <label class="flex items-start gap-3 cursor-pointer group">
+               <input type="checkbox" x-model="settings.bypassPermissions" @change="saveSettings()" class="mt-0.5 accent-[var(--accent-color)] w-4 h-4">
+               <div class="flex flex-col">
+                   <span class="text-[14px] font-medium group-hover:text-white transition-colors">Bypass Permission Prompts</span>
+                   <span class="text-xs text-[var(--warning-color)] mt-0.5">⚠️ Agent will execute actions without asking for approval. Use with caution.</span>
+               </div>
+             </label>
+           </div>
+ 
+           <hr class="border-t border-[var(--glass-border)] opacity-50" />
+ 
+           <h3 class="text-[14px] font-semibold text-[var(--text-secondary)]">API Keys</h3>
+           
+           <!-- API Key Input -->
+           <div class="flex flex-col gap-2">
+             <div class="flex justify-between items-center">
+                 <label class="text-[13px] font-medium text-[var(--text-secondary)]">Anthropic API Key</label>
+                 <span x-show="hasAnthropicKey" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
+                     <i data-lucide="check" class="w-3 h-3"></i> Saved
+                 </span>
+             </div>
+             <div class="flex gap-2">
+               <input
+                 type="password"
+                 x-model="apiKeys.anthropic"
+                 :placeholder="hasAnthropicKey ? '••••••••••••••••' : 'sk-ant-...'"
+                 class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+               />
+               <button 
+                  class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95" 
+                  @click="saveApiKey('anthropic')"
+               >
+                 Save
+               </button>
+             </div>
+           </div>
+ 
+           <!-- OpenAI API Key Input -->
+           <div class="flex flex-col gap-2">
+             <div class="flex justify-between items-center">
+                 <label class="text-[13px] font-medium text-[var(--text-secondary)]">OpenAI API Key</label>
+                 <span x-show="hasOpenaiKey" class="text-xs font-medium text-[var(--success-color)] flex items-center gap-1">
+                     <i data-lucide="check" class="w-3 h-3"></i> Saved
+                 </span>
+             </div>
+             <div class="flex gap-2">
+               <input
+                 type="password"
+                 x-model="apiKeys.openai"
+                 :placeholder="hasOpenaiKey ? '••••••••••••••••' : 'sk-...'"
+                 class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+               />
+               <button 
+                  class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[8px] text-[13px] font-semibold transition-all active:scale-95" 
+                  @click="saveApiKey('openai')"
+                >
+                Save
+                </button>
+             </div>
+           </div>
+         </div>
+       </div>
+     </div>
+
+    <!-- Screenshot Modal -->
+    <div
+      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+      x-show="showScreenshot"
+      x-transition.opacity
+      @click.self="showScreenshot = false"
+    >
+      <div class="w-full max-w-[800px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+          <h2 class="text-[17px] font-semibold">Screenshot</h2>
+          <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showScreenshot = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-6 overflow-y-auto">
+          <img
+            :src="screenshotSrc"
+            alt="Screenshot"
+            class="w-full h-auto rounded-lg border border-[var(--glass-border)]"
+          />
+        </div>
+      </div>
+    </div>
+ 
+    <!-- File Browser Modal -->
+    <div
+      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+      x-show="showFileBrowser"
+      x-transition.opacity
+      @click.self="showFileBrowser = false"
+    >
+      <div class="w-full max-w-[700px] max-h-[80vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+          <h2 class="text-[17px] font-semibold">Files</h2>
+          <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showFileBrowser = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-6 overflow-y-auto flex-1 flex flex-col min-h-0">
+          <div class="flex flex-col gap-4 flex-1 min-h-0">
+ 
+            <!-- Path bar -->
+            <div class="flex items-center gap-1.5 p-3 bg-black/30 rounded-[10px] text-[13px] font-mono text-[var(--text-secondary)] overflow-x-auto whitespace-nowrap scrollbar-hide">
+              <span class="flex items-center gap-1 text-[var(--accent-color)] hover:underline cursor-pointer" @click="navigateTo('~')">
+                <i data-lucide="home" class="w-4 h-4"></i>
+              </span>
+              <template x-for="(segment, i) in filePath.split('/').filter(s => s)" :key="i">
+                <span class="flex items-center shrink-0">
+                  <span class="text-white/30 mx-1">/</span>
+                  <span
+                    class="cursor-pointer hover:text-[var(--accent-color)] transition-colors"
+                    @click="navigateToSegment(i)"
+                    x-text="segment"
+                  ></span>
+                </span>
+              </template>
+            </div>
+ 
+            <!-- Loading State -->
+            <template x-if="fileLoading">
+              <div class="flex-1 flex flex-col items-center justify-center p-8 text-white/60 gap-3">
+                <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
+                <span class="text-sm">Loading...</span>
+              </div>
+            </template>
+ 
+            <!-- Error State -->
+            <template x-if="!fileLoading && fileError">
+              <div class="p-4 text-center text-[var(--danger-color)] bg-[var(--danger-color)]/10 rounded-lg text-sm" x-text="fileError"></div>
+            </template>
+ 
+            <!-- File List (only when loaded and no error) -->
+            <template x-if="!fileLoading && !fileError">
+              <div class="flex-1 overflow-y-auto border border-[var(--glass-border)] rounded-xl bg-black/20 min-h-0">
+                <!-- Parent Directory -->
+                <template x-if="filePath && filePath !== '~' && filePath !== '.'">
+                  <div class="flex items-center gap-3 p-3.5 border-b border-[var(--glass-border)] hover:bg-white/5 cursor-pointer text-[var(--accent-color)] transition-colors" @click="navigateUp()">
+                    <i data-lucide="corner-left-up" class="w-5 h-5"></i>
+                    <span class="flex-1 font-medium text-sm">..</span>
+                  </div>
+                </template>
+ 
+                <!-- Files & Folders -->
+                <template x-for="item in files" :key="item.name">
+                  <div class="flex items-center gap-3 p-3.5 border-b border-[var(--glass-border)] hover:bg-white/5 cursor-pointer transition-colors last:border-b-0" @click="selectFile(item)">
+                    <svg x-show="item.isDir" class="w-5 h-5 text-white/60 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                    <svg x-show="!item.isDir" class="w-5 h-5 text-white/60 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+                    <span class="flex-1 font-medium text-sm truncate" x-text="item.name + (item.isDir ? '/' : '')"></span>
+                    <span class="text-xs text-white/30 font-mono shrink-0" x-show="!item.isDir" x-text="item.size"></span>
+                  </div>
+                </template>
+ 
+                <!-- Empty State -->
+                <template x-if="files.length === 0">
+                  <div class="flex-1 flex flex-col items-center justify-center p-12 text-white/40 gap-3">
+                    <i data-lucide="folder-open" class="w-10 h-10 opacity-50"></i>
+                    <span class="font-medium">Empty directory</span>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+ 
+    <!-- Reminders Modal -->
+    <div
+      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+      x-show="showReminders"
+      x-transition.opacity
+      @click.self="showReminders = false"
+    >
+      <div class="w-full max-w-[600px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+          <h2 class="text-[17px] font-semibold">Reminders</h2>
+          <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showReminders = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-6">
+          <div class="flex flex-col gap-5">
+            <!-- Add Reminder Input -->
+            <div class="flex flex-col gap-2">
+                <form class="flex gap-2" @submit.prevent="addReminder()">
+                <input
+                    type="text"
+                    class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-3 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+                    x-model="reminderInput"
+                    placeholder="Remind me in 30 minutes to..."
+                    :disabled="reminderLoading"
+                />
+                <button
+                    type="submit"
+                    class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-[10px] flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    :disabled="!reminderInput.trim() || reminderLoading"
+                >
+                    <i data-lucide="plus" class="w-5 h-5"></i>
+                </button>
+                </form>
+                <p class="text-[12px] text-white/40 pl-1">
+                Try: "in 5 minutes", "at 3pm", "tomorrow at 9am"
+                </p>
+            </div>
+ 
+            <!-- Loading State -->
+            <template x-if="reminderLoading && reminders.length === 0">
+              <div class="p-8 text-center text-white/60 flex flex-col items-center gap-3">
+                <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
+                <span>Loading...</span>
+              </div>
+            </template>
+ 
+            <!-- Reminders List -->
+            <template x-if="!reminderLoading || reminders.length > 0">
+              <div class="flex flex-col max-h-[300px] overflow-y-auto border border-[var(--glass-border)] rounded-xl bg-black/20">
+                <template x-for="reminder in reminders" :key="reminder.id">
+                  <div class="flex items-start gap-3 p-3.5 border-b border-[var(--glass-border)] hover:bg-white/5 transition-colors last:border-b-0 group">
+                    <i data-lucide="bell" class="w-5 h-5 text-[var(--accent-color)] mt-0.5 shrink-0"></i>
+                    <div class="flex-1 min-w-0">
+                      <p class="font-medium text-[14px] truncate" x-text="reminder.text"></p>
+                      <p class="text-xs text-white/50 mt-0.5">
+                        <span x-text="formatReminderTime(reminder)"></span>
+                        <span class="text-[var(--accent-color)] ml-2" x-text="reminder.time_remaining"></span>
+                      </p>
+                    </div>
+                    <button
+                      class="text-white/30 hover:text-[var(--danger-color)] hover:bg-white/10 p-1.5 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                      @click="deleteReminder(reminder.id)"
+                      title="Delete reminder"
+                    >
+                      <i data-lucide="trash-2" class="w-4 h-4"></i>
+                    </button>
+                  </div>
+                </template>
+ 
+                <!-- Empty State -->
+                <template x-if="reminders.length === 0">
+                  <div class="p-8 text-center text-white/40 flex flex-col items-center gap-3">
+                    <i data-lucide="bell-off" class="w-10 h-10 opacity-50"></i>
+                    <span class="font-medium">No reminders set</span>
+                    <span class="text-xs">Add one above to get started</span>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+ 
+    <!-- Intentions Modal -->
+    <div
+      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+      x-show="showIntentions"
+      x-transition.opacity
+      @click.self="showIntentions = false"
+    >
+      <div class="w-full max-w-[700px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] max-h-[85vh] overflow-hidden" @click.stop>
+        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+          <h2 class="text-[17px] font-semibold">Intentions</h2>
+          <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showIntentions = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-6 overflow-y-auto">
+          <div class="flex flex-col gap-6">
+            <!-- Add Intention Form -->
+            <div class="bg-black/30 p-5 rounded-xl border border-[var(--glass-border)]">
+              <h3 class="text-sm font-semibold mb-4 text-[var(--text-secondary)] uppercase tracking-wider">New Intention</h3>
+              <div class="flex flex-col gap-3">
+                <input
+                  type="text"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+                  x-model="intentionForm.name"
+                  placeholder="Name (e.g., Morning Standup)"
+                />
+                <textarea
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20 min-h-[80px] resize-y"
+                  x-model="intentionForm.prompt"
+                  placeholder="Prompt (e.g., Good morning! What are your priorities today?)"
+                ></textarea>
+                <div class="flex flex-col md:flex-row gap-3">
+                    <div class="relative flex-1">
+                        <select class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all" x-model="intentionForm.schedulePreset">
+                        <option value="">Select schedule...</option>
+                        <option value="every_minute">Every minute (testing)</option>
+                        <option value="every_5_minutes">Every 5 minutes</option>
+                        <option value="every_15_minutes">Every 15 minutes</option>
+                        <option value="every_hour">Every hour</option>
+                        <option value="every_morning_8am">Daily at 8am</option>
+                        <option value="every_morning_9am">Daily at 9am</option>
+                        <option value="weekday_morning_8am">Weekdays at 8am</option>
+                        <option value="weekday_morning_9am">Weekdays at 9am</option>
+                        <option value="daily_noon">Daily at noon</option>
+                        <option value="every_evening_6pm">Daily at 6pm</option>
+                        <option value="custom">Custom cron...</option>
+                        </select>
+                        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                            <i data-lucide="chevron-down" class="w-4 h-4 text-white"></i>
+                        </div>
+                    </div>
+                  <input
+                    x-show="intentionForm.schedulePreset === 'custom'"
+                    type="text"
+                    class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+                    x-model="intentionForm.customCron"
+                    placeholder="0 9 * * 1-5"
+                  />
+                </div>
+                <div class="flex items-center gap-2 mt-1">
+                  <input type="checkbox" id="includeSystemStatus" x-model="intentionForm.includeSystemStatus" class="accent-[var(--accent-color)] w-4 h-4 cursor-pointer" />
+                  <label for="includeSystemStatus" class="text-sm text-white/60 cursor-pointer select-none">Include system status in prompt</label>
+                </div>
+                <button
+                  class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-3 rounded-[10px] text-[14px] font-semibold flex items-center justify-center gap-2 transition-all active:scale-[0.98] mt-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  @click="createIntention()"
+                  :disabled="!intentionForm.name.trim() || !intentionForm.prompt.trim() || !intentionForm.schedulePreset"
+                >
+                  <i data-lucide="plus" class="w-4 h-4"></i>
+                  <span>Add Intention</span>
+                </button>
+              </div>
+            </div>
+ 
+            <!-- Loading State -->
+            <template x-if="intentionLoading && intentions.length === 0">
+              <div class="p-8 text-center text-white/60 flex flex-col items-center gap-3">
+                <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
+                <span>Loading...</span>
+              </div>
+            </template>
+ 
+            <!-- Intentions List -->
+            <template x-if="!intentionLoading || intentions.length > 0">
+              <div class="flex flex-col border border-[var(--glass-border)] rounded-xl bg-black/20 overflow-hidden">
+                <template x-for="intention in intentions" :key="intention.id">
+                  <div class="flex items-start gap-4 p-4 border-b border-[var(--glass-border)] hover:bg-white/5 transition-colors last:border-b-0" :class="{ 'opacity-50': !intention.enabled }">
+                    <button
+                      class="mt-1 transition-transform hover:scale-110 active:scale-95 shrink-0"
+                      @click="toggleIntention(intention.id)"
+                      :title="intention.enabled ? 'Disable' : 'Enable'"
+                    >
+                      <i x-show="intention.enabled" data-lucide="toggle-right" class="w-6 h-6 text-[var(--success-color)]"></i>
+                      <i x-show="!intention.enabled" data-lucide="toggle-left" class="w-6 h-6 text-white/30"></i>
+                    </button>
+                    <div class="flex-1 min-w-0">
+                      <p class="font-medium text-[15px] text-white" x-text="intention.name"></p>
+                      <p class="text-xs text-white/50 truncate mt-0.5" x-text="intention.prompt"></p>
+                      <div class="flex flex-wrap items-center gap-3 mt-2">
+                        <span class="text-xs text-white/40 flex items-center gap-1.5 bg-white/5 px-2 py-0.5 rounded-md">
+                          <i data-lucide="clock" class="w-3 h-3"></i>
+                          <span x-text="intention.trigger?.schedule || 'No schedule'"></span>
+                        </span>
+                        <span x-show="intention.next_run" class="text-xs text-[var(--accent-color)] font-medium">
+                          Next: <span x-text="formatNextRun(intention.next_run)"></span>
+                        </span>
+                      </div>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <button
+                        class="p-2 rounded-lg text-white/30 hover:text-[var(--success-color)] hover:bg-white/10 transition-colors"
+                        @click="runIntention(intention.id)"
+                        title="Run now"
+                      >
+                        <i data-lucide="play" class="w-4 h-4"></i>
+                      </button>
+                      <button
+                        class="p-2 rounded-lg text-white/30 hover:text-[var(--danger-color)] hover:bg-white/10 transition-colors"
+                        @click="deleteIntention(intention.id)"
+                        title="Delete"
+                      >
+                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                      </button>
+                    </div>
+                  </div>
+                </template>
+ 
+                <!-- Empty State -->
+                <template x-if="intentions.length === 0">
+                  <div class="p-12 text-center text-white/40 flex flex-col items-center gap-3">
+                    <i data-lucide="target" class="w-10 h-10 opacity-50"></i>
+                    <span class="font-medium">No intentions set</span>
+                    <span class="text-xs">Create one above to make PocketPaw proactive</span>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+ 
+    <!-- Skills Modal -->
+    <div
+      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4"
+      x-show="showSkills"
+      x-transition.opacity
+      @click.self="showSkills = false"
+    >
+      <div class="w-full max-w-[600px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+        <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+          <h2 class="text-[17px] font-semibold">Skills</h2>
+          <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showSkills = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-6 overflow-y-auto">
+          <div class="flex flex-col gap-5">
+            <!-- Info -->
+            <div class="bg-blue-500/10 border border-blue-500/20 p-4 rounded-xl flex gap-3 text-sm text-blue-200/90">
+                <i data-lucide="info" class="w-5 h-5 shrink-0 mt-0.5"></i>
+                <p>
+                Skills extend PocketPaw. Use <code class="text-white font-mono bg-white/10 px-1.5 py-0.5 rounded">/skill-name</code> in chat to run a skill.
+                Install more from <a href="https://skills.sh" target="_blank" class="text-white underline decoration-white/30 underline-offset-2 hover:decoration-white transition-all">skills.sh</a>
+                </p>
+            </div>
+ 
+            <!-- Loading State -->
+            <template x-if="skillsLoading && skills.length === 0">
+              <div class="p-8 text-center text-white/60 flex flex-col items-center gap-3">
+                <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i>
+                <span>Loading skills...</span>
+              </div>
+            </template>
+ 
+            <!-- Skills List -->
+            <template x-if="!skillsLoading || skills.length > 0">
+              <div class="flex flex-col border border-[var(--glass-border)] rounded-xl bg-black/20 overflow-hidden">
+                <template x-for="skill in skills" :key="skill.name">
+                  <div class="flex items-start gap-4 p-4 border-b border-[var(--glass-border)] transition-colors last:border-b-0 hover:bg-white/5">
+                    <div class="p-2 bg-[var(--warning-color)]/20 rounded-lg shrink-0">
+                       <i data-lucide="wand-2" class="w-5 h-5 text-[var(--warning-color)]"></i>
+                    </div>
+                    
+                    <div class="flex-1 min-w-0">
+                      <p class="font-medium text-[15px] flex items-center gap-1.5 text-white">
+                        <span class="font-mono text-[var(--accent-color)]">/</span><span x-text="skill.name"></span>
+                        <span x-show="skill.argument_hint" class="text-white/30 text-xs font-normal border border-white/10 px-1.5 py-0.5 rounded font-mono" x-text="skill.argument_hint"></span>
+                      </p>
+                      <p class="text-[13px] text-white/50 mt-1 line-clamp-2" x-text="skill.description"></p>
+                    </div>
+                    <button
+                      class="bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded-[8px] text-[12px] font-medium transition-all active:scale-95 shrink-0"
+                      @click="runSkill(skill.name); showSkills = false;"
+                    >
+                      Run
+                    </button>
+                  </div>
+                </template>
+ 
+                <!-- Empty State -->
+                <template x-if="skills.length === 0">
+                  <div class="p-12 text-center text-white/40 flex flex-col items-center gap-3">
+                    <i data-lucide="wand-2" class="w-10 h-10 opacity-50"></i>
+                    <span class="font-medium">No skills installed</span>
+                    <span class="text-xs">Install skills with: <code class="text-[var(--accent-color)]">npx skills add owner/repo</code></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+ 
+    <!-- Identity Modal -->
+    <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showIdentity" x-transition.opacity @click.self="showIdentity = false">
+        <div class="w-full max-w-[800px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+            <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+                <h2 class="text-[17px] font-semibold">Agent Identity</h2>
+                <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showIdentity = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+            </div>
+            <div class="p-6 overflow-y-auto">
+                <div x-show="identityLoading" class="p-12 text-center text-white/50 flex flex-col items-center gap-3">
+                    <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i> 
+                    <span>Loading identity...</span>
+                </div>
+                <div x-show="!identityLoading" class="flex flex-col gap-6">
+                    <div class="bg-black/30 p-5 rounded-xl border border-[var(--glass-border)] group hover:border-white/20 transition-colors">
+                        <h3 class="text-[var(--accent-color)] font-semibold mb-3 flex items-center gap-2">
+                            <i data-lucide="fingerprint" class="w-4 h-4"></i>
+                            Primary Directive (IDENTITY.md)
+                        </h3>
+                        <div class="bg-black/50 p-4 rounded-lg border border-white/5">
+                            <pre class="text-[11px] md:text-[12px] text-white/70 whitespace-pre-wrap font-mono leading-relaxed" x-text="identityData.identity_file"></pre>
+                        </div>
+                    </div>
+                     <div class="bg-black/30 p-5 rounded-xl border border-[var(--glass-border)] group hover:border-white/20 transition-colors">
+                        <h3 class="text-[var(--accent-color)] font-semibold mb-3 flex items-center gap-2">
+                             <i data-lucide="heart" class="w-4 h-4"></i>
+                            Soul & Personality (SOUL.md)
+                        </h3>
+                        <div class="bg-black/50 p-4 rounded-lg border border-white/5">
+                            <pre class="text-[11px] md:text-[12px] text-white/70 whitespace-pre-wrap font-mono leading-relaxed" x-text="identityData.soul_file"></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+ 
+    <!-- Memory Modal -->
+    <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showMemory" x-transition.opacity @click.self="showMemory = false">
+        <div class="w-full max-w-[800px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+            <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+                <h2 class="text-[17px] font-semibold">Memory Banks</h2>
+                <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showMemory = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+            </div>
+            <div class="p-6 overflow-y-auto">
+                <div x-show="memoryLoading" class="p-12 text-center text-white/50 flex flex-col items-center gap-3">
+                    <i data-lucide="loader-2" class="w-8 h-8 animate-spin"></i> 
+                    <span>Loading memories...</span>
+                </div>
+                
+                <div x-show="!memoryLoading" class="flex flex-col gap-6">
+                    <!-- Stats Grid -->
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-[var(--accent-color)]/30 transition-colors">
+                            <i data-lucide="brain" class="w-5 h-5 text-[var(--accent-color)] mb-1"></i>
+                            <span class="text-2xl font-bold text-white" x-text="memoryStats.total_memories || 0"></span>
+                            <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Total</span>
+                        </div>
+                        <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-[var(--success-color)]/30 transition-colors">
+                            <i data-lucide="check-circle" class="w-5 h-5 text-[var(--success-color)] mb-1"></i>
+                            <span class="text-2xl font-bold text-white" x-text="memoryStats.active_context || 0"></span>
+                            <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Active</span>
+                        </div>
+                        <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-[var(--warning-color)]/30 transition-colors">
+                            <i data-lucide="archive" class="w-5 h-5 text-[var(--warning-color)] mb-1"></i>
+                            <span class="text-2xl font-bold text-white" x-text="memoryStats.archived || 0"></span>
+                            <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Archived</span>
+                        </div>
+                        <div class="bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col items-center gap-1.5 hover:border-purple-400/30 transition-colors">
+                            <i data-lucide="clock" class="w-5 h-5 text-purple-400 mb-1"></i>
+                            <span class="text-2xl font-bold text-white" x-text="memoryStats.user_interactions || 0"></span>
+                            <span class="text-[11px] text-[var(--text-secondary)] uppercase tracking-wide">Interactions</span>
+                        </div>
+                    </div>
+
+                    <!-- Search -->
+                    <div class="relative group">
+                        <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 group-focus-within:text-[var(--accent-color)] transition-colors"></i>
+                        <input 
+                            type="text" 
+                            x-model="memorySearch" 
+                            placeholder="Search memories..." 
+                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[12px] py-3 pl-11 pr-4 text-[14px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/20"
+                        >
+                    </div>
+
+                    <!-- Memory List -->
+                    <div class="flex flex-col gap-3">
+                        <template x-for="memory in filteredMemories" :key="memory.id">
+                            <div class="bg-black/30 p-4 md:p-5 rounded-xl border border-[var(--glass-border)] hover:bg-white/5 transition-all group">
+                                <div class="flex items-start justify-between gap-4 mb-2">
+                                    <div class="flex gap-2.5">
+                                        <span 
+                                            class="text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider border"
+                                            :class="getMemoryTypeClass(memory.type)"
+                                            x-text="memory.type"
+                                        ></span>
+                                        <span class="text-[11px] text-[var(--text-tertiary)] flex items-center gap-1.5 opacity-60">
+                                            <i data-lucide="calendar" class="w-3 h-3"></i>
+                                            <span x-text="formatDate(memory.created_at)"></span>
+                                        </span>
+                                    </div>
+                                    <button 
+                                        class="text-white/20 hover:text-[var(--danger-color)] hover:bg-white/10 p-1.5 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                        @click="deleteMemory(memory.id)"
+                                        title="Forget memory"
+                                    >
+                                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                    </button>
+                                </div>
+                                <p class="text-[14px] md:text-[15px] leading-relaxed text-white/90 break-words" x-text="memory.content"></p>
+                                <div class="flex gap-2 mt-3" x-show="memory.tags && memory.tags.length">
+                                    <template x-for="tag in memory.tags" :key="tag">
+                                        <span class="text-[11px] text-[var(--accent-color)] bg-[var(--accent-color)]/10 px-2 py-0.5 rounded border border-[var(--accent-color)]/20">
+                                            #<span x-text="tag"></span>
+                                        </span>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                         <div x-show="filteredMemories.length === 0" class="p-12 text-center text-white/30 italic">
+                            No memories found
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audit Log Modal -->
+    <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showAudit" x-transition.opacity @click.self="showAudit = false">
+        <div class="w-full max-w-[800px] max-h-[85vh] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+            <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+                <h2 class="text-[17px] font-semibold">Audit Log</h2>
+                <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showAudit = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+            </div>
+            <div class="p-6 overflow-y-auto">
+                <div x-show="auditLoading" class="p-8 text-center"><i data-lucide="loader-2" class="w-8 h-8 animate-spin mx-auto text-white/50"></i></div>
+                <div class="flex flex-col gap-2 font-mono text-xs">
+                    <template x-for="log in auditLogs" :key="log.id">
+                        <div class="p-3 rounded-lg border-l-[3px] bg-black/30 hover:bg-white/5 transition-colors" 
+                             :class="{
+                                'border-[var(--info-color)]': log.severity === 'info',
+                                'border-[var(--warning-color)]': log.severity === 'warning',
+                                'border-[var(--danger-color)]': log.severity === 'critical' || log.severity === 'alert'
+                             }">
+                            <div class="flex justify-between text-white/40 mb-1.5">
+                                <span x-text="new Date(log.timestamp).toLocaleTimeString()"></span>
+                                <span x-text="log.severity.toUpperCase()" :class="log.severity === 'critical' ? 'text-[var(--danger-color)]' : ''"></span>
+                            </div>
+                            <div class="flex gap-2.5 mb-1.5">
+                                <span class="bg-white/10 px-1.5 py-0.5 rounded text-[var(--accent-color)] font-semibold" x-text="log.action"></span>
+                                <span class="text-white/90" x-text="log.target"></span>
+                            </div>
+                            <div class="text-white/50 break-all" x-text="JSON.stringify(log.context)"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Remote Access Modal -->
+    <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-md p-4" x-show="showRemote" x-transition.opacity @click.self="showRemote = false">
+        <div class="w-full max-w-[400px] flex flex-col bg-[#1c1c1e]/95 backdrop-blur-xl border border-[var(--glass-border)] rounded-[20px] shadow-2xl animate-[modalPop_0.25s_ease-out] overflow-hidden" @click.stop>
+            <div class="flex items-center justify-between px-6 py-5 border-b border-[var(--glass-border)] shrink-0">
+                <h2 class="text-[17px] font-semibold">Remote Access</h2>
+                <button class="p-2 -mr-2 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 rounded-lg transition-colors" @click="showRemote = false"><i data-lucide="x" class="w-5 h-5"></i></button>
+            </div>
+            <div class="p-6">
+                <div class="flex flex-col gap-6 items-center text-center">
+                    
+                    <!-- QR Code -->
+                    <div class="bg-white p-3 rounded-2xl shadow-lg">
+                        <img :src="'/api/qr?t=' + Date.now()" alt="Scan to Login" class="w-48 h-48 block" />
+                    </div>
+                    
+                    <p class="text-white/60 text-[13px] leading-relaxed max-w-[260px]">
+                        Scan with your phone to access PocketPaw remotely.
+                    </p>
+ 
+                    <!-- Tunnel Controls -->
+                    <div class="w-full bg-black/30 p-4 rounded-xl border border-[var(--glass-border)] flex flex-col gap-3">
+                        <div class="flex justify-between items-center">
+                            <span class="text-[13px] font-medium text-white/90">Cloudflare Tunnel</span>
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border" 
+                                  :class="remoteStatus.active ? 'bg-[var(--success-color)]/10 text-[var(--success-color)] border-[var(--success-color)]/20' : 'bg-white/5 text-white/40 border-white/10'"
+                                  x-text="remoteStatus.active ? 'ONLINE' : 'OFFLINE'">
+                            </span>
+                        </div>
+                        
+                        <div x-show="remoteStatus.active" class="text-[11px] text-[var(--accent-color)] break-all bg-black/40 p-2.5 rounded-lg border border-white/5 font-mono text-left">
+                            <a :href="remoteStatus.url" target="_blank" class="hover:underline" x-text="remoteStatus.url"></a>
+                        </div>
+                        
+                        <div class="flex gap-2 mt-1">
+                            <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2 rounded-[8px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed" 
+                                    x-show="!remoteStatus.active" 
+                                    @click="toggleTunnel()"
+                                    :disabled="tunnelLoading">
+                                <i x-show="tunnelLoading" data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>
+                                Start Tunnel
+                            </button>
+                            
+                            <button class="w-full bg-[var(--danger-color)] hover:bg-red-600 text-white py-2 rounded-[8px] text-[13px] font-medium transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed" 
+                                    x-show="remoteStatus.active" 
+                                    @click="toggleTunnel()"
+                                    :disabled="tunnelLoading">
+                                <i x-show="tunnelLoading" data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>
+                                Stop Tunnel
+                            </button>
+                        </div>
+                    </div>
+ 
+                    <!-- Token Reset -->
+                    <div class="w-full border-t border-[var(--glass-border)] pt-4">
+                        <button class="text-[12px] text-white/40 hover:text-[var(--accent-color)] transition-colors flex items-center justify-center gap-1.5 mx-auto" @click="regenerateToken()">
+                            <i data-lucide="refresh-cw" class="w-3 h-3"></i>
+                            Regenerate Access Token
+                        </button>
+                    </div>
+ 
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" x-ref="toasts"></div>
+
+    <!-- Scripts -->
+    <script src="/static/js/websocket.js"></script>
+    <script src="/static/js/tools.js"></script>
+    <script src="/static/js/app.js"></script>
+
+    <!-- Initialize Lucide icons -->
+    <script>
+      // Initial render
+      document.addEventListener('DOMContentLoaded', () => {
+        lucide.createIcons();
+      });
+
+      // Debounced refresh for dynamic content
+      let iconTimeout;
+      window.refreshIcons = () => {
+        clearTimeout(iconTimeout);
+        iconTimeout = setTimeout(() => lucide.createIcons(), 50);
+      };
+    </script>
+  </body>
+</html>

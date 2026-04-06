@@ -1,0 +1,72 @@
+<!--
+  PocketPaw Dashboard - Crew View (Control Room)
+
+  Created: 2026-02-05
+  Updated: 2026-02-12 — Added Deep Work sub-tab (Tasks/Projects) with project
+    list, project detail sheet, and start project modal.
+
+  Sub-components:
+  - missions/stats-bar.html: Stats + running task banner
+  - missions/task-list.html: Task filters + compact table
+  - missions/agents-sidebar.html: Agents list + activity feed
+  - missions/deep-work-projects.html: Deep Work project list + detail
+  - missions/sheets/task-detail.html: Full-height task detail slide panel
+  - missions/sheets/agent-activity.html: Agent activity stream panel
+  - missions/sheets/project-detail.html: Deep Work project detail panel
+  - missions/modals/create-task.html: New task modal
+  - missions/modals/create-agent.html: New agent modal
+  - missions/modals/start-project.html: Start Deep Work project modal
+-->
+
+<!-- Missions View -->
+<div class="flex-1 flex flex-col pt-20 overflow-hidden" x-show="view === 'missions'" x-cloak>
+
+    <!-- Loading State -->
+    <div x-show="missionControl.loading" class="flex-1 flex items-center justify-center">
+        <div class="flex flex-col items-center gap-4 text-white/50">
+            <div class="w-8 h-8 border-2 border-accent/30 border-t-accent rounded-full animate-spin"></div>
+            <span class="text-sm">Loading Crew...</span>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div x-show="!missionControl.loading" class="flex-1 flex flex-col overflow-hidden">
+
+        {% include "components/missions/stats-bar.html" %}
+
+        <!-- Tasks view -->
+        <div class="flex-1 flex overflow-hidden" x-show="missionControl.crewTab === 'tasks'">
+            {% include "components/missions/task-list.html" %}
+            {% include "components/missions/agents-sidebar.html" %}
+        </div>
+
+        <!-- Projects view (Deep Work) -->
+        <div class="flex-1 flex overflow-hidden" x-show="missionControl.crewTab === 'projects'">
+            {% include "components/missions/deep-work-projects.html" %}
+        </div>
+    </div>
+
+    <!-- Sheets (Slide-out Panels) -->
+    {% include "components/missions/sheets/task-detail.html" %}
+    {% include "components/missions/sheets/agent-activity.html" %}
+    {% include "components/missions/sheets/project-detail.html" %}
+
+    <!-- Modals -->
+    {% include "components/missions/modals/create-task.html" %}
+    {% include "components/missions/modals/create-agent.html" %}
+    {% include "components/missions/modals/start-project.html" %}
+</div>
+
+<style>
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(-4px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes shimmer {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+    }
+    .animate-shimmer {
+        animation: shimmer 2s ease-in-out infinite;
+    }
+</style>

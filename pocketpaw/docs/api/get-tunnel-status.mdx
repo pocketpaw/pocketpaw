@@ -1,0 +1,73 @@
+---
+title: Get Tunnel Status
+description: "Check if a Cloudflare tunnel is currently active and retrieve its public URL. Tunnels provide HTTPS access to PocketPaw's local server for WhatsApp webhooks and remote access."
+api: GET /api/remote/status
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["tunnel status", "cloudflare tunnel", "public url"]
+tags: ["api", "tunnel"]
+---
+
+## Overview
+
+Returns the current status of the Cloudflare tunnel (used for remote access to the dashboard without port forwarding).
+
+## Response
+
+<ResponseField name="active" type="boolean">Whether a tunnel is currently running</ResponseField>
+<ResponseField name="url" type="string" nullable>The public tunnel URL (e.g., `https://abc-xyz.trycloudflare.com`)</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/remote/status" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/remote/status", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/remote/status",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200 (Active)", "200 (Inactive)"]}>
+  <Tab title="200 (Active)">
+    ```json
+    {
+      "active": true,
+      "url": "https://steep-mountain-abc123.trycloudflare.com"
+    }
+    ```
+  </Tab>
+  <Tab title="200 (Inactive)">
+    ```json
+    {
+      "active": false,
+      "url": null
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

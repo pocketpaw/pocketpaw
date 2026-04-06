@@ -1,0 +1,81 @@
+---
+title: Create Mission Control Task
+description: "Create a new task in PocketPaw's Mission Control with title, description, priority, tags, and optional agent assignment. Tasks can be linked to Deep Work projects for orchestrated execution."
+api: POST /api/mission-control/tasks
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["create task", "task creation", "assign task"]
+tags: ["api", "mission-control"]
+---
+
+## Overview
+
+Creates a new task. Optionally link it to a Deep Work project and assign it to agents.
+
+## Request Body
+
+<ResponseField name="title" type="string" required>
+  Task title.
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Full task description with acceptance criteria.
+</ResponseField>
+
+<ResponseField name="priority" type="string" default="medium">
+  Priority: `low`, `medium`, `high`, or `urgent`.
+</ResponseField>
+
+<ResponseField name="tags" type="array">
+  List of categorization tags.
+</ResponseField>
+
+<ResponseField name="assignee_ids" type="array">
+  Agent IDs to assign the task to.
+</ResponseField>
+
+<ResponseField name="project_id" type="string">
+  Deep Work project to associate with.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/mission-control/tasks \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Implement user authentication",
+    "description": "Add JWT-based auth with login/register endpoints",
+    "priority": "high",
+    "tags": ["backend", "security"],
+    "assignee_ids": ["agent-uuid-1"]
+  }'
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "task": {
+    "id": "task-uuid-2",
+    "title": "Implement user authentication",
+    "status": "assigned",
+    "priority": "high",
+    "assignee_ids": ["agent-uuid-1"],
+    "tags": ["backend", "security"],
+    "created_at": "2024-01-15T14:32:00Z"
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

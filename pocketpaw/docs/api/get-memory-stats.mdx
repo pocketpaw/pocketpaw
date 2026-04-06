@@ -1,0 +1,65 @@
+---
+title: Get Memory Stats
+description: "Retrieve memory backend statistics including total entries stored, storage size, last auto-learn timestamp, and provider-specific metrics for monitoring memory system health."
+api: GET /api/memory/stats
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["memory stats", "storage metrics", "memory health"]
+tags: ["api", "memory"]
+---
+
+## Overview
+
+Returns statistics about the current memory backend, including the number of stored memories and the active backend type.
+
+## Response
+
+<ResponseField name="backend" type="string">Active memory backend (`file` or `mem0`)</ResponseField>
+<ResponseField name="total_memories" type="integer">Total number of long-term memory entries</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+    ```bash
+    curl -X GET "http://localhost:8000/api/memory/stats" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const response = await fetch("http://localhost:8000/api/memory/stats", {
+      headers: { "Authorization": "Bearer <token>" }
+    });
+    const data = await response.json();
+    console.log(data);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import requests
+
+    response = requests.get(
+        "http://localhost:8000/api/memory/stats",
+        headers={"Authorization": "Bearer <token>"}
+    )
+    print(response.json())
+    ```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+    ```json
+    {
+      "backend": "mem0",
+      "total_memories": 47
+    }
+    ```
+  </Tab>
+</Tabs>
+</ResponseExample>

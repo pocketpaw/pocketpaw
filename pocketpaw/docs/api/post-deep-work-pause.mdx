@@ -1,0 +1,59 @@
+---
+title: Pause Deep Work Project
+description: "Pause a running Deep Work project and stop all currently executing agent tasks. The project can be resumed later with all progress preserved and ready tasks re-dispatched."
+api: POST /api/deep-work/projects/{project_id}/pause
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["pause project", "stop execution", "suspend work"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Pauses a running Deep Work project. All currently executing tasks are stopped. The project can be resumed later.
+
+## Path Parameters
+
+<ResponseField name="project_id" type="string" required>
+  The project ID. Project must be in `executing` status.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the project was paused.
+</ResponseField>
+
+<ResponseField name="project" type="object">
+  The updated project with `status: "paused"`.
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/projects/PROJECT_ID/pause \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "project": {
+    "id": "a1b2c3d4...",
+    "status": "paused"
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

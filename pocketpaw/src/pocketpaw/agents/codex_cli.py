@@ -1,0 +1,390 @@
+"""Codex CLI backend for PocketPaw.
+
+Spawns OpenAI's Codex CLI (npm install -g @openai/codex) as a subprocess
+and parses its streaming NDJSON output. Analogous to Gemini CLI but for Codex.
+
+Built-in tools: shell (command_execution), file editing (file_change),
+MCP tool calls, web search.
+
+Requires: OPENAI_API_KEY (or CODEX_API_KEY) env var and `codex` on PATH.
+
+Note: The prompt is passed via stdin (using "-" as the prompt arg) rather than
+as a command-line argument.  This avoids the Windows command-line length limit
+(~8191 chars).  Codex CLI added stdin support in v0.1.2504.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.config import Settings
+
+logger = logging.getLogger(__name__)
+
+# Only allow safe characters in model names to prevent shell injection
+_MODEL_NAME_RE = re.compile(r"^[\w\-.:]+$")
+
+# 10 MiB buffer for subprocess stdout. Codex CLI emits NDJSON events that can
+# exceed the asyncio default of 64 KiB (e.g., large MCP tool results from
+# Playwright, code completions, etc.).
+_SUBPROCESS_BUFFER_LIMIT = 10 * 1024 * 1024
+
+
+class CodexCLIBackend:
+    """Codex CLI backend — subprocess wrapper for OpenAI's terminal AI agent."""
+
+    @staticmethod
+    def info() -> BackendInfo:
+        return BackendInfo(
+            name="codex_cli",
+            display_name="Codex CLI",
+            capabilities=(
+                Capability.STREAMING
+                | Capability.TOOLS
+                | Capability.MCP
+                | Capability.MULTI_TURN
+                | Capability.CUSTOM_SYSTEM_PROMPT
+            ),
+            builtin_tools=["shell", "file_edit", "web_search", "mcp"],
+            tool_policy_map={
+                "shell": "shell",
+                "file_edit": "write_file",
+                "web_search": "browser",
+                "mcp": "mcp",
+            },
+            required_keys=["openai_api_key"],
+            supported_providers=["openai"],
+            install_hint={
+                "external_cmd": "npm install -g @openai/codex",
+            },
+            beta=True,
+        )
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._stop_flag = False
+        self._codex_path = shutil.which("codex")
+        self._cli_available = self._codex_path is not None
+        self._process: asyncio.subprocess.Process | None = None
+        if self._cli_available:
+            logger.info("Codex CLI found: %s", self._codex_path)
+        else:
+            logger.warning("Codex CLI not found — install with: npm install -g @openai/codex")
+
+    @staticmethod
+    def _inject_history(instruction: str, history: list[dict]) -> str:
+        """Append conversation history to instruction as text."""
+        lines = ["# Recent Conversation"]
+        for msg in history:
+            role = msg.get("role", "user").capitalize()
+            content = msg.get("content", "")
+            if len(content) > 500:
+                content = content[:500] + "..."
+            lines.append(f"**{role}**: {content}")
+        return instruction + "\n\n" + "\n".join(lines)
+
+    async def run(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+        session_key: str | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        if not self._cli_available:
+            yield AgentEvent(
+                type="error",
+                content=(
+                    "Codex CLI not found on PATH.\n\nInstall with: npm install -g @openai/codex"
+                ),
+            )
+            return
+
+        self._stop_flag = False
+
+        # Temp file for system prompt injection (cleaned up in finally block)
+        _instructions_file = None
+
+        try:
+            # Build the prompt: history + user message (sent via stdin).
+            # System prompt is passed via model_instructions_file so Codex CLI
+            # uses it as actual system-level instructions, replacing the
+            # built-in "You are Codex" identity.
+            effective_system = system_prompt or _DEFAULT_IDENTITY
+
+            # Write system prompt to a temp file for model_instructions_file
+            import tempfile
+
+            _instructions_file = tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".md",
+                prefix="paw_codex_instructions_",
+                delete=False,
+                encoding="utf-8",
+            )
+            _instructions_file.write(effective_system)
+            _instructions_file.close()
+            instructions_path = _instructions_file.name
+
+            prompt_parts = []
+            if history:
+                prompt_parts.append(self._inject_history("", history).strip())
+            prompt_parts.append(message)
+            full_prompt = "\n\n".join(prompt_parts)
+
+            model = self.settings.codex_cli_model or "gpt-5.3-codex"
+
+            # Validate model name to prevent shell injection (C1)
+            if not _MODEL_NAME_RE.match(model):
+                yield AgentEvent(
+                    type="error",
+                    content=f"Invalid model name: {model!r}. "
+                    "Only alphanumeric characters, hyphens, dots, colons, "
+                    "and underscores are allowed.",
+                )
+                return
+
+            codex_bin = self._codex_path
+            # Use "-" as the prompt arg so the actual prompt is read from
+            # stdin.  This avoids the Windows command-line length limit
+            # (~8191 chars) which is easily hit when system prompts and
+            # conversation history are included.
+            args = [
+                "exec",
+                "--json",
+                "--full-auto",
+                "-c",
+                f"model_instructions_file={instructions_path}",
+                "--model",
+                model,
+                "-",
+            ]
+
+            # Explicitly pass env so runtime key changes are visible
+            proc_env = os.environ.copy()
+
+            if sys.platform == "win32":
+                # On Windows, npm global installs are .cmd wrappers that
+                # create_subprocess_exec cannot run directly. Use shell mode.
+                shell_cmd = subprocess.list2cmdline([codex_bin, *args])
+                self._process = await asyncio.create_subprocess_shell(
+                    shell_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
+                    limit=_SUBPROCESS_BUFFER_LIMIT,
+                )
+            else:
+                self._process = await asyncio.create_subprocess_exec(
+                    codex_bin,
+                    *args,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
+                    limit=_SUBPROCESS_BUFFER_LIMIT,
+                )
+
+            # Feed the prompt via stdin and close to signal EOF
+            if self._process.stdin:
+                try:
+                    self._process.stdin.write(full_prompt.encode("utf-8"))
+                    await self._process.stdin.drain()
+                    self._process.stdin.close()
+                    await self._process.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Codex CLI crashed before reading stdin
+                    stderr_out = ""
+                    if self._process.stderr:
+                        stderr_bytes = await self._process.stderr.read()
+                        stderr_out = stderr_bytes.decode("utf-8", errors="replace").strip()
+                    msg = "Codex CLI exited before reading the prompt"
+                    if stderr_out:
+                        msg += f": {stderr_out[:200]}"
+                    yield AgentEvent(type="error", content=msg)
+                    return
+
+            if self._process.stdout is None:
+                yield AgentEvent(type="error", content="Failed to capture Codex CLI stdout")
+                return
+
+            async for raw_line in self._process.stdout:
+                if self._stop_flag:
+                    break
+
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+
+                try:
+                    event_data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event_data.get("type", "")
+
+                if event_type == "thread.started":
+                    thread_id = event_data.get("thread_id", "unknown")
+                    logger.info("Codex CLI thread: %s", thread_id)
+
+                elif event_type == "turn.started":
+                    logger.debug("Codex CLI turn started")
+
+                elif event_type == "turn.completed":
+                    usage = event_data.get("usage", {})
+                    if usage:
+                        yield AgentEvent(
+                            type="token_usage",
+                            content="",
+                            metadata={
+                                "input_tokens": usage.get("input_tokens", 0),
+                                "output_tokens": usage.get("output_tokens", 0),
+                                "cached_input_tokens": usage.get("cached_input_tokens", 0),
+                                "model": self.settings.codex_cli_model or "codex-mini-latest",
+                                "backend": "codex_cli",
+                            },
+                        )
+
+                elif event_type == "turn.failed":
+                    yield AgentEvent(
+                        type="error",
+                        content=event_data.get("message", "Codex CLI turn failed"),
+                    )
+
+                elif event_type == "item.started":
+                    item = event_data.get("item", {})
+                    item_type = item.get("type", "")
+                    if item_type == "command_execution":
+                        cmd_str = item.get("command", "")
+                        yield AgentEvent(
+                            type="tool_use",
+                            content=f"Running: {cmd_str}",
+                            metadata={"name": "shell", "input": {"command": cmd_str}},
+                        )
+                    elif item_type == "file_change":
+                        filename = item.get("filename", "unknown")
+                        yield AgentEvent(
+                            type="tool_use",
+                            content=f"Editing: {filename}",
+                            metadata={"name": "file_edit", "input": {"filename": filename}},
+                        )
+                    elif item_type == "mcp_tool_call":
+                        tool_name = item.get("name", "mcp_tool")
+                        yield AgentEvent(
+                            type="tool_use",
+                            content=f"MCP: {tool_name}",
+                            metadata={"name": tool_name, "input": item.get("arguments", {})},
+                        )
+                    elif item_type == "web_search":
+                        query = item.get("query", "")
+                        yield AgentEvent(
+                            type="tool_use",
+                            content=f"Searching: {query}",
+                            metadata={"name": "web_search", "input": {"query": query}},
+                        )
+
+                elif event_type == "item.completed":
+                    item = event_data.get("item", {})
+                    item_type = item.get("type", "")
+                    if item_type == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            yield AgentEvent(type="message", content=text)
+                    elif item_type == "command_execution":
+                        output = item.get("output", "")
+                        yield AgentEvent(
+                            type="tool_result",
+                            content=str(output)[:200],
+                            metadata={"name": "shell"},
+                        )
+                    elif item_type == "file_change":
+                        filename = item.get("filename", "unknown")
+                        yield AgentEvent(
+                            type="tool_result",
+                            content=f"Updated {filename}",
+                            metadata={"name": "file_edit"},
+                        )
+                    elif item_type == "mcp_tool_call":
+                        tool_name = item.get("name", "mcp_tool")
+                        output = item.get("output", "")
+                        yield AgentEvent(
+                            type="tool_result",
+                            content=str(output)[:200],
+                            metadata={"name": tool_name},
+                        )
+                    elif item_type == "web_search":
+                        output = item.get("output", "")
+                        yield AgentEvent(
+                            type="tool_result",
+                            content=str(output)[:200],
+                            metadata={"name": "web_search"},
+                        )
+                    elif item_type == "reasoning":
+                        text = item.get("text", "")
+                        if text:
+                            yield AgentEvent(type="thinking", content=text)
+
+                elif event_type == "error":
+                    error_msg = event_data.get("message", "Unknown Codex CLI error")
+                    yield AgentEvent(type="error", content=error_msg)
+
+            # Wait for process to finish
+            await self._process.wait()
+            exit_code = self._process.returncode
+
+            if exit_code and exit_code != 0 and not self._stop_flag:
+                stderr_output = ""
+                if self._process.stderr:
+                    stderr_bytes = await self._process.stderr.read()
+                    stderr_output = stderr_bytes.decode("utf-8", errors="replace").strip()
+
+                base_msg = f"Codex CLI exited with code {exit_code}"
+                if stderr_output:
+                    base_msg += f": {stderr_output[:200]}"
+                yield AgentEvent(type="error", content=base_msg)
+
+            self._process = None
+            yield AgentEvent(type="done", content="")
+
+        except (asyncio.LimitOverrunError, asyncio.IncompleteReadError) as e:
+            logger.warning("Codex CLI session terminated: stdout buffer exceeded: %s", e)
+            self._process = None
+            yield AgentEvent(type="error", content="Codex CLI output exceeded buffer limit")
+            yield AgentEvent(type="done", content="")
+        except Exception as e:
+            logger.error("Codex CLI error: %s", e)
+            yield AgentEvent(type="error", content=f"Codex CLI error: {e}")
+        finally:
+            # Clean up temp instructions file
+            if _instructions_file is not None:
+                try:
+                    Path(_instructions_file.name).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    async def stop(self) -> None:
+        self._stop_flag = True
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.terminate()
+            except ProcessLookupError:
+                pass
+
+    async def get_status(self) -> dict[str, Any]:
+        return {
+            "backend": "codex_cli",
+            "cli_available": self._cli_available,
+            "running": self._process is not None and self._process.returncode is None,
+            "model": self.settings.codex_cli_model or "gpt-5.3-codex",
+        }

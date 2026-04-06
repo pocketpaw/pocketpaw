@@ -1,0 +1,268 @@
+# Contributing to PocketPaw
+
+<!-- Updated: 2026-02-26 — Added "What we don't accept" section, tightened PR expectations. -->
+
+PocketPaw is an open-source AI agent that runs locally, with a native desktop app (Tauri + SvelteKit) and a web dashboard. Connects to Telegram, Discord, Slack, WhatsApp, and more. Python 3.11+, async everywhere, protocol-oriented.
+
+We welcome contributions that solve real problems: bug fixes, new tools, channel adapters, tests, meaningful documentation improvements.
+
+> **GitHub Copilot users:** see [`.github/copilot-instructions.md`](.github/copilot-instructions.md) for repo-specific Copilot guidance that keeps suggestions aligned with our architecture.
+
+## What we don't accept
+
+To keep the review queue healthy, we close PRs that fall into these categories:
+
+- **Cosmetic-only changes** — whitespace fixes, comment rewording, reformatting code that already passes linting. If `ruff` is happy, we are too.
+- **Trivial doc changes as standalone PRs** — fixing a single typo in README, renaming a variable in a code example, updating a link. These should be a comment on an issue or batched into a larger doc PR.
+- **Unrelated changes bundled together** — a PR should do one thing. Don't sneak a README change into a bug fix. Split them.
+- **PRs without a linked issue** — every PR needs a reason to exist. Open an issue first, even if it's brief. This lets us discuss the approach before you write code.
+- **PRs targeting `main`** — these are auto-closed by our bot. See branch strategy below.
+- **AI-generated PRs with no evidence of understanding** — if the PR description is generic or the author can't explain the change, we'll close it.
+
+If you're new and want to contribute, check [`good first issue`](https://github.com/pocketpaw/pocketpaw/labels/good%20first%20issue) — those are real problems that need solving and are the best way to make a meaningful first contribution.
+
+## Branch strategy
+
+> **All pull requests must target the `dev` branch.**
+>
+> PRs opened against `main` will be closed. The `main` branch is updated only via merge from `dev` when a release is ready.
+
+## Before you start
+
+- Search [existing issues](https://github.com/pocketpaw/pocketpaw/issues) to see if your bug or feature has already been reported.
+- Check [open pull requests](https://github.com/pocketpaw/pocketpaw/pulls) to make sure someone isn't already working on the same thing.
+- If an issue exists, comment on it to let others know you're picking it up.
+- If no issue exists, open one first to discuss the approach before writing code.
+- Issues labeled [`good first issue`](https://github.com/pocketpaw/pocketpaw/labels/good%20first%20issue) are a good starting point if you're new to the codebase.
+
+## Setting up your environment
+
+### Backend (Python)
+
+1. **Fork** the repository and clone your fork.
+2. **Create a feature branch** off `dev`:
+   ```bash
+   git checkout dev
+   git pull origin dev
+   git checkout -b feat/your-feature
+   ```
+3. **Install dependencies** (requires [uv](https://docs.astral.sh/uv/)):
+   ```bash
+   uv sync --dev
+   ```
+4. **Install pre-commit hooks** (ruff lint/format on commit, tests on push):
+   ```bash
+   uv tool install pre-commit
+   pre-commit install --hook-type pre-commit --hook-type pre-push
+   ```
+5. **Run the app** to verify your setup:
+   ```bash
+   uv run pocketpaw
+   ```
+   The web dashboard should open at `http://localhost:8888`.
+
+### Desktop Client (Tauri + SvelteKit)
+
+If you're working on the desktop client in `client/`, you'll also need:
+
+1. **[Bun](https://bun.sh/)** for package management (not npm/yarn).
+2. **[Rust](https://rustup.rs/)** for the Tauri backend.
+3. **Install client dependencies:**
+   ```bash
+   cd client && bun install
+   ```
+4. **Start the backend** in one terminal:
+   ```bash
+   uv run pocketpaw
+   ```
+5. **Start the client** in another terminal:
+   ```bash
+   cd client && bun run tauri dev
+   ```
+
+See `client/CLAUDE.md` for full architecture details, Svelte 5 rules, and Tailwind CSS 4 conventions.
+
+## Development commands
+
+### Backend
+
+```bash
+# Run the app (web dashboard)
+uv run pocketpaw
+
+# Run with auto-reload (watches *.py, *.html, *.js, *.css)
+uv run pocketpaw --dev
+
+# Run tests (skip e2e, they need Playwright browsers)
+uv run pytest --ignore=tests/e2e
+
+# Run E2E tests (requires one-time Playwright browser installation first)
+# Install browsers: uv run playwright install (or .venv\Scripts\python -m playwright install on Windows)
+uv run pytest tests/e2e/ -v
+
+# Run a specific test file
+uv run pytest tests/test_bus.py -v
+
+# Lint
+uv run ruff check .
+
+# Format
+uv run ruff format .
+
+# Type check
+uv run mypy .
+
+# Run pre-commit hooks manually (on all files)
+pre-commit run --all-files
+```
+
+### Desktop Client
+
+```bash
+cd client
+bun install                    # Install dependencies (uses Bun, not npm)
+bun run dev                    # Vite dev server (http://localhost:1420)
+bun run tauri dev              # Full desktop app (frontend + Tauri shell)
+bun run check                  # Type check (svelte-kit sync + svelte-check)
+bun run build                  # Production frontend build
+bun run tauri build            # Build desktop app installer
+bun run tauri:android          # Android dev
+bun run tauri:ios              # iOS dev
+```
+
+### Pre-commit hooks
+
+This repo uses [pre-commit](https://pre-commit.com/) to catch issues before they hit CI:
+
+**On commit** (fast, runs every time):
+1. **ruff** - lints Python files and auto-fixes what it can
+2. **ruff-format** - enforces consistent code formatting
+
+**On push** (runs the full test suite before pushing):
+3. **pytest** - runs all tests excluding E2E
+
+If a hook fails, the action is blocked. Fix the issue and try again.
+
+## Project structure
+
+```
+src/pocketpaw/
+  agents/            # Agent backends (Claude SDK, OpenAI Agents, Google ADK, Codex, OpenCode, Copilot) + router + registry
+  api/               # v1 REST API (FastAPI router)
+  bus/               # Message bus + event types
+    adapters/        # Channel adapters (Telegram, Discord, Slack, WhatsApp, etc.)
+  tools/
+    builtin/         # 60+ built-in tools (Gmail, Spotify, web search, filesystem, etc.)
+    protocol.py      # ToolProtocol interface (implement this for new tools)
+    registry.py      # Central tool registry with policy filtering
+    policy.py        # Tool access control (profiles, allow/deny lists)
+  memory/            # Memory stores (file-based, mem0)
+  security/          # Guardian AI, injection scanner, audit log
+  mcp/               # MCP server configuration and management
+  deep_work/         # Multi-step task decomposition and execution
+  mission_control/   # Multi-agent orchestration
+  daemon/            # Background tasks, triggers, proactive behaviors
+  config.py          # Pydantic Settings with POCKETPAW_ env prefix
+  credentials.py     # Fernet-encrypted credential store
+  dashboard.py       # FastAPI server, WebSocket handler, REST APIs
+  scheduler.py       # APScheduler-based reminders and cron jobs
+frontend/            # Vanilla JS/CSS/HTML dashboard (no build step)
+client/              # Tauri 2.0 + SvelteKit desktop app
+  src/               # SvelteKit frontend (Svelte 5 + Tailwind CSS 4)
+    lib/api/         # REST client + WebSocket with auto-reconnect
+    lib/stores/      # Svelte 5 rune-based state management
+    lib/components/  # UI components (shadcn-svelte)
+    lib/auth/        # OAuth PKCE flow
+    routes/          # SPA routes (chat, settings, onboarding, side panel)
+  src-tauri/         # Rust backend (system tray, global shortcuts, multi-window)
+tests/               # pytest suite (2900+ tests)
+```
+
+## Writing code
+
+### Conventions
+
+- **Async everywhere.** All agent, bus, memory, and tool interfaces are async.
+- **Protocol-oriented.** Core interfaces (`AgentProtocol`, `ToolProtocol`, `MemoryStoreProtocol`, `BaseChannelAdapter`) are Python `Protocol` classes. Implement the protocol, don't subclass the concrete class.
+- **Ruff config:** line-length 100, target Python 3.11, lint rules E/F/I/UP.
+- **Lazy imports** for optional dependencies. Agent backends and tools with heavy deps are imported inside functions, not at module level.
+
+### Adding a new tool
+
+1. Create a file in `src/pocketpaw/tools/builtin/`.
+2. Subclass `BaseTool` from `tools/protocol.py`.
+3. Implement `name`, `description`, `parameters` (JSON Schema), and `execute(**params) -> str`.
+4. Add the class to `tools/builtin/__init__.py` lazy imports.
+5. Add the tool to the appropriate policy group in `tools/policy.py`.
+6. Write tests.
+
+### Adding a new channel adapter
+
+1. Create a file in `src/pocketpaw/bus/adapters/`.
+2. Extend `BaseChannelAdapter`.
+3. Implement `_on_start()`, `_on_stop()`, and `send(message)`.
+4. Use `self._publish_inbound()` to push incoming messages to the bus.
+5. Add any new dependencies as optional extras in `pyproject.toml`.
+
+### Security considerations
+
+PocketPaw handles API keys, OAuth tokens, and shell execution. Keep these in mind:
+
+- Never log or expose credentials. Use `credentials.py` for secret storage.
+- New config fields that hold secrets must be added to the `SECRET_FIELDS` list in `credentials.py`.
+- Shell-executing tools must respect the Guardian AI safety checks.
+- New API endpoints need auth middleware.
+- Test for injection patterns if your feature handles user input.
+
+## Commit messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+feat: add Spotify playback tool
+fix: handle empty WebSocket message
+docs: update channel adapter guide
+refactor: simplify model router thresholds
+test: add coverage for injection scanner
+```
+
+Keep the subject line under 72 characters. Add a body if the change needs explanation.
+
+## Pull request checklist
+
+**All PRs:**
+- [ ] Branch is based on `dev` (not `main`)
+- [ ] PR targets the `dev` branch
+- [ ] Pre-commit hooks pass (`pre-commit run --all-files`)
+- [ ] No secrets or credentials in the diff
+
+**Backend PRs:**
+- [ ] Tests pass (`uv run pytest --ignore=tests/e2e`)
+- [ ] Linting passes (`uv run ruff check .`)
+- [ ] New config fields are added to `Settings.save()` dict
+- [ ] New secret fields are added to `SECRET_FIELDS` in `credentials.py`
+- [ ] New tools are registered in the appropriate policy group
+- [ ] New optional dependencies are declared in `pyproject.toml` extras
+
+**Client PRs:**
+- [ ] Type check passes (`cd client && bun run check`)
+- [ ] Desktop app builds without errors (`cd client && bun run tauri build`)
+- [ ] New Tauri IPC commands are added to `src-tauri/capabilities/default.json`
+
+## Code review
+
+- PRs are reviewed by maintainers. We aim to respond within a few days.
+- Small, focused PRs get reviewed faster than large ones.
+- If your PR has been open for a week with no response, ping us in the issue.
+
+## Reporting bugs
+
+Open an issue with:
+- What you expected to happen
+- What actually happened
+- Steps to reproduce
+- Your OS, Python version, and PocketPaw version (`pocketpaw --version`)
+
+## Questions
+
+Join our [Discord server](https://discord.gg/asRrtm95Zc), open a [Discussion](https://github.com/pocketpaw/pocketpaw/discussions), or comment on a relevant issue. We're around.
