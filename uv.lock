@@ -898,7 +898,7 @@ wheels = [
 
 [[package]]
 name = "fastapi"
-version = "0.129.0"
+version = "0.135.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -907,9 +907,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/48/47/75f6bea02e797abff1bca968d5997793898032d9923c1935ae2efdece642/fastapi-0.129.0.tar.gz", hash = "sha256:61315cebd2e65df5f97ec298c888f9de30430dd0612d59d6480beafbc10655af", size = 375450, upload-time = "2026-02-12T13:54:52.541Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f7/e6/7adb4c5fa231e82c35b8f5741a9f2d055f520c29af5546fd70d3e8e1cd2e/fastapi-0.135.3.tar.gz", hash = "sha256:bd6d7caf1a2bdd8d676843cdcd2287729572a1ef524fc4d65c17ae002a1be654", size = 396524, upload-time = "2026-04-01T16:23:58.188Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/dd/d0ee25348ac58245ee9f90b6f3cbb666bf01f69be7e0911f9851bddbda16/fastapi-0.129.0-py3-none-any.whl", hash = "sha256:b4946880e48f462692b31c083be0432275cbfb6e2274566b1be91479cc1a84ec", size = 102950, upload-time = "2026-02-12T13:54:54.528Z" },
+    { url = "https://files.pythonhosted.org/packages/84/a4/5caa2de7f917a04ada20018eccf60d6cc6145b0199d55ca3711b0fc08312/fastapi-0.135.3-py3-none-any.whl", hash = "sha256:9b0f590c813acd13d0ab43dd8494138eb58e484bfac405db1f3187cfc5810d98", size = 117734, upload-time = "2026-04-01T16:23:59.328Z" },
 ]
 
 [[package]]
@@ -3006,6 +3006,15 @@ wheels = [
 ]
 
 [[package]]
+name = "networkx"
+version = "3.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504, upload-time = "2025-12-08T17:02:38.159Z" },
+]
+
+[[package]]
 name = "numpy"
 version = "2.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3686,6 +3695,7 @@ all-tools = [
     { name = "html2text" },
     { name = "mcp" },
     { name = "mem0ai" },
+    { name = "networkx" },
     { name = "ollama" },
     { name = "playwright" },
     { name = "psutil" },
@@ -3757,6 +3767,9 @@ gchat = [
 ]
 google-adk = [
     { name = "google-adk" },
+]
+graph = [
+    { name = "networkx" },
 ]
 image = [
     { name = "google-genai" },
@@ -3862,7 +3875,7 @@ requires-dist = [
     { name = "chromadb", marker = "extra == 'vector'" },
     { name = "claude-agent-sdk", specifier = ">=0.1.30" },
     { name = "click", specifier = ">=8.0" },
-    { name = "cryptography", specifier = ">=42.0" },
+    { name = "cryptography", specifier = ">=46.0.0" },
     { name = "deepagents", marker = "extra == 'all'", specifier = ">=0.1.0" },
     { name = "deepagents", marker = "extra == 'deep-agents'", specifier = ">=0.1.0" },
     { name = "deepagents", marker = "extra == 'dev'", specifier = ">=0.1.0" },
@@ -3875,7 +3888,7 @@ requires-dist = [
     { name = "elevenlabs", marker = "extra == 'all-tools'", specifier = ">=1.0.0" },
     { name = "elevenlabs", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "elevenlabs", marker = "extra == 'voice'", specifier = ">=1.0.0" },
-    { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "fastapi", specifier = ">=0.134.0" },
     { name = "github-copilot-sdk", marker = "extra == 'all'", specifier = ">=0.1.0" },
     { name = "github-copilot-sdk", marker = "extra == 'copilot-sdk'", specifier = ">=0.1.0" },
     { name = "github-copilot-sdk", marker = "extra == 'dev'", specifier = ">=0.1.0" },
@@ -3922,6 +3935,8 @@ requires-dist = [
     { name = "neonize", marker = "extra == 'all-channels'", specifier = ">=0.3.14" },
     { name = "neonize", marker = "extra == 'dev'", specifier = ">=0.3.14" },
     { name = "neonize", marker = "extra == 'whatsapp-personal'", specifier = ">=0.3.14" },
+    { name = "networkx", marker = "extra == 'all-tools'", specifier = ">=3.0" },
+    { name = "networkx", marker = "extra == 'graph'", specifier = ">=3.0" },
     { name = "ollama", marker = "extra == 'all'", specifier = ">=0.6.1" },
     { name = "ollama", marker = "extra == 'all-tools'", specifier = ">=0.6.1" },
     { name = "ollama", marker = "extra == 'dev'", specifier = ">=0.6.1" },
@@ -3955,7 +3970,7 @@ requires-dist = [
     { name = "pytesseract", marker = "extra == 'dev'", specifier = ">=0.3.10" },
     { name = "pytesseract", marker = "extra == 'ocr'", specifier = ">=0.3.10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0,<1.0.0" },
     { name = "pytest-playwright", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "python-dateutil", specifier = ">=2.8.0" },
     { name = "python-multipart", specifier = ">=0.0.22" },
@@ -3976,12 +3991,12 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'channels'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'dev'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", specifier = ">=0.2.4" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", specifier = ">=0.2.4" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", specifier = ">=0.2.4" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", specifier = ">=0.2.9" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", specifier = ">=0.2.9" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", specifier = ">=0.2.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
-provides-extras = ["vector", "dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
+provides-extras = ["vector", "graph", "dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4009,7 +4024,7 @@ dev = [
     { name = "pyautogui", specifier = ">=0.9.54" },
     { name = "pytesseract", specifier = ">=0.3.10" },
     { name = "pytest", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0,<1.0.0" },
     { name = "pytest-playwright", specifier = ">=0.7.2" },
     { name = "python-telegram-bot", specifier = ">=21.0" },
     { name = "ruff", specifier = ">=0.4.0" },
@@ -4781,7 +4796,7 @@ wheels = [
 
 [[package]]
 name = "pytest"
-version = "9.0.2"
+version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -4790,22 +4805,21 @@ dependencies = [
     { name = "pluggy" },
     { name = "pygments" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d1/db/7ef3487e0fb0049ddb5ce41d3a49c235bf9ad299b6a25d5780a89f19230f/pytest-9.0.2.tar.gz", hash = "sha256:75186651a92bd89611d1d9fc20f0b4345fd827c41ccd5c299a868a05d70edf11", size = 1568901, upload-time = "2025-12-06T21:30:51.014Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/5c/00a0e072241553e1a7496d638deababa67c5058571567b92a7eaa258397c/pytest-8.4.2.tar.gz", hash = "sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01", size = 1519618, upload-time = "2025-09-04T14:34:22.711Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/ab/b3226f0bd7cdcf710fbede2b3548584366da3b19b5021e74f5bde2a8fa3f/pytest-9.0.2-py3-none-any.whl", hash = "sha256:711ffd45bf766d5264d487b917733b453d917afd2b0ad65223959f59089f875b", size = 374801, upload-time = "2025-12-06T21:30:49.154Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/a4/20da314d277121d6534b3a980b29035dcd51e6744bd79075a6ce8fa4eb8d/pytest-8.4.2-py3-none-any.whl", hash = "sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79", size = 365750, upload-time = "2025-09-04T14:34:20.226Z" },
 ]
 
 [[package]]
 name = "pytest-asyncio"
-version = "1.3.0"
+version = "0.26.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pytest" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8e/c4/453c52c659521066969523e87d85d54139bbd17b78f09532fb8eb8cdb58e/pytest_asyncio-0.26.0.tar.gz", hash = "sha256:c4df2a697648241ff39e7f0e4a73050b03f123f760673956cf0d72a4990e312f", size = 54156, upload-time = "2025-03-25T06:22:28.883Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/35/f8b19922b6a25bc0880171a2f1a003eaeb93657475193ab516fd87cac9da/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:611e26147c7f77640e6d0a92a38ed17c3e9848063698d5c93d5aa7aa11cebff5", size = 15075, upload-time = "2025-11-10T16:07:45.537Z" },
+    { url = "https://files.pythonhosted.org/packages/20/7f/338843f449ace853647ace35870874f69a764d251872ed1b4de9f234822c/pytest_asyncio-0.26.0-py3-none-any.whl", hash = "sha256:7b51ed894f4fbea1340262bdae5135797ebbe21d8638978e35d31c6d19f72fb0", size = 19694, upload-time = "2025-03-25T06:22:27.807Z" },
 ]
 
 [[package]]
@@ -5448,14 +5462,14 @@ wheels = [
 
 [[package]]
 name = "soul-protocol"
-version = "0.2.4"
+version = "0.2.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/f7/b8cd8e78f03a78dac8c59c925810bb3d9b1321b7b0dad28240348b5edd32/soul_protocol-0.2.4.tar.gz", hash = "sha256:29413dddb32ff1335b813493f80f9da02c20b2b2374df4eb86de3e660c3557c8", size = 1148676, upload-time = "2026-03-19T05:13:51.602Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/0a/7b6ea4f8903edad06ad73d2280bee3c1a387821ea90d38186ab9ac5d2d50/soul_protocol-0.2.9.tar.gz", hash = "sha256:7e8a6ec7179694a465fd1cb17f9db6af73a5426d6d3a3bf1e4a33495a687fb37", size = 1232417, upload-time = "2026-03-29T10:43:25.293Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6a/ee/85e3fef0f2ce45286c7a54935bdbe4081415209bd7a827668d7c9597ce7b/soul_protocol-0.2.4-py3-none-any.whl", hash = "sha256:df54fdf1765e9e59ac46fdb3474320e8a571c0194580a27d1a0308e75441d4be", size = 181844, upload-time = "2026-03-19T05:13:49.168Z" },
+    { url = "https://files.pythonhosted.org/packages/98/13/8ea72d17a23848e04ae46834895d2ee4dd4c59b42cf586fc9da0443d3eed/soul_protocol-0.2.9-py3-none-any.whl", hash = "sha256:82199de3114d5ceb5084e23dc6d253bb48032ba9fc3ced4ea2956fb1abec6e22", size = 266368, upload-time = "2026-03-29T10:43:24.046Z" },
 ]
 
 [package.optional-dependencies]

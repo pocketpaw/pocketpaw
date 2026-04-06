@@ -98,7 +98,8 @@ def test_app():
 @pytest_asyncio.fixture
 async def client(test_app):
     transport = ASGITransport(app=test_app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    headers = {"Content-Type": "application/json"}
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as client:
         yield client
 
 

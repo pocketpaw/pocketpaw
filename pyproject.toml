@@ -46,9 +46,9 @@ dependencies = [
     # Agent Backend (recommended default)
     "claude-agent-sdk>=0.1.30",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
-    "fastapi>=0.115.0",
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",
+    "fastapi>=0.134.0",   # fastapi 0.134.0 first allowed starlette 1.0.0 (dropped upper bound)
     "qrcode[pil]>=7.4",
     "python-multipart>=0.0.22",
     # Logging & CLI
@@ -58,7 +58,7 @@ dependencies = [
     "apscheduler>=3.10.0",
     "python-dateutil>=2.8.0",
     # Credential Encryption
-    "cryptography>=42.0",
+    "cryptography>=46.0.0",
     # Image basics
     "pillow>=10.0.0",
 ]
@@ -66,6 +66,7 @@ dependencies = [
 [project.optional-dependencies]
 # --- Feature extras ---
 vector = ["chromadb"]
+graph = ["networkx>=3.0"]
 dashboard = [
     # Kept for backward compat — dashboard deps are now in core.
     # Users with `pip install pocketpaw[dashboard]` in scripts won't break.
@@ -101,7 +102,7 @@ memory = [
     "ollama>=0.6.1",
 ]
 soul = [
-    "soul-protocol[engine]>=0.2.4",
+    "soul-protocol[engine]>=0.2.9",
 ]
 
 # --- Channel extras ---
@@ -203,8 +204,10 @@ all-tools = [
     # memory
     "mem0ai>=0.1.115",
     "ollama>=0.6.1",
+    # graph
+    "networkx>=3.0",
     # soul
-    "soul-protocol[engine]>=0.2.4",
+    "soul-protocol[engine]>=0.2.9",
 ]
 all-backends = [
     "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
@@ -236,7 +239,7 @@ all = [
     "sarvamai>=0.1.25",
     "mcp>=1.0.0",
     # soul
-    "soul-protocol[engine]>=0.2.4",
+    "soul-protocol[engine]>=0.2.9",
     # backends
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
@@ -273,7 +276,7 @@ dev = [
     "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "pytest-playwright>=0.4.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
@@ -337,7 +340,7 @@ dev = [
     "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "ruff>=0.4.0",
     "mypy>=1.8.0",
     "pytest-playwright>=0.7.2",

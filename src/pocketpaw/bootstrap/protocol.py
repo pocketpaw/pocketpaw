@@ -56,13 +56,29 @@ class BootstrapContext:
             identity_lines.append(self.user_profile)
         identity_lines.append("</identity>")
         parts.append("\n".join(identity_lines))
-
         return "\n\n".join(parts)
+
+    def to_identity_block(self) -> str:
+        """Get just the <identity> block for periodic reinforcement."""
+        identity_lines: list[str] = [
+            "<identity>",
+            f"# Identity: {self.name}",
+            self.identity,
+            "\n# Core Philosophy (Soul)",
+            self.soul,
+            "\n# Communication Style",
+            self.style,
+        ]
+        if self.user_profile:
+            identity_lines.append("\n# User Profile")
+            identity_lines.append(self.user_profile)
+        identity_lines.append("</identity>")
+        return "\n".join(identity_lines)
 
 
 class BootstrapProviderProtocol(Protocol):
     """Protocol for loading agent bootstrap context."""
 
-    async def get_context(self) -> BootstrapContext:
+    async def get_context(self) -> "BootstrapContext":
         """Load and return the bootstrap context."""
         ...

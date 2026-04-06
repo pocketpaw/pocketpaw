@@ -297,7 +297,15 @@ The **desktop client** (`client/`) is a Tauri 2.0 + SvelteKit app that connects 
   <img src="docs/public/pocketpaw-security-stack.webp" alt="PocketPaw 7-Layer Security Stack" width="500">
 </p>
 
-A secondary LLM (Guardian AI) reviews every tool call before it runs. On top of that: injection scanning, configurable tool policies, plan mode for human approval, `--security-audit` CLI, a self-audit daemon, and an append-only audit log. [Details in the docs](https://pocketpaw.xyz/security).
+PocketPaw uses a secondary LLM (**Guardian AI**) to review every tool call before execution. Our security stack includes:
+
+* **Injection Scanning** & configurable tool policies.
+* **Plan Mode** for mandatory human approval.
+* `--security-audit` **CLI** for manual reviews.
+* **Self-audit Daemon** with append-only audit logs.
+
+> [!TIP]
+> Full details and configuration options are available in the [Security Documentation](./docs/SECURITY.md) or on the [official website](https://pocketpaw.xyz/security).
 
 <details>
 <summary>Detailed security architecture</summary>

@@ -177,6 +177,14 @@ def resolve_llm_client(
             provider = "anthropic"
         elif settings.openai_api_key:
             provider = "openai"
+        elif settings.google_api_key:
+            provider = "gemini"
+        elif settings.openrouter_api_key:
+            provider = "openrouter"
+        elif settings.openai_compatible_base_url and settings.openai_compatible_api_key:
+            provider = "openai_compatible"
+        elif settings.litellm_api_key:
+            provider = "litellm"
         else:
             provider = "ollama"
 

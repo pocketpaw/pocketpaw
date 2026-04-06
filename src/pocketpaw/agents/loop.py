@@ -5,6 +5,12 @@ through AgentRouter (which delegates to the configured backend),
 and streams AgentEvent responses back to channels.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
+
+Updated: feat/pocketpaw-cognitive-engine
+- start() now builds a PocketPawCognitiveEngine backed by the active AgentRouter
+  and passes it to SoulManager.initialize() so the soul's cognition pipeline
+  (sentiment, significance, fact extraction, reflection) uses the same LLM
+  as the conversation rather than falling back to heuristics.
 """
 
 import asyncio
@@ -27,10 +33,17 @@ from pocketpaw.security.redact import redact_output
 
 logger = logging.getLogger(__name__)
 
-# Number of history messages (user + assistant turns) at which a compact
-# identity reminder is appended to the system prompt.  The reminder nudges
-# the model back toward the configured identity without a full re-injection.
-_IDENTITY_REINFORCE_THRESHOLD = 20
+# Number of messages after which periodic identity reinforcement occurs.
+# Re-injects the full <identity> block every N messages to prevent personality drift.
+_IDENTITY_REINFORCE_INTERVAL = 5
+
+
+def _reinforce_identity(system_prompt: str, identity: str, message_count: int) -> str:
+    """Reinforce identity by re-injecting it periodically."""
+    if message_count > 0 and message_count % _IDENTITY_REINFORCE_INTERVAL == 0:
+        return system_prompt + f"\n\n{identity}"
+    return system_prompt
+
 
 # How long (seconds) a session lock must be idle before it is eligible for
 # garbage collection.  1 hour is generous enough to cover any in-flight work
@@ -128,10 +141,22 @@ class AgentLoop:
         # Initialize Soul if enabled
         if settings.soul_enabled:
             try:
+                from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
                 from pocketpaw.soul.manager import SoulManager
 
+                # Build a lazy engine: the backend_provider lambda captures `self`
+                # so it resolves the router (and therefore the backend) on every
+                # think() call.  By the time any cognitive call fires the router
+                # will already be initialised (first in-bound message precedes any
+                # memory/reflect pipeline call).
+                engine = PocketPawCognitiveEngine(
+                    backend_provider=lambda: (
+                        self._get_router()._backend if self._router is not None else None
+                    )
+                )
+
                 self._soul_manager = SoulManager(settings)
-                await self._soul_manager.initialize()
+                await self._soul_manager.initialize(engine=engine)
                 if self._soul_manager.bootstrap_provider:
                     self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
                 self._soul_manager.start_auto_save()
@@ -512,20 +537,20 @@ class AgentLoop:
                     exc_info=True,
                 )
 
-            # 2b. Emit thinking event
             # 2b. Periodic identity reinforcement for long conversations.
-            # When the session has accumulated many turns the model may start
-            # drifting from the identity defined in <identity> block.
-            # Appending a compact reminder keeps the agent on-character without
-            # a full re-injection (which would waste context window).
-            if len(history) >= _IDENTITY_REINFORCE_THRESHOLD:
-                system_prompt += (
-                    "\n\n<identity-reminder>\n"
-                    "Regardless of conversation length, you remain the agent described in the "
-                    "<identity> block above. Maintain your defined personality, tone, and "
-                    "communication style consistently throughout this conversation.\n"
-                    "</identity-reminder>"
-                )
+            # Re-inject the full identity block every 5 messages to prevent drift.
+            try:
+                session_entries = await self.memory._store.get_session(session_key)
+                message_count = len(session_entries)
+            except (AttributeError, TypeError):
+                # Handle mocked memory store in tests
+                message_count = 0
+
+            bootstrap_context = self.context_builder.bootstrap.get_context()
+            if asyncio.iscoroutine(bootstrap_context):
+                bootstrap_context = await bootstrap_context
+            identity_block = bootstrap_context.to_identity_block()
+            system_prompt = _reinforce_identity(system_prompt, identity_block, message_count)
 
             # 2c. Emit agent_start + thinking events
             agent_started = True
@@ -907,8 +932,21 @@ class AgentLoop:
                 event_data: dict[str, Any] = {
                     "mood": getattr(state, "mood", None),
                     "energy": getattr(state, "energy", None),
+                    "social_battery": getattr(state, "social_battery", None),
+                    "focus": getattr(state, "focus", None),
+                    "memory_count": soul.memory_count if hasattr(soul, "memory_count") else None,
                     "session_key": session_key,
                 }
+
+                # v0.2.8+: Include bond state if available
+                if hasattr(soul, "bond") and soul.bond:
+                    try:
+                        bond = soul.bond
+                        event_data["bond"] = (
+                            bond.model_dump() if hasattr(bond, "model_dump") else str(bond)
+                        )
+                    except Exception:
+                        pass
 
                 # v0.2.4+: Run rubric self-evaluation (non-blocking)
                 eval_result = await self._soul_manager.evaluate(user_input, agent_output)
@@ -945,12 +983,26 @@ class AgentLoop:
                 # Not yet initialized, just discard the reference
                 self._soul_manager = None
 
+    def _build_cognitive_engine(self) -> Any:
+        """Build a CognitiveEngine for soul, backed by the active agent backend."""
+        try:
+            from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
+
+            return PocketPawCognitiveEngine(
+                backend_provider=lambda: (
+                    self._get_router()._backend if self._router is not None else None
+                )
+            )
+        except ImportError:
+            return None
+
     async def _initialize_soul_runtime(self) -> None:
         """Initialize soul when enabled at runtime."""
         if self._soul_manager is None:
             return
         try:
-            await self._soul_manager.initialize()
+            engine = self._build_cognitive_engine()
+            await self._soul_manager.initialize(engine=engine)
             if self._soul_manager.bootstrap_provider:
                 self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
             self._soul_manager.start_auto_save()
