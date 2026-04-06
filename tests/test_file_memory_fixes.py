@@ -2,7 +2,8 @@
 # dedup, persistent delete, ForgetTool, auto-learn, context limits.
 # Created: 2026-02-09
 
-from datetime import date, timedelta
+import sqlite3
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -128,6 +129,27 @@ class TestUUIDCollision:
         id1 = _make_deterministic_id(p, "Memory", "Fact one")
         id2 = _make_deterministic_id(p, "Memory", "Fact one")
         assert id1 == id2
+
+
+class TestVectorSchemaMigrations:
+    """Schema version checks for sqlite vector index."""
+
+    async def test_vector_schema_migrates_user_version_on_init(self, tmp_path):
+        db_path = tmp_path / "vector_index.sqlite3"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA user_version = 0")
+
+        FileMemoryStore(base_path=tmp_path, vector_enabled=True, embedding_provider="hash")
+
+        with sqlite3.connect(db_path) as conn:
+            version_row = conn.execute("PRAGMA user_version").fetchone()
+            assert version_row is not None
+            assert int(version_row[0]) == 1
+
+            columns = conn.execute("PRAGMA table_info(memory_vectors)").fetchall()
+            column_names = {str(row[1]) for row in columns}
+            assert "doc_id" in column_names
+            assert "embedding_json" in column_names
 
 
 # ===========================================================================
@@ -608,3 +630,603 @@ class TestContextLimits:
         context = await manager.get_context_for_agent(max_chars=500)
         assert len(context) <= 520  # 500 + "...(truncated)" suffix
         assert "(truncated)" in context
+
+
+# ===========================================================================
+# TestFileVectorSemanticSearch
+# ===========================================================================
+
+
+class TestFileVectorSemanticSearch:
+    """Phase 1: file backend is markdown + vector retrieval."""
+
+    async def test_semantic_search_returns_relevant_memory(self, tmp_path):
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="API refactor should preserve backward compatibility",
+                metadata={"header": "Architecture"},
+            )
+        )
+        await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Buy groceries tomorrow morning",
+                metadata={"header": "Personal"},
+            )
+        )
+
+        results = await store.semantic_search("api backward compatibility", user_id="default")
+        assert len(results) >= 1
+        assert "API refactor" in results[0]["memory"]
+
+    async def test_delete_removes_vector_record(self, tmp_path):
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        entry_id = await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Legacy deployment issue in staging",
+                metadata={"header": "Deploy"},
+            )
+        )
+
+        before = await store.semantic_search("deployment issue", user_id="default")
+        assert any(item["id"] == entry_id for item in before)
+
+        assert await store.delete(entry_id) is True
+
+        after = await store.semantic_search("deployment issue", user_id="default")
+        assert all(item["id"] != entry_id for item in after)
+
+    async def test_manager_uses_file_semantic_context(self, tmp_path):
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+        manager = MemoryManager(store=store)
+
+        await manager.remember(
+            "Project Phoenix uses React and TypeScript",
+            header="Project",
+        )
+
+        context = await manager.get_semantic_context("what stack does project phoenix use")
+        assert "Relevant Memories" in context
+        assert "React" in context
+
+
+class TestFileGraphAndManagement:
+    """Phase 2/3: graph indexing, memory edits, and pruning."""
+
+    async def test_graph_db_not_created_when_graph_feature_disabled(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path, vector_enabled=False)
+
+        assert store._graph_enabled is False
+        assert not store._graph_db_path.exists()
+
+    async def test_graph_snapshot_disabled_returns_empty_without_db_creation(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path, vector_enabled=False)
+
+        snapshot = await store.get_graph_snapshot(user_id="default", limit=500)
+
+        assert snapshot == {"nodes": [], "edges": []}
+        assert not store._graph_db_path.exists()
+
+    async def test_graph_snapshot_limit_500_avoids_sql_variable_limit(self, tmp_path):
+        """Graph snapshot with limit=500 should not exceed SQLite bind variable cap."""
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        now = datetime.now(UTC).isoformat()
+        entities = [
+            (f"entity_{i}", "default", f"entity-{i}", f"Entity {i}", 1, now, now)
+            for i in range(500)
+        ]
+        relationships = [
+            (
+                f"rel_{i}",
+                "default",
+                f"entity_{i}",
+                f"entity_{i + 1}",
+                "related_to",
+                1,
+                now,
+                now,
+            )
+            for i in range(499)
+        ]
+
+        with sqlite3.connect(store._graph_db_path) as conn:
+            conn.executemany(
+                """INSERT INTO entities
+                (entity_id, user_scope, entity_key, display_name,
+                mention_count, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                entities,
+            )
+            conn.executemany(
+                """INSERT INTO relationships
+                (relationship_id, user_scope, source_entity_id, target_entity_id,
+                relation_type, weight, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                relationships,
+            )
+            conn.commit()
+
+        snapshot = await store.get_graph_snapshot(user_id="default", limit=500)
+
+        assert len(snapshot["nodes"]) == 500
+        assert len(snapshot["edges"]) <= 500
+
+    async def test_graph_snapshot_contains_entities_and_edges(self, tmp_path):
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Project Phoenix uses React",
+                metadata={"header": "Project"},
+            )
+        )
+
+        graph = await store.get_graph_snapshot(user_id="default")
+        assert len(graph["nodes"]) >= 2
+        assert any(edge["relation"] == "uses" for edge in graph["edges"])
+
+    async def test_update_entry_reindexes_content(self, tmp_path):
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        entry_id = await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Service runs on Flask",
+                metadata={"header": "Tech"},
+            )
+        )
+
+        updated = await store.update_entry(entry_id, content="Service runs on FastAPI")
+        assert updated is True
+
+        entry = await store.get(entry_id)
+        assert entry is not None
+        assert "FastAPI" in entry.content
+
+    async def test_prune_memories_deletes_old_daily_entries(self, tmp_path):
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        old_entry = MemoryEntry(
+            id="",
+            type=MemoryType.DAILY,
+            content="Old daily memory",
+            created_at=datetime.now(tz=UTC) - timedelta(days=45),
+            metadata={"header": "Daily"},
+        )
+        old_id = await store.save(old_entry)
+
+        result = await store.prune_memories(older_than_days=30)
+        assert result["ok"] is True
+        assert result["deleted_daily_memories"] >= 1
+        assert await store.get(old_id) is None
+
+    async def test_clear_session_handles_non_list_json(self, tmp_path):
+        store = FileMemoryStore(base_path=tmp_path)
+        session_key = "discord:test-session"
+        session_file = store._get_session_file(session_key)
+        session_file.write_text('{"unexpected": "shape"}', encoding="utf-8")
+
+        count = await store.clear_session(session_key)
+        assert count == 0
+        assert not session_file.exists()
+
+    async def test_cleanup_orphan_records_handles_large_memory_stores(self, tmp_path):
+        """Test cleanup_orphan_records with 1000+ memories without SQLite variable limit crash.
+
+        Verifies the fix for SQLite SQLITE_LIMIT_VARIABLE_NUMBER (default 999).
+        With >999 valid memory IDs, a direct NOT IN clause would fail with
+        OperationalError: too many SQL variables. The fix uses a temporary
+        table approach to avoid this limit.
+        """
+        store = FileMemoryStore(base_path=tmp_path, vector_enabled=True)
+
+        # Create 1050 entries to comfortably exceed SQLite's default variable limit (999)
+        entry_ids = []
+        for i in range(1050):
+            entry = MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content=f"Memory {i}: Important fact about topic {i}",
+                metadata={"header": f"Entry {i}"},
+            )
+            entry_id = await store.save(entry)
+            entry_ids.append(entry_id)
+
+        # Verify all 1050 are indexed
+        assert len(store._index) == 1050
+
+        # Create orphan vector records (not in _index)
+        with sqlite3.connect(store._vector_db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_vectors
+                (doc_id, content, memory_type, user_scope, created_at, metadata_json,
+                 embedding_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "orphan_1",
+                    "orphaned text",
+                    "long_term",
+                    "default",
+                    datetime.now(tz=UTC).isoformat(),
+                    "{}",
+                    "[]",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO memory_vectors
+                (doc_id, content, memory_type, user_scope, created_at, metadata_json,
+                 embedding_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "orphan_2",
+                    "another orphaned text",
+                    "long_term",
+                    "default",
+                    datetime.now(tz=UTC).isoformat(),
+                    "{}",
+                    "[]",
+                ),
+            )
+            conn.commit()
+
+        # Verify orphans are present before cleanup
+        with sqlite3.connect(store._vector_db_path) as conn:
+            orphan_count = conn.execute(
+                "SELECT COUNT(*) FROM memory_vectors WHERE doc_id LIKE 'orphan_%'"
+            ).fetchone()[0]
+            total_before = conn.execute("SELECT COUNT(*) FROM memory_vectors").fetchone()[0]
+
+        assert orphan_count == 2
+        assert total_before >= 1050 + 2
+
+        # Run cleanup — must not crash with "too many SQL variables" error
+        # This is the critical test: with 1050 valid IDs in a direct NOT IN clause,
+        # SQLite would hit the variable limit. The temp table approach should work.
+        await store._cleanup_orphan_records()
+
+        # Verify orphans are deleted and valid entries remain
+        with sqlite3.connect(store._vector_db_path) as conn:
+            remaining_orphan_count = conn.execute(
+                "SELECT COUNT(*) FROM memory_vectors WHERE doc_id LIKE 'orphan_%'"
+            ).fetchone()[0]
+            total_after = conn.execute("SELECT COUNT(*) FROM memory_vectors").fetchone()[0]
+
+        assert remaining_orphan_count == 0, "Orphaned records should be deleted"
+        # All 1050 valid entries should still have vector records
+        assert total_after >= 1050, "Valid entries should be preserved"
+
+    async def test_cleanup_orphan_records_with_graph_entities(self, tmp_path):
+        """Test that cleanup_orphan_records also cleans up graph relationships correctly."""
+        store = FileMemoryStore(base_path=tmp_path, vector_enabled=True)
+
+        # Create 100 entries with graph relationships
+        entry_ids = []
+        for i in range(100):
+            entry = MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Project Alpha uses PostgreSQL and FastAPI framework",
+                metadata={"header": f"Entry {i}"},
+            )
+            entry_id = await store.save(entry)
+            entry_ids.append(entry_id)
+
+        await store._cleanup_orphan_records()
+
+        # Verify that the cleanup completes without error and maintains valid entities
+        stats = await store.get_memory_stats()
+        assert stats["total_memories"] >= 100
+
+    async def test_semantic_search_sqlite_caps_candidate_limit(self, tmp_path):
+        """Candidate fetch size should be bounded to avoid excessive memory usage."""
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Semantic candidate limit regression test",
+                metadata={"header": "Limits"},
+            )
+        )
+
+        observed_limits: list[int] = []
+        real_connect = sqlite3.connect
+
+        class _ConnectionProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __enter__(self):
+                self._conn.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return self._conn.__exit__(exc_type, exc_val, exc_tb)
+
+            def execute(self, sql, params=()):
+                if "FROM memory_vectors" in sql and "LIMIT ?" in sql and len(params) >= 2:
+                    observed_limits.append(int(params[1]))
+                return self._conn.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        def _connect_proxy(*args, **kwargs):
+            return _ConnectionProxy(real_connect(*args, **kwargs))
+
+        with patch("pocketpaw.memory.file_store.sqlite3.connect", side_effect=_connect_proxy):
+            await store._semantic_search_sqlite("semantic query", user_id="default", limit=1)
+            await store._semantic_search_sqlite("semantic query", user_id="default", limit=10_000)
+
+        assert observed_limits, "Expected semantic search SQL query to run"
+        assert 200 in observed_limits
+        assert 2000 in observed_limits
+
+
+# ===========================================================================
+# TestGraphSVGHtmlEscaping
+# ===========================================================================
+
+
+class TestGraphSVGHtmlEscaping:
+    """HTML escaping in get_graph_svg to prevent malformed SVG."""
+
+    @staticmethod
+    def _skip_if_graph_unavailable(svg: str) -> None:
+        if "Graph visualization unavailable" in svg:
+            pytest.skip("graph extras unavailable; SVG renderer fallback active")
+
+    async def test_direct_entity_escaping_greater_than(self, tmp_path):
+        """Test HTML escaping by directly inserting entities with >."""
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._graph_db_path) as conn:
+            conn.execute(
+                """INSERT INTO entities
+                (entity_id, entity_key, display_name, mention_count, user_scope,
+                first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "entity_1",
+                    "value>100",
+                    "Value>100",
+                    5,
+                    "default",
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+        svg = await store.get_graph_svg(user_id="default")
+        self._skip_if_graph_unavailable(svg)
+        assert "&gt;" in svg
+        assert "<svg" in svg
+        assert "</svg>" in svg
+
+    async def test_direct_entity_escaping_ampersand(self, tmp_path):
+        """Test HTML escaping by directly inserting entities with &."""
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._graph_db_path) as conn:
+            conn.execute(
+                """INSERT INTO entities
+                (entity_id, entity_key, display_name, mention_count, user_scope,
+                first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "entity_1",
+                    "dogs&cats",
+                    "Dogs&Cats",
+                    5,
+                    "default",
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+        svg = await store.get_graph_svg(user_id="default")
+        self._skip_if_graph_unavailable(svg)
+        assert "&amp;" in svg
+        assert "<svg" in svg
+        assert "</svg>" in svg
+
+    async def test_direct_relation_type_escaping(self, tmp_path):
+        """Test HTML escaping for relation types in edge labels."""
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        # Insert entities and a relationship with special chars in type
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._graph_db_path) as conn:
+            conn.execute(
+                """INSERT INTO entities
+                (entity_id, entity_key, display_name, mention_count, user_scope,
+                first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                ("entity_1", "python", "Python", 5, "default", now, now),
+            )
+            conn.execute(
+                """INSERT INTO entities
+                (entity_id, entity_key, display_name, mention_count, user_scope,
+                first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                ("entity_2", "framework", "Framework", 3, "default", now, now),
+            )
+            # Relationship with normalized types; test escaping
+            conn.execute(
+                """INSERT INTO relationships
+                (relationship_id, source_entity_id, target_entity_id,
+                relation_type, weight, user_scope, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("rel_1", "entity_1", "entity_2", "uses", 0, "default", now, now),
+            )
+            conn.commit()
+
+        svg = await store.get_graph_svg(user_id="default")
+        self._skip_if_graph_unavailable(svg)
+        # Verify SVG is well-formed and contains the entities
+        assert "<svg" in svg
+        assert "</svg>" in svg
+        assert "Python" in svg or "Framework" in svg or "uses" in svg
+
+    async def test_svg_without_special_chars_unchanged(self, tmp_path):
+        """Normal entity names without special chars work as expected."""
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Python is great for backend development",
+                metadata={"header": "Language"},
+            )
+        )
+
+        svg = await store.get_graph_svg(user_id="default")
+        self._skip_if_graph_unavailable(svg)
+        # Should have normal SVG structure
+        assert "<svg" in svg
+        assert "</svg>" in svg
+        assert "<text" in svg
+        # Should have node label text
+        assert "Python" in svg
+
+    async def test_svg_malformed_without_escaping(self, tmp_path):
+        """Demonstrate that without escaping, SVG would be malformed."""
+        # This test verifies the fix prevents SVG malformation
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._graph_db_path) as conn:
+            conn.execute(
+                """INSERT INTO entities
+                (entity_id, entity_key, display_name, mention_count, user_scope,
+                first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "entity_1",
+                    "test<bad>evil",
+                    "Test<Bad>Evil",
+                    5,
+                    "default",
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+        svg = await store.get_graph_svg(user_id="default")
+        self._skip_if_graph_unavailable(svg)
+        # SVG should still be well-formed (properly closed tags)
+        assert svg.count("<svg") == 1
+        assert svg.count("</svg>") == 1
+        # Should have escaped the angle brackets
+        assert "&lt;" in svg or "&gt;" in svg
+
+    async def test_empty_graph_returns_valid_svg(self, tmp_path):
+        """Empty graph with no entities returns valid SVG."""
+        store = FileMemoryStore(base_path=tmp_path)
+
+        svg = await store.get_graph_svg(user_id="default")
+        # Should return valid SVG even with no data
+        assert "<svg" in svg
+        assert "</svg>" in svg
+        assert not store._graph_db_path.exists()
+
+    async def test_graph_with_networkx_unavailable_returns_fallback(self, tmp_path):
+        """If networkx is unavailable, returns fallback SVG."""
+        store = FileMemoryStore(
+            base_path=tmp_path,
+            vector_enabled=True,
+            embedding_provider="hash",
+        )
+
+        await store.save(
+            MemoryEntry(
+                id="",
+                type=MemoryType.LONG_TERM,
+                content="Test entity",
+                metadata={"header": "Test"},
+            )
+        )
+
+        # Mock networkx import failure
+        with patch("importlib.import_module", side_effect=ImportError("No networkx")):
+            svg = await store.get_graph_svg(user_id="default")
+
+        # Should return fallback SVG
+        assert "<svg" in svg
+        assert "</svg>" in svg
+        assert "Graph visualization unavailable" in svg or "pocketpaw[graph]" in svg

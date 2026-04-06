@@ -1,6 +1,7 @@
 # Tool registry for managing available tools.
 # Created: 2026-02-02
 # Updated: 2026-02-25 — Strengthen param validation: also reject None for required params.
+# Updated: 2026-03-29 — Also reject empty/whitespace-only strings for required params (#793).
 
 
 from __future__ import annotations
@@ -118,7 +119,12 @@ class ToolRegistry:
         schema = tool.definition.parameters
         if schema and "required" in schema:
             required_params = schema.get("required", [])
-            missing_params = [p for p in required_params if params.get(p) is None]
+            missing_params = [
+                p
+                for p in required_params
+                if params.get(p) is None
+                or (isinstance(params.get(p), str) and not params.get(p).strip())
+            ]
             if missing_params:
                 error_msg = f"Missing required parameter(s): {', '.join(missing_params)}"
                 logger.warning("Parameter validation failed for %s: %s", name, error_msg)

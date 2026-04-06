@@ -11,6 +11,7 @@ _stop_channel_adapter(), and all channel-related REST endpoints:
 
 import asyncio
 import logging
+import re
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -574,8 +575,18 @@ async def _validate_channel_tokens(channel: str, config: dict) -> str | None:
 
     elif channel == "discord":
         bot_token = config.get("bot_token", "")
-        if bot_token and len(bot_token) < 50:
-            return "Invalid Discord bot token. Token appears too short."
+        if bot_token:
+            # Discord tokens: [BotID].[Timestamp].[HMAC] format with base64 segments
+            # Bot ID: 24+ chars, Timestamp: 6 chars, HMAC: 25-110 chars
+            discord_token_pattern = re.compile(
+                r"^[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{25,110}$"
+            )
+            if not discord_token_pattern.match(bot_token):
+                return (
+                    "Invalid Discord bot token format. "
+                    "Expected format: [BotID].[Timestamp].[HMAC] "
+                    "with base64 characters."
+                )
 
     elif channel == "telegram":
         bot_token = config.get("bot_token", "")

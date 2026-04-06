@@ -707,6 +707,11 @@ class MCTaskExecutor:
         if task.description:
             prompt_parts.append(f"**Description:** {task.description}")
 
+        # Inject simulation tick context when running in tick-synchronized mode
+        sim_tick = task.metadata.get("simulation_tick")
+        if sim_tick is not None:
+            prompt_parts.append(f"**Simulation Tick:** {sim_tick}")
+
         prompt_parts.extend(
             [
                 f"**Priority:** {task.priority.value}",

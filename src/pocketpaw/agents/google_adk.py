@@ -75,6 +75,15 @@ class GoogleADKBackend:
             logger.warning("Google ADK not installed -- pip install 'pocketpaw[google-adk]'")
             return
 
+        # JSON Schema declarations for ADK function tools and MCP tools.
+        try:
+            from google.adk.features import FeatureName, override_feature_enabled
+
+            override_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, True)
+            logger.info("Enabled ADK feature JSON_SCHEMA_FOR_FUNC_DECL")
+        except Exception as exc:
+            logger.debug("Could not enable ADK JSON schema feature flag: %s", exc)
+
         from pocketpaw.llm.providers import get_adapter
 
         provider = self.settings.google_adk_provider

@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.api.v1.settings import router
+from pocketpaw.api.v1.settings import _IMMUTABLE_FIELDS, router
 
 
 @pytest.fixture
@@ -70,4 +70,37 @@ class TestUpdateSettings:
         )
         assert resp.status_code == 200
         # agent_backend should be set, _internal should not
+        assert settings.agent_backend == "openai_agents"
+
+    @pytest.mark.parametrize("field", sorted(_IMMUTABLE_FIELDS))
+    def test_rejects_immutable_field(self, field, client):
+        """PUT /settings must return 403 for every security-critical field."""
+        resp = client.put(
+            "/api/v1/settings",
+            json={"settings": {field: "evil"}},
+        )
+        assert resp.status_code == 403
+        assert field in resp.json()["detail"]
+
+    def test_rejects_multiple_immutable_fields(self, client):
+        """All blocked field names appear in the error when several are sent at once."""
+        payload = {"file_jail_path": "/", "bypass_permissions": True}
+        resp = client.put("/api/v1/settings", json={"settings": payload})
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert "bypass_permissions" in detail
+        assert "file_jail_path" in detail
+
+    @patch("pocketpaw.config.get_settings")
+    @patch("pocketpaw.config.Settings.load")
+    def test_safe_field_still_accepted(self, mock_load, mock_get_settings, client):
+        """Non-blocked fields are still written normally."""
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        mock_load.return_value = settings
+        resp = client.put(
+            "/api/v1/settings",
+            json={"settings": {"agent_backend": "openai_agents"}},
+        )
+        assert resp.status_code == 200
         assert settings.agent_backend == "openai_agents"

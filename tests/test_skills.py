@@ -229,3 +229,24 @@ class TestSkillLoaderIntegration:
 
         # Should find at least one skill if the directory exists
         assert len(skills) >= 0  # May be empty but shouldn't error
+
+
+class TestSkillLoaderOverride:
+    """Test that later paths override earlier paths."""
+
+    def test_later_path_overrides_earlier(self, tmp_path):
+        """Skills in later paths should override earlier ones with the same name."""
+        path_a = tmp_path / "a"
+        path_b = tmp_path / "b"
+
+        for p in [path_a, path_b]:
+            skill_dir = p / "my-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: my-skill\ndescription: From {p.name}\n---\n\nContent.\n"
+            )
+
+        loader = SkillLoader(extra_paths=[path_a, path_b])
+        skills = loader.load()
+
+        assert skills["my-skill"].description == "From b"

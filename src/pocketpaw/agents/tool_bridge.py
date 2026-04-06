@@ -132,8 +132,8 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
         props = params_schema.get("properties")
         if not props and "required" in params_schema:
             params_schema.pop("required")
-        if not props and "properties" in params_schema:
-            params_schema.pop("properties")
+        if "properties" not in params_schema:
+            params_schema["properties"] = {}
 
         ft = FunctionTool(
             name=defn.name,

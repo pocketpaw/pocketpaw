@@ -116,7 +116,8 @@ class TestSoulBootstrapProvider:
         ctx = await provider.get_context()
 
         assert isinstance(ctx, BootstrapContext)
-        assert ctx.knowledge == []
+        # Self-model images should be empty (exception), but memory_count may be present
+        assert not any("confidence=" in k for k in ctx.knowledge)
 
     @pytest.mark.asyncio
     async def test_get_context_soul_string_present(self, mock_soul):

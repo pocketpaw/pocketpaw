@@ -1777,7 +1777,7 @@
                 @change="saveSettings()"
                 class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
               >
-                <option value="file">File (Simple Markdown)</option>
+                <option value="file">File (Markdown + vector-based retrieval)</option>
                 <option value="mem0">Mem0 (Semantic Search + LLM)</option>
               </select>
               <div
@@ -1790,6 +1790,101 @@
               class="text-white/50 text-[11px]"
               x-text="settings.memoryBackend === 'mem0' ? 'Uses LLM to extract and evolve facts. Requires mem0ai package.' : 'Simple append-only markdown files. No dependencies needed.'"
             ></small>
+          </div>
+
+          <!-- File + Vector Options -->
+          <div
+            x-show="settings.memoryBackend === 'file'"
+            x-transition
+            class="flex flex-col gap-3.5 pl-2 border-l-2 border-[var(--accent-color)]/30 ml-1"
+          >
+            <div>
+              <label class="flex items-start gap-2.5 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  x-model="settings.fileVectorEnabled"
+                  @change="saveSettings()"
+                  class="mt-0.5 accent-[var(--accent-color)] w-4 h-4"
+                />
+                <div class="flex flex-col">
+                  <span class="text-[13px] font-medium group-hover:text-white transition-colors"
+                    >Vector Retrieval</span
+                  >
+                  <span class="text-[11px] text-white/50 mt-0.5"
+                    >Keep markdown files as source of truth and add semantic retrieval.</span
+                  >
+                </div>
+              </label>
+            </div>
+
+            <div class="flex flex-col gap-1.5" x-show="settings.fileVectorEnabled" x-transition>
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]"
+                >Vector Store</label
+              >
+              <div class="relative">
+                <select
+                  x-model="settings.vectorStore"
+                  @change="saveSettings()"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+                  <option value="sqlite-vec">SQLite-Vec (Local Default)</option>
+                  <option value="chromadb">ChromaDB</option>
+                  <option value="qdrant">Qdrant</option>
+                </select>
+                <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex flex-col gap-1.5" x-show="settings.fileVectorEnabled" x-transition>
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]"
+                >Embedding Provider</label
+              >
+              <div class="relative">
+                <select
+                  x-model="settings.embeddingProvider"
+                  @change="saveSettings()"
+                  class="w-full appearance-none bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all"
+                >
+                  <option value="ollama">Ollama (Local)</option>
+                  <option value="hash">Local Hash Embeddings</option>
+                </select>
+                <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50">
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex flex-col gap-1.5" x-show="settings.fileVectorEnabled" x-transition>
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]"
+                >Embedding Model</label
+              >
+              <input
+                type="text"
+                x-model="settings.embeddingModel"
+                @change="saveSettings()"
+                placeholder="nomic-embed-text"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+            </div>
+
+            <div
+              class="flex flex-col gap-1.5"
+              x-show="settings.fileVectorEnabled && settings.embeddingProvider === 'ollama'"
+              x-transition
+            >
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]"
+                >Embedding Base URL</label
+              >
+              <input
+                type="text"
+                x-model="settings.embeddingBaseUrl"
+                @change="saveSettings()"
+                placeholder="http://localhost:11434"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+            </div>
           </div>
 
           <!-- Mem0 Options -->

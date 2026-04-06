@@ -379,3 +379,232 @@ class TestProactiveDaemon:
 
         intentions = daemon.get_intentions()
         assert len(intentions) == 0
+
+
+class TestStaleSessionTrigger:
+    """Tests for the stale-session trigger type."""
+
+    @pytest.fixture
+    async def engine(self):
+        engine = TriggerEngine()
+
+        async def noop(x):
+            pass
+
+        engine.start(callback=noop)
+        yield engine
+        engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_add_stale_trigger_registers_job(self, engine):
+        """Adding a stale trigger should register a job in the scheduler."""
+        intention = {
+            "id": "stale-1",
+            "name": "Stale Test",
+            "enabled": True,
+            "trigger": {
+                "type": "stale",
+                "threshold_hours": 12,
+                "check_interval_minutes": 60,
+            },
+            "prompt": "Hey {{session.title}} is stale",
+        }
+        result = engine.add_intention(intention)
+        assert result is True
+        assert "stale-1" in engine.get_scheduled_intentions()
+
+    @pytest.mark.asyncio
+    async def test_stale_trigger_calls_callback_for_stale_sessions(self, engine, monkeypatch):
+        """_fire_stale_trigger should call the callback for sessions past the threshold."""
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import patch
+
+        from pocketpaw.daemon.triggers import _DEFAULT_STALE_THRESHOLD_HOURS
+
+        now_utc = datetime.now(tz=UTC)
+        stale_ts = (now_utc - timedelta(hours=_DEFAULT_STALE_THRESHOLD_HOURS + 1)).isoformat()
+        fresh_ts = now_utc.isoformat()
+
+        fake_index = {
+            "chan_stale_user": {
+                "title": "Old Project",
+                "last_activity": stale_ts,
+                "preview": "Let's discuss...",
+            },
+            "chan_fresh_user": {
+                "title": "New Chat",
+                "last_activity": fresh_ts,
+                "preview": "",
+            },
+        }
+
+        class FakeManager:
+            def list_sessions_with_metadata(self):
+                return fake_index
+
+        fired: list[dict] = []
+
+        async def capture(intention: dict) -> None:
+            fired.append(intention)
+
+        engine.callback = capture
+
+        intention = {
+            "id": "stale-2",
+            "name": "Stale Watcher",
+            "enabled": True,
+            "trigger": {
+                "type": "stale",
+                "threshold_hours": _DEFAULT_STALE_THRESHOLD_HOURS,
+                "check_interval_minutes": 60,
+            },
+            "prompt": "I noticed '{{session.title}}' has been idle {{session.idle_hours}} hours.",
+        }
+
+        with patch("pocketpaw.daemon.triggers.get_memory_manager", return_value=FakeManager()):
+            await engine._fire_stale_trigger(intention)
+
+        # Only the stale session should have triggered a callback
+        assert len(fired) == 1
+        stale_meta = fired[0]["_stale_session"]
+        assert stale_meta["session_key"] == "chan_stale_user"
+        assert stale_meta["title"] == "Old Project"
+        assert stale_meta["idle_hours"] > _DEFAULT_STALE_THRESHOLD_HOURS
+
+    @pytest.mark.asyncio
+    async def test_stale_trigger_rate_limits_nudges(self, engine):
+        """The same stale session should not be nudged twice within the cooldown window."""
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import patch
+
+        from pocketpaw.daemon.triggers import _DEFAULT_STALE_THRESHOLD_HOURS
+
+        stale_ts = (
+            datetime.now(tz=UTC) - timedelta(hours=_DEFAULT_STALE_THRESHOLD_HOURS + 1)
+        ).isoformat()
+
+        fake_index = {
+            "chan_rate_user": {
+                "title": "Rate Limited Chat",
+                "last_activity": stale_ts,
+                "preview": "",
+            },
+        }
+
+        class FakeManager:
+            def list_sessions_with_metadata(self):
+                return fake_index
+
+        fired: list[dict] = []
+
+        async def capture(intention: dict) -> None:
+            fired.append(intention)
+
+        engine.callback = capture
+
+        intention = {
+            "id": "stale-rate",
+            "name": "Rate Limit Test",
+            "enabled": True,
+            "trigger": {
+                "type": "stale",
+                "threshold_hours": _DEFAULT_STALE_THRESHOLD_HOURS,
+                "check_interval_minutes": 60,
+            },
+            "prompt": "nudge",
+        }
+
+        with patch("pocketpaw.daemon.triggers.get_memory_manager", return_value=FakeManager()):
+            await engine._fire_stale_trigger(intention)
+            await engine._fire_stale_trigger(intention)  # second call — should be suppressed
+
+        assert len(fired) == 1, "Session should only be nudged once within the cooldown window"
+
+    @pytest.mark.asyncio
+    async def test_executor_injects_session_variables(self):
+        """execute() should replace {{session.*}} placeholders when session_meta is provided."""
+        from unittest.mock import AsyncMock, patch
+
+        from pocketpaw.daemon.executor import IntentionExecutor
+
+        async def fake_run(prompt, **_):
+            yield {"type": "text", "content": prompt, "metadata": {}}
+            yield {"type": "done", "content": "", "metadata": {}}
+
+        with (
+            patch("pocketpaw.daemon.executor.AgentRouter") as MockRouter,
+            patch("pocketpaw.daemon.executor.get_settings"),
+            patch("pocketpaw.daemon.executor.get_context_hub"),
+            patch("pocketpaw.daemon.executor.get_intention_store"),
+        ):
+            mock_router_instance = MockRouter.return_value
+            mock_router_instance.run = fake_run
+
+            executor = IntentionExecutor()
+            # Bypass context gathering
+            executor.context_hub = AsyncMock()
+            executor.context_hub.gather = AsyncMock(return_value={})
+            executor.context_hub.apply_template = lambda prompt, _ctx: prompt
+            executor.intention_store = AsyncMock()
+            executor.intention_store.mark_run = AsyncMock()
+
+            intention = {
+                "id": "exec-stale",
+                "name": "Stale Exec Test",
+                "prompt": "Hi! '{{session.title}}' has been idle {{session.idle_hours}} hours.",
+                "context_sources": [],
+            }
+            session_meta = {
+                "session_key": "ws_user1",
+                "title": "Project X",
+                "idle_hours": 14.5,
+                "preview": "Let's continue",
+            }
+
+            chunks = [c async for c in executor.execute(intention, session_meta=session_meta)]
+            text_chunks = [c for c in chunks if c.get("type") == "text"]
+            assert text_chunks, "Expected at least one text chunk"
+            text = text_chunks[0]["content"]
+            assert "Project X" in text
+            assert "14.5" in text
+
+    @pytest.mark.asyncio
+    async def test_eviction_removes_expired_entries(self, engine):
+        """Expired entries in _nudged_sessions should be evicted on the next fire."""
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import patch
+
+        from pocketpaw.daemon.triggers import _DEFAULT_STALE_THRESHOLD_HOURS
+
+        threshold_hours = _DEFAULT_STALE_THRESHOLD_HOURS
+        cooldown = timedelta(hours=threshold_hours * 2)
+
+        # Pre-populate _nudged_sessions with an entry that has expired
+        expired_key = "chan_expired_user"
+        engine._nudged_sessions[expired_key] = datetime.now(tz=UTC) - cooldown - timedelta(hours=1)
+        # Also add a fresh entry that should survive eviction
+        fresh_key = "chan_fresh_nudge"
+        engine._nudged_sessions[fresh_key] = datetime.now(tz=UTC)
+
+        # Return an empty index so no new sessions fire — we only care about eviction
+        class FakeManager:
+            def list_sessions_with_metadata(self):
+                return {}
+
+        intention = {
+            "id": "stale-evict",
+            "name": "Eviction Test",
+            "enabled": True,
+            "trigger": {
+                "type": "stale",
+                "threshold_hours": threshold_hours,
+                "check_interval_minutes": 60,
+            },
+            "prompt": "nudge",
+        }
+
+        with patch("pocketpaw.daemon.triggers.get_memory_manager", return_value=FakeManager()):
+            await engine._fire_stale_trigger(intention)
+
+        assert expired_key not in engine._nudged_sessions, "Expired entry should have been evicted"
+        assert fresh_key in engine._nudged_sessions, "Fresh entry should survive eviction"

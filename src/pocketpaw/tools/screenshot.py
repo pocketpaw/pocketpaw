@@ -10,10 +10,13 @@ except Exception:
     PYAUTOGUI_AVAILABLE = False
 
 
-def take_screenshot() -> bytes | None:
-    """Take a screenshot and return as bytes."""
+def take_screenshot() -> bytes | str:
+    """Take a screenshot and return as bytes, or an error string on failure."""
     if not PYAUTOGUI_AVAILABLE:
-        return None
+        return (
+            "Screenshot capture is unavailable: pyautogui is not installed. "
+            "Install it with: pip install pocketpaw[screenshot]"
+        )
 
     try:
         # Take screenshot
@@ -25,6 +28,6 @@ def take_screenshot() -> bytes | None:
         buffer.seek(0)
 
         return buffer.getvalue()
-    except Exception:
+    except Exception as exc:
         # Common on headless servers or when display is not available
-        return None
+        return f"Screenshot failed: {exc}"
