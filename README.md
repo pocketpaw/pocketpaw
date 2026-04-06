@@ -73,7 +73,7 @@ python3 --version
 # 2. Upgrade pip to latest version
 python3 -m pip install --upgrade pip
 
-# 3. Create and activate virtual environment (optional but recommended)
+# 3. Create and activate virtual environment (recommended)
 python3 -m venv pocketpaw-env
 source pocketpaw-env/bin/activate
 
@@ -85,26 +85,13 @@ pocketpaw
 ```
 
 ### ⚠️ Virtual Environment Issue (Important)
+If you're running PocketPaw **v0.4.15 or earlier** inside a virtual environment, you may encounter a `500 Internal Server Error` with `TypeError: unhashable type: 'dict'` when opening the dashboard.
 
-In some environments, running PocketPaw inside a virtual environment may result in a runtime error:
+**Cause:** Starlette 1.0.0 removed the old `TemplateResponse(name, context)` API. A fresh virtual environment resolves the latest Starlette (1.0+), which exposed this incompatibility.
 
-
-This is likely caused by incompatible versions of dependencies (e.g., Jinja2 / Starlette) being installed inside the virtual environment.
-
-#### ✅ Workarounds:
-
-- Run PocketPaw using system Python instead of a virtual environment:
-  ```bash
-  pip install pocketpaw
-  pocketpaw
-
-  Or ensure compatible dependency versions:
-  pip install "jinja2>=3.1.2,<3.2" "starlette>=0.27,<0.28"
-
-**Or use the automated install script:**
-
+**Fix:** This has been resolved in the current version. Ensure you are running the latest PocketPaw:
 ```bash
-curl -fsSL https://pocketpaw.xyz/install.sh | sh
+pip install --upgrade pocketpaw
 ```
 
 </details>
