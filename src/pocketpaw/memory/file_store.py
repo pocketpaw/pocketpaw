@@ -2411,7 +2411,18 @@ class FileMemoryStore:
             return []
 
         try:
-            raw = await asyncio.to_thread(lambda: session_file.read_text(encoding="utf-8"))
+            # raw = await asyncio.to_thread(lambda: session_file.read_text(encoding="utf-8"))
+            import time
+
+            def safe_read():
+                for _ in range(3):
+                    try:
+                        return session_file.read_text(encoding="utf-8")
+                    except PermissionError:
+                        time.sleep(0.01)
+                return ""
+
+            raw = await asyncio.to_thread(safe_read)
             data = json.loads(raw)
             return [
                 MemoryEntry(

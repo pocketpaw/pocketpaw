@@ -350,8 +350,17 @@ class ClaudeSDKBackend:
             logger.debug(f"✅ Allowed command: {command[:50]}...")
             return {}
         except Exception as e:
-            logger.error(f"Hook callback error (allowing command): {e}")
-            return {}
+            logger.error(f"Hook callback error (blocking command as precaution): {e}")
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "Safety hook encountered an internal error — "
+                        "blocking command as a precaution"
+                    ),
+                }
+            }
 
     def _extract_text_from_message(self, message: Any) -> str:
         """Extract text content from an AssistantMessage.

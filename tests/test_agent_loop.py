@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pocketpaw.agents.loop import _IDENTITY_REINFORCE_THRESHOLD, AgentLoop
+from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.bus import Channel, InboundMessage
 
@@ -371,12 +371,16 @@ async def test_agent_loop_builds_context_and_passes_to_router(
     mock_builder_instance.build_system_prompt = AsyncMock(
         return_value="You are PocketPaw with identity and memory."
     )
+    mock_builder_instance.bootstrap.get_context = AsyncMock(
+        return_value=MagicMock(to_identity_block=lambda: "<identity>Test</identity>")
+    )
 
     session_history = [
         {"role": "user", "content": "previous question"},
         {"role": "assistant", "content": "previous answer"},
     ]
     mock_memory.get_compacted_history = AsyncMock(return_value=session_history)
+    mock_memory._store.get_session = AsyncMock(return_value=[])  # No messages for this test
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -481,7 +485,7 @@ async def test_identity_reinforcement_appended_on_long_conversations(
     mock_bus,
     mock_memory,
 ):
-    """Identity reminder is appended to system_prompt when history is long."""
+    """Full identity block is re-injected periodically when message count is multiple of 5."""
     mock_get_bus.return_value = mock_bus
     mock_get_memory.return_value = mock_memory
 
@@ -497,17 +501,33 @@ async def test_identity_reinforcement_appended_on_long_conversations(
     router.stop = AsyncMock()
     mock_router_cls.return_value = router
 
+    # Mock the bootstrap context
+    from pocketpaw.bootstrap.protocol import BootstrapContext
+
+    mock_bootstrap = MagicMock()
+    mock_bootstrap.get_context = AsyncMock(
+        return_value=BootstrapContext(
+            name="TestAgent",
+            identity="You are a test agent",
+            soul="Test soul",
+            style="Test style",
+            user_profile="Test profile",
+        )
+    )
+
     mock_builder_instance = mock_builder_cls.return_value
     mock_builder_instance.build_system_prompt = AsyncMock(
         return_value="<identity>You are PocketPaw</identity>"
     )
+    mock_builder_instance.bootstrap = mock_bootstrap
 
-    # Simulate a long conversation with enough messages to trigger reinforcement
-    long_history = [
-        {"role": "user" if i % 2 == 0 else "assistant", "content": f"message {i}"}
-        for i in range(_IDENTITY_REINFORCE_THRESHOLD)
-    ]
-    mock_memory.get_compacted_history = AsyncMock(return_value=long_history)
+    # Mock session with 5 messages to trigger reinforcement
+    mock_memory._store.get_session = AsyncMock(
+        return_value=[MagicMock(role="user", content=f"msg {i}") for i in range(5)]
+    )
+    mock_memory.get_compacted_history = AsyncMock(
+        return_value=[{"role": "user", "content": f"message {i}"} for i in range(5)]
+    )
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -527,9 +547,11 @@ async def test_identity_reinforcement_appended_on_long_conversations(
             )
             await loop._process_message(msg)
 
-    assert "identity-reminder" in captured.get("system_prompt", ""), (
-        "System prompt should contain identity reinforcement block for long conversations"
-    )
+    # Check that the system prompt contains the re-injected identity block
+    system_prompt = captured.get("system_prompt", "")
+    assert "<identity>" in system_prompt
+    assert "TestAgent" in system_prompt  # From the re-injected identity
+    assert system_prompt.count("<identity>") >= 2  # Original + re-injected
 
 
 @patch("pocketpaw.agents.loop.get_message_bus")
@@ -545,7 +567,7 @@ async def test_identity_reinforcement_not_appended_on_short_conversations(
     mock_bus,
     mock_memory,
 ):
-    """Identity reminder is NOT appended when history is short."""
+    """Identity re-injection does NOT happen when message count is not multiple of 5."""
     mock_get_bus.return_value = mock_bus
     mock_get_memory.return_value = mock_memory
 
@@ -561,17 +583,33 @@ async def test_identity_reinforcement_not_appended_on_short_conversations(
     router.stop = AsyncMock()
     mock_router_cls.return_value = router
 
+    # Mock the bootstrap context
+    from pocketpaw.bootstrap.protocol import BootstrapContext
+
+    mock_bootstrap = MagicMock()
+    mock_bootstrap.get_context = AsyncMock(
+        return_value=BootstrapContext(
+            name="TestAgent",
+            identity="You are a test agent",
+            soul="Test soul",
+            style="Test style",
+            user_profile="Test profile",
+        )
+    )
+
     mock_builder_instance = mock_builder_cls.return_value
     mock_builder_instance.build_system_prompt = AsyncMock(
         return_value="<identity>You are PocketPaw</identity>"
     )
+    mock_builder_instance.bootstrap = mock_bootstrap
 
-    # Short history — below threshold
-    short_history = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
-    ]
-    mock_memory.get_compacted_history = AsyncMock(return_value=short_history)
+    # Short session — 3 messages (not multiple of 5)
+    mock_memory._store.get_session = AsyncMock(
+        return_value=[MagicMock(role="user", content=f"msg {i}") for i in range(3)]
+    )
+    mock_memory.get_compacted_history = AsyncMock(
+        return_value=[{"role": "user", "content": f"message {i}"} for i in range(3)]
+    )
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -591,9 +629,9 @@ async def test_identity_reinforcement_not_appended_on_short_conversations(
             )
             await loop._process_message(msg)
 
-    assert "identity-reminder" not in captured.get("system_prompt", ""), (
-        "System prompt should NOT contain identity reinforcement block for short conversations"
-    )
+    # Check that no additional identity block was appended
+    system_prompt = captured.get("system_prompt", "")
+    assert system_prompt.count("<identity>") == 1  # Only the original one
 
 
 # ---------------------------------------------------------------------------

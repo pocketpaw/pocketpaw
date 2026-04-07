@@ -13,7 +13,18 @@
   --glass-bg: rgba(28, 28, 30, 0.65);
   --glass-border: rgba(255, 255, 255, 0.12);
   --card-bg: rgba(44, 44, 46, 0.6);
-  
+  /* Component Library Variables (bits-ui / shadcn) */
+  /*Format: space-separated RGB channels � used as rgb(var(--popover)) at the call site. */
+  --popover: 28 28 30;
+  --popover-foreground: 255 255 255;
+  --background: 0 0 0;
+  --foreground: 255 255 255;
+  --border: 255 255 255 / 0.12;
+  --input: 44 44 46;
+  --ring: 10 132 255;
+  --muted: 44 44 46;
+  --muted-foreground: 235 235 245;
+  --surface-bg: rgb(28, 28, 30);
   /* Text */
   --text-primary: #FFFFFF;
   --text-secondary: rgba(235, 235, 245, 0.6);
@@ -118,9 +129,9 @@ body {
   100% { transform: scale(1); opacity: 1; }
 }
 
-@keyframes messageSlide { 
-  from { opacity: 0; transform: translateY(10px); } 
-  to { opacity: 1; transform: translateY(0); } 
+@keyframes messageSlide {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes badgeFadeIn {
@@ -435,3 +446,29 @@ body {
   border-color: var(--accent-color, #4CAF50);
   color: #fff;
 }
+
+  .settings-nav select,
+  .settings-content select,
+  .channels-nav select,
+  .channels-content select {
+    color-scheme: dark;
+    background-color: var(--surface-bg);
+    color: #ffffff;
+  }
+
+  .settings-nav select option,
+  .settings-content select option,
+  .channels-nav select option,
+  .channels-content select option {
+    background-color: var(--surface-bg);
+    color: #ffffff;
+  }
+
+  .settings-nav [data-slot="select-content"],
+  .settings-content [data-slot="select-content"],
+  .channels-nav [data-slot="select-content"],
+  .channels-content [data-slot="select-content"] {
+    background-color: var(--surface-bg);
+    color: #ffffff;
+    border-color: rgba(255, 255, 255, 0.12);
+  }

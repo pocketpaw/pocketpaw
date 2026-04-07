@@ -92,7 +92,7 @@ def _extract_root_error(exc: BaseException) -> str:
     leaves: list[BaseException] = []
 
     def _collect(e: BaseException) -> None:
-        if isinstance(e, (ExceptionGroup, BaseExceptionGroup)):
+        if isinstance(e, ExceptionGroup | BaseExceptionGroup):
             for sub in e.exceptions:
                 _collect(sub)
         elif e.__cause__:

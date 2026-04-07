@@ -60,6 +60,16 @@ def _run_async(coro):
 setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
+
+def _check_python_version() -> None:
+    """Warn if running on an unsupported Python version."""
+    if sys.version_info[:2] >= (3, 14):
+        sys.stderr.write(
+            "Warning: Python 3.14+ may not be fully supported. "
+            "Recommended version is 3.11 or 3.12.\n"
+        )
+
+
 def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
     """Run in web dashboard mode."""
     from pocketpaw.dashboard import run_dashboard
@@ -318,6 +328,7 @@ def _serve(fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127
 
 def main() -> None:
     """Main entry point."""
+    _check_python_version()
     parser = _build_parser()
     args = parser.parse_args()
     _resolve_subargs(args)

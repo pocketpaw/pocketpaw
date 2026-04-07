@@ -69,10 +69,8 @@ class TestMemoryLongTerm:
         item.content = "Test memory"
         item.created_at = "2026-02-21T00:00:00"
         item.tags = ["test"]
-        store = AsyncMock()
-        store.get_by_type.return_value = [item]
         mgr = MagicMock()
-        mgr._store = store
+        mgr.get_by_type = AsyncMock(return_value=[item])
         mock_get_mgr.return_value = mgr
 
         resp = client.get("/api/v1/memory/long_term")
@@ -83,14 +81,12 @@ class TestMemoryLongTerm:
 
     @patch("pocketpaw.memory.get_memory_manager")
     def test_get_long_term_memory_with_limit(self, mock_get_mgr, client):
-        store = AsyncMock()
-        store.get_by_type.return_value = []
         mgr = MagicMock()
-        mgr._store = store
+        mgr.get_by_type = AsyncMock(return_value=[])
         mock_get_mgr.return_value = mgr
         resp = client.get("/api/v1/memory/long_term?limit=10")
         assert resp.status_code == 200
-        store.get_by_type.assert_called_once()
+        mgr.get_by_type.assert_called_once()
 
     @patch("pocketpaw.memory.get_memory_manager")
     def test_delete_memory_entry(self, mock_get_mgr, client):

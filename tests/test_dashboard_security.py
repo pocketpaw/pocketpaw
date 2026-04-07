@@ -233,6 +233,51 @@ class TestIsGenuineLocalhost:
         req = self._make_request("::1")
         assert _is_genuine_localhost(req) is True
 
+    @patch("pocketpaw.dashboard_auth.Settings")
+    @patch("pocketpaw.dashboard_auth.get_tunnel_manager")
+    def test_proxy_header_blocks_bypass_when_tunnel_inactive(
+        self, mock_tunnel_fn, mock_settings_cls
+    ):
+        """Regression test for issue #871.
+
+        A remote client that spoofs X-Forwarded-For: 127.0.0.1 must be blocked
+        even when the tunnel manager reports inactive.  Previously the proxy-header
+        check was only performed when tunnel.get_status()["active"] was True,
+        allowing nginx / Caddy / ngrok deployments to be exploited.
+        """
+        from pocketpaw.dashboard_auth import _is_genuine_localhost
+
+        settings = MagicMock()
+        settings.localhost_auth_bypass = True
+        mock_settings_cls.load.return_value = settings
+
+        # Tunnel is NOT active — this was the exploitable code path before the fix.
+        tunnel = MagicMock()
+        tunnel.get_status.return_value = {"active": False}
+        mock_tunnel_fn.return_value = tunnel
+
+        req = self._make_request("127.0.0.1", headers={"x-forwarded-for": "127.0.0.1"})
+        assert _is_genuine_localhost(req) is False
+
+    @patch("pocketpaw.dashboard_auth.Settings")
+    @patch("pocketpaw.dashboard_auth.get_tunnel_manager")
+    def test_cf_connecting_ip_blocks_bypass_when_tunnel_inactive(
+        self, mock_tunnel_fn, mock_settings_cls
+    ):
+        """Regression test for issue #871 — Cf-Connecting-Ip variant."""
+        from pocketpaw.dashboard_auth import _is_genuine_localhost
+
+        settings = MagicMock()
+        settings.localhost_auth_bypass = True
+        mock_settings_cls.load.return_value = settings
+
+        tunnel = MagicMock()
+        tunnel.get_status.return_value = {"active": False}
+        mock_tunnel_fn.return_value = tunnel
+
+        req = self._make_request("127.0.0.1", headers={"cf-connecting-ip": "8.8.8.8"})
+        assert _is_genuine_localhost(req) is False
+
 
 # ---------------------------------------------------------------------------
 # Dashboard integration tests (auth middleware, headers, CORS, session exchange)

@@ -33,10 +33,17 @@ from pocketpaw.security.redact import redact_output
 
 logger = logging.getLogger(__name__)
 
-# Number of history messages (user + assistant turns) at which a compact
-# identity reminder is appended to the system prompt.  The reminder nudges
-# the model back toward the configured identity without a full re-injection.
-_IDENTITY_REINFORCE_THRESHOLD = 20
+# Number of messages after which periodic identity reinforcement occurs.
+# Re-injects the full <identity> block every N messages to prevent personality drift.
+_IDENTITY_REINFORCE_INTERVAL = 5
+
+
+def _reinforce_identity(system_prompt: str, identity: str, message_count: int) -> str:
+    """Reinforce identity by re-injecting it periodically."""
+    if message_count > 0 and message_count % _IDENTITY_REINFORCE_INTERVAL == 0:
+        return system_prompt + f"\n\n{identity}"
+    return system_prompt
+
 
 # How long (seconds) a session lock must be idle before it is eligible for
 # garbage collection.  1 hour is generous enough to cover any in-flight work
@@ -530,20 +537,20 @@ class AgentLoop:
                     exc_info=True,
                 )
 
-            # 2b. Emit thinking event
             # 2b. Periodic identity reinforcement for long conversations.
-            # When the session has accumulated many turns the model may start
-            # drifting from the identity defined in <identity> block.
-            # Appending a compact reminder keeps the agent on-character without
-            # a full re-injection (which would waste context window).
-            if len(history) >= _IDENTITY_REINFORCE_THRESHOLD:
-                system_prompt += (
-                    "\n\n<identity-reminder>\n"
-                    "Regardless of conversation length, you remain the agent described in the "
-                    "<identity> block above. Maintain your defined personality, tone, and "
-                    "communication style consistently throughout this conversation.\n"
-                    "</identity-reminder>"
-                )
+            # Re-inject the full identity block every 5 messages to prevent drift.
+            try:
+                session_entries = await self.memory._store.get_session(session_key)
+                message_count = len(session_entries)
+            except (AttributeError, TypeError):
+                # Handle mocked memory store in tests
+                message_count = 0
+
+            bootstrap_context = self.context_builder.bootstrap.get_context()
+            if asyncio.iscoroutine(bootstrap_context):
+                bootstrap_context = await bootstrap_context
+            identity_block = bootstrap_context.to_identity_block()
+            system_prompt = _reinforce_identity(system_prompt, identity_block, message_count)
 
             # 2c. Emit agent_start + thinking events
             agent_started = True

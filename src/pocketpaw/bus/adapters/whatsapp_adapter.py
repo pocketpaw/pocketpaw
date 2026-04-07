@@ -3,6 +3,7 @@ WhatsApp Channel Adapter (Business Cloud API).
 Created: 2026-02-06
 """
 
+import hmac
 import logging
 
 import httpx
@@ -66,7 +67,7 @@ class WhatsAppAdapter(BaseChannelAdapter):
 
         Returns the challenge string on success, None on failure.
         """
-        if mode == "subscribe" and token == self.verify_token:
+        if mode == "subscribe" and hmac.compare_digest(token or "", self.verify_token):
             return challenge
         return None
 

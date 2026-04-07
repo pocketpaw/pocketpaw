@@ -46,9 +46,9 @@ dependencies = [
     # Agent Backend (recommended default)
     "claude-agent-sdk>=0.1.30",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
-    "fastapi>=0.115.0",
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",
+    "fastapi>=0.134.0",   # fastapi 0.134.0 first allowed starlette 1.0.0 (dropped upper bound)
     "qrcode[pil]>=7.4",
     "python-multipart>=0.0.22",
     # Logging & CLI
@@ -107,7 +107,7 @@ soul = [
 
 # --- Channel extras ---
 discord = [
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
 ]
 slack = [
     "slack-bolt>=1.20.0",
@@ -161,7 +161,7 @@ channels = [
     # telegram
     "python-telegram-bot>=21.0",
     # discord
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     # slack
     "slack-bolt>=1.20.0",
 ]
@@ -169,7 +169,7 @@ all-channels = [
     # telegram
     "python-telegram-bot>=21.0",
     # discord
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     # slack
     "slack-bolt>=1.20.0",
     # whatsapp-personal
@@ -223,7 +223,7 @@ all = [
     "pyautogui>=0.9.54",
     # channels
     "python-telegram-bot>=21.0",
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     "slack-bolt>=1.20.0",
     "neonize>=0.3.14",
     "matrix-nio>=0.24.0",
@@ -255,7 +255,7 @@ dev = [
     "psutil>=5.9.0",
     "pyautogui>=0.9.54",
     "python-telegram-bot>=21.0",
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     "slack-bolt>=1.20.0",
     "neonize>=0.3.14",
     "matrix-nio>=0.24.0",
@@ -276,7 +276,7 @@ dev = [
     "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "pytest-playwright>=0.4.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
@@ -319,7 +319,7 @@ dev = [
     "psutil>=5.9.0",
     "pyautogui>=0.9.54",
     "python-telegram-bot>=21.0",
-    "discord-cli-agent>=0.6.4",
+    "discord-cli-agent>=0.7.0",
     "slack-bolt>=1.20.0",
     "neonize>=0.3.14",
     "matrix-nio>=0.24.0",
@@ -340,7 +340,7 @@ dev = [
     "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "ruff>=0.4.0",
     "mypy>=1.8.0",
     "pytest-playwright>=0.7.2",
