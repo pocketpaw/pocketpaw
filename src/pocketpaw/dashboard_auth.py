@@ -8,6 +8,7 @@ Extracted from dashboard.py — contains:
   and token regeneration endpoints
 """
 
+import hmac
 import io
 import logging
 
@@ -59,11 +60,13 @@ def _audit_auth_event(
 
 
 def _is_genuine_localhost(request_or_ws) -> bool:
-    """Check if request originates from genuine localhost (not a tunneled proxy).
+    """Check if request originates from genuine localhost (not forwarded by any proxy).
 
-    When a Cloudflare tunnel is active, requests arrive from cloudflared running
-    on localhost — but they carry proxy headers (Cf-Connecting-Ip / X-Forwarded-For).
-    Those are NOT genuine localhost and must authenticate.
+    Proxy headers (``Cf-Connecting-Ip``, ``X-Forwarded-For``) are **always**
+    inspected — regardless of whether a Cloudflare tunnel is active — because
+    any reverse proxy (nginx, Caddy, ngrok, cloudflared, …) can forward these
+    headers.  A remote client that spoofs ``X-Forwarded-For: 127.0.0.1`` must
+    not be granted the localhost bypass (OWASP A01 — Broken Access Control).
 
     The ``localhost_auth_bypass`` setting (default True) controls whether genuine
     localhost connections skip auth.  Set to False to require tokens everywhere.
@@ -76,14 +79,16 @@ def _is_genuine_localhost(request_or_ws) -> bool:
     if client_host not in _LOCALHOST_ADDRS:
         return False
 
-    # If the tunnel is active, check for proxy headers indicating the request
-    # was forwarded by cloudflared (not a genuine local browser).
-    tunnel = get_tunnel_manager()
-    if tunnel.get_status()["active"]:
-        headers = request_or_ws.headers
-        for hdr in _PROXY_HEADERS:
-            if headers.get(hdr):
-                return False
+    # Always check for proxy headers — regardless of whether a Cloudflare tunnel
+    # is active.  Any reverse proxy (nginx, Caddy, ngrok, cloudflared, …) that
+    # forwards requests will inject these headers.  A remote client that sets
+    # X-Forwarded-For: 127.0.0.1 must NOT be granted the localhost bypass even
+    # when the tunnel manager reports inactive (OWASP A01 — Broken Access Control,
+    # see issue #871).
+    headers = request_or_ws.headers
+    for hdr in _PROXY_HEADERS:
+        if headers.get(hdr):
+            return False
 
     return True
 
@@ -249,7 +254,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
 
     # 1. Check Query Param (master token or session token)
     if token:
-        if token == current_token:
+        if hmac.compare_digest(token, current_token):
             is_valid = True
         elif ":" in token and verify_session_token(token, current_token):
             is_valid = True
@@ -259,7 +264,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
         bearer_value = (
             auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
         )
-        if bearer_value == current_token:
+        if hmac.compare_digest(bearer_value, current_token):
             is_valid = True
         elif ":" in bearer_value and verify_session_token(bearer_value, current_token):
             is_valid = True
@@ -268,7 +273,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
     if not is_valid:
         cookie_token = request.cookies.get("pocketpaw_session")
         if cookie_token:
-            if cookie_token == current_token:
+            if hmac.compare_digest(cookie_token, current_token):
                 is_valid = True
             elif ":" in cookie_token and verify_session_token(cookie_token, current_token):
                 is_valid = True
@@ -402,7 +407,7 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
-    is_valid = submitted == master
+    is_valid = hmac.compare_digest(submitted, master)
     # Accept OAuth2 access tokens (ppat_*)
     if not is_valid and submitted.startswith("ppat_"):
         try:

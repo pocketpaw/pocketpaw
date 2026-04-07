@@ -117,7 +117,15 @@ class SoulManager:
         if soul_path.exists():
             self.soul = await self._try_awaken(Soul, soul_path, engine=engine)
         else:
-            self.soul = await self._birth_soul(Soul, engine=engine)
+            # Auto-import bundled soul config (e.g. ~/paw.yaml baked into Docker image)
+            # if no .soul file exists yet. This makes first-run on Coolify work
+            # without manual import.
+            auto_import = self._find_auto_import_config()
+            if auto_import:
+                logger.info("Auto-importing soul config from %s", auto_import)
+                self.soul = await Soul.birth_from_config(auto_import)
+            else:
+                self.soul = await self._birth_soul(Soul, engine=engine)
 
         # Fallback: if awaken returned None (corrupt file), birth fresh
         if self.soul is None:
@@ -167,6 +175,23 @@ class SoulManager:
             except OSError:
                 logger.warning("Could not back up corrupt soul file")
             return None
+
+    def _find_auto_import_config(self) -> Path | None:
+        """Look for a bundled soul config to auto-import on first run.
+
+        Checks ~/paw.yaml (baked into Docker image) and the soul directory
+        for any .yaml/.yml config file. Returns the first match or None.
+        """
+        candidates = [
+            Path.home() / "paw.yaml",
+            Path.home() / "paw.yml",
+            self.soul_dir / "paw.yaml",
+            self.soul_dir / "paw.yml",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
 
     async def _birth_soul(self, soul_cls: type, engine: Any | None = None) -> Any:
         """Birth a new soul from settings.

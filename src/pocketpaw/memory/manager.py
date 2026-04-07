@@ -636,6 +636,27 @@ class MemoryManager:
         # Fall back to standard context
         return await self.get_context_for_agent(sender_id=sender_id)
 
+    async def get_by_type(
+        self,
+        memory_type: MemoryType,
+        limit: int = 100,
+        user_id: str | None = None,
+    ) -> list[MemoryEntry]:
+        """Get all memories of a specific type.
+
+        Exposes the underlying store's get_by_type as a public manager method,
+        so callers don't need to access the private _store directly.
+
+        Args:
+            memory_type: The type of memory to retrieve.
+            limit: Maximum number of entries to return.
+            user_id: Optional user ID for scoped memory retrieval.
+
+        Returns:
+            List of MemoryEntry objects of the requested type.
+        """
+        return await self._store.get_by_type(memory_type, limit=limit, user_id=user_id)
+
     async def clear_session(self, session_key: str) -> int:
         """Clear session history."""
         return await self._store.clear_session(session_key)

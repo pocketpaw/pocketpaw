@@ -64,6 +64,7 @@ class MemoryStoreProtocol(Protocol):
         self,
         memory_type: MemoryType,
         limit: int = 100,
+        user_id: str | None = None,
     ) -> list[MemoryEntry]:
         """Get all memories of a specific type."""
         ...
