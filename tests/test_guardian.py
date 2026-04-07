@@ -72,3 +72,28 @@ class TestGuardianEmptyResponse:
 
         assert is_safe is False
         assert reason == "Destructive command"
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_concurrent_calls_initialize_once(self):
+    """Concurrent calls to _ensure_client() should only initialize client once."""
+    import asyncio
+    from unittest.mock import patch, MagicMock
+
+    with (
+        patch("pocketpaw.security.guardian.get_settings"),
+        patch("pocketpaw.security.guardian.get_audit_logger"),
+    ):
+        agent = GuardianAgent()
+
+        mock_llm = MagicMock()
+        mock_llm.api_key = "test-key"
+        mock_client = MagicMock()
+        mock_llm.create_anthropic_client = MagicMock(return_value=mock_client)
+
+        with patch("pocketpaw.llm.client.resolve_llm_client", return_value=mock_llm):
+            # Fire 10 concurrent _ensure_client() calls
+            await asyncio.gather(*[agent._ensure_client() for _ in range(10)])
+
+        # Client should only have been created once
+        assert mock_llm.create_anthropic_client.call_count == 1
