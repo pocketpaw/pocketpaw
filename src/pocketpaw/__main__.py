@@ -200,6 +200,7 @@ def _resolve_port_for_server(requested_port: int) -> int:
             print(f"\n  [WARN] Port {requested_port} is busy — switching to port {fallback}\n")
         return fallback
 
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="PocketPaw - The AI agent that runs on your laptop",
@@ -520,11 +521,7 @@ def main() -> None:
         or args.gchat
     )
 
-    is_starting_server = (
-        args.command in (None, "serve")
-        or args.telegram
-        or has_channel_flag
-    )
+    is_starting_server = args.command in (None, "serve") or args.telegram or has_channel_flag
 
     if is_starting_server:
         effective_port = _resolve_port_for_server(args.port)
