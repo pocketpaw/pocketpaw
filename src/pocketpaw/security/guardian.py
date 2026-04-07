@@ -4,7 +4,7 @@ Created: 2026-02-02
 
 This module provides a secondary LLM check for dangerous actions.
 """
-
+import asyncio
 import logging
 
 from pocketpaw.config import get_settings
@@ -46,11 +46,16 @@ Respond with valid JSON only:
         self.settings = get_settings()
         self.client = None
         self._audit = get_audit_logger()
+        self._client_lock = asyncio.Lock()
 
     async def _ensure_client(self):
         if not self.client:
+            return # No API key configured, will use local safety check
+        async with self._client_lock:
+            if self.client:
+                return
             from pocketpaw.llm.client import resolve_llm_client
-
+            
             llm = resolve_llm_client(self.settings, force_provider="anthropic")
             if llm.api_key:
                 self.client = llm.create_anthropic_client()
