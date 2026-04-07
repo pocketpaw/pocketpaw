@@ -1,7 +1,7 @@
 """PocketPaw entry point.
 
 Changes:
-  - 2026-03-29: Auto-detect free port in range 8000-9000 if requested port is busy.
+  - 2026-04-07: Auto-detect free port in range 8000-9000 if requested port is busy.
   - 2026-03-18: Added CLI subcommands: doctor, health, channels, skills,
                 sessions, memory, config, errors, logs.
   - 2026-02-20: Extracted diagnostics to diagnostics.py, headless runners to headless.py.
@@ -172,6 +172,7 @@ def _handle_early_command(args) -> int | None:
     return None
 
 
+# ── Argument parser ─────────────────────────────────────────────────────
 def find_free_port(start=8000, end=9000):
     for port in range(start, end):
         try:
@@ -188,22 +189,16 @@ def _resolve_port_for_server(requested_port: int) -> int:
     Resolve the actual port to bind: try requested first, fallback to 8000-9000 if busy.
 
     Only call this when starting a server (not for CLI subcommands).
-    Minimizes TOCTOU by checking immediately before bind.
     """
-    # Try the requested port first
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", requested_port))
-        return requested_port  # Free → use it
+        return requested_port
     except OSError:
-        # Busy → find fallback in range
         fallback = find_free_port(start=8000, end=9000)
         if fallback != requested_port:
             print(f"\n  [WARN] Port {requested_port} is busy — switching to port {fallback}\n")
         return fallback
-
-# ── Argument parser ─────────────────────────────────────────────────────
-
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -289,7 +284,13 @@ Examples:
         default=None,
         help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
     )
-
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8888,
+        help="Port for web server (default: 8888)",
+    )
     parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
         "--check-ollama",
@@ -359,13 +360,6 @@ Examples:
     )
 
     # ── Flags for subcommands (shared namespace) ────────────────────────
-    parser.add_argument(
-        "--port",
-        "-p",
-        type=int,
-        default=8888,  # ✅ Stable default for integrations
-        help="Port for web server (default: 8888; auto-falls back if busy)",
-    )
     parser.add_argument("--search", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--limit",
@@ -526,18 +520,17 @@ def main() -> None:
         or args.gchat
     )
 
-    # Determine if we're actually starting a server (not just running a CLI subcommand)
     is_starting_server = (
-        args.command in (None, "serve")  # None = default dashboard mode
+        args.command in (None, "serve")
         or args.telegram
         or has_channel_flag
     )
 
-    # Only resolve/fallback if a server will actually bind to a port
     if is_starting_server:
         effective_port = _resolve_port_for_server(args.port)
     else:
-        effective_port = args.port  # ✅ CLI commands don't bind
+        effective_port = args.port
+
     try:
         if args.command == "serve":
             from pocketpaw.api.serve import run_api_server
@@ -575,6 +568,7 @@ def main() -> None:
         else:
             # Default: web dashboard (also handles --web flag)
             run_dashboard_mode(settings, host, effective_port, dev=args.dev)
+    except KeyboardInterrupt:
         logger.info("PocketPaw stopped.")
     finally:
         # Coordinated singleton shutdown
