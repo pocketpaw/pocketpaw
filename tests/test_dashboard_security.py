@@ -10,6 +10,7 @@ Covers:
 """
 
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -263,6 +264,54 @@ class TestSecurityHeaders:
         assert "Strict-Transport-Security" not in resp.headers
 
 
+class TestFrontendSvgSafety:
+    def test_memory_graph_uses_sanitized_svg_insertion(self):
+        js_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "pocketpaw"
+            / "frontend"
+            / "js"
+            / "features"
+            / "transparency.js"
+        )
+        source = js_path.read_text(encoding="utf-8")
+
+        assert "safeInsertGraphSvg(container, svg)" in source
+        assert "container.innerHTML = graphUnavailable ? '' : svg;" not in source
+
+    def test_memory_prune_requires_confirmation(self):
+        js_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "pocketpaw"
+            / "frontend"
+            / "js"
+            / "features"
+            / "transparency.js"
+        )
+        source = js_path.read_text(encoding="utf-8")
+
+        assert "pruneMemories()" in source
+        assert "confirm(" in source
+        assert "Prune memories older than" in source
+
+    def test_memory_delete_requires_confirmation(self):
+        js_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "pocketpaw"
+            / "frontend"
+            / "js"
+            / "features"
+            / "transparency.js"
+        )
+        source = js_path.read_text(encoding="utf-8")
+
+        assert "deleteMemory(id)" in source
+        assert "Delete this memory permanently?" in source
+
+
 class TestSessionTokenEndpoint:
     @patch("pocketpaw.dashboard_auth.get_access_token", return_value="master-abc")
     @patch("pocketpaw.dashboard_auth.Settings")
@@ -309,3 +358,112 @@ class TestAuthMiddlewareSessionToken:
     def test_no_token_rejected(self, mock_local, mock_token, test_client):
         resp = test_client.get("/api/channels/status")
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Issue #851 — /api/auth/login rate-limit brute-force fix
+# ---------------------------------------------------------------------------
+
+
+class TestLoginRateLimit:
+    """Auth login endpoints must be rate-limited even though they are exempt from
+    token auth.  Verifies the OWASP A07 fix: auth_limiter fires BEFORE the
+    exempt-paths check so unlimited brute-force is no longer possible.
+
+    Tests call _auth_dispatch directly to avoid full-app test_client side effects.
+    """
+
+    def _make_request(self, path: str, method: str = "POST", client_ip: str = "1.2.3.4"):
+        req = MagicMock()
+        req.method = method
+        req.url.path = path
+        req.client = MagicMock()
+        req.client.host = client_ip
+        req.query_params = {}
+        req.headers = {}
+        req.cookies = {}
+        req.state = MagicMock()
+        return req
+
+    def _denied_rl_info(self):
+        from pocketpaw.security.rate_limiter import RateLimitInfo
+
+        return RateLimitInfo(allowed=False, limit=5, remaining=0, reset_after=1.0)
+
+    def _allowed_rl_info(self):
+        from pocketpaw.security.rate_limiter import RateLimitInfo
+
+        return RateLimitInfo(allowed=True, limit=5, remaining=4, reset_after=1.0)
+
+    @patch("pocketpaw.dashboard_auth.auth_limiter")
+    @patch("pocketpaw.dashboard_auth._audit_auth_event")
+    async def test_login_rate_limited_when_over_limit(self, mock_audit, mock_auth_limiter):
+        """_auth_dispatch must return 429 for /api/auth/login when auth_limiter denies."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        mock_auth_limiter.check.return_value = self._denied_rl_info()
+        req = self._make_request("/api/auth/login")
+        resp = await _auth_dispatch(req)
+        assert resp is not None
+        assert resp.status_code == 429
+        mock_auth_limiter.check.assert_called_once_with("1.2.3.4")
+
+    @patch("pocketpaw.dashboard_auth.auth_limiter")
+    @patch("pocketpaw.dashboard_auth._audit_auth_event")
+    async def test_v1_login_rate_limited_when_over_limit(self, mock_audit, mock_auth_limiter):
+        """_auth_dispatch must return 429 for /api/v1/auth/login when denied."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        mock_auth_limiter.check.return_value = self._denied_rl_info()
+        req = self._make_request("/api/v1/auth/login")
+        resp = await _auth_dispatch(req)
+        assert resp is not None
+        assert resp.status_code == 429
+        mock_auth_limiter.check.assert_called_once()
+
+    @patch("pocketpaw.dashboard_auth.auth_limiter")
+    async def test_login_allowed_when_within_limit(self, mock_auth_limiter):
+        """_auth_dispatch must return None (allow-through) when auth_limiter allows."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        mock_auth_limiter.check.return_value = self._allowed_rl_info()
+        req = self._make_request("/api/auth/login")
+        resp = await _auth_dispatch(req)
+        # Returns None = allow through to handler (login path is still exempt from token auth)
+        assert resp is None
+        mock_auth_limiter.check.assert_called_once()
+
+    @patch("pocketpaw.dashboard_auth.auth_limiter")
+    @patch("pocketpaw.dashboard_auth._audit_auth_event")
+    async def test_login_rate_limit_audit_on_block(self, mock_audit, mock_auth_limiter):
+        """A 429 block on /api/auth/login must emit an audit event."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        mock_auth_limiter.check.return_value = self._denied_rl_info()
+        req = self._make_request("/api/auth/login")
+        await _auth_dispatch(req)
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "brute_force_blocked"
+        assert mock_audit.call_args[1]["status"] == "block"
+
+    @patch("pocketpaw.dashboard_auth.auth_limiter")
+    @patch("pocketpaw.dashboard_auth._audit_auth_event")
+    async def test_qr_endpoint_rate_limited_when_over_limit(self, mock_audit, mock_auth_limiter):
+        """_auth_dispatch must return 429 for /api/qr when auth_limiter denies."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        mock_auth_limiter.check.return_value = self._denied_rl_info()
+        req = self._make_request("/api/qr", method="GET")
+        resp = await _auth_dispatch(req)
+        assert resp is not None
+        assert resp.status_code == 429
+        mock_auth_limiter.check.assert_called_once()
+
+    @patch("pocketpaw.dashboard_auth.auth_limiter")
+    async def test_static_assets_not_rate_limited(self, mock_auth_limiter):
+        """_auth_dispatch must NOT call auth_limiter for static assets."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        req = self._make_request("/static/some-asset.js", method="GET")
+        await _auth_dispatch(req)
+        mock_auth_limiter.check.assert_not_called()

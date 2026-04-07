@@ -3,18 +3,23 @@ TriggerEngine - Manages trigger scheduling for intentions.
 
 Currently supports:
 - Cron triggers (via APScheduler CronTrigger)
+- Stale-session triggers (interval polling of session last_activity)
 
 Future support planned for:
 - File watch triggers (watchdog)
-- Idle detection triggers
 """
+
+from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+from ..memory.manager import get_memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +74,11 @@ def parse_cron_expression(schedule: str) -> dict:
     }
 
 
+# Default stale-session check interval (minutes) and threshold (hours)
+_DEFAULT_STALE_CHECK_MINUTES = 60
+_DEFAULT_STALE_THRESHOLD_HOURS = 12
+
+
 class TriggerEngine:
     """
     Manages trigger scheduling for intentions using APScheduler.
@@ -89,6 +99,8 @@ class TriggerEngine:
         self.scheduler = scheduler or AsyncIOScheduler()
         self.callback: Callable | None = None
         self._jobs: dict[str, str] = {}  # intention_id -> job_id
+        # session_key -> last nudge time (rate-limit stale nudges per session)
+        self._nudged_sessions: dict[str, datetime] = {}
 
     def start(self, callback: Callable) -> None:
         """
@@ -131,6 +143,8 @@ class TriggerEngine:
 
         if trigger_type == "cron":
             return self._add_cron_trigger(intention)
+        elif trigger_type == "stale":
+            return self._add_stale_trigger(intention)
         else:
             logger.warning(f"Unknown trigger type: {trigger_type}")
             return False
@@ -173,8 +187,125 @@ class TriggerEngine:
             logger.error(f"Failed to add cron trigger for {intention['name']}: {e}")
             return False
 
+    def _add_stale_trigger(self, intention: dict) -> bool:
+        """Add an interval-based stale-session trigger for an intention."""
+        intention_id = intention["id"]
+        trigger_config = intention["trigger"]
+
+        check_minutes = trigger_config.get("check_interval_minutes", _DEFAULT_STALE_CHECK_MINUTES)
+        job_id = f"intention_{intention_id}"
+
+        # Remove existing job if any
+        if intention_id in self._jobs:
+            self.remove_intention(intention_id)
+
+        try:
+            self.scheduler.add_job(
+                self._fire_stale_trigger,
+                trigger=IntervalTrigger(minutes=check_minutes),
+                args=[intention],
+                id=job_id,
+                replace_existing=True,
+                name=intention["name"],
+            )
+            self._jobs[intention_id] = job_id
+            logger.info(
+                f"Added stale trigger for '{intention['name']}': checks every {check_minutes} min"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add stale trigger for {intention['name']}: {e}")
+            return False
+
+    async def _fire_stale_trigger(self, intention: dict) -> None:
+        """Scan session index and fire for each stale session (rate-limited)."""
+        if not self.callback:
+            return
+
+        trigger_config = intention.get("trigger", {})
+        threshold_hours = trigger_config.get("threshold_hours", _DEFAULT_STALE_THRESHOLD_HOURS)
+        # Re-nudge window: don't fire the same session again within 2× the threshold
+        cooldown = timedelta(hours=threshold_hours * 2)
+        cutoff = datetime.now(tz=UTC) - timedelta(hours=threshold_hours)
+
+        # Evict expired entries so _nudged_sessions doesn't grow unboundedly
+        now_evict = datetime.now(tz=UTC)
+        expired_keys = [
+            k for k, ts in self._nudged_sessions.items() if (now_evict - ts) >= cooldown
+        ]
+        for k in expired_keys:
+            del self._nudged_sessions[k]
+
+        stale_sessions = self._find_stale_sessions(cutoff)
+        if not stale_sessions:
+            logger.debug(f"[stale trigger] No stale sessions found for '{intention['name']}'")
+            return
+
+        now = datetime.now(tz=UTC)
+        for session_meta in stale_sessions:
+            session_key = session_meta["session_key"]
+            last_nudge = self._nudged_sessions.get(session_key)
+            if last_nudge and (now - last_nudge) < cooldown:
+                logger.debug(f"[stale trigger] Skipping {session_key!r} — nudged recently")
+                continue
+
+            self._nudged_sessions[session_key] = now
+            enriched = {**intention, "_stale_session": session_meta}
+            logger.info(
+                f"[stale trigger] Firing for session {session_key!r} "
+                f"('{session_meta.get('title', 'untitled')}'), "
+                f"idle ~{session_meta.get('idle_hours', '?')}h"
+            )
+            try:
+                await self.callback(enriched)
+            except Exception as e:
+                logger.error(
+                    f"Error executing stale intention '{intention['name']}' "
+                    f"for session {session_key!r}: {e}"
+                )
+
+    def _find_stale_sessions(self, cutoff: datetime) -> list[dict]:
+        """
+        Return session metadata dicts for sessions with last_activity before *cutoff*.
+
+        Reads the file-store session index if available; falls back to an empty list
+        so the trigger degrades gracefully for other memory backends.
+        """
+        try:
+            index: dict = get_memory_manager().list_sessions_with_metadata()
+        except Exception as e:
+            logger.warning(f"[stale trigger] Could not read session index: {e}")
+            return []
+
+        stale = []
+        now = datetime.now(tz=UTC)
+        for safe_key, meta in index.items():
+            last_activity_str = meta.get("last_activity", "")
+            if not last_activity_str:
+                continue
+            try:
+                last_activity = datetime.fromisoformat(last_activity_str)
+                # Normalise to UTC if the stored value is naive
+                if last_activity.tzinfo is None:
+                    last_activity = last_activity.replace(tzinfo=UTC)
+            except ValueError:
+                continue
+
+            if last_activity < cutoff:
+                idle_hours = round((now - last_activity).total_seconds() / 3600, 1)
+                stale.append(
+                    {
+                        "session_key": safe_key,
+                        "title": meta.get("title", "New Chat"),
+                        "last_activity": last_activity_str,
+                        "idle_hours": idle_hours,
+                        "preview": meta.get("preview", ""),
+                    }
+                )
+        return stale
+
     async def _fire_trigger(self, intention: dict) -> None:
-        """Called when a trigger fires."""
+        """Called when a cron trigger fires."""
         logger.info(f"Trigger fired for intention: {intention['name']}")
 
         if self.callback:

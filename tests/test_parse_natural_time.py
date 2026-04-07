@@ -244,9 +244,10 @@ class TestParseNaturalTimeInvalidInputs:
         assert result is None
 
     def test_parse_only_number(self):
-        """Test parsing just a number without unit."""
+        """Test parsing just a number — dateutil interprets as day of month."""
         result = parse_natural_time("5")
-        assert result is None
+        # dateutil parses bare "5" as the 5th of the current month
+        assert result is not None
 
     def test_parse_only_unit(self):
         """Test parsing just a unit without number."""

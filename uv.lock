@@ -3006,6 +3006,15 @@ wheels = [
 ]
 
 [[package]]
+name = "networkx"
+version = "3.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504, upload-time = "2025-12-08T17:02:38.159Z" },
+]
+
+[[package]]
 name = "numpy"
 version = "2.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3686,6 +3695,7 @@ all-tools = [
     { name = "html2text" },
     { name = "mcp" },
     { name = "mem0ai" },
+    { name = "networkx" },
     { name = "ollama" },
     { name = "playwright" },
     { name = "psutil" },
@@ -3757,6 +3767,9 @@ gchat = [
 ]
 google-adk = [
     { name = "google-adk" },
+]
+graph = [
+    { name = "networkx" },
 ]
 image = [
     { name = "google-genai" },
@@ -3862,7 +3875,7 @@ requires-dist = [
     { name = "chromadb", marker = "extra == 'vector'" },
     { name = "claude-agent-sdk", specifier = ">=0.1.30" },
     { name = "click", specifier = ">=8.0" },
-    { name = "cryptography", specifier = ">=42.0" },
+    { name = "cryptography", specifier = ">=46.0.0" },
     { name = "deepagents", marker = "extra == 'all'", specifier = ">=0.1.0" },
     { name = "deepagents", marker = "extra == 'deep-agents'", specifier = ">=0.1.0" },
     { name = "deepagents", marker = "extra == 'dev'", specifier = ">=0.1.0" },
@@ -3922,6 +3935,8 @@ requires-dist = [
     { name = "neonize", marker = "extra == 'all-channels'", specifier = ">=0.3.14" },
     { name = "neonize", marker = "extra == 'dev'", specifier = ">=0.3.14" },
     { name = "neonize", marker = "extra == 'whatsapp-personal'", specifier = ">=0.3.14" },
+    { name = "networkx", marker = "extra == 'all-tools'", specifier = ">=3.0" },
+    { name = "networkx", marker = "extra == 'graph'", specifier = ">=3.0" },
     { name = "ollama", marker = "extra == 'all'", specifier = ">=0.6.1" },
     { name = "ollama", marker = "extra == 'all-tools'", specifier = ">=0.6.1" },
     { name = "ollama", marker = "extra == 'dev'", specifier = ">=0.6.1" },
@@ -3976,12 +3991,12 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'channels'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'dev'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", specifier = ">=0.2.4" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", specifier = ">=0.2.4" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", specifier = ">=0.2.4" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", specifier = ">=0.2.9" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", specifier = ">=0.2.9" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", specifier = ">=0.2.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
-provides-extras = ["vector", "dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
+provides-extras = ["vector", "graph", "dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -5448,14 +5463,14 @@ wheels = [
 
 [[package]]
 name = "soul-protocol"
-version = "0.2.4"
+version = "0.2.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/f7/b8cd8e78f03a78dac8c59c925810bb3d9b1321b7b0dad28240348b5edd32/soul_protocol-0.2.4.tar.gz", hash = "sha256:29413dddb32ff1335b813493f80f9da02c20b2b2374df4eb86de3e660c3557c8", size = 1148676, upload-time = "2026-03-19T05:13:51.602Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/0a/7b6ea4f8903edad06ad73d2280bee3c1a387821ea90d38186ab9ac5d2d50/soul_protocol-0.2.9.tar.gz", hash = "sha256:7e8a6ec7179694a465fd1cb17f9db6af73a5426d6d3a3bf1e4a33495a687fb37", size = 1232417, upload-time = "2026-03-29T10:43:25.293Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6a/ee/85e3fef0f2ce45286c7a54935bdbe4081415209bd7a827668d7c9597ce7b/soul_protocol-0.2.4-py3-none-any.whl", hash = "sha256:df54fdf1765e9e59ac46fdb3474320e8a571c0194580a27d1a0308e75441d4be", size = 181844, upload-time = "2026-03-19T05:13:49.168Z" },
+    { url = "https://files.pythonhosted.org/packages/98/13/8ea72d17a23848e04ae46834895d2ee4dd4c59b42cf586fc9da0443d3eed/soul_protocol-0.2.9-py3-none-any.whl", hash = "sha256:82199de3114d5ceb5084e23dc6d253bb48032ba9fc3ced4ea2956fb1abec6e22", size = 266368, upload-time = "2026-03-29T10:43:24.046Z" },
 ]
 
 [package.optional-dependencies]

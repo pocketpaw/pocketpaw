@@ -363,8 +363,8 @@ class Settings(BaseSettings):
     memory_backend: str = Field(
         default="file",
         description=(
-            "Memory backend: 'file' (simple markdown), "
-            "'mem0' (semantic with LLM), 'vector' (ChromaDB)"
+            "Memory backend: 'file' (markdown + optional vector retrieval) or "
+            "'mem0' (semantic with LLM)"
         ),
     )
     vectordb_path: str = Field(
@@ -406,6 +406,30 @@ class Settings(BaseSettings):
     file_auto_learn: bool = Field(
         default=False,
         description="Auto-extract facts from conversations for file memory backend (uses Haiku)",
+    )
+    file_vector_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable vector indexing and semantic retrieval for file memory backend "
+            "(opt-in). Also enables knowledge graph extraction with conservative "
+            "regex patterns and heuristic filtering."
+        ),
+    )
+    vector_store: str = Field(
+        default="sqlite-vec",
+        description="Vector store for file memory backend: 'sqlite-vec', 'chromadb', or 'qdrant'",
+    )
+    embedding_provider: str = Field(
+        default="ollama",
+        description="Embedding provider for file memory backend (default: ollama)",
+    )
+    embedding_model: str = Field(
+        default="nomic-embed-text",
+        description="Embedding model for file memory semantic retrieval",
+    )
+    embedding_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Embedding provider base URL (for ollama)",
     )
 
     # Session History Compaction
@@ -891,6 +915,8 @@ class Settings(BaseSettings):
         Runs format validation on API keys before saving; logs warnings but
         never blocks or raises.
         """
+        # TODO: When adding new sensitive fields, ensure they are included in SECRET_FIELDS in
+        # pocketpaw/credentials.py to prevent plaintext storage.
         from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 
         config_path = get_config_path()

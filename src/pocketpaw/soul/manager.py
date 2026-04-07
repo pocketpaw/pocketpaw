@@ -8,6 +8,9 @@ Edge cases handled:
 - Auto-sync: detects external .soul file changes (v0.2.4+)
 - Rubric self-evaluation: heuristic scoring after interactions (v0.2.4+)
 - Configurable biorhythms: energy/mood dynamics via DNA (v0.2.4+)
+- CognitiveEngine wiring: passes PocketPawCognitiveEngine to Soul so the
+  active agent backend powers fact extraction, significance scoring,
+  and reflection instead of heuristic fallbacks (feat/pocketpaw-cognitive-engine)
 """
 
 from __future__ import annotations
@@ -84,8 +87,19 @@ class SoulManager:
             return p / f"{self._settings.soul_name.lower()}.soul"
         return self.soul_dir / f"{self._settings.soul_name.lower()}.soul"
 
-    async def initialize(self) -> None:
-        """Birth or awaken the soul."""
+    async def initialize(
+        self,
+        engine: Any | None = None,
+    ) -> None:
+        """Birth or awaken the soul.
+
+        Args:
+            engine: Optional CognitiveEngine to wire into the soul for
+                LLM-enhanced cognition (significance, fact extraction,
+                reflection).  When None the soul runs in heuristic mode.
+                Typically a PocketPawCognitiveEngine wrapping the active
+                agent backend is passed by AgentLoop.start().
+        """
         if self._initialized:
             return
 
@@ -101,13 +115,13 @@ class SoulManager:
 
         soul_path = self.soul_file
         if soul_path.exists():
-            self.soul = await self._try_awaken(Soul, soul_path)
+            self.soul = await self._try_awaken(Soul, soul_path, engine=engine)
         else:
-            self.soul = await self._birth_soul(Soul)
+            self.soul = await self._birth_soul(Soul, engine=engine)
 
         # Fallback: if awaken returned None (corrupt file), birth fresh
         if self.soul is None:
-            self.soul = await self._birth_soul(Soul)
+            self.soul = await self._birth_soul(Soul, engine=engine)
 
         self.bridge = SoulBridge(self.soul)
         self.bootstrap_provider = SoulBootstrapProvider(self.soul)
@@ -118,17 +132,28 @@ class SoulManager:
         global _manager
         _manager = self
 
-        logger.info("Soul initialized: %s", self.soul.name)
+        engine_label = type(engine).__name__ if engine is not None else "HeuristicEngine"
+        logger.info("Soul initialized: %s (cognitive engine: %s)", self.soul.name, engine_label)
 
-    async def _try_awaken(self, soul_cls: type, soul_path: Path) -> Any | None:
+    async def _try_awaken(
+        self,
+        soul_cls: type,
+        soul_path: Path,
+        engine: Any | None = None,
+    ) -> Any | None:
         """Attempt to awaken a soul from file.
 
         If the file is corrupt or encrypted, back it up and return None
         so the caller can birth a fresh soul.
+
+        Args:
+            soul_cls: The Soul class to call awaken() on.
+            soul_path: Path to the .soul file.
+            engine: Optional CognitiveEngine forwarded to Soul.awaken().
         """
         try:
             logger.info("Awakening soul from %s", soul_path)
-            return await soul_cls.awaken(soul_path)
+            return await soul_cls.awaken(soul_path, engine=engine)
         except Exception as exc:
             logger.warning(
                 "Failed to awaken soul from %s: %s. Backing up and birthing fresh soul.",
@@ -143,8 +168,13 @@ class SoulManager:
                 logger.warning("Could not back up corrupt soul file")
             return None
 
-    async def _birth_soul(self, soul_cls: type) -> Any:
-        """Birth a new soul from settings."""
+    async def _birth_soul(self, soul_cls: type, engine: Any | None = None) -> Any:
+        """Birth a new soul from settings.
+
+        Args:
+            soul_cls: The Soul class to call birth() on.
+            engine: Optional CognitiveEngine forwarded to Soul.birth().
+        """
         s = self._settings
         persona = s.soul_persona or (
             f"I am {s.soul_name}, a persistent AI companion. I value {', '.join(s.soul_values)}."
@@ -157,6 +187,8 @@ class SoulManager:
             "values": s.soul_values,
             "persona": persona,
         }
+        if engine is not None:
+            kwargs["engine"] = engine
         if s.soul_ocean:
             kwargs["ocean"] = s.soul_ocean
         if s.soul_communication:
@@ -241,6 +273,20 @@ class SoulManager:
         except Exception:
             logger.exception("Failed to reload soul")
             return False
+
+    async def forget(self, query: str) -> dict[str, Any]:
+        """Forget memories matching query (v0.2.8+)."""
+        if self.soul is None:
+            return {"error": "Soul not available"}
+        if not hasattr(self.soul, "forget"):
+            return {"error": "Requires soul-protocol >= 0.2.8."}
+        try:
+            result = await self.soul.forget(query)
+            self._dirty = True
+            return result if isinstance(result, dict) else {"result": str(result)}
+        except Exception:
+            logger.debug("Soul forget() failed", exc_info=True)
+            return {"error": "forget() failed"}
 
     async def save(self) -> None:
         """Persist the soul to disk."""
@@ -387,8 +433,11 @@ class SoulManager:
         if self._tools_cache is not None:
             return self._tools_cache
         from pocketpaw.paw.tools import (
+            SoulContextTool,
+            SoulCoreMemoryTool,
             SoulEditCoreTool,
             SoulEvaluateTool,
+            SoulForgetTool,
             SoulRecallTool,
             SoulReloadTool,
             SoulRememberTool,
@@ -402,5 +451,9 @@ class SoulManager:
             SoulStatusTool(self.soul),
             SoulEvaluateTool(self.soul, self),
             SoulReloadTool(self),
+            # v0.2.8 tools
+            SoulForgetTool(self.soul),
+            SoulCoreMemoryTool(self.soul),
+            SoulContextTool(self.soul),
         ]
         return self._tools_cache

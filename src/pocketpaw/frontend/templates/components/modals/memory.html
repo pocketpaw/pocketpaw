@@ -30,6 +30,24 @@
                     class="w-full bg-black/30 border border-[var(--glass-border)] rounded-xl py-2.5 pl-10 pr-4 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 focus:bg-black/40 transition-all placeholder-white/30"
                 >
             </div>
+
+            <div class="mt-3 flex items-center gap-1.5 bg-black/25 border border-[var(--glass-border)] rounded-xl p-1">
+                <button
+                    class="px-3 py-1.5 text-[11px] rounded-lg transition-colors"
+                    :class="memoryTab === 'facts' ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'"
+                    @click="memoryTab = 'facts'"
+                >Facts</button>
+                <button
+                    class="px-3 py-1.5 text-[11px] rounded-lg transition-colors"
+                    :class="memoryTab === 'graph' ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'"
+                    @click="memoryTab = 'graph'; loadMemoryGraph()"
+                >Graph</button>
+                <button
+                    class="px-3 py-1.5 text-[11px] rounded-lg transition-colors"
+                    :class="memoryTab === 'stats' ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'"
+                    @click="memoryTab = 'stats'; loadMemoryStats()"
+                >Stats</button>
+            </div>
         </div>
 
         <!-- Facts List (scrollable) -->
@@ -40,12 +58,34 @@
                 <span class="text-[13px]">Loading memories...</span>
             </div>
 
-            <div x-show="!memoryLoading" class="flex flex-col gap-2 py-1">
+            <div x-show="!memoryLoading && memoryTab === 'facts'" class="flex flex-col gap-2 py-1">
                 <template x-for="memory in getFilteredMemories()" :key="memory.id">
                     <div class="group p-3.5 rounded-xl border border-[var(--glass-border)] hover:bg-white/[0.03] transition-all">
                         <div class="flex items-start gap-3">
                             <div class="flex-1 min-w-0">
-                                <p class="text-[13px] leading-relaxed text-white/85 break-words" x-text="memory.content"></p>
+                                <template x-if="memoryEditingId !== memory.id">
+                                    <p class="text-[13px] leading-relaxed text-white/85 break-words" x-text="memory.content"></p>
+                                </template>
+
+                                <template x-if="memoryEditingId === memory.id">
+                                    <div class="flex flex-col gap-2">
+                                        <textarea
+                                            x-model="memoryEditContent"
+                                            rows="3"
+                                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-lg py-2 px-2.5 text-[12px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all"
+                                        ></textarea>
+                                        <input
+                                            type="text"
+                                            x-model="memoryEditTags"
+                                            placeholder="tag1, tag2"
+                                            class="w-full bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 px-2.5 text-[11px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all"
+                                        />
+                                        <div class="flex items-center gap-2">
+                                            <button class="px-2.5 py-1 text-[11px] rounded bg-[var(--accent-color)]/20 text-[var(--accent-color)] hover:bg-[var(--accent-color)]/30 transition-colors" @click="saveMemoryEdit(memory.id)">Save</button>
+                                            <button class="px-2.5 py-1 text-[11px] rounded bg-white/10 text-white/70 hover:text-white transition-colors" @click="cancelMemoryEdit()">Cancel</button>
+                                        </div>
+                                    </div>
+                                </template>
                                 <div class="flex items-center gap-2 mt-2">
                                     <span class="text-[10px] text-white/30" x-text="formatDate(memory.timestamp)"></span>
                                     <template x-for="tag in (memory.tags || [])" :key="tag">
@@ -55,13 +95,22 @@
                                     </template>
                                 </div>
                             </div>
-                            <button
-                                class="shrink-0 p-1.5 rounded-lg text-white/0 group-hover:text-white/20 hover:!text-[var(--danger-color)] hover:bg-white/5 transition-all"
-                                @click="deleteMemory(memory.id)"
-                                title="Forget"
-                            >
-                                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
-                            </button>
+                            <div class="shrink-0 flex items-center gap-1.5">
+                                <button
+                                    class="p-1.5 rounded-lg text-white/0 group-hover:text-white/30 hover:!text-[var(--accent-color)] hover:bg-white/5 transition-all"
+                                    @click="startMemoryEdit(memory)"
+                                    title="Edit"
+                                >
+                                    <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+                                </button>
+                                <button
+                                    class="p-1.5 rounded-lg text-white/0 group-hover:text-white/20 hover:!text-[var(--danger-color)] hover:bg-white/5 transition-all"
+                                    @click="deleteMemory(memory.id)"
+                                    title="Forget"
+                                >
+                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </template>
@@ -76,6 +125,95 @@
                 <!-- No results -->
                 <div x-show="longTermMemory.length > 0 && getFilteredMemories().length === 0 && memorySearch.trim()" class="py-12 text-center">
                     <p class="text-[13px] text-white/40">No memories match "<span class="text-white/60" x-text="memorySearch"></span>"</p>
+                </div>
+            </div>
+
+            <div x-show="!memoryLoading && memoryTab === 'graph'" class="flex flex-col gap-3 py-1">
+                <div class="flex items-center gap-2">
+                    <input
+                        type="text"
+                        x-model="memoryGraphSearch"
+                        placeholder="Filter graph entities..."
+                        class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 px-2.5 text-[12px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all"
+                    />
+                    <button class="px-2.5 py-1.5 text-[11px] rounded-lg bg-white/10 text-white/80 hover:bg-white/15 transition-colors" @click="loadMemoryGraph()">Apply</button>
+                </div>
+
+                <div x-show="memoryGraphUnavailable" class="text-[12px] text-white/70 flex items-center justify-between gap-3 bg-white/5 border border-[var(--glass-border)] rounded-lg px-3 py-2">
+                    <span x-text="memoryGraphUnavailableText || \"Requires networkx. Install with: pip install 'pocketpaw[graph]'\""></span>
+                    <button
+                        @click="installMemoryGraphDependency()"
+                        :disabled="memoryGraphInstallLoading"
+                        class="shrink-0 px-2.5 py-1 rounded-md text-[11px] bg-white/10 hover:bg-white/15 text-white/85 transition-colors disabled:opacity-50"
+                    >
+                        <span x-text="memoryGraphInstallLoading ? 'Installing…' : 'Install' "></span>
+                    </button>
+                </div>
+
+                <!-- SVG Network Visualization -->
+                <div id="memoryGraphContainer" style="width: 100%; height: 300px; border-radius: 12px; border: 1px solid var(--glass-border); background: rgba(0,0,0,0.4); overflow: auto;" x-show="!memoryGraphUnavailable && (memoryGraph.nodes || []).length > 0"></div>
+
+                <div class="grid grid-cols-1 gap-2.5">
+                    <div class="p-3 rounded-xl border border-[var(--glass-border)] bg-black/20">
+                        <div class="text-[11px] uppercase tracking-wider text-white/40 mb-2">Entities (<span x-text="(memoryGraph.nodes || []).length"></span>)</div>
+                        <div class="flex flex-wrap gap-1.5">
+                            <template x-for="node in (memoryGraph.nodes || [])" :key="node.id">
+                                <span class="text-[11px] px-2 py-1 rounded-full bg-white/10 text-white/70">
+                                    <span x-text="node.name"></span>
+                                    <span class="text-white/40" x-text="` (${node.count})`"></span>
+                                </span>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="p-3 rounded-xl border border-[var(--glass-border)] bg-black/20">
+                        <div class="text-[11px] uppercase tracking-wider text-white/40 mb-2">Relationships (<span x-text="(memoryGraph.edges || []).length"></span>)</div>
+                        <div class="flex flex-col gap-1.5 max-h-[150px] overflow-y-auto">
+                            <template x-for="edge in (memoryGraph.edges || [])" :key="edge.id">
+                                <div class="text-[11px] text-white/75 bg-white/[0.03] rounded px-2 py-1.5">
+                                    <span x-text="edge.source_name || edge.source"></span>
+                                    <span class="text-white/30"> → </span>
+                                    <span class="text-white/60 italic" x-text="edge.relation"></span>
+                                    <span class="text-white/30"> → </span>
+                                    <span x-text="edge.target_name || edge.target"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <div x-show="!memoryGraphUnavailable && (memoryGraph.nodes || []).length === 0" class="py-10 text-center text-white/35 text-[12px]">
+                    No graph entities yet.
+                </div>
+            </div>
+
+            <div x-show="!memoryLoading && memoryTab === 'stats'" class="flex flex-col gap-3 py-1">
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    <div class="p-3 rounded-xl border border-[var(--glass-border)] bg-black/20">
+                        <div class="text-[10px] uppercase tracking-wider text-white/35">Total</div>
+                        <div class="text-[16px] font-semibold text-white/85" x-text="memoryStats?.total_memories ?? 0"></div>
+                    </div>
+                    <div class="p-3 rounded-xl border border-[var(--glass-border)] bg-black/20">
+                        <div class="text-[10px] uppercase tracking-wider text-white/35">Vector Rows</div>
+                        <div class="text-[16px] font-semibold text-white/85" x-text="memoryStats?.vector_entries ?? 0"></div>
+                    </div>
+                    <div class="p-3 rounded-xl border border-[var(--glass-border)] bg-black/20">
+                        <div class="text-[10px] uppercase tracking-wider text-white/35">Graph Edges</div>
+                        <div class="text-[16px] font-semibold text-white/85" x-text="memoryStats?.graph_relationships ?? 0"></div>
+                    </div>
+                </div>
+
+                <div class="p-3 rounded-xl border border-[var(--glass-border)] bg-black/20 flex items-end gap-2">
+                    <div class="flex-1">
+                        <label class="text-[10px] uppercase tracking-wider text-white/35">Prune daily older than (days)</label>
+                        <input
+                            type="number"
+                            min="1"
+                            x-model="memoryPruneDays"
+                            class="mt-1 w-full bg-black/30 border border-[var(--glass-border)] rounded-lg py-1.5 px-2.5 text-[12px] text-white focus:outline-none focus:border-[var(--accent-color)]/50 transition-all"
+                        />
+                    </div>
+                    <button class="px-3 py-1.5 text-[11px] rounded-lg bg-[var(--danger-color)]/20 text-[var(--danger-color)] hover:bg-[var(--danger-color)]/30 transition-colors" @click="pruneMemories()">Prune</button>
                 </div>
             </div>
         </div>

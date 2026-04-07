@@ -227,6 +227,7 @@ BACKENDS = {
     "codex_cli": "Codex CLI (OpenAI)",
     "opencode": "OpenCode (External Server)",
     "copilot_sdk": "Copilot SDK",
+    "deep_agents": "Deep Agents (LangChain/LangGraph)",
 }
 
 LLM_PROVIDERS = {
@@ -1069,8 +1070,6 @@ class PocketPawInstaller:
 
         # 5. Backend selection
         self.backend = self.ui.prompt_backend()
-        if self.backend == "pocketpaw_native" and "native" not in self.extras:
-            self.extras.append("native")
 
         # 6. LLM provider
         self.llm_provider = self.ui.prompt_llm_provider()
@@ -1258,13 +1257,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=["claude_agent_sdk", "pocketpaw_native", "open_interpreter"],
+        choices=list(BACKENDS.keys()),
         default=None,
         help="Agent backend (non-interactive)",
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["anthropic", "openai", "ollama", "auto"],
+        choices=list(LLM_PROVIDERS.keys()),
         default=None,
         help="LLM provider (non-interactive)",
     )

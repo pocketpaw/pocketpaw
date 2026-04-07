@@ -6,9 +6,25 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from pocketpaw.api.deps import require_scope
+
+# Security-critical fields that MUST NOT be modified via the REST API.
+# These fields control file-system boundaries, permission checks, prompt-injection
+# scanning, and other safety guardrails.  They can only be changed by editing the
+# config file or environment variables directly.
+_IMMUTABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "file_jail_path",
+        "bypass_permissions",
+        "trust_level",
+        "injection_scan_enabled",
+        "guardian_enabled",
+        "localhost_auth_bypass",
+        "pii_scan_enabled",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +79,14 @@ async def update_settings(request: Request):
                 is_valid, warning = validate_api_key(field, value)
                 if not is_valid:
                     warnings.append(warning)
+
+    # Block writes to security-critical fields
+    blocked = _IMMUTABLE_FIELDS.intersection(settings_data)
+    if blocked:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Field(s) {', '.join(sorted(blocked))} cannot be modified via the API",
+        )
 
     async with _settings_lock:
         settings = Settings.load()

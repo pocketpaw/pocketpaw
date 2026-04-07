@@ -200,3 +200,174 @@ class TestChatFallbackIntegration:
             result = await router.chat("ping")
 
         assert result == FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# Provider detection (issue #795)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectBackendProviders:
+    """_detect_backend must recognise all supported providers."""
+
+    async def test_detect_openai_compatible(self):
+        settings = Settings(
+            llm_provider="openai_compatible",
+            openai_compatible_base_url="http://localhost:8000/v1",
+            openai_compatible_api_key="sk-test",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "openai_compatible"
+
+    async def test_detect_openai_compatible_missing_url(self):
+        settings = Settings(
+            llm_provider="openai_compatible",
+            openai_compatible_base_url="",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() is None
+
+    async def test_detect_openrouter(self):
+        settings = Settings(
+            llm_provider="openrouter",
+            openrouter_api_key="sk-or-v1-test",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "openrouter"
+
+    async def test_detect_openrouter_fallback_to_compat_key(self):
+        settings = Settings(
+            llm_provider="openrouter",
+            openrouter_api_key=None,
+            openai_compatible_api_key="sk-compat",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "openrouter"
+
+    async def test_detect_openrouter_missing_keys(self):
+        settings = Settings(
+            llm_provider="openrouter",
+            openrouter_api_key=None,
+            openai_compatible_api_key=None,
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() is None
+
+    async def test_detect_gemini(self):
+        settings = Settings(
+            llm_provider="gemini",
+            google_api_key="AIza-test",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "gemini"
+
+    async def test_detect_gemini_missing_key(self):
+        settings = Settings(
+            llm_provider="gemini",
+            google_api_key=None,
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() is None
+
+    async def test_detect_litellm(self):
+        settings = Settings(llm_provider="litellm")
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "litellm"
+
+    async def test_auto_selects_gemini_over_ollama(self):
+        """Auto mode should prefer Gemini (cloud) over Ollama when key is set."""
+        settings = Settings(
+            llm_provider="auto",
+            anthropic_api_key=None,
+            openai_api_key=None,
+            google_api_key="AIza-test",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "gemini"
+
+    async def test_auto_selects_openrouter_when_key_set(self):
+        settings = Settings(
+            llm_provider="auto",
+            anthropic_api_key=None,
+            openai_api_key=None,
+            google_api_key=None,
+            openrouter_api_key="sk-or-v1-test",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "openrouter"
+
+    async def test_auto_selects_litellm_when_key_set(self):
+        settings = Settings(
+            llm_provider="auto",
+            anthropic_api_key=None,
+            openai_api_key=None,
+            google_api_key=None,
+            openrouter_api_key=None,
+            openai_compatible_base_url="",
+            litellm_api_key="sk-litellm-test",
+        )
+        router = LLMRouter(settings)
+        assert await router._detect_backend() == "litellm"
+
+
+# ---------------------------------------------------------------------------
+# chat() routing for OpenAI-compatible providers (issue #795)
+# ---------------------------------------------------------------------------
+
+
+class TestChatOpenAICompatProviders:
+    """chat() must route openai_compatible / openrouter / gemini / litellm
+    through _chat_openai_compat and return the model response."""
+
+    @pytest.mark.parametrize(
+        "provider",
+        ["openai_compatible", "openrouter", "gemini", "litellm"],
+    )
+    async def test_chat_routes_to_openai_compat(self, provider):
+        settings = Settings(llm_provider=provider)
+        router = LLMRouter(settings)
+        router._available_backend = provider
+
+        mock_message = MagicMock()
+        mock_message.content = "Hello from provider!"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        mock_llm = MagicMock()
+        mock_llm.model = "test-model"
+        mock_llm.create_openai_client.return_value = mock_client
+
+        with patch("pocketpaw.llm.client.resolve_llm_client", return_value=mock_llm):
+            result = await router.chat("hi")
+
+        assert result == "Hello from provider!"
+        mock_llm.create_openai_client.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "provider",
+        ["openai_compatible", "openrouter", "gemini", "litellm"],
+    )
+    async def test_chat_openai_compat_empty_response(self, provider):
+        settings = Settings(llm_provider=provider)
+        router = LLMRouter(settings)
+        router._available_backend = provider
+
+        mock_response = MagicMock()
+        mock_response.choices = []
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        mock_llm = MagicMock()
+        mock_llm.model = "test-model"
+        mock_llm.create_openai_client.return_value = mock_client
+
+        with patch("pocketpaw.llm.client.resolve_llm_client", return_value=mock_llm):
+            result = await router.chat("hi")
+
+        assert result == FALLBACK

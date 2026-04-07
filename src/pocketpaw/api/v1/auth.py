@@ -121,7 +121,11 @@ async def cookie_logout():
 
 @router.get("/qr")
 async def get_qr_code(request: Request):
-    """Generate QR login code."""
+    """Generate QR login code.
+
+    Requires authentication — the caller must already have a valid session.
+    Generates a short-lived (60 s) pairing token embedded in the QR URL.
+    """
     from pocketpaw.security.rate_limiter import auth_limiter
 
     client_ip = request.client.host if request.client else "unknown"
@@ -139,7 +143,8 @@ async def get_qr_code(request: Request):
     tunnel = get_tunnel_manager()
     status = tunnel.get_status()
 
-    qr_token = create_session_token(get_access_token(), ttl_hours=1)
+    # Short-lived pairing token (60 seconds) — scoped to the QR pairing flow
+    qr_token = create_session_token(get_access_token(), ttl_hours=0, ttl_seconds=60)
 
     if status.get("active") and status.get("url"):
         login_url = f"{status['url']}/?token={qr_token}"

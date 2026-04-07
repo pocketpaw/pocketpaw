@@ -103,10 +103,10 @@ class TestSecurityHeaders:
         response = page.request.get(f"{dashboard_url}/api/identity")
         assert response.status == 401
 
-    def test_qr_endpoint_is_open(self, page: Page, dashboard_url: str):
-        """QR endpoint should be accessible without auth (login flow)."""
+    def test_qr_endpoint_requires_auth(self, page: Page, dashboard_url: str):
+        """QR endpoint must require authentication (fixes #854)."""
         response = page.request.get(f"{dashboard_url}/api/qr")
-        assert response.status == 200
+        assert response.status == 401
 
     def test_static_files_accessible(self, page: Page, dashboard_url: str):
         """Static files should be accessible without auth."""
