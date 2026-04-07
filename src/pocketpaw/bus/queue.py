@@ -6,6 +6,7 @@ Created: 2026-02-02
 import asyncio
 import copy
 import logging
+from typing import Any
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 
@@ -87,7 +88,7 @@ class MessageBus:
             except ValueError:
                 pass
 
-    async def publish_outbound(self, msg: OutboundMessage) -> None:
+    async def publish_outbound(self, msg: OutboundMessage) -> list[Any]:
         """Publish message to all subscribers of the given channel."""
         subs = self._outbound_subscribers.get(msg.channel, [])
         if not subs:
@@ -98,18 +99,26 @@ class MessageBus:
         # Each subscriber gets a deep copy of metadata and media to prevent leakage.
         async def _safe_publish(idx: int, callback: Callable[[OutboundMessage], Awaitable[None]]):
             try:
-                # 1. Isolate mutable data
-                isolated_msg = replace(
-                    msg,
-                    metadata=copy.deepcopy(msg.metadata),
-                    media=[copy.deepcopy(m) for m in msg.media],
-                )
+                # 1. Isolate mutable data for safety
+                if msg.metadata or msg.media:
+                    isolated_msg = replace(
+                        msg,
+                        metadata=copy.deepcopy(msg.metadata),
+                        media=[copy.deepcopy(m) for m in msg.media],
+                    )
+                else:
+                    isolated_msg = msg
             except Exception as e:
                 logger.error(
                     f"⛔ Isolation FAILED for {msg.channel.value} subscriber {idx}; "
-                    f"falling back to original message (potential leakage!): {e}"
+                    f"falling back to shallow copy (reduced isolation): {e}"
                 )
-                isolated_msg = msg
+                # Shallow copy fallback as a safer middle ground
+                isolated_msg = replace(
+                    msg,
+                    metadata=dict(msg.metadata),
+                    media=list(msg.media),
+                )
 
             # 2. Deliver message
             try:
@@ -125,12 +134,9 @@ class MessageBus:
             return_exceptions=True
         )
         
-        # Propagation: if any sub failed, report to caller (e.g. broadcast)
-        exceptions = [r for r in results if isinstance(r, Exception)]
-        if exceptions:
-            # We raise a combined exception or just the first one. 
-            # Given we've already logged them locally, raising the first one is enough to signal failure.
-            raise exceptions[0]
+        # Propagation: Errors are already logged per-subscriber in _safe_publish.
+        # We return results to let callers react if needed, without crashing.
+        return results
 
     async def broadcast_outbound(
         self, msg: OutboundMessage, exclude: Channel | None = None
