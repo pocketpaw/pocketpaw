@@ -46,6 +46,7 @@ from pocketpaw.headless import (
 )
 from pocketpaw.logging_setup import setup_logging
 
+
 def _run_async(coro):
     """Run coroutine; use asyncio.run() when no loop is running, else run in a thread to avoid
     'Runner.run() cannot be called from a running event loop' (e.g. under pytest-asyncio)."""
@@ -56,9 +57,11 @@ def _run_async(coro):
     with ThreadPoolExecutor(max_workers=1) as ex:
         return ex.submit(asyncio.run, coro).result()
 
+
 # Setup beautiful logging with Rich
 setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
+
 
 def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = False) -> None:
     """Run in web dashboard mode."""
@@ -70,6 +73,7 @@ def run_dashboard_mode(settings: Settings, host: str, port: int, dev: bool = Fal
         open_browser=not _is_headless() and not dev,
         dev=dev,
     )
+
 
 # ── Subcommands that exit early (no settings/health needed) ─────────────
 
@@ -84,6 +88,7 @@ _EARLY_COMMANDS = {
     "errors",
     "logs",
 }
+
 
 def _handle_early_command(args) -> int | None:
     """Handle subcommands that don't need settings/health/env setup.
@@ -165,7 +170,9 @@ def _handle_early_command(args) -> int | None:
 
     return None
 
+
 # ── Argument parser ─────────────────────────────────────────────────────
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -207,41 +214,109 @@ Examples:
 """,
     )
 
-    parser.add_argument("--web", "-w", action="store_true", help="Run web dashboard (same as default, kept for compatibility)")
-    parser.add_argument("--telegram", action="store_true", help="Run Telegram-only mode (legacy pairing flow)")
+    parser.add_argument(
+        "--web",
+        "-w",
+        action="store_true",
+        help="Run web dashboard (same as default, kept for compatibility)",
+    )
+    parser.add_argument(
+        "--telegram", action="store_true", help="Run Telegram-only mode (legacy pairing flow)"
+    )
     parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
     parser.add_argument("--slack", action="store_true", help="Run headless Slack bot (Socket Mode)")
-    parser.add_argument("--whatsapp", action="store_true", help="Run headless WhatsApp webhook server")
+    parser.add_argument(
+        "--whatsapp", action="store_true", help="Run headless WhatsApp webhook server"
+    )
     parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
     parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
     parser.add_argument("--teams", action="store_true", help="Run headless Teams bot")
     parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
-    parser.add_argument("--security-audit", action="store_true", help="Run security audit and print report")
-    parser.add_argument("--fix", action="store_true", help="Auto-fix fixable issues found by --security-audit")
-    parser.add_argument("--pii-scan", action="store_true", help="Scan existing memory files for PII and report findings")
-    parser.add_argument("--host", type=str, default=None, help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)")
+    parser.add_argument(
+        "--security-audit", action="store_true", help="Run security audit and print report"
+    )
+    parser.add_argument(
+        "--fix", action="store_true", help="Auto-fix fixable issues found by --security-audit"
+    )
+    parser.add_argument(
+        "--pii-scan",
+        action="store_true",
+        help="Scan existing memory files for PII and report findings",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
+    )
     parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
-    parser.add_argument("--check-ollama", action="store_true", help="Check Ollama connectivity, model availability, and tool calling support")
-    parser.add_argument("--check-openai-compatible", action="store_true", help="Check OpenAI-compatible endpoint connectivity and tool calling support")
-    parser.add_argument("--doctor", action="store_true", help="(deprecated: use 'pocketpaw doctor') Run diagnostics")
-    parser.add_argument("--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}")
-    parser.add_argument("--json", action="store_true", help="Output as JSON (works with most subcommands)")
-    parser.add_argument("--watch", nargs="?", type=float, const=2.0, default=0, help="Watch mode: refresh status every N seconds (default: 2)")
-    parser.add_argument("--port", "-p", type=int, default=8888, help="Port for web server (default: 8888; auto-falls back if busy)")
+    parser.add_argument(
+        "--check-ollama",
+        action="store_true",
+        help="Check Ollama connectivity, model availability, and tool calling support",
+    )
+    parser.add_argument(
+        "--check-openai-compatible",
+        action="store_true",
+        help="Check OpenAI-compatible endpoint connectivity and tool calling support",
+    )
+    parser.add_argument(
+        "--doctor", action="store_true", help="(deprecated: use 'pocketpaw doctor') Run diagnostics"
+    )
+    parser.add_argument(
+        "--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}"
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (works with most subcommands)"
+    )
+    parser.add_argument(
+        "--watch",
+        nargs="?",
+        type=float,
+        const=2.0,
+        default=0,
+        help="Watch mode: refresh status every N seconds (default: 2)",
+    )
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8888,
+        help="Port for web server (default: 8888; auto-falls back if busy)",
+    )
 
     parser.add_argument(
         "command",
         nargs="?",
         default=None,
-        choices=["serve", "status", "update", "doctor", "health", "channels", "skills", "sessions", "memory", "config", "errors", "logs"],
+        choices=[
+            "serve",
+            "status",
+            "update",
+            "doctor",
+            "health",
+            "channels",
+            "skills",
+            "sessions",
+            "memory",
+            "config",
+            "errors",
+            "logs",
+        ],
         help="Subcommand to run",
     )
     parser.add_argument("subargs", nargs="*", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--search", type=str, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of results (for errors, logs, sessions, memory)")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit number of results (for errors, logs, sessions, memory)",
+    )
     parser.add_argument("--follow", action="store_true", help="Tail mode (for logs)")
 
     return parser
+
 
 def _resolve_subargs(args) -> None:
     """Parse positional subargs into named attributes based on the command."""
@@ -276,7 +351,10 @@ def _resolve_subargs(args) -> None:
         defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}
         args.limit = defaults.get(cmd, 20)
 
-def _serve(fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127.0.0.1", **kwargs) -> None:
+
+def _serve(
+    fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127.0.0.1", **kwargs
+) -> None:
     """Start server, retrying with port+1 on EADDRINUSE.
 
     Uses SO_REUSEADDR socket probe as best-effort pre-check (fast feedback),
@@ -286,8 +364,9 @@ def _serve(fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127
     0.0.0.0 vs 127.0.0.1 mismatch. Scanning starts from the requested port,
     not from 8000, so fallback is always requested+N.
     """
-    import socket as _socket
     import errno as _errno
+    import socket as _socket
+
     current_port = port
     for attempt in range(max_attempts):
         # Best-effort probe using same host the server will bind to
@@ -297,7 +376,13 @@ def _serve(fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127
                 s.bind((host, current_port))
             except OSError:
                 next_port = current_port + 1
-                print("\n  [WARN] Port " + str(current_port) + " busy — trying " + str(next_port) + "\n")
+                print(
+                    "\n  [WARN] Port "
+                    + str(current_port)
+                    + " busy — trying "
+                    + str(next_port)
+                    + "\n"
+                )
                 current_port = next_port
                 continue
         # Probe passed — attempt real server startup
@@ -307,14 +392,20 @@ def _serve(fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127
         except OSError as e:
             if e.errno in (_errno.EADDRINUSE, 10048):
                 next_port = current_port + 1
-                print("\n  [WARN] Port " + str(current_port) + " taken at bind — trying " + str(next_port) + "\n")
+                print(
+                    "\n  [WARN] Port "
+                    + str(current_port)
+                    + " taken at bind — trying "
+                    + str(next_port)
+                    + "\n"
+                )
                 current_port = next_port
             else:
                 raise
     raise RuntimeError(
-        f"No free port found after {max_attempts} attempts "
-        f"(tried {port}-{current_port - 1})."
+        f"No free port found after {max_attempts} attempts (tried {port}-{current_port - 1})."
     )
+
 
 def main() -> None:
     """Main entry point."""
@@ -480,6 +571,7 @@ def main() -> None:
             # RuntimeError: event loop already closed (common on Windows)
             # OSError: socket/fd cleanup errors during forced shutdown
             pass
+
 
 if __name__ == "__main__":
     main()

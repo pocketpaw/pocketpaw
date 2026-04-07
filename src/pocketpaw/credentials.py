@@ -294,8 +294,7 @@ class CredentialStore:
                 if backup_path.exists():
                     shutil.copy2(backup_path, self._secrets_path)
                     logger.error(
-                        "v1 secret decryption failed (wrong key?). "
-                        "Backup restored to secrets.enc."
+                        "v1 secret decryption failed (wrong key?). Backup restored to secrets.enc."
                     )
                 raise CredentialMigrationError(
                     "Failed to decrypt v1 secrets.enc — key derivation mismatch. "
