@@ -47,19 +47,28 @@ Respond with valid JSON only:
         self.settings = get_settings()
         self.client = None
         self._audit = get_audit_logger()
-        self._client_lock = asyncio.Lock()
+        self._client_lock = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._client_lock is None:
+            self._client_lock = asyncio.Lock()
+        return self._client_lock
 
     async def _ensure_client(self):
         if not self.client:
             return  # No API key configured, will use local safety check
-        async with self._client_lock:
+
+        async def _ensure_client(self):
             if self.client:
                 return
-            from pocketpaw.llm.client import resolve_llm_client
+            async with self._get_lock():
+                if self.client:
+                    return
+                from pocketpaw.llm.client import resolve_llm_client
 
-            llm = resolve_llm_client(self.settings, force_provider="anthropic")
-            if llm.api_key:
-                self.client = llm.create_anthropic_client()
+                llm = resolve_llm_client(self.settings, force_provider="anthropic")
+                if llm.api_key:
+                    self.client = llm.create_anthropic_client()
 
     def _local_safety_check(self, command: str) -> tuple[bool, str]:
         """Deny-by-default local pattern check.
