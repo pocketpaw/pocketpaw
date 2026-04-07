@@ -2,7 +2,6 @@
 # Created: 2026-02-02
 
 
-import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -233,20 +232,24 @@ async def test_outbound_message_isolation():
     """Verify that subscribers receive isolated copies of mutable metadata/media."""
     bus = MessageBus()
 
-    # Track what each subscriber received
-    received_messages = []
+    # Coordination for deterministic execution order
+    sub1_done = asyncio.Event()
+    received: dict[str, OutboundMessage] = {}
 
-    async def sub1(msg):
+    async def sub1(msg: OutboundMessage):
         # Mutate the metadata in the first subscriber's copy
-        # This tests that the deepcopy in MessageBus works.
         msg.metadata["leaked"] = "yes"
-        received_messages.append(msg)
+        received["sub1"] = msg
+        sub1_done.set()
 
-    async def sub2(msg):
-        # Wait a bit to ensure sub1 runs first (although gather is concurrent)
-        await asyncio.sleep(0.05)
-        received_messages.append(msg)
+    async def sub2(msg: OutboundMessage):
+        # Wait for sub1 to finish its mutation to prove isolation
+        # Even if sub1 modifies its copy, sub2 should have a clean one.
+        await sub1_done.wait()
+        received["sub2"] = msg
 
+    # Order in list defines order in asyncio.gather starting, but not finishing.
+    # However, sub2 now explicitly waits for sub1.
     bus.subscribe_outbound(Channel.TELEGRAM, sub1)
     bus.subscribe_outbound(Channel.TELEGRAM, sub2)
 
@@ -259,9 +262,9 @@ async def test_outbound_message_isolation():
 
     await bus.publish_outbound(test_msg)
 
-    assert len(received_messages) == 2
+    assert len(received) == 2
     # sub1 should have the modification
-    assert received_messages[0].metadata.get("leaked") == "yes"
-    # sub2 should NOT have the modification
-    assert "leaked" not in received_messages[1].metadata
-    assert received_messages[1].metadata["original"] == "value"
+    assert received["sub1"].metadata.get("leaked") == "yes"
+    # sub2 should NOT have the modification despite waiting for sub1 to finish
+    assert "leaked" not in received["sub2"].metadata
+    assert received["sub2"].metadata["original"] == "value"

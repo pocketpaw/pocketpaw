@@ -96,21 +96,41 @@ class MessageBus:
 
         # Fan-out to all subscribers concurrently with deep isolation.
         # Each subscriber gets a deep copy of metadata and media to prevent leakage.
-        async def _safe_publish(idx, callback):
+        async def _safe_publish(idx: int, callback: Callable[[OutboundMessage], Awaitable[None]]):
             try:
-                # Isolate mutable data
+                # 1. Isolate mutable data
                 isolated_msg = replace(
                     msg,
                     metadata=copy.deepcopy(msg.metadata),
                     media=[copy.deepcopy(m) for m in msg.media],
                 )
+            except Exception as e:
+                logger.error(
+                    f"⛔ Isolation FAILED for {msg.channel.value} subscriber {idx}; "
+                    f"falling back to original message (potential leakage!): {e}"
+                )
+                isolated_msg = msg
+
+            # 2. Deliver message
+            try:
                 await callback(isolated_msg)
             except Exception as e:
                 logger.error(
-                    f"Error in {msg.channel.value} subscriber {idx} ({callback}): {e}"
+                    f"❌ Delivery FAILED for {msg.channel.value} subscriber {idx} ({callback}): {e}"
                 )
+                raise  # Re-raise to let gather capture it
 
-        await asyncio.gather(*[_safe_publish(i, sub) for i, sub in enumerate(subs)])
+        results = await asyncio.gather(
+            *[_safe_publish(i, sub) for i, sub in enumerate(subs)],
+            return_exceptions=True
+        )
+        
+        # Propagation: if any sub failed, report to caller (e.g. broadcast)
+        exceptions = [r for r in results if isinstance(r, Exception)]
+        if exceptions:
+            # We raise a combined exception or just the first one. 
+            # Given we've already logged them locally, raising the first one is enough to signal failure.
+            raise exceptions[0]
 
     async def broadcast_outbound(
         self, msg: OutboundMessage, exclude: Channel | None = None
@@ -118,15 +138,24 @@ class MessageBus:
         """Broadcast an outbound message to ALL registered channels."""
         # This is used for multi-channel announcements.
         tasks = []
+        channels = []
         for channel in self._outbound_subscribers.keys():
             if channel == exclude:
                 continue
             # Create a clone for each channel
             channel_msg = replace(msg, channel=channel)
             tasks.append(self.publish_outbound(channel_msg))
+            channels.append(channel)
 
-        if tasks:
-            await asyncio.gather(*tasks)
+        if not tasks:
+            return
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"🚨 Broadcast to channel {channels[i].value} FAILED: {result}"
+                )
 
     # =========================================================================
     # System Events (Internal)
