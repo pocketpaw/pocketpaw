@@ -48,6 +48,10 @@ def require_scope(*scopes: str):
                 )
             return
 
-        # Not an API key or OAuth auth — master/session/cookie/localhost have full access
+        # Enforce scope check for all other auth methods (no silent bypass)
+        raise HTTPException(
+            status_code=403,
+            detail="Insufficient scope (no valid scoped authentication provided)",
+        )
 
     return _check
