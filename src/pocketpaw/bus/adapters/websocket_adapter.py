@@ -133,6 +133,15 @@ class WebSocketAdapter(BaseChannelAdapter):
                     pass
 
             await self._publish_inbound(message)
+
+            # Persist user message to MongoDB (cloud persistence bridge)
+            try:
+                from ee.cloud.shared.chat_persistence import save_user_message
+                await save_user_message(chat_id, content)
+            except ImportError:
+                pass  # ee/cloud not available
+            except Exception:
+                pass  # Non-fatal
         # Other actions (settings, tools) handled separately
 
     async def send(self, message: OutboundMessage) -> None:

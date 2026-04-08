@@ -98,6 +98,74 @@ def _extract_pocket_json(content: str) -> dict | None:
     return None
 
 
+async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None:
+    """Create pocket + session in MongoDB. Returns pocket _id or None on failure."""
+    try:
+        from ee.cloud.models.session import Session
+        from ee.cloud.models.user import User
+        from ee.cloud.models.workspace import Workspace
+
+        # Find user + workspace from existing cloud data
+        # Try to find user from any existing session, or get the first active user
+        user = await User.find_one()
+        if not user:
+            logger.warning("Cannot create pocket — no user in DB")
+            return None
+        user_id = str(user.id)
+
+        workspace = await Workspace.find_one(Workspace.owner == user_id)
+        if not workspace:
+            # Try any workspace the user belongs to
+            workspace = await Workspace.find_one()
+        if not workspace:
+            logger.warning("Cannot create pocket — no workspace in DB")
+            return None
+        workspace_id = str(workspace.id)
+
+        # Create pocket
+        from ee.cloud.pockets.schemas import CreatePocketRequest
+        from ee.cloud.pockets.service import PocketService
+        meta = spec.get("metadata", {})
+        pocket = await PocketService.create(
+            workspace_id,
+            user_id,
+            CreatePocketRequest(
+                name=spec.get("title") or spec.get("name") or "Untitled",
+                description=spec.get("description", ""),
+                type=meta.get("category", "custom"),
+                icon="sparkles",
+                color=meta.get("color", "#0A84FF"),
+                rippleSpec=spec,
+            ),
+        )
+        pocket_id = str(pocket["_id"])
+
+        # Create session linked to this pocket
+        safe_key = session_key.replace(":", "_") if session_key else ""
+        if safe_key:
+            existing = await Session.find_one(Session.sessionId == safe_key)
+            if existing:
+                existing.pocket = pocket_id
+                await existing.save()
+            else:
+                from datetime import UTC, datetime
+                session = Session(
+                    sessionId=safe_key,
+                    workspace=workspace_id,
+                    owner=user_id,
+                    title=spec.get("title") or "New Chat",
+                    pocket=pocket_id,
+                    lastActivity=datetime.now(UTC),
+                )
+                await session.insert()
+
+        logger.info("Created pocket %s + session %s in MongoDB", pocket_id, safe_key)
+        return pocket_id
+    except Exception:
+        logger.warning("Failed to create pocket/session in MongoDB", exc_info=True)
+        return None
+
+
 async def _publish_pocket_event(
     bus: "MessageBus", content: str, session_key: str
 ) -> None:
@@ -124,10 +192,16 @@ async def _publish_pocket_event(
         "panes" in spec,
     )
     if evt_type == "created":
+        # Create pocket + session in MongoDB right here
+        pocket_cloud_id = await _create_pocket_and_session(spec, session_key)
         await bus.publish_system(
             SystemEvent(
                 event_type="pocket_created",
-                data={"spec": spec, "session_key": session_key},
+                data={
+                    "spec": spec,
+                    "session_key": session_key,
+                    "pocket_cloud_id": pocket_cloud_id,
+                },
             )
         )
     elif evt_type == "mutation":

@@ -88,9 +88,12 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.shared.agent_bridge import register_agent_bridge
     register_agent_bridge()
 
-    # Start/stop agent pool with app lifecycle
+    # Start/stop agent pool with app lifecycle + chat persistence
     @app.on_event("startup")
     async def _start_agent_pool():
+        # Register chat persistence bridge (saves runtime WS messages to MongoDB)
+        from ee.cloud.shared.chat_persistence import register_chat_persistence
+        register_chat_persistence()
         from pocketpaw.agents.pool import get_agent_pool
         await get_agent_pool().start()
 

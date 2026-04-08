@@ -17,6 +17,7 @@ class CreateSessionRequest(BaseModel):
     pocket_id: str | None = None  # Link to pocket on creation
     group_id: str | None = None
     agent_id: str | None = None
+    session_id: str | None = None  # Link to existing runtime session (e.g. "websocket_abc123")
 
 
 class UpdateSessionRequest(BaseModel):

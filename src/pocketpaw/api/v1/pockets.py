@@ -535,7 +535,8 @@ async def pocket_chat_stream(body: ChatRequest):
                         pocket_emitted = True
                         fmt = "UISpec" if "ui" in spec else f"{len(spec.get('panes', {}))} panes" if "panes" in spec else f"{len(spec.get('widgets', []))} widgets"
                         logger.info("Pocket created: %s (%s)", spec.get("title", "?"), fmt)
-                        yield (f"event: pocket_created\ndata: {json.dumps(spec)}\n\n")
+                        pocket_cloud_id = edata.get("pocket_cloud_id")
+                        yield (f"event: pocket_created\ndata: {json.dumps({'spec': spec, 'session_id': safe_key, 'pocket_cloud_id': pocket_cloud_id})}\n\n")
                     else:
                         logger.warning(
                             "pocket_created event dropped — _prepare_pocket_spec returned None for title=%r",
@@ -572,7 +573,7 @@ async def pocket_chat_stream(body: ChatRequest):
                                 spec.get("title", spec.get("name", "?")),
                                 len(spec.get("widgets", [])),
                             )
-                            yield (f"event: pocket_created\ndata: {json.dumps(spec)}\n\n")
+                            yield (f"event: pocket_created\ndata: {json.dumps({'spec': spec, 'session_id': safe_key})}\n\n")
 
                 # Forward original event
                 yield (f"event: {etype}\ndata: {json.dumps(edata)}\n\n")

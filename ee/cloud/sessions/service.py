@@ -40,17 +40,27 @@ def _session_response(session: Session) -> dict:
 class SessionService:
     """Stateless service encapsulating session business logic."""
 
-    # -----------------------------------------------------------------
-    # CRUD
-    # -----------------------------------------------------------------
-
     @staticmethod
     async def create(
         workspace_id: str, user_id: str, body: CreateSessionRequest
     ) -> dict:
-        """Create a session. Optionally link to a pocket on creation."""
+        """Create a session, or update if sessionId already exists."""
+        sid = body.session_id or f"websocket_{uuid.uuid4().hex[:12]}"
+
+        # If linking to an existing runtime session, check if MongoDB record exists
+        if body.session_id:
+            existing = await Session.find_one(Session.sessionId == body.session_id)
+            if existing:
+                # Update the existing record (e.g. add pocket link)
+                if body.pocket_id:
+                    existing.pocket = body.pocket_id
+                if body.title and body.title != "New Chat":
+                    existing.title = body.title
+                await existing.save()
+                return _session_response(existing)
+
         session = Session(
-            sessionId=str(uuid.uuid4()),
+            sessionId=sid,
             workspace=workspace_id,
             owner=user_id,
             title=body.title,
@@ -77,7 +87,7 @@ class SessionService:
     async def list_sessions(
         workspace_id: str, user_id: str
     ) -> list[dict]:
-        """List sessions for user in workspace, exclude deleted, sort by lastActivity desc."""
+        """List all sessions for user, sorted by lastActivity desc."""
         sessions = (
             await Session.find(
                 Session.workspace == workspace_id,
@@ -91,7 +101,6 @@ class SessionService:
 
     @staticmethod
     async def get(session_id: str, user_id: str) -> dict:
-        """Get a session by _id or sessionId. Verify owner."""
         session = await SessionService._get_session(session_id, user_id)
         return _session_response(session)
 
@@ -99,33 +108,29 @@ class SessionService:
     async def update(
         session_id: str, user_id: str, body: UpdateSessionRequest
     ) -> dict:
-        """Update session fields. Owner only."""
         session = await SessionService._get_session(session_id, user_id)
-
         if body.title is not None:
             session.title = body.title
         if body.pocket_id is not None:
             session.pocket = body.pocket_id
-
         await session.save()
         return _session_response(session)
 
     @staticmethod
     async def delete(session_id: str, user_id: str) -> None:
-        """Soft-delete a session via deleted_at. Owner only."""
         session = await SessionService._get_session(session_id, user_id)
         session.deleted_at = datetime.now(UTC)
         await session.save()
 
     # -----------------------------------------------------------------
-    # Pocket-scoped helpers
+    # Pocket-scoped
     # -----------------------------------------------------------------
 
     @staticmethod
     async def list_for_pocket(
         pocket_id: str, user_id: str
     ) -> list[dict]:
-        """Find sessions where pocket == pocket_id."""
+        logger.info(f"Listing sessions for pocket {pocket_id} and user {user_id}")
         sessions = (
             await Session.find(
                 Session.pocket == pocket_id,
@@ -144,92 +149,97 @@ class SessionService:
         pocket_id: str,
         body: CreateSessionRequest,
     ) -> dict:
-        """Create a session with pocket already set."""
         body_with_pocket = CreateSessionRequest(
             title=body.title,
             pocket_id=pocket_id,
             group_id=body.group_id,
             agent_id=body.agent_id,
+            session_id=body.session_id,
         )
         return await SessionService.create(workspace_id, user_id, body_with_pocket)
 
     # -----------------------------------------------------------------
-    # Runtime proxy
+    # History
     # -----------------------------------------------------------------
 
     @staticmethod
     async def get_history(session_id: str, user_id: str) -> dict:
-        """Get session chat history from cloud Messages collection.
-
-        Cloud sessions store messages in MongoDB (group chat messages),
-        not in the runtime file-based memory store.
-        """
+        """Get session chat history from runtime file memory."""
         session = await SessionService._get_session(session_id, user_id)
 
-        # Session can be linked to a group — fetch messages from that group
-        group_id = session.group
-        if not group_id and session.pocket:
-            # If session is linked to a pocket but not a group,
-            # there may not be chat history yet
-            return {"messages": []}
+        # Try cloud Messages first (group chat)
+        if session.group:
+            try:
+                from ee.cloud.models.message import Message
 
-        if not group_id:
-            return {"messages": []}
-
-        try:
-            from ee.cloud.models.message import Message
-
-            messages = (
-                await Message.find(
-                    Message.group == group_id,
-                    Message.deleted == False,  # noqa: E711
+                messages = (
+                    await Message.find(
+                        Message.group == session.group,
+                        Message.deleted == False,  # noqa: E711
+                    )
+                    .sort("createdAt")
+                    .limit(100)
+                    .to_list()
                 )
-                .sort("createdAt")
-                .limit(100)
-                .to_list()
-            )
-
-            return {
-                "messages": [
-                    {
-                        "_id": str(m.id),
-                        "role": "assistant" if m.sender_type == "agent" else "user",
-                        "content": m.content,
-                        "sender": m.sender,
-                        "senderType": m.sender_type,
-                        "createdAt": m.createdAt.isoformat() if m.createdAt else None,
+                if messages:
+                    return {
+                        "messages": [
+                            {
+                                "_id": str(m.id),
+                                "role": "assistant" if m.sender_type == "agent" else "user",
+                                "content": m.content,
+                                "sender": m.sender,
+                                "senderType": m.sender_type,
+                                "createdAt": m.createdAt.isoformat() if m.createdAt else None,
+                            }
+                            for m in messages
+                        ]
                     }
-                    for m in messages
-                ]
-            }
+            except Exception:
+                pass
+
+        # Try runtime file-based memory
+        try:
+            from pocketpaw.memory.manager import MemoryManager
+
+            manager = MemoryManager()
+            sid = session.sessionId
+            # Try all possible key formats
+            for key in [sid, sid.replace("_", ":", 1), f"websocket:{sid}"]:
+                try:
+                    entries = await manager.get_session_history(key)
+                    if entries:
+                        return {"messages": entries}
+                except Exception:
+                    continue
         except Exception:
-            logger.warning(
-                "Failed to fetch history for session %s",
-                session.sessionId,
-                exc_info=True,
-            )
-            return {"messages": []}
+            pass
+
+        return {"messages": []}
 
     # -----------------------------------------------------------------
-    # Touch (activity tracking)
+    # Touch
     # -----------------------------------------------------------------
 
     @staticmethod
     async def touch(session_id: str) -> None:
         """Update lastActivity and increment messageCount."""
         session = await Session.find_one(Session.sessionId == session_id)
+        # Fallback: strip websocket_ prefix
+        if not session and session_id.startswith("websocket_"):
+            session = await Session.find_one(Session.sessionId == session_id[10:])
         if session:
             session.lastActivity = datetime.now(UTC)
             session.messageCount += 1
             await session.save()
 
     # -----------------------------------------------------------------
-    # Internal helpers
+    # Internal
     # -----------------------------------------------------------------
 
     @staticmethod
     async def _get_session(session_id: str, user_id: str) -> Session:
-        """Fetch by ObjectId first, then by sessionId. Verify owner."""
+        """Fetch by ObjectId first, then by sessionId."""
         session = None
         try:
             session = await Session.get(PydanticObjectId(session_id))

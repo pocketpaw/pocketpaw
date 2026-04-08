@@ -143,8 +143,14 @@ class _APISessionBridge:
                     }
                 )
             elif evt.event_type == "pocket_created":
+                sk = data.get("session_key", "")
+                safe_key = sk.replace(":", "_") if sk else ""
                 await self.queue.put(
-                    {"event": "pocket_created", "data": {"spec": data.get("spec", {})}}
+                    {"event": "pocket_created", "data": {
+                        "spec": data.get("spec", {}),
+                        "session_id": safe_key,
+                        "pocket_cloud_id": data.get("pocket_cloud_id"),
+                    }}
                 )
             elif evt.event_type == "pocket_mutation":
                 await self.queue.put(
