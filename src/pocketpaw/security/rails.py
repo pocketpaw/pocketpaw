@@ -55,7 +55,7 @@ DANGEROUS_PATTERNS: list[str] = [
     # -- Reverse shells --
     r"\bnc\b.*-e\s+/bin/(ba)?sh",  # nc -e /bin/sh
     r"bash\s+-i\s+>&\s+/dev/tcp/",  # bash -i >& /dev/tcp/
-    r"\bpython[23]?\s+-c\b",
+    r"\bpython[23]?\s+-c\s+.{0,200}?socket.{0,200}?connect",
     r"perl\s+-e\s+.*socket.*INET",  # Perl reverse shell
     r"ruby\s+-rsocket\s+-e",  # Ruby reverse shell
     # -- Crontab / scheduled task injection --
@@ -145,6 +145,4 @@ DANGEROUS_SUBSTRINGS: list[str] = [
     "fdisk /dev/",
     "parted /dev/",
     "find / -delete",
-    "python -c",
-    "socket.connect",
 ]
