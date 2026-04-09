@@ -1,6 +1,7 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-04-07: Auto-detect free port in range 8000-9000 if requested port is busy.
   - 2026-03-18: Added CLI subcommands: doctor, health, channels, skills,
                 sessions, memory, config, errors, logs.
   - 2026-02-20: Extracted diagnostics to diagnostics.py, headless runners to headless.py.
@@ -271,7 +272,7 @@ Examples:
         "-p",
         type=int,
         default=8888,
-        help="Port for web server (default: 8888)",
+        help="Port for web server (default: 8888; auto-falls back if busy)",
     )
     parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
@@ -310,10 +311,6 @@ Examples:
     )
 
     # ── Subcommand (positional) ─────────────────────────────────────────
-    # We use a single positional with nargs="*" to support:
-    #   pocketpaw channels start discord  (command=channels, rest=[start, discord])
-    #   pocketpaw config set key value    (command=config, rest=[set, key, value])
-    #   pocketpaw memory search foo       (command=memory, rest=[search, foo])
     parser.add_argument(
         "command",
         nargs="?",
@@ -369,31 +366,69 @@ def _resolve_subargs(args) -> None:
     cmd = args.command
 
     if cmd == "channels" and subargs:
-        args.subaction = subargs[0]  # start / stop
+        args.subaction = subargs[0]
         if len(subargs) > 1:
-            args.query = subargs[1]  # channel name
-
+            args.query = subargs[1]
     elif cmd == "sessions" and subargs:
-        args.subaction = subargs[0]  # delete / search
+        args.subaction = subargs[0]
         if len(subargs) > 1:
             args.query = subargs[1]
-
     elif cmd == "memory" and subargs:
-        args.subaction = subargs[0]  # search
+        args.subaction = subargs[0]
         if len(subargs) > 1:
             args.query = subargs[1]
-
     elif cmd == "config" and subargs:
-        args.subaction = subargs[0]  # set / validate / path
+        args.subaction = subargs[0]
         if len(subargs) > 1:
             args.key = subargs[1]
         if len(subargs) > 2:
             args.value = subargs[2]
 
-    # Apply default limits per command
     if args.limit is None:
         defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}
         args.limit = defaults.get(cmd, 20)
+
+
+def _serve(
+    fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127.0.0.1", **kwargs
+) -> None:
+    """Start server, retrying with port+1 on EADDRINUSE.
+
+    Uses SO_REUSEADDR socket probe as best-effort pre-check (fast feedback),
+    then passes the port directly to the server. The probe window is tiny so
+    the race is acceptable; the real guard is the server bind itself.
+    The probe binds to the same host the server will use, fixing the
+    0.0.0.0 vs 127.0.0.1 mismatch. Scanning starts from the requested port,
+    not from 8000, so fallback is always requested+N.
+    """
+    import errno as _errno
+    import socket as _socket
+
+    current_port = port
+    for attempt in range(max_attempts):
+        # Best-effort probe using same host the server will bind to
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, current_port))
+            except OSError:
+                next_port = current_port + 1
+                print(f"\n  [WARN] Port {current_port} busy — trying {next_port}\n")
+                current_port = next_port
+                continue
+        # Probe passed — attempt real server startup
+        try:
+            fn(*args, port=current_port, host=host, **kwargs)
+            return
+        except OSError as e:
+            if e.errno in (_errno.EADDRINUSE, 10048):
+                next_port = current_port + 1
+                print(f"\n  [WARN] Port {current_port} taken at bind — trying {next_port}\n")
+                current_port = next_port
+            else:
+                raise
+    raise RuntimeError(
+        f"No free port found after {max_attempts} attempts (tried {port}-{current_port - 1})."
+    )
 
 
 def main() -> None:
@@ -507,7 +542,7 @@ def main() -> None:
         if args.command == "serve":
             from pocketpaw.api.serve import run_api_server
 
-            run_api_server(host=host, port=args.port, dev=args.dev)
+            _serve(run_api_server, host=host, port=args.port, dev=args.dev)
         elif args.command == "status":
             from pocketpaw.cli.status import run_status
 
@@ -539,7 +574,7 @@ def main() -> None:
             _run_async(run_multi_channel_mode(settings, args))
         else:
             # Default: web dashboard (also handles --web flag)
-            run_dashboard_mode(settings, host, args.port, dev=args.dev)
+            _serve(run_dashboard_mode, settings, host=host, port=args.port, dev=args.dev)
     except KeyboardInterrupt:
         logger.info("PocketPaw stopped.")
     finally:

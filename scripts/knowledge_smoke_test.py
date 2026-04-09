@@ -1,11 +1,19 @@
-"""Test script — create a CFO agent with knowledge base.
+"""Manual smoke test — create a CFO agent and ingest knowledge docs.
 
-Run with: uv run python tests/fixtures/knowledge/test_agent_setup.py
+This is a development helper, not a pytest test. It lives under ``scripts/``
+(alongside ``a2a_smoke_test.py``) rather than ``tests/`` so pytest doesn't
+try to collect it and so it doesn't pollute CI.
+
+Run with:
+
+    uv run python scripts/knowledge_smoke_test.py
 
 Prerequisites:
-  1. Backend running: uv run pocketpaw serve
-  2. Logged in (have a token)
-  3. Active workspace
+    1. Backend running: ``uv run pocketpaw serve``
+    2. Paste a bearer token into ``TOKEN`` below
+    3. Place the three sample docs — ``nexwrk-financials.md``,
+       ``nexwrk-product.md``, ``nexwrk-team.md`` — in the same directory
+       as this script before running.
 """
 
 import asyncio
@@ -14,7 +22,7 @@ from pathlib import Path
 import httpx
 
 BASE = "http://localhost:8888/api/v1"
-TOKEN = ""  # Paste your JWT token here
+TOKEN = ""  # Paste your bearer token here before running
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",

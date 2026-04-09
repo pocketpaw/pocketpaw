@@ -1,5 +1,7 @@
 # Tests for API v1 settings router.
 # Created: 2026-02-20
+# Updated: 2026-04-09 — added regression coverage that GET /settings never
+# returns SECRET_FIELDS (API keys, tokens, passwords) over REST.
 
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from pocketpaw.api.v1.settings import _IMMUTABLE_FIELDS, router
+from pocketpaw.credentials import SECRET_FIELDS
 
 
 @pytest.fixture
@@ -37,6 +40,39 @@ class TestGetSettings:
         data = resp.json()
         assert data["agent_backend"] == "claude_agent_sdk"
         assert data["web_port"] == 8888
+
+    @patch("pocketpaw.config.Settings.load")
+    def test_get_settings_never_returns_secrets(self, mock_load, client):
+        """GET /settings must strip every SECRET_FIELDS entry from the response.
+
+        Regression for the v0.4.16 fix where the previous handler only
+        skipped ``_``-prefixed fields, leaking API keys and bot tokens to
+        any caller with the ``settings:read`` scope.
+        """
+        settings = MagicMock()
+        # Mix a safe field with every declared secret field so we can assert
+        # each one is scrubbed individually.
+        settings.model_fields = {"agent_backend": None, **{f: None for f in SECRET_FIELDS}}
+        settings.agent_backend = "claude_agent_sdk"
+        for field in SECRET_FIELDS:
+            setattr(settings, field, f"SECRET_{field}")
+        mock_load.return_value = settings
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Safe fields are still returned.
+        assert data["agent_backend"] == "claude_agent_sdk"
+
+        # Secrets are filtered out entirely — not masked, not present.
+        leaked = sorted(f for f in SECRET_FIELDS if f in data)
+        assert leaked == [], f"GET /settings leaked secret fields: {leaked}"
+        for field in SECRET_FIELDS:
+            serialised = f"SECRET_{field}"
+            assert serialised not in resp.text, (
+                f"Secret value for {field} appeared in response body"
+            )
 
 
 class TestUpdateSettings:

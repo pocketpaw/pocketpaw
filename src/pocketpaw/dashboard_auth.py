@@ -131,24 +131,132 @@ async def verify_token(
 
 
 # ---------------------------------------------------------------------------
-# HTTP auth middleware (registered by dashboard.py via app.add_middleware)
+# WebSocket scope authentication (used by AuthMiddleware — issue #883)
+# ---------------------------------------------------------------------------
+
+
+def _ws_scope_auth_ok(scope: dict) -> bool:
+    """Return True if the raw ASGI WebSocket *scope* carries valid auth.
+
+    Checks — in order — query-string ``token`` param, ``Cookie`` header
+    (``pocketpaw_session``), ``Authorization: Bearer …`` header,
+    ``Sec-WebSocket-Protocol`` header, and genuine-localhost bypass.
+
+    This runs *before* the WebSocket upgrade completes so that
+    unauthenticated connections are rejected immediately.
+    """
+    from urllib.parse import parse_qs
+
+    current_token = get_access_token()
+
+    # --- helpers -----------------------------------------------------------
+
+    def _tok_ok(t: str | None) -> bool:
+        if not t:
+            return False
+        if hmac.compare_digest(t, current_token):
+            return True
+        if ":" in t and verify_session_token(t, current_token):
+            return True
+        if t.startswith("pp_") and not t.startswith("ppat_"):
+            try:
+                from pocketpaw.api.api_keys import get_api_key_manager
+
+                if get_api_key_manager().verify(t) is not None:
+                    return True
+            except Exception:
+                pass
+        if t.startswith("ppat_"):
+            try:
+                from pocketpaw.api.oauth2.server import get_oauth_server
+
+                if get_oauth_server().verify_access_token(t) is not None:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    # --- extract headers as a dict (lower-cased keys) ----------------------
+    headers: dict[str, str] = {}
+    for raw_name, raw_val in scope.get("headers", []):
+        headers[raw_name.decode("latin-1").lower()] = raw_val.decode("latin-1")
+
+    # 1. Query-string token
+    qs = scope.get("query_string", b"").decode("latin-1")
+    params = parse_qs(qs)
+    token_vals = params.get("token", [])
+    if token_vals and _tok_ok(token_vals[0]):
+        return True
+
+    # 2. HTTP-only session cookie
+    cookie_header = headers.get("cookie", "")
+    for morsel in cookie_header.split(";"):
+        morsel = morsel.strip()
+        if morsel.startswith("pocketpaw_session="):
+            cookie_token = morsel.split("=", 1)[1]
+            if _tok_ok(cookie_token):
+                return True
+
+    # 3. Authorization header
+    auth_header = headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        bearer = auth_header.removeprefix("Bearer ").strip()
+        if _tok_ok(bearer):
+            return True
+
+    # 4. Sec-WebSocket-Protocol (browser clients)
+    protocols = headers.get("sec-websocket-protocol", "")
+    for proto in protocols.split(","):
+        candidate = proto.strip()
+        if candidate and _tok_ok(candidate):
+            return True
+
+    # 5. Genuine localhost bypass
+    class _ScopeProxy:
+        """Minimal object satisfying ``_is_genuine_localhost`` expectations."""
+
+        def __init__(self, s, h):
+            self.client = type("C", (), {"host": s.get("client", ("", 0))[0]})()
+            self.headers = h
+
+    if _is_genuine_localhost(_ScopeProxy(scope, headers)):
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Auth middleware (registered by dashboard.py via app.add_middleware)
 # ---------------------------------------------------------------------------
 
 
 class AuthMiddleware:
-    """Pure ASGI middleware — explicitly passes WebSocket through.
+    """Pure ASGI middleware with auth checks for both HTTP and WebSocket scopes.
 
     Using a raw ASGI class instead of ``BaseHTTPMiddleware`` avoids known
     issues with Starlette's ``@app.middleware("http")`` blocking WebSocket
     connections in certain middleware stack configurations.
+
+    WebSocket connections are authenticated at the middleware level as a
+    defence-in-depth measure (see issue #883).  Individual WebSocket
+    handlers may perform additional checks, but any *new* WebSocket route
+    is now protected by default.
     """
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            if not _ws_scope_auth_ok(scope):
+                # Reject before the upgrade completes.
+                await receive()  # consume websocket.connect
+                await send({"type": "websocket.close", "code": 4003})
+                return
+            await self.app(scope, receive, send)
+            return
         if scope["type"] != "http":
-            # WebSocket / lifespan — pass through immediately
+            # lifespan — pass through immediately
             await self.app(scope, receive, send)
             return
         # HTTP — run the auth dispatch
@@ -208,9 +316,8 @@ async def _auth_dispatch(request: Request) -> Response | None:
     exempt_paths = [
         "/static",
         "/favicon.ico",
-        "/ws",  # WebSocket handles its own auth in dashboard_ws.py
-        "/v1/ws",  # v1 WebSocket (short path) — same handler, same auth
-        "/api/v1/ws",  # v1 WebSocket — same handler, same auth
+        # NOTE: /ws, /v1/ws, /api/v1/ws are no longer exempted here — WebSocket
+        # scopes are now authenticated at the middleware level (issue #883).
         "/api/auth/login",
         "/api/v1/auth/login",
         "/api/v1/docs",

@@ -512,3 +512,165 @@ class TestLoginRateLimit:
         req = self._make_request("/static/some-asset.js", method="GET")
         await _auth_dispatch(req)
         mock_auth_limiter.check.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #883 — WebSocket middleware auth (defence-in-depth)
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketMiddlewareAuth:
+    """AuthMiddleware must authenticate WebSocket scopes *before* the upgrade
+    completes, so that any new WebSocket route is protected by default (issue #883).
+    """
+
+    def _ws_scope(
+        self,
+        path: str = "/ws",
+        query_string: str = "",
+        headers: dict[str, str] | None = None,
+        client: tuple[str, int] = ("10.0.0.1", 12345),
+    ) -> dict:
+        raw_headers = []
+        for k, v in (headers or {}).items():
+            raw_headers.append((k.lower().encode(), v.encode()))
+        return {
+            "type": "websocket",
+            "path": path,
+            "query_string": query_string.encode(),
+            "headers": raw_headers,
+            "client": client,
+        }
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    def test_ws_no_token_rejected(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        scope = self._ws_scope()
+        assert _ws_scope_auth_ok(scope) is False
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    def test_ws_valid_query_token(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        scope = self._ws_scope(query_string="token=tok-secret")
+        assert _ws_scope_auth_ok(scope) is True
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    def test_ws_invalid_query_token(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        scope = self._ws_scope(query_string="token=wrong")
+        assert _ws_scope_auth_ok(scope) is False
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    def test_ws_valid_cookie(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        scope = self._ws_scope(headers={"cookie": "pocketpaw_session=tok-secret"})
+        assert _ws_scope_auth_ok(scope) is True
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    def test_ws_valid_bearer_header(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        scope = self._ws_scope(headers={"authorization": "Bearer tok-secret"})
+        assert _ws_scope_auth_ok(scope) is True
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    def test_ws_valid_session_token(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        session = create_session_token("tok-secret", ttl_hours=1)
+        scope = self._ws_scope(query_string=f"token={session}")
+        assert _ws_scope_auth_ok(scope) is True
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
+    def test_ws_localhost_bypass(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        scope = self._ws_scope(client=("127.0.0.1", 9999))
+        assert _ws_scope_auth_ok(scope) is True
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    def test_ws_sec_websocket_protocol(self, mock_local, mock_token):
+        from pocketpaw.dashboard_auth import _ws_scope_auth_ok
+
+        scope = self._ws_scope(headers={"sec-websocket-protocol": "tok-secret"})
+        assert _ws_scope_auth_ok(scope) is True
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    async def test_middleware_closes_unauthenticated_ws(self, mock_local, mock_token):
+        """AuthMiddleware must send websocket.close for unauthenticated WS."""
+        from pocketpaw.dashboard_auth import AuthMiddleware
+
+        downstream_called = False
+
+        async def downstream_app(scope, receive, send):
+            nonlocal downstream_called
+            downstream_called = True
+
+        middleware = AuthMiddleware(downstream_app)
+        scope = self._ws_scope()
+        messages_sent = []
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        async def send(msg):
+            messages_sent.append(msg)
+
+        await middleware(scope, receive, send)
+        assert not downstream_called
+        assert len(messages_sent) == 1
+        assert messages_sent[0]["type"] == "websocket.close"
+        assert messages_sent[0]["code"] == 4003
+
+    @patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok-secret")
+    @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False)
+    async def test_middleware_passes_authenticated_ws(self, mock_local, mock_token):
+        """AuthMiddleware must pass authenticated WS to downstream app."""
+        from pocketpaw.dashboard_auth import AuthMiddleware
+
+        downstream_called = False
+
+        async def downstream_app(scope, receive, send):
+            nonlocal downstream_called
+            downstream_called = True
+
+        middleware = AuthMiddleware(downstream_app)
+        scope = self._ws_scope(query_string="token=tok-secret")
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        async def send(msg):
+            pass
+
+        await middleware(scope, receive, send)
+        assert downstream_called
+
+    async def test_middleware_passes_lifespan_through(self):
+        """Lifespan scopes must always pass through without auth."""
+        from pocketpaw.dashboard_auth import AuthMiddleware
+
+        downstream_called = False
+
+        async def downstream_app(scope, receive, send):
+            nonlocal downstream_called
+            downstream_called = True
+
+        middleware = AuthMiddleware(downstream_app)
+        scope = {"type": "lifespan"}
+
+        await middleware(scope, None, None)
+        assert downstream_called

@@ -1,0 +1,10 @@
+{
+  "level": "component",
+  "title": "Components -- LLM \u0026 Inference",
+  "description": "Component-level view of LLM \u0026 Inference",
+  "elements": [
+    "llm",
+    "deepwork"
+  ],
+  "relationships": []
+}

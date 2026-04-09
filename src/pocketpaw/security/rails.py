@@ -4,11 +4,14 @@ Shared dangerous-command patterns — single source of truth.
 Every security rail in the codebase (Guardian, ShellTool, pocketpaw_native,
 claude_sdk) imports from here.  **Do not define ad-hoc pattern lists elsewhere.**
 
-Two exports:
+Exports:
   DANGEROUS_PATTERNS           – raw regex strings (case-insensitive intent)
   COMPILED_DANGEROUS_PATTERNS  – pre-compiled ``re.Pattern`` objects (IGNORECASE)
   DANGEROUS_SUBSTRINGS         – plain lowercase strings for substring matching
                                  (used by claude_sdk's PreToolUse hook)
+  is_substring_blocked()       – canonical helper; always prefer this over
+                                 iterating DANGEROUS_SUBSTRINGS directly so that
+                                 case-insensitive matching is guaranteed.
 """
 
 import re
@@ -20,12 +23,14 @@ import re
 DANGEROUS_PATTERNS: list[str] = [
     # -- Destructive file operations --
     r"rm\s+(-[rf]+\s+)*[/~]",  # rm -rf /, rm -r -f ~, etc.
+    r"rm\s+[/~]\s+(-[rf]+\s*)+",  # rm / -rf, rm ~ -fr
     r"rm\s+(-[rf]+\s+)*\*",  # rm -rf *
     r"sudo\s+rm\b",  # Any sudo rm
     r">\s*/dev/",  # Write to devices
     r">\s*/etc/",  # Overwrite system config
     r"mkfs\.",  # Format filesystem
     r"dd\s+if=",  # Disk operations
+    r"dd\s+.*of=/dev/",  # Disk device writes via dd
     r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  # Fork bomb
     r"chmod\s+(-R\s+)?777\s+/",  # Dangerous permissions on root
     r"find\s+/\s+.*-delete",  # find / -delete
@@ -42,7 +47,11 @@ DANGEROUS_PATTERNS: list[str] = [
     r"xxd\s+-r\s*.*\|\s*(ba)?sh",  # xxd hex decode to shell
     r"\beval\s+[\"'\$]",  # eval "...", eval $VAR
     r"\bexec\s+[\"'\$]",  # exec "...", exec $VAR
+    r"\$\{IFS\}",  # IFS injection style spacing bypass
     r"echo\s+.*\|\s*base64\s+(-d|--decode)",  # echo ... | base64 -d
+    r"\b(invoke-expression|iex)\b\s*[\(\$]",  # PowerShell IEX execution
+    r"new-object\s+net\.webclient",  # PowerShell download primitive
+    r"python[23]?\s+-c\s+.*os\.(system|exec)",  # python -c OS command execution
     # -- Privilege escalation --
     r"sudo\s+(-i|-s)\b",  # sudo -i / sudo -s (interactive root shell)
     r"sudo\s+su\b",  # sudo su
@@ -92,7 +101,9 @@ COMPILED_DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
 # ---------------------------------------------------------------------------
 DANGEROUS_SUBSTRINGS: list[str] = [
     "rm -rf /",
+    "rm / -rf",
     "rm -rf ~",
+    "rm ~ -rf",
     "rm -rf *",
     "sudo rm",
     "> /dev/",
@@ -102,6 +113,7 @@ DANGEROUS_SUBSTRINGS: list[str] = [
     ":(){ :|:& };:",
     "dd if=/dev/zero",
     "dd if=/dev/random",
+    "dd of=/dev/",
     "> /etc/passwd",
     "> /etc/shadow",
     "curl | sh",
@@ -120,6 +132,12 @@ DANGEROUS_SUBSTRINGS: list[str] = [
     'eval "',
     "eval $",
     "eval '",
+    "${ifs}",
+    "invoke-expression",
+    "iex ",
+    "new-object net.webclient",
+    "os.system(",
+    "os.exec(",
     # Privilege escalation
     "sudo -i",
     "sudo -s",
@@ -146,3 +164,23 @@ DANGEROUS_SUBSTRINGS: list[str] = [
     "parted /dev/",
     "find / -delete",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Canonical helper — always use this instead of raw ``sub in command`` so
+# that case-insensitivity is enforced at the source and call sites cannot
+# accidentally re-introduce the case-sensitive bypass (OWASP A01).
+# ---------------------------------------------------------------------------
+
+
+def is_substring_blocked(command: str) -> str | None:
+    """Return the first matching substring if *command* is dangerous, else ``None``.
+
+    Matching is case-insensitive: ``'SUDO RM'`` is equivalent to ``'sudo rm'``.
+    Prefer this helper over iterating :data:`DANGEROUS_SUBSTRINGS` directly.
+    """
+    command_lower = command.lower()
+    for sub in DANGEROUS_SUBSTRINGS:
+        if sub in command_lower:
+            return sub
+    return None

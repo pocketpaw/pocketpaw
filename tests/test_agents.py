@@ -132,10 +132,10 @@ class TestClaudeAgentSDK:
         assert "PocketPaw Tools" in _DEFAULT_INSTRUCTIONS
 
     def test_sdk_has_dangerous_patterns(self):
-        from pocketpaw.agents.claude_sdk import DANGEROUS_PATTERNS
+        from pocketpaw.security.rails import DANGEROUS_SUBSTRINGS
 
-        assert isinstance(DANGEROUS_PATTERNS, list)
-        assert "rm -rf /" in DANGEROUS_PATTERNS
+        assert isinstance(DANGEROUS_SUBSTRINGS, list)
+        assert "rm -rf /" in DANGEROUS_SUBSTRINGS
 
     @pytest.mark.asyncio
     async def test_sdk_status(self):

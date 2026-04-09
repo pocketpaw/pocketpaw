@@ -1,0 +1,18 @@
+{
+  "level": "component",
+  "title": "Components -- CLI \u0026 Interfaces",
+  "description": "Component-level view of CLI \u0026 Interfaces",
+  "elements": [
+    "cli",
+    "browser",
+    "js",
+    "features"
+  ],
+  "relationships": [
+    {
+      "source": "cli",
+      "target": "api",
+      "description": "CLI communicates with backend API for system management"
+    }
+  ]
+}

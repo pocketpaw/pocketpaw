@@ -3619,7 +3619,7 @@ wheels = [
 
 [[package]]
 name = "pocketpaw"
-version = "0.4.15"
+version = "0.4.16"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

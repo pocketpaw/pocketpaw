@@ -1,0 +1,12 @@
+{
+  "level": "component",
+  "title": "Components -- Skills \u0026 Tools",
+  "description": "Component-level view of Skills \u0026 Tools",
+  "elements": [
+    "skills",
+    "tools",
+    "kits",
+    "builtins"
+  ],
+  "relationships": []
+}

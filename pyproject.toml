@@ -1,7 +1,7 @@
-# Updated: 2026-03-17 — Release 0.4.10: Soul Protocol, agent primitives, Discord overhaul, LiteLLM.
+# Updated: 2026-04-09 — Release 0.4.16: security rollup (CredentialStore v2, WS auth, dangerous-cmd hardening, OWASP fixes), discli 0.7, soul 0.2.9, Python 3.14 warning, fast-chat disabled for CLI compaction.
 [project]
 name = "pocketpaw"
-version = "0.4.15"
+version = "0.4.16"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -44,7 +44,7 @@ dependencies = [
     "openai>=1.60.0",
     "anthropic>=0.45.0",
     # Agent Backend (recommended default)
-    "claude-agent-sdk>=0.1.30",
+    "claude-agent-sdk>=0.1.56",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",

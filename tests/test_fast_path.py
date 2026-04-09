@@ -1,21 +1,20 @@
-"""Tests for the fast-path optimization and persistent client in ClaudeAgentSDK.
+"""Tests for dispatch logic and the persistent client in ClaudeAgentSDK.
 
 Covers:
-- _fast_chat() direct API streaming
-- Error handling in fast-path
-- Stop flag respected mid-stream
-- Consecutive role merging
-- Dispatch: SIMPLE -> fast path, MODERATE -> standard, routing disabled -> standard
-- Persistent ClaudeSDKClient reuse, reconnection, fallback, cleanup
+- Dispatch: all messages (SIMPLE, MODERATE, routing disabled) flow through
+  the persistent Claude Code CLI path. The old direct-API ``_fast_chat``
+  bypass was removed in 0.4.16 because it sidestepped the CLI's built-in
+  conversation compaction and caused unrecoverable context-overflow errors
+  on long sessions.
+- Persistent ``ClaudeSDKClient`` reuse, reconnection, fallback, cleanup.
 """
 
 from unittest.mock import MagicMock, patch
 
 from pocketpaw.agents.claude_sdk import ClaudeAgentSDK
 from pocketpaw.agents.model_router import ModelSelection, TaskComplexity
-from pocketpaw.agents.protocol import AgentEvent
 
-# Patch target for local imports inside _fast_chat / chat
+# Patch targets for local imports inside chat()
 _LLM_CLIENT = "pocketpaw.llm.client.resolve_llm_client"
 _MODEL_ROUTER = "pocketpaw.agents.model_router.ModelRouter"
 
@@ -130,148 +129,29 @@ class _FakeSDKClient:
 
 
 # ---------------------------------------------------------------------------
-# Tests for _fast_chat
-# ---------------------------------------------------------------------------
-
-
-async def test_fast_chat_yields_message_and_done():
-    """_fast_chat should yield message events then a done event."""
-    sdk = _make_sdk()
-
-    fake_client = MagicMock()
-    fake_client.messages.stream = MagicMock(return_value=_FakeStreamCM(["Hello", " world"]))
-
-    with patch(_LLM_CLIENT) as mock_resolve:
-        mock_llm = MagicMock()
-        mock_llm.create_anthropic_client.return_value = fake_client
-        mock_resolve.return_value = mock_llm
-
-        events = []
-        async for ev in sdk._fast_chat(
-            "hi",
-            system_prompt="You are helpful.",
-            model="claude-haiku-4-5-20251001",
-        ):
-            events.append(ev)
-
-    types = [e.type for e in events]
-    assert types == ["message", "message", "done"]
-    assert events[0].content == "Hello"
-    assert events[1].content == " world"
-
-
-async def test_fast_chat_handles_api_error():
-    """_fast_chat should yield an error event on API failure."""
-    sdk = _make_sdk()
-
-    with patch(_LLM_CLIENT) as mock_resolve:
-        mock_llm = MagicMock()
-        mock_llm.create_anthropic_client.side_effect = RuntimeError("API key invalid")
-        mock_llm.format_api_error.return_value = "Formatted: API key invalid"
-        mock_resolve.return_value = mock_llm
-
-        events = []
-        async for ev in sdk._fast_chat(
-            "hi",
-            system_prompt="You are helpful.",
-            model="claude-haiku-4-5-20251001",
-        ):
-            events.append(ev)
-
-    assert len(events) == 1
-    assert events[0].type == "error"
-    assert "API key invalid" in events[0].content
-
-
-async def test_fast_chat_respects_stop_flag():
-    """_fast_chat should break early when _stop_flag is set."""
-    sdk = _make_sdk()
-
-    fake_client = MagicMock()
-    fake_client.messages.stream = MagicMock(
-        return_value=_FakeStreamCM(["chunk1", "chunk2", "chunk3"])
-    )
-
-    with patch(_LLM_CLIENT) as mock_resolve:
-        mock_llm = MagicMock()
-        mock_llm.create_anthropic_client.return_value = fake_client
-        mock_resolve.return_value = mock_llm
-
-        events = []
-        async for ev in sdk._fast_chat(
-            "hi",
-            system_prompt="test",
-            model="claude-haiku-4-5-20251001",
-        ):
-            events.append(ev)
-            # Set stop flag after receiving the first message event
-            if ev.type == "message" and len(events) == 1:
-                sdk._stop_flag = True
-
-    # Should have gotten chunk1 + done (stopped before chunk2/chunk3)
-    message_events = [e for e in events if e.type == "message"]
-    assert len(message_events) == 1
-    assert message_events[0].content == "chunk1"
-
-
-async def test_fast_chat_merges_consecutive_roles():
-    """Consecutive user messages in history should be merged."""
-    sdk = _make_sdk()
-
-    captured_messages = []
-    fake_client = MagicMock()
-
-    def _capture_stream(**kwargs):
-        captured_messages.extend(kwargs.get("messages", []))
-        return _FakeStreamCM(["ok"])
-
-    fake_client.messages.stream = MagicMock(side_effect=_capture_stream)
-
-    history = [
-        {"role": "user", "content": "first"},
-        {"role": "user", "content": "second"},
-        {"role": "assistant", "content": "reply"},
-    ]
-
-    with patch(_LLM_CLIENT) as mock_resolve:
-        mock_llm = MagicMock()
-        mock_llm.create_anthropic_client.return_value = fake_client
-        mock_resolve.return_value = mock_llm
-
-        events = []
-        async for ev in sdk._fast_chat(
-            "third",
-            system_prompt="test",
-            history=history,
-            model="claude-haiku-4-5-20251001",
-        ):
-            events.append(ev)
-
-    # History had 2 consecutive user msgs -> merged into 1
-    # Then assistant, then current user msg -> 3 API messages total
-    assert len(captured_messages) == 3
-    assert captured_messages[0]["role"] == "user"
-    assert "first\nsecond" in captured_messages[0]["content"]
-    assert captured_messages[1]["role"] == "assistant"
-    assert captured_messages[2]["role"] == "user"
-    assert captured_messages[2]["content"] == "third"
-
-
-# ---------------------------------------------------------------------------
 # Tests for chat() dispatch logic
 # ---------------------------------------------------------------------------
 
 
 async def test_chat_dispatches_fast_path_for_simple():
-    """chat() should call _fast_chat for SIMPLE messages."""
+    """SIMPLE messages now go through the persistent CLI path (fast-chat disabled)."""
     sdk = _make_sdk()
 
-    # Stub _fast_chat to yield a known event
-    async def _fake_fast_chat(msg, *, system_prompt, history, model):
-        yield AgentEvent(type="message", content="fast!")
-        yield AgentEvent(type="done", content="")
+    # Create a fake response message — same setup as moderate path
+    fake_msg = MagicMock()
+    fake_msg.__class__.__name__ = "AssistantMessage"
+    fake_msg.content = "simple response"
 
-    sdk._fast_chat = _fake_fast_chat
+    fake_client = _FakeSDKClient(responses=[fake_msg])
+
+    sdk._ClaudeSDKClient = lambda **kwargs: fake_client
+    sdk._ClaudeAgentOptions = MagicMock()
+    sdk._HookMatcher = MagicMock()
+    sdk._StreamEvent = None
+    sdk._AssistantMessage = None
+    sdk._SystemMessage = None
+    sdk._UserMessage = None
+    sdk._ResultMessage = None
 
     selection = ModelSelection(
         complexity=TaskComplexity.SIMPLE,
@@ -286,17 +166,19 @@ async def test_chat_dispatches_fast_path_for_simple():
         mock_llm.is_gemini = False
         mock_llm.is_litellm = False
         mock_llm.is_openrouter = False
+        mock_llm.to_sdk_env.return_value = {"ANTHROPIC_API_KEY": "sk-test"}
         mock_resolve.return_value = mock_llm
 
         with patch(_MODEL_ROUTER) as MockRouter:
             MockRouter.return_value.classify.return_value = selection
+            with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
+                events = []
+                async for ev in sdk.run("hi", system_prompt="identity"):
+                    events.append(ev)
 
-            events = []
-            async for ev in sdk.run("hi", system_prompt="identity"):
-                events.append(ev)
-
-    assert any(e.content == "fast!" for e in events)
-    assert events[-1].type == "done"
+    # Simple messages now use the persistent client (same as moderate)
+    assert fake_client.queries == ["hi"]
+    assert any(e.type == "done" for e in events)
 
 
 async def test_chat_uses_persistent_client_for_moderate():
@@ -382,36 +264,6 @@ async def test_chat_standard_path_when_routing_disabled():
 
     # "hi" would be SIMPLE, but routing is disabled -> standard path via persistent client
     assert any(e.type == "done" for e in events)
-
-
-async def test_fast_chat_prompt_passes_identity():
-    """_fast_chat should pass the identity system prompt to the API."""
-    sdk = _make_sdk()
-
-    captured_system = []
-    fake_client = MagicMock()
-
-    def _capture_stream(**kwargs):
-        captured_system.append(kwargs.get("system", ""))
-        return _FakeStreamCM(["ok"])
-
-    fake_client.messages.stream = MagicMock(side_effect=_capture_stream)
-
-    with patch(_LLM_CLIENT) as mock_resolve:
-        mock_llm = MagicMock()
-        mock_llm.create_anthropic_client.return_value = fake_client
-        mock_resolve.return_value = mock_llm
-
-        events = []
-        async for ev in sdk._fast_chat(
-            "hi",
-            system_prompt="You are PocketPaw.",
-            model="claude-haiku-4-5-20251001",
-        ):
-            events.append(ev)
-
-    assert len(captured_system) == 1
-    assert "You are PocketPaw." in captured_system[0]
 
 
 # ---------------------------------------------------------------------------

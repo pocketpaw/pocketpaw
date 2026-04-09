@@ -1,0 +1,23 @@
+{
+  "level": "component",
+  "title": "Components -- Observability \u0026 Operations",
+  "description": "Component-level view of Observability \u0026 Operations",
+  "elements": [
+    "health",
+    "audit",
+    "checks",
+    "missioncontrol"
+  ],
+  "relationships": [
+    {
+      "source": "audit",
+      "target": "observability-operations",
+      "description": "Logs all operational events and security-relevant activities"
+    },
+    {
+      "source": "health",
+      "target": "observability-operations",
+      "description": "Monitors system health and component availability"
+    }
+  ]
+}
