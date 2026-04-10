@@ -691,10 +691,7 @@ async def list_notifications(
     elif agent_id:
         notifications = await manager.get_notifications_for_agent(agent_id, unread_only)
     else:
-        notifications = await manager._store.get_notifications_for_agent("", False, limit)
-        # Get all notifications (hacky but works for now)
-        notifications = list(manager._store._notifications.values())
-        notifications.sort(key=lambda n: n.created_at, reverse=True)
+        notifications = await manager.get_all_notifications(limit=limit)
 
     return {
         "notifications": [n.to_dict() for n in notifications[:limit]],

@@ -759,6 +759,10 @@ class MissionControlManager:
         """Get notifications for an agent."""
         return await self._store.get_notifications_for_agent(agent_id, unread_only)
 
+    async def get_all_notifications(self, limit: int = 50) -> list[Notification]:
+        """Get all notifications regardless of agent."""
+        return await self._store.get_all_notifications(limit=limit)
+
     async def get_undelivered_notifications(
         self, agent_id: str | None = None
     ) -> list[Notification]:
