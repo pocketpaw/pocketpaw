@@ -19,6 +19,7 @@ from pocketpaw.api.v1.schemas.auth import (
     SessionTokenResponse,
     TokenRegenerateResponse,
 )
+from pocketpaw.http_utils import is_request_secure
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ async def cookie_login(request: Request):
         samesite="lax",
         path="/",
         max_age=max_age,
+        secure=is_request_secure(request),
     )
     return response
 
@@ -136,7 +138,7 @@ async def get_qr_code(request: Request):
     if not auth_limiter.allow(client_ip):
         return JSONResponse(status_code=429, content={"detail": "Too many requests"})
 
-    import qrcode
+    import qrcode  # type: ignore
 
     from pocketpaw.config import get_access_token
     from pocketpaw.security.session_tokens import create_session_token
