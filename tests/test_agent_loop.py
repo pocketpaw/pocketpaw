@@ -748,6 +748,62 @@ async def test_process_message_cleans_up_lock_on_inner_exception(agent_loop, moc
 
 
 @pytest.mark.asyncio
+async def test_lock_released_on_exception_concurrent(agent_loop, mock_memory):
+    """
+    Tests that a waiting coroutine can acquire the same session lock
+    after the first coroutine fails while holding it.
+
+    This exercises the actual concurrency path in _process_message rather than
+    only asserting single-coroutine cleanup.
+    """
+    resolved_key = "resolved:chat1:user1"
+    mock_memory.resolve_session_key = AsyncMock(return_value=resolved_key)
+
+    entered_first = asyncio.Event()
+    allow_first_to_fail = asyncio.Event()
+    results: list[str] = []
+    call_count = 0
+
+    async def inner_side_effect(message, session_key):
+        nonlocal call_count
+        call_count += 1
+
+        if call_count == 1:
+            entered_first.set()
+            await allow_first_to_fail.wait()
+            raise RuntimeError("A failed")
+
+        results.append("B ran")
+
+    agent_loop._process_message_inner = AsyncMock(side_effect=inner_side_effect)
+
+    msg_a = InboundMessage(
+        channel=Channel.CLI,
+        sender_id="user1",
+        chat_id="chat1",
+        content="Hello from A",
+    )
+    msg_b = InboundMessage(
+        channel=Channel.CLI,
+        sender_id="user1",
+        chat_id="chat1",
+        content="Hello from B",
+    )
+
+    task_a = asyncio.create_task(agent_loop._process_message(msg_a))
+    await entered_first.wait()
+
+    task_b = asyncio.create_task(agent_loop._process_message(msg_b))
+    await asyncio.sleep(0)
+    allow_first_to_fail.set()
+
+    results_out = await asyncio.gather(task_a, task_b, return_exceptions=True)
+
+    assert any(isinstance(result, RuntimeError) for result in results_out)
+    assert "B ran" in results
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_gc_task():
     """
     stop() must cancel the GC background task so it does not outlive the loop.

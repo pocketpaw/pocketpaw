@@ -315,6 +315,7 @@ class AgentLoop:
         # Resolve alias so two chats aliased to the same session serialize correctly
         resolved_key = await self.memory.resolve_session_key(session_key)
 
+        lock: asyncio.Lock | None = None
         try:
             # Global concurrency limit — blocks until a slot is available
             async with self._global_semaphore:
@@ -332,17 +333,18 @@ class AgentLoop:
                         logger.info("Session lock acquired for %s", resolved_key)
                     await self._process_message_inner(message, resolved_key)
 
-                # Eager cleanup: remove the lock immediately when no further
-                # coroutines are waiting on it.  The GC task is a safety net
-                # for the cases where this eager path is skipped (e.g. after
-                # an exception propagates past this block).
-                if not lock.locked():
-                    self._session_locks.pop(resolved_key, None)
-                    self._session_lock_last_used.pop(resolved_key, None)
                 logger.info("Message processing complete for %s", session_key)
         except asyncio.CancelledError:
             logger.info("Processing cancelled for session %s", session_key)
             raise
+        finally:
+            # Eager cleanup: remove the lock immediately when no further
+            # coroutines are waiting on it.  The GC task is a safety net
+            # for the cases where this eager path is skipped (e.g. after
+            # an exception propagates past this block).
+            if lock is not None and not lock.locked():
+                self._session_locks.pop(resolved_key, None)
+                self._session_lock_last_used.pop(resolved_key, None)
 
     _WELCOME_EXCLUDED = frozenset({Channel.WEBSOCKET, Channel.CLI, Channel.SYSTEM, Channel.DISCORD})
 
@@ -702,7 +704,9 @@ class AgentLoop:
                 cancelled = True
                 logger.info("Stream cancelled for session %s", session_key)
             finally:
-                await run_iter.aclose()
+                aclose = getattr(run_iter, "aclose", None)
+                if callable(aclose):
+                    await aclose()
 
             # 4. Send stream end marker (with any media files detected)
             # Fallback: if no media tags found in tool_result chunks,
@@ -737,7 +741,13 @@ class AgentLoop:
 
             # Deduplicate while preserving order
             seen: set[str] = set()
-            media_paths = [p for p in media_paths if not (p in seen or seen.add(p))]
+            deduped_media_paths: list[str] = []
+            for path in media_paths:
+                if path in seen:
+                    continue
+                seen.add(path)
+                deduped_media_paths.append(path)
+            media_paths = deduped_media_paths
             metadata_out: dict[str, Any] = {}
             if voice_media_paths:
                 metadata_out["voice_media_paths"] = voice_media_paths
