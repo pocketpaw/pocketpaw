@@ -21,11 +21,7 @@ def normalize_ripple_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
 
     name = spec.get("title") or spec.get("name")
-    pocket_id = (
-        spec.get("id")
-        or (spec.get("lifecycle") or {}).get("id")
-        or f"pocket-{_short_id()}"
-    )
+    pocket_id = spec.get("id") or (spec.get("lifecycle") or {}).get("id") or f"pocket-{_short_id()}"
     meta = spec.get("metadata") or {}
     color = spec.get("color") or meta.get("color", "#0A84FF")
 

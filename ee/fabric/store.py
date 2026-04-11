@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import json
-import aiosqlite
 from pathlib import Path
 from typing import Any
+
+import aiosqlite
 
 from ee.fabric.models import (
     FabricLink,
@@ -15,9 +16,7 @@ from ee.fabric.models import (
     FabricQueryResult,
     ObjectType,
     PropertyDef,
-    _gen_id,
 )
-
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS fabric_object_types (
@@ -81,19 +80,34 @@ class FabricStore:
     # --- Object Types ---
 
     async def define_type(
-        self, name: str, properties: list[PropertyDef],
-        description: str = "", icon: str = "box", color: str = "#0A84FF",
+        self,
+        name: str,
+        properties: list[PropertyDef],
+        description: str = "",
+        icon: str = "box",
+        color: str = "#0A84FF",
     ) -> ObjectType:
         obj_type = ObjectType(
-            name=name, description=description, icon=icon, color=color,
+            name=name,
+            description=description,
+            icon=icon,
+            color=color,
             properties=properties,
         )
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO fabric_object_types (id, name, description, icon, color, properties_schema) VALUES (?, ?, ?, ?, ?, ?)",
-                (obj_type.id, obj_type.name, obj_type.description, obj_type.icon, obj_type.color,
-                 json.dumps([p.model_dump() for p in properties])),
+                "INSERT INTO fabric_object_types"
+                " (id, name, description, icon, color, properties_schema)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    obj_type.id,
+                    obj_type.name,
+                    obj_type.description,
+                    obj_type.icon,
+                    obj_type.color,
+                    json.dumps([p.model_dump() for p in properties]),
+                ),
             )
             await db.commit()
         return obj_type
@@ -102,7 +116,9 @@ class FabricStore:
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM fabric_object_types WHERE id = ?", (type_id,)) as cur:
+            async with db.execute(
+                "SELECT * FROM fabric_object_types WHERE id = ?", (type_id,)
+            ) as cur:
                 row = await cur.fetchone()
                 if not row:
                     return None
@@ -132,8 +148,11 @@ class FabricStore:
         async with self._conn() as db:
             # Cascade: delete links involving objects of this type, then objects, then type
             await db.execute(
-                "DELETE FROM fabric_links WHERE from_object_id IN (SELECT id FROM fabric_objects WHERE type_id = ?) "
-                "OR to_object_id IN (SELECT id FROM fabric_objects WHERE type_id = ?)",
+                "DELETE FROM fabric_links"
+                " WHERE from_object_id IN"
+                " (SELECT id FROM fabric_objects WHERE type_id = ?)"
+                " OR to_object_id IN"
+                " (SELECT id FROM fabric_objects WHERE type_id = ?)",
                 (type_id, type_id),
             )
             await db.execute("DELETE FROM fabric_objects WHERE type_id = ?", (type_id,))
@@ -143,8 +162,11 @@ class FabricStore:
     # --- Objects ---
 
     async def create_object(
-        self, type_id: str, properties: dict[str, Any],
-        source_connector: str | None = None, source_id: str | None = None,
+        self,
+        type_id: str,
+        properties: dict[str, Any],
+        source_connector: str | None = None,
+        source_id: str | None = None,
     ) -> FabricObject:
         obj_type = await self.get_type(type_id)
         obj = FabricObject(
@@ -157,8 +179,18 @@ class FabricStore:
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO fabric_objects (id, type_id, type_name, properties, source_connector, source_id) VALUES (?, ?, ?, ?, ?, ?)",
-                (obj.id, obj.type_id, obj.type_name, json.dumps(properties), source_connector, source_id),
+                "INSERT INTO fabric_objects"
+                " (id, type_id, type_name, properties,"
+                " source_connector, source_id)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    obj.id,
+                    obj.type_id,
+                    obj.type_name,
+                    json.dumps(properties),
+                    source_connector,
+                    source_id,
+                ),
             )
             await db.commit()
         return obj
@@ -181,7 +213,9 @@ class FabricStore:
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "UPDATE fabric_objects SET properties = ?, updated_at = datetime('now') WHERE id = ?",
+                "UPDATE fabric_objects"
+                " SET properties = ?, updated_at = datetime('now')"
+                " WHERE id = ?",
                 (json.dumps(merged), obj_id),
             )
             await db.commit()
@@ -199,17 +233,29 @@ class FabricStore:
 
     # --- Links ---
 
-    async def link(self, from_id: str, to_id: str, link_type: str,
-                   properties: dict[str, Any] | None = None) -> FabricLink:
+    async def link(
+        self, from_id: str, to_id: str, link_type: str, properties: dict[str, Any] | None = None
+    ) -> FabricLink:
         lnk = FabricLink(
-            from_object_id=from_id, to_object_id=to_id,
-            link_type=link_type, properties=properties or {},
+            from_object_id=from_id,
+            to_object_id=to_id,
+            link_type=link_type,
+            properties=properties or {},
         )
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO fabric_links (id, from_object_id, to_object_id, link_type, properties) VALUES (?, ?, ?, ?, ?)",
-                (lnk.id, lnk.from_object_id, lnk.to_object_id, lnk.link_type, json.dumps(lnk.properties)),
+                "INSERT INTO fabric_links"
+                " (id, from_object_id, to_object_id,"
+                " link_type, properties)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    lnk.id,
+                    lnk.from_object_id,
+                    lnk.to_object_id,
+                    lnk.link_type,
+                    json.dumps(lnk.properties),
+                ),
             )
             await db.commit()
         return lnk
@@ -220,7 +266,9 @@ class FabricStore:
             await db.execute("DELETE FROM fabric_links WHERE id = ?", (link_id,))
             await db.commit()
 
-    async def get_linked_objects(self, obj_id: str, link_type: str | None = None) -> list[FabricObject]:
+    async def get_linked_objects(
+        self, obj_id: str, link_type: str | None = None
+    ) -> list[FabricObject]:
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
@@ -259,9 +307,11 @@ class FabricStore:
             if q.link_type:
                 link_cond = (
                     "o.id IN ("
-                    "SELECT to_object_id FROM fabric_links WHERE from_object_id = ? AND link_type = ? "
+                    "SELECT to_object_id FROM fabric_links"
+                    " WHERE from_object_id = ? AND link_type = ? "
                     "UNION "
-                    "SELECT from_object_id FROM fabric_links WHERE to_object_id = ? AND link_type = ?"
+                    "SELECT from_object_id FROM fabric_links"
+                    " WHERE to_object_id = ? AND link_type = ?"
                     ")"
                 )
                 conditions.append(link_cond)
@@ -283,13 +333,16 @@ class FabricStore:
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
             # Count
-            async with db.execute(f"SELECT COUNT(*) as cnt FROM fabric_objects o {where}", params) as cur:
+            async with db.execute(
+                f"SELECT COUNT(*) as cnt FROM fabric_objects o {where}", params
+            ) as cur:
                 row = await cur.fetchone()
                 total = row["cnt"] if row else 0
 
             # Fetch
             async with db.execute(
-                f"SELECT o.* FROM fabric_objects o {where} ORDER BY o.created_at DESC LIMIT ? OFFSET ?",
+                f"SELECT o.* FROM fabric_objects o {where}"
+                " ORDER BY o.created_at DESC LIMIT ? OFFSET ?",
                 [*params, q.limit, q.offset],
             ) as cur:
                 objects = [self._row_to_object(row) async for row in cur]
@@ -315,14 +368,20 @@ class FabricStore:
     def _row_to_type(self, row: Any) -> ObjectType:
         props_raw = json.loads(row["properties_schema"]) if row["properties_schema"] else []
         return ObjectType(
-            id=row["id"], name=row["name"], description=row["description"] or "",
-            icon=row["icon"] or "box", color=row["color"] or "#0A84FF",
+            id=row["id"],
+            name=row["name"],
+            description=row["description"] or "",
+            icon=row["icon"] or "box",
+            color=row["color"] or "#0A84FF",
             properties=[PropertyDef(**p) for p in props_raw],
         )
 
     def _row_to_object(self, row: Any) -> FabricObject:
         return FabricObject(
-            id=row["id"], type_id=row["type_id"], type_name=row["type_name"] or "",
+            id=row["id"],
+            type_id=row["type_id"],
+            type_name=row["type_name"] or "",
             properties=json.loads(row["properties"]) if row["properties"] else {},
-            source_connector=row["source_connector"], source_id=row["source_id"],
+            source_connector=row["source_connector"],
+            source_id=row["source_id"],
         )

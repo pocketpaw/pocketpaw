@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -41,7 +41,9 @@ class AuditQueryResponse(BaseModel):
 @router.get("/audit", response_model=AuditQueryResponse)
 async def query_audit_log(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
-    category: str | None = Query(None, description="Filter by category: decision|data|config|security"),
+    category: str | None = Query(
+        None, description="Filter by category: decision|data|config|security"
+    ),
     actor: str | None = Query(None, description="Filter by actor (agent, user:name, system)"),
     date_from: datetime | None = Query(None, description="ISO datetime lower bound"),
     date_to: datetime | None = Query(None, description="ISO datetime upper bound"),

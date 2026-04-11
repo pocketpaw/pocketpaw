@@ -101,7 +101,11 @@ class ConnectorConnectTool(BaseTool):
                 },
                 "config": {
                     "type": "object",
-                    "description": "Credentials and config (e.g., {'STRIPE_API_KEY': 'sk_...'} or {'BASE_URL': 'https://api.example.com'})",
+                    "description": (
+                        "Credentials and config"
+                        " (e.g., {'STRIPE_API_KEY': 'sk_...'}"
+                        " or {'BASE_URL': 'https://api.example.com'})"
+                    ),
                 },
                 "pocket_id": {
                     "type": "string",
@@ -111,8 +115,9 @@ class ConnectorConnectTool(BaseTool):
             "required": ["connector_name", "config"],
         }
 
-    async def execute(self, connector_name: str, config: dict[str, Any],
-                      pocket_id: str = "default") -> str:
+    async def execute(
+        self, connector_name: str, config: dict[str, Any], pocket_id: str = "default"
+    ) -> str:
         reg = _get_registry()
 
         defn = reg.get_definition(connector_name)
@@ -175,16 +180,17 @@ class ConnectorExecuteTool(BaseTool):
             "required": ["connector_name", "action"],
         }
 
-    async def execute(self, connector_name: str, action: str,
-                      params: dict[str, Any] | None = None,
-                      pocket_id: str = "default") -> str:
+    async def execute(
+        self,
+        connector_name: str,
+        action: str,
+        params: dict[str, Any] | None = None,
+        pocket_id: str = "default",
+    ) -> str:
         reg = _get_registry()
         adapter = reg.get_adapter(pocket_id, connector_name)
         if not adapter:
-            return (
-                f"Connector '{connector_name}' is not connected. "
-                f"Use connector_connect first."
-            )
+            return f"Connector '{connector_name}' is not connected. Use connector_connect first."
 
         result = await adapter.execute(action, params or {})
         if not result.success:

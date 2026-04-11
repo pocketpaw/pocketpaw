@@ -858,7 +858,7 @@ class TestFileGraphAndManagement:
         OperationalError: too many SQL variables. The fix uses a temporary
         table approach to avoid this limit.
         """
-        store = FileMemoryStore(base_path=tmp_path, vector_enabled=True)
+        store = FileMemoryStore(base_path=tmp_path, vector_enabled=True, embedding_provider="hash")
 
         # Create 1050 entries to comfortably exceed SQLite's default variable limit (999)
         entry_ids = []
@@ -941,7 +941,7 @@ class TestFileGraphAndManagement:
 
     async def test_cleanup_orphan_records_with_graph_entities(self, tmp_path):
         """Test that cleanup_orphan_records also cleans up graph relationships correctly."""
-        store = FileMemoryStore(base_path=tmp_path, vector_enabled=True)
+        store = FileMemoryStore(base_path=tmp_path, vector_enabled=True, embedding_provider="hash")
 
         # Create 100 entries with graph relationships
         entry_ids = []

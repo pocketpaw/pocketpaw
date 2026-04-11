@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ee.fabric.models import FabricObject, FabricQuery, FabricQueryResult, ObjectType, PropertyDef
@@ -27,6 +27,7 @@ def _store() -> FabricStore:
 # ---------------------------------------------------------------------------
 # Request / response schemas
 # ---------------------------------------------------------------------------
+
 
 class DefineTypeRequest(BaseModel):
     name: str
@@ -54,6 +55,7 @@ class LinkRequest(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @router.get("/fabric/types", response_model=list[ObjectType])
 async def list_types():
     return await _store().list_types()
@@ -62,16 +64,21 @@ async def list_types():
 @router.post("/fabric/types", response_model=ObjectType, status_code=201)
 async def define_type(req: DefineTypeRequest):
     return await _store().define_type(
-        name=req.name, properties=req.properties,
-        description=req.description, icon=req.icon, color=req.color,
+        name=req.name,
+        properties=req.properties,
+        description=req.description,
+        icon=req.icon,
+        color=req.color,
     )
 
 
 @router.post("/fabric/objects", response_model=FabricObject, status_code=201)
 async def create_object(req: CreateObjectRequest):
     return await _store().create_object(
-        type_id=req.type_id, properties=req.properties,
-        source_connector=req.source_connector, source_id=req.source_id,
+        type_id=req.type_id,
+        properties=req.properties,
+        source_connector=req.source_connector,
+        source_id=req.source_id,
     )
 
 
@@ -91,8 +98,10 @@ async def query_fabric(q: FabricQuery):
 @router.post("/fabric/links", status_code=201)
 async def create_link(req: LinkRequest):
     return await _store().link(
-        from_id=req.from_id, to_id=req.to_id,
-        link_type=req.link_type, properties=req.properties,
+        from_id=req.from_id,
+        to_id=req.to_id,
+        link_type=req.link_type,
+        properties=req.properties,
     )
 
 

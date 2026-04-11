@@ -11,7 +11,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-
 # Valid categories for audit entries
 AuditCategory = Literal["decision", "data", "config", "security"]
 
@@ -27,9 +26,7 @@ class AuditEntry(BaseModel):
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp: str = Field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     pocket_id: str | None = None
     actor: str  # "agent", "user:prakash", "system"
     action: str  # "create_pocket", "approve_action", "connector_sync"
@@ -77,7 +74,7 @@ class AuditEntry(BaseModel):
         }
 
     @classmethod
-    def from_db_row(cls, row: dict) -> "AuditEntry":
+    def from_db_row(cls, row: dict) -> AuditEntry:
         """Deserialize from SQLite row."""
         import json
 

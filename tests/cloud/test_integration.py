@@ -1,7 +1,9 @@
 """Integration smoke test — verify all cloud routes mount correctly."""
+
 from __future__ import annotations
 
 from fastapi import FastAPI
+
 from ee.cloud import mount_cloud
 
 
@@ -80,6 +82,7 @@ def test_license_endpoint_mounted():
 def test_cloud_error_handler_registered():
     """CloudError exception handler should be registered."""
     from ee.cloud.shared.errors import CloudError
+
     app = FastAPI()
     mount_cloud(app)
     assert CloudError in app.exception_handlers

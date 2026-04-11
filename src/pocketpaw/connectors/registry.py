@@ -14,7 +14,6 @@ from pocketpaw.connectors.protocol import (
     ActionSchema,
     ConnectionResult,
     ConnectorStatus,
-    SyncResult,
 )
 from pocketpaw.connectors.yaml_engine import ConnectorDef, DirectRESTAdapter, parse_connector_yaml
 
@@ -45,12 +44,14 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
     if connector_name in _SQL_CONNECTORS:
         try:
             from pocketpaw.connectors.db_adapter import DatabaseAdapter
+
             return DatabaseAdapter(connector_name)
         except Exception:
             return None
     if connector_name in _NOSQL_CONNECTORS:
         try:
             from pocketpaw.connectors.mongo_adapter import MongoDBAdapter
+
             return MongoDBAdapter()
         except Exception:
             return None
@@ -58,8 +59,10 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
         try:
             if connector_name == "gcp":
                 from pocketpaw.connectors.gcp_adapter import GCPAdapter
+
                 return GCPAdapter()
             from pocketpaw.connectors.firebase_adapter import FirebaseAdapter
+
             return FirebaseAdapter()
         except Exception:
             return None
@@ -146,12 +149,16 @@ class ConnectorRegistry:
         for name, defn in self._definitions.items():
             key = f"{pocket_id}:{name}"
             adapter = self._instances.get(key)
-            results.append({
-                "name": name,
-                "display_name": defn.display_name,
-                "icon": defn.icon,
-                "status": ConnectorStatus.CONNECTED if adapter else ConnectorStatus.DISCONNECTED,
-            })
+            results.append(
+                {
+                    "name": name,
+                    "display_name": defn.display_name,
+                    "icon": defn.icon,
+                    "status": ConnectorStatus.CONNECTED
+                    if adapter
+                    else ConnectorStatus.DISCONNECTED,
+                }
+            )
         return results
 
     def reload(self) -> None:

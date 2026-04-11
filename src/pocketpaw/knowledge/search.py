@@ -3,6 +3,7 @@
 No vector DB, no embeddings. BM25 over well-structured LLM-compiled articles
 is highly effective because the compile step already does semantic understanding.
 """
+
 from __future__ import annotations
 
 import logging

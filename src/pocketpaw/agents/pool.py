@@ -3,13 +3,15 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pocketpaw.agents.backend import AgentBackend
@@ -70,8 +72,9 @@ class AgentPool:
             inst = self._instances[agent_id]
             inst.last_active = datetime.now(UTC)
             # Check config staleness
-            from ee.cloud.models.agent import Agent
             from beanie import PydanticObjectId
+
+            from ee.cloud.models.agent import Agent
 
             try:
                 agent_doc = await Agent.get(PydanticObjectId(agent_id))
@@ -90,8 +93,9 @@ class AgentPool:
             return inst
 
         # Build new instance
-        from ee.cloud.models.agent import Agent
         from beanie import PydanticObjectId
+
+        from ee.cloud.models.agent import Agent
 
         agent_doc = await Agent.get(PydanticObjectId(agent_id))
         if not agent_doc:
@@ -141,7 +145,8 @@ class AgentPool:
                 f"{system_prompt}\n\n"
                 "## Your Knowledge Base\n"
                 "Use the following information from your knowledge base to answer questions. "
-                "Always reference this data when relevant instead of making things up or using tools to search.\n\n"
+                "Always reference this data when relevant instead of "
+                "making things up or using tools to search.\n\n"
                 f"{knowledge_context}"
             )
 
@@ -217,9 +222,7 @@ class AgentPool:
             created_from_updated_at=agent_doc.updatedAt,
         )
         self._instances[agent_id] = instance
-        logger.info(
-            "AgentPool: built instance for %s (%s)", agent_doc.name, settings.agent_backend
-        )
+        logger.info("AgentPool: built instance for %s (%s)", agent_doc.name, settings.agent_backend)
         return instance
 
     async def _init_soul(self, agent_doc: Any, settings: Any) -> SoulManager:

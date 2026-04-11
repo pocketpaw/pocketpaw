@@ -6,6 +6,7 @@ Finds:
 - Missing connections (articles that should link but don't)
 - Suggestions for new articles from raw docs not yet compiled
 """
+
 from __future__ import annotations
 
 import json
@@ -67,10 +68,15 @@ async def lint_knowledge(
     for a in articles:
         compiled_ids.update(a.source_docs)
     uncompiled = [d for d in raw_docs if d.get("id") not in compiled_ids]
-    raw_docs_summary = "\n".join(
-        f"- [{d.get('id', '?')}] {d.get('filename') or d.get('source', 'unknown')} ({d.get('content_type', '?')})"
-        for d in uncompiled[:20]
-    ) or "None"
+    raw_docs_summary = (
+        "\n".join(
+            f"- [{d.get('id', '?')}] "
+            f"{d.get('filename') or d.get('source', 'unknown')} "
+            f"({d.get('content_type', '?')})"
+            for d in uncompiled[:20]
+        )
+        or "None"
+    )
 
     prompt = _LINT_PROMPT.format(
         articles_summary=articles_summary,
@@ -91,7 +97,11 @@ async def lint_knowledge(
 
     backend_cls = get_backend_class(backend_name)
     if not backend_cls:
-        return [LintIssue(type="error", severity="error", message=f"Backend '{backend_name}' not available")]
+        return [
+            LintIssue(
+                type="error", severity="error", message=f"Backend '{backend_name}' not available"
+            )
+        ]
 
     agent = backend_cls(settings)
     result_text = ""

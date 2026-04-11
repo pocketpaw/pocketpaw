@@ -10,6 +10,7 @@ Responsibilities (focused orchestrator):
 4. Delegates pocket creation to PocketService
 5. Persists agent messages to MongoDB
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,6 +46,7 @@ async def on_message_for_agents(data: dict) -> None:
     logger.info("Agent bridge: message in group %s from %s: %s", group_id, sender_id, content[:50])
 
     from beanie import PydanticObjectId
+
     from ee.cloud.models.group import Group
 
     try:
@@ -56,11 +58,20 @@ async def on_message_for_agents(data: dict) -> None:
         logger.info("Agent bridge: group %s has no agents", group_id)
         return
 
-    logger.info("Agent bridge: group has %d agents: %s", len(group.agents), [(a.agent, a.respond_mode) for a in group.agents])
+    logger.info(
+        "Agent bridge: group has %d agents: %s",
+        len(group.agents),
+        [(a.agent, a.respond_mode) for a in group.agents],
+    )
 
     for group_agent in group.agents:
         should = await _should_agent_respond(group_agent, content, mentions)
-        logger.info("Agent bridge: agent %s respond_mode=%s should_respond=%s", group_agent.agent, group_agent.respond_mode, should)
+        logger.info(
+            "Agent bridge: agent %s respond_mode=%s should_respond=%s",
+            group_agent.agent,
+            group_agent.respond_mode,
+            should,
+        )
         if should:
             asyncio.create_task(
                 _run_agent_response(
@@ -73,9 +84,7 @@ async def on_message_for_agents(data: dict) -> None:
             )
 
 
-async def _should_agent_respond(
-    group_agent: Any, content: str, mentions: list
-) -> bool:
+async def _should_agent_respond(group_agent: Any, content: str, mentions: list) -> bool:
     """Determine if an agent should respond based on its respond_mode."""
     mode = group_agent.respond_mode
 
@@ -84,10 +93,7 @@ async def _should_agent_respond(
     if mode == "auto":
         return True
     if mode == "mention_only":
-        return any(
-            m.get("type") == "agent" and m.get("id") == group_agent.agent
-            for m in mentions
-        )
+        return any(m.get("type") == "agent" and m.get("id") == group_agent.agent for m in mentions)
     if mode == "smart":
         return await _smart_relevance_check(group_agent.agent, content)
     return False
@@ -96,6 +102,7 @@ async def _should_agent_respond(
 async def _smart_relevance_check(agent_id: str, content: str) -> bool:
     """Use a cheap LLM call to check if the message is relevant to the agent."""
     from beanie import PydanticObjectId
+
     from ee.cloud.models.agent import Agent
 
     try:
@@ -146,10 +153,8 @@ async def _run_agent_response(
     group_members: list[str],
 ) -> None:
     """Run an agent's response and stream it to the group."""
-    from beanie import PydanticObjectId
+    from ee.cloud.models.message import Attachment, Message
     from pocketpaw.agents.pool import get_agent_pool
-
-    from ee.cloud.models.message import Message, Attachment
 
     pool = get_agent_pool()
     session_key = f"cloud:{group_id}:{agent_id}"
@@ -183,9 +188,14 @@ async def _run_agent_response(
     knowledge_context = ""
     try:
         from ee.cloud.agents.knowledge import KnowledgeService
+
         knowledge_context = await KnowledgeService.search_context(agent_id, user_message)
         if knowledge_context:
-            logger.info("Agent bridge: injected %d chars of knowledge for agent %s", len(knowledge_context), agent_id)
+            logger.info(
+                "Agent bridge: injected %d chars of knowledge for agent %s",
+                len(knowledge_context),
+                agent_id,
+            )
     except Exception:
         logger.warning("Knowledge search failed for agent %s", agent_id, exc_info=True)
 
@@ -208,7 +218,9 @@ async def _run_agent_response(
     # Stream response
     full_text = ""
     try:
-        async for event in pool.run(agent_id, user_message, session_key, history, knowledge_context=knowledge_context):
+        async for event in pool.run(
+            agent_id, user_message, session_key, history, knowledge_context=knowledge_context
+        ):
             if event.type == "message":
                 full_text += event.content
                 await ws_manager.broadcast_to_group(

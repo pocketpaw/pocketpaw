@@ -55,6 +55,7 @@ class MongoDBAdapter:
 
             if user and password:
                 from urllib.parse import quote_plus
+
                 uri = f"mongodb://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}"
             else:
                 uri = f"mongodb://{host}:{port}"
@@ -113,9 +114,13 @@ class MongoDBAdapter:
                 method="LOCAL",
                 parameters={
                     "collection": {"type": "string", "required": True},
-                    "filter": {"type": "object", "default": {}, "description": "MongoDB query filter (JSON)"},
+                    "filter": {
+                        "type": "object",
+                        "default": {},
+                        "description": "MongoDB query filter (JSON)",
+                    },
                     "limit": {"type": "integer", "default": 20},
-                    "sort": {"type": "object", "description": "Sort spec, e.g. {\"created\": -1}"},
+                    "sort": {"type": "object", "description": 'Sort spec, e.g. {"created": -1}'},
                     "projection": {"type": "object", "description": "Fields to include/exclude"},
                 },
                 trust_level=TrustLevel.AUTO,
@@ -126,7 +131,11 @@ class MongoDBAdapter:
                 method="LOCAL",
                 parameters={
                     "collection": {"type": "string", "required": True},
-                    "filter": {"type": "object", "required": True, "description": "Query filter or {\"_id\": \"...\"}"},
+                    "filter": {
+                        "type": "object",
+                        "required": True,
+                        "description": 'Query filter or {"_id": "..."}',
+                    },
                 },
                 trust_level=TrustLevel.AUTO,
             ),
@@ -157,7 +166,11 @@ class MongoDBAdapter:
                 method="LOCAL",
                 parameters={
                     "collection": {"type": "string", "required": True},
-                    "pipeline": {"type": "object", "required": True, "description": "Aggregation pipeline array"},
+                    "pipeline": {
+                        "type": "object",
+                        "required": True,
+                        "description": "Aggregation pipeline array",
+                    },
                 },
                 trust_level=TrustLevel.CONFIRM,
             ),
@@ -194,7 +207,11 @@ class MongoDBAdapter:
                 parameters={
                     "collection": {"type": "string", "required": True},
                     "filter": {"type": "object", "required": True},
-                    "update": {"type": "object", "required": True, "description": "Update operators, e.g. {\"$set\": {...}}"},
+                    "update": {
+                        "type": "object",
+                        "required": True,
+                        "description": 'Update operators, e.g. {"$set": {...}}',
+                    },
                 },
                 trust_level=TrustLevel.CONFIRM,
             ),
@@ -240,6 +257,7 @@ class MongoDBAdapter:
         val = params.get(key, default)
         if isinstance(val, str):
             import json
+
             try:
                 return json.loads(val)
             except json.JSONDecodeError:
@@ -248,8 +266,9 @@ class MongoDBAdapter:
 
     def _serialize(self, doc: Any) -> Any:
         """Make MongoDB documents JSON-safe (ObjectId → str, datetime → iso)."""
-        from bson import ObjectId
         from datetime import datetime
+
+        from bson import ObjectId
 
         if isinstance(doc, dict):
             return {k: self._serialize(v) for k, v in doc.items()}
@@ -297,6 +316,7 @@ class MongoDBAdapter:
         if "_id" in query and isinstance(query["_id"], str) and len(query["_id"]) == 24:
             try:
                 from bson import ObjectId
+
                 query["_id"] = ObjectId(query["_id"])
             except Exception:
                 pass
@@ -345,12 +365,14 @@ class MongoDBAdapter:
         for name in sorted(names):
             try:
                 s = await self._db.command("collStats", name)
-                stats.append({
-                    "collection": name,
-                    "documents": s.get("count", 0),
-                    "size_bytes": s.get("size", 0),
-                    "indexes": s.get("nindexes", 0),
-                })
+                stats.append(
+                    {
+                        "collection": name,
+                        "documents": s.get("count", 0),
+                        "size_bytes": s.get("size", 0),
+                        "indexes": s.get("nindexes", 0),
+                    }
+                )
             except Exception:
                 stats.append({"collection": name, "documents": "error"})
         return ActionResult(success=True, data=stats, records_affected=len(stats))
@@ -375,7 +397,9 @@ class MongoDBAdapter:
             return ActionResult(success=False, error="document must be a JSON object")
 
         result = await self._db[coll].insert_one(doc)
-        return ActionResult(success=True, data={"inserted_id": str(result.inserted_id)}, records_affected=1)
+        return ActionResult(
+            success=True, data={"inserted_id": str(result.inserted_id)}, records_affected=1
+        )
 
     async def _update_many(self, params: dict[str, Any]) -> ActionResult:
         coll = params.get("collection", "")
@@ -401,13 +425,23 @@ class MongoDBAdapter:
 
         query = self._parse_json_param(params, "filter", {})
         if not query:
-            return ActionResult(success=False, error="Empty filter — refusing to delete all documents. Pass {\"_confirm_delete_all\": true} to override.")
+            return ActionResult(
+                success=False,
+                error=(
+                    "Empty filter — refusing to delete all documents."
+                    ' Pass {"_confirm_delete_all": true} to override.'
+                ),
+            )
 
         if query == {"_confirm_delete_all": True}:
             query = {}
 
         result = await self._db[coll].delete_many(query)
-        return ActionResult(success=True, data={"deleted": result.deleted_count}, records_affected=result.deleted_count)
+        return ActionResult(
+            success=True,
+            data={"deleted": result.deleted_count},
+            records_affected=result.deleted_count,
+        )
 
     async def sync(self, pocket_id: str) -> SyncResult:
         return SyncResult(success=False, connector_name=self.name, error="Sync not supported")

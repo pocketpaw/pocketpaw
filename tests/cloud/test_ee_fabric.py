@@ -3,12 +3,11 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
 
-from ee.fabric.models import PropertyDef, FabricQuery
+from ee.fabric.models import FabricQuery, PropertyDef
 from ee.fabric.store import FabricStore
 
 
@@ -27,7 +26,8 @@ class TestObjectTypes:
                 PropertyDef(name="email", type="string"),
                 PropertyDef(name="revenue", type="number"),
             ],
-            icon="user", color="#FF6B35",
+            icon="user",
+            color="#FF6B35",
         )
         assert t.id.startswith("ot-")
         assert t.name == "Customer"
@@ -89,7 +89,9 @@ class TestObjects:
     @pytest.mark.asyncio
     async def test_source_tracking(self, store: FabricStore) -> None:
         t = await store.define_type(name="Invoice", properties=[])
-        obj = await store.create_object(t.id, {"amount": 100}, source_connector="stripe", source_id="inv_123")
+        obj = await store.create_object(
+            t.id, {"amount": 100}, source_connector="stripe", source_id="inv_123"
+        )
         assert obj.source_connector == "stripe"
         assert obj.source_id == "inv_123"
 

@@ -23,6 +23,7 @@ from pocketpaw.connectors.protocol import (
 @dataclass
 class ConnectorDef:
     """Parsed connector YAML definition."""
+
     name: str
     display_name: str
     type: str = "generic"
@@ -113,13 +114,15 @@ class DirectRESTAdapter:
             for key, val in act.get("body", {}).items():
                 params[key] = val
 
-            schemas.append(ActionSchema(
-                name=act["name"],
-                description=act.get("description", ""),
-                method=act.get("method", "GET"),
-                parameters=params,
-                trust_level=TrustLevel(act.get("trust_level", "confirm")),
-            ))
+            schemas.append(
+                ActionSchema(
+                    name=act["name"],
+                    description=act.get("description", ""),
+                    method=act.get("method", "GET"),
+                    parameters=params,
+                    trust_level=TrustLevel(act.get("trust_level", "confirm")),
+                )
+            )
         return schemas
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
@@ -142,6 +145,7 @@ class DirectRESTAdapter:
         # Substitute {placeholder} in URL templates — check credentials first, then params
         if url:
             import re
+
             for placeholder in re.findall(r"\{(\w+)\}", url):
                 if placeholder in self._credentials:
                     url = url.replace(f"{{{placeholder}}}", self._credentials[placeholder])
@@ -195,26 +199,42 @@ class DirectRESTAdapter:
                     resp = await client.get(url, params=query_params, headers=headers)
                 elif method == "POST":
                     if use_form:
-                        resp = await client.post(url, data=body_data, params=query_params, headers=headers)
+                        resp = await client.post(
+                            url, data=body_data, params=query_params, headers=headers
+                        )
                     else:
-                        resp = await client.post(url, json=body_data, params=query_params, headers=headers)
+                        resp = await client.post(
+                            url, json=body_data, params=query_params, headers=headers
+                        )
                 elif method == "PUT":
                     if use_form:
-                        resp = await client.put(url, data=body_data, params=query_params, headers=headers)
+                        resp = await client.put(
+                            url, data=body_data, params=query_params, headers=headers
+                        )
                     else:
-                        resp = await client.put(url, json=body_data, params=query_params, headers=headers)
+                        resp = await client.put(
+                            url, json=body_data, params=query_params, headers=headers
+                        )
                 elif method == "PATCH":
                     if use_form:
-                        resp = await client.patch(url, data=body_data, params=query_params, headers=headers)
+                        resp = await client.patch(
+                            url, data=body_data, params=query_params, headers=headers
+                        )
                     else:
-                        resp = await client.patch(url, json=body_data, params=query_params, headers=headers)
+                        resp = await client.patch(
+                            url, json=body_data, params=query_params, headers=headers
+                        )
                 elif method == "DELETE":
                     resp = await client.delete(url, params=query_params, headers=headers)
                 else:
                     return ActionResult(success=False, error=f"Unsupported method: {method}")
 
                 resp.raise_for_status()
-                data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                data = (
+                    resp.json()
+                    if resp.headers.get("content-type", "").startswith("application/json")
+                    else resp.text
+                )
 
                 # Count records — handle wrapped responses (Stripe: {data: [...]})
                 if isinstance(data, list):
@@ -227,7 +247,9 @@ class DirectRESTAdapter:
                 return ActionResult(success=True, data=data, records_affected=records)
 
         except httpx.HTTPStatusError as e:
-            return ActionResult(success=False, error=f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+            return ActionResult(
+                success=False, error=f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            )
         except httpx.RequestError as e:
             return ActionResult(success=False, error=f"Request failed: {e}")
         except Exception as e:
@@ -255,6 +277,7 @@ class DirectRESTAdapter:
                         break
         elif auth_method == "basic":
             import base64
+
             username = self._credentials.get("username", "")
             password = self._credentials.get("password", "")
             encoded = base64.b64encode(f"{username}:{password}".encode()).decode()

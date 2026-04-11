@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from beanie import Indexed
+from pydantic import BaseModel, Field
 
 from ee.cloud.models.base import TimestampedDocument
-from pydantic import BaseModel, Field
 
 
 class AgentConfig(BaseModel):
@@ -21,13 +21,15 @@ class AgentConfig(BaseModel):
     soul_persona: str = ""
     soul_archetype: str = ""
     soul_values: list[str] = Field(default_factory=lambda: ["helpfulness", "accuracy"])
-    soul_ocean: dict[str, float] = Field(default_factory=lambda: {
-        "openness": 0.7,
-        "conscientiousness": 0.85,
-        "extraversion": 0.5,
-        "agreeableness": 0.8,
-        "neuroticism": 0.2,
-    })
+    soul_ocean: dict[str, float] = Field(
+        default_factory=lambda: {
+            "openness": 0.7,
+            "conscientiousness": 0.85,
+            "extraversion": 0.5,
+            "agreeableness": 0.8,
+            "neuroticism": 0.2,
+        }
+    )
 
 
 class Agent(TimestampedDocument):

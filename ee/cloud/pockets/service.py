@@ -84,25 +84,25 @@ class PocketService:
     # -----------------------------------------------------------------
 
     @staticmethod
-    async def create(
-        workspace_id: str, user_id: str, body: CreatePocketRequest
-    ) -> dict:
+    async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> dict:
         """Create a pocket with optional agents, widgets, and rippleSpec."""
         # Build initial widgets from request body
         initial_widgets: list[Widget] = []
         for w in body.widgets:
-            initial_widgets.append(Widget(
-                name=w.get("name", "Widget"),
-                type=w.get("type", "custom"),
-                icon=w.get("icon", ""),
-                color=w.get("color", ""),
-                span=w.get("span", "col-span-1"),
-                dataSourceType=w.get("dataSourceType", w.get("data_source_type", "static")),
-                config=w.get("config", {}),
-                props=w.get("props", {}),
-                data=w.get("data"),
-                assignedAgent=w.get("assignedAgent", w.get("assigned_agent")),
-            ))
+            initial_widgets.append(
+                Widget(
+                    name=w.get("name", "Widget"),
+                    type=w.get("type", "custom"),
+                    icon=w.get("icon", ""),
+                    color=w.get("color", ""),
+                    span=w.get("span", "col-span-1"),
+                    dataSourceType=w.get("dataSourceType", w.get("data_source_type", "static")),
+                    config=w.get("config", {}),
+                    props=w.get("props", {}),
+                    data=w.get("data"),
+                    assignedAgent=w.get("assignedAgent", w.get("assigned_agent")),
+                )
+            )
 
         pocket = Pocket(
             workspace=workspace_id,
@@ -165,9 +165,7 @@ class PocketService:
         return _pocket_response(pocket)
 
     @staticmethod
-    async def update(
-        pocket_id: str, user_id: str, body: UpdatePocketRequest
-    ) -> dict:
+    async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dict:
         """Update pocket fields. Owner or edit-access users."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)
@@ -246,9 +244,7 @@ class PocketService:
     # -----------------------------------------------------------------
 
     @staticmethod
-    async def add_widget(
-        pocket_id: str, user_id: str, body: AddWidgetRequest
-    ) -> dict:
+    async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> dict:
         """Add a widget to the pocket."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)
@@ -299,9 +295,7 @@ class PocketService:
         return _pocket_response(pocket)
 
     @staticmethod
-    async def remove_widget(
-        pocket_id: str, widget_id: str, user_id: str
-    ) -> dict:
+    async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
         """Remove a widget from the pocket."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)
@@ -315,9 +309,7 @@ class PocketService:
         return _pocket_response(pocket)
 
     @staticmethod
-    async def reorder_widgets(
-        pocket_id: str, user_id: str, widget_ids: list[str]
-    ) -> dict:
+    async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -> dict:
         """Reorder widgets by the given ordered list of widget IDs."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)
@@ -339,9 +331,7 @@ class PocketService:
     # -----------------------------------------------------------------
 
     @staticmethod
-    async def generate_share_link(
-        pocket_id: str, user_id: str, access: str
-    ) -> dict:
+    async def generate_share_link(pocket_id: str, user_id: str, access: str) -> dict:
         """Generate a share link token. Owner only."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_owner(pocket, user_id)
@@ -364,9 +354,7 @@ class PocketService:
         await pocket.save()
 
     @staticmethod
-    async def update_share_link(
-        pocket_id: str, user_id: str, access: str
-    ) -> dict:
+    async def update_share_link(pocket_id: str, user_id: str, access: str) -> dict:
         """Update the share link access level. Owner only."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_owner(pocket, user_id)
@@ -396,9 +384,7 @@ class PocketService:
     # -----------------------------------------------------------------
 
     @staticmethod
-    async def add_collaborator(
-        pocket_id: str, user_id: str, body: AddCollaboratorRequest
-    ) -> None:
+    async def add_collaborator(pocket_id: str, user_id: str, body: AddCollaboratorRequest) -> None:
         """Add a collaborator to the pocket. Owner only."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_owner(pocket, user_id)
@@ -418,9 +404,7 @@ class PocketService:
         )
 
     @staticmethod
-    async def remove_collaborator(
-        pocket_id: str, user_id: str, target_user_id: str
-    ) -> None:
+    async def remove_collaborator(pocket_id: str, user_id: str, target_user_id: str) -> None:
         """Remove a collaborator from the pocket. Owner only."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_owner(pocket, user_id)
@@ -434,9 +418,7 @@ class PocketService:
     # -----------------------------------------------------------------
 
     @staticmethod
-    async def add_team_member(
-        pocket_id: str, user_id: str, member_id: str
-    ) -> dict:
+    async def add_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
         """Add a team member to the pocket. Owner or edit access."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)
@@ -448,9 +430,7 @@ class PocketService:
         return _pocket_response(pocket)
 
     @staticmethod
-    async def remove_team_member(
-        pocket_id: str, user_id: str, member_id: str
-    ) -> dict:
+    async def remove_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
         """Remove a team member from the pocket. Owner or edit access."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)
@@ -466,9 +446,7 @@ class PocketService:
     # -----------------------------------------------------------------
 
     @staticmethod
-    async def add_agent(
-        pocket_id: str, user_id: str, agent_id: str
-    ) -> dict:
+    async def add_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
         """Add an agent to the pocket. Owner or edit access."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)
@@ -480,9 +458,7 @@ class PocketService:
         return _pocket_response(pocket)
 
     @staticmethod
-    async def remove_agent(
-        pocket_id: str, user_id: str, agent_id: str
-    ) -> dict:
+    async def remove_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
         """Remove an agent from the pocket. Owner or edit access."""
         pocket = await _get_pocket_or_404(pocket_id)
         _check_edit_access(pocket, user_id)

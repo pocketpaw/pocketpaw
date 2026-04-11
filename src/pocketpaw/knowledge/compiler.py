@@ -3,6 +3,7 @@
 The compile step is what makes this a knowledge engine, not just RAG:
 raw text → LLM → structured article with title, summary, concepts, categories.
 """
+
 from __future__ import annotations
 
 import json
@@ -14,7 +15,9 @@ from pocketpaw.knowledge.models import RawDoc, WikiArticle
 
 logger = logging.getLogger(__name__)
 
-_COMPILE_PROMPT = """You are a knowledge compiler. Transform the raw document into a structured wiki article.
+_COMPILE_PROMPT = """\
+You are a knowledge compiler. \
+Transform the raw document into a structured wiki article.
 
 Raw document (source: {source}):
 ---
@@ -25,7 +28,9 @@ Output EXACTLY this JSON format (no markdown fences, just raw JSON):
 {{
   "title": "Concise descriptive title",
   "summary": "2-3 sentence summary of the key information",
-  "content": "Full well-structured markdown article with headers (## sections). Preserve all important facts, numbers, names, dates. Organize logically.",
+  "content": "Full well-structured markdown article with headers \
+(## sections). Preserve all important facts, numbers, names, dates. \
+Organize logically.",
   "concepts": ["key entity 1", "key entity 2", "important term"],
   "categories": ["broad topic 1", "broad topic 2"]
 }}
@@ -84,7 +89,9 @@ async def compile_article(
     # Run LLM
     result_text = ""
     try:
-        async for event in agent.run(prompt, system_prompt="You are a knowledge compiler. Output only valid JSON."):
+        async for event in agent.run(
+            prompt, system_prompt="You are a knowledge compiler. Output only valid JSON."
+        ):
             if event.type == "message":
                 result_text += event.content
             if event.type == "done":

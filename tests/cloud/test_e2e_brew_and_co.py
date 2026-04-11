@@ -24,10 +24,10 @@ from ee.fabric.store import FabricStore
 from ee.instinct.models import ActionContext, ActionPriority, ActionTrigger
 from ee.instinct.store import InstinctStore
 
-
 # ---------------------------------------------------------------------------
 # Inline threshold evaluator
 # ---------------------------------------------------------------------------
+
 
 async def _check_threshold(
     store: FabricStore,
@@ -68,6 +68,7 @@ async def _check_threshold(
 # ---------------------------------------------------------------------------
 # Main scenario
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_brew_and_co_monday(tmp_path: Path) -> None:
@@ -121,7 +122,7 @@ async def test_brew_and_co_monday(tmp_path: Path) -> None:
         product_type.id,
         {"name": "Cold Brew", "price": 4.00, "stock": 50, "category": "cold drinks"},
     )
-    croissant = await store.create_object(
+    _croissant = await store.create_object(
         product_type.id,
         {"name": "Croissant", "price": 3.25, "stock": 12, "category": "pastries"},
     )
@@ -230,7 +231,7 @@ async def test_brew_and_co_monday(tmp_path: Path) -> None:
 
     fabric_stats = await store.stats()
     assert fabric_stats["objects"] >= 5  # 3 products + 1 customer + 2 orders
-    assert fabric_stats["links"] >= 4    # 2 placed + 2 contains
+    assert fabric_stats["links"] >= 4  # 2 placed + 2 contains
     assert fabric_stats["types"] == 3
 
     # --- 12. Export full audit as JSON and verify ---
@@ -277,8 +278,12 @@ async def test_brew_multi_customer_order_graph(tmp_path: Path) -> None:
     """Multiple customers, multiple orders — graph links are correctly traversed."""
     store = FabricStore(tmp_path / "brew.db")
 
-    customer_type = await store.define_type("Customer", properties=[PropertyDef(name="name", type="string")])
-    order_type = await store.define_type("Order", properties=[PropertyDef(name="amount", type="number")])
+    customer_type = await store.define_type(
+        "Customer", properties=[PropertyDef(name="name", type="string")]
+    )
+    order_type = await store.define_type(
+        "Order", properties=[PropertyDef(name="amount", type="number")]
+    )
 
     alice = await store.create_object(customer_type.id, {"name": "Alice"})
     bob = await store.create_object(customer_type.id, {"name": "Bob"})
@@ -324,7 +329,7 @@ async def test_brew_rejected_action_does_not_execute(tmp_path: Path) -> None:
 
     # Attempting to mark as executed after rejection — store allows it (no state machine
     # enforcement currently), but the audit trail shows both events
-    executed = await instinct.mark_executed(action.id, "Tried anyway")
+    _executed = await instinct.mark_executed(action.id, "Tried anyway")
     # If execution goes through, the test documents current permissive behaviour
     # What matters is the audit trail captures both events
     audit = await instinct.query_audit(pocket_id="brew-hq")

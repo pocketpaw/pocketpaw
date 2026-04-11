@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 class ConnectorStatus(StrEnum):
     """Connection status."""
+
     DISCONNECTED = "disconnected"
     CONNECTED = "connected"
     SYNCING = "syncing"
@@ -18,14 +19,16 @@ class ConnectorStatus(StrEnum):
 
 class TrustLevel(StrEnum):
     """How much human oversight this action needs."""
-    AUTO = "auto"          # Agent can execute without asking
-    CONFIRM = "confirm"    # Agent must ask user first
+
+    AUTO = "auto"  # Agent can execute without asking
+    CONFIRM = "confirm"  # Agent must ask user first
     RESTRICTED = "restricted"  # Requires admin approval
 
 
 @dataclass
 class ConnectionResult:
     """Result of a connect() call."""
+
     success: bool
     connector_name: str
     status: ConnectorStatus = ConnectorStatus.DISCONNECTED
@@ -36,6 +39,7 @@ class ConnectionResult:
 @dataclass
 class ActionSchema:
     """Schema for a single connector action."""
+
     name: str
     description: str = ""
     method: str = "GET"
@@ -46,6 +50,7 @@ class ActionSchema:
 @dataclass
 class ActionResult:
     """Result of executing a connector action."""
+
     success: bool
     data: Any = None
     error: str | None = None
@@ -55,6 +60,7 @@ class ActionResult:
 @dataclass
 class SyncResult:
     """Result of syncing data from a connector."""
+
     success: bool
     connector_name: str
     records_synced: int = 0

@@ -660,7 +660,7 @@ class ClaudeSDKBackend:
             # ── API key check for Anthropic provider ──────────────
             # Skip if using a non-Anthropic provider, or if the active
             # provider is claude_code (it handles OAuth auth via its CLI).
-            is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
+            _is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
             is_non_anthropic = (
                 llm.is_ollama
                 or llm.is_openai_compatible
@@ -720,15 +720,19 @@ class ClaudeSDKBackend:
                         "To manage connectors, use Bash to call the local API:\n"
                         "- List: curl -s http://localhost:8888/api/v1/connectors\n"
                         "- Detail: curl -s http://localhost:8888/api/v1/connectors/<name>\n"
-                        "- Connect: curl -s -X POST http://localhost:8888/api/v1/connectors/connect "
+                        "- Connect: curl -s -X POST "
+                        "http://localhost:8888/api/v1/connectors/connect "
                         "-H 'Content-Type: application/json' "
-                        "-d '{\"connector_name\":\"<name>\",\"config\":{...}}'\n"
-                        "- Execute: curl -s -X POST http://localhost:8888/api/v1/connectors/execute "
+                        '-d \'{"connector_name":"<name>","config":{...}}\'\n'
+                        "- Execute: curl -s -X POST "
+                        "http://localhost:8888/api/v1/connectors/execute "
                         "-H 'Content-Type: application/json' "
-                        "-d '{\"connector_name\":\"<name>\",\"action\":\"<action>\",\"params\":{...}}'\n"
-                        "- Disconnect: curl -s -X POST http://localhost:8888/api/v1/connectors/disconnect "
+                        '-d \'{"connector_name":"<name>","action":"<action>"'
+                        ',"params":{...}}\'\n'
+                        "- Disconnect: curl -s -X POST "
+                        "http://localhost:8888/api/v1/connectors/disconnect "
                         "-H 'Content-Type: application/json' "
-                        "-d '{\"connector_name\":\"<name>\"}'\n"
+                        '-d \'{"connector_name":"<name>"}\'\n'
                     )
             except Exception:
                 pass  # Don't break agent if connector registry fails

@@ -210,6 +210,7 @@ app.include_router(deep_work_router, prefix="/api/deep-work")
 # Mount enterprise cloud module FIRST (takes priority over core v1 routers)
 try:
     from ee.cloud import mount_cloud
+
     mount_cloud(app)
     logger.info("Enterprise cloud module mounted successfully")
 except ImportError as exc:
@@ -1811,6 +1812,7 @@ def run_dashboard(
 # ---------------------------------------------------------------------------
 try:
     from ee.cloud.socketio_server import wrap_asgi_app
+
     app = wrap_asgi_app(app)
     logger.info("Socket.IO ASGI wrapper applied")
 except ImportError:

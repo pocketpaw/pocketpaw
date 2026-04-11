@@ -8,6 +8,7 @@ The kb binary (github.com/qbtrix/kb-go) handles compilation, search, indexing,
 and storage. This wrapper handles heavy extraction (PDF, URL, OCR, DOCX) in
 Python and pipes extracted text to kb via stdin.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,11 @@ def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict |
     cmd = [KB_BIN, *args, "--json"]
     try:
         result = subprocess.run(
-            cmd, input=input_text, capture_output=True, text=True, timeout=timeout,
+            cmd,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -56,7 +61,12 @@ class KnowledgeService:
         try:
             text = await _extract_url(url)
             return _kb(
-                "ingest", "--scope", f"agent:{agent_id}", "--source", url, input_text=text,
+                "ingest",
+                "--scope",
+                f"agent:{agent_id}",
+                "--source",
+                url,
+                input_text=text,
             )
         except Exception as exc:
             return {"error": str(exc), "url": url}
@@ -69,8 +79,12 @@ class KnowledgeService:
             if path.suffix in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"):
                 text = await _extract_file(file_path)
                 return _kb(
-                    "ingest", "--scope", f"agent:{agent_id}",
-                    "--source", file_path, input_text=text,
+                    "ingest",
+                    "--scope",
+                    f"agent:{agent_id}",
+                    "--source",
+                    file_path,
+                    input_text=text,
                 )
             # Text/code files go directly to kb
             return _kb("ingest", file_path, "--scope", f"agent:{agent_id}")
@@ -80,7 +94,12 @@ class KnowledgeService:
     @staticmethod
     async def search(agent_id: str, query: str, limit: int = 5) -> list[str]:
         results = _kb(
-            "search", query, "--scope", f"agent:{agent_id}", "--limit", str(limit),
+            "search",
+            query,
+            "--scope",
+            f"agent:{agent_id}",
+            "--limit",
+            str(limit),
         )
         if isinstance(results, list):
             return [r.get("summary", r.get("title", "")) for r in results]
@@ -90,8 +109,13 @@ class KnowledgeService:
     async def search_context(agent_id: str, query: str, limit: int = 3) -> str:
         """Get formatted knowledge context for agent prompt injection."""
         result = _kb(
-            "search", query, "--scope", f"agent:{agent_id}",
-            "--limit", str(limit), "--context",
+            "search",
+            query,
+            "--scope",
+            f"agent:{agent_id}",
+            "--limit",
+            str(limit),
+            "--context",
         )
         return result if isinstance(result, str) else ""
 
@@ -114,8 +138,8 @@ class KnowledgeService:
 async def _extract_url(url: str) -> str:
     """Extract article text from URL using trafilatura."""
     try:
-        import trafilatura
         import httpx
+        import trafilatura
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
             resp = await client.get(url)

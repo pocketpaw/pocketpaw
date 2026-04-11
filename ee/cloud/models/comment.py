@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from beanie import Indexed
+from pydantic import BaseModel, Field
 
 from ee.cloud.models.base import TimestampedDocument
-from pydantic import BaseModel, Field
 
 
 class CommentTarget(BaseModel):

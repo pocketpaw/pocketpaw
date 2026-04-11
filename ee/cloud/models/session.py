@@ -23,9 +23,7 @@ class Session(TimestampedDocument):
     workspace: Indexed(str)  # type: ignore[valid-type]
     owner: str
     title: str = "New Chat"
-    lastActivity: datetime = Field(
-        default_factory=lambda: datetime.now(UTC), alias="lastActivity"
-    )
+    lastActivity: datetime = Field(default_factory=lambda: datetime.now(UTC), alias="lastActivity")
     messageCount: int = Field(default=0, alias="messageCount")
     deleted_at: datetime | None = None
 

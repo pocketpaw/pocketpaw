@@ -20,10 +20,10 @@ from ee.fabric.store import FabricStore
 from ee.instinct.models import ActionTrigger
 from ee.instinct.store import InstinctStore
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _agent_trigger(reason: str = "Low stock detected") -> ActionTrigger:
     return ActionTrigger(type="agent", source="pocketpaw", reason=reason)
@@ -67,6 +67,7 @@ async def _evaluate_threshold(
 # Test
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_full_decision_loop(tmp_path: Path) -> None:
     """Step-by-step decision loop: Fabric → threshold rule → Instinct → audit export."""
@@ -88,9 +89,9 @@ async def test_full_decision_loop(tmp_path: Path) -> None:
     assert len(inv_type.properties) == 2
 
     # --- Step 2: Create 3 inventory objects ---
-    oat_milk = await fabric.create_object(inv_type.id, {"name": "Oat Milk", "quantity": 4})
-    coffee = await fabric.create_object(inv_type.id, {"name": "Coffee Beans", "quantity": 50})
-    cups = await fabric.create_object(inv_type.id, {"name": "Cups", "quantity": 200})
+    _oat_milk = await fabric.create_object(inv_type.id, {"name": "Oat Milk", "quantity": 4})
+    _coffee = await fabric.create_object(inv_type.id, {"name": "Coffee Beans", "quantity": 50})
+    _cups = await fabric.create_object(inv_type.id, {"name": "Cups", "quantity": 200})
 
     all_inv = await fabric.query(FabricQuery(type_name="Inventory"))
     assert all_inv.total == 3
@@ -181,7 +182,10 @@ async def test_multiple_low_stock_items_all_get_actions(tmp_path: Path) -> None:
 
     inv_type = await fabric.define_type(
         name="Inventory",
-        properties=[PropertyDef(name="name", type="string"), PropertyDef(name="quantity", type="number")],
+        properties=[
+            PropertyDef(name="name", type="string"),
+            PropertyDef(name="quantity", type="number"),
+        ],
     )
 
     # Three items below threshold, one above

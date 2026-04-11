@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile
+from fastapi import File as FastAPIFile
 from starlette.responses import Response
 
 from ee.cloud.agents.schemas import (
@@ -14,9 +15,7 @@ from ee.cloud.agents.service import AgentService
 from ee.cloud.license import require_license
 from ee.cloud.shared.deps import current_user_id, current_workspace_id
 
-router = APIRouter(
-    prefix="/agents", tags=["Agents"], dependencies=[Depends(require_license)]
-)
+router = APIRouter(prefix="/agents", tags=["Agents"], dependencies=[Depends(require_license)])
 
 # ---------------------------------------------------------------------------
 # Backends discovery
@@ -26,17 +25,19 @@ router = APIRouter(
 @router.get("/backends")
 async def list_available_backends():
     """List available agent backends with their display names."""
-    from pocketpaw.agents.registry import list_backends, get_backend_info
+    from pocketpaw.agents.registry import get_backend_info, list_backends
 
     results = []
     for name in list_backends():
         try:
             info = get_backend_info(name)
-            results.append({
-                "name": name,
-                "displayName": info.display_name if info else name,
-                "available": info is not None,
-            })
+            results.append(
+                {
+                    "name": name,
+                    "displayName": info.display_name if info else name,
+                    "available": info is not None,
+                }
+            )
         except Exception:
             results.append({"name": name, "displayName": name, "available": False})
     return results
@@ -117,8 +118,9 @@ async def discover_agents(
 @router.post("/{agent_id}/knowledge/text")
 async def ingest_text(agent_id: str, body: dict):
     """Ingest plain text into agent's knowledge base."""
-    from ee.cloud.agents.knowledge import KnowledgeService
     import logging
+
+    from ee.cloud.agents.knowledge import KnowledgeService
 
     text = body.get("text", "")
     source = body.get("source", "manual")
@@ -164,18 +166,19 @@ async def search_knowledge(agent_id: str, q: str = Query(..., min_length=1), lim
     return {"results": results}
 
 
-from fastapi import UploadFile, File as FastAPIFile
-
-
 @router.post("/{agent_id}/knowledge/upload")
-async def upload_and_ingest(agent_id: str, file: UploadFile = FastAPIFile(...)):
+async def upload_and_ingest(
+    agent_id: str,
+    file: UploadFile = FastAPIFile(...),  # noqa: B008
+):
     """Upload a file and ingest into agent's knowledge base.
 
     Supports: .pdf, .txt, .md, .csv, .json, .docx, .png, .jpg, .jpeg, .webp
     """
-    from ee.cloud.agents.knowledge import KnowledgeService
     import tempfile
     from pathlib import Path
+
+    from ee.cloud.agents.knowledge import KnowledgeService
 
     if not file.filename:
         return {"error": "No filename provided"}
@@ -193,6 +196,7 @@ async def upload_and_ingest(agent_id: str, file: UploadFile = FastAPIFile(...)):
         return result
     finally:
         import os
+
         os.unlink(tmp_path)
 
 

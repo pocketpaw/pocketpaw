@@ -165,9 +165,7 @@ class AutomationEvaluator:
                 asyncio.create_task(daemon.run_intention_now(rule.linked_intention_id))
                 logger.info("Triggered direct execution for rule: %s", rule.name)
             else:
-                logger.warning(
-                    "Rule %s has auto_execute mode but no linked intention", rule.id
-                )
+                logger.warning("Rule %s has auto_execute mode but no linked intention", rule.id)
         except Exception as e:
             logger.error("Failed to execute rule %s: %s", rule.id, e)
 

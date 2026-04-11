@@ -3,9 +3,11 @@
 Registered on app startup via register_event_handlers().
 Handles side effects that span domain boundaries.
 """
+
 from __future__ import annotations
 
 import logging
+
 from ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
@@ -20,8 +22,9 @@ async def _on_invite_accepted(data: dict) -> None:
     if not group_id or not user_id:
         return
 
-    from ee.cloud.models.group import Group
     from beanie import PydanticObjectId
+
+    from ee.cloud.models.group import Group
 
     try:
         group = await Group.get(PydanticObjectId(group_id))
@@ -38,7 +41,7 @@ async def _on_invite_accepted(data: dict) -> None:
         recipient=user_id,
         type="invite",
         title="Invite accepted",
-        body=f"You joined workspace",
+        body="You joined workspace",
     )
 
 
@@ -52,9 +55,11 @@ async def _on_message_sent(data: dict) -> None:
         return
 
     # Update group stats (last_message_at, message_count)
-    from ee.cloud.models.group import Group
-    from beanie import PydanticObjectId
     from datetime import UTC, datetime
+
+    from beanie import PydanticObjectId
+
+    from ee.cloud.models.group import Group
 
     try:
         group = await Group.get(PydanticObjectId(group_id))

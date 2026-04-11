@@ -201,14 +201,16 @@ def test_ws_outbound_defaults():
 
 
 def test_ws_inbound_full_message():
-    msg = WsInbound.model_validate({
-        "type": "message.send",
-        "group_id": "g1",
-        "content": "hello world",
-        "reply_to": "m99",
-        "mentions": [{"type": "user", "id": "u1"}],
-        "attachments": [{"type": "file", "name": "doc.pdf"}],
-    })
+    msg = WsInbound.model_validate(
+        {
+            "type": "message.send",
+            "group_id": "g1",
+            "content": "hello world",
+            "reply_to": "m99",
+            "mentions": [{"type": "user", "id": "u1"}],
+            "attachments": [{"type": "file", "name": "doc.pdf"}],
+        }
+    )
     assert msg.group_id == "g1"
     assert msg.content == "hello world"
     assert msg.reply_to == "m99"
@@ -217,18 +219,22 @@ def test_ws_inbound_full_message():
 
 
 def test_ws_inbound_react():
-    msg = WsInbound.model_validate({
-        "type": "message.react",
-        "message_id": "m1",
-        "emoji": "thumbsup",
-    })
+    msg = WsInbound.model_validate(
+        {
+            "type": "message.react",
+            "message_id": "m1",
+            "emoji": "thumbsup",
+        }
+    )
     assert msg.message_id == "m1"
     assert msg.emoji == "thumbsup"
 
 
 def test_ws_inbound_presence():
-    msg = WsInbound.model_validate({
-        "type": "presence.update",
-        "status": "away",
-    })
+    msg = WsInbound.model_validate(
+        {
+            "type": "presence.update",
+            "status": "away",
+        }
+    )
     assert msg.status == "away"

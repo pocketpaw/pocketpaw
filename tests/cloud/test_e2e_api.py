@@ -12,22 +12,22 @@
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 import json
 import os
 import uuid
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-
 # ---------------------------------------------------------------------------
 # Helpers — license key generation
 # ---------------------------------------------------------------------------
+
 
 def _make_license_key(secret: str = "test-secret") -> str:
     """Generate a valid HMAC-based license key for tests."""
@@ -48,6 +48,7 @@ def _make_license_key(secret: str = "test-secret") -> str:
 # ---------------------------------------------------------------------------
 # Core fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def license_env():
@@ -70,12 +71,13 @@ async def beanie_db():
     Uses a unique database name per test run to avoid collisions.
     Drops the database after tests complete.
     """
-    from motor.motor_asyncio import AsyncIOMotorClient
     from beanie import init_beanie
-    from ee.cloud.models import ALL_DOCUMENTS
+    from motor.motor_asyncio import AsyncIOMotorClient
 
     # Reset license cache so env vars take effect
     import ee.cloud.license as lic_mod
+    from ee.cloud.models import ALL_DOCUMENTS
+
     lic_mod._cached_license = None
     lic_mod._license_error = None
 
@@ -92,10 +94,10 @@ async def beanie_db():
 @pytest.fixture()
 async def app(license_env, beanie_db) -> FastAPI:
     """Build a FastAPI app with cloud routes mounted, agent pool mocked."""
-    from ee.cloud import mount_cloud
-
     # Reset license module cache before mounting
     import ee.cloud.license as lic_mod
+    from ee.cloud import mount_cloud
+
     lic_mod._cached_license = None
 
     test_app = FastAPI()
@@ -125,6 +127,7 @@ async def http(app) -> AsyncIterator[AsyncClient]:
 # Per-test auth helpers
 # ---------------------------------------------------------------------------
 
+
 def _unique_email() -> str:
     return f"user-{uuid.uuid4().hex[:8]}@test.example"
 
@@ -135,19 +138,25 @@ async def _register_and_login(http: AsyncClient, email: str | None = None) -> di
     password = "Test1234!"
 
     # Register
-    r = await http.post("/api/v1/auth/register", json={
-        "email": email,
-        "password": password,
-        "full_name": "Test User",
-    })
+    r = await http.post(
+        "/api/v1/auth/register",
+        json={
+            "email": email,
+            "password": password,
+            "full_name": "Test User",
+        },
+    )
     assert r.status_code == 201, f"Register failed: {r.text}"
     user_data = r.json()
 
     # Login via bearer transport
-    r = await http.post("/api/v1/auth/bearer/login", data={
-        "username": email,
-        "password": password,
-    })
+    r = await http.post(
+        "/api/v1/auth/bearer/login",
+        data={
+            "username": email,
+            "password": password,
+        },
+    )
     assert r.status_code == 200, f"Login failed: {r.text}"
     token = r.json()["access_token"]
 
@@ -163,10 +172,14 @@ async def _register_and_login(http: AsyncClient, email: str | None = None) -> di
 async def _make_workspace(http: AsyncClient, headers: dict, slug: str | None = None) -> dict:
     """Create a workspace and return the workspace dict."""
     slug = slug or f"ws-{uuid.uuid4().hex[:8]}"
-    r = await http.post("/api/v1/workspaces", json={
-        "name": "Test Workspace",
-        "slug": slug,
-    }, headers=headers)
+    r = await http.post(
+        "/api/v1/workspaces",
+        json={
+            "name": "Test Workspace",
+            "slug": slug,
+        },
+        headers=headers,
+    )
     assert r.status_code == 200, f"Create workspace failed: {r.text}"
     return r.json()
 
@@ -175,16 +188,20 @@ async def _make_workspace(http: AsyncClient, headers: dict, slug: str | None = N
 # AUTH DOMAIN
 # ===========================================================================
 
+
 class TestAuthFlow:
     """Tests for POST /auth/register, POST /auth/bearer/login, GET /auth/me."""
 
     async def test_register_new_user_returns_201(self, http: AsyncClient):
         email = _unique_email()
-        r = await http.post("/api/v1/auth/register", json={
-            "email": email,
-            "password": "Password1!",
-            "full_name": "Alice",
-        })
+        r = await http.post(
+            "/api/v1/auth/register",
+            json={
+                "email": email,
+                "password": "Password1!",
+                "full_name": "Alice",
+            },
+        )
         assert r.status_code == 201
         data = r.json()
         assert data["email"] == email
@@ -200,14 +217,20 @@ class TestAuthFlow:
 
     async def test_login_returns_access_token(self, http: AsyncClient):
         email = _unique_email()
-        await http.post("/api/v1/auth/register", json={
-            "email": email,
-            "password": "Password1!",
-        })
-        r = await http.post("/api/v1/auth/bearer/login", data={
-            "username": email,
-            "password": "Password1!",
-        })
+        await http.post(
+            "/api/v1/auth/register",
+            json={
+                "email": email,
+                "password": "Password1!",
+            },
+        )
+        r = await http.post(
+            "/api/v1/auth/bearer/login",
+            data={
+                "username": email,
+                "password": "Password1!",
+            },
+        )
         assert r.status_code == 200
         body = r.json()
         assert "access_token" in body
@@ -215,14 +238,20 @@ class TestAuthFlow:
 
     async def test_login_wrong_password_returns_400(self, http: AsyncClient):
         email = _unique_email()
-        await http.post("/api/v1/auth/register", json={
-            "email": email,
-            "password": "Password1!",
-        })
-        r = await http.post("/api/v1/auth/bearer/login", data={
-            "username": email,
-            "password": "WrongPassword!",
-        })
+        await http.post(
+            "/api/v1/auth/register",
+            json={
+                "email": email,
+                "password": "Password1!",
+            },
+        )
+        r = await http.post(
+            "/api/v1/auth/bearer/login",
+            data={
+                "username": email,
+                "password": "WrongPassword!",
+            },
+        )
         assert r.status_code == 400
 
     async def test_get_me_returns_profile(self, http: AsyncClient):
@@ -239,7 +268,9 @@ class TestAuthFlow:
 
     async def test_update_profile_full_name(self, http: AsyncClient):
         auth = await _register_and_login(http)
-        r = await http.patch("/api/v1/auth/me", json={"full_name": "Updated Name"}, headers=auth["headers"])
+        r = await http.patch(
+            "/api/v1/auth/me", json={"full_name": "Updated Name"}, headers=auth["headers"]
+        )
         assert r.status_code == 200
         assert r.json()["name"] == "Updated Name"
 
@@ -255,6 +286,7 @@ class TestAuthFlow:
 # WORKSPACE DOMAIN
 # ===========================================================================
 
+
 class TestWorkspaceFlow:
     """Tests for workspace CRUD, members, and invites."""
 
@@ -269,10 +301,14 @@ class TestWorkspaceFlow:
         auth = await _register_and_login(http)
         slug = f"ws-{uuid.uuid4().hex[:8]}"
         await _make_workspace(http, auth["headers"], slug=slug)
-        r = await http.post("/api/v1/workspaces", json={
-            "name": "Second",
-            "slug": slug,
-        }, headers=auth["headers"])
+        r = await http.post(
+            "/api/v1/workspaces",
+            json={
+                "name": "Second",
+                "slug": slug,
+            },
+            headers=auth["headers"],
+        )
         assert r.status_code == 409
 
     async def test_list_workspaces_returns_created_workspace(self, http: AsyncClient):
@@ -293,7 +329,9 @@ class TestWorkspaceFlow:
     async def test_update_workspace_name(self, http: AsyncClient):
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        r = await http.patch(f"/api/v1/workspaces/{ws['_id']}", json={"name": "Renamed"}, headers=auth["headers"])
+        r = await http.patch(
+            f"/api/v1/workspaces/{ws['_id']}", json={"name": "Renamed"}, headers=auth["headers"]
+        )
         assert r.status_code == 200
         assert r.json()["name"] == "Renamed"
 
@@ -322,10 +360,14 @@ class TestWorkspaceFlow:
     async def test_create_invite_for_workspace(self, http: AsyncClient):
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        r = await http.post(f"/api/v1/workspaces/{ws['_id']}/invites", json={
-            "email": "invitee@example.com",
-            "role": "member",
-        }, headers=auth["headers"])
+        r = await http.post(
+            f"/api/v1/workspaces/{ws['_id']}/invites",
+            json={
+                "email": "invitee@example.com",
+                "role": "member",
+            },
+            headers=auth["headers"],
+        )
         assert r.status_code == 200
         invite = r.json()
         assert invite["email"] == "invitee@example.com"
@@ -334,10 +376,14 @@ class TestWorkspaceFlow:
     async def test_validate_invite_by_token(self, http: AsyncClient):
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        r = await http.post(f"/api/v1/workspaces/{ws['_id']}/invites", json={
-            "email": "invitee2@example.com",
-            "role": "member",
-        }, headers=auth["headers"])
+        r = await http.post(
+            f"/api/v1/workspaces/{ws['_id']}/invites",
+            json={
+                "email": "invitee2@example.com",
+                "role": "member",
+            },
+            headers=auth["headers"],
+        )
         token = r.json()["token"]
 
         # Validate without auth
@@ -351,17 +397,23 @@ class TestWorkspaceFlow:
 
         # Create invite
         invitee_email = _unique_email()
-        r = await http.post(f"/api/v1/workspaces/{ws['_id']}/invites", json={
-            "email": invitee_email,
-            "role": "member",
-        }, headers=owner["headers"])
+        r = await http.post(
+            f"/api/v1/workspaces/{ws['_id']}/invites",
+            json={
+                "email": invitee_email,
+                "role": "member",
+            },
+            headers=owner["headers"],
+        )
         token = r.json()["token"]
 
         # Register and login as invitee
         invitee = await _register_and_login(http, email=invitee_email)
 
         # Accept the invite
-        r2 = await http.post(f"/api/v1/workspaces/invites/{token}/accept", headers=invitee["headers"])
+        r2 = await http.post(
+            f"/api/v1/workspaces/invites/{token}/accept", headers=invitee["headers"]
+        )
         assert r2.status_code == 200
 
         # Invitee should now be in workspace members
@@ -372,13 +424,19 @@ class TestWorkspaceFlow:
     async def test_revoke_invite_marks_it_revoked(self, http: AsyncClient):
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        r = await http.post(f"/api/v1/workspaces/{ws['_id']}/invites", json={
-            "email": "revoke-me@example.com",
-            "role": "member",
-        }, headers=auth["headers"])
+        r = await http.post(
+            f"/api/v1/workspaces/{ws['_id']}/invites",
+            json={
+                "email": "revoke-me@example.com",
+                "role": "member",
+            },
+            headers=auth["headers"],
+        )
         invite_id = r.json()["_id"]
 
-        r2 = await http.delete(f"/api/v1/workspaces/{ws['_id']}/invites/{invite_id}", headers=auth["headers"])
+        r2 = await http.delete(
+            f"/api/v1/workspaces/{ws['_id']}/invites/{invite_id}", headers=auth["headers"]
+        )
         assert r2.status_code == 204
 
     async def test_workspace_without_license_returns_403(self, http: AsyncClient):
@@ -386,10 +444,15 @@ class TestWorkspaceFlow:
         auth = await _register_and_login(http)
         with patch.dict(os.environ, {"POCKETPAW_LICENSE_KEY": ""}):
             import ee.cloud.license as lic_mod
+
             lic_mod._cached_license = None
             lic_mod._license_error = None
             try:
-                r = await http.post("/api/v1/workspaces", json={"name": "X", "slug": "x-slug"}, headers=auth["headers"])
+                r = await http.post(
+                    "/api/v1/workspaces",
+                    json={"name": "X", "slug": "x-slug"},
+                    headers=auth["headers"],
+                )
                 assert r.status_code == 403
             finally:
                 # Restore cached license for other tests
@@ -401,6 +464,7 @@ class TestWorkspaceFlow:
 # CHAT DOMAIN
 # ===========================================================================
 
+
 class TestChatFlow:
     """Tests for groups, messages, reactions, pins, search, DMs."""
 
@@ -409,7 +473,11 @@ class TestChatFlow:
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
         # Set active workspace so current_workspace_id dep works
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=auth["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=auth["headers"],
+        )
         return {**auth, "workspace_id": ws["_id"]}
 
     async def test_create_group_returns_group(self, http: AsyncClient):
@@ -430,7 +498,9 @@ class TestChatFlow:
 
     async def test_get_group_by_id(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/chat/groups", json={"name": "get-test"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/chat/groups", json={"name": "get-test"}, headers=ctx["headers"]
+        )
         group_id = r1.json()["_id"]
         r2 = await http.get(f"/api/v1/chat/groups/{group_id}", headers=ctx["headers"])
         assert r2.status_code == 200
@@ -438,12 +508,18 @@ class TestChatFlow:
 
     async def test_send_message_to_group(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "msg-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "msg-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
 
-        r2 = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={
-            "content": "Hello world!",
-        }, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={
+                "content": "Hello world!",
+            },
+            headers=ctx["headers"],
+        )
         assert r2.status_code == 200
         msg = r2.json()
         assert msg["content"] == "Hello world!"
@@ -451,14 +527,22 @@ class TestChatFlow:
 
     async def test_list_messages_with_cursor_pagination(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "page-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "page-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
 
         # Send 3 messages
         for i in range(3):
-            await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": f"msg {i}"}, headers=ctx["headers"])
+            await http.post(
+                f"/api/v1/chat/groups/{group_id}/messages",
+                json={"content": f"msg {i}"},
+                headers=ctx["headers"],
+            )
 
-        r2 = await http.get(f"/api/v1/chat/groups/{group_id}/messages?limit=2", headers=ctx["headers"])
+        r2 = await http.get(
+            f"/api/v1/chat/groups/{group_id}/messages?limit=2", headers=ctx["headers"]
+        )
         assert r2.status_code == 200
         page = r2.json()
         assert "items" in page
@@ -466,23 +550,39 @@ class TestChatFlow:
 
     async def test_edit_message_updates_content(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "edit-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "edit-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
 
-        r2 = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "original"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "original"},
+            headers=ctx["headers"],
+        )
         msg_id = r2.json()["_id"]
 
-        r3 = await http.patch(f"/api/v1/chat/messages/{msg_id}", json={"content": "edited"}, headers=ctx["headers"])
+        r3 = await http.patch(
+            f"/api/v1/chat/messages/{msg_id}", json={"content": "edited"}, headers=ctx["headers"]
+        )
         assert r3.status_code == 200
         assert r3.json()["content"] == "edited"
 
     async def test_edit_message_sets_edited_flag(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "edit-flag-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "edit-flag-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
-        r2 = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "original"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "original"},
+            headers=ctx["headers"],
+        )
         msg_id = r2.json()["_id"]
-        await http.patch(f"/api/v1/chat/messages/{msg_id}", json={"content": "updated"}, headers=ctx["headers"])
+        await http.patch(
+            f"/api/v1/chat/messages/{msg_id}", json={"content": "updated"}, headers=ctx["headers"]
+        )
 
         r3 = await http.get(f"/api/v1/chat/groups/{group_id}/messages", headers=ctx["headers"])
         msgs = r3.json()["items"]
@@ -492,9 +592,15 @@ class TestChatFlow:
 
     async def test_delete_message_soft_deletes(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "delete-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "delete-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
-        r2 = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "to-delete"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "to-delete"},
+            headers=ctx["headers"],
+        )
         msg_id = r2.json()["_id"]
 
         r3 = await http.delete(f"/api/v1/chat/messages/{msg_id}", headers=ctx["headers"])
@@ -507,26 +613,42 @@ class TestChatFlow:
 
     async def test_toggle_reaction_adds_then_removes(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "react-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "react-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
-        r2 = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "react me"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "react me"},
+            headers=ctx["headers"],
+        )
         msg_id = r2.json()["_id"]
 
         # Add reaction
-        r3 = await http.post(f"/api/v1/chat/messages/{msg_id}/react", json={"emoji": "👍"}, headers=ctx["headers"])
+        r3 = await http.post(
+            f"/api/v1/chat/messages/{msg_id}/react", json={"emoji": "👍"}, headers=ctx["headers"]
+        )
         assert r3.status_code == 200
         reactions_after_add = r3.json().get("reactions", [])
         assert any(rx.get("emoji") == "👍" for rx in reactions_after_add)
 
         # Toggle off (same emoji same user)
-        r4 = await http.post(f"/api/v1/chat/messages/{msg_id}/react", json={"emoji": "👍"}, headers=ctx["headers"])
+        r4 = await http.post(
+            f"/api/v1/chat/messages/{msg_id}/react", json={"emoji": "👍"}, headers=ctx["headers"]
+        )
         assert r4.status_code == 200
 
     async def test_pin_message_and_list_pinned(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "pin-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "pin-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
-        r2 = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "pin me"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "pin me"},
+            headers=ctx["headers"],
+        )
         msg_id = r2.json()["_id"]
 
         r3 = await http.post(f"/api/v1/chat/groups/{group_id}/pin/{msg_id}", headers=ctx["headers"])
@@ -539,13 +661,21 @@ class TestChatFlow:
 
     async def test_unpin_message(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "unpin-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "unpin-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
-        r2 = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "pin then unpin"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "pin then unpin"},
+            headers=ctx["headers"],
+        )
         msg_id = r2.json()["_id"]
 
         await http.post(f"/api/v1/chat/groups/{group_id}/pin/{msg_id}", headers=ctx["headers"])
-        r3 = await http.delete(f"/api/v1/chat/groups/{group_id}/pin/{msg_id}", headers=ctx["headers"])
+        r3 = await http.delete(
+            f"/api/v1/chat/groups/{group_id}/pin/{msg_id}", headers=ctx["headers"]
+        )
         assert r3.status_code == 204
 
         r4 = await http.get(f"/api/v1/chat/groups/{group_id}", headers=ctx["headers"])
@@ -554,12 +684,24 @@ class TestChatFlow:
 
     async def test_search_messages_by_content(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "search-test"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "search-test"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
-        await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "find this needle"}, headers=ctx["headers"])
-        await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "irrelevant haystack"}, headers=ctx["headers"])
+        await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "find this needle"},
+            headers=ctx["headers"],
+        )
+        await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "irrelevant haystack"},
+            headers=ctx["headers"],
+        )
 
-        r2 = await http.get(f"/api/v1/chat/groups/{group_id}/search?q=needle", headers=ctx["headers"])
+        r2 = await http.get(
+            f"/api/v1/chat/groups/{group_id}/search?q=needle", headers=ctx["headers"]
+        )
         assert r2.status_code == 200
         results = r2.json()
         assert isinstance(results, list)
@@ -568,15 +710,27 @@ class TestChatFlow:
     async def test_create_dm_between_two_users(self, http: AsyncClient):
         owner = await _register_and_login(http)
         ws = await _make_workspace(http, owner["headers"])
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=owner["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=owner["headers"],
+        )
 
         # Second user accepts invite
         invitee_email = _unique_email()
-        r_inv = await http.post(f"/api/v1/workspaces/{ws['_id']}/invites", json={"email": invitee_email, "role": "member"}, headers=owner["headers"])
+        r_inv = await http.post(
+            f"/api/v1/workspaces/{ws['_id']}/invites",
+            json={"email": invitee_email, "role": "member"},
+            headers=owner["headers"],
+        )
         token = r_inv.json()["token"]
         invitee = await _register_and_login(http, email=invitee_email)
         await http.post(f"/api/v1/workspaces/invites/{token}/accept", headers=invitee["headers"])
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=invitee["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=invitee["headers"],
+        )
 
         # Create DM
         r = await http.post(f"/api/v1/chat/dm/{invitee['user_id']}", headers=owner["headers"])
@@ -586,16 +740,22 @@ class TestChatFlow:
 
     async def test_update_group_name(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "old-name"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "old-name"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
 
-        r2 = await http.patch(f"/api/v1/chat/groups/{group_id}", json={"name": "new-name"}, headers=ctx["headers"])
+        r2 = await http.patch(
+            f"/api/v1/chat/groups/{group_id}", json={"name": "new-name"}, headers=ctx["headers"]
+        )
         assert r2.status_code == 200
         assert r2.json()["name"] == "new-name"
 
     async def test_archive_group(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/chat/groups", json={"name": "archive-me"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/chat/groups", json={"name": "archive-me"}, headers=ctx["headers"]
+        )
         group_id = r.json()["_id"]
 
         r2 = await http.post(f"/api/v1/chat/groups/{group_id}/archive", headers=ctx["headers"])
@@ -609,13 +769,18 @@ class TestChatFlow:
 # POCKETS DOMAIN
 # ===========================================================================
 
+
 class TestPocketsFlow:
     """Tests for pocket CRUD, widgets, sharing."""
 
     async def _setup(self, http: AsyncClient) -> dict:
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=auth["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=auth["headers"],
+        )
         return {**auth, "workspace_id": ws["_id"]}
 
     async def test_create_pocket_returns_pocket(self, http: AsyncClient):
@@ -630,10 +795,14 @@ class TestPocketsFlow:
     async def test_create_pocket_with_ripple_spec(self, http: AsyncClient):
         ctx = await self._setup(http)
         spec = {"layout": "grid", "columns": 2, "rows": 1, "widgets": []}
-        r = await http.post("/api/v1/pockets", json={
-            "name": "Ripple Pocket",
-            "rippleSpec": spec,
-        }, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/pockets",
+            json={
+                "name": "Ripple Pocket",
+                "rippleSpec": spec,
+            },
+            headers=ctx["headers"],
+        )
         assert r.status_code == 200
         # rippleSpec should be stored
         pocket = r.json()
@@ -659,10 +828,14 @@ class TestPocketsFlow:
         ctx = await self._setup(http)
         r1 = await http.post("/api/v1/pockets", json={"name": "Original"}, headers=ctx["headers"])
         pocket_id = r1.json()["_id"]
-        r2 = await http.patch(f"/api/v1/pockets/{pocket_id}", json={
-            "name": "Renamed",
-            "description": "A description",
-        }, headers=ctx["headers"])
+        r2 = await http.patch(
+            f"/api/v1/pockets/{pocket_id}",
+            json={
+                "name": "Renamed",
+                "description": "A description",
+            },
+            headers=ctx["headers"],
+        )
         assert r2.status_code == 200
         assert r2.json()["name"] == "Renamed"
         assert r2.json()["description"] == "A description"
@@ -685,39 +858,61 @@ class TestPocketsFlow:
 
     async def test_add_widget_to_pocket(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/pockets", json={"name": "WidgetPocket"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/pockets", json={"name": "WidgetPocket"}, headers=ctx["headers"]
+        )
         pocket_id = r1.json()["_id"]
 
-        r2 = await http.post(f"/api/v1/pockets/{pocket_id}/widgets", json={
-            "name": "My Widget",
-            "type": "chart",
-        }, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/pockets/{pocket_id}/widgets",
+            json={
+                "name": "My Widget",
+                "type": "chart",
+            },
+            headers=ctx["headers"],
+        )
         assert r2.status_code == 200
         pocket = r2.json()
         assert any(w["name"] == "My Widget" for w in pocket.get("widgets", []))
 
     async def test_update_widget_config(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/pockets", json={"name": "UpdateWidget"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/pockets", json={"name": "UpdateWidget"}, headers=ctx["headers"]
+        )
         pocket_id = r1.json()["_id"]
-        r2 = await http.post(f"/api/v1/pockets/{pocket_id}/widgets", json={"name": "W1"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/pockets/{pocket_id}/widgets", json={"name": "W1"}, headers=ctx["headers"]
+        )
         widgets = r2.json()["widgets"]
         widget_id = widgets[0].get("_id") or widgets[0].get("id")
 
-        r3 = await http.patch(f"/api/v1/pockets/{pocket_id}/widgets/{widget_id}", json={
-            "config": {"key": "value"},
-        }, headers=ctx["headers"])
+        r3 = await http.patch(
+            f"/api/v1/pockets/{pocket_id}/widgets/{widget_id}",
+            json={
+                "config": {"key": "value"},
+            },
+            headers=ctx["headers"],
+        )
         assert r3.status_code == 200
 
     async def test_remove_widget_from_pocket(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/pockets", json={"name": "RemoveWidget"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/pockets", json={"name": "RemoveWidget"}, headers=ctx["headers"]
+        )
         pocket_id = r1.json()["_id"]
-        r2 = await http.post(f"/api/v1/pockets/{pocket_id}/widgets", json={"name": "ToRemove"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/pockets/{pocket_id}/widgets",
+            json={"name": "ToRemove"},
+            headers=ctx["headers"],
+        )
         w = r2.json()["widgets"][0]
         widget_id = w.get("_id") or w.get("id")
 
-        r3 = await http.delete(f"/api/v1/pockets/{pocket_id}/widgets/{widget_id}", headers=ctx["headers"])
+        r3 = await http.delete(
+            f"/api/v1/pockets/{pocket_id}/widgets/{widget_id}", headers=ctx["headers"]
+        )
         assert r3.status_code == 204
 
         r4 = await http.get(f"/api/v1/pockets/{pocket_id}", headers=ctx["headers"])
@@ -726,20 +921,28 @@ class TestPocketsFlow:
 
     async def test_generate_share_link_returns_token(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/pockets", json={"name": "SharePocket"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/pockets", json={"name": "SharePocket"}, headers=ctx["headers"]
+        )
         pocket_id = r1.json()["_id"]
 
-        r2 = await http.post(f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"]
+        )
         assert r2.status_code == 200
         result = r2.json()
         assert "shareLinkToken" in result or "token" in result
 
     async def test_access_pocket_via_share_link(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/pockets", json={"name": "PublicPocket"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/pockets", json={"name": "PublicPocket"}, headers=ctx["headers"]
+        )
         pocket_id = r1.json()["_id"]
 
-        r2 = await http.post(f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"]
+        )
         token = r2.json().get("shareLinkToken") or r2.json().get("token")
         assert token
 
@@ -750,18 +953,26 @@ class TestPocketsFlow:
 
     async def test_revoke_share_link_returns_204(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/pockets", json={"name": "RevokeShare"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/pockets", json={"name": "RevokeShare"}, headers=ctx["headers"]
+        )
         pocket_id = r1.json()["_id"]
-        await http.post(f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"])
+        await http.post(
+            f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"]
+        )
 
         r2 = await http.delete(f"/api/v1/pockets/{pocket_id}/share", headers=ctx["headers"])
         assert r2.status_code == 204
 
     async def test_revoked_share_link_no_longer_accessible(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/pockets", json={"name": "RevokeAccess"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/pockets", json={"name": "RevokeAccess"}, headers=ctx["headers"]
+        )
         pocket_id = r1.json()["_id"]
-        r2 = await http.post(f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"])
+        r2 = await http.post(
+            f"/api/v1/pockets/{pocket_id}/share", json={"access": "view"}, headers=ctx["headers"]
+        )
         token = r2.json().get("shareLinkToken") or r2.json().get("token")
 
         await http.delete(f"/api/v1/pockets/{pocket_id}/share", headers=ctx["headers"])
@@ -774,18 +985,25 @@ class TestPocketsFlow:
 # SESSIONS DOMAIN
 # ===========================================================================
 
+
 class TestSessionsFlow:
     """Tests for session CRUD and activity tracking."""
 
     async def _setup(self, http: AsyncClient) -> dict:
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=auth["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=auth["headers"],
+        )
         return {**auth, "workspace_id": ws["_id"]}
 
     async def test_create_session_returns_session(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r = await http.post("/api/v1/sessions", json={"title": "My Session"}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/sessions", json={"title": "My Session"}, headers=ctx["headers"]
+        )
         assert r.status_code == 200
         session = r.json()
         assert session["title"] == "My Session"
@@ -808,7 +1026,9 @@ class TestSessionsFlow:
 
     async def test_get_session_by_id(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/sessions", json={"title": "Fetchable"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/sessions", json={"title": "Fetchable"}, headers=ctx["headers"]
+        )
         session_id = r1.json()["_id"]
         r2 = await http.get(f"/api/v1/sessions/{session_id}", headers=ctx["headers"])
         assert r2.status_code == 200
@@ -818,7 +1038,9 @@ class TestSessionsFlow:
         ctx = await self._setup(http)
         r1 = await http.post("/api/v1/sessions", json={"title": "OldTitle"}, headers=ctx["headers"])
         session_id = r1.json()["_id"]
-        r2 = await http.patch(f"/api/v1/sessions/{session_id}", json={"title": "NewTitle"}, headers=ctx["headers"])
+        r2 = await http.patch(
+            f"/api/v1/sessions/{session_id}", json={"title": "NewTitle"}, headers=ctx["headers"]
+        )
         assert r2.status_code == 200
         assert r2.json()["title"] == "NewTitle"
 
@@ -832,7 +1054,9 @@ class TestSessionsFlow:
 
     async def test_deleted_session_not_in_list(self, http: AsyncClient):
         ctx = await self._setup(http)
-        r1 = await http.post("/api/v1/sessions", json={"title": "GoneSession"}, headers=ctx["headers"])
+        r1 = await http.post(
+            "/api/v1/sessions", json={"title": "GoneSession"}, headers=ctx["headers"]
+        )
         session_id = r1.json()["_id"]
         await http.delete(f"/api/v1/sessions/{session_id}", headers=ctx["headers"])
 
@@ -869,11 +1093,17 @@ class TestSessionsFlow:
         ctx = await self._setup(http)
 
         # Create a pocket first
-        r_pocket = await http.post("/api/v1/pockets", json={"name": "PocketForSession"}, headers=ctx["headers"])
+        r_pocket = await http.post(
+            "/api/v1/pockets", json={"name": "PocketForSession"}, headers=ctx["headers"]
+        )
         pocket_id = r_pocket.json()["_id"]
 
         # Create session linked to pocket
-        r = await http.post("/api/v1/sessions", json={"title": "PocketSession", "pocket_id": pocket_id}, headers=ctx["headers"])
+        r = await http.post(
+            "/api/v1/sessions",
+            json={"title": "PocketSession", "pocket_id": pocket_id},
+            headers=ctx["headers"],
+        )
         assert r.status_code == 200
         assert r.json()["pocket"] == pocket_id
 
@@ -882,6 +1112,7 @@ class TestSessionsFlow:
 # CROSS-DOMAIN FLOWS
 # ===========================================================================
 
+
 class TestCrossDomainFlows:
     """Tests that span multiple domains, verifying integrated behavior."""
 
@@ -889,14 +1120,24 @@ class TestCrossDomainFlows:
         """Create workspace → create group → send message → verify message persists."""
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=auth["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=auth["headers"],
+        )
 
         # Create group
-        r_grp = await http.post("/api/v1/chat/groups", json={"name": "cross-domain"}, headers=auth["headers"])
+        r_grp = await http.post(
+            "/api/v1/chat/groups", json={"name": "cross-domain"}, headers=auth["headers"]
+        )
         group_id = r_grp.json()["_id"]
 
         # Send message
-        r_msg = await http.post(f"/api/v1/chat/groups/{group_id}/messages", json={"content": "cross-domain test"}, headers=auth["headers"])
+        r_msg = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "cross-domain test"},
+            headers=auth["headers"],
+        )
         msg_id = r_msg.json()["_id"]
 
         # Retrieve messages — verify persists
@@ -908,12 +1149,22 @@ class TestCrossDomainFlows:
         """Pocket sessions endpoint lists sessions linked to that pocket."""
         auth = await _register_and_login(http)
         ws = await _make_workspace(http, auth["headers"])
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=auth["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=auth["headers"],
+        )
 
-        r_pocket = await http.post("/api/v1/pockets", json={"name": "PocketWithSessions"}, headers=auth["headers"])
+        r_pocket = await http.post(
+            "/api/v1/pockets", json={"name": "PocketWithSessions"}, headers=auth["headers"]
+        )
         pocket_id = r_pocket.json()["_id"]
 
-        r_session = await http.post(f"/api/v1/pockets/{pocket_id}/sessions", json={"title": "Pocket Session"}, headers=auth["headers"])
+        r_session = await http.post(
+            f"/api/v1/pockets/{pocket_id}/sessions",
+            json={"title": "Pocket Session"},
+            headers=auth["headers"],
+        )
         assert r_session.status_code == 200
         session_id = r_session.json()["_id"]
 
@@ -930,10 +1181,14 @@ class TestCrossDomainFlows:
         assert initial_count == 1
 
         invitee_email = _unique_email()
-        r_inv = await http.post(f"/api/v1/workspaces/{ws['_id']}/invites", json={
-            "email": invitee_email,
-            "role": "member",
-        }, headers=owner["headers"])
+        r_inv = await http.post(
+            f"/api/v1/workspaces/{ws['_id']}/invites",
+            json={
+                "email": invitee_email,
+                "role": "member",
+            },
+            headers=owner["headers"],
+        )
         token = r_inv.json()["token"]
 
         invitee = await _register_and_login(http, email=invitee_email)
@@ -955,10 +1210,16 @@ class TestCrossDomainFlows:
         """GET /api/v1/users with search param returns matching workspace members."""
         owner = await _register_and_login(http)
         ws = await _make_workspace(http, owner["headers"])
-        await http.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ws["_id"]}, headers=owner["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": ws["_id"]},
+            headers=owner["headers"],
+        )
 
         # Update owner's name so search can find them
-        await http.patch("/api/v1/auth/me", json={"full_name": "SearchableUser"}, headers=owner["headers"])
+        await http.patch(
+            "/api/v1/auth/me", json={"full_name": "SearchableUser"}, headers=owner["headers"]
+        )
 
         r = await http.get("/api/v1/users?search=Searchable", headers=owner["headers"])
         assert r.status_code == 200

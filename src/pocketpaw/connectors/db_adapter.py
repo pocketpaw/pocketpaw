@@ -111,6 +111,7 @@ class DatabaseAdapter:
 
         # URL-encode password in case it has special chars
         from urllib.parse import quote_plus
+
         safe_pass = quote_plus(password) if password else ""
 
         if user and safe_pass:
@@ -128,7 +129,9 @@ class DatabaseAdapter:
                 success=False,
                 connector_name=self.name,
                 status=ConnectorStatus.ERROR,
-                message="sqlalchemy[asyncio] not installed. Run: uv pip install 'sqlalchemy[asyncio]'",
+                message=(
+                    "sqlalchemy[asyncio] not installed. Run: uv pip install 'sqlalchemy[asyncio]'"
+                ),
             )
 
         normalized = self._normalize_config(config)
@@ -152,6 +155,7 @@ class DatabaseAdapter:
 
             # Test connection
             from sqlalchemy import text
+
             async with self._engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
 
@@ -288,18 +292,22 @@ class DatabaseAdapter:
             return ActionResult(success=True, data=rows, records_affected=len(rows))
         else:
             await conn.commit()
-            return ActionResult(success=True, data={"rowcount": result.rowcount}, records_affected=result.rowcount)
+            return ActionResult(
+                success=True, data={"rowcount": result.rowcount}, records_affected=result.rowcount
+            )
 
     async def _list_tables(self, conn: Any, text: Any, params: dict[str, Any]) -> ActionResult:
         schema = params.get("schema", "public")
 
         # information_schema works across PostgreSQL, MySQL, MSSQL
-        result = await conn.execute(text(
-            "SELECT table_name, table_type "
-            "FROM information_schema.tables "
-            f"WHERE table_schema = '{schema}' "
-            "ORDER BY table_name"
-        ))
+        result = await conn.execute(
+            text(
+                "SELECT table_name, table_type "
+                "FROM information_schema.tables "
+                f"WHERE table_schema = '{schema}' "
+                "ORDER BY table_name"
+            )
+        )
         rows = [dict(r._mapping) for r in result.fetchall()]
         return ActionResult(success=True, data=rows, records_affected=len(rows))
 
@@ -309,12 +317,14 @@ class DatabaseAdapter:
         if not table:
             return ActionResult(success=False, error="No table specified")
 
-        result = await conn.execute(text(
-            "SELECT column_name, data_type, is_nullable, column_default "
-            "FROM information_schema.columns "
-            f"WHERE table_schema = '{schema}' AND table_name = '{table}' "
-            "ORDER BY ordinal_position"
-        ))
+        result = await conn.execute(
+            text(
+                "SELECT column_name, data_type, is_nullable, column_default "
+                "FROM information_schema.columns "
+                f"WHERE table_schema = '{schema}' AND table_name = '{table}' "
+                "ORDER BY ordinal_position"
+            )
+        )
         rows = [dict(r._mapping) for r in result.fetchall()]
         return ActionResult(success=True, data=rows, records_affected=len(rows))
 
@@ -330,12 +340,14 @@ class DatabaseAdapter:
         return ActionResult(success=True, data=rows, records_affected=len(rows))
 
     async def _list_schemas(self, conn: Any, text: Any) -> ActionResult:
-        result = await conn.execute(text(
-            "SELECT schema_name FROM information_schema.schemata "
-            "WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast', "
-            "'mysql', 'performance_schema', 'sys') "
-            "ORDER BY schema_name"
-        ))
+        result = await conn.execute(
+            text(
+                "SELECT schema_name FROM information_schema.schemata "
+                "WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast', "
+                "'mysql', 'performance_schema', 'sys') "
+                "ORDER BY schema_name"
+            )
+        )
         rows = [dict(r._mapping) for r in result.fetchall()]
         return ActionResult(success=True, data=rows, records_affected=len(rows))
 
@@ -343,11 +355,13 @@ class DatabaseAdapter:
         schema = params.get("schema", "public")
 
         # Get table names first, then count rows individually
-        tables_result = await conn.execute(text(
-            "SELECT table_name FROM information_schema.tables "
-            f"WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE' "
-            "ORDER BY table_name"
-        ))
+        tables_result = await conn.execute(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                f"WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE' "
+                "ORDER BY table_name"
+            )
+        )
         tables = [r._mapping["table_name"] for r in tables_result.fetchall()]
 
         stats = []

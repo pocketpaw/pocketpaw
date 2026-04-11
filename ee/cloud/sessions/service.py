@@ -41,9 +41,7 @@ class SessionService:
     """Stateless service encapsulating session business logic."""
 
     @staticmethod
-    async def create(
-        workspace_id: str, user_id: str, body: CreateSessionRequest
-    ) -> dict:
+    async def create(workspace_id: str, user_id: str, body: CreateSessionRequest) -> dict:
         """Create a session, or update if sessionId already exists."""
         sid = body.session_id or f"websocket_{uuid.uuid4().hex[:12]}"
 
@@ -84,9 +82,7 @@ class SessionService:
         return _session_response(session)
 
     @staticmethod
-    async def list_sessions(
-        workspace_id: str, user_id: str
-    ) -> list[dict]:
+    async def list_sessions(workspace_id: str, user_id: str) -> list[dict]:
         """List all sessions for user, sorted by lastActivity desc."""
         sessions = (
             await Session.find(
@@ -105,9 +101,7 @@ class SessionService:
         return _session_response(session)
 
     @staticmethod
-    async def update(
-        session_id: str, user_id: str, body: UpdateSessionRequest
-    ) -> dict:
+    async def update(session_id: str, user_id: str, body: UpdateSessionRequest) -> dict:
         session = await SessionService._get_session(session_id, user_id)
         if body.title is not None:
             session.title = body.title
@@ -127,9 +121,7 @@ class SessionService:
     # -----------------------------------------------------------------
 
     @staticmethod
-    async def list_for_pocket(
-        pocket_id: str, user_id: str
-    ) -> list[dict]:
+    async def list_for_pocket(pocket_id: str, user_id: str) -> list[dict]:
         logger.info(f"Listing sessions for pocket {pocket_id} and user {user_id}")
         sessions = (
             await Session.find(
@@ -175,7 +167,7 @@ class SessionService:
                 messages = (
                     await Message.find(
                         Message.group == session.group,
-                        Message.deleted == False,  # noqa: E711
+                        Message.deleted == False,  # noqa: E711, E712
                     )
                     .sort("createdAt")
                     .limit(100)

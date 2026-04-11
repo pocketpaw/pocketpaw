@@ -56,17 +56,19 @@ def _convert_legacy_widget(widget: dict[str, Any], widget_id: str) -> list[dict[
         widgets = []
         for j, stat in enumerate(stats):
             wid = f"{widget_id}-s{j}" if len(stats) > 1 else widget_id
-            widgets.append({
-                "id": wid,
-                "type": "metric",
-                "title": stat.get("label", title),
-                "size": "sm",
-                "data": {
-                    "value": stat.get("value", ""),
-                    "label": stat.get("label", ""),
-                    "trend": stat.get("trend", ""),
-                },
-            })
+            widgets.append(
+                {
+                    "id": wid,
+                    "type": "metric",
+                    "title": stat.get("label", title),
+                    "size": "sm",
+                    "data": {
+                        "value": stat.get("value", ""),
+                        "label": stat.get("label", ""),
+                        "trend": stat.get("trend", ""),
+                    },
+                }
+            )
         return widgets
 
     if display_type == "chart":
@@ -74,76 +76,89 @@ def _convert_legacy_widget(widget: dict[str, Any], widget_id: str) -> list[dict[
         chart_type = display.get("chartType", display.get("type", "bar"))
         if chart_type == "chart":
             chart_type = "bar"
-        return [{
-            "id": widget_id,
-            "type": "chart",
-            "title": title,
-            "size": size,
-            "data": [{"label": d.get("label", ""), "value": d.get("value", 0)} for d in data]
-            if isinstance(data, list) else data,
-            "props": {"type": chart_type, "height": 200},
-        }]
+        return [
+            {
+                "id": widget_id,
+                "type": "chart",
+                "title": title,
+                "size": size,
+                "data": [{"label": d.get("label", ""), "value": d.get("value", 0)} for d in data]
+                if isinstance(data, list)
+                else data,
+                "props": {"type": chart_type, "height": 200},
+            }
+        ]
 
     if display_type == "table":
         headers = display.get("headers", [])
         rows = display.get("rows", [])
-        return [{
-            "id": widget_id,
-            "type": "table",
-            "title": title,
-            "size": size,
-            "data": {
-                "columns": headers,
-                "data": [r.get("cells", r) if isinstance(r, dict) else r for r in rows],
-            },
-        }]
+        return [
+            {
+                "id": widget_id,
+                "type": "table",
+                "title": title,
+                "size": size,
+                "data": {
+                    "columns": headers,
+                    "data": [r.get("cells", r) if isinstance(r, dict) else r for r in rows],
+                },
+            }
+        ]
 
     if display_type in ("feed", "activity"):
         items = display.get("feedItems", display.get("items", []))
-        return [{
-            "id": widget_id,
-            "type": "feed",
-            "title": title,
-            "size": size,
-            "data": {"items": items},
-        }]
+        return [
+            {
+                "id": widget_id,
+                "type": "feed",
+                "title": title,
+                "size": size,
+                "data": {"items": items},
+            }
+        ]
 
     if display_type == "metric":
         metric = display.get("metric", {})
-        return [{
-            "id": widget_id,
-            "type": "metric",
-            "title": metric.get("label", title),
-            "size": size,
-            "data": {
-                "value": metric.get("value", ""),
-                "label": metric.get("label", ""),
-                "trend": metric.get("trend", ""),
-                "description": metric.get("description", ""),
-            },
-        }]
+        return [
+            {
+                "id": widget_id,
+                "type": "metric",
+                "title": metric.get("label", title),
+                "size": size,
+                "data": {
+                    "value": metric.get("value", ""),
+                    "label": metric.get("label", ""),
+                    "trend": metric.get("trend", ""),
+                    "description": metric.get("description", ""),
+                },
+            }
+        ]
 
     if display_type == "terminal":
-        return [{
-            "id": widget_id,
-            "type": "terminal",
-            "title": display.get("termTitle", title),
-            "size": size,
-            "data": {"lines": display.get("termLines", display.get("lines", []))},
-            "props": {
+        return [
+            {
+                "id": widget_id,
+                "type": "terminal",
                 "title": display.get("termTitle", title),
-                "interactive": display.get("interactive", False),
-            },
-        }]
+                "size": size,
+                "data": {"lines": display.get("termLines", display.get("lines", []))},
+                "props": {
+                    "title": display.get("termTitle", title),
+                    "interactive": display.get("interactive", False),
+                },
+            }
+        ]
 
     # Fallback — pass through as-is
-    return [{
-        "id": widget_id,
-        "type": ripple_type,
-        "title": title,
-        "size": size,
-        "data": display,
-    }]
+    return [
+        {
+            "id": widget_id,
+            "type": ripple_type,
+            "title": title,
+            "size": size,
+            "data": display,
+        }
+    ]
 
 
 class CreatePocketTool(BaseTool):
@@ -177,7 +192,7 @@ class CreatePocketTool(BaseTool):
             '{"type":"metric","props":{"label":"Revenue","value":"$10B","trend":"+15%"}},'
             '{"type":"metric","props":{"label":"Users","value":"2.4M","trend":"+8%"}},'
             '{"type":"metric","props":{"label":"NPS","value":"72","trend":"+5"}}'
-            ']},'
+            "]},"
             '{"type":"chart","props":{"type":"area","height":200,"data":['
             '{"label":"Q1","value":2400},{"label":"Q2","value":3100},'
             '{"label":"Q3","value":3800},{"label":"Q4","value":4500}]}},'
@@ -186,7 +201,7 @@ class CreatePocketTool(BaseTool):
             '{"id":"a1","type":"action","label":"Build"},'
             '{"id":"o1","type":"output","label":"Deploy"}'
             '],"edges":[{"from":"t1","to":"a1"},{"from":"a1","to":"o1"}]}}'
-            ']}}\n\n'
+            "]}}\n\n"
             "UISpec node types:\n"
             "- layout: flex, grid, card, tabs, container\n"
             "- display: heading, text, image, badge, metric, avatar, progress, feed\n"
@@ -292,8 +307,16 @@ class CreatePocketTool(BaseTool):
                             "type": {
                                 "type": "string",
                                 "description": "Widget type: metric, chart, table, "
-                            "feed, terminal, text",
-                                "enum": ["metric", "chart", "table", "feed", "terminal", "text", "workflow"],
+                                "feed, terminal, text",
+                                "enum": [
+                                    "metric",
+                                    "chart",
+                                    "table",
+                                    "feed",
+                                    "terminal",
+                                    "text",
+                                    "workflow",
+                                ],
                             },
                             "title": {
                                 "type": "string",
@@ -349,10 +372,7 @@ class CreatePocketTool(BaseTool):
 
         # ── Multi-pane path: per-pane UISpec trees ──
         if panes and isinstance(panes, dict) and layout:
-            valid_panes = {
-                k: v for k, v in panes.items()
-                if isinstance(v, dict) and v.get("type")
-            }
+            valid_panes = {k: v for k, v in panes.items() if isinstance(v, dict) and v.get("type")}
             if valid_panes:
                 spec: dict[str, Any] = {
                     "version": "1.0",
@@ -393,7 +413,13 @@ class CreatePocketTool(BaseTool):
 
             # If widget already has Ripple 'type' field, use it directly
             if "type" in w and w["type"] in (
-                "metric", "chart", "table", "feed", "terminal", "text", "workflow",
+                "metric",
+                "chart",
+                "table",
+                "feed",
+                "terminal",
+                "text",
+                "workflow",
             ):
                 widget = {
                     "id": w.get("id", wid),
@@ -411,13 +437,15 @@ class CreatePocketTool(BaseTool):
                 built_widgets.extend(converted)
             else:
                 # Minimal widget
-                built_widgets.append({
-                    "id": wid,
-                    "type": w.get("type", "text"),
-                    "title": w.get("title", w.get("name", f"Widget {i + 1}")),
-                    "size": w.get("size", "sm"),
-                    "data": w.get("data", {}),
-                })
+                built_widgets.append(
+                    {
+                        "id": wid,
+                        "type": w.get("type", "text"),
+                        "title": w.get("title", w.get("name", f"Widget {i + 1}")),
+                        "size": w.get("size", "sm"),
+                        "data": w.get("data", {}),
+                    }
+                )
 
         spec = {
             "version": "2.0",
@@ -474,7 +502,15 @@ class AddWidgetTool(BaseTool):
                     "properties": {
                         "type": {
                             "type": "string",
-                            "enum": ["metric", "chart", "table", "feed", "terminal", "text", "workflow"],
+                            "enum": [
+                                "metric",
+                                "chart",
+                                "table",
+                                "feed",
+                                "terminal",
+                                "text",
+                                "workflow",
+                            ],
                         },
                         "title": {"type": "string"},
                         "size": {"type": "string", "enum": ["sm", "md", "lg"]},
@@ -519,9 +555,7 @@ class AddWidgetTool(BaseTool):
             if isinstance(data, dict) and "columns" in data and "data" in data:
                 cols = data["columns"]
                 rows = data["data"]
-                built_widget["props"]["columns"] = [
-                    {"accessorKey": c, "header": c} for c in cols
-                ]
+                built_widget["props"]["columns"] = [{"accessorKey": c, "header": c} for c in cols]
                 built_widget["data"] = [
                     {cols[ci]: cell for ci, cell in enumerate(row) if ci < len(cols)}
                     for row in rows

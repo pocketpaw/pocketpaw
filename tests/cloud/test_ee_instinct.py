@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 
 from ee.instinct.models import (
     ActionCategory,
-    ActionContext,
     ActionPriority,
     ActionStatus,
     ActionTrigger,
@@ -22,7 +21,6 @@ from ee.instinct.models import (
 )
 from ee.instinct.router import router
 from ee.instinct.store import InstinctStore
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -293,15 +291,24 @@ class TestListPending:
     @pytest.mark.asyncio
     async def test_list_pending_excludes_approved(self, store: InstinctStore) -> None:
         a1 = await store.propose(
-            pocket_id="pocket-1", title="Action A", description="", recommendation="",
+            pocket_id="pocket-1",
+            title="Action A",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.propose(
-            pocket_id="pocket-1", title="Action B", description="", recommendation="",
+            pocket_id="pocket-1",
+            title="Action B",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.propose(
-            pocket_id="pocket-1", title="Action C", description="", recommendation="",
+            pocket_id="pocket-1",
+            title="Action C",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
 
@@ -315,15 +322,24 @@ class TestListPending:
     @pytest.mark.asyncio
     async def test_list_pending_filters_by_pocket_id(self, store: InstinctStore) -> None:
         await store.propose(
-            pocket_id="pocket-A", title="For A", description="", recommendation="",
+            pocket_id="pocket-A",
+            title="For A",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.propose(
-            pocket_id="pocket-B", title="For B", description="", recommendation="",
+            pocket_id="pocket-B",
+            title="For B",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.propose(
-            pocket_id="pocket-A", title="For A again", description="", recommendation="",
+            pocket_id="pocket-A",
+            title="For A again",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
 
@@ -334,11 +350,17 @@ class TestListPending:
     @pytest.mark.asyncio
     async def test_list_pending_empty_when_all_resolved(self, store: InstinctStore) -> None:
         a = await store.propose(
-            pocket_id="pocket-1", title="Will be approved", description="", recommendation="",
+            pocket_id="pocket-1",
+            title="Will be approved",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         b = await store.propose(
-            pocket_id="pocket-1", title="Will be rejected", description="", recommendation="",
+            pocket_id="pocket-1",
+            title="Will be rejected",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.approve(a.id)
@@ -354,15 +376,24 @@ class TestListActionsByStatus:
     @pytest.mark.asyncio
     async def test_filter_by_pending_status(self, store: InstinctStore) -> None:
         await store.propose(
-            pocket_id="p1", title="Pending 1", description="", recommendation="",
+            pocket_id="p1",
+            title="Pending 1",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.propose(
-            pocket_id="p1", title="Pending 2", description="", recommendation="",
+            pocket_id="p1",
+            title="Pending 2",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         a3 = await store.propose(
-            pocket_id="p1", title="Will approve", description="", recommendation="",
+            pocket_id="p1",
+            title="Will approve",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.approve(a3.id)
@@ -374,15 +405,24 @@ class TestListActionsByStatus:
     @pytest.mark.asyncio
     async def test_filter_by_approved_status(self, store: InstinctStore) -> None:
         a1 = await store.propose(
-            pocket_id="p1", title="Approve 1", description="", recommendation="",
+            pocket_id="p1",
+            title="Approve 1",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         a2 = await store.propose(
-            pocket_id="p1", title="Approve 2", description="", recommendation="",
+            pocket_id="p1",
+            title="Approve 2",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.propose(
-            pocket_id="p1", title="Stay pending", description="", recommendation="",
+            pocket_id="p1",
+            title="Stay pending",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.approve(a1.id)
@@ -395,11 +435,17 @@ class TestListActionsByStatus:
     @pytest.mark.asyncio
     async def test_filter_by_rejected_status(self, store: InstinctStore) -> None:
         a1 = await store.propose(
-            pocket_id="p1", title="Reject this", description="", recommendation="",
+            pocket_id="p1",
+            title="Reject this",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.propose(
-            pocket_id="p1", title="Keep pending", description="", recommendation="",
+            pocket_id="p1",
+            title="Keep pending",
+            description="",
+            recommendation="",
             trigger=make_trigger(),
         )
         await store.reject(a1.id, reason="no longer needed")
@@ -426,7 +472,10 @@ class TestListActionsByStatus:
     async def test_list_actions_limit_is_respected(self, store: InstinctStore) -> None:
         for i in range(10):
             await store.propose(
-                pocket_id="p1", title=f"Action {i}", description="", recommendation="",
+                pocket_id="p1",
+                title=f"Action {i}",
+                description="",
+                recommendation="",
                 trigger=make_trigger(),
             )
 
@@ -590,7 +639,9 @@ class TestExportAudit:
             actor="system", event="test_event_1", description="First event", pocket_id="export-p"
         )
         await store.log(
-            actor="agent:claude", event="test_event_2", description="Second event",
+            actor="agent:claude",
+            event="test_event_2",
+            description="Second event",
             pocket_id="export-p",
         )
 
@@ -1000,7 +1051,7 @@ class TestFullLifecycle:
         assert rejected["rejected_reason"] == "Too costly for this quarter"
 
         # Audit trail has reject entry
-        audit_resp = client.get(f"/instinct/audit?event=action_rejected")
+        audit_resp = client.get("/instinct/audit?event=action_rejected")
         assert audit_resp.json()["total"] >= 1
 
         # Export includes the rejection

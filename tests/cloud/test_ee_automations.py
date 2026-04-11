@@ -17,9 +17,8 @@ from pocketpaw.ee.automations.models import (
     RuleType,
     UpdateRuleRequest,
 )
-from pocketpaw.ee.automations.store import AutomationStore
 from pocketpaw.ee.automations.router import router
-
+from pocketpaw.ee.automations.store import AutomationStore
 
 # ============================================================================
 # Helpers / shared factories
@@ -606,7 +605,7 @@ class TestFullCrudLifecycle:
         assert toggle_resp.json()["enabled"] is False
 
         # Confirm state via list
-        list_resp = client.get(f"/api/v1/automations/rules?pocket_id=lifecycle-pocket")
+        list_resp = client.get("/api/v1/automations/rules?pocket_id=lifecycle-pocket")
         assert list_resp.status_code == 200
         listed = list_resp.json()
         assert len(listed) == 1

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
+from ee.cloud.agents.schemas import CreateAgentRequest
 from ee.cloud.models.agent import AgentConfig
 
 
@@ -48,8 +47,6 @@ def test_agent_config_no_soul_path():
 # ---------------------------------------------------------------------------
 # Schema tests
 # ---------------------------------------------------------------------------
-
-from ee.cloud.agents.schemas import CreateAgentRequest
 
 
 def test_create_agent_with_persona():

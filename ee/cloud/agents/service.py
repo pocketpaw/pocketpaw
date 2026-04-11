@@ -33,9 +33,7 @@ class AgentService:
     """Stateless service encapsulating agent business logic."""
 
     @staticmethod
-    async def create(
-        workspace_id: str, user_id: str, body: CreateAgentRequest
-    ) -> dict:
+    async def create(workspace_id: str, user_id: str, body: CreateAgentRequest) -> dict:
         """Create an agent with slug uniqueness within the workspace."""
         existing = await Agent.find_one(
             Agent.workspace == workspace_id,
@@ -82,9 +80,7 @@ class AgentService:
         return _agent_response(agent)
 
     @staticmethod
-    async def list_agents(
-        workspace_id: str, query: str | None = None
-    ) -> list[dict]:
+    async def list_agents(workspace_id: str, query: str | None = None) -> list[dict]:
         """List agents in a workspace with optional name search."""
         filters: dict = {"workspace": workspace_id}
         if query:
@@ -113,9 +109,7 @@ class AgentService:
         return _agent_response(agent)
 
     @staticmethod
-    async def update(
-        agent_id: str, user_id: str, body: UpdateAgentRequest
-    ) -> dict:
+    async def update(agent_id: str, user_id: str, body: UpdateAgentRequest) -> dict:
         """Update agent fields. Owner only."""
         agent = await Agent.get(PydanticObjectId(agent_id))
         if not agent:
@@ -172,9 +166,7 @@ class AgentService:
         await agent.delete()
 
     @staticmethod
-    async def discover(
-        workspace_id: str, user_id: str, body: DiscoverRequest
-    ) -> list[dict]:
+    async def discover(workspace_id: str, user_id: str, body: DiscoverRequest) -> list[dict]:
         """Paginated agent discovery with visibility filtering.
 
         Visibility rules:

@@ -241,7 +241,7 @@ class TestAgentContextBuilder:
 
         builder = AgentContextBuilder(bootstrap_provider=mock_provider, memory_manager=mock_memory)
 
-        prompt = await builder.build_system_prompt(channel=Channel.WEBSOCKET)
+        prompt = await builder.build_system_prompt(channel=Channel.CLI)
         assert "# Response Format" not in prompt
 
     @pytest.mark.asyncio

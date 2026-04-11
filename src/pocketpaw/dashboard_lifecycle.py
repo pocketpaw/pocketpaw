@@ -168,6 +168,7 @@ async def startup_event(
     # Load .env for enterprise config (license key, MongoDB URI, admin creds)
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
     except ImportError:
         pass
@@ -175,12 +176,14 @@ async def startup_event(
     # Initialize enterprise cloud DB (Beanie/MongoDB) — best-effort
     try:
         import os
+
         from ee.cloud.db import init_cloud_db
 
         mongo_uri = os.environ.get("CLOUD_MONGODB_URI", "mongodb://localhost:27017/paw-enterprise")
         await init_cloud_db(mongo_uri)
         # Seed default admin user and workspace
         from ee.cloud.auth.core import seed_admin, seed_workspace
+
         admin = await seed_admin()
         await seed_workspace(admin)
     except ImportError:

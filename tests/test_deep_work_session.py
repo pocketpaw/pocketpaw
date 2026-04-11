@@ -229,6 +229,15 @@ def mock_human_router():
     return router
 
 
+@pytest.fixture(autouse=True)
+def _mock_goal_parser():
+    """Prevent GoalParser from hitting real LLM during tests."""
+    with patch("pocketpaw.deep_work.goal_parser.GoalParser") as MockParser:
+        instance = MockParser.return_value
+        instance.parse = AsyncMock(return_value=MagicMock(to_dict=MagicMock(return_value={})))
+        yield
+
+
 @pytest.fixture
 def session(manager, mock_executor, mock_planner, mock_human_router):
     """Create a DeepWorkSession with real store but mocked planner/executor."""

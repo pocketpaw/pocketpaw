@@ -6,12 +6,12 @@ Storage layout per scope:
     ├── wiki/          # WikiArticle .md files with YAML frontmatter
     └── index.json     # KnowledgeIndex
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
-from datetime import UTC, datetime
 from pathlib import Path
 
 from pocketpaw.knowledge.models import KnowledgeIndex, RawDoc, WikiArticle
@@ -28,6 +28,7 @@ class WikiStore:
             self.root = Path(base_path) / _sanitize(scope)
         else:
             from pocketpaw.config import get_config_dir
+
             self.root = get_config_dir() / "knowledge" / _sanitize(scope)
         self.raw_dir = self.root / "raw"
         self.wiki_dir = self.root / "wiki"
@@ -154,12 +155,14 @@ class WikiStore:
 
     def clear(self) -> None:
         import shutil
+
         if self.root.exists():
             shutil.rmtree(self.root)
         self._ensure_dirs()
 
 
 # ── Helpers ──
+
 
 def _sanitize(scope: str) -> str:
     """Sanitize scope string for use as directory name."""
@@ -170,11 +173,23 @@ def _parse_article(article_id: str, text: str) -> WikiArticle | None:
     """Parse a .md file with JSON frontmatter into a WikiArticle."""
     try:
         if not text.startswith("---"):
-            return WikiArticle(id=article_id, title=article_id, summary="", content=text, word_count=len(text.split()))
+            return WikiArticle(
+                id=article_id,
+                title=article_id,
+                summary="",
+                content=text,
+                word_count=len(text.split()),
+            )
 
         parts = text.split("---", 2)
         if len(parts) < 3:
-            return WikiArticle(id=article_id, title=article_id, summary="", content=text, word_count=len(text.split()))
+            return WikiArticle(
+                id=article_id,
+                title=article_id,
+                summary="",
+                content=text,
+                word_count=len(text.split()),
+            )
 
         fm = json.loads(parts[1])
         content = parts[2].strip()

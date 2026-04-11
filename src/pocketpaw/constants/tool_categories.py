@@ -16,7 +16,11 @@ CATEGORY_TO_GROUPS: dict[str, list[str]] = {
 # Direct tool names for categories without groups (enterprise)
 CATEGORY_DIRECT_TOOLS: dict[str, list[str]] = {
     "enterprise": [
-        "instinct_propose", "instinct_pending", "instinct_audit",
-        "fabric_create", "fabric_query", "fabric_stats",
+        "instinct_propose",
+        "instinct_pending",
+        "instinct_audit",
+        "fabric_create",
+        "fabric_query",
+        "fabric_stats",
     ],
 }

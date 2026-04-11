@@ -19,7 +19,7 @@ from pocketpaw.connectors.protocol import (
     SyncResult,
     TrustLevel,
 )
-from pocketpaw.connectors.yaml_engine import ConnectorDef, parse_connector_yaml
+from pocketpaw.connectors.yaml_engine import ConnectorDef
 
 # Default gcloud binary paths to search
 _GCLOUD_PATHS = [
@@ -158,7 +158,7 @@ class GCPAdapter:
 
         try:
             return await handler(self, params)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ActionResult(success=False, error=f"Command timed out after {_CMD_TIMEOUT}s")
         except Exception as e:
             return ActionResult(success=False, error=str(e))
@@ -187,7 +187,9 @@ class GCPAdapter:
 
         return stdout.decode()
 
-    def _base_flags(self, *, include_project: bool = True, include_region: bool = False) -> list[str]:
+    def _base_flags(
+        self, *, include_project: bool = True, include_region: bool = False
+    ) -> list[str]:
         """Build common flags (--project, --region, --format=json)."""
         flags = ["--format=json"]
         if include_project and self._project:
@@ -208,7 +210,9 @@ class GCPAdapter:
     async def _list_projects(self, params: dict[str, Any]) -> ActionResult:
         out = await self._run_gcloud(["projects", "list", "--format=json"])
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _get_project(self, params: dict[str, Any]) -> ActionResult:
         pid = params.get("project_id", self._project or "")
@@ -220,9 +224,13 @@ class GCPAdapter:
 
     async def _storage_list_buckets(self, params: dict[str, Any]) -> ActionResult:
         flags = self._base_flags()
-        out = await self._run_gcloud(["storage", "ls", "--json"] if False else ["storage", "buckets", "list"] + flags)
+        out = await self._run_gcloud(
+            ["storage", "ls", "--json"] if False else ["storage", "buckets", "list"] + flags
+        )
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _storage_list_objects(self, params: dict[str, Any]) -> ActionResult:
         bucket = params.get("bucket", "")
@@ -233,7 +241,9 @@ class GCPAdapter:
         flags = self._base_flags()
         out = await self._run_gcloud(["storage", "objects", "list", uri] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _storage_get_object(self, params: dict[str, Any]) -> ActionResult:
         bucket = params.get("bucket", "")
@@ -263,13 +273,17 @@ class GCPAdapter:
         flags = self._base_flags()
         out = await self._run_gcloud(["pubsub", "topics", "list"] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _pubsub_list_subscriptions(self, params: dict[str, Any]) -> ActionResult:
         flags = self._base_flags()
         out = await self._run_gcloud(["pubsub", "subscriptions", "list"] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _pubsub_publish(self, params: dict[str, Any]) -> ActionResult:
         topic = params.get("topic", "")
@@ -287,7 +301,9 @@ class GCPAdapter:
         flags = self._base_flags(include_region=True)
         out = await self._run_gcloud(["run", "services", "list"] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _run_describe_service(self, params: dict[str, Any]) -> ActionResult:
         name = params.get("name", "")
@@ -302,33 +318,43 @@ class GCPAdapter:
         flags = self._base_flags(include_region=True)
         out = await self._run_gcloud(["run", "revisions", "list"] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _secrets_list(self, params: dict[str, Any]) -> ActionResult:
         flags = self._base_flags()
         out = await self._run_gcloud(["secrets", "list"] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _secrets_get(self, params: dict[str, Any]) -> ActionResult:
         name = params.get("name", "")
         if not name:
             return ActionResult(success=False, error="name is required")
-        flags = self._base_flags()
+        _flags = self._base_flags()
         # secrets access doesn't support --format=json, returns raw value
         raw_flags = [f"--project={self._project}"] if self._project else []
         out = await self._run_gcloud(
             ["secrets", "versions", "access", "latest", f"--secret={name}"] + raw_flags
         )
-        return ActionResult(success=True, data={"secret": name, "value": out.strip()}, records_affected=1)
+        return ActionResult(
+            success=True, data={"secret": name, "value": out.strip()}, records_affected=1
+        )
 
     async def _secrets_create(self, params: dict[str, Any]) -> ActionResult:
         name = params.get("name", "")
         if not name:
             return ActionResult(success=False, error="name is required")
         flags = self._base_flags()
-        out = await self._run_gcloud(["secrets", "create", name, "--replication-policy=automatic"] + flags)
-        return ActionResult(success=True, data={"created": name, "output": out.strip()}, records_affected=1)
+        out = await self._run_gcloud(
+            ["secrets", "create", name, "--replication-policy=automatic"] + flags
+        )
+        return ActionResult(
+            success=True, data={"created": name, "output": out.strip()}, records_affected=1
+        )
 
     async def _logs_read(self, params: dict[str, Any]) -> ActionResult:
         log_filter = params.get("filter", "")
@@ -340,13 +366,17 @@ class GCPAdapter:
         cmd.extend([f"--limit={limit}"] + flags)
         out = await self._run_gcloud(cmd)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _compute_list_instances(self, params: dict[str, Any]) -> ActionResult:
         flags = self._base_flags()
         out = await self._run_gcloud(["compute", "instances", "list"] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     async def _compute_describe_instance(self, params: dict[str, Any]) -> ActionResult:
         name = params.get("name", "")
@@ -366,7 +396,9 @@ class GCPAdapter:
         flags = self._base_flags()
         out = await self._run_gcloud(["iam", "service-accounts", "list"] + flags)
         data = self._parse_json(out)
-        return ActionResult(success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1)
+        return ActionResult(
+            success=True, data=data, records_affected=len(data) if isinstance(data, list) else 1
+        )
 
     # Action name → handler method mapping
     _ACTION_MAP: dict[str, Any] = {
@@ -395,10 +427,42 @@ class GCPAdapter:
     def _hardcoded_actions(self) -> list[ActionSchema]:
         """Fallback action list when no YAML definition is loaded."""
         return [
-            ActionSchema(name="list_projects", description="List GCP projects", method="LOCAL", trust_level=TrustLevel.AUTO),
-            ActionSchema(name="get_project", description="Describe a GCP project", method="LOCAL", parameters={"project_id": {"type": "string", "required": True}}, trust_level=TrustLevel.AUTO),
-            ActionSchema(name="storage_list_buckets", description="List Cloud Storage buckets", method="LOCAL", trust_level=TrustLevel.AUTO),
-            ActionSchema(name="storage_list_objects", description="List objects in a bucket", method="LOCAL", parameters={"bucket": {"type": "string", "required": True}}, trust_level=TrustLevel.AUTO),
-            ActionSchema(name="compute_list_instances", description="List Compute Engine instances", method="LOCAL", trust_level=TrustLevel.AUTO),
-            ActionSchema(name="iam_list_accounts", description="List IAM service accounts", method="LOCAL", trust_level=TrustLevel.AUTO),
+            ActionSchema(
+                name="list_projects",
+                description="List GCP projects",
+                method="LOCAL",
+                trust_level=TrustLevel.AUTO,
+            ),
+            ActionSchema(
+                name="get_project",
+                description="Describe a GCP project",
+                method="LOCAL",
+                parameters={"project_id": {"type": "string", "required": True}},
+                trust_level=TrustLevel.AUTO,
+            ),
+            ActionSchema(
+                name="storage_list_buckets",
+                description="List Cloud Storage buckets",
+                method="LOCAL",
+                trust_level=TrustLevel.AUTO,
+            ),
+            ActionSchema(
+                name="storage_list_objects",
+                description="List objects in a bucket",
+                method="LOCAL",
+                parameters={"bucket": {"type": "string", "required": True}},
+                trust_level=TrustLevel.AUTO,
+            ),
+            ActionSchema(
+                name="compute_list_instances",
+                description="List Compute Engine instances",
+                method="LOCAL",
+                trust_level=TrustLevel.AUTO,
+            ),
+            ActionSchema(
+                name="iam_list_accounts",
+                description="List IAM service accounts",
+                method="LOCAL",
+                trust_level=TrustLevel.AUTO,
+            ),
         ]

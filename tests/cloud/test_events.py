@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from ee.cloud.shared.events import EventBus, event_bus
 
 

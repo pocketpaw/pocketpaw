@@ -116,6 +116,7 @@ async def get_connector_detail(connector_name: str, pocket_id: str = "default"):
     defn = reg.get_definition(connector_name)
     if not defn:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
 
     status_list = reg.status(pocket_id)
@@ -128,13 +129,15 @@ async def get_connector_detail(connector_name: str, pocket_id: str = "default"):
     actions = []
     for act in defn.actions:
         params = list(act.get("params", {}).keys()) + list(act.get("body", {}).keys())
-        actions.append(ConnectorActionInfo(
-            name=act["name"],
-            description=act.get("description", ""),
-            method=act.get("method", "GET"),
-            params=params,
-            trust_level=act.get("trust_level", "confirm"),
-        ))
+        actions.append(
+            ConnectorActionInfo(
+                name=act["name"],
+                description=act.get("description", ""),
+                method=act.get("method", "GET"),
+                params=params,
+                trust_level=act.get("trust_level", "confirm"),
+            )
+        )
 
     credentials = defn.auth.get("credentials", [])
 

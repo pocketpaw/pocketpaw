@@ -6,14 +6,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from pocketpaw.connectors.firebase_adapter import FirebaseAdapter
 from pocketpaw.connectors.protocol import ConnectorStatus, TrustLevel
 from pocketpaw.connectors.yaml_engine import parse_connector_yaml
-
 
 # ---------------------------------------------------------------------------
 # YAML Parsing
@@ -70,10 +69,17 @@ class TestFirebaseYAML:
         defn = parse_connector_yaml(CONNECTORS_DIR / "firebase.yaml")
         action_map = {a["name"]: a for a in defn.actions}
         auto_actions = [
-            "list_projects", "get_project", "firestore_list_collections",
-            "firestore_databases_list", "firestore_get", "auth_list_users",
-            "hosting_list_sites", "functions_list", "functions_log",
-            "remoteconfig_get", "extensions_list",
+            "list_projects",
+            "get_project",
+            "firestore_list_collections",
+            "firestore_databases_list",
+            "firestore_get",
+            "auth_list_users",
+            "hosting_list_sites",
+            "functions_list",
+            "functions_log",
+            "remoteconfig_get",
+            "extensions_list",
         ]
         for name in auto_actions:
             assert action_map[name]["trust_level"] == "auto", f"{name} should be auto"
@@ -83,13 +89,12 @@ class TestFirebaseYAML:
 # Helper to create a mock subprocess
 # ---------------------------------------------------------------------------
 
+
 def _make_mock_proc(returncode: int = 0, stdout: str = "", stderr: str = ""):
     """Create a mock asyncio.subprocess result."""
     proc = AsyncMock()
     proc.returncode = returncode
-    proc.communicate = AsyncMock(
-        return_value=(stdout.encode(), stderr.encode())
-    )
+    proc.communicate = AsyncMock(return_value=(stdout.encode(), stderr.encode()))
     return proc
 
 
@@ -97,23 +102,31 @@ def _make_mock_proc(returncode: int = 0, stdout: str = "", stderr: str = ""):
 # Adapter Unit Tests
 # ---------------------------------------------------------------------------
 
+
 class TestFirebaseAdapterConnect:
     """Test FirebaseAdapter.connect() with mocked subprocess calls."""
 
     @pytest.mark.asyncio
     async def test_connect_success(self):
         adapter = FirebaseAdapter()
-        projects_response = json.dumps({
-            "status": "success",
-            "result": [
-                {"projectId": "my-project", "displayName": "My Project"},
-            ],
-        })
+        projects_response = json.dumps(
+            {
+                "status": "success",
+                "result": [
+                    {"projectId": "my-project", "displayName": "My Project"},
+                ],
+            }
+        )
 
-        with patch("shutil.which", return_value="/usr/bin/firebase"), \
-             patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-                 stdout=projects_response,
-             )):
+        with (
+            patch("shutil.which", return_value="/usr/bin/firebase"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                return_value=_make_mock_proc(
+                    stdout=projects_response,
+                ),
+            ),
+        ):
             result = await adapter.connect("pocket-1", {})
 
         assert result.success is True
@@ -123,15 +136,22 @@ class TestFirebaseAdapterConnect:
     @pytest.mark.asyncio
     async def test_connect_with_project(self):
         adapter = FirebaseAdapter()
-        projects_response = json.dumps({
-            "status": "success",
-            "result": [{"projectId": "my-proj"}],
-        })
+        projects_response = json.dumps(
+            {
+                "status": "success",
+                "result": [{"projectId": "my-proj"}],
+            }
+        )
 
-        with patch("shutil.which", return_value="/usr/bin/firebase"), \
-             patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-                 stdout=projects_response,
-             )):
+        with (
+            patch("shutil.which", return_value="/usr/bin/firebase"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                return_value=_make_mock_proc(
+                    stdout=projects_response,
+                ),
+            ),
+        ):
             result = await adapter.connect("pocket-1", {"FIREBASE_PROJECT": "my-proj"})
 
         assert result.success is True
@@ -151,16 +171,23 @@ class TestFirebaseAdapterConnect:
     @pytest.mark.asyncio
     async def test_connect_not_logged_in(self):
         adapter = FirebaseAdapter()
-        error_response = json.dumps({
-            "status": "error",
-            "error": {"message": "Authentication required. Please login."},
-        })
+        error_response = json.dumps(
+            {
+                "status": "error",
+                "error": {"message": "Authentication required. Please login."},
+            }
+        )
 
-        with patch("shutil.which", return_value="/usr/bin/firebase"), \
-             patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-                 returncode=1,
-                 stdout=error_response,
-             )):
+        with (
+            patch("shutil.which", return_value="/usr/bin/firebase"),
+            patch(
+                "asyncio.create_subprocess_exec",
+                return_value=_make_mock_proc(
+                    returncode=1,
+                    stdout=error_response,
+                ),
+            ),
+        ):
             result = await adapter.connect("pocket-1", {})
 
         assert result.success is False
@@ -230,9 +257,12 @@ class TestFirebaseAdapterExecute:
         ]
         response = json.dumps({"status": "success", "result": projects})
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-            stdout=response,
-        )):
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_make_mock_proc(
+                stdout=response,
+            ),
+        ):
             result = await adapter.execute("list_projects", {})
 
         assert result.success is True
@@ -245,9 +275,12 @@ class TestFirebaseAdapterExecute:
         doc = {"name": "users/abc", "fields": {"email": {"stringValue": "a@b.com"}}}
         response = json.dumps({"status": "success", "result": doc})
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-            stdout=response,
-        )):
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_make_mock_proc(
+                stdout=response,
+            ),
+        ):
             result = await adapter.execute("firestore_get", {"path": "users/abc"})
 
         assert result.success is True
@@ -265,13 +298,19 @@ class TestFirebaseAdapterExecute:
         adapter = await self._connected_adapter()
         response = json.dumps({"status": "success", "result": {}})
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-            stdout=response,
-        )):
-            result = await adapter.execute("firestore_delete", {
-                "path": "users/abc",
-                "recursive": True,
-            })
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_make_mock_proc(
+                stdout=response,
+            ),
+        ):
+            result = await adapter.execute(
+                "firestore_delete",
+                {
+                    "path": "users/abc",
+                    "recursive": True,
+                },
+            )
 
         assert result.success is True
 
@@ -281,9 +320,12 @@ class TestFirebaseAdapterExecute:
         logs = [{"timestamp": "2026-04-01T00:00:00Z", "message": "Hello"}]
         response = json.dumps({"status": "success", "result": logs})
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-            stdout=response,
-        )):
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_make_mock_proc(
+                stdout=response,
+            ),
+        ):
             result = await adapter.execute("functions_log", {"limit": 10})
 
         assert result.success is True
@@ -295,9 +337,12 @@ class TestFirebaseAdapterExecute:
         sites = [{"name": "my-site", "defaultUrl": "https://my-site.web.app"}]
         response = json.dumps({"status": "success", "result": sites})
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-            stdout=response,
-        )):
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_make_mock_proc(
+                stdout=response,
+            ),
+        ):
             result = await adapter.execute("hosting_list_sites", {})
 
         assert result.success is True
@@ -307,10 +352,13 @@ class TestFirebaseAdapterExecute:
     async def test_command_failure_returns_error(self):
         adapter = await self._connected_adapter()
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_mock_proc(
-            returncode=1,
-            stderr="Error: project not found",
-        )):
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_make_mock_proc(
+                returncode=1,
+                stderr="Error: project not found",
+            ),
+        ):
             result = await adapter.execute("list_projects", {})
 
         assert result.success is False
@@ -357,15 +405,18 @@ class TestFirebaseAdapterSyncSchema:
 # Registry Integration
 # ---------------------------------------------------------------------------
 
+
 class TestFirebaseRegistry:
     """Test that the Firebase adapter is registered in the connector registry."""
 
     def test_firebase_in_cli_connectors(self):
         from pocketpaw.connectors.registry import _CLI_CONNECTORS
+
         assert "firebase" in _CLI_CONNECTORS
 
     def test_create_native_adapter_returns_firebase(self):
         from pocketpaw.connectors.registry import _create_native_adapter
+
         adapter = _create_native_adapter("firebase")
         assert adapter is not None
         assert adapter.name == "firebase"

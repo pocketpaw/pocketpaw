@@ -5,16 +5,19 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pocketpaw.audit.store import AuditStore
+
 import csv
 import io
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -22,7 +25,7 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def audit_db(tmp_path) -> "AuditStore":
+def audit_db(tmp_path) -> AuditStore:
     """Isolated in-memory (tmp file) AuditStore per test."""
     from pocketpaw.audit.store import AuditStore
 
@@ -55,7 +58,12 @@ def populated_store(audit_db, sample_entry_data):
         {**sample_entry_data, "category": "data", "actor": "user:prakash", "pocket_id": "pocket-1"},
         {**sample_entry_data, "category": "security", "actor": "system", "pocket_id": "pocket-2"},
         {**sample_entry_data, "category": "decision", "actor": "agent", "pocket_id": "pocket-2"},
-        {**sample_entry_data, "category": "config", "actor": "user:prakash", "pocket_id": "pocket-1"},
+        {
+            **sample_entry_data,
+            "category": "config",
+            "actor": "user:prakash",
+            "pocket_id": "pocket-1",
+        },
     ]
 
     async def _populate():
@@ -219,7 +227,6 @@ class TestAuditStoreQueryEntries:
 
     @pytest.mark.asyncio
     async def test_filter_by_date_range(self, audit_db):
-        from pocketpaw.audit.models import AuditEntry
 
         past = datetime.now(UTC) - timedelta(hours=2)
         future = datetime.now(UTC) + timedelta(hours=2)
@@ -369,12 +376,18 @@ class TestAuditAPIQuery:
     async def test_get_audit_filter_by_pocket_id(self, api_client):
         client, store = api_client
         await store.log_entry(
-            actor="agent", action="x", category="decision",
-            description="d", pocket_id="pocket-1",
+            actor="agent",
+            action="x",
+            category="decision",
+            description="d",
+            pocket_id="pocket-1",
         )
         await store.log_entry(
-            actor="agent", action="x", category="decision",
-            description="d", pocket_id="pocket-2",
+            actor="agent",
+            action="x",
+            category="decision",
+            description="d",
+            pocket_id="pocket-2",
         )
         resp = client.get("/api/v1/audit?pocket_id=pocket-1")
         assert resp.status_code == 200
@@ -422,9 +435,7 @@ class TestAuditAPIExport:
     @pytest.mark.asyncio
     async def test_export_csv_returns_csv_content_type(self, api_client):
         client, store = api_client
-        await store.log_entry(
-            actor="agent", action="x", category="decision", description="d"
-        )
+        await store.log_entry(actor="agent", action="x", category="decision", description="d")
         resp = client.get("/api/v1/audit/export?format=csv")
         assert resp.status_code == 200
         assert "text/csv" in resp.headers["content-type"]
@@ -432,9 +443,7 @@ class TestAuditAPIExport:
     @pytest.mark.asyncio
     async def test_export_json_returns_json(self, api_client):
         client, store = api_client
-        await store.log_entry(
-            actor="agent", action="x", category="decision", description="d"
-        )
+        await store.log_entry(actor="agent", action="x", category="decision", description="d")
         resp = client.get("/api/v1/audit/export?format=json")
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("application/json")
@@ -445,12 +454,18 @@ class TestAuditAPIExport:
     async def test_export_csv_respects_pocket_id(self, api_client):
         client, store = api_client
         await store.log_entry(
-            actor="agent", action="x", category="decision",
-            description="d", pocket_id="p1",
+            actor="agent",
+            action="x",
+            category="decision",
+            description="d",
+            pocket_id="p1",
         )
         await store.log_entry(
-            actor="agent", action="x", category="decision",
-            description="d", pocket_id="p2",
+            actor="agent",
+            action="x",
+            category="decision",
+            description="d",
+            pocket_id="p2",
         )
         resp = client.get("/api/v1/audit/export?format=csv&pocket_id=p1")
         assert resp.status_code == 200
@@ -475,7 +490,6 @@ class TestAuditIntegration:
     @pytest.mark.asyncio
     async def test_log_tool_execution(self, audit_db):
         """log_tool_execution helper logs a tool action."""
-        from pocketpaw.audit.store import AuditStore
 
         entry_id = await audit_db.log_tool_execution(
             tool_name="web_search",

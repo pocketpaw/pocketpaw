@@ -5,6 +5,7 @@ Updated: Added kb (knowledge base) domain router to mount_cloud().
 Domains: auth, workspace, chat, pockets, sessions, agents, kb.
 Each has router.py (thin), service.py (logic), schemas.py (validation).
 """
+
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI, Request
@@ -22,13 +23,13 @@ def mount_cloud(app: FastAPI) -> None:
         return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
 
     # Import and mount domain routers
-    from ee.cloud.auth.router import router as auth_router
-    from ee.cloud.workspace.router import router as workspace_router
     from ee.cloud.agents.router import router as agents_router
+    from ee.cloud.auth.router import router as auth_router
     from ee.cloud.chat.router import router as chat_router
+    from ee.cloud.license import get_license_info
     from ee.cloud.pockets.router import router as pockets_router
     from ee.cloud.sessions.router import router as sessions_router
-    from ee.cloud.license import get_license_info
+    from ee.cloud.workspace.router import router as workspace_router
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(workspace_router, prefix="/api/v1")
@@ -38,6 +39,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(sessions_router, prefix="/api/v1")
 
     from ee.cloud.kb.router import router as kb_router
+
     app.include_router(kb_router, prefix="/api/v1")
 
     # User search endpoint — used by group settings, pocket sharing
@@ -52,6 +54,7 @@ def mount_cloud(app: FastAPI) -> None:
         workspace_id: str = Depends(current_workspace_id),
     ):
         import re
+
         query = {"workspaces.workspace": workspace_id}
         if search:
             pattern = re.compile(re.escape(search), re.IGNORECASE)
@@ -74,6 +77,7 @@ def mount_cloud(app: FastAPI) -> None:
     # Mount WebSocket at root path (not under /api/v1 prefix)
     # so frontend can connect to ws://host/ws/cloud?token=...
     from ee.cloud.chat.router import websocket_endpoint
+
     app.add_api_websocket_route("/ws/cloud", websocket_endpoint)
 
     # License endpoint (no auth)
@@ -83,9 +87,11 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Register cross-domain event handlers + agent bridge
     from ee.cloud.shared.event_handlers import register_event_handlers
+
     register_event_handlers()
 
     from ee.cloud.shared.agent_bridge import register_agent_bridge
+
     register_agent_bridge()
 
     # Start/stop agent pool with app lifecycle + chat persistence
@@ -93,11 +99,14 @@ def mount_cloud(app: FastAPI) -> None:
     async def _start_agent_pool():
         # Register chat persistence bridge (saves runtime WS messages to MongoDB)
         from ee.cloud.shared.chat_persistence import register_chat_persistence
+
         register_chat_persistence()
         from pocketpaw.agents.pool import get_agent_pool
+
         await get_agent_pool().start()
 
     @app.on_event("shutdown")
     async def _stop_agent_pool():
         from pocketpaw.agents.pool import get_agent_pool
+
         await get_agent_pool().stop()

@@ -80,6 +80,7 @@ def create_api_app():
     # --- Mount enterprise cloud module FIRST (takes priority over core) --
     try:
         from ee.cloud import mount_cloud
+
         mount_cloud(app)
         logger.info("Enterprise cloud module mounted successfully")
     except ImportError as exc:
