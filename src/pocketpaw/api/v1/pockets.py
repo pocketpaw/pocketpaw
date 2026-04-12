@@ -1,7 +1,8 @@
 # Pocket chat router — dedicated endpoint for pocket creation.
-# Updated: 2026-04-01 — _prepare_pocket_spec now handles UISpec v1.0, multi-pane specs,
-#   and flat widget specs. System prompt teaches all three formats with UISpec as default.
-#   Debug logging added to trace pocket event pipeline.
+# Updated: 2026-04-12 — Added dynamic Ripple widget knowledge injection via kb-go.
+#   _get_ripple_widget_context() searches the 'ripple' kb scope for widget docs
+#   relevant to the user's request. Results are appended to the static pocket system
+#   context so agents get deep, targeted knowledge about the widgets they need.
 
 from __future__ import annotations
 
@@ -29,6 +30,65 @@ _WS_PREFIX = "websocket_"
 
 # Match the JSON arg passed to create_pocket in a Bash command (legacy fallback)
 _CREATE_POCKET_RE = re.compile(r"create_pocket\s+'(.*?)'", re.DOTALL)
+
+_RIPPLE_KB_SCOPE = "ripple"
+_RIPPLE_KB_LIMIT = 3
+
+
+async def _get_ripple_widget_context(user_message: str) -> str:
+    """Search the 'ripple' kb scope for widget docs relevant to the user's request.
+
+    Returns pre-formatted markdown articles about the specific Ripple widgets
+    the agent will need. Falls back to empty string on any failure — this is
+    a nice-to-have enhancement, never a blocker.
+    """
+    if not user_message:
+        return ""
+
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    binary = settings.kb_binary or "kb"
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            "search",
+            user_message,
+            "--scope",
+            _RIPPLE_KB_SCOPE,
+            "--context",
+            "--limit",
+            str(_RIPPLE_KB_LIMIT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return ""
+    except FileNotFoundError:
+        logger.debug("kb binary not found — skipping ripple widget context")
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+    if proc.returncode != 0:
+        return ""
+
+    output = stdout.decode("utf-8", errors="replace").strip()
+    if not output:
+        return ""
+
+    return (
+        "\n\n<ripple-widget-reference>\n"
+        "The following Ripple widget documentation is relevant to this request. "
+        "Use these props, types, and examples when building the UI spec.\n\n"
+        + output
+        + "\n</ripple-widget-reference>"
+    )
 
 _POCKET_SYSTEM_CONTEXT = """\
 <pocket-creation-context>
@@ -553,10 +613,17 @@ async def pocket_chat_stream(body: ChatRequest):
     chat_id = _extract_chat_id(body.session_id)
     safe_key = _to_safe_key(chat_id)
 
-    # Build metadata with pocket context if provided
+    # Fetch relevant Ripple widget docs in parallel (non-blocking, ~10ms)
+    widget_context = await _get_ripple_widget_context(body.content)
+
+    # Build metadata with pocket context — static rules + dynamic widget knowledge
+    pocket_ctx = _POCKET_SYSTEM_CONTEXT
+    if widget_context:
+        pocket_ctx += widget_context
+
     meta: dict = {
         "source": "pocket_chat",
-        "pocket_system_context": _POCKET_SYSTEM_CONTEXT,
+        "pocket_system_context": pocket_ctx,
     }
     if body.pocket_context:
         meta["pocket_context"] = body.pocket_context.model_dump(exclude_none=True)
