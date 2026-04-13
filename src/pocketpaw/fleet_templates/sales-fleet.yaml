@@ -1,0 +1,56 @@
+# Sales Fleet — Arrow + a sales pipeline pocket + the connectors a 40-person
+# SaaS sales org would use. The first reference fleet, intentionally minimal
+# so the install flow is testable end-to-end without setting up fifteen
+# external services.
+
+name: sales-fleet
+display_name: Sales Fleet
+description: |
+  Arrow soul + sales pipeline pocket + HubSpot + Gong connectors. The
+  default scope is org:sales:* so any reps already given that scope see
+  the fleet's data immediately; admins can narrow individual records via
+  the per-record ACLs the connectors report back.
+version: 0.1.0
+
+soul_template: arrow
+soul_name: Arrow
+
+pocket_name: Pipeline
+pocket_description: Live deal pipeline + outreach drafts.
+
+pocket_widgets:
+  - id: hot_leads
+    type: list
+    title: Hot Leads
+    source: fabric:Lead
+    limit: 10
+  - id: pipeline_summary
+    type: kpi
+    title: Pipeline This Week
+    source: fabric:Deal:summary
+  - id: arrow_chat
+    type: chat
+    title: Talk to Arrow
+    agent: arrow
+
+connectors:
+  - name: hubspot
+    optional: true
+    config:
+      poll_minutes: 15
+  - name: gong
+    optional: true
+    config:
+      poll_minutes: 30
+
+scopes:
+  - org:sales:*
+
+metadata:
+  recommended_tools:
+    - instinct_propose
+    - instinct_corrections
+    - fabric_query
+  industry_fit:
+    - saas
+    - mid_market_b2b
