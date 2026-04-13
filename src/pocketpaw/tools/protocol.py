@@ -7,6 +7,18 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 
+def normalize_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Normalize JSON schema for strict OpenAI-style function validators."""
+    schema = dict(schema)
+    if schema.get("type") == "object":
+        # Zero-arg tools still need an explicit object shape for strict validators.
+        schema.setdefault("properties", {})
+        if not schema["properties"]:
+            # Keep the schema callable with no inputs instead of emitting an invalid object schema.
+            schema["required"] = []
+    return schema
+
+
 @dataclass
 class ToolDefinition:
     """Tool definition for LLM function calling."""
@@ -23,7 +35,8 @@ class ToolDefinition:
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters,
+                # OpenAI-style backends are stricter than Anthropic about empty object schemas.
+                "parameters": normalize_schema(self.parameters),
             },
         }
 

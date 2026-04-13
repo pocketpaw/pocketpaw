@@ -55,8 +55,15 @@ WORKDIR /home/pocketpaw
 # Without this marker file, it treats every start as a fresh install.
 RUN echo '{}' > /home/pocketpaw/.claude.json
 
+# Bake Discord identity files and soul config into the image so they work
+# on Coolify without volume mounts. The identity dir is created before the
+# named volume mounts, so if the volume is empty on first run these files
+# are already in place.
+COPY --chown=pocketpaw:pocketpaw deploy/discord/identity/ /home/pocketpaw/.pocketpaw/identity/
+COPY --chown=pocketpaw:pocketpaw deploy/discord/paw.yaml /home/pocketpaw/paw.yaml
+
 ENV HOME=/home/pocketpaw
-# Agent-created files land here — bind-mount to access them on the host
+# Agent-created files land here
 ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
 
 CMD ["pocketpaw", "--discord"]

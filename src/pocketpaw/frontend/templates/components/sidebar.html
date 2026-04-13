@@ -110,47 +110,122 @@
           <div class="mb-3">
             <h4 class="text-[10px] uppercase tracking-wider text-white/30 font-semibold mb-1.5 px-2" x-text="group.label"></h4>
             <template x-for="session in group.sessions" :key="session.id">
-              <button
-                  class="group w-full text-left px-2.5 py-2 rounded-lg transition-all mb-0.5 border border-transparent"
+              <div
+                  class="group relative w-full text-left rounded-lg transition-all mb-0.5 border border-transparent"
                   :class="currentSessionId === session.id
                       ? 'bg-accent/15 border-accent/20 text-white'
                       : 'text-white/70 hover:bg-white/5 hover:text-white'"
-                  @click="selectSession(session.id)"
-                  @dblclick="startRenameSession(session.id, session.title, $event)"
+                  x-data="{ sessionMenuOpen: false }"
+                  @click.outside="sessionMenuOpen = false"
               >
-                <div class="flex items-start gap-2">
-                  <!-- Channel icon -->
-                  <i :data-lucide="getChannelIcon(session.channel)" class="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-50"></i>
+                <!-- Main session select button — right-padding leaves room for the ⋮ button -->
+                <button
+                    class="w-full text-left px-2.5 py-2 pr-8"
+                    @click="selectSession(session.id)"
+                    @dblclick="startRenameSession(session.id, session.title, $event)"
+                >
+                  <div class="flex items-start gap-2">
+                    <!-- Channel icon -->
+                    <i :data-lucide="getChannelIcon(session.channel)" class="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-50"></i>
 
-                  <div class="flex-1 min-w-0">
-                    <!-- Title or inline rename -->
-                    <template x-if="editingSessionId === session.id">
-                      <input
-                          type="text"
-                          x-model="editingSessionTitle"
-                          class="session-rename-input w-full bg-white/10 border border-accent/40 rounded px-1.5 py-0.5 text-xs text-white focus:outline-none"
-                          @keydown.enter="saveRenameSession(session.id)"
-                          @keydown.escape="cancelRenameSession()"
-                          @blur="saveRenameSession(session.id)"
-                          @click.stop
-                      />
-                    </template>
-                    <template x-if="editingSessionId !== session.id">
-                      <div class="text-[13px] font-medium truncate leading-tight" x-text="session.title || 'New Chat'"></div>
-                    </template>
-                    <div class="text-[11px] text-white/30 truncate mt-0.5 leading-tight" x-text="session.preview || ''"></div>
+                    <div class="flex-1 min-w-0">
+                      <!-- Title or inline rename -->
+                      <template x-if="editingSessionId === session.id">
+                        <input
+                            type="text"
+                            x-model="editingSessionTitle"
+                            class="session-rename-input w-full bg-white/10 border border-accent/40 rounded px-1.5 py-0.5 text-xs text-white focus:outline-none"
+                            @keydown.enter="saveRenameSession(session.id)"
+                            @keydown.escape="cancelRenameSession()"
+                            @blur="saveRenameSession(session.id)"
+                            @click.stop
+                        />
+                      </template>
+                      <template x-if="editingSessionId !== session.id">
+                        <div class="text-[13px] font-medium truncate leading-tight" x-text="session.title || 'New Chat'"></div>
+                      </template>
+                      <div class="text-[11px] text-white/30 truncate mt-0.5 leading-tight" x-text="session.preview || ''"></div>
+                    </div>
+                  </div>
+                </button>
+
+                <!-- Three-dot actions menu trigger — absolutely positioned so it is NOT nested inside the session button -->
+                <button
+                    x-ref="menuTrigger"
+                    class="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-white/10 transition-all"
+                    :class="sessionMenuOpen ? '!opacity-100 bg-white/10' : ''"
+                    @click.stop="sessionMenuOpen = !sessionMenuOpen"
+                    title="Session actions"
+                >
+                  <i data-lucide="more-vertical" class="w-3.5 h-3.5 text-white/50"></i>
+                </button>
+
+                <!-- Actions dropdown — fixed positioning to escape scroll container clipping -->
+                <div
+                    x-show="sessionMenuOpen"
+                    x-transition:enter="transition ease-out duration-100"
+                    x-transition:enter-start="opacity-0 scale-95"
+                    x-transition:enter-end="opacity-100 scale-100"
+                    x-transition:leave="transition ease-in duration-75"
+                    x-transition:leave-start="opacity-100 scale-100"
+                    x-transition:leave-end="opacity-0 scale-95"
+                    class="fixed z-50 w-44 rounded-lg bg-[var(--glass-bg)] border border-[var(--glass-border)] shadow-xl backdrop-blur-xl py-1"
+                    x-init="$watch('sessionMenuOpen', open => { if (open) { $nextTick(() => { const r = $refs.menuTrigger.getBoundingClientRect(); $el.style.top = (r.bottom + 2) + 'px'; $el.style.left = (r.right - $el.offsetWidth) + 'px'; }); } })"
+                    @click.stop
+                >
+                  <!-- Export submenu -->
+                  <div x-data="{ exportSubOpen: false }" class="relative" @mouseenter="exportSubOpen = true" @mouseleave="exportSubOpen = false">
+                    <button
+                        class="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+                        @click="exportSubOpen = !exportSubOpen"
+                    >
+                      <i data-lucide="download" class="w-3.5 h-3.5 shrink-0"></i>
+                      <span>Export</span>
+                      <i data-lucide="chevron-right" class="w-3 h-3 ml-auto shrink-0"></i>
+                    </button>
+                    <!-- Export sub-dropdown -->
+                    <div
+                        x-show="exportSubOpen"
+                        class="absolute left-full top-0 w-32 rounded-lg bg-[var(--glass-bg)] border border-[var(--glass-border)] shadow-xl backdrop-blur-xl py-1 ml-1"
+                    >
+                      <button
+                          class="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+                          @click="exportSessionById(session.id, 'json'); sessionMenuOpen = false; exportSubOpen = false"
+                      >
+                        <i data-lucide="braces" class="w-3.5 h-3.5 shrink-0"></i>
+                        JSON
+                      </button>
+                      <button
+                          class="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+                          @click="exportSessionById(session.id, 'md'); sessionMenuOpen = false; exportSubOpen = false"
+                      >
+                        <i data-lucide="file-text" class="w-3.5 h-3.5 shrink-0"></i>
+                        Markdown
+                      </button>
+                    </div>
                   </div>
 
-                  <!-- Delete button (hover) -->
+                  <!-- Rename -->
                   <button
-                      class="shrink-0 opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-white/10 transition-all"
-                      @click="deleteSession(session.id, $event)"
-                      title="Delete"
+                      class="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+                      @click="startRenameSession(session.id, session.title, $event); sessionMenuOpen = false"
                   >
-                    <i data-lucide="x" class="w-3 h-3 text-white/40 hover:text-danger"></i>
+                    <i data-lucide="pencil" class="w-3.5 h-3.5 shrink-0"></i>
+                    Rename
+                  </button>
+
+                  <div class="border-t border-white/10 my-1"></div>
+
+                  <!-- Delete with confirmation -->
+                  <button
+                      class="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                      @click="confirmDeleteSession(session.id, $event); sessionMenuOpen = false"
+                  >
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5 shrink-0"></i>
+                    Delete
                   </button>
                 </div>
-              </button>
+              </div>
             </template>
           </div>
         </template>
@@ -389,7 +464,7 @@
       </div>
 
       <!-- Compact system status -->
-      <div class="grid grid-cols-4 gap-1 mt-2 px-1 py-2 bg-black/20 rounded-lg">
+      <div :class="'grid gap-1 mt-2 px-1 py-2 bg-black/20 rounded-lg ' + (typeof status.battery === 'number' ? 'grid-cols-4' : 'grid-cols-3')">
         <div class="text-center">
           <div class="text-[10px] text-white/30">CPU</div>
           <div class="text-[11px] font-mono text-white/70" x-text="typeof status.cpu === 'number' ? status.cpu + '%' : status.cpu"></div>
@@ -402,9 +477,10 @@
           <div class="text-[10px] text-white/30">Disk</div>
           <div class="text-[11px] font-mono text-white/70" x-text="typeof status.disk === 'number' ? status.disk + '%' : status.disk"></div>
         </div>
-        <div class="text-center">
-          <div class="text-[10px] text-white/30">Bat</div>
-          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.battery === 'number' ? status.battery + '%' : status.battery"></div>
+        <div class="text-center" x-show="typeof status.battery === 'number'"
+>
+          <div class="text-[10px] text-white/30">Battery</div>
+          <div class="text-[11px] font-mono text-white/70" x-text="typeof status.battery === 'number' ? status.battery + '%' : '—'"></div>
         </div>
       </div>
 
@@ -426,4 +502,39 @@
       </div>
     </div>
   </div>
+
+  <!-- Delete confirmation dialog -->
+  <template x-if="deletingSessionId">
+    <div
+        class="fixed inset-0 z-[200] flex items-center justify-center p-4"
+        @click.self="deletingSessionId = null"
+        @keydown.window.escape="deletingSessionId = null"
+    >
+      <div class="w-72 rounded-xl bg-[var(--glass-bg)] border border-[var(--glass-border)] shadow-2xl backdrop-blur-xl p-5">
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-8 h-8 rounded-full bg-red-500/15 flex items-center justify-center shrink-0">
+            <i data-lucide="trash-2" class="w-4 h-4 text-red-400"></i>
+          </div>
+          <div>
+            <p class="text-sm font-semibold text-white">Delete session?</p>
+            <p class="text-xs text-white/40 mt-0.5">This cannot be undone.</p>
+          </div>
+        </div>
+        <div class="flex gap-2 mt-4">
+          <button
+              class="flex-1 py-1.5 rounded-lg text-xs font-medium bg-white/8 text-white/70 hover:bg-white/12 hover:text-white transition-colors"
+              @click="deletingSessionId = null"
+          >
+            Cancel
+          </button>
+          <button
+              class="flex-1 py-1.5 rounded-lg text-xs font-medium bg-red-500/80 text-white hover:bg-red-500 transition-colors"
+              @click="deleteSession(deletingSessionId); deletingSessionId = null"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
 </aside>

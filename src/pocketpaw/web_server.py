@@ -166,10 +166,10 @@ def create_app(settings: Settings) -> FastAPI:
         .logo { font-size: 64px; margin-bottom: 16px; }
         h1 { font-size: 28px; margin-bottom: 8px; }
         .tagline { color: #888; margin-bottom: 32px; }
-        .step { 
-            background: rgba(255,255,255,0.05); 
-            border-radius: 12px; 
-            padding: 20px; 
+        .step {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 20px;
             margin-bottom: 16px;
             text-align: left;
         }
@@ -211,16 +211,16 @@ def create_app(settings: Settings) -> FastAPI:
         button:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(102,126,234,0.4); }
         .qr-section { display: none; margin-top: 32px; }
         .qr-section.active { display: block; }
-        .qr-code { 
-            background: #fff; 
-            padding: 16px; 
-            border-radius: 16px; 
+        .qr-code {
+            background: #fff;
+            padding: 16px;
+            border-radius: 16px;
             display: inline-block;
             margin: 16px 0;
         }
         .qr-code img { width: 200px; height: 200px; }
-        .success { 
-            background: rgba(34, 197, 94, 0.2); 
+        .success {
+            background: rgba(34, 197, 94, 0.2);
             border: 1px solid rgba(34, 197, 94, 0.5);
             padding: 16px;
             border-radius: 12px;
@@ -249,7 +249,7 @@ def create_app(settings: Settings) -> FastAPI:
         <div class="logo">🦀</div>
         <h1>PocketPaw Setup</h1>
         <p class="tagline">Your AI agent, on your machine</p>
-        
+
         <form id="setup-form" method="POST" action="/setup">
             <div class="step">
                 <span class="step-number">1</span>
@@ -263,7 +263,7 @@ def create_app(settings: Settings) -> FastAPI:
                 <input type="text" name="bot_token"
                     placeholder="Paste your bot token here..." required>
             </div>
-            
+
             <div class="step api-keys">
                 <span class="step-number">2</span>
                 <strong>LLM API Keys (Optional)</strong>
@@ -275,10 +275,10 @@ def create_app(settings: Settings) -> FastAPI:
                 <label>Anthropic API Key</label>
                 <input type="password" name="anthropic_key" placeholder="sk-ant-...">
             </div>
-            
+
             <button type="submit">Generate QR Code →</button>
         </form>
-        
+
         <div id="qr-section" class="qr-section">
             <div class="step">
                 <span class="step-number">3</span>
@@ -292,12 +292,12 @@ def create_app(settings: Settings) -> FastAPI:
             </div>
             <p style="color: #888; font-size: 14px;">Waiting for connection...</p>
         </div>
-        
+
         <div id="success-section" class="success" style="display: none;">
             ✅ <strong>Connected!</strong> PocketPaw is now running.
         </div>
     </div>
-    
+
     <script>
         document.getElementById('setup-form').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -305,7 +305,7 @@ def create_app(settings: Settings) -> FastAPI:
             const originalText = btn.innerText;
             btn.innerText = "Connecting...";
             btn.disabled = true;
-            
+
             const formData = new FormData(e.target);
             try {
                 const response = await fetch('/setup', {
@@ -331,7 +331,7 @@ def create_app(settings: Settings) -> FastAPI:
                 btn.disabled = false;
             }
         });
-        
+
         async function pollStatus() {
             while (true) {
                 try {

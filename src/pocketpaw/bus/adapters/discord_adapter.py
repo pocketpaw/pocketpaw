@@ -10,6 +10,7 @@ import json
 import logging
 import shutil
 import time
+from collections.abc import Callable
 from typing import Any
 
 from pocketpaw.bus import BaseChannelAdapter, Channel, InboundMessage, OutboundMessage
@@ -33,6 +34,9 @@ _STREAM_BUFFER_THRESHOLD = 25
 
 class DiscliAdapter(BaseChannelAdapter):
     """Discord adapter that delegates to discli serve subprocess."""
+
+    # Event name -> handler method. Async handlers are wrapped in create_task.
+    _EVENT_DISPATCH: dict[str, Callable] = {}  # populated after class body
 
     def __init__(
         self,
@@ -80,6 +84,7 @@ class DiscliAdapter(BaseChannelAdapter):
         self._conversation_last_active: dict[int, float] = {}
         self._eviction_task: asyncio.Task | None = None
         self._start_time: float = 0.0
+        self._disconnected: bool = False
 
     @property
     def channel(self) -> Channel:
@@ -117,9 +122,6 @@ class DiscliAdapter(BaseChannelAdapter):
             cmd += ["--slash-commands", slash_file]
 
         import os
-
-        # Set token in parent env so DiscordCLITool subprocesses inherit it
-        os.environ["DISCORD_BOT_TOKEN"] = self.token
 
         env = {
             "DISCORD_BOT_TOKEN": self.token,
@@ -377,17 +379,19 @@ class DiscliAdapter(BaseChannelAdapter):
                         future.set_result(data)
                     continue
 
-                # Handle events — fire as tasks to avoid deadlocking
-                # the reader (handlers may call _send_command which reads
-                # from the same stdout this loop consumes).
+                # Handle events via dispatch table. Async handlers are
+                # wrapped in tasks to avoid deadlocking the reader (they
+                # may call _send_command which reads from the same stdout).
                 if event == "ready":
                     self._bot_id = data.get("bot_id")
-                elif event == "message":
-                    asyncio.create_task(self._handle_message_event(data))
-                elif event == "slash_command":
-                    asyncio.create_task(self._handle_slash_event(data))
                 elif event == "error":
                     logger.error("discli serve error: %s", data.get("message"))
+                else:
+                    handler = self._EVENT_DISPATCH.get(event)
+                    if handler:
+                        bound = handler(self, data)
+                        if asyncio.iscoroutine(bound):
+                            asyncio.create_task(bound)
 
         except asyncio.CancelledError:
             pass
@@ -607,6 +611,97 @@ class DiscliAdapter(BaseChannelAdapter):
             metadata=metadata,
         )
         await self._publish_inbound(msg)
+
+    async def _handle_component_interaction(self, data: dict) -> None:
+        """Handle button click or select menu interaction from discli."""
+        user_id = data.get("user_id", "")
+        channel_id = data.get("channel_id", "")
+        guild_id = data.get("guild_id")
+        interaction_token = data.get("interaction_token", "")
+        custom_id = data.get("custom_id", "")
+
+        if not self._check_auth(guild_id, user_id, channel_id):
+            return
+
+        # Format content for agent: include custom_id and any selected values
+        values = data.get("values")
+        if values:
+            content = (
+                f"[Component interaction: {custom_id}] "
+                f"User selected: {', '.join(str(v) for v in values)}"
+            )
+        else:
+            content = f"[Component interaction: {custom_id}] User clicked button."
+
+        metadata: dict[str, Any] = {
+            "username": data.get("user", ""),
+            "guild_id": guild_id,
+            "interaction_token": interaction_token,
+            "component_interaction": True,
+            "custom_id": custom_id,
+        }
+        if data.get("message_id"):
+            metadata["message_id"] = data["message_id"]
+
+        msg = InboundMessage(
+            channel=Channel.DISCORD,
+            sender_id=user_id,
+            chat_id=channel_id,
+            content=content,
+            metadata=metadata,
+        )
+        await self._publish_inbound(msg)
+
+    async def _handle_modal_submit(self, data: dict) -> None:
+        """Handle modal form submission from discli."""
+        user_id = data.get("user_id", "")
+        channel_id = data.get("channel_id", "")
+        guild_id = data.get("guild_id")
+        interaction_token = data.get("interaction_token", "")
+        custom_id = data.get("custom_id", "")
+        fields = data.get("fields", {})
+
+        if not self._check_auth(guild_id, user_id, channel_id):
+            return
+
+        # Format fields for agent
+        field_lines = "\n".join(f"  {k}: {v}" for k, v in fields.items())
+        content = f"[Modal submitted: {custom_id}]\nForm data:\n{field_lines}"
+
+        metadata: dict[str, Any] = {
+            "username": data.get("user", ""),
+            "guild_id": guild_id,
+            "interaction_token": interaction_token,
+            "modal_submit": True,
+            "custom_id": custom_id,
+        }
+
+        msg = InboundMessage(
+            channel=Channel.DISCORD,
+            sender_id=user_id,
+            chat_id=channel_id,
+            content=content,
+            metadata=metadata,
+        )
+        await self._publish_inbound(msg)
+
+    def _handle_voice_state(self, data: dict) -> None:
+        """Log voice state changes. Not routed to agent."""
+        user_id = data.get("user_id", "")
+        action = data.get("action", "unknown")
+        channel_id = data.get("channel_id", "")
+        logger.debug("Voice state: user=%s action=%s channel=%s", user_id, action, channel_id)
+
+    def _handle_disconnected(self, data: dict) -> None:
+        """Handle discli disconnection event."""
+        reason = data.get("reason", "unknown")
+        logger.warning("Discord bot disconnected: %s", reason)
+        self._disconnected = True
+
+    def _handle_resumed(self, data: dict) -> None:
+        """Handle discli reconnection event."""
+        logger.info("Discord bot reconnected")
+        self._disconnected = False
 
     # ── Send (OutboundMessage → discli) ─────────────────────────────
 
@@ -861,3 +956,15 @@ class DiscliAdapter(BaseChannelAdapter):
         # Strip markdown formatting (backticks, bold, italic, underscores, periods)
         cleaned = stripped.strip("`*_ .\n\r\t")
         return cleaned == _NO_RESPONSE_MARKER
+
+
+# Populate dispatch table after class body so all methods are defined
+DiscliAdapter._EVENT_DISPATCH = {
+    "message": DiscliAdapter._handle_message_event,
+    "slash_command": DiscliAdapter._handle_slash_event,
+    "component_interaction": DiscliAdapter._handle_component_interaction,
+    "modal_submit": DiscliAdapter._handle_modal_submit,
+    "voice_state": DiscliAdapter._handle_voice_state,
+    "disconnected": DiscliAdapter._handle_disconnected,
+    "resumed": DiscliAdapter._handle_resumed,
+}

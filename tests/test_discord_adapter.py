@@ -80,6 +80,41 @@ async def test_start_no_token():
         await a._on_start()
 
 
+async def test_on_start_does_not_pollute_os_environ():
+    """Token must not be written into os.environ (OWASP A02 — process-wide secret exposure)."""
+    import os
+
+    secret = "super-secret-discord-token"
+    a = DiscliAdapter(token=secret)
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/discli"),
+        patch.object(a, "_write_slash_config", new=AsyncMock(return_value=None)),
+        patch("asyncio.create_subprocess_exec", new=AsyncMock()) as mock_exec,
+        patch.object(a, "_read_stdout", new=AsyncMock()),
+        patch.object(a, "_drain_stderr", new=AsyncMock()),
+        patch.object(a, "_eviction_loop", new=AsyncMock()),
+    ):
+        # Fake bot_id so _on_start does not time-out waiting for a ready event
+        async def _set_bot_id(*_args, **_kwargs):
+            a._bot_id = "123456789"
+            return MagicMock(
+                stdin=MagicMock(),
+                stdout=MagicMock(),
+                stderr=MagicMock(),
+            )
+
+        mock_exec.side_effect = _set_bot_id
+
+        with patch.object(a, "_register_discord_mcp"):
+            os.environ.pop("DISCORD_BOT_TOKEN", None)
+            await a._on_start()
+
+    assert os.environ.get("DISCORD_BOT_TOKEN") != secret, (
+        "Bot token must not be written into os.environ"
+    )
+
+
 # ── Auth checks ─────────────────────────────────────────────────────
 
 
@@ -775,3 +810,165 @@ def test_stale_history_eviction(convo_adapter):
     ]
     assert 100 in stale
     assert 200 not in stale
+
+
+# ── New v0.7.0 event handler tests ────────────────────────────────
+
+
+async def test_handle_component_interaction(adapter, bus):
+    """component_interaction events are routed to the agent as InboundMessage."""
+    adapter._on_start = AsyncMock()
+    adapter._on_stop = AsyncMock()
+    await adapter.start(bus)
+    adapter._bot_id = "BOT1"
+    adapter._send_command = AsyncMock(return_value={"ok": True})
+
+    await adapter._handle_component_interaction(
+        {
+            "custom_id": "ok_btn",
+            "channel_id": "100",
+            "user_id": "999",
+            "user": "testuser",
+            "guild_id": "111",
+            "interaction_token": "comp_tok1",
+            "message_id": "msg123",
+        }
+    )
+
+    assert bus.inbound_pending() == 1
+    msg = await bus.consume_inbound()
+    assert "ok_btn" in msg.content
+    assert msg.metadata["interaction_token"] == "comp_tok1"
+    assert msg.metadata["component_interaction"] is True
+
+
+async def test_handle_component_interaction_with_values(adapter, bus):
+    """Select menu interactions include selected values."""
+    adapter._on_start = AsyncMock()
+    adapter._on_stop = AsyncMock()
+    await adapter.start(bus)
+    adapter._bot_id = "BOT1"
+    adapter._send_command = AsyncMock(return_value={"ok": True})
+
+    await adapter._handle_component_interaction(
+        {
+            "custom_id": "color_select",
+            "channel_id": "100",
+            "user_id": "999",
+            "user": "testuser",
+            "guild_id": "111",
+            "interaction_token": "comp_tok2",
+            "values": ["red", "blue"],
+        }
+    )
+
+    msg = await bus.consume_inbound()
+    assert "red" in msg.content
+    assert "blue" in msg.content
+
+
+async def test_handle_component_interaction_unauthorized(adapter, bus):
+    """Unauthorized component interactions are rejected."""
+    adapter._on_start = AsyncMock()
+    adapter._on_stop = AsyncMock()
+    await adapter.start(bus)
+    adapter._bot_id = "BOT1"
+    adapter._send_command = AsyncMock(return_value={"ok": True})
+
+    await adapter._handle_component_interaction(
+        {
+            "custom_id": "ok_btn",
+            "channel_id": "100",
+            "user_id": "666",  # not in allowed_user_ids
+            "guild_id": "111",
+            "interaction_token": "comp_tok3",
+        }
+    )
+
+    assert bus.inbound_pending() == 0
+
+
+async def test_handle_modal_submit(adapter, bus):
+    """modal_submit events are routed to the agent as InboundMessage."""
+    adapter._on_start = AsyncMock()
+    adapter._on_stop = AsyncMock()
+    await adapter.start(bus)
+    adapter._bot_id = "BOT1"
+    adapter._send_command = AsyncMock(return_value={"ok": True})
+
+    await adapter._handle_modal_submit(
+        {
+            "custom_id": "feedback_form",
+            "channel_id": "100",
+            "user_id": "999",
+            "user": "testuser",
+            "guild_id": "111",
+            "interaction_token": "modal_tok1",
+            "fields": {"rating": "5", "comment": "Great bot!"},
+        }
+    )
+
+    assert bus.inbound_pending() == 1
+    msg = await bus.consume_inbound()
+    assert "feedback_form" in msg.content
+    assert "Great bot!" in msg.content
+    assert msg.metadata["interaction_token"] == "modal_tok1"
+    assert msg.metadata["modal_submit"] is True
+
+
+async def test_handle_modal_submit_unauthorized(adapter, bus):
+    """Unauthorized modal submissions are rejected."""
+    adapter._on_start = AsyncMock()
+    adapter._on_stop = AsyncMock()
+    await adapter.start(bus)
+    adapter._bot_id = "BOT1"
+    adapter._send_command = AsyncMock(return_value={"ok": True})
+
+    await adapter._handle_modal_submit(
+        {
+            "custom_id": "feedback_form",
+            "channel_id": "100",
+            "user_id": "666",
+            "guild_id": "111",
+            "interaction_token": "modal_tok2",
+            "fields": {"rating": "5"},
+        }
+    )
+
+    assert bus.inbound_pending() == 0
+
+
+async def test_handle_voice_state_is_logged_not_routed(adapter, bus):
+    """voice_state events are logged but not routed to agent."""
+    adapter._on_start = AsyncMock()
+    adapter._on_stop = AsyncMock()
+    await adapter.start(bus)
+    adapter._bot_id = "BOT1"
+
+    # Should not raise, should not publish
+    adapter._handle_voice_state(
+        {
+            "user_id": "999",
+            "action": "join",
+            "channel_id": "vc1",
+            "guild_id": "111",
+        }
+    )
+
+    assert bus.inbound_pending() == 0
+
+
+async def test_handle_disconnected_sets_status(adapter):
+    """disconnected event logs warning."""
+    adapter._bot_id = "BOT1"
+    adapter._handle_disconnected({"reason": "network"})
+    # No crash, status tracked
+    assert adapter._disconnected is True
+
+
+async def test_handle_resumed_clears_status(adapter):
+    """resumed event clears disconnected status."""
+    adapter._bot_id = "BOT1"
+    adapter._disconnected = True
+    adapter._handle_resumed({})
+    assert adapter._disconnected is False

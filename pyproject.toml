@@ -1,7 +1,7 @@
-# Updated: 2026-03-17 — Release 0.4.10: Soul Protocol, agent primitives, Discord overhaul, LiteLLM.
+# Updated: 2026-04-09 — Release 0.4.16: security rollup (CredentialStore v2, WS auth, dangerous-cmd hardening, OWASP fixes), discli 0.7, soul 0.2.9, Python 3.14 warning, fast-chat disabled for CLI compaction.
 [project]
 name = "pocketpaw"
-version = "0.4.15"
+version = "0.4.16"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -44,11 +44,11 @@ dependencies = [
     "openai>=1.60.0",
     "anthropic>=0.45.0",
     # Agent Backend (recommended default)
-    "claude-agent-sdk>=0.1.30",
+    "claude-agent-sdk>=0.1.56",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
-    "fastapi>=0.115.0",
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",
+    "fastapi>=0.134.0",   # fastapi 0.134.0 first allowed starlette 1.0.0 (dropped upper bound)
     "qrcode[pil]>=7.4",
     "python-multipart>=0.0.22",
     # Logging & CLI
@@ -58,7 +58,7 @@ dependencies = [
     "apscheduler>=3.10.0",
     "python-dateutil>=2.8.0",
     # Credential Encryption
-    "cryptography>=42.0",
+    "cryptography>=46.0.0",
     # Image basics
     "pillow>=10.0.0",
 ]
@@ -66,6 +66,7 @@ dependencies = [
 [project.optional-dependencies]
 # --- Feature extras ---
 vector = ["chromadb"]
+graph = ["networkx>=3.0"]
 dashboard = [
     # Kept for backward compat — dashboard deps are now in core.
     # Users with `pip install pocketpaw[dashboard]` in scripts won't break.
@@ -101,12 +102,12 @@ memory = [
     "ollama>=0.6.1",
 ]
 soul = [
-    "soul-protocol[engine]>=0.2.4",
+    "soul-protocol[engine]>=0.2.9",
 ]
 
 # --- Channel extras ---
 discord = [
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
 ]
 slack = [
     "slack-bolt>=1.20.0",
@@ -160,7 +161,7 @@ channels = [
     # telegram
     "python-telegram-bot>=21.0",
     # discord
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     # slack
     "slack-bolt>=1.20.0",
 ]
@@ -168,7 +169,7 @@ all-channels = [
     # telegram
     "python-telegram-bot>=21.0",
     # discord
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     # slack
     "slack-bolt>=1.20.0",
     # whatsapp-personal
@@ -203,8 +204,10 @@ all-tools = [
     # memory
     "mem0ai>=0.1.115",
     "ollama>=0.6.1",
+    # graph
+    "networkx>=3.0",
     # soul
-    "soul-protocol[engine]>=0.2.4",
+    "soul-protocol[engine]>=0.2.9",
 ]
 all-backends = [
     "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
@@ -220,7 +223,7 @@ all = [
     "pyautogui>=0.9.54",
     # channels
     "python-telegram-bot>=21.0",
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     "slack-bolt>=1.20.0",
     "neonize>=0.3.14",
     "matrix-nio>=0.24.0",
@@ -236,7 +239,7 @@ all = [
     "sarvamai>=0.1.25",
     "mcp>=1.0.0",
     # soul
-    "soul-protocol[engine]>=0.2.4",
+    "soul-protocol[engine]>=0.2.9",
     # backends
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
@@ -252,7 +255,7 @@ dev = [
     "psutil>=5.9.0",
     "pyautogui>=0.9.54",
     "python-telegram-bot>=21.0",
-    "discord-cli-agent>=0.6.0",
+    "discord-cli-agent>=0.7.0",
     "slack-bolt>=1.20.0",
     "neonize>=0.3.14",
     "matrix-nio>=0.24.0",
@@ -273,7 +276,7 @@ dev = [
     "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "pytest-playwright>=0.4.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
@@ -316,7 +319,7 @@ dev = [
     "psutil>=5.9.0",
     "pyautogui>=0.9.54",
     "python-telegram-bot>=21.0",
-    "discord-cli-agent>=0.6.4",
+    "discord-cli-agent>=0.7.0",
     "slack-bolt>=1.20.0",
     "neonize>=0.3.14",
     "matrix-nio>=0.24.0",
@@ -337,7 +340,7 @@ dev = [
     "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "ruff>=0.4.0",
     "mypy>=1.8.0",
     "pytest-playwright>=0.7.2",

@@ -8,6 +8,7 @@ Extracted from dashboard.py — contains:
   and token regeneration endpoints
 """
 
+import hmac
 import io
 import logging
 
@@ -59,11 +60,13 @@ def _audit_auth_event(
 
 
 def _is_genuine_localhost(request_or_ws) -> bool:
-    """Check if request originates from genuine localhost (not a tunneled proxy).
+    """Check if request originates from genuine localhost (not forwarded by any proxy).
 
-    When a Cloudflare tunnel is active, requests arrive from cloudflared running
-    on localhost — but they carry proxy headers (Cf-Connecting-Ip / X-Forwarded-For).
-    Those are NOT genuine localhost and must authenticate.
+    Proxy headers (``Cf-Connecting-Ip``, ``X-Forwarded-For``) are **always**
+    inspected — regardless of whether a Cloudflare tunnel is active — because
+    any reverse proxy (nginx, Caddy, ngrok, cloudflared, …) can forward these
+    headers.  A remote client that spoofs ``X-Forwarded-For: 127.0.0.1`` must
+    not be granted the localhost bypass (OWASP A01 — Broken Access Control).
 
     The ``localhost_auth_bypass`` setting (default True) controls whether genuine
     localhost connections skip auth.  Set to False to require tokens everywhere.
@@ -76,14 +79,16 @@ def _is_genuine_localhost(request_or_ws) -> bool:
     if client_host not in _LOCALHOST_ADDRS:
         return False
 
-    # If the tunnel is active, check for proxy headers indicating the request
-    # was forwarded by cloudflared (not a genuine local browser).
-    tunnel = get_tunnel_manager()
-    if tunnel.get_status()["active"]:
-        headers = request_or_ws.headers
-        for hdr in _PROXY_HEADERS:
-            if headers.get(hdr):
-                return False
+    # Always check for proxy headers — regardless of whether a Cloudflare tunnel
+    # is active.  Any reverse proxy (nginx, Caddy, ngrok, cloudflared, …) that
+    # forwards requests will inject these headers.  A remote client that sets
+    # X-Forwarded-For: 127.0.0.1 must NOT be granted the localhost bypass even
+    # when the tunnel manager reports inactive (OWASP A01 — Broken Access Control,
+    # see issue #871).
+    headers = request_or_ws.headers
+    for hdr in _PROXY_HEADERS:
+        if headers.get(hdr):
+            return False
 
     return True
 
@@ -126,24 +131,132 @@ async def verify_token(
 
 
 # ---------------------------------------------------------------------------
-# HTTP auth middleware (registered by dashboard.py via app.add_middleware)
+# WebSocket scope authentication (used by AuthMiddleware — issue #883)
+# ---------------------------------------------------------------------------
+
+
+def _ws_scope_auth_ok(scope: dict) -> bool:
+    """Return True if the raw ASGI WebSocket *scope* carries valid auth.
+
+    Checks — in order — query-string ``token`` param, ``Cookie`` header
+    (``pocketpaw_session``), ``Authorization: Bearer …`` header,
+    ``Sec-WebSocket-Protocol`` header, and genuine-localhost bypass.
+
+    This runs *before* the WebSocket upgrade completes so that
+    unauthenticated connections are rejected immediately.
+    """
+    from urllib.parse import parse_qs
+
+    current_token = get_access_token()
+
+    # --- helpers -----------------------------------------------------------
+
+    def _tok_ok(t: str | None) -> bool:
+        if not t:
+            return False
+        if hmac.compare_digest(t, current_token):
+            return True
+        if ":" in t and verify_session_token(t, current_token):
+            return True
+        if t.startswith("pp_") and not t.startswith("ppat_"):
+            try:
+                from pocketpaw.api.api_keys import get_api_key_manager
+
+                if get_api_key_manager().verify(t) is not None:
+                    return True
+            except Exception:
+                pass
+        if t.startswith("ppat_"):
+            try:
+                from pocketpaw.api.oauth2.server import get_oauth_server
+
+                if get_oauth_server().verify_access_token(t) is not None:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    # --- extract headers as a dict (lower-cased keys) ----------------------
+    headers: dict[str, str] = {}
+    for raw_name, raw_val in scope.get("headers", []):
+        headers[raw_name.decode("latin-1").lower()] = raw_val.decode("latin-1")
+
+    # 1. Query-string token
+    qs = scope.get("query_string", b"").decode("latin-1")
+    params = parse_qs(qs)
+    token_vals = params.get("token", [])
+    if token_vals and _tok_ok(token_vals[0]):
+        return True
+
+    # 2. HTTP-only session cookie
+    cookie_header = headers.get("cookie", "")
+    for morsel in cookie_header.split(";"):
+        morsel = morsel.strip()
+        if morsel.startswith("pocketpaw_session="):
+            cookie_token = morsel.split("=", 1)[1]
+            if _tok_ok(cookie_token):
+                return True
+
+    # 3. Authorization header
+    auth_header = headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        bearer = auth_header.removeprefix("Bearer ").strip()
+        if _tok_ok(bearer):
+            return True
+
+    # 4. Sec-WebSocket-Protocol (browser clients)
+    protocols = headers.get("sec-websocket-protocol", "")
+    for proto in protocols.split(","):
+        candidate = proto.strip()
+        if candidate and _tok_ok(candidate):
+            return True
+
+    # 5. Genuine localhost bypass
+    class _ScopeProxy:
+        """Minimal object satisfying ``_is_genuine_localhost`` expectations."""
+
+        def __init__(self, s, h):
+            self.client = type("C", (), {"host": s.get("client", ("", 0))[0]})()
+            self.headers = h
+
+    if _is_genuine_localhost(_ScopeProxy(scope, headers)):
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Auth middleware (registered by dashboard.py via app.add_middleware)
 # ---------------------------------------------------------------------------
 
 
 class AuthMiddleware:
-    """Pure ASGI middleware — explicitly passes WebSocket through.
+    """Pure ASGI middleware with auth checks for both HTTP and WebSocket scopes.
 
     Using a raw ASGI class instead of ``BaseHTTPMiddleware`` avoids known
     issues with Starlette's ``@app.middleware("http")`` blocking WebSocket
     connections in certain middleware stack configurations.
+
+    WebSocket connections are authenticated at the middleware level as a
+    defence-in-depth measure (see issue #883).  Individual WebSocket
+    handlers may perform additional checks, but any *new* WebSocket route
+    is now protected by default.
     """
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            if not _ws_scope_auth_ok(scope):
+                # Reject before the upgrade completes.
+                await receive()  # consume websocket.connect
+                await send({"type": "websocket.close", "code": 4003})
+                return
+            await self.app(scope, receive, send)
+            return
         if scope["type"] != "http":
-            # WebSocket / lifespan — pass through immediately
+            # lifespan — pass through immediately
             await self.app(scope, receive, send)
             return
         # HTTP — run the auth dispatch
@@ -175,15 +288,36 @@ async def _auth_dispatch(request: Request) -> Response | None:
     if request.method == "OPTIONS":
         return None
 
+    path = request.url.path
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Rate-limit authentication endpoints BEFORE exempt-path processing.
+    # Login and QR endpoints are intentionally exempt from token auth (the user
+    # does not yet have a token), but they MUST still be rate-limited to prevent
+    # unlimited brute-force / token-enumeration attacks (OWASP A07).
+    _AUTH_RATE_LIMITED_PREFIXES = (
+        "/api/auth/login",
+        "/api/v1/auth/login",
+        "/api/qr",
+        "/api/v1/qr",
+    )
+    if any(path.startswith(p) for p in _AUTH_RATE_LIMITED_PREFIXES):
+        rl_info = auth_limiter.check(client_ip)
+        if not rl_info.allowed:
+            _audit_auth_event("brute_force_blocked", request, status="block")
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests"},
+                headers=rl_info.headers(),
+            )
+        request.state.rate_limit_headers = rl_info.headers()
+
     # Exempt routes — return None to let the request through
     exempt_paths = [
         "/static",
         "/favicon.ico",
-        "/ws",  # WebSocket handles its own auth in dashboard_ws.py
-        "/v1/ws",  # v1 WebSocket (short path) — same handler, same auth
-        "/api/v1/ws",  # v1 WebSocket — same handler, same auth
-        "/api/qr",
-        "/api/v1/qr",
+        # NOTE: /ws, /v1/ws, /api/v1/ws are no longer exempted here — WebSocket
+        # scopes are now authenticated at the middleware level (issue #883).
         "/api/auth/login",
         "/api/v1/auth/login",
         "/api/v1/docs",
@@ -200,13 +334,13 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/api/v1/oauth/token",
     ]
 
-    for path in exempt_paths:
-        if request.url.path.startswith(path):
+    for exempt in exempt_paths:
+        if path.startswith(exempt):
             return None  # allow through
 
     # Rate limiting — pick tier based on path
     client_ip = request.client.host if request.client else "unknown"
-    is_auth_path = request.url.path in ("/api/auth/session", "/api/qr")
+    is_auth_path = request.url.path == "/api/auth/session"
     limiter = auth_limiter if is_auth_path else api_limiter
     rl_info = limiter.check(client_ip)
     if not rl_info.allowed:
@@ -227,7 +361,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
 
     # 1. Check Query Param (master token or session token)
     if token:
-        if token == current_token:
+        if hmac.compare_digest(token, current_token):
             is_valid = True
         elif ":" in token and verify_session_token(token, current_token):
             is_valid = True
@@ -237,7 +371,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
         bearer_value = (
             auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
         )
-        if bearer_value == current_token:
+        if hmac.compare_digest(bearer_value, current_token):
             is_valid = True
         elif ":" in bearer_value and verify_session_token(bearer_value, current_token):
             is_valid = True
@@ -246,7 +380,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
     if not is_valid:
         cookie_token = request.cookies.get("pocketpaw_session")
         if cookie_token:
-            if cookie_token == current_token:
+            if hmac.compare_digest(cookie_token, current_token):
                 is_valid = True
             elif ":" in cookie_token and verify_session_token(cookie_token, current_token):
                 is_valid = True
@@ -380,7 +514,7 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
-    is_valid = submitted == master
+    is_valid = hmac.compare_digest(submitted, master)
     # Accept OAuth2 access tokens (ppat_*)
     if not is_valid and submitted.startswith("ppat_"):
         try:
@@ -438,7 +572,11 @@ async def cookie_logout(request: Request):
 
 @auth_router.get("/api/qr")
 async def get_qr_code(request: Request):
-    """Generate QR login code."""
+    """Generate QR login code.
+
+    Requires authentication — the caller must already have a valid session.
+    Generates a short-lived (60 s) one-time pairing token embedded in the QR URL.
+    """
     import qrcode
 
     # Logic: If tunnel is active, use tunnel URL. Else local IP.
@@ -448,9 +586,9 @@ async def get_qr_code(request: Request):
     tunnel = get_tunnel_manager()
     status = tunnel.get_status()
 
-    # Use a short-lived session token instead of the master token
-    # to limit exposure in browser history, screenshots, and logs.
-    qr_token = create_session_token(get_access_token(), ttl_hours=1)
+    # Short-lived pairing token (60 seconds) — scoped to the QR pairing flow
+    # so a leaked QR code cannot grant long-lived access.
+    qr_token = create_session_token(get_access_token(), ttl_hours=0, ttl_seconds=60)
 
     if status.get("active") and status.get("url"):
         login_url = f"{status['url']}/?token={qr_token}"
@@ -458,6 +596,8 @@ async def get_qr_code(request: Request):
         # Fallback to current request host (localhost or network IP)
         protocol = "https" if "trycloudflare" in str(host) else "http"
         login_url = f"{protocol}://{host}/?token={qr_token}"
+
+    _audit_auth_event("qr_code_generated", request, status="success")
 
     img = qrcode.make(login_url)
     buf = io.BytesIO()

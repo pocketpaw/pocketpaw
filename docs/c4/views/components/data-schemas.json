@@ -1,0 +1,16 @@
+{
+  "level": "component",
+  "title": "Components -- Data \u0026 Schemas",
+  "description": "Component-level view of Data \u0026 Schemas",
+  "elements": [
+    "schemas",
+    "constants"
+  ],
+  "relationships": [
+    {
+      "source": "schemas",
+      "target": "data-schemas",
+      "description": "Defines data validation and API contracts"
+    }
+  ]
+}

@@ -1,0 +1,137 @@
+{
+  "level": "component",
+  "title": "Components -- Pocketpaw Core",
+  "description": "Component-level view of Pocketpaw Core",
+  "elements": [
+    "api",
+    "agents",
+    "llm",
+    "knowledge",
+    "memory",
+    "adapters",
+    "tools",
+    "mcp",
+    "security",
+    "audit",
+    "automations",
+    "integrations",
+    "connectors",
+    "providers",
+    "daemon",
+    "bus",
+    "health",
+    "bootstrap",
+    "cli",
+    "schemas",
+    "constants",
+    "browser",
+    "deepwork",
+    "checks",
+    "soul",
+    "ee",
+    "features",
+    "js"
+  ],
+  "relationships": [
+    {
+      "source": "adapters",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "agents",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "audit",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "automations",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "bootstrap",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "bus",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "checks",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "cli",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "connectors",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "daemon",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "deepwork",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "health",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "integrations",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "knowledge",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "llm",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "mcp",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "memory",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "providers",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "security",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "tools",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "level": "component",
+  "title": "Components -- Platform Core",
+  "description": "Component-level view of Platform Core",
+  "elements": [
+    "bootstrap",
+    "paw",
+    "builtin",
+    "ee"
+  ],
+  "relationships": [
+    {
+      "source": "bootstrap",
+      "target": "platform-core",
+      "description": "Initializes and sets up platform core components"
+    }
+  ]
+}

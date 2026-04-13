@@ -29,12 +29,17 @@ def create_memory_store(
     ollama_base_url: str = "http://localhost:11434",
     anthropic_api_key: str | None = None,
     openai_api_key: str | None = None,
+    file_vector_enabled: bool = False,
+    vector_store_name: str = "sqlite-vec",
+    embedding_provider: str = "ollama",
+    embedding_model: str = "nomic-embed-text",
+    embedding_base_url: str = "http://localhost:11434",
 ) -> MemoryStoreProtocol:
     """
     Factory function to create the appropriate memory store.
 
     Args:
-        backend: Backend type - 'file' or 'mem0'
+        backend: Backend type - 'file', 'mem0', or legacy 'vector' (maps to file+vector)
         base_path: Base path for storage
         user_id: User ID for mem0 scoping
         use_inference: Whether to use LLM inference (mem0 only)
@@ -78,9 +83,18 @@ def create_memory_store(
                 "Install with: pip install pocketpaw[memory]"
             )
             return FileMemoryStore(base_path)
-    else:
-        logger.info("Using file-based memory backend")
-        return FileMemoryStore(base_path)
+    logger.info("Using file-based memory backend")
+    # Backward compatibility: legacy "vector" backend now maps to file+vector mode.
+    # Graph extraction is tied to vector_enabled - only active when semantic features on.
+    resolved_vector_enabled = file_vector_enabled or backend == "vector"
+    return FileMemoryStore(
+        base_path,
+        vector_enabled=resolved_vector_enabled,
+        vector_store=vector_store_name,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        embedding_base_url=embedding_base_url,
+    )
 
 
 class MemoryManager:
@@ -118,6 +132,11 @@ class MemoryManager:
         ollama_base_url: str = "http://localhost:11434",
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
+        file_vector_enabled: bool = False,
+        vector_store_name: str = "sqlite-vec",
+        embedding_provider: str = "ollama",
+        embedding_model: str = "nomic-embed-text",
+        embedding_base_url: str = "http://localhost:11434",
     ):
         """
         Initialize memory manager.
@@ -151,6 +170,11 @@ class MemoryManager:
                 ollama_base_url=ollama_base_url,
                 anthropic_api_key=anthropic_api_key,
                 openai_api_key=openai_api_key,
+                file_vector_enabled=file_vector_enabled,
+                vector_store_name=vector_store_name,
+                embedding_provider=embedding_provider,
+                embedding_model=embedding_model,
+                embedding_base_url=embedding_base_url,
             )
 
     # =========================================================================
@@ -612,6 +636,27 @@ class MemoryManager:
         # Fall back to standard context
         return await self.get_context_for_agent(sender_id=sender_id)
 
+    async def get_by_type(
+        self,
+        memory_type: MemoryType,
+        limit: int = 100,
+        user_id: str | None = None,
+    ) -> list[MemoryEntry]:
+        """Get all memories of a specific type.
+
+        Exposes the underlying store's get_by_type as a public manager method,
+        so callers don't need to access the private _store directly.
+
+        Args:
+            memory_type: The type of memory to retrieve.
+            limit: Maximum number of entries to return.
+            user_id: Optional user ID for scoped memory retrieval.
+
+        Returns:
+            List of MemoryEntry objects of the requested type.
+        """
+        return await self._store.get_by_type(memory_type, limit=limit, user_id=user_id)
+
     async def clear_session(self, session_key: str) -> int:
         """Clear session history."""
         return await self._store.clear_session(session_key)
@@ -640,6 +685,65 @@ class MemoryManager:
             return await self._store.search_sessions(query, limit=limit)
         return []
 
+    async def update_memory(
+        self,
+        entry_id: str,
+        *,
+        content: str | None = None,
+        tags: list[str] | None = None,
+    ) -> bool:
+        """Update a memory entry when supported by backend."""
+        if hasattr(self._store, "update_entry"):
+            return await self._store.update_entry(entry_id, content=content, tags=tags)
+        return False
+
+    async def get_graph_snapshot(
+        self,
+        *,
+        sender_id: str | None = None,
+        query: str | None = None,
+        limit: int = 200,
+    ) -> dict:
+        """Get a lightweight knowledge-graph snapshot for the caller's scope."""
+        if not hasattr(self._store, "get_graph_snapshot"):
+            return {"nodes": [], "edges": []}
+        user_id = self._resolve_user_id(sender_id)
+        return await self._store.get_graph_snapshot(user_id=user_id, query=query, limit=limit)
+
+    async def get_graph_svg(
+        self,
+        *,
+        sender_id: str | None = None,
+        query: str | None = None,
+        limit: int = 200,
+        width: int = 800,
+        height: int = 400,
+    ) -> str:
+        """Get SVG visualization of the knowledge graph for the caller's scope."""
+        if not hasattr(self._store, "get_graph_svg"):
+            unsupported_svg = (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400">'
+                '<text x="10" y="20" fill="rgba(255,255,255,0.6)">'
+                "Graph visualization not supported</text></svg>"
+            )
+            return unsupported_svg
+        user_id = self._resolve_user_id(sender_id)
+        return await self._store.get_graph_svg(
+            user_id=user_id, query=query, limit=limit, width=width, height=height
+        )
+
+    async def get_memory_stats(self) -> dict:
+        """Return memory backend statistics when supported."""
+        if hasattr(self._store, "get_memory_stats"):
+            return await self._store.get_memory_stats()
+        return {"backend": "file", "total_memories": len(getattr(self._store, "_index", {}))}
+
+    async def prune_memories(self, older_than_days: int = 30) -> dict:
+        """Prune memories via backend if supported."""
+        if hasattr(self._store, "prune_memories"):
+            return await self._store.prune_memories(older_than_days=older_than_days)
+        return {"ok": False, "reason": "backend_not_supported"}
+
     # =========================================================================
     # Session Aliases (pass-through for file store)
     # =========================================================================
@@ -665,6 +769,16 @@ class MemoryManager:
             return await self._store.remove_session_alias(source_key)
         return False
 
+    def list_sessions_with_metadata(self) -> dict[str, dict]:
+        """Return the full session index as {safe_key: metadata_dict}.
+
+        Delegates to the underlying store's session index loader when
+        available; returns an empty dict for backends that don't support it.
+        """
+        if not hasattr(self._store, "_load_session_index"):
+            return {}
+        return self._store._load_session_index()
+
     async def list_sessions_for_chat(self, session_key: str) -> list[dict]:
         """List all sessions associated with a chat, sorted by last_activity desc.
 
@@ -677,10 +791,9 @@ class MemoryManager:
         keys = await self._store.get_session_keys_for_chat(session_key)
 
         # Load session index metadata
-        if not hasattr(self._store, "_load_session_index"):
+        index = self.list_sessions_with_metadata()
+        if not index:
             return []
-
-        index = self._store._load_session_index()
 
         # Find which key is currently active (aliased target)
         active_key = session_key
@@ -740,6 +853,11 @@ def get_memory_manager(force_reload: bool = False) -> MemoryManager:
             ollama_base_url=settings.mem0_ollama_base_url,
             anthropic_api_key=settings.anthropic_api_key,
             openai_api_key=settings.openai_api_key,
+            file_vector_enabled=settings.file_vector_enabled,
+            vector_store_name=settings.vector_store,
+            embedding_provider=settings.embedding_provider,
+            embedding_model=settings.embedding_model,
+            embedding_base_url=settings.embedding_base_url,
         )
 
         from pocketpaw.lifecycle import register

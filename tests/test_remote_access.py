@@ -93,19 +93,22 @@ def test_auth_middleware_allow_query_param(mock_config):
     assert response.status_code == 200
 
 
-def test_qr_endpoint_open():
-    """Test QR endpoint is open (no auth required to GET it implies login flow,
-    but wait, we generate the QR *inside* the dashboard for the user to scan?
-    Or is it public?
-    Actually, usually the QR is displayed on the HOST device (localhost),
-    so the user is already on the machine.
-    Remote user logic:
-    We need access to /api/qr to show it on the dashboard.
-    Dashboard is loaded via localhost.
-    So /api/qr should be allowed locally?
-    Auth middleware allows /api/qr.
+def test_qr_endpoint_requires_auth():
+    """Test that /api/qr returns 401 without authentication.
+
+    Fixes #854 — the QR endpoint was previously exempt from auth,
+    allowing any network-reachable client to obtain a valid session token.
     """
     client = TestClient(app)
     response = client.get("/api/qr")
+    assert response.status_code == 401
+
+
+def test_qr_endpoint_allowed_with_auth(mock_config):
+    """Test that /api/qr returns a PNG image when authenticated."""
+    token = get_access_token()
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/api/qr", headers=headers)
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"

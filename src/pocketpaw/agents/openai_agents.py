@@ -20,8 +20,10 @@ from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)
 
-# Session DB path — shared across all OpenAI Agents sessions
-_SESSION_DB = Path.home() / ".pocketpaw" / "openai_agents_sessions.db"
+
+def _get_session_db_path() -> Path:
+    """Resolve session DB path lazily so ``Path.home()`` is evaluated at call time."""
+    return Path.home() / ".pocketpaw" / "openai_agents_sessions.db"
 
 
 class OpenAIAgentsBackend:
@@ -91,8 +93,9 @@ class OpenAIAgentsBackend:
 
         from agents.extensions.persistence import SQLiteSession
 
-        _SESSION_DB.parent.mkdir(parents=True, exist_ok=True)
-        session = SQLiteSession(str(_SESSION_DB))
+        db_path = _get_session_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        session = SQLiteSession(str(db_path), session_key)
         self._sessions[session_key] = session
         logger.info("Created SQLiteSession for key %s", session_key)
         return session

@@ -4,7 +4,7 @@ description: "Generate a QR code for mobile device login to the PocketPaw dashbo
 api: GET /api/qr
 baseUrl: http://localhost:8000
 layout: '@/layouts/APIEndpointLayout.astro'
-auth: none
+auth: bearer
 section: API Reference
 ogType: article
 keywords: ["qr code login", "mobile auth", "qr authentication"]
@@ -15,7 +15,7 @@ tags: ["api", "authentication"]
 
 Generates a QR code PNG image that encodes the dashboard URL with an embedded access token. Scanning this QR code on a mobile device automatically authenticates the user.
 
-This endpoint is **auth-exempt** — it can be accessed without a token (intended for the initial login flow).
+This endpoint **requires authentication**. The caller must already have a valid session (via Bearer token, session cookie, or localhost bypass). The QR code embeds a short-lived (60-second) pairing token so that a leaked QR image cannot grant long-lived access.
 
 ## Response
 
@@ -25,12 +25,15 @@ Returns a PNG image (`image/png` content type) as a streaming response.
 <Tabs items={["cURL", "JavaScript", "Python"]}>
   <Tab title="cURL">
     ```bash
-    curl -X GET "http://localhost:8000/api/qr" -o login-qr.png
+    curl -X GET "http://localhost:8000/api/qr" \
+      -H "Authorization: Bearer $TOKEN" -o login-qr.png
     ```
   </Tab>
   <Tab title="JavaScript">
     ```javascript
-    const response = await fetch("http://localhost:8000/api/qr");
+    const response = await fetch("http://localhost:8000/api/qr", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     // Use url in an <img> tag or download link
@@ -41,7 +44,10 @@ Returns a PNG image (`image/png` content type) as a streaming response.
     ```python
     import requests
 
-    response = requests.get("http://localhost:8000/api/qr")
+    response = requests.get(
+        "http://localhost:8000/api/qr",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     with open("login-qr.png", "wb") as f:
         f.write(response.content)
     print("QR code saved to login-qr.png")

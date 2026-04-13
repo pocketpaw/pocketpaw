@@ -1,0 +1,523 @@
+{
+  "version": "1.0",
+  "scope": "pocketpaw",
+  "generated_at": "2026-04-07T07:37:46Z",
+  "source_path": "/Users/prakash/Documents/Qbtrix/OCEAN-workspace/pocketPaw/src",
+  "model": {
+    "people": [
+      {
+        "id": "end-user",
+        "name": "End User",
+        "description": "Users interacting with Pocketpaw through various messaging platforms (Discord, Slack, Telegram) to access AI-powered features and services",
+        "tags": [
+          "user"
+        ]
+      },
+      {
+        "id": "discord-user",
+        "name": "Discord User",
+        "description": "Users accessing Pocketpaw through Discord servers and direct messages for AI-assisted conversations and commands",
+        "tags": [
+          "user",
+          "discord"
+        ]
+      },
+      {
+        "id": "slack-user",
+        "name": "Slack User",
+        "description": "Team members using Pocketpaw integrated within Slack workspaces for collaborative AI-powered assistance",
+        "tags": [
+          "user",
+          "slack"
+        ]
+      },
+      {
+        "id": "telegram-user",
+        "name": "Telegram User",
+        "description": "Users interacting with Pocketpaw through Telegram bot for on-the-go AI assistance and conversations",
+        "tags": [
+          "user",
+          "telegram"
+        ]
+      },
+      {
+        "id": "system-admin",
+        "name": "System Administrator",
+        "description": "Administrator responsible for managing Pocketpaw deployment, monitoring system health, and configuring external AI service integrations",
+        "tags": [
+          "admin",
+          "operator"
+        ]
+      }
+    ],
+    "systems": [
+      {
+        "id": "pocketpaw",
+        "name": "Pocketpaw",
+        "description": "Software system: pocketpaw",
+        "tags": [
+          "internal"
+        ],
+        "containers": [
+          {
+            "id": "pocketpaw-core",
+            "name": "Pocketpaw Core",
+            "description": "Core Python/FastAPI backend providing agent orchestration, LLM integration, knowledge management, security, and extensible adapters for multiple platforms including Discord, Slack, Telegram, and OpenAI.",
+            "technology": "Python/FastAPI",
+            "tags": [
+              "async",
+              "auth",
+              "database",
+              "web",
+              "internal"
+            ],
+            "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents",
+            "components": [
+              {
+                "id": "api",
+                "name": "API Layer",
+                "description": "REST API endpoints and HTTP routing for external and internal requests. Handles versioning and endpoint management.",
+                "technology": "Python/FastAPI",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "agents",
+                "name": "Agent Orchestration",
+                "description": "Manages AI agent creation, configuration, lifecycle, and execution. Coordinates agent-to-agent communication and markdown-based agent definitions.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "llm",
+                "name": "LLM Integration",
+                "description": "Interfaces with language models including Anthropic and OpenAI. Manages model selection, prompting, and response handling.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "knowledge",
+                "name": "Knowledge Management",
+                "description": "Manages knowledge bases, vector database operations, and semantic search capabilities for agent context and memory.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "memory",
+                "name": "Memory \u0026 State",
+                "description": "Handles conversation history, agent state persistence, and context management across sessions.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "adapters",
+                "name": "Platform Adapters",
+                "description": "Integrates with Discord, Slack, Telegram, and other messaging platforms. Transforms platform-specific formats to unified internal protocols.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "tools",
+                "name": "Tools \u0026 Skills",
+                "description": "Extensible tool system enabling agents to execute actions. Includes built-in tools, custom skill definitions, and integration kits.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "mcp",
+                "name": "Model Context Protocol",
+                "description": "Implements MCP server and client for standardized tool and resource integration with language models.",
+                "technology": "Python",
+                "kb_article": "ripplenormalizer-normalizes-ai-generated-pocket-specifications-into-a-consistent"
+              },
+              {
+                "id": "security",
+                "name": "Security \u0026 Authentication",
+                "description": "Handles OAuth2 authentication, authorization, encryption, and secure credential management across all components.",
+                "technology": "Python",
+                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
+              },
+              {
+                "id": "audit",
+                "name": "Audit \u0026 Compliance",
+                "description": "Tracks system events, user actions, and compliance logging for security and regulatory requirements.",
+                "technology": "Python",
+                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
+              },
+              {
+                "id": "automations",
+                "name": "Automation Engine",
+                "description": "Defines and executes automated workflows, triggers, and scheduled tasks for agent-driven operations.",
+                "technology": "Python",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "integrations",
+                "name": "Integrations",
+                "description": "Third-party service connectors and external system bridges for extended functionality and data exchange.",
+                "technology": "Python",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "connectors",
+                "name": "Data Connectors",
+                "description": "Manages connections to databases, APIs, and data sources used by agents and tools.",
+                "technology": "Python",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "providers",
+                "name": "Service Providers",
+                "description": "Abstracts service implementations including LLM providers, vector database providers, and storage backends.",
+                "technology": "Python",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "daemon",
+                "name": "Background Daemon",
+                "description": "Long-running background processes for event processing, cleanup, and asynchronous task execution.",
+                "technology": "Python",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "bus",
+                "name": "Event Bus",
+                "description": "Asynchronous message bus for inter-component communication and event-driven architecture.",
+                "technology": "Python",
+                "kb_article": "message-data-model-for-group-chat-messages-with-mentions-reactions-and-threading"
+              },
+              {
+                "id": "health",
+                "name": "Health \u0026 Monitoring",
+                "description": "System health checks, status reporting, and diagnostic endpoints for operational monitoring.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "bootstrap",
+                "name": "Bootstrap \u0026 Initialization",
+                "description": "Application startup, configuration loading, dependency injection, and system initialization.",
+                "technology": "Python",
+                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
+              },
+              {
+                "id": "cli",
+                "name": "Command Line Interface",
+                "description": "CLI tools for system administration, testing, deployment, and manual operations.",
+                "technology": "Python",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "schemas",
+                "name": "Data Schemas",
+                "description": "Request/response validation schemas, data models, and serialization definitions using Pydantic.",
+                "technology": "Python",
+                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
+              },
+              {
+                "id": "constants",
+                "name": "Constants \u0026 Configuration",
+                "description": "Centralized application constants, configuration values, and environment-based settings.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "browser",
+                "name": "Browser Automation",
+                "description": "Web automation and browser control capabilities for agents to interact with web applications.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "deepwork",
+                "name": "Deep Work Engine",
+                "description": "Complex task decomposition and multi-step reasoning for sophisticated agent workflows.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "checks",
+                "name": "Validation Checks",
+                "description": "Pre and post-execution validation, sanity checks, and error detection throughout the system.",
+                "technology": "Python",
+                "kb_article": "ripplenormalizer-normalizes-ai-generated-pocket-specifications-into-a-consistent"
+              },
+              {
+                "id": "soul",
+                "name": "Agent Personality \u0026 Soul",
+                "description": "Manages agent personality traits, behavioral patterns, and character definitions.",
+                "technology": "Python",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "ee",
+                "name": "Enterprise Edition",
+                "description": "Enterprise-specific features, advanced capabilities, and specialized functionality.",
+                "technology": "Python",
+                "kb_article": "core-enterprise-jwt-authentication-with-cookie-and-bearer-transport-for-fastapi"
+              },
+              {
+                "id": "features",
+                "name": "Feature Flags",
+                "description": "Feature toggle management and experimental feature control.",
+                "technology": "JavaScript",
+                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
+              },
+              {
+                "id": "js",
+                "name": "JavaScript Utilities",
+                "description": "JavaScript-based utilities and client-side functionality.",
+                "technology": "JavaScript",
+                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "anthropic-api",
+        "name": "Anthropic API",
+        "description": "Claude AI service providing large language model capabilities for natural language processing and intelligent conversation features in Pocketpaw",
+        "tags": [
+          "external"
+        ],
+        "containers": []
+      },
+      {
+        "id": "discord-api",
+        "name": "Discord API",
+        "description": "Discord messaging platform API enabling Pocketpaw to integrate with Discord servers and provide bot functionality for Discord users",
+        "tags": [
+          "external"
+        ],
+        "containers": []
+      },
+      {
+        "id": "openai-api",
+        "name": "OpenAI API",
+        "description": "GPT-based AI service providing alternative language model capabilities for text generation and conversation features in Pocketpaw",
+        "tags": [
+          "external"
+        ],
+        "containers": []
+      },
+      {
+        "id": "slack-api",
+        "name": "Slack API",
+        "description": "Slack workplace messaging platform API enabling Pocketpaw integration with Slack workspaces for team-based AI assistance",
+        "tags": [
+          "external"
+        ],
+        "containers": []
+      },
+      {
+        "id": "telegram-bot-api",
+        "name": "Telegram Bot API",
+        "description": "Telegram messaging platform API enabling Pocketpaw to operate as a Telegram bot for direct user interactions and conversations",
+        "tags": [
+          "external"
+        ],
+        "containers": []
+      }
+    ],
+    "relationships": [
+      {
+        "source": "a2a",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "adapters",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "async"
+      },
+      {
+        "source": "agents",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "agentsmd",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "audit",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "automations",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "bootstrap",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "builtin",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "async"
+      },
+      {
+        "source": "bus",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "async"
+      },
+      {
+        "source": "checks",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "cli",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "connectors",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "daemon",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "deepwork",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "health",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "integrations",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "kits",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "knowledge",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "llm",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "mcp",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "memory",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "missioncontrol",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "oauth2",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "paw",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "pocketpaw",
+        "target": "anthropic-api",
+        "description": "Uses Anthropic API",
+        "style": "async"
+      },
+      {
+        "source": "pocketpaw",
+        "target": "discord-api",
+        "description": "Uses Discord API",
+        "style": "async"
+      },
+      {
+        "source": "pocketpaw",
+        "target": "openai-api",
+        "description": "Uses OpenAI API",
+        "style": "async"
+      },
+      {
+        "source": "pocketpaw",
+        "target": "slack-api",
+        "description": "Uses Slack API",
+        "style": "async"
+      },
+      {
+        "source": "pocketpaw",
+        "target": "telegram-bot-api",
+        "description": "Uses Telegram Bot API",
+        "style": "async"
+      },
+      {
+        "source": "providers",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "security",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "tools",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "v1",
+        "target": "pocketpaw",
+        "description": "imports pocketpaw",
+        "style": "async"
+      }
+    ]
+  }
+}

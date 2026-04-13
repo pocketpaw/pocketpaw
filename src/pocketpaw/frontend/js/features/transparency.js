@@ -62,7 +62,19 @@ window.PocketPaw.Transparency = {
             longTermMemory: [],
             memoryLoading: false,
             memorySearch: '',
+            memoryTab: 'facts',
             memoryConfigOpen: false,
+            memoryGraph: { nodes: [], edges: [] },
+            memoryGraphSearch: '',
+            memoryGraphUnavailable: false,
+            memoryGraphUnavailableText: '',
+            memoryGraphInstallLoading: false,
+            memoryStats: null,
+            memoryPruneDays: 30,
+            memoryEditingId: null,
+            memoryEditContent: '',
+            memoryEditTags: '',
+            _visNetwork: null,
 
             // Audit
             showAudit: false,
@@ -160,8 +172,9 @@ window.PocketPaw.Transparency = {
 
             openMemory() {
                 this.showMemory = true;
+                this.memoryTab = 'facts';
                 this.memoryLoading = true;
-                fetch('/api/memory/long_term')
+                const longTermReq = fetch('/api/memory/long_term')
                     .then(r => r.json())
                     .then(data => {
                         this.longTermMemory = data;
@@ -172,6 +185,164 @@ window.PocketPaw.Transparency = {
                         console.error('Failed to load memories:', e);
                         this.memoryLoading = false;
                     });
+
+                this.loadMemoryGraph();
+                this.loadMemoryStats();
+                return longTermReq;
+            },
+
+            loadMemoryGraph() {
+                const q = (this.memoryGraphSearch || '').trim();
+                const url = q
+                    ? `/api/memory/graph.svg?q=${encodeURIComponent(q)}&limit=200`
+                    : '/api/memory/graph.svg?limit=200';
+                
+                const container = document.getElementById('memoryGraphContainer');
+                if (!container) return;
+
+                // Load SVG directly via fetch
+                fetch(url)
+                    .then(r => r.text())
+                    .then(svg => {
+                        const graphUnavailable =
+                            svg.includes('Graph visualization unavailable') ||
+                            svg.includes('networkx not installed');
+
+                        this.memoryGraphUnavailable = graphUnavailable;
+                        this.memoryGraphUnavailableText = graphUnavailable
+                            ? "Requires networkx. Install with: pip install 'pocketpaw[graph]'"
+                            : '';
+
+                        if (graphUnavailable) {
+                            container.innerHTML = '';
+                        } else {
+                            this.safeInsertGraphSvg(container, svg);
+                        }
+                        // Also load JSON for entity/relationship list
+                        this.loadMemoryGraphData();
+                    })
+                    .catch(e => {
+                        console.error('Failed to load memory graph:', e);
+                        this.memoryGraphUnavailable = false;
+                        this.memoryGraphUnavailableText = '';
+                        container.innerHTML = '<div style="padding: 20px; color: rgba(255,255,255,0.5);">Failed to load graph</div>';
+                    });
+            },
+
+            safeInsertGraphSvg(container, svgText) {
+                const parser = new DOMParser();
+                const parsed = parser.parseFromString(svgText, 'image/svg+xml');
+                const svgEl = parsed.documentElement;
+
+                if (!svgEl || svgEl.nodeName.toLowerCase() !== 'svg') {
+                    throw new Error('Invalid SVG payload');
+                }
+
+                svgEl.querySelectorAll('script, foreignObject').forEach(node => node.remove());
+
+                svgEl.querySelectorAll('*').forEach(node => {
+                    Array.from(node.attributes || []).forEach(attr => {
+                        const name = (attr.name || '').toLowerCase();
+                        const value = (attr.value || '').trim().toLowerCase();
+
+                        if (name.startsWith('on')) {
+                            node.removeAttribute(attr.name);
+                            return;
+                        }
+
+                        if ((name === 'href' || name === 'xlink:href') && value.startsWith('javascript:')) {
+                            node.removeAttribute(attr.name);
+                        }
+                    });
+                });
+
+                container.replaceChildren(svgEl);
+            },
+
+            loadMemoryGraphData() {
+                const q = (this.memoryGraphSearch || '').trim();
+                const jsonUrl = q
+                    ? `/api/memory/graph?q=${encodeURIComponent(q)}&limit=200`
+                    : '/api/memory/graph?limit=200';
+                
+                return fetch(jsonUrl)
+                    .then(r => r.json())
+                    .then(data => {
+                        this.memoryGraph = {
+                            nodes: Array.isArray(data?.nodes) ? data.nodes : [],
+                            edges: Array.isArray(data?.edges) ? data.edges : []
+                        };
+                        this.$nextTick(() => {
+                            if (window.refreshIcons) window.refreshIcons();
+                        });
+                    })
+                    .catch(e => {
+                        console.error('Failed to load memory graph data:', e);
+                    });
+            },
+
+            renderMemoryGraph() {
+                // SVG is now loaded directly via loadMemoryGraph
+                // No need for any rendering logic
+            },
+
+            async installMemoryGraphDependency() {
+                this.memoryGraphInstallLoading = true;
+                try {
+                    const res = await fetch('/api/extras/install', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ extra: 'graph' })
+                    });
+                    const data = await res.json();
+
+                    if (data.error || data.detail) {
+                        this.showToast(`Install failed: ${data.error || data.detail}`, 'error');
+                        return;
+                    }
+
+                    if (data.restart_required) {
+                        const restartNow = confirm(
+                            'networkx installed. Server restart required to load it. Restart now?'
+                        );
+                        if (restartNow) {
+                            await fetch('/api/system/restart', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ confirm: true })
+                            });
+                            this.showToast('Server restarting...', 'info');
+                        } else {
+                            this.showToast('networkx installed. Restart server when ready.', 'info');
+                        }
+                        return;
+                    }
+
+                    this.showToast('networkx installed successfully', 'success');
+                    this.memoryGraphUnavailable = false;
+                    this.memoryGraphUnavailableText = '';
+                    await this.loadMemoryGraph();
+                } catch (e) {
+                    this.showToast(`Install failed: ${e.message}`, 'error');
+                } finally {
+                    this.memoryGraphInstallLoading = false;
+                }
+            },
+
+            loadMemoryStats() {
+                return fetch('/api/memory/stats')
+                    .then(r => r.json())
+                    .then(data => {
+                        this.memoryStats = data || null;
+                    })
+                    .catch(e => {
+                        console.error('Failed to load memory stats:', e);
+                    });
+            },
+
+            refreshMemoryInsights() {
+                this.loadMemoryGraph();
+                this.loadMemoryStats();
             },
 
             /**
@@ -208,14 +379,85 @@ window.PocketPaw.Transparency = {
              * Delete a long-term memory
              */
             deleteMemory(id) {
+                const confirmed = confirm(
+                    'Delete this memory permanently? This action cannot be undone.'
+                );
+                if (!confirmed) return;
+
                 fetch(`/api/memory/long_term/${encodeURIComponent(id)}`, { method: 'DELETE' })
                     .then(r => {
                         if (!r.ok) throw new Error('Delete failed');
                         this.longTermMemory = this.longTermMemory.filter(m => m.id !== id);
+                        this.refreshMemoryInsights();
                         this.showToast('Memory forgotten', 'success');
                     })
                     .catch(() => {
                         this.showToast('Failed to delete memory', 'error');
+                    });
+            },
+
+            startMemoryEdit(memory) {
+                this.memoryEditingId = memory.id;
+                this.memoryEditContent = memory.content || '';
+                this.memoryEditTags = (memory.tags || []).join(', ');
+            },
+
+            cancelMemoryEdit() {
+                this.memoryEditingId = null;
+                this.memoryEditContent = '';
+                this.memoryEditTags = '';
+            },
+
+            saveMemoryEdit(id) {
+                const content = (this.memoryEditContent || '').trim();
+                if (!content) {
+                    this.showToast('Memory content cannot be empty', 'error');
+                    return;
+                }
+
+                const tags = (this.memoryEditTags || '')
+                    .split(',')
+                    .map(t => t.trim())
+                    .filter(Boolean);
+
+                fetch(`/api/memory/long_term/${encodeURIComponent(id)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content, tags }),
+                })
+                    .then(r => {
+                        if (!r.ok) throw new Error('Update failed');
+                        this.longTermMemory = this.longTermMemory.map(m =>
+                            m.id === id ? { ...m, content, tags } : m
+                        );
+                        this.cancelMemoryEdit();
+                        this.refreshMemoryInsights();
+                        this.showToast('Memory updated', 'success');
+                    })
+                    .catch(() => {
+                        this.showToast('Failed to update memory', 'error');
+                    });
+            },
+
+            pruneMemories() {
+                const days = Math.max(1, parseInt(this.memoryPruneDays, 10) || 30);
+                const confirmed = confirm(
+                    `Prune memories older than ${days} days? This permanently deletes data and cannot be undone.`
+                );
+                if (!confirmed) return;
+
+                fetch('/api/memory/prune', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ older_than_days: days }),
+                })
+                    .then(r => r.json())
+                    .then(() => {
+                        this.openMemory();
+                        this.showToast(`Pruned old memories (>${days} days)`, 'success');
+                    })
+                    .catch(() => {
+                        this.showToast('Failed to prune memories', 'error');
                     });
             },
 

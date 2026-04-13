@@ -351,3 +351,14 @@ class TestToolDefinitions:
         assert schema["type"] == "function"
         assert "function" in schema
         assert schema["function"]["name"] == "soul_remember"
+
+    def test_openai_schema_normalizes_zero_arg_tools(self, mock_soul):
+        tool = SoulStatusTool(mock_soul)
+        schema = tool.definition.to_openai_schema()
+
+        # Shared OpenAI schema formatting should normalize zero-arg tools at the definition layer.
+        assert schema["function"]["parameters"] == {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }

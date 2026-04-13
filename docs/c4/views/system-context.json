@@ -1,0 +1,85 @@
+{
+  "level": "context",
+  "title": "System Context -- pocketpaw",
+  "description": "How pocketpaw fits in its ecosystem",
+  "elements": [
+    "end-user",
+    "discord-user",
+    "slack-user",
+    "telegram-user",
+    "system-admin",
+    "pocketpaw",
+    "anthropic-api",
+    "discord-api",
+    "openai-api",
+    "slack-api",
+    "telegram-bot-api"
+  ],
+  "relationships": [
+    {
+      "source": "a2a",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "agentsmd",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "builtin",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "kits",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "missioncontrol",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "oauth2",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "paw",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    },
+    {
+      "source": "pocketpaw",
+      "target": "anthropic-api",
+      "description": "Uses Anthropic API"
+    },
+    {
+      "source": "pocketpaw",
+      "target": "discord-api",
+      "description": "Uses Discord API"
+    },
+    {
+      "source": "pocketpaw",
+      "target": "openai-api",
+      "description": "Uses OpenAI API"
+    },
+    {
+      "source": "pocketpaw",
+      "target": "slack-api",
+      "description": "Uses Slack API"
+    },
+    {
+      "source": "pocketpaw",
+      "target": "telegram-bot-api",
+      "description": "Uses Telegram Bot API"
+    },
+    {
+      "source": "v1",
+      "target": "pocketpaw",
+      "description": "imports pocketpaw"
+    }
+  ]
+}

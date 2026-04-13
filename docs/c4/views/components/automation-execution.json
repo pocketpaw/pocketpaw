@@ -1,0 +1,23 @@
+{
+  "level": "component",
+  "title": "Components -- Automation \u0026 Execution",
+  "description": "Component-level view of Automation \u0026 Execution",
+  "elements": [
+    "automations",
+    "daemon",
+    "bus",
+    "a2a"
+  ],
+  "relationships": [
+    {
+      "source": "automations",
+      "target": "automation-execution",
+      "description": "Automations are executed via the automation engine and event bus"
+    },
+    {
+      "source": "automations",
+      "target": "agents-orchestration",
+      "description": "Automations orchestrate and trigger agent execution"
+    }
+  ]
+}

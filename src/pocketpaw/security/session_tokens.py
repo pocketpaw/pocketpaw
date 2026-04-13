@@ -14,12 +14,15 @@ import time
 __all__ = ["create_session_token", "verify_session_token"]
 
 
-def create_session_token(master_token: str, ttl_hours: int = 24) -> str:
-    """Issue a session token that expires after *ttl_hours*.
+def create_session_token(master_token: str, ttl_hours: int = 24, ttl_seconds: int = 0) -> str:
+    """Issue a session token that expires after *ttl_hours* (plus *ttl_seconds*).
 
     Returns a string of the form ``{expires_unix}:{hex_hmac}``.
+
+    Use *ttl_seconds* for short-lived tokens (e.g. QR pairing codes).
+    When both are provided the durations are added together.
     """
-    expires = int(time.time()) + ttl_hours * 3600
+    expires = int(time.time()) + ttl_hours * 3600 + ttl_seconds
     sig = _sign(master_token, str(expires))
     return f"{expires}:{sig}"
 
