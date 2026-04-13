@@ -24,7 +24,6 @@ from pocketpaw.connectors import (
 )
 from pocketpaw.connectors.protocol import ConnectorStatus
 
-
 # ---------------------------------------------------------------------------
 # IngestACL dataclass
 # ---------------------------------------------------------------------------
