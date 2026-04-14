@@ -159,7 +159,7 @@ async def get_qr_code(request: Request):
     if not auth_limiter.allow(client_ip):
         return JSONResponse(status_code=429, content={"detail": "Too many requests"})
 
-    import qrcode
+    import qrcode  # type: ignore
 
     from pocketpaw.config import get_access_token
     from pocketpaw.security.session_tokens import create_session_token
