@@ -26,6 +26,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Auth"])
 
 
+def _is_secure_request(request: Request) -> bool:
+    """Return True when request arrived through HTTPS (directly or via proxy).
+
+    `X-Forwarded-Proto` may contain a comma-separated chain added by multiple
+    proxies (e.g. ``"https,http"``). We inspect the first value because it
+    represents the protocol used by the original client at the edge.
+    """
+    if request.url.scheme == "https":
+        return True
+
+    raw_forwarded_proto = request.headers.get("x-forwarded-proto")
+    if not raw_forwarded_proto:
+        return False
+
+    first_hop_proto = raw_forwarded_proto.split(",", maxsplit=1)[0].strip().lower()
+    # `==` is a comparison (not assignment): this yields the bool expected by
+    # `set_cookie(..., secure=...)`.
+    is_https = first_hop_proto == "https"
+    return is_https
+
+
 @router.post("/auth/session", response_model=SessionTokenResponse)
 async def exchange_session_token(request: Request):
     """Exchange a master access token for a time-limited session token."""

@@ -27,6 +27,53 @@ logger = logging.getLogger(__name__)
 auth_router = APIRouter()
 
 
+def _is_secure_request(request: Request) -> bool:
+    """Return True when request arrived through HTTPS (directly or via proxy).
+
+    `X-Forwarded-Proto` may contain a comma-separated chain added by multiple
+    proxies (e.g. ``"https,http"``). We inspect the first value because it
+    represents the protocol used by the original client at the edge.
+    """
+    if request.url.scheme == "https":
+        return True
+
+    raw_forwarded_proto = request.headers.get("x-forwarded-proto")
+    if not raw_forwarded_proto:
+        return False
+
+    first_hop_proto = raw_forwarded_proto.split(",", maxsplit=1)[0].strip().lower()
+    # `==` is a comparison (not assignment): this yields the bool expected by
+    # `set_cookie(..., secure=...)`.
+    is_https = first_hop_proto == "https"
+    return is_https
+def _audit_auth_event(
+    action: str,
+    request: Request | None = None,
+    status: str = "success",
+) -> None:
+    """Log an authentication event to the audit trail."""
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        severity = AuditSeverity.ALERT if status == "block" else AuditSeverity.INFO
+        client_ip = ""
+        if request:
+            client_ip = request.client.host if request.client else "unknown"
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=severity,
+                actor="dashboard_user",
+                action=action,
+                target="auth",
+                status=status,
+                client_ip=client_ip,
+            )
+        )
+    except Exception:
+        pass  # Don't let audit failure break auth flow
+
+
 # ---------------------------------------------------------------------------
 # Localhost detection
 # ---------------------------------------------------------------------------
@@ -522,7 +569,7 @@ async def cookie_login(request: Request):
         samesite="lax",
         path="/",
         max_age=max_age,
-        secure=is_request_secure(request)
+        secure=is_request_secure(request),
     )
     return response
 
