@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Auth"])
 
+from pocketpaw.http_utils import is_request_secure
 
 @router.post("/auth/session", response_model=SessionTokenResponse)
 async def exchange_session_token(request: Request):
@@ -111,6 +112,7 @@ async def cookie_login(request: Request):
         samesite="lax",
         path="/",
         max_age=max_age,
+        secure=is_request_secure(request),
     )
     return response
 

@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from pocketpaw.config import Settings, get_access_token, regenerate_token
 from pocketpaw.dashboard_state import _LOCALHOST_ADDRS, _PROXY_HEADERS
+from pocketpaw.http_utils import is_request_secure
 from pocketpaw.security.rate_limiter import api_limiter, auth_limiter
 from pocketpaw.security.session_tokens import create_session_token, verify_session_token
 from pocketpaw.tunnel import get_tunnel_manager
@@ -565,6 +566,7 @@ async def cookie_login(request: Request):
         samesite="lax",
         path="/",
         max_age=max_age,
+        secure=is_request_secure(request),
     )
     return response
 
