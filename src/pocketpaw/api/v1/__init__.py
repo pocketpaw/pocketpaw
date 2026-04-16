@@ -1,6 +1,9 @@
 # API v1 router aggregation.
 # Created: 2026-02-20
 # Updated: 2026-03-30 — Added Automations router (enterprise, rule-based pocket automations).
+# Updated: 2026-04-16 (feat/fleet-rest-router) — Added Fleet router so
+#   paw-enterprise's InstallFleetPanel can call GET /api/v1/fleet/templates
+#   and POST /api/v1/fleet/install against a running pocketpaw instance.
 #
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
@@ -53,6 +56,7 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
 # Enterprise API routes (require ee/ module) — skipped silently when ee/ is absent.
 _EE_ROUTERS: list[tuple[str, str, str]] = [
     ("ee.fabric.router", "router", "Fabric"),
+    ("ee.fleet.router", "router", "Fleet"),
     ("ee.instinct.router", "router", "Instinct"),
     ("pocketpaw.ee.automations.router", "router", "Automations"),
 ]
