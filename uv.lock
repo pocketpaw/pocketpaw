@@ -4301,6 +4301,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "qrcode", extra = ["pil"] },
     { name = "rich" },
+    { name = "soul-protocol" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -4331,7 +4332,7 @@ all = [
     { name = "python-telegram-bot" },
     { name = "sarvamai" },
     { name = "slack-bolt" },
-    { name = "soul-protocol", extra = ["engine"] },
+    { name = "soul-protocol" },
 ]
 all-backends = [
     { name = "deepagents" },
@@ -4365,7 +4366,7 @@ all-tools = [
     { name = "pyautogui" },
     { name = "pytesseract" },
     { name = "sarvamai" },
-    { name = "soul-protocol", extra = ["engine"] },
+    { name = "soul-protocol" },
 ]
 browser = [
     { name = "playwright" },
@@ -4508,7 +4509,7 @@ slack = [
     { name = "slack-bolt" },
 ]
 soul = [
-    { name = "soul-protocol", extra = ["engine"] },
+    { name = "soul-protocol" },
 ]
 teams = [
     { name = "botbuilder-core" },
@@ -4716,6 +4717,7 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'dev'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
     { name = "slowapi", marker = "extra == 'enterprise'", specifier = ">=0.1.9" },
+    { name = "soul-protocol", extras = ["engine"], specifier = ">=0.3.1" },
     { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", specifier = ">=0.2.9" },
     { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", specifier = ">=0.2.9" },
     { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", specifier = ">=0.2.9" },
@@ -6353,23 +6355,16 @@ wheels = [
 
 [[package]]
 name = "soul-protocol"
-version = "0.2.9"
+version = "0.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7d/0a/7b6ea4f8903edad06ad73d2280bee3c1a387821ea90d38186ab9ac5d2d50/soul_protocol-0.2.9.tar.gz", hash = "sha256:7e8a6ec7179694a465fd1cb17f9db6af73a5426d6d3a3bf1e4a33495a687fb37", size = 1232417, upload-time = "2026-03-29T10:43:25.293Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/13/8ea72d17a23848e04ae46834895d2ee4dd4c59b42cf586fc9da0443d3eed/soul_protocol-0.2.9-py3-none-any.whl", hash = "sha256:82199de3114d5ceb5084e23dc6d253bb48032ba9fc3ced4ea2956fb1abec6e22", size = 266368, upload-time = "2026-03-29T10:43:24.046Z" },
-]
-
-[package.optional-dependencies]
-engine = [
     { name = "click" },
     { name = "cryptography" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "rich" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/b6/e7/1799cfc9c83c0a12b7e3d403190d01794c2c685917ec63bb3c4741183ca7/soul_protocol-0.3.1.tar.gz", hash = "sha256:1885b4878b09f3ff766080d13edb698581d564353cdb04ed8f186a5ade0d786d", size = 1506135, upload-time = "2026-04-14T18:32:03.919Z" }
 
 [[package]]
 name = "soupsieve"

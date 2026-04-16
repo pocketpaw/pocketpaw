@@ -61,6 +61,11 @@ dependencies = [
     "cryptography>=46.0.0",
     # Image basics
     "pillow>=10.0.0",
+    # Soul Protocol — runtime imports from soul_protocol.spec.journal and
+    # soul_protocol.engine.journal for fleet installer event emission (#947).
+    # Promoted from optional extra to base dep in v0.3.1 integration work;
+    # the runtime now takes a hard dependency on the journal primitives.
+    "soul-protocol[engine]>=0.3.1",
 ]
 
 [project.optional-dependencies]
