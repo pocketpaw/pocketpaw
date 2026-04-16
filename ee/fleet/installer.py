@@ -3,6 +3,9 @@
 # primitives (SoulFactory, ConnectorRegistry, Pocket service) and does not
 # introduce new runtime concepts. Each install step is independently
 # reported so partial failures are observable.
+# Updated: 2026-04-16 — PyYAML import-error message now points at
+# `pocketpaw[soul]` (the pocketpaw extra that pulls PyYAML in via
+# soul-protocol[engine]) instead of the transitive package name.
 
 from __future__ import annotations
 
@@ -56,7 +59,7 @@ def _load_from_path(path: Path) -> FleetTemplate:
         except ImportError as exc:
             raise ImportError(
                 "PyYAML is required to load fleet templates. "
-                "Install with `pip install soul-protocol[engine]`."
+                "Install with `pip install pocketpaw[soul]`."
             ) from exc
         data = yaml.safe_load(text) or {}
     else:
