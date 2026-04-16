@@ -141,6 +141,15 @@ gchat = [
     "google-api-python-client>=2.100.0",
     "google-auth>=2.25.0",
 ]
+drive = [
+    # Google Drive SourceAdapter (zero-copy live federation) — see
+    # src/pocketpaw/connectors/drive/. The client itself runs on httpx (core
+    # dep), but we ship the Google SDK alongside for parity with gchat and
+    # for future DriveIngestAdapter bulk-sync work.
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-auth-oauthlib>=1.2.0",
+]
 
 # --- Tool extras ---
 image = [
@@ -194,9 +203,10 @@ all-channels = [
     # teams
     "botbuilder-core>=4.16.0",
     "botbuilder-integration-aiohttp>=4.16.0",
-    # gchat
+    # gchat + drive
     "google-api-python-client>=2.100.0",
     "google-auth>=2.25.0",
+    "google-auth-oauthlib>=1.2.0",
 ]
 all-tools = [
     # browser
@@ -269,6 +279,7 @@ all = [
     "botbuilder-integration-aiohttp>=4.16.0",
     "google-api-python-client>=2.100.0",
     "google-auth>=2.25.0",
+    "google-auth-oauthlib>=1.2.0",
     # tools
     "google-genai>=1.0.0",
     "html2text>=2020.1.16",

@@ -1,0 +1,68 @@
+# Google Drive connector — live file search, content fetch, and revision history.
+# Created: 2026-04-16
+# Pairs with src/pocketpaw/connectors/drive/ for the SourceAdapter surface.
+# Auth is OAuth 2.0 (bearer token) — either from the credential broker at
+# dispatch time or from GOOGLE_OAUTH_TOKEN for local dev.
+
+name: drive
+display_name: Google Drive
+type: knowledge
+icon: cloud
+
+auth:
+  method: bearer
+  credentials:
+    - name: GOOGLE_OAUTH_TOKEN
+      description: OAuth access token with https://www.googleapis.com/auth/drive.readonly (plus drive.file for writes)
+      required: true
+
+actions:
+  - name: list_files
+    description: List or browse files in Drive, newest first
+    method: GET
+    url: https://www.googleapis.com/drive/v3/files
+    params:
+      q: { type: string, description: "Drive search query (e.g. \"name contains 'forecast'\")" }
+      page_size: { type: integer, default: 20, description: "Max results (1-100)" }
+      order_by: { type: string, default: "modifiedTime desc" }
+    trust_level: auto
+
+  - name: search_files
+    description: Full-text search across Drive file contents and metadata
+    method: GET
+    url: https://www.googleapis.com/drive/v3/files
+    params:
+      query: { type: string, required: true, description: "Free-text search term; wrapped into fullText contains" }
+      page_size: { type: integer, default: 20 }
+    trust_level: auto
+
+  - name: get_file_content
+    description: Fetch the content of a single file, exporting Google Docs to PDF
+    method: GET
+    url: https://www.googleapis.com/drive/v3/files/{file_id}
+    params:
+      file_id: { type: string, required: true, description: "Drive file ID" }
+      revision_id: { type: string, description: "Specific revision to fetch (defaults to latest)" }
+    trust_level: auto
+
+  - name: get_file_revisions
+    description: List the edit history of a file for point-in-time retrieval
+    method: GET
+    url: https://www.googleapis.com/drive/v3/files/{file_id}/revisions
+    params:
+      file_id: { type: string, required: true }
+      page_size: { type: integer, default: 50 }
+    trust_level: auto
+
+sync:
+  # Drive is primarily live-federated via SourceAdapter — no batch sync table.
+  # The ingest path (DriveIngestAdapter, future) would populate drive_files.
+  table: drive_files
+  schedule: manual
+  mapping:
+    id: id
+    name: name
+    mime_type: mimeType
+    modified: modifiedTime
+    size: size
+    web_view_link: webViewLink

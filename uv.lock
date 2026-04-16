@@ -4316,6 +4316,7 @@ all = [
     { name = "google-adk" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
+    { name = "google-auth-oauthlib" },
     { name = "google-genai" },
     { name = "html2text" },
     { name = "langchain-mcp-adapters" },
@@ -4348,6 +4349,7 @@ all-channels = [
     { name = "discord-cli-agent" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
+    { name = "google-auth-oauthlib" },
     { name = "matrix-nio" },
     { name = "neonize" },
     { name = "python-telegram-bot" },
@@ -4427,6 +4429,11 @@ dev = [
 ]
 discord = [
     { name = "discord-cli-agent" },
+]
+drive = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-oauthlib" },
 ]
 enterprise = [
     { name = "beanie" },
@@ -4612,13 +4619,18 @@ requires-dist = [
     { name = "google-api-python-client", marker = "extra == 'all'", specifier = ">=2.100.0" },
     { name = "google-api-python-client", marker = "extra == 'all-channels'", specifier = ">=2.100.0" },
     { name = "google-api-python-client", marker = "extra == 'dev'", specifier = ">=2.100.0" },
+    { name = "google-api-python-client", marker = "extra == 'drive'", specifier = ">=2.100.0" },
     { name = "google-api-python-client", marker = "extra == 'enterprise'", specifier = ">=2.100.0" },
     { name = "google-api-python-client", marker = "extra == 'gchat'", specifier = ">=2.100.0" },
     { name = "google-auth", marker = "extra == 'all'", specifier = ">=2.25.0" },
     { name = "google-auth", marker = "extra == 'all-channels'", specifier = ">=2.25.0" },
     { name = "google-auth", marker = "extra == 'dev'", specifier = ">=2.25.0" },
+    { name = "google-auth", marker = "extra == 'drive'", specifier = ">=2.25.0" },
     { name = "google-auth", marker = "extra == 'enterprise'", specifier = ">=2.25.0" },
     { name = "google-auth", marker = "extra == 'gchat'", specifier = ">=2.25.0" },
+    { name = "google-auth-oauthlib", marker = "extra == 'all'", specifier = ">=1.2.0" },
+    { name = "google-auth-oauthlib", marker = "extra == 'all-channels'", specifier = ">=1.2.0" },
+    { name = "google-auth-oauthlib", marker = "extra == 'drive'", specifier = ">=1.2.0" },
     { name = "google-auth-oauthlib", marker = "extra == 'enterprise'", specifier = ">=1.2.0" },
     { name = "google-cloud-storage", marker = "extra == 'enterprise'", specifier = ">=2.14.0" },
     { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.0.0" },
@@ -4727,7 +4739,7 @@ requires-dist = [
     { name = "trafilatura", marker = "extra == 'knowledge'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
-provides-extras = ["vector", "knowledge", "databases", "postgresql", "mysql", "mongodb", "graph", "dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "enterprise", "all", "dev"]
+provides-extras = ["vector", "knowledge", "databases", "postgresql", "mysql", "mongodb", "graph", "dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "drive", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "enterprise", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
