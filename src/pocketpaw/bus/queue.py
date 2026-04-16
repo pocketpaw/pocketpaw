@@ -88,7 +88,7 @@ class MessageBus:
             except ValueError:
                 pass
 
-    async def publish_outbound(self, msg: OutboundMessage) -> list[Any]:
+    async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish message to all subscribers of the given channel."""
         subs = self._outbound_subscribers.get(msg.channel, [])
         if not subs:
@@ -129,38 +129,26 @@ class MessageBus:
                 )
                 raise  # Re-raise to let gather capture it
 
-        results = await asyncio.gather(
+        await asyncio.gather(
             *[_safe_publish(i, sub) for i, sub in enumerate(subs)],
             return_exceptions=True
         )
-        
-        # Propagation: Errors are already logged per-subscriber in _safe_publish.
-        # We return results to let callers react if needed, without crashing.
-        return results
 
     async def broadcast_outbound(
         self, msg: OutboundMessage, exclude: Channel | None = None
     ) -> None:
         """Broadcast an outbound message to ALL registered channels."""
         # This is used for multi-channel announcements.
-        tasks = []
-        channels = []
-        for channel in self._outbound_subscribers.keys():
+        for channel in list(self._outbound_subscribers.keys()):
             if channel == exclude:
                 continue
             # Create a clone for each channel
             channel_msg = replace(msg, channel=channel)
-            tasks.append(self.publish_outbound(channel_msg))
-            channels.append(channel)
-
-        if not tasks:
-            return
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            try:
+                await self.publish_outbound(channel_msg)
+            except Exception as e:
                 logger.error(
-                    f"🚨 Broadcast to channel {channels[i].value} FAILED: {result}"
+                    f"🚨 Broadcast to channel {channel.value} FAILED: {e}"
                 )
 
     # =========================================================================

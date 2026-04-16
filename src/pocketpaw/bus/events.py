@@ -61,7 +61,7 @@ class InboundMessage:
         )
 
 
-@dataclass(frozen=True)
+@dataclass
 class OutboundMessage:
     """Message to send to a channel."""
 
