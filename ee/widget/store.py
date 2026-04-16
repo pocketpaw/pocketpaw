@@ -7,9 +7,19 @@
 # one append-only event log, write serialisation inherited from
 # SQLite WAL + transaction semantics rather than a per-process
 # asyncio lock that didn't protect across multiple processes anyway.
+# Updated: 2026-04-16 (feat/widget-track-endpoint) — Added
+# ``log_widget_interaction_with_seq`` helper that returns the
+# ``(EventEntry, seq)`` pair atomically. The POST /widgets/track writer
+# endpoint needs the seq on its ack so the UI can round-trip to the
+# journal cursor without a second lookup. The backend's
+# ``SQLiteJournalBackend.append`` already returns the assigned seq;
+# ``Journal.append`` drops it. Going through the backend here keeps the
+# write serialised by BEGIN IMMEDIATE so there is no race between the
+# INSERT and the seq read — which ``Journal.last_entry`` would have.
 #
 # Same store-as-thin-facade shape as ee/retrieval/store.py:
 #   - ``log_widget_interaction`` emits ``widget.interaction.recorded``
+#   - ``log_widget_interaction_with_seq`` same, returns (entry, seq)
 #   - ``log_widget_graduation`` emits ``widget.graduated``
 #   - ``log_cooccurrence`` emits ``widget.cooccurrence.detected``
 #   - every emit is folded into the shared WidgetProjection so reads
@@ -126,6 +136,43 @@ class WidgetJournalStore:
         list.
         """
 
+        entry, _seq = await self.log_widget_interaction_with_seq(
+            widget_name=widget_name,
+            scope=scope,
+            actor=actor,
+            surface=surface,
+            action_type=action_type,
+            pocket_id=pocket_id,
+            metadata=metadata,
+            query_text=query_text,
+            correlation_id=correlation_id,
+        )
+        return entry
+
+    async def log_widget_interaction_with_seq(
+        self,
+        *,
+        widget_name: str,
+        scope: list[str],
+        actor: Actor | None = None,
+        surface: str = "dashboard",
+        action_type: str = "open",
+        pocket_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        query_text: str | None = None,
+        correlation_id: UUID | None = None,
+    ) -> tuple[EventEntry, int]:
+        """Same as :meth:`log_widget_interaction` but returns the
+        ``(EventEntry, seq)`` pair.
+
+        The POST /widgets/track writer endpoint needs the journal seq
+        on its ack so UIs can pin a cursor against the write without a
+        second lookup. ``Journal.append`` drops the seq the backend
+        assigns; reaching into the backend keeps the seq read atomic
+        with the INSERT (same ``BEGIN IMMEDIATE`` transaction), so
+        there is no race with concurrent writers.
+        """
+
         _require_scope(scope)
         _require_str("widget_name", widget_name)
 
@@ -144,9 +191,9 @@ class WidgetJournalStore:
             correlation_id=correlation_id,
             payload=payload,
         )
-        self._journal.append(entry)
+        seq = self._append_with_seq(entry)
         self._projection.apply(entry)
-        return entry
+        return entry, seq
 
     async def log_widget_graduation(
         self,
@@ -262,6 +309,57 @@ class WidgetJournalStore:
             correlation_id=correlation_id,
             payload=payload,
         )
+
+    def _append_with_seq(self, entry: EventEntry) -> int:
+        """Append an entry and return its assigned seq.
+
+        ``Journal.append`` drops the seq the SQLite backend already
+        hands it back from the INSERT. Reach through to the backend
+        directly so callers that need the seq (the POST /widgets/track
+        writer ack) get it atomically, without a second ``last_entry``
+        round-trip that could race other writers on the same journal.
+
+        Hash-linking is reproduced here to keep the chain behaviour
+        identical to ``Journal.append`` — every other widget writer in
+        this module eventually routes through that. A backend that
+        happens to expose ``append`` directly is the SQLite backend;
+        other backends (memory, remote) still work via the
+        Journal-level path.
+        """
+
+        backend = getattr(self._journal, "_backend", None)
+        if backend is None or not hasattr(backend, "append"):  # pragma: no cover - defensive
+            # No backend handle — fall back to the public path and
+            # approximate the seq by re-reading. Other backends will
+            # either expose the attribute or should be wrapped with a
+            # shim that does.
+            self._journal.append(entry)
+            tail = None
+            last_entry = getattr(self._journal, "_backend", None)
+            if last_entry is not None and hasattr(last_entry, "last_entry"):
+                tail = last_entry.last_entry()
+            if tail is None:
+                return 0
+            return int(tail[1])
+
+        # Reproduce Journal.append's hash-link step so the chain stays
+        # consistent with the public path.
+        if entry.prev_hash is None:
+            last = backend.last_entry()
+            if last is not None:
+                from soul_protocol.engine.journal.journal import _hash_link
+
+                prev_entry, prev_seq = last
+                try:
+                    entry = entry.model_copy(
+                        update={"prev_hash": _hash_link(prev_entry, prev_seq)}
+                    )
+                except Exception:
+                    # Match Journal.append's policy: a hash-link failure
+                    # is logged upstream and does not block the write.
+                    pass
+
+        return int(backend.append(entry))
 
 
 def _require_scope(scope: list[str]) -> None:

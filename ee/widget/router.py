@@ -3,12 +3,22 @@
 # Architecture RFC, Phase 3. Carries the read-side intent of held PRs
 # #941 (graduation state per widget) and #942 (co-occurrence
 # suggestions) onto the journal-backed projection.
+# Updated: 2026-04-16 (feat/widget-track-endpoint) — Added the writer
+# endpoint POST /widgets/track. The paw-enterprise SuggestedWidgetsFeed
+# (issue #74) has been POSTing to this route since it shipped; before
+# this change the endpoint 404'd and every widget interaction dropped
+# on the floor. The writer validates the UI's payload shape, emits
+# ``widget.interaction.recorded`` onto the org journal via
+# ``WidgetJournalStore.log_widget_interaction_with_seq``, and returns
+# the journal seq on its ack so UIs can pin a cursor without a second
+# lookup. Scope falls back to ``["org:*"]`` when the actor carries no
+# ``scope_context`` — the UI's anonymous-session path passes an empty
+# list.
 #
 # Reads hit the in-memory projection; writes happen via
-# WidgetJournalStore from pocketpaw callsites (dashboard widget
-# clicks, scheduled graduation scans). Nothing in this router writes
-# widget interactions — the dashboard does that directly when a user
-# touches a widget.
+# WidgetJournalStore from pocketpaw callsites (this endpoint, the
+# scheduled graduation scan). The dashboard still posts from the UI,
+# it just now lands on a real route instead of 404ing silently.
 #
 # Store cache follows the same pattern as ee/retrieval/router.py: one
 # warmed store per Journal id, bootstrap on first request, incremental
@@ -18,10 +28,12 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from soul_protocol.engine.journal import Journal
+from soul_protocol.spec.journal import Actor
 
 from ee.journal_dep import get_journal
 from ee.widget.policy import (
@@ -112,6 +124,42 @@ class GraduationScanResponse(BaseModel):
     window_days: int
     dry_run: bool
     generated_at: str
+
+
+class WidgetInteractionRequest(BaseModel):
+    """Payload shape the SuggestedWidgetsFeed (paw-enterprise #74) POSTs.
+
+    ``action_type`` is a free-form string on purpose — #941's
+    vocabulary (open / click / edit / dismiss / remove / pin /
+    archive) already covers every UI action, but future additions
+    (view, hover, drag) should land without a schema migration. The
+    journal projection already treats ``action_type`` as opaque for
+    storage and only applies its promote/demote policy on the known
+    values, so an unknown action_type is recorded but does not move
+    the graduation needle.
+    """
+
+    widget_name: str = Field(min_length=1)
+    actor: Actor
+    pocket_id: str | None = None
+    surface: str | None = None
+    action_type: str = Field(min_length=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    correlation_id: UUID | None = None
+
+
+class WidgetInteractionAck(BaseModel):
+    """Writer ack with the journal seq + event id.
+
+    Seq is what lets UIs pin a cursor and stream the projection
+    deltas without a second round-trip. Event id is the stable
+    identifier for the emitted row — callers can correlate it with
+    their own request-side trace id if they want.
+    """
+
+    ok: bool
+    event_id: UUID
+    seq: int
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +306,48 @@ async def widget_graduation_state(
         for r in rows
     ]
     return GraduationStateResponse(entries=entries, total=len(entries))
+
+
+@router.post("/widgets/track", response_model=WidgetInteractionAck)
+async def post_widget_interaction(
+    request: WidgetInteractionRequest,
+    journal: Journal = Depends(get_journal),
+) -> WidgetInteractionAck:
+    """Record a single widget interaction.
+
+    The UI fires this on every widget touch (view, open, click, pin,
+    dismiss). The writer emits one ``widget.interaction.recorded``
+    event onto the org journal and folds it into the warmed
+    projection so ``GET /widgets/usage`` reflects the interaction
+    before the next scheduled scan.
+
+    Scope policy: the UI carries the caller's scope context on
+    ``actor.scope_context``. When it's empty (anonymous session
+    actors, or a not-yet-scoped dashboard visit) we fall back to
+    ``["org:*"]`` — an explicit wildcard, not an absence. The journal
+    refuses scope=[] by model validation, so a fallback is required.
+    """
+
+    store = _get_store(journal)
+    scope = list(request.actor.scope_context) if request.actor.scope_context else ["org:*"]
+    surface = request.surface or "dashboard"
+
+    entry, seq = await store.log_widget_interaction_with_seq(
+        widget_name=request.widget_name,
+        scope=scope,
+        actor=request.actor,
+        surface=surface,
+        action_type=request.action_type,
+        pocket_id=request.pocket_id,
+        metadata=request.metadata,
+        correlation_id=request.correlation_id,
+    )
+
+    return WidgetInteractionAck(
+        ok=True,
+        event_id=entry.id,
+        seq=seq,
+    )
 
 
 @router.post("/widgets/graduation/scan", response_model=GraduationScanResponse)
