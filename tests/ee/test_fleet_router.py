@@ -23,7 +23,6 @@ from soul_protocol.engine.journal import open_journal
 from ee.fleet import FleetTemplate
 from ee.fleet.router import router
 
-
 # ---------------------------------------------------------------------------
 # Fixtures — app, client, and a fake fleet factory stack so we never boot
 # a real soul runtime inside the test suite.
@@ -337,7 +336,5 @@ class TestResponseShape:
             json={"template_name": "sales-fleet", "journal": False},
         )
         assert resp.status_code == 200
-        pydantic_warnings = [
-            w for w in recwarn.list if "pydantic" in str(w.category).lower()
-        ]
+        pydantic_warnings = [w for w in recwarn.list if "pydantic" in str(w.category).lower()]
         assert not pydantic_warnings, [str(w) for w in pydantic_warnings]
