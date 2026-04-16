@@ -89,9 +89,7 @@ class FakeIngestAdapter:
     async def schema(self) -> dict[str, Any]:
         return {"messages": {"text": "string"}}
 
-    async def permissions(
-        self, pocket_id: str, record_id: str | None = None
-    ) -> IngestACL:
+    async def permissions(self, pocket_id: str, record_id: str | None = None) -> IngestACL:
         self.permissions_calls.append((pocket_id, record_id))
         if record_id and record_id.startswith("private_"):
             return IngestACL(

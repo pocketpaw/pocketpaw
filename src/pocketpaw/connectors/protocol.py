@@ -153,9 +153,7 @@ class IngestAdapter(ConnectorProtocol, Protocol):
     connectors without sniffing for the method.
     """
 
-    async def permissions(
-        self, pocket_id: str, record_id: str | None = None
-    ) -> IngestACL:
+    async def permissions(self, pocket_id: str, record_id: str | None = None) -> IngestACL:
         """Report source-side ACLs for the next ingest.
 
         ``record_id`` may be ``None`` for connector-wide defaults (e.g. a
