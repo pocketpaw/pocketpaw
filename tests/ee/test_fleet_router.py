@@ -5,9 +5,18 @@
 # name, emit journal events when opted in, 404 on unknown template,
 # 422 on a malformed body.
 #
+# Updated: 2026-04-16 (feat/ee-journal-dep) — swapped the
+# ``_open_default_journal`` patch for FastAPI's ``dependency_overrides``
+# so tests exercise the same ``get_journal`` seam production uses.
+# The override points at a ``tmp_path`` SQLite file so tests never
+# touch the real ``~/.soul/`` dir. ``journal=false`` is now verified by
+# inspecting the ``install_fleet`` call signature instead of asserting
+# the dep was never called (it's always resolved; the router decides
+# whether to forward it).
+#
 # Mocks the soul-protocol + connector + pocket factories out at the
 # ee.fleet.router seam so these tests stay hermetic — no filesystem
-# journal writes, no mongo, no soul-protocol runtime.
+# journal writes to the real data dir, no mongo, no soul-protocol runtime.
 
 from __future__ import annotations
 
@@ -22,6 +31,7 @@ from soul_protocol.engine.journal import open_journal
 
 from ee.fleet import FleetTemplate
 from ee.fleet.router import router
+from ee.journal_dep import get_journal, reset_journal_cache
 
 # ---------------------------------------------------------------------------
 # Fixtures — app, client, and a fake fleet factory stack so we never boot
@@ -29,10 +39,42 @@ from ee.fleet.router import router
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolate_journal_cache():
+    """Drop any Journal cached by a previous test before/after each run.
+
+    The dep's ``lru_cache`` is module-global, so without a reset an open
+    handle from an earlier test could leak into the next one and mask
+    override bugs.
+    """
+
+    reset_journal_cache()
+    yield
+    reset_journal_cache()
+
+
 @pytest.fixture
-def app() -> FastAPI:
+def journal_path(tmp_path: Path) -> Path:
+    """A disposable SQLite path the tests' ``get_journal`` override
+    points at. Shared between the override factory and the read helper.
+    """
+
+    return tmp_path / "router_journal.db"
+
+
+@pytest.fixture
+def app(journal_path: Path) -> FastAPI:
+    """FastAPI app with the fleet router mounted + ``get_journal``
+    overridden to write into a tmp-path journal.
+
+    Using ``dependency_overrides`` is the canonical FastAPI pattern for
+    swapping collaborators in tests — it exercises the real Depends
+    wiring instead of monkey-patching an internal helper.
+    """
+
     a = FastAPI()
     a.include_router(router)
+    a.dependency_overrides[get_journal] = lambda: open_journal(journal_path)
     return a
 
 
@@ -75,25 +117,6 @@ def patch_install_fleet(fake_soul_factory):
 
     with patch("ee.fleet.router.install_fleet", side_effect=_wrapped) as mock:
         yield mock
-
-
-@pytest.fixture
-def journal_path(tmp_path: Path):
-    """Redirect ``_open_default_journal`` to a disposable SQLite path.
-
-    The router opens (and closes) the journal per request — mirroring
-    production where each install is an isolated HTTP round-trip. The
-    fixture itself yields the path so tests can re-open a read handle
-    after the request completes.
-    """
-
-    path = tmp_path / "router_journal.db"
-
-    def _factory() -> Any:
-        return open_journal(path)
-
-    with patch("ee.fleet.router._open_default_journal", side_effect=_factory):
-        yield path
 
 
 @pytest.fixture
@@ -217,13 +240,13 @@ class TestInstallFleet:
         self,
         client: TestClient,
         patch_install_fleet,
-        journal_path,
         read_journal,
     ) -> None:
-        """``journal=true`` wires the default journal into the installer
-        and yields the canonical ``fleet.install.started`` /
+        """``journal=true`` hands the shared org Journal into the
+        installer and yields the canonical ``fleet.install.started`` /
         ``agent.spawned`` / ``fleet.installed`` trio sharing one
-        correlation id.
+        correlation id. Under the dependency override the journal lives
+        at ``tmp_path``, so we can re-open it for read assertions.
         """
 
         resp = client.post(
@@ -242,23 +265,25 @@ class TestInstallFleet:
         corr_ids = {e.correlation_id for e in events}
         assert len(corr_ids) == 1
 
-    def test_install_without_journal_does_not_open_one(
+    def test_install_without_journal_forwards_none(
         self,
         client: TestClient,
         patch_install_fleet,
     ) -> None:
-        """``journal=false`` must not even attempt to open the default
-        journal — keeps the router silent when callers opt out.
+        """``journal=false`` must forward ``None`` into ``install_fleet``.
+        The dep itself is still resolved (FastAPI has no graceful way to
+        skip it), but the router is responsible for the opt-out.
         """
 
-        with patch("ee.fleet.router._open_default_journal") as opener:
-            resp = client.post(
-                "/fleet/install",
-                json={"template_name": "sales-fleet", "journal": False},
-            )
-
+        resp = client.post(
+            "/fleet/install",
+            json={"template_name": "sales-fleet", "journal": False},
+        )
         assert resp.status_code == 200
-        opener.assert_not_called()
+
+        assert patch_install_fleet.call_count == 1
+        kwargs = patch_install_fleet.call_args.kwargs
+        assert kwargs["journal"] is None
 
     def test_unknown_template_returns_404(self, client: TestClient) -> None:
         """Missing templates surface as 404 with a message that names the
@@ -284,7 +309,6 @@ class TestInstallFleet:
         self,
         client: TestClient,
         patch_install_fleet,
-        journal_path,
         read_journal,
     ) -> None:
         """When the caller supplies an ActorSpec it reaches the journal

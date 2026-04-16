@@ -7,20 +7,22 @@
 # ``/api/v1``, giving ``/api/v1/fleet/templates`` and
 # ``/api/v1/fleet/install``.
 #
-# Journal emission is opt-in per request. When ``journal=true`` the
-# router lazily opens a local SQLite journal at
-# ``~/.pocketpaw/journal/fleet.db`` so every install is observable even
-# without an org-scoped journal wiring. The heavier per-org Journal
-# dependency-injection can supersede this later without breaking callers.
+# Updated: 2026-04-16 (feat/ee-journal-dep) — dropped the local
+# ``~/.pocketpaw/journal/fleet.db`` in favour of the shared
+# ``ee.journal_dep.get_journal`` FastAPI dependency. Now every ee/ route
+# writes into the same org journal (SOUL_DATA_DIR or ~/.soul/), so the
+# audit trail is no longer split across two SQLite files. The request
+# body flag ``journal`` still defaults to True; setting it False opts
+# out and passes ``None`` into ``install_fleet`` unchanged.
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from soul_protocol.engine.journal import Journal
 
 from ee.fleet import (
     FleetInstallReport,
@@ -29,13 +31,11 @@ from ee.fleet import (
     list_bundled_fleets,
     load_fleet,
 )
+from ee.journal_dep import get_journal
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/fleet", tags=["Fleet"])
-
-
-_DEFAULT_JOURNAL_PATH = Path.home() / ".pocketpaw" / "journal" / "fleet.db"
 
 
 # ---------------------------------------------------------------------------
@@ -102,31 +102,6 @@ def _load_all_bundled() -> list[FleetTemplate]:
     return templates
 
 
-def _open_default_journal() -> Any | None:
-    """Open (or create) the default fleet journal at the canonical path.
-
-    Returns ``None`` when soul-protocol is not installed or the journal
-    cannot be opened — the installer tolerates a missing journal and
-    the request still succeeds.
-    """
-
-    try:
-        from soul_protocol.engine.journal import open_journal
-    except ImportError:
-        logger.warning(
-            "Fleet install: soul-protocol not available, skipping journal emission. "
-            "Install `pocketpaw[soul]` or pass journal=false to silence this.",
-        )
-        return None
-
-    try:
-        _DEFAULT_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        return open_journal(_DEFAULT_JOURNAL_PATH)
-    except Exception:  # noqa: BLE001 — observability only.
-        logger.exception("Fleet install: failed to open default journal")
-        return None
-
-
 def _resolve_actor(spec: ActorSpec | None) -> Any | None:
     """Translate an ``ActorSpec`` payload to a soul-protocol Actor.
 
@@ -163,14 +138,19 @@ async def get_templates() -> FleetTemplatesResponse:
 
 
 @router.post("/install", response_model=FleetInstallReport)
-async def post_install(req: InstallFleetRequest) -> FleetInstallReport:
+async def post_install(
+    req: InstallFleetRequest,
+    journal: Journal = Depends(get_journal),
+) -> FleetInstallReport:
     """Install a bundled fleet by name.
 
     Resolves ``template_name`` via ``load_fleet()``, installs it, and
     returns the ``FleetInstallReport`` verbatim. Unknown names return
-    404 with a clear message. When ``journal=true`` the installer
-    emits the correlated ``fleet.install.started`` /
-    ``agent.spawned`` / ``fleet.installed`` event trio.
+    404 with a clear message. When ``journal=true`` (the default) the
+    installer receives the org's canonical Journal and emits the
+    correlated ``fleet.install.started`` / ``agent.spawned`` /
+    ``fleet.installed`` event trio; ``journal=false`` forwards ``None``
+    so the installer skips emission.
     """
 
     try:
@@ -187,20 +167,10 @@ async def post_install(req: InstallFleetRequest) -> FleetInstallReport:
             detail=f"Failed to load fleet template: {exc}",
         ) from exc
 
-    journal = _open_default_journal() if req.journal else None
     actor = _resolve_actor(req.actor)
+    effective_journal: Journal | None = journal if req.journal else None
 
-    try:
-        report = await install_fleet(fleet, journal=journal, actor=actor)
-    finally:
-        # open_journal returns a resource with a close() method on the
-        # SQLite backend. Closing keeps the per-request writer from
-        # leaking file handles under load.
-        close = getattr(journal, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:  # noqa: BLE001 — best-effort cleanup.
-                logger.debug("Fleet install: journal close failed", exc_info=True)
-
-    return report
+    # Journal lifetime is managed by the dependency (process-scoped
+    # singleton via lru_cache) — no per-request close, that would defeat
+    # the cache and churn SQLite connections under load.
+    return await install_fleet(fleet, journal=effective_journal, actor=actor)
