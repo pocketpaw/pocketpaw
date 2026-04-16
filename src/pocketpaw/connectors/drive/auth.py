@@ -64,8 +64,7 @@ def resolve_bearer_token(
         from pocketpaw.integrations.token_store import TokenStore
     except Exception as e:  # pragma: no cover - defensive
         raise DriveAuthError(
-            "no Drive bearer token available (credential empty, env unset, "
-            "OAuth store unavailable)"
+            "no Drive bearer token available (credential empty, env unset, OAuth store unavailable)"
         ) from e
 
     store = TokenStore()

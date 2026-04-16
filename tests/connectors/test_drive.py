@@ -198,9 +198,7 @@ class TestDriveClient:
         assert len(sleep_calls) == 2  # backed off twice, succeeded on 3rd attempt
 
     def test_403_quota_reason_also_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "pocketpaw.connectors.drive.client.time.sleep", lambda s: None
-        )
+        monkeypatch.setattr("pocketpaw.connectors.drive.client.time.sleep", lambda s: None)
         quota_body = {
             "error": {
                 "errors": [{"reason": "userRateLimitExceeded", "message": "quota"}],
@@ -216,12 +214,8 @@ class TestDriveClient:
         client.list_files()  # should not raise
         assert len(http.calls) == 2
 
-    def test_rate_limit_budget_exhausted_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "pocketpaw.connectors.drive.client.time.sleep", lambda s: None
-        )
+    def test_rate_limit_budget_exhausted_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("pocketpaw.connectors.drive.client.time.sleep", lambda s: None)
         script = [FakeResponse(status_code=429, json_data={}) for _ in range(6)]
         http = ScriptedClient(script)
         client = DriveClient(token="ok", http=http, max_retries=2, base_backoff_s=0.01)
@@ -258,9 +252,7 @@ class TestDriveClient:
     def test_revision_at_returns_none_when_all_revisions_are_future(self) -> None:
         script = [
             FakeResponse(
-                json_data={
-                    "revisions": [{"id": "r1", "modifiedTime": "2027-01-01T00:00:00Z"}]
-                }
+                json_data={"revisions": [{"id": "r1", "modifiedTime": "2027-01-01T00:00:00Z"}]}
             )
         ]
         http = ScriptedClient(script)
@@ -297,9 +289,7 @@ class FakeDriveClient:
         self.revision_calls: list[tuple[str, datetime]] = []
         self._DriveRevision = DriveRevision
 
-    def list_files(
-        self, *, query: str | None = None, page_size: int = 20, **kwargs: Any
-    ):
+    def list_files(self, *, query: str | None = None, page_size: int = 20, **kwargs: Any):
         if self._raise_on_list is not None:
             raise self._raise_on_list
         self.list_calls.append((query, page_size))
@@ -514,9 +504,7 @@ class TestRouterIntegration:
         yield j
         j.close()
 
-    def test_router_dispatches_to_drive_adapter_and_emits_query_event(
-        self, journal
-    ) -> None:
+    def test_router_dispatches_to_drive_adapter_and_emits_query_event(self, journal) -> None:
         broker = InMemoryCredentialBroker(journal=journal)
         router = RetrievalRouter(journal=journal, broker=broker)
 
@@ -602,5 +590,3 @@ def test_public_api_exports() -> None:
     assert hasattr(mod, "DriveRateLimitError")
     assert hasattr(mod, "DriveNotFoundError")
     assert hasattr(mod, "resolve_bearer_token")
-
-

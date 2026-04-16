@@ -135,7 +135,7 @@ def _split_point_in_time(raw: str) -> tuple[datetime | None, str]:
     stripped = raw.strip()
     if not stripped.startswith(_POINT_IN_TIME_PREFIX):
         return None, raw
-    remainder = stripped[len(_POINT_IN_TIME_PREFIX):]
+    remainder = stripped[len(_POINT_IN_TIME_PREFIX) :]
     if "|" not in remainder:
         return _parse_iso(remainder.strip()), ""
     ts_text, rest = remainder.split("|", 1)

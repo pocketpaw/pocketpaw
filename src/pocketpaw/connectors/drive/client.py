@@ -151,8 +151,7 @@ class DriveClient:
     ) -> list[DriveFile]:
         """List or search files. ``query`` is a Drive search expression."""
         fields = fields or (
-            "files(id,name,mimeType,modifiedTime,size,webViewLink,"
-            "headRevisionId,owners)"
+            "files(id,name,mimeType,modifiedTime,size,webViewLink,headRevisionId,owners)"
         )
         params: dict[str, Any] = {
             "pageSize": max(1, min(page_size, 100)),
@@ -172,10 +171,7 @@ class DriveClient:
     def get_file(self, file_id: str) -> DriveFile:
         """Fetch metadata for a single file (no body)."""
         params = {
-            "fields": (
-                "id,name,mimeType,modifiedTime,size,webViewLink,"
-                "headRevisionId,owners"
-            )
+            "fields": ("id,name,mimeType,modifiedTime,size,webViewLink,headRevisionId,owners")
         }
         data = self._request("GET", f"{_DRIVE_BASE}/files/{file_id}", params=params)
         return DriveFile.from_api(data)
@@ -186,14 +182,10 @@ class DriveClient:
             "pageSize": max(1, min(page_size, 200)),
             "fields": "revisions(id,modifiedTime,keepForever)",
         }
-        data = self._request(
-            "GET", f"{_DRIVE_BASE}/files/{file_id}/revisions", params=params
-        )
+        data = self._request("GET", f"{_DRIVE_BASE}/files/{file_id}/revisions", params=params)
         return [DriveRevision.from_api(r) for r in data.get("revisions", [])]
 
-    def revision_at(
-        self, file_id: str, point_in_time: datetime
-    ) -> DriveRevision | None:
+    def revision_at(self, file_id: str, point_in_time: datetime) -> DriveRevision | None:
         """Return the most recent revision at or before ``point_in_time``.
 
         Drive's revision timestamps are ISO-8601 UTC. We parse them with
