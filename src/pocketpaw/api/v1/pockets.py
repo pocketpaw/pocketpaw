@@ -90,6 +90,7 @@ async def _get_ripple_widget_context(user_message: str) -> str:
         + "\n</ripple-widget-reference>"
     )
 
+
 _POCKET_SYSTEM_CONTEXT = """\
 <pocket-creation-context>
 You are running inside PocketPaw OS, a desktop workspace app.
