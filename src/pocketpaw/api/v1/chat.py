@@ -188,6 +188,7 @@ async def _send_message(chat_request: ChatRequest) -> str:
     """Publish an inbound message to the bus and return the chat_id."""
     from pocketpaw.bus import get_message_bus
     from pocketpaw.bus.events import Channel, InboundMessage
+    from pocketpaw.uploads.resolver import default_resolver, resolve_media_paths
 
     chat_id = _extract_chat_id(chat_request.session_id)
 
@@ -195,12 +196,16 @@ async def _send_message(chat_request: ChatRequest) -> str:
     if chat_request.file_context:
         meta["file_context"] = chat_request.file_context.model_dump(exclude_none=True)
 
+    # Resolve ``/api/v1/uploads/{id}`` URLs in ``media`` to local disk paths
+    # so the agent loop can hand them to the Read tool.
+    media = resolve_media_paths(chat_request.media or [], resolver=default_resolver())
+
     msg = InboundMessage(
         channel=Channel.WEBSOCKET,
         sender_id="api_client",
         chat_id=chat_id,
         content=chat_request.content,
-        media=chat_request.media,
+        media=media,
         metadata=meta,
     )
     bus = get_message_bus()

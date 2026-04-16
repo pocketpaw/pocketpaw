@@ -183,3 +183,78 @@ class TestSSEFormat:
             data_str = data_line.split(":", 1)[1].strip()
             parsed = _json.loads(data_str)
             assert isinstance(parsed, dict), f"SSE data must be a JSON object, got: {type(parsed)}"
+
+
+class TestSendMessageResolvesMedia:
+    """_send_message must rewrite upload URLs to local paths before bus publish."""
+
+    @pytest.mark.asyncio
+    async def test_upload_urls_become_local_paths(self, tmp_path, monkeypatch):
+        import uuid
+        from datetime import UTC, datetime
+
+        from pocketpaw.api.v1.chat import _send_message
+        from pocketpaw.api.v1.schemas.chat import ChatRequest
+        from pocketpaw.uploads.file_store import FileRecord, JSONLFileStore
+        from pocketpaw.uploads.local import LocalStorageAdapter
+        from pocketpaw.uploads.resolver import UploadResolver
+
+        # Stand up isolated adapter + meta store.
+        root = tmp_path / "uploads"
+        root.mkdir()
+        adapter = LocalStorageAdapter(root=root)
+        meta = JSONLFileStore(path=root / "_idx.jsonl")
+
+        # Stash a real blob + record.
+        fid = uuid.uuid4().hex
+        storage_key = f"chat/202604/{fid}.txt"
+        disk = root / storage_key
+        disk.parent.mkdir(parents=True, exist_ok=True)
+        disk.write_bytes(b"hello")
+        meta.save(
+            FileRecord(
+                id=fid,
+                storage_key=storage_key,
+                filename="x.txt",
+                mime="text/plain",
+                size=5,
+                owner_id="local",
+                chat_id=None,
+                created=datetime.now(UTC),
+            )
+        )
+
+        # Force chat._send_message's internal import to use our stub resolver.
+        from pocketpaw.uploads import resolver as resolver_mod
+
+        monkeypatch.setattr(
+            resolver_mod,
+            "default_resolver",
+            lambda: UploadResolver(adapter=adapter, meta=meta),
+        )
+
+        # Capture the InboundMessage that gets published.
+        captured: dict = {}
+
+        class _StubBus:
+            async def publish_inbound(self, msg):
+                captured["msg"] = msg
+
+        from pocketpaw import bus as bus_mod
+
+        monkeypatch.setattr(bus_mod, "get_message_bus", lambda: _StubBus())
+
+        req = ChatRequest(
+            content="look at this",
+            session_id="chat-1",
+            media=[
+                f"/api/v1/uploads/{fid}",
+                "/already/local/path.pdf",
+                "/api/v1/uploads/ghost0000000000000000000000000000",
+            ],
+        )
+        await _send_message(req)
+
+        msg = captured["msg"]
+        assert msg.content == "look at this"
+        assert msg.media == [str(disk), "/already/local/path.pdf"]
