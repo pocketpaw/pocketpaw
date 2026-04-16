@@ -4,6 +4,9 @@
 # Updated: 2026-04-16 (feat/fleet-rest-router) — Added Fleet router so
 #   paw-enterprise's InstallFleetPanel can call GET /api/v1/fleet/templates
 #   and POST /api/v1/fleet/install against a running pocketpaw instance.
+# Updated: 2026-04-16 (feat/retrieval-journal-projection) — Added the
+#   Retrieval router so UIs can surface the journal-backed retrieval +
+#   graduation projection (supersedes held PRs #936 / #937).
 #
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
@@ -58,6 +61,7 @@ _EE_ROUTERS: list[tuple[str, str, str]] = [
     ("ee.fabric.router", "router", "Fabric"),
     ("ee.fleet.router", "router", "Fleet"),
     ("ee.instinct.router", "router", "Instinct"),
+    ("ee.retrieval.router", "router", "Retrieval"),
     ("pocketpaw.ee.automations.router", "router", "Automations"),
 ]
 
