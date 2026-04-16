@@ -73,3 +73,10 @@ class LocalStorageAdapter(StorageAdapter):
     async def exists(self, key: str) -> bool:
         target = self._resolve(key)
         return target.exists()
+
+    def local_path(self, key: str) -> Path | None:
+        try:
+            target = self._resolve(key)
+        except AccessDenied:
+            return None
+        return target if target.exists() else None

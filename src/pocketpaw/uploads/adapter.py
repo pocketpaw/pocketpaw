@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 
@@ -38,3 +39,11 @@ class StorageAdapter(Protocol):
 
     async def exists(self, key: str) -> bool:
         """Return whether ``key`` is currently stored."""
+
+    def local_path(self, key: str) -> Path | None:
+        """Return an absolute local path to the blob, or ``None`` if unsupported.
+
+        Lets the agent loop pass local files to built-in tools (e.g. Read)
+        without streaming through HTTP. Remote adapters (S3, GCS) return
+        ``None`` — the caller should fall back to streaming via ``open``.
+        """
