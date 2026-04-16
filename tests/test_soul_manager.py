@@ -70,15 +70,21 @@ class TestSoulManager:
         await mgr.initialize()
         await mgr.observe("Hello", "Hi there!")
 
-    async def test_get_tools_returns_six(self, soul_settings):
+    async def test_get_tools_exposes_core_soul_tools(self, soul_settings):
+        """SoulManager exposes at least the six core tools pocketpaw depends on.
+
+        Subset-check (renamed from the old exact-6 variant) so soul-protocol
+        can add new tools without breaking this contract. v0.3.1 ships three
+        extras (soul_forget, soul_core_memory, soul_context) on top of the
+        original six; the test now proves the core six are always present.
+        """
         from pocketpaw.soul.manager import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
         tools = mgr.get_tools()
-        assert len(tools) == 6
         names = {t.name for t in tools}
-        assert names == {
+        required = {
             "soul_remember",
             "soul_recall",
             "soul_edit_core",
@@ -86,6 +92,8 @@ class TestSoulManager:
             "soul_evaluate",
             "soul_reload",
         }
+        missing = required - names
+        assert not missing, f"SoulManager missing core tools: {missing}"
 
     async def test_corrupt_soul_file_falls_back_to_birth(self, soul_settings, tmp_path):
         from pocketpaw.soul.manager import SoulManager

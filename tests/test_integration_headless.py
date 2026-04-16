@@ -188,6 +188,22 @@ class TestToolBridgeCompleteness:
     to invoke the tools via subprocess.
     """
 
+    @pytest.fixture(autouse=True)
+    def _reset_soul(self):
+        """Reset the soul manager singleton before each test.
+
+        `_instantiate_all_tools` strips `remember/recall/forget` when a soul
+        manager is active (soul_remember/soul_recall supersede them). A prior
+        test in the suite may leave a SoulManager installed globally; without
+        this reset the memory-tool assertions below fail non-deterministically
+        depending on test order. Mirrors the pattern in test_soul_v024_smoke.py.
+        """
+        from pocketpaw.soul.manager import _reset_manager
+
+        _reset_manager()
+        yield
+        _reset_manager()
+
     # All backends that go through _instantiate_all_tools()
     _ALL_BACKENDS = [
         "openai_agents",
