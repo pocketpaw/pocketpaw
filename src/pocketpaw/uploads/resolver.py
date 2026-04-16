@@ -9,12 +9,15 @@ OSS-only — EE has its own workspace-scoped resolver alongside its Mongo store.
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Protocol
 
 from pocketpaw.uploads.adapter import StorageAdapter
 from pocketpaw.uploads.file_store import FileRecord, JSONLFileStore
+
+logger = logging.getLogger(__name__)
 
 _UPLOAD_URL_RE = re.compile(r"^/api/v1/uploads/(?P<id>[A-Za-z0-9_-]+)$")
 
@@ -54,7 +57,18 @@ class UploadResolver:
         rec = self._meta.get(file_id)
         if rec is None:
             return None
-        return self._adapter.local_path(rec.storage_key)
+        # Contain unexpected adapter failures (permission errors on the
+        # storage root, remount races, future remote adapters) so chat
+        # never crashes over a bad attachment — just drops the entry.
+        try:
+            return self._adapter.local_path(rec.storage_key)
+        except Exception:
+            logger.exception(
+                "upload adapter.local_path failed for file_id=%s storage_key=%s",
+                file_id,
+                rec.storage_key,
+            )
+            return None
 
 
 def resolve_media_paths(
@@ -77,8 +91,14 @@ def resolve_media_paths(
             out.append(entry)
             continue
         path = resolver.resolve(entry)
-        if path is not None:
-            out.append(str(path))
+        if path is None:
+            # Upload-URL-shaped but unresolvable: record missing, record
+            # soft-deleted, blob gone, or adapter failure. Log so the next
+            # time a user says "the agent ignored my file" the trail is
+            # visible in server logs.
+            logger.warning("dropping unresolvable upload entry: %s", entry)
+            continue
+        out.append(str(path))
     return out
 
 

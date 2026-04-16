@@ -7,11 +7,14 @@ up metadata in Mongo with workspace isolation. Cross-tenant lookups return
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw.uploads.adapter import StorageAdapter
 from pocketpaw.uploads.resolver import parse_upload_url
+
+logger = logging.getLogger(__name__)
 
 
 class EEUploadResolver:
@@ -28,7 +31,19 @@ class EEUploadResolver:
         rec = await self._meta.get_scoped(file_id, workspace=workspace)
         if rec is None:
             return None
-        return self._adapter.local_path(rec.storage_key)
+        # Contain unexpected adapter failures (permission errors on the
+        # storage root, remount races, future remote adapters) so chat
+        # never crashes over a bad attachment — just drops the entry.
+        try:
+            return self._adapter.local_path(rec.storage_key)
+        except Exception:
+            logger.exception(
+                "upload adapter.local_path failed for file_id=%s storage_key=%s workspace=%s",
+                file_id,
+                rec.storage_key,
+                workspace,
+            )
+            return None
 
 
 async def resolve_media_paths_scoped(
@@ -49,8 +64,12 @@ async def resolve_media_paths_scoped(
             out.append(entry)
             continue
         path = await resolver.resolve(entry, workspace=workspace)
-        if path is not None:
-            out.append(str(path))
+        if path is None:
+            logger.warning(
+                "dropping unresolvable upload entry (workspace=%s): %s", workspace, entry
+            )
+            continue
+        out.append(str(path))
     return out
 
 
