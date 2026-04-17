@@ -1,7 +1,6 @@
 # Fabric tools — agent tools for querying and managing the ontology.
 # Created: 2026-03-28 — Lets the agent create objects, query links, reason across data.
 
-import json
 import logging
 from typing import Any
 
@@ -14,6 +13,7 @@ def _get_fabric_store():
     """Lazy import to avoid circular deps and missing ee/ module."""
     try:
         from ee.api import get_fabric_store
+
         return get_fabric_store()
     except ImportError:
         return None
@@ -63,18 +63,28 @@ class FabricQueryTool(BaseTool):
             },
         }
 
-    async def execute(self, type_name: str | None = None, linked_to: str | None = None,
-                      link_type: str | None = None, limit: int = 20) -> str:
+    async def execute(
+        self,
+        type_name: str | None = None,
+        linked_to: str | None = None,
+        link_type: str | None = None,
+        limit: int = 20,
+    ) -> str:
         store = _get_fabric_store()
         if not store:
             return "Fabric is not available (enterprise feature)."
 
         try:
             from ee.fabric.models import FabricQuery
-            result = await store.query(FabricQuery(
-                type_name=type_name, linked_to=linked_to,
-                link_type=link_type, limit=min(limit, 50),
-            ))
+
+            result = await store.query(
+                FabricQuery(
+                    type_name=type_name,
+                    linked_to=linked_to,
+                    link_type=link_type,
+                    limit=min(limit, 50),
+                )
+            )
 
             if not result.objects:
                 query_desc = type_name or f"linked to {linked_to}" or "all"
@@ -120,15 +130,25 @@ class FabricCreateTool(BaseTool):
                 "action": {
                     "type": "string",
                     "enum": ["define_type", "create_object", "link"],
-                    "description": "What to create: define_type (new object type), create_object (new instance), link (connect two objects)",
+                    "description": (
+                        "What to create: define_type (new object type),"
+                        " create_object (new instance),"
+                        " link (connect two objects)"
+                    ),
                 },
                 "type_name": {
                     "type": "string",
-                    "description": "For define_type: the type name. For create_object: which type to instantiate.",
+                    "description": (
+                        "For define_type: the type name."
+                        " For create_object: which type"
+                        " to instantiate."
+                    ),
                 },
                 "properties": {
                     "type": "object",
-                    "description": "For define_type: property definitions. For create_object: property values.",
+                    "description": (
+                        "For define_type: property definitions. For create_object: property values."
+                    ),
                 },
                 "from_id": {
                     "type": "string",
@@ -154,11 +174,17 @@ class FabricCreateTool(BaseTool):
             "required": ["action"],
         }
 
-    async def execute(self, action: str, type_name: str | None = None,
-                      properties: dict[str, Any] | None = None,
-                      from_id: str | None = None, to_id: str | None = None,
-                      link_type: str | None = None,
-                      source_connector: str | None = None, source_id: str | None = None) -> str:
+    async def execute(
+        self,
+        action: str,
+        type_name: str | None = None,
+        properties: dict[str, Any] | None = None,
+        from_id: str | None = None,
+        to_id: str | None = None,
+        link_type: str | None = None,
+        source_connector: str | None = None,
+        source_id: str | None = None,
+    ) -> str:
         store = _get_fabric_store()
         if not store:
             return "Fabric is not available (enterprise feature)."
@@ -168,6 +194,7 @@ class FabricCreateTool(BaseTool):
                 if not type_name:
                     return "type_name is required for define_type"
                 from ee.fabric.models import PropertyDef
+
                 prop_defs = []
                 if properties:
                     for name, ptype in properties.items():
@@ -176,17 +203,26 @@ class FabricCreateTool(BaseTool):
                         else:
                             prop_defs.append(PropertyDef(name=name, type=str(ptype)))
                 obj_type = await store.define_type(name=type_name, properties=prop_defs)
-                return f"Created object type '{obj_type.name}' (ID: {obj_type.id}) with {len(prop_defs)} properties."
+                return (
+                    f"Created object type '{obj_type.name}'"
+                    f" (ID: {obj_type.id})"
+                    f" with {len(prop_defs)} properties."
+                )
 
             elif action == "create_object":
                 if not type_name:
                     return "type_name is required for create_object"
                 obj_type = await store.get_type_by_name(type_name)
                 if not obj_type:
-                    return f"Object type '{type_name}' not found. Define it first with action='define_type'."
+                    return (
+                        f"Object type '{type_name}' not found."
+                        " Define it first with action='define_type'."
+                    )
                 obj = await store.create_object(
-                    type_id=obj_type.id, properties=properties or {},
-                    source_connector=source_connector, source_id=source_id,
+                    type_id=obj_type.id,
+                    properties=properties or {},
+                    source_connector=source_connector,
+                    source_id=source_id,
                 )
                 props_str = ", ".join(f"{k}: {v}" for k, v in obj.properties.items())
                 return f"Created {type_name} object (ID: {obj.id}): {props_str}"
@@ -214,7 +250,9 @@ class FabricStatsTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Get statistics about the Fabric ontology: number of object types, objects, and links."
+        return (
+            "Get statistics about the Fabric ontology: number of object types, objects, and links."
+        )
 
     @property
     def trust_level(self) -> str:
@@ -231,7 +269,11 @@ class FabricStatsTool(BaseTool):
         try:
             stats = await store.stats()
             types = await store.list_types()
-            lines = [f"Fabric: {stats['types']} types, {stats['objects']} objects, {stats['links']} links"]
+            lines = [
+                f"Fabric: {stats['types']} types,"
+                f" {stats['objects']} objects,"
+                f" {stats['links']} links"
+            ]
             if types:
                 lines.append("Types: " + ", ".join(t.name for t in types))
             return "\n".join(lines)

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock
 
 from ee.cloud.chat.schemas import WsOutbound
 from ee.cloud.chat.ws import ConnectionManager

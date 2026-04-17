@@ -73,7 +73,8 @@ class WorkspaceService:
     async def create(user: User, body: CreateWorkspaceRequest) -> dict:
         """Create a workspace and add the creator as owner."""
         existing = await Workspace.find_one(
-            Workspace.slug == body.slug, Workspace.deleted_at == None  # noqa: E711
+            Workspace.slug == body.slug,
+            Workspace.deleted_at == None,  # noqa: E711
         )
         if existing:
             raise ConflictError("workspace.slug_taken", f"Slug '{body.slug}' is already in use")
@@ -111,9 +112,7 @@ class WorkspaceService:
         return _workspace_response(ws, member_count=count)
 
     @staticmethod
-    async def update(
-        workspace_id: str, user: User, body: UpdateWorkspaceRequest
-    ) -> dict:
+    async def update(workspace_id: str, user: User, body: UpdateWorkspaceRequest) -> dict:
         """Update workspace fields. Requires admin+ role."""
         membership = _get_membership(user, workspace_id)
         check_workspace_role(membership.role, minimum="admin")
@@ -199,9 +198,7 @@ class WorkspaceService:
         if not ws or ws.deleted_at is not None:
             raise NotFound("workspace", workspace_id)
         if ws.owner == target_user_id and role != "owner":
-            raise Forbidden(
-                "workspace.cannot_demote_owner", "Cannot demote the workspace owner"
-            )
+            raise Forbidden("workspace.cannot_demote_owner", "Cannot demote the workspace owner")
 
         target = await User.get(PydanticObjectId(target_user_id))
         if not target:
@@ -229,9 +226,7 @@ class WorkspaceService:
         if not ws or ws.deleted_at is not None:
             raise NotFound("workspace", workspace_id)
         if ws.owner == target_user_id:
-            raise Forbidden(
-                "workspace.cannot_remove_owner", "Cannot remove the workspace owner"
-            )
+            raise Forbidden("workspace.cannot_remove_owner", "Cannot remove the workspace owner")
 
         target = await User.get(PydanticObjectId(target_user_id))
         if not target:
@@ -262,9 +257,7 @@ class WorkspaceService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def create_invite(
-        workspace_id: str, user: User, body: CreateInviteRequest
-    ) -> dict:
+    async def create_invite(workspace_id: str, user: User, body: CreateInviteRequest) -> dict:
         """Create an invite. Requires admin+. Checks seat limit and existing pending invites."""
         membership = _get_membership(user, workspace_id)
         check_workspace_role(membership.role, minimum="admin")
@@ -297,7 +290,7 @@ class WorkspaceService:
             raise ConflictError(
                 "invite.already_pending",
                 f"A pending invite already exists for {body.email}"
-                + (f" in this group" if body.group_id else ""),
+                + (" in this group" if body.group_id else ""),
             )
 
         invite = Invite(

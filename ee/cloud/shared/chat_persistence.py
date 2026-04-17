@@ -4,6 +4,7 @@ Subscribes to the message bus outbound channel to persist agent responses.
 User messages are persisted via save_user_message() called from the WS adapter.
 This ensures all chat history is in MongoDB regardless of chat system.
 """
+
 from __future__ import annotations
 
 import logging
@@ -85,6 +86,7 @@ async def _on_outbound_message(message) -> None:
 
             # Touch session activity
             from ee.cloud.models.session import Session
+
             session_doc = await Session.find_one(Session.sessionId == f"websocket_{chat_id}")
             if session_doc:
                 session_doc.lastActivity = datetime.now(UTC)
@@ -105,15 +107,19 @@ async def _ensure_cloud_session(chat_id: str) -> dict | None:
         return _active_sessions[chat_id]
 
     try:
-        from ee.cloud.models.session import Session
         from ee.cloud.models.group import Group
+        from ee.cloud.models.session import Session
 
         session_id = f"websocket_{chat_id}"
 
         # Check if session already exists
         session = await Session.find_one(Session.sessionId == session_id)
         if session and session.group:
-            info = {"session_id": str(session.id), "group_id": session.group, "user_id": session.owner}
+            info = {
+                "session_id": str(session.id),
+                "group_id": session.group,
+                "user_id": session.owner,
+            }
             _active_sessions[chat_id] = info
             return info
 
@@ -170,7 +176,9 @@ async def _ensure_cloud_session(chat_id: str) -> dict | None:
             info = {"session_id": str(session.id), "group_id": str(group.id), "user_id": user_id}
 
         _active_sessions[chat_id] = info
-        logger.info("Created cloud session for runtime chat: %s → group %s", session_id, info["group_id"])
+        logger.info(
+            "Created cloud session for runtime chat: %s → group %s", session_id, info["group_id"]
+        )
         return info
     except Exception:
         logger.debug("Failed to ensure cloud session for %s", chat_id, exc_info=True)

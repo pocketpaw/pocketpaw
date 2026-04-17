@@ -1,11 +1,11 @@
-# test_ee_evaluator.py — Tests for the automation evaluator, bridge, and related router/model behavior.
+# test_ee_evaluator.py
+# Tests for the automation evaluator, bridge, and related router/model behavior.
 # Created: 2026-03-30 — Covers bridge spec conversion, evaluator lifecycle and cooldown logic,
 #   _fire_rule dispatch by mode, router evaluator endpoints, router bridge integration,
 #   and model defaults/enums. All I/O uses tmp_path; daemon and instinct store are mocked.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,9 +28,8 @@ from pocketpaw.ee.automations.models import (
     RuleType,
     UpdateRuleRequest,
 )
-from pocketpaw.ee.automations.store import AutomationStore
 from pocketpaw.ee.automations.router import router
-
+from pocketpaw.ee.automations.store import AutomationStore
 
 # ============================================================================
 # Helpers / factories
@@ -308,9 +307,7 @@ class TestEvaluatorEvaluateAll:
         self, evaluator: AutomationEvaluator, store: AutomationStore
     ) -> None:
         """Disabled rules are never evaluated (no _evaluate_threshold call)."""
-        store.create_rule(
-            _threshold_req(name="disabled", **{"enabled": True})
-        )
+        store.create_rule(_threshold_req(name="disabled", **{"enabled": True}))
         # Retrieve and disable it
         rule = store.list_rules()[0]
         store.toggle_rule(rule.id)  # now disabled
@@ -341,9 +338,7 @@ class TestEvaluatorEvaluateAll:
                 return_value=store,
             ),
             patch.object(evaluator, "_evaluate_threshold", new_callable=AsyncMock) as mock_thresh,
-            patch.object(
-                evaluator, "_evaluate_data_change", new_callable=AsyncMock
-            ) as mock_dc,
+            patch.object(evaluator, "_evaluate_data_change", new_callable=AsyncMock) as mock_dc,
         ):
             await evaluator._evaluate_all()
 
@@ -448,9 +443,7 @@ class TestFireRule:
                 "pocketpaw.ee.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
-            patch.object(
-                evaluator, "_propose_action", new_callable=AsyncMock
-            ) as mock_propose,
+            patch.object(evaluator, "_propose_action", new_callable=AsyncMock) as mock_propose,
         ):
             await evaluator._fire_rule(fetched)
 
@@ -470,9 +463,7 @@ class TestFireRule:
                 "pocketpaw.ee.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
-            patch.object(
-                evaluator, "_execute_directly", new_callable=AsyncMock
-            ) as mock_execute,
+            patch.object(evaluator, "_execute_directly", new_callable=AsyncMock) as mock_execute,
         ):
             await evaluator._fire_rule(fetched)
 
@@ -493,12 +484,8 @@ class TestFireRule:
                 return_value=store,
             ),
             patch.object(evaluator, "_notify", new_callable=AsyncMock) as mock_notify,
-            patch.object(
-                evaluator, "_propose_action", new_callable=AsyncMock
-            ) as mock_propose,
-            patch.object(
-                evaluator, "_execute_directly", new_callable=AsyncMock
-            ) as mock_execute,
+            patch.object(evaluator, "_propose_action", new_callable=AsyncMock) as mock_propose,
+            patch.object(evaluator, "_execute_directly", new_callable=AsyncMock) as mock_execute,
         ):
             await evaluator._fire_rule(fetched)
 
@@ -529,9 +516,7 @@ class TestFireRule:
         assert updated.last_fired is not None
 
     @pytest.mark.asyncio
-    async def test_execute_directly_triggers_daemon(
-        self, evaluator: AutomationEvaluator
-    ) -> None:
+    async def test_execute_directly_triggers_daemon(self, evaluator: AutomationEvaluator) -> None:
         """_execute_directly calls daemon.run_intention_now for rules with a linked intention."""
         rule = _threshold_rule(linked_intention_id="int-123", mode=ExecutionMode.AUTO_EXECUTE)
 
@@ -743,7 +728,8 @@ class TestExecutionModeEnum:
         assert rule.mode == ExecutionMode.NOTIFY_ONLY
 
     def test_store_create_rule_default_mode_when_omitted(self, store: AutomationStore) -> None:
-        """AutomationStore.create_rule falls back to model default (REQUIRE_APPROVAL) when mode not in request."""
+        """AutomationStore.create_rule falls back to model default
+        (REQUIRE_APPROVAL) when mode not in request."""
         req = CreateRuleRequest(name="default rule", type=RuleType.THRESHOLD)
         rule = store.create_rule(req)
         assert rule.mode == ExecutionMode.REQUIRE_APPROVAL

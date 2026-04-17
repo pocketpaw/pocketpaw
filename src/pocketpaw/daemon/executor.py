@@ -179,7 +179,9 @@ class IntentionExecutor:
                     except Exception as e:
                         logger.error(f"Error in stream callback: {e}")
         except asyncio.CancelledError:
-            logger.warning(f"Intention execution cancelled: {intention.get('name', intention.get('id', '?'))}")
+            logger.warning(
+                f"Intention execution cancelled: {intention.get('name', intention.get('id', '?'))}"
+            )
         except Exception as e:
             logger.error(f"Intention execution failed: {intention.get('name', '?')}: {e}")
 

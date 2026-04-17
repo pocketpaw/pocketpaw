@@ -8,7 +8,6 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from pocketpaw.ee.automations.models import CreateRuleRequest, Rule, UpdateRuleRequest
 
@@ -44,7 +43,11 @@ class AutomationStore:
             schedule=req.schedule,
             action=req.action,
             **({"mode": req.mode} if req.mode is not None else {}),
-            **({"cooldown_minutes": req.cooldown_minutes} if req.cooldown_minutes is not None else {}),
+            **(
+                {"cooldown_minutes": req.cooldown_minutes}
+                if req.cooldown_minutes is not None
+                else {}
+            ),
         )
         self._rules[rule.id] = rule
         self._save()
@@ -85,7 +88,7 @@ class AutomationStore:
         logger.info("Toggled rule %s -> enabled=%s", rule_id, rule.enabled)
         return rule
 
-    def list_rules(self, pocket_id: Optional[str] = None) -> list[Rule]:
+    def list_rules(self, pocket_id: str | None = None) -> list[Rule]:
         rules = list(self._rules.values())
         if pocket_id is not None:
             rules = [r for r in rules if r.pocket_id == pocket_id]

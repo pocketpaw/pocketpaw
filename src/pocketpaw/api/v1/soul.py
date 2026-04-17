@@ -39,6 +39,7 @@ async def get_soul_dashboard():
         born_iso = soul.born.isoformat()
         try:
             from datetime import UTC, datetime
+
             now = datetime.now(UTC)
             born = soul.born if soul.born.tzinfo else soul.born.replace(tzinfo=UTC)
             age_days = (now - born).days
@@ -87,7 +88,10 @@ async def get_soul_dashboard():
 
     # Communication style
     communication = {
-        "warmth": "medium", "verbosity": "low", "humor_style": "dry", "emoji_usage": "minimal",
+        "warmth": "medium",
+        "verbosity": "low",
+        "humor_style": "dry",
+        "emoji_usage": "minimal",
     }
     if hasattr(soul, "communication"):
         c = soul.communication
@@ -102,13 +106,15 @@ async def get_soul_dashboard():
     skills = []
     if hasattr(soul, "skills"):
         for s in soul.skills:
-            skills.append({
-                "id": getattr(s, "id", ""),
-                "name": getattr(s, "name", ""),
-                "level": getattr(s, "level", 1),
-                "xp": getattr(s, "xp", 0),
-                "xp_to_next": getattr(s, "xp_to_next", 100),
-            })
+            skills.append(
+                {
+                    "id": getattr(s, "id", ""),
+                    "name": getattr(s, "name", ""),
+                    "level": getattr(s, "level", 1),
+                    "xp": getattr(s, "xp", 0),
+                    "xp_to_next": getattr(s, "xp_to_next", 100),
+                }
+            )
 
     # Bond
     bond = None
@@ -118,7 +124,9 @@ async def get_soul_dashboard():
                 "bonded_to": getattr(soul.bond, "bonded_to", ""),
                 "strength": getattr(soul.bond, "bond_strength", 0),
                 "interaction_count": getattr(soul.bond, "interaction_count", 0),
-                "bonded_at": soul.bond.bonded_at.isoformat() if hasattr(soul.bond, "bonded_at") and soul.bond.bonded_at else "",
+                "bonded_at": soul.bond.bonded_at.isoformat()
+                if hasattr(soul.bond, "bonded_at") and soul.bond.bonded_at
+                else "",
             }
         except Exception:
             pass
@@ -132,15 +140,19 @@ async def get_soul_dashboard():
     evolution = []
     if hasattr(soul, "evolution_log"):
         for e in (soul.evolution_log or [])[-20:]:
-            evolution.append({
-                "id": getattr(e, "id", ""),
-                "trait": getattr(e, "trait", ""),
-                "old_value": str(getattr(e, "old_value", "")),
-                "new_value": str(getattr(e, "new_value", "")),
-                "reason": getattr(e, "reason", None),
-                "approved": getattr(e, "approved", None),
-                "proposed_at": e.proposed_at.isoformat() if hasattr(e, "proposed_at") and e.proposed_at else "",
-            })
+            evolution.append(
+                {
+                    "id": getattr(e, "id", ""),
+                    "trait": getattr(e, "trait", ""),
+                    "old_value": str(getattr(e, "old_value", "")),
+                    "new_value": str(getattr(e, "new_value", "")),
+                    "reason": getattr(e, "reason", None),
+                    "approved": getattr(e, "approved", None),
+                    "proposed_at": e.proposed_at.isoformat()
+                    if hasattr(e, "proposed_at") and e.proposed_at
+                    else "",
+                }
+            )
 
     # Self model
     self_model = []
@@ -148,7 +160,11 @@ async def get_soul_dashboard():
         try:
             images = soul.self_model.get_active_self_images(limit=10)
             self_model = [
-                {"domain": img.domain, "confidence": img.confidence, "evidence_count": getattr(img, "evidence_count", 0)}
+                {
+                    "domain": img.domain,
+                    "confidence": img.confidence,
+                    "evidence_count": getattr(img, "evidence_count", 0),
+                }
                 for img in images
             ]
         except Exception:

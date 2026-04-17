@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import socket
 
-import pytest
 import httpx
+import pytest
 
 # ---------------------------------------------------------------------------
 # Reachability guard — skips the entire module when backend is offline
 # ---------------------------------------------------------------------------
+
 
 def _is_backend_up(host: str = "localhost", port: int = 3000) -> bool:
     try:
@@ -40,6 +41,7 @@ SUPERUSER_PASSWORD = "hello super interacly"
 # Shared session fixture — logs in once per test module
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def auth_client():
     """Synchronous fixture that provides an httpx.Client with auth cookie.
@@ -62,6 +64,7 @@ def auth_client():
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @skip_if_no_backend
 def test_login_returns_ok(auth_client: httpx.Client) -> None:
@@ -124,9 +127,7 @@ def test_ocean_room_lifecycle(auth_client: httpx.Client) -> None:
             f"/ocean/rooms/{created_room_id}/messages",
             json={"content": "Hello from e2e test", "role": "user"},
         )
-        assert msg_resp.status_code in (200, 201), (
-            f"Add message failed: {msg_resp.text[:300]}"
-        )
+        assert msg_resp.status_code in (200, 201), f"Add message failed: {msg_resp.text[:300]}"
 
         # --- Get room and verify message persisted ---
         get_resp = auth_client.get(f"/ocean/rooms/{created_room_id}")

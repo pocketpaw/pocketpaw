@@ -40,7 +40,8 @@ def _generate_slug(name: str) -> str:
 async def _group_response(group: Group) -> dict:
     """Convert a Group document to a frontend-compatible dict.
 
-    Populates member IDs -> {_id, name, email} and agent IDs -> {_id, agent, name, role, respond_mode}.
+    Populates member IDs -> {_id, name, email} and agent IDs ->
+    {_id, agent, name, role, respond_mode}.
     Uses batch queries to avoid N+1 per-member / per-agent lookups.
     """
     from ee.cloud.models.agent import Agent as AgentModel
@@ -55,12 +56,14 @@ async def _group_response(group: Group) -> dict:
     for uid in group.members:
         user = user_map.get(uid)
         if user:
-            populated_members.append({
-                "_id": str(user.id),
-                "name": user.full_name or user.email,
-                "email": user.email,
-                "avatar": user.avatar,
-            })
+            populated_members.append(
+                {
+                    "_id": str(user.id),
+                    "name": user.full_name or user.email,
+                    "email": user.email,
+                    "avatar": user.avatar,
+                }
+            )
         else:
             populated_members.append({"_id": uid, "name": uid, "email": ""})
 
@@ -72,14 +75,16 @@ async def _group_response(group: Group) -> dict:
     populated_agents = []
     for ga in group.agents:
         agent_doc = agent_map.get(ga.agent)
-        populated_agents.append({
-            "_id": str(agent_doc.id) if agent_doc else ga.agent,
-            "agent": ga.agent,
-            "name": agent_doc.name if agent_doc else "Agent",
-            "uname": agent_doc.slug if agent_doc else "",
-            "role": ga.role,
-            "respond_mode": ga.respond_mode,
-        })
+        populated_agents.append(
+            {
+                "_id": str(agent_doc.id) if agent_doc else ga.agent,
+                "agent": ga.agent,
+                "name": agent_doc.name if agent_doc else "Agent",
+                "uname": agent_doc.slug if agent_doc else "",
+                "role": ga.role,
+                "respond_mode": ga.respond_mode,
+            }
+        )
 
     return {
         "_id": str(group.id),
@@ -133,9 +138,7 @@ class GroupService:
     """Stateless service for group/channel business logic."""
 
     @staticmethod
-    async def create_group(
-        workspace_id: str, user_id: str, body: CreateGroupRequest
-    ) -> dict:
+    async def create_group(workspace_id: str, user_id: str, body: CreateGroupRequest) -> dict:
         """Create a group and add the creator as a member.
 
         For DMs: validates exactly 2 member_ids, auto-names as "DM".
@@ -198,9 +201,7 @@ class GroupService:
         return await _group_response(group)
 
     @staticmethod
-    async def update_group(
-        group_id: str, user_id: str, body: UpdateGroupRequest
-    ) -> dict:
+    async def update_group(group_id: str, user_id: str, body: UpdateGroupRequest) -> dict:
         """Update group fields. Owner only. Cannot update DMs."""
         group = await _get_group_or_404(group_id)
 
@@ -292,9 +293,7 @@ class GroupService:
         await group.save()
 
     @staticmethod
-    async def add_agent(
-        group_id: str, user_id: str, body: AddGroupAgentRequest
-    ) -> None:
+    async def add_agent(group_id: str, user_id: str, body: AddGroupAgentRequest) -> None:
         """Add an agent to a group. Owner only."""
         group = await _get_group_or_404(group_id)
         _require_group_admin(group, user_id)
@@ -346,9 +345,7 @@ class GroupService:
         await group.save()
 
     @staticmethod
-    async def get_or_create_dm(
-        workspace_id: str, user_id: str, target_user_id: str
-    ) -> dict:
+    async def get_or_create_dm(workspace_id: str, user_id: str, target_user_id: str) -> dict:
         """Find an existing DM between two users, or create one.
 
         DM groups have type="dm", sorted members, and name="DM".

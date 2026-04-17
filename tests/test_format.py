@@ -19,11 +19,12 @@ class TestChannelFormatHints:
             assert isinstance(hint, str), f"{ch} hint is not a string"
 
     def test_passthrough_channels_have_empty_hint(self):
-        for ch in (Channel.WEBSOCKET, Channel.MATRIX):
+        for ch in (Channel.MATRIX,):
             assert CHANNEL_FORMAT_HINTS[ch] == ""
 
     def test_non_passthrough_channels_have_nonempty_hint(self):
         for ch in (
+            Channel.WEBSOCKET,
             Channel.WHATSAPP,
             Channel.SLACK,
             Channel.SIGNAL,

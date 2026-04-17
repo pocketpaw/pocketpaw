@@ -3,16 +3,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pocketpaw.connectors.protocol import ActionResult, ConnectorStatus, TrustLevel
+from pocketpaw.connectors.protocol import ConnectorStatus, TrustLevel
 from pocketpaw.connectors.yaml_engine import parse_connector_yaml
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -32,6 +30,7 @@ def gcp_definition():
 def gcp_adapter(gcp_definition):
     """Create a GCPAdapter with the parsed definition."""
     from pocketpaw.connectors.gcp_adapter import GCPAdapter
+
     return GCPAdapter(definition=gcp_definition)
 
 
@@ -67,14 +66,25 @@ class TestYAMLParsing:
     def test_action_names(self, gcp_definition):
         names = {a["name"] for a in gcp_definition.actions}
         expected = {
-            "list_projects", "get_project",
-            "storage_list_buckets", "storage_list_objects", "storage_get_object",
-            "storage_copy", "storage_delete",
-            "pubsub_list_topics", "pubsub_list_subscriptions", "pubsub_publish",
-            "run_list_services", "run_describe_service", "run_list_revisions",
-            "secrets_list", "secrets_get", "secrets_create",
+            "list_projects",
+            "get_project",
+            "storage_list_buckets",
+            "storage_list_objects",
+            "storage_get_object",
+            "storage_copy",
+            "storage_delete",
+            "pubsub_list_topics",
+            "pubsub_list_subscriptions",
+            "pubsub_publish",
+            "run_list_services",
+            "run_describe_service",
+            "run_list_revisions",
+            "secrets_list",
+            "secrets_get",
+            "secrets_create",
             "logs_read",
-            "compute_list_instances", "compute_describe_instance",
+            "compute_list_instances",
+            "compute_describe_instance",
             "iam_list_accounts",
         }
         assert expected.issubset(names)
@@ -127,7 +137,9 @@ class TestAdapterConnect:
     async def test_connect_success(self, gcp_adapter):
         auth_response = json.dumps([{"account": "test@example.com", "status": "ACTIVE"}])
         with patch("pocketpaw.connectors.gcp_adapter._find_gcloud", return_value="/usr/bin/gcloud"):
-            with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)):
+            with patch(
+                "asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)
+            ):
                 result = await gcp_adapter.connect("pocket-1", {})
         assert result.success is True
         assert result.status == ConnectorStatus.CONNECTED
@@ -137,7 +149,9 @@ class TestAdapterConnect:
     async def test_connect_with_project(self, gcp_adapter):
         auth_response = json.dumps([{"account": "dev@corp.com", "status": "ACTIVE"}])
         with patch("pocketpaw.connectors.gcp_adapter._find_gcloud", return_value="/usr/bin/gcloud"):
-            with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)):
+            with patch(
+                "asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)
+            ):
                 result = await gcp_adapter.connect("pocket-1", {"GCP_PROJECT": "my-project"})
         assert result.success is True
         assert "my-project" in result.message
@@ -154,7 +168,9 @@ class TestAdapterConnect:
         # No active account
         auth_response = json.dumps([{"account": "old@test.com", "status": "DISABLED"}])
         with patch("pocketpaw.connectors.gcp_adapter._find_gcloud", return_value="/usr/bin/gcloud"):
-            with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)):
+            with patch(
+                "asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)
+            ):
                 result = await gcp_adapter.connect("pocket-1", {})
         assert result.success is False
         assert "gcloud auth login" in result.message
@@ -177,7 +193,9 @@ class TestAdapterExecute:
         """Helper to connect an adapter with mocked gcloud."""
         auth_response = json.dumps([{"account": "test@example.com", "status": "ACTIVE"}])
         with patch("pocketpaw.connectors.gcp_adapter._find_gcloud", return_value="/usr/bin/gcloud"):
-            with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)):
+            with patch(
+                "asyncio.create_subprocess_exec", return_value=_mock_process(stdout=auth_response)
+            ):
                 await adapter.connect("pocket-1", {"GCP_PROJECT": "test-proj"})
 
     @pytest.mark.asyncio
@@ -196,10 +214,12 @@ class TestAdapterExecute:
     @pytest.mark.asyncio
     async def test_list_projects(self, gcp_adapter):
         await self._connect_adapter(gcp_adapter)
-        projects = json.dumps([
-            {"projectId": "proj-1", "name": "Project One"},
-            {"projectId": "proj-2", "name": "Project Two"},
-        ])
+        projects = json.dumps(
+            [
+                {"projectId": "proj-1", "name": "Project One"},
+                {"projectId": "proj-2", "name": "Project Two"},
+            ]
+        )
         with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=projects)):
             result = await gcp_adapter.execute("list_projects", {})
         assert result.success is True
@@ -230,7 +250,9 @@ class TestAdapterExecute:
         await self._connect_adapter(gcp_adapter)
         content = "Hello, world!"
         with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=content)):
-            result = await gcp_adapter.execute("storage_get_object", {"bucket": "my-bucket", "path": "test.txt"})
+            result = await gcp_adapter.execute(
+                "storage_get_object", {"bucket": "my-bucket", "path": "test.txt"}
+            )
         assert result.success is True
         assert result.data["content"] == content
 
@@ -290,6 +312,7 @@ class TestAdapterActions:
     @pytest.mark.asyncio
     async def test_actions_fallback_without_yaml(self):
         from pocketpaw.connectors.gcp_adapter import GCPAdapter
+
         adapter = GCPAdapter(definition=None)
         schemas = await adapter.actions()
         # Hardcoded fallback has fewer actions
@@ -313,10 +336,12 @@ class TestAdapterDisconnect:
 class TestRegistryIntegration:
     def test_gcp_in_cli_connectors(self):
         from pocketpaw.connectors.registry import _CLI_CONNECTORS
+
         assert "gcp" in _CLI_CONNECTORS
 
     def test_create_native_adapter_returns_gcp(self):
         from pocketpaw.connectors.registry import _create_native_adapter
+
         adapter = _create_native_adapter("gcp")
         assert adapter is not None
         assert adapter.name == "gcp"

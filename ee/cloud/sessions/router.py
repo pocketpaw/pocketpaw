@@ -13,9 +13,7 @@ from ee.cloud.sessions.schemas import (
 from ee.cloud.sessions.service import SessionService
 from ee.cloud.shared.deps import current_user_id, current_workspace_id
 
-router = APIRouter(
-    prefix="/sessions", tags=["Sessions"], dependencies=[Depends(require_license)]
-)
+router = APIRouter(prefix="/sessions", tags=["Sessions"], dependencies=[Depends(require_license)])
 
 # ---------------------------------------------------------------------------
 # CRUD

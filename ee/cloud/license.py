@@ -16,9 +16,8 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -71,7 +70,6 @@ def _verify_signature(payload_bytes: bytes, signature_hex: str) -> bool:
 
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
         pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(_PUBLIC_KEY_HEX))
         pub_key.verify(bytes.fromhex(signature_hex), payload_bytes)
@@ -117,6 +115,7 @@ def load_license() -> LicensePayload | None:
     # Ensure .env is loaded
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
     except ImportError:
         pass

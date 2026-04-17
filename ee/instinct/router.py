@@ -96,14 +96,18 @@ async def pending_actions(pocket_id: str | None = Query(None)):
 @router.get("/instinct/actions", response_model=ActionsListResponse)
 async def list_actions(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
-    status: str | None = Query(None, description="Filter by status: pending|approved|rejected|executed|failed"),
+    status: str | None = Query(
+        None, description="Filter by status: pending|approved|rejected|executed|failed"
+    ),
     limit: int = Query(50, ge=1, le=500, description="Max actions to return"),
 ):
     """List all actions with optional status and pocket filters."""
     store = _store()
     status_enum = ActionStatus(status) if status else None
     actions = await store.list_actions(
-        pocket_id=pocket_id, status=status_enum, limit=limit,
+        pocket_id=pocket_id,
+        status=status_enum,
+        limit=limit,
     )
     return ActionsListResponse(actions=actions, total=len(actions))
 
@@ -135,13 +139,18 @@ async def reject_action(action_id: str, req: RejectRequest | None = None):
 @router.get("/instinct/audit", response_model=AuditListResponse)
 async def query_audit(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
-    category: str | None = Query(None, description="Filter by category: decision|data|config|security"),
+    category: str | None = Query(
+        None, description="Filter by category: decision|data|config|security"
+    ),
     event: str | None = Query(None, description="Filter by event type"),
     limit: int = Query(100, ge=1, le=1000, description="Max entries to return"),
 ):
     """Query instinct audit log entries with optional filters."""
     entries = await _store().query_audit(
-        pocket_id=pocket_id, category=category, event=event, limit=limit,
+        pocket_id=pocket_id,
+        category=category,
+        event=event,
+        limit=limit,
     )
     return AuditListResponse(entries=entries, total=len(entries))
 

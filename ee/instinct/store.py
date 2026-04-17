@@ -5,10 +5,11 @@
 from __future__ import annotations
 
 import json
-import aiosqlite
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import aiosqlite
 
 from ee.instinct.models import (
     Action,
@@ -19,9 +20,7 @@ from ee.instinct.models import (
     ActionTrigger,
     AuditCategory,
     AuditEntry,
-    _gen_id,
 )
-
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS instinct_actions (
@@ -89,33 +88,55 @@ class InstinctStore:
     # --- Actions ---
 
     async def propose(
-        self, pocket_id: str, title: str, description: str,
-        recommendation: str, trigger: ActionTrigger,
+        self,
+        pocket_id: str,
+        title: str,
+        description: str,
+        recommendation: str,
+        trigger: ActionTrigger,
         category: ActionCategory = ActionCategory.WORKFLOW,
         priority: ActionPriority = ActionPriority.MEDIUM,
         parameters: dict[str, Any] | None = None,
         context: ActionContext | None = None,
     ) -> Action:
         action = Action(
-            pocket_id=pocket_id, title=title, description=description,
-            recommendation=recommendation, trigger=trigger,
-            category=category, priority=priority,
-            parameters=parameters or {}, context=context or ActionContext(),
+            pocket_id=pocket_id,
+            title=title,
+            description=description,
+            recommendation=recommendation,
+            trigger=trigger,
+            category=category,
+            priority=priority,
+            parameters=parameters or {},
+            context=context or ActionContext(),
         )
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO instinct_actions (id, pocket_id, title, description, category, status, priority, trigger, recommendation, parameters, context) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (action.id, pocket_id, title, description, action.category.value,
-                 action.status.value, action.priority.value,
-                 action.trigger.model_dump_json(), recommendation,
-                 json.dumps(parameters or {}), action.context.model_dump_json()),
+                "INSERT INTO instinct_actions"
+                " (id, pocket_id, title, description,"
+                " category, status, priority, trigger,"
+                " recommendation, parameters, context)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    action.id,
+                    pocket_id,
+                    title,
+                    description,
+                    action.category.value,
+                    action.status.value,
+                    action.priority.value,
+                    action.trigger.model_dump_json(),
+                    recommendation,
+                    json.dumps(parameters or {}),
+                    action.context.model_dump_json(),
+                ),
             )
             await db.commit()
 
         await self._log(
-            action_id=action.id, pocket_id=pocket_id,
+            action_id=action.id,
+            pocket_id=pocket_id,
             actor=f"{trigger.type}:{trigger.source}",
             event="action_proposed",
             description=f"Proposed: {title}",
@@ -125,37 +146,55 @@ class InstinctStore:
 
     async def approve(self, action_id: str, approver: str = "user") -> Action | None:
         return await self._update_status(
-            action_id, ActionStatus.APPROVED,
-            approved_by=approver, approved_at=datetime.now().isoformat(),
-            event="action_approved", actor=approver,
+            action_id,
+            ActionStatus.APPROVED,
+            approved_by=approver,
+            approved_at=datetime.now().isoformat(),
+            event="action_approved",
+            actor=approver,
         )
 
-    async def reject(self, action_id: str, reason: str = "", rejector: str = "user") -> Action | None:
+    async def reject(
+        self, action_id: str, reason: str = "", rejector: str = "user"
+    ) -> Action | None:
         return await self._update_status(
-            action_id, ActionStatus.REJECTED,
+            action_id,
+            ActionStatus.REJECTED,
             rejected_reason=reason,
-            event="action_rejected", actor=rejector,
+            event="action_rejected",
+            actor=rejector,
             extra_desc=f" — {reason}" if reason else "",
         )
 
     async def mark_executed(self, action_id: str, outcome: str | None = None) -> Action | None:
         return await self._update_status(
-            action_id, ActionStatus.EXECUTED,
-            outcome=outcome, executed_at=datetime.now().isoformat(),
-            event="action_executed", actor="system",
+            action_id,
+            ActionStatus.EXECUTED,
+            outcome=outcome,
+            executed_at=datetime.now().isoformat(),
+            event="action_executed",
+            actor="system",
         )
 
     async def mark_failed(self, action_id: str, error: str) -> Action | None:
         return await self._update_status(
-            action_id, ActionStatus.FAILED,
+            action_id,
+            ActionStatus.FAILED,
             error=error,
-            event="action_failed", actor="system",
+            event="action_failed",
+            actor="system",
             extra_desc=f" — {error}",
         )
 
     async def _update_status(
-        self, action_id: str, status: ActionStatus, *,
-        event: str, actor: str, extra_desc: str = "", **fields: Any,
+        self,
+        action_id: str,
+        status: ActionStatus,
+        *,
+        event: str,
+        actor: str,
+        extra_desc: str = "",
+        **fields: Any,
     ) -> Action | None:
         action = await self.get_action(action_id)
         if not action:
@@ -171,14 +210,14 @@ class InstinctStore:
 
         await self._ensure_schema()
         async with self._conn() as db:
-            await db.execute(
-                f"UPDATE instinct_actions SET {', '.join(sets)} WHERE id = ?", params
-            )
+            await db.execute(f"UPDATE instinct_actions SET {', '.join(sets)} WHERE id = ?", params)
             await db.commit()
 
         await self._log(
-            action_id=action_id, pocket_id=action.pocket_id,
-            actor=actor, event=event,
+            action_id=action_id,
+            pocket_id=action.pocket_id,
+            actor=actor,
+            event=event,
             description=f"{event.replace('_', ' ').title()}: {action.title}{extra_desc}",
         )
         return await self.get_action(action_id)
@@ -187,7 +226,9 @@ class InstinctStore:
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM instinct_actions WHERE id = ?", (action_id,)) as cur:
+            async with db.execute(
+                "SELECT * FROM instinct_actions WHERE id = ?", (action_id,)
+            ) as cur:
                 row = await cur.fetchone()
                 return self._row_to_action(row) if row else None
 
@@ -246,24 +287,50 @@ class InstinctStore:
 
     # --- Audit Log ---
 
-    async def _log(self, *, actor: str, event: str, description: str,
-                   action_id: str | None = None, pocket_id: str | None = None,
-                   category: AuditCategory = AuditCategory.DECISION,
-                   context: dict[str, Any] | None = None,
-                   ai_recommendation: str | None = None, outcome: str | None = None) -> AuditEntry:
+    async def _log(
+        self,
+        *,
+        actor: str,
+        event: str,
+        description: str,
+        action_id: str | None = None,
+        pocket_id: str | None = None,
+        category: AuditCategory = AuditCategory.DECISION,
+        context: dict[str, Any] | None = None,
+        ai_recommendation: str | None = None,
+        outcome: str | None = None,
+    ) -> AuditEntry:
         entry = AuditEntry(
-            action_id=action_id, pocket_id=pocket_id, actor=actor,
-            event=event, category=category, description=description,
-            context=context or {}, ai_recommendation=ai_recommendation, outcome=outcome,
+            action_id=action_id,
+            pocket_id=pocket_id,
+            actor=actor,
+            event=event,
+            category=category,
+            description=description,
+            context=context or {},
+            ai_recommendation=ai_recommendation,
+            outcome=outcome,
         )
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO instinct_audit (id, action_id, pocket_id, actor, event, category, description, context, ai_recommendation, outcome) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (entry.id, entry.action_id, entry.pocket_id, entry.actor, entry.event,
-                 entry.category.value, entry.description, json.dumps(entry.context),
-                 entry.ai_recommendation, entry.outcome),
+                "INSERT INTO instinct_audit"
+                " (id, action_id, pocket_id, actor, event,"
+                " category, description, context,"
+                " ai_recommendation, outcome)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.id,
+                    entry.action_id,
+                    entry.pocket_id,
+                    entry.actor,
+                    entry.event,
+                    entry.category.value,
+                    entry.description,
+                    json.dumps(entry.context),
+                    entry.ai_recommendation,
+                    entry.outcome,
+                ),
             )
             await db.commit()
         return entry
@@ -273,8 +340,11 @@ class InstinctStore:
         return await self._log(actor=actor, event=event, description=description, **kwargs)
 
     async def query_audit(
-        self, pocket_id: str | None = None, category: str | None = None,
-        event: str | None = None, limit: int = 100,
+        self,
+        pocket_id: str | None = None,
+        category: str | None = None,
+        event: str | None = None,
+        limit: int = 100,
     ) -> list[AuditEntry]:
         conditions: list[str] = []
         params: list[Any] = []
@@ -306,7 +376,9 @@ class InstinctStore:
 
     def _row_to_action(self, row: Any) -> Action:
         return Action(
-            id=row["id"], pocket_id=row["pocket_id"], title=row["title"],
+            id=row["id"],
+            pocket_id=row["pocket_id"],
+            title=row["title"],
             description=row["description"] or "",
             category=ActionCategory(row["category"]),
             status=ActionStatus(row["status"]),
@@ -314,17 +386,25 @@ class InstinctStore:
             trigger=ActionTrigger.model_validate_json(row["trigger"]),
             recommendation=row["recommendation"] or "",
             parameters=json.loads(row["parameters"]) if row["parameters"] else {},
-            context=ActionContext.model_validate_json(row["context"]) if row["context"] else ActionContext(),
-            outcome=row["outcome"], error=row["error"],
-            approved_by=row["approved_by"], rejected_reason=row["rejected_reason"],
+            context=ActionContext.model_validate_json(row["context"])
+            if row["context"]
+            else ActionContext(),
+            outcome=row["outcome"],
+            error=row["error"],
+            approved_by=row["approved_by"],
+            rejected_reason=row["rejected_reason"],
         )
 
     def _row_to_audit(self, row: Any) -> AuditEntry:
         return AuditEntry(
-            id=row["id"], action_id=row["action_id"], pocket_id=row["pocket_id"],
-            actor=row["actor"], event=row["event"],
+            id=row["id"],
+            action_id=row["action_id"],
+            pocket_id=row["pocket_id"],
+            actor=row["actor"],
+            event=row["event"],
             category=AuditCategory(row["category"]),
             description=row["description"],
             context=json.loads(row["context"]) if row["context"] else {},
-            ai_recommendation=row["ai_recommendation"], outcome=row["outcome"],
+            ai_recommendation=row["ai_recommendation"],
+            outcome=row["outcome"],
         )

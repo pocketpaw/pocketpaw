@@ -1,7 +1,8 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
-Updated: 2026-04-08 - kb injection: query kb-go (github.com/qbtrix/kb-go) for structured knowledge alongside soul memories
+Updated: 2026-04-08 - kb injection: query kb-go for structured knowledge
+alongside soul memories
 Updated: 2026-04-01 - Context window budget tracking: priority-based injection with per-block caps
 Updated: 2026-03-10 - AGENTS.md injection: read project-specific constraints from target repos
 Updated: 2026-03-09 - Sanitize file_context paths before injecting into system prompt
@@ -206,6 +207,7 @@ class AgentContextBuilder:
         # 4d. Inject current pocket info so the AI knows what pocket is open
         if metadata and metadata.get("pocket_context"):
             import json
+
             pc = metadata["pocket_context"]
             pocket_tag = (
                 f"\n<current-pocket>\n"

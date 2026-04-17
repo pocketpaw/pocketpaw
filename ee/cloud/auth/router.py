@@ -5,12 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from ee.cloud.auth.core import (
-    cookie_backend,
+    UserCreate,
+    UserRead,
     bearer_backend,
+    cookie_backend,
     current_active_user,
     fastapi_users,
-    UserRead,
-    UserCreate,
 )
 from ee.cloud.auth.schemas import ProfileUpdateRequest, SetWorkspaceRequest
 from ee.cloud.auth.service import AuthService

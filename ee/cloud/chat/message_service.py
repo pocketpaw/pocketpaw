@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Optional
 
 from beanie import PydanticObjectId
 
@@ -71,9 +70,7 @@ class MessageService:
     """Stateless service for message business logic."""
 
     @staticmethod
-    async def send_message(
-        group_id: str, user_id: str, body: SendMessageRequest
-    ) -> dict:
+    async def send_message(group_id: str, user_id: str, body: SendMessageRequest) -> dict:
         """Send a message to a group.
 
         Verifies membership, checks group is not archived, creates the
@@ -127,7 +124,7 @@ class MessageService:
         group_id: str,
         agent_id: str,
         content: str,
-        attachments: Optional[list[Attachment]] = None,
+        attachments: list[Attachment] | None = None,
     ) -> Message:
         """Create a message from an agent in a group.
 
@@ -153,9 +150,7 @@ class MessageService:
         return msg
 
     @staticmethod
-    async def edit_message(
-        message_id: str, user_id: str, body: EditMessageRequest
-    ) -> dict:
+    async def edit_message(message_id: str, user_id: str, body: EditMessageRequest) -> dict:
         """Edit a message. Author only."""
         msg = await _get_message_or_404(message_id)
 
@@ -187,9 +182,7 @@ class MessageService:
         await msg.save()
 
     @staticmethod
-    async def toggle_reaction(
-        message_id: str, user_id: str, emoji: str
-    ) -> dict:
+    async def toggle_reaction(message_id: str, user_id: str, emoji: str) -> dict:
         """Toggle a reaction on a message.
 
         If the user already reacted with the given emoji, remove their
@@ -315,9 +308,7 @@ class MessageService:
         await group.save()
 
     @staticmethod
-    async def search_messages(
-        group_id: str, user_id: str, query: str
-    ) -> list[dict]:
+    async def search_messages(group_id: str, user_id: str, query: str) -> list[dict]:
         """Search messages by content using regex. Limited to 50 results."""
         group = await _get_group_or_404(group_id)
 

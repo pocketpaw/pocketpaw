@@ -57,6 +57,7 @@ _EE_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.ee.automations.router", "router", "Automations"),
 ]
 
+
 def mount_v1_routers(app: FastAPI) -> None:
     """Mount all v1 domain routers on *app*.
 

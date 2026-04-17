@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Annotated
 
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, Request
+from fastapi import Depends, Request
 from fastapi_users import BaseUserManager, FastAPIUsers
+from fastapi_users import schemas as fastapi_users_schemas
 from fastapi_users.authentication import (
     AuthenticationBackend,
     BearerTransport,
@@ -30,8 +30,6 @@ from fastapi_users.authentication import (
     JWTStrategy,
 )
 from fastapi_users_db_beanie import BeanieUserDatabase, ObjectIDIDMixin
-from fastapi_users import schemas as fastapi_users_schemas
-from pydantic import BaseModel
 
 from ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from ee.cloud.models.workspace import Workspace, WorkspaceSettings
@@ -46,6 +44,7 @@ TOKEN_LIFETIME = 60 * 60 * 24 * 7  # 7 days
 # User database adapter
 # ---------------------------------------------------------------------------
 
+
 async def get_user_db():
     yield BeanieUserDatabase(User, OAuthAccount)
 
@@ -53,6 +52,7 @@ async def get_user_db():
 # ---------------------------------------------------------------------------
 # User manager (handles registration, password hashing, etc.)
 # ---------------------------------------------------------------------------
+
 
 class UserManager(ObjectIDIDMixin, BaseUserManager[User, PydanticObjectId]):
     reset_password_token_secret = SECRET
@@ -117,6 +117,7 @@ current_optional_user = fastapi_users.current_user(active=True, optional=True)
 # Schemas for register/read
 # ---------------------------------------------------------------------------
 
+
 class UserRead(fastapi_users_schemas.BaseUser[PydanticObjectId]):
     full_name: str = ""
     avatar: str = ""
@@ -129,6 +130,7 @@ class UserCreate(fastapi_users_schemas.BaseUserCreate):
 # ---------------------------------------------------------------------------
 # Admin seeding
 # ---------------------------------------------------------------------------
+
 
 async def seed_admin(
     email: str | None = None,
@@ -226,7 +228,9 @@ async def seed_workspace(admin: User | None = None) -> Workspace | None:
 
         logger.info(
             "Default workspace created: %s (slug: %s, id: %s)",
-            ws_name, ws_slug, ws.id,
+            ws_name,
+            ws_slug,
+            ws.id,
         )
 
         # Create a default "General" chat group

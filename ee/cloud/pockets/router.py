@@ -19,9 +19,7 @@ from ee.cloud.pockets.service import PocketService
 from ee.cloud.sessions.schemas import CreateSessionRequest
 from ee.cloud.shared.deps import current_user_id, current_workspace_id
 
-router = APIRouter(
-    prefix="/pockets", tags=["Pockets"], dependencies=[Depends(require_license)]
-)
+router = APIRouter(prefix="/pockets", tags=["Pockets"], dependencies=[Depends(require_license)])
 
 # ---------------------------------------------------------------------------
 # CRUD

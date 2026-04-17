@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from beanie import Document
-from fastapi_users_db_beanie import BeanieBaseUser, BaseOAuthAccount
+from fastapi_users_db_beanie import BaseOAuthAccount, BeanieBaseUser
 from pydantic import BaseModel, Field
 
 

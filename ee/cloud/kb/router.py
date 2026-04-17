@@ -13,7 +13,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from ee.cloud.agents.knowledge import _kb, _extract_url
+from ee.cloud.agents.knowledge import _extract_url, _kb
 from ee.cloud.kb.schemas import IngestTextRequest, IngestUrlRequest, LintRequest, SearchRequest
 from ee.cloud.license import require_license
 from ee.cloud.shared.deps import current_user_id, current_workspace_id
@@ -21,9 +21,7 @@ from ee.cloud.shared.errors import CloudError, NotFound
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/kb", tags=["Knowledge Base"], dependencies=[Depends(require_license)]
-)
+router = APIRouter(prefix="/kb", tags=["Knowledge Base"], dependencies=[Depends(require_license)])
 
 
 def _scope(workspace_id: str, override: str | None = None) -> str:

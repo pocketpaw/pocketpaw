@@ -61,8 +61,8 @@ async def list_tools():
     # OAuth connection status — check which services have saved tokens.
     oauth_status: dict[str, str] = {}
     try:
-        from pocketpaw.integrations.token_store import TokenStore
         from pocketpaw.config import Settings
+        from pocketpaw.integrations.token_store import TokenStore
 
         settings = Settings.load()
         store = TokenStore()

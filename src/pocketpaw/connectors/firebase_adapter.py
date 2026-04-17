@@ -79,7 +79,9 @@ class FirebaseAdapter:
 
             if proc.returncode != 0:
                 # Try to parse JSON error from stdout first (firebase --json wraps errors)
-                error_msg = stderr_text or stdout_text or f"Command exited with code {proc.returncode}"
+                error_msg = (
+                    stderr_text or stdout_text or f"Command exited with code {proc.returncode}"
+                )
                 try:
                     parsed = json.loads(stdout_text)
                     if isinstance(parsed, dict) and parsed.get("error"):
@@ -100,7 +102,7 @@ class FirebaseAdapter:
                     return True, stdout_text
             return True, None
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False, f"Command timed out after {timeout}s"
         except FileNotFoundError:
             return False, (

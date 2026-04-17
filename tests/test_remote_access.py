@@ -1,49 +1,31 @@
-import shutil
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from pocketpaw.config import get_access_token, get_config_dir
+from pocketpaw.config import get_access_token
 
 # Import app and config logic
 from pocketpaw.dashboard import app
 
 
-# Mock config dir specifically for tests to avoid messing with real token
+# Mock config dir to use tmp_path — avoids race conditions under parallel test runs.
+# Patches every call site so get_access_token / get_token_path resolve to tmp_path.
 @pytest.fixture
 def mock_config(tmp_path):
-    # Override HOME or specific paths?
-    # Easier to mock get_config_dir for the duration of the test,
-    # but that's hard if imported.
-    # Instead, we'll back up existing token if any, and restore.
-
-    config_dir = get_config_dir()
-    token_path = config_dir / "access_token"
-    backup_path = config_dir / "access_token.bak"
-
-    had_token = False
-    if token_path.exists():
-        shutil.move(token_path, backup_path)
-        had_token = True
-
-    yield
-
-    # Restore
-    if token_path.exists():
-        token_path.unlink()
-
-    if had_token:
-        shutil.move(backup_path, token_path)
+    with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+        # Clear any cached token so it regenerates under tmp_path
+        token_path = tmp_path / "access_token"
+        token_path.unlink(missing_ok=True)
+        yield
 
 
-def test_token_generation(mock_config):
+def test_token_generation(mock_config, tmp_path):
     """Test that a token is generated if missing."""
-    settings_dir = get_config_dir()
-    token_path = settings_dir / "access_token"
+    token_path = tmp_path / "access_token"
 
     # Ensure clean state
-    if token_path.exists():
-        token_path.unlink()
+    token_path.unlink(missing_ok=True)
 
     token = get_access_token()
     assert token is not None

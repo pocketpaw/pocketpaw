@@ -7,19 +7,18 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from enum import Enum
-from typing import Optional
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class RuleType(str, Enum):
+class RuleType(StrEnum):
     THRESHOLD = "threshold"
     SCHEDULE = "schedule"
     DATA_CHANGE = "data_change"
 
 
-class ExecutionMode(str, Enum):
+class ExecutionMode(StrEnum):
     REQUIRE_APPROVAL = "require_approval"
     AUTO_EXECUTE = "auto_execute"
     NOTIFY_ONLY = "notify_only"
@@ -33,24 +32,24 @@ class Rule(BaseModel):
     enabled: bool = True
     type: RuleType
     # Condition fields
-    object_type: Optional[str] = None  # "Product", "Order", etc.
-    property: Optional[str] = None  # "stock", "revenue", etc.
-    operator: Optional[str] = None  # "less_than", "greater_than", "equals", "changed"
-    value: Optional[str] = None
-    schedule: Optional[str] = None  # cron expression or preset
+    object_type: str | None = None  # "Product", "Order", etc.
+    property: str | None = None  # "stock", "revenue", etc.
+    operator: str | None = None  # "less_than", "greater_than", "equals", "changed"
+    value: str | None = None
+    schedule: str | None = None  # cron expression or preset
     # Action
     action: str = ""  # what to do when rule fires
     # Execution
     mode: ExecutionMode = ExecutionMode.REQUIRE_APPROVAL
     cooldown_minutes: int = 60  # don't re-fire within this window
     # Stats
-    last_fired: Optional[datetime] = None
-    last_evaluated: Optional[datetime] = None
+    last_fired: datetime | None = None
+    last_evaluated: datetime | None = None
     fire_count: int = 0
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     # Bridge to core daemon
-    linked_intention_id: Optional[str] = None  # core daemon intention ID
+    linked_intention_id: str | None = None  # core daemon intention ID
 
 
 class CreateRuleRequest(BaseModel):
@@ -58,27 +57,27 @@ class CreateRuleRequest(BaseModel):
     name: str
     description: str = ""
     type: RuleType
-    object_type: Optional[str] = None
-    property: Optional[str] = None
-    operator: Optional[str] = None
-    value: Optional[str] = None
-    schedule: Optional[str] = None
+    object_type: str | None = None
+    property: str | None = None
+    operator: str | None = None
+    value: str | None = None
+    schedule: str | None = None
     action: str = ""
-    mode: Optional[ExecutionMode] = None
-    cooldown_minutes: Optional[int] = None
+    mode: ExecutionMode | None = None
+    cooldown_minutes: int | None = None
 
 
 class UpdateRuleRequest(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    enabled: Optional[bool] = None
-    object_type: Optional[str] = None
-    property: Optional[str] = None
-    operator: Optional[str] = None
-    value: Optional[str] = None
-    schedule: Optional[str] = None
-    action: Optional[str] = None
-    mode: Optional[ExecutionMode] = None
-    cooldown_minutes: Optional[int] = None
-    last_evaluated: Optional[datetime] = None
-    linked_intention_id: Optional[str] = None
+    name: str | None = None
+    description: str | None = None
+    enabled: bool | None = None
+    object_type: str | None = None
+    property: str | None = None
+    operator: str | None = None
+    value: str | None = None
+    schedule: str | None = None
+    action: str | None = None
+    mode: ExecutionMode | None = None
+    cooldown_minutes: int | None = None
+    last_evaluated: datetime | None = None
+    linked_intention_id: str | None = None

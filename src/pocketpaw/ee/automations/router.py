@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
@@ -24,7 +23,7 @@ router = APIRouter(prefix="/automations", tags=["Automations"])
 
 
 @router.get("/rules", response_model=list[Rule])
-async def list_rules(pocket_id: Optional[str] = None):
+async def list_rules(pocket_id: str | None = None):
     """List all automation rules, optionally filtered by pocket_id."""
     store = get_automation_store()
     return store.list_rules(pocket_id=pocket_id)

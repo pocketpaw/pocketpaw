@@ -8,9 +8,8 @@ from pathlib import Path
 import pytest
 
 from pocketpaw.connectors.protocol import ConnectorStatus, TrustLevel
-from pocketpaw.connectors.yaml_engine import DirectRESTAdapter, parse_connector_yaml
 from pocketpaw.connectors.registry import ConnectorRegistry
-
+from pocketpaw.connectors.yaml_engine import DirectRESTAdapter, parse_connector_yaml
 
 CONNECTORS_DIR = Path(__file__).parent.parent / "connectors"
 
@@ -92,6 +91,7 @@ class TestDirectRESTAdapter:
     @pytest.mark.asyncio
     async def test_execute_connected(self, stripe_adapter: DirectRESTAdapter) -> None:
         from unittest.mock import AsyncMock, MagicMock, patch
+
         await stripe_adapter.connect("pocket-1", {"STRIPE_API_KEY": "sk_test_123"})
 
         mock_resp = MagicMock()

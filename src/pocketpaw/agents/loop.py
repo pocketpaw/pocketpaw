@@ -19,7 +19,10 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pocketpaw.bus.queue import MessageBus
 
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
@@ -132,6 +135,7 @@ async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None
         # Create pocket
         from ee.cloud.pockets.schemas import CreatePocketRequest
         from ee.cloud.pockets.service import PocketService
+
         meta = spec.get("metadata", {})
         pocket = await PocketService.create(
             workspace_id,
@@ -156,6 +160,7 @@ async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None
                 await existing.save()
             else:
                 from datetime import UTC, datetime
+
                 session = Session(
                     sessionId=safe_key,
                     workspace=workspace_id,
@@ -173,9 +178,7 @@ async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None
         return None
 
 
-async def _publish_pocket_event(
-    bus: "MessageBus", content: str, session_key: str
-) -> None:
+async def _publish_pocket_event(bus: "MessageBus", content: str, session_key: str) -> None:
     """Detect pocket event JSON in tool output and publish a dedicated SystemEvent.
 
     Pocket tools return output as: ``{json}\\n\\nhuman message``.
@@ -337,6 +340,7 @@ class AgentLoop:
 
                 # Register as global singleton so API endpoints can access it
                 import pocketpaw.soul.manager as _sm
+
                 _sm._manager = self._soul_manager
             except Exception:
                 logger.exception("Soul initialization failed, continuing without soul")
@@ -648,8 +652,7 @@ class AgentLoop:
 
             # 1. Store User Message (strip bulky transient context from stored metadata)
             store_meta = {
-                k: v for k, v in (message.metadata or {}).items()
-                if k != "pocket_system_context"
+                k: v for k, v in (message.metadata or {}).items() if k != "pocket_system_context"
             }
             await self.memory.add_to_session(
                 session_key=session_key,
@@ -747,7 +750,10 @@ class AgentLoop:
             pocket_tool_policy = _extract_pocket_tool_policy(content)
             pocket_deny_tools: list[str] = []
             if pocket_tool_policy:
-                from pocketpaw.constants.tool_categories import CATEGORY_TO_GROUPS, CATEGORY_DIRECT_TOOLS
+                from pocketpaw.constants.tool_categories import (
+                    CATEGORY_DIRECT_TOOLS,
+                    CATEGORY_TO_GROUPS,
+                )
                 from pocketpaw.tools.policy import TOOL_GROUPS
 
                 for cat_id, enabled in pocket_tool_policy.items():
@@ -759,8 +765,9 @@ class AgentLoop:
             # 3. Run through AgentRouter (handles all backends)
             router = self._get_router()
             _saved_policy = None
-            if pocket_deny_tools and hasattr(router, '_registry') and router._registry:
+            if pocket_deny_tools and hasattr(router, "_registry") and router._registry:
                 from pocketpaw.tools.policy import ToolPolicy
+
                 _saved_policy = router._registry._policy  # Save to restore after request
                 scoped_policy = ToolPolicy(
                     profile=self.settings.tool_profile or "full",
@@ -937,7 +944,7 @@ class AgentLoop:
             finally:
                 await run_iter.aclose()
                 # Restore global tool policy after per-pocket scoped request
-                if _saved_policy is not None and hasattr(router, '_registry') and router._registry:
+                if _saved_policy is not None and hasattr(router, "_registry") and router._registry:
                     router._registry.set_policy(_saved_policy)
 
             # 4. Send stream end marker (with any media files detected)

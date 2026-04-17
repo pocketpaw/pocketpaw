@@ -1,4 +1,5 @@
-# test_e2e_connector_to_fabric.py — E2E: Stripe connector → Fabric objects → Automation rule → Instinct.
+# test_e2e_connector_to_fabric.py
+# E2E: Stripe connector -> Fabric objects -> Automation rule -> Instinct.
 # Created: 2026-03-28
 # Tests the data ingestion chain:
 #   parse stripe.yaml → connect adapter (mock HTTP) → execute list_invoices
@@ -18,13 +19,13 @@ from ee.instinct.models import ActionTrigger
 from ee.instinct.store import InstinctStore
 from pocketpaw.connectors.yaml_engine import DirectRESTAdapter, parse_connector_yaml
 
-
 CONNECTORS_DIR = Path(__file__).parent.parent / "connectors"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_mock_httpx_client(json_data: list) -> MagicMock:
     """Return a patched httpx.AsyncClient whose GET returns the given JSON."""
@@ -68,6 +69,7 @@ async def _threshold_check(objects, property_name: str, operator: str, threshold
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_connector_to_fabric_full_chain(tmp_path: Path) -> None:
@@ -148,7 +150,9 @@ async def test_connector_to_fabric_full_chain(tmp_path: Path) -> None:
     action = await instinct.propose(
         pocket_id="finance-hq",
         title=f"Review large invoice {large_inv.source_id}",
-        description=f"Invoice amount ${large_inv.properties['amount_due'] / 100:.2f} exceeds threshold",
+        description=(
+            f"Invoice amount ${large_inv.properties['amount_due'] / 100:.2f} exceeds threshold"
+        ),
         recommendation="Review and confirm payment status with accounting team",
         trigger=ActionTrigger(
             type="automation",

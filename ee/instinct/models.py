@@ -37,6 +37,7 @@ class ActionCategory(StrEnum):
 
 class ActionTrigger(BaseModel):
     """What triggered an action."""
+
     type: str  # "agent", "automation", "user", "connector"
     source: str  # agent name, rule ID, user ID, connector name
     reason: str
@@ -44,6 +45,7 @@ class ActionTrigger(BaseModel):
 
 class ActionContext(BaseModel):
     """Data context for a decision."""
+
     object_ids: list[str] = Field(default_factory=list)
     connector_data: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, float] = Field(default_factory=dict)
@@ -52,6 +54,7 @@ class ActionContext(BaseModel):
 
 class Action(BaseModel):
     """A proposed action from the agent, waiting for approval."""
+
     id: str = Field(default_factory=lambda: _gen_id("act"))
     pocket_id: str
     title: str
@@ -82,6 +85,7 @@ class AuditCategory(StrEnum):
 
 class AuditEntry(BaseModel):
     """An audit log entry for every decision."""
+
     id: str = Field(default_factory=lambda: _gen_id("aud"))
     action_id: str | None = None
     pocket_id: str | None = None

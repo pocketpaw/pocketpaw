@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from ee.cloud.models.user import User
 from ee.cloud.auth.schemas import ProfileUpdateRequest
+from ee.cloud.models.user import User
 
 
 class AuthService:
@@ -21,10 +21,7 @@ class AuthService:
             "image": user.avatar,
             "emailVerified": user.is_verified,
             "activeWorkspace": user.active_workspace,
-            "workspaces": [
-                {"workspace": w.workspace, "role": w.role}
-                for w in user.workspaces
-            ],
+            "workspaces": [{"workspace": w.workspace, "role": w.role} for w in user.workspaces],
         }
 
     @staticmethod

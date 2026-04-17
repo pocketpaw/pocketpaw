@@ -7,24 +7,23 @@ Pydantic's model_validate (construct=True).
 
 from __future__ import annotations
 
-import pytest
-from pydantic import ValidationError
-
 from ee.cloud.models.group import Group
-from ee.cloud.models.message import Message
-from ee.cloud.models.pocket import Pocket
 from ee.cloud.models.invite import Invite
-from ee.cloud.models.workspace import Workspace
-from ee.cloud.models.session import Session
+from ee.cloud.models.message import Message
 from ee.cloud.models.notification import Notification
-
+from ee.cloud.models.pocket import Pocket
+from ee.cloud.models.session import Session
+from ee.cloud.models.workspace import Workspace
 
 # ---------------------------------------------------------------------------
 # Group
 # ---------------------------------------------------------------------------
 
+
 def test_group_supports_dm_type():
-    g = Group.model_construct(workspace="w1", name="DM", type="dm", owner="u1", members=["u1", "u2"])
+    g = Group.model_construct(
+        workspace="w1", name="DM", type="dm", owner="u1", members=["u1", "u2"]
+    )
     assert g.type == "dm"
 
 
@@ -42,6 +41,7 @@ def test_group_has_message_count():
 # Message
 # ---------------------------------------------------------------------------
 
+
 def test_message_has_edited_at():
     m = Message.model_construct(group="g1", sender="u1", content="hello")
     assert m.edited_at is None
@@ -50,6 +50,7 @@ def test_message_has_edited_at():
 # ---------------------------------------------------------------------------
 # Pocket
 # ---------------------------------------------------------------------------
+
 
 def test_pocket_sharing_fields():
     p = Pocket.model_construct(workspace="w1", name="test", owner="u1")
@@ -69,6 +70,7 @@ def test_pocket_visibility_values():
 # Invite
 # ---------------------------------------------------------------------------
 
+
 def test_invite_has_revoked():
     i = Invite.model_construct(workspace="w1", email="a@b.com", invited_by="u1", token="tok1")
     assert i.revoked is False
@@ -77,6 +79,7 @@ def test_invite_has_revoked():
 # ---------------------------------------------------------------------------
 # Workspace
 # ---------------------------------------------------------------------------
+
 
 def test_workspace_has_deleted_at():
     w = Workspace.model_construct(name="test", slug="test", owner="u1")
@@ -87,6 +90,7 @@ def test_workspace_has_deleted_at():
 # Session
 # ---------------------------------------------------------------------------
 
+
 def test_session_has_deleted_at():
     s = Session.model_construct(sessionId="s1", workspace="w1", owner="u1")
     assert s.deleted_at is None
@@ -95,6 +99,7 @@ def test_session_has_deleted_at():
 # ---------------------------------------------------------------------------
 # Notification
 # ---------------------------------------------------------------------------
+
 
 def test_notification_has_expires_at():
     n = Notification.model_construct(workspace="w1", recipient="u1", type="mention", title="test")

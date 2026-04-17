@@ -9,12 +9,12 @@ Usage:
     results = await engine.search("revenue projections")
     issues = await engine.lint()
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from pocketpaw.knowledge.models import KnowledgeIndex, LintIssue, RawDoc, WikiArticle
+from pocketpaw.knowledge.models import KnowledgeIndex, LintIssue, RawDoc, WikiArticle  # noqa: F401
 from pocketpaw.knowledge.store import WikiStore
 
 logger = logging.getLogger(__name__)
@@ -68,18 +68,24 @@ class KnowledgeEngine:
         Raw doc is always saved regardless of compilation success.
         """
         import re
+
         from pocketpaw.knowledge.indexer import update_index
 
         # Always save raw doc first
         self.store.save_raw(raw)
-        logger.info("Saved raw doc: %s (%s, %d words)", raw.id, raw.source, len(raw.raw_text.split()))
+        logger.info(
+            "Saved raw doc: %s (%s, %d words)", raw.id, raw.source, len(raw.raw_text.split())
+        )
 
         # Try LLM compilation, fall back to basic article
         try:
             from pocketpaw.knowledge.compiler import compile_article
+
             article = await compile_article(raw)
         except Exception:
-            logger.warning("LLM compilation failed for %s, creating basic article", raw.id, exc_info=True)
+            logger.warning(
+                "LLM compilation failed for %s, creating basic article", raw.id, exc_info=True
+            )
             # Create basic article from raw text without LLM
             slug = re.sub(r"[^a-z0-9\s-]", "", (raw.filename or raw.source or raw.id).lower())
             slug = re.sub(r"[\s-]+", "-", slug)[:80].strip("-") or raw.id[:16]
@@ -131,7 +137,11 @@ class KnowledgeEngine:
         total = 0
         for article in results:
             # Use summary if article is too long
-            text = article.content if len(article.content) <= 2000 else f"## {article.title}\n{article.summary}"
+            text = (
+                article.content
+                if len(article.content) <= 2000
+                else f"## {article.title}\n{article.summary}"
+            )
             if total + len(text) > max_chars:
                 break
             parts.append(f"## {article.title}\n{text}")
@@ -236,6 +246,7 @@ class KnowledgeEngine:
                 logger.warning("Failed to recompile %s: %s", article.id, exc)
         # Rebuild full index
         from pocketpaw.knowledge.indexer import rebuild_index
+
         all_articles = self.store.list_articles()
         index = rebuild_index(self.scope, all_articles)
         self.store.save_index(index)

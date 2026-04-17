@@ -11,7 +11,7 @@ import io
 import json
 import logging
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -170,9 +170,18 @@ class AuditStore:
         )
         buf = io.StringIO()
         fieldnames = [
-            "id", "timestamp", "pocket_id", "actor", "action",
-            "category", "description", "context", "ai_recommendation",
-            "outcome", "status", "metadata",
+            "id",
+            "timestamp",
+            "pocket_id",
+            "actor",
+            "action",
+            "category",
+            "description",
+            "context",
+            "ai_recommendation",
+            "outcome",
+            "status",
+            "metadata",
         ]
         writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()

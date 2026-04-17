@@ -223,9 +223,7 @@ class TestKbContext:
         async def fake_create_subprocess_exec(*args, **kwargs):
             return fake_proc
 
-        monkeypatch.setattr(
-            "asyncio.create_subprocess_exec", fake_create_subprocess_exec
-        )
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
         result = await ctx_mod.AgentContextBuilder._get_kb_context("auth")
         assert "auth module details" in result

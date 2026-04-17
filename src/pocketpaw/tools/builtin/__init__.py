@@ -99,8 +99,12 @@ try:
     )
 
     _EE_TOOLS: list[type] = [
-        FabricQueryTool, FabricCreateTool, FabricStatsTool,
-        InstinctProposeTool, InstinctPendingTool, InstinctAuditTool,
+        FabricQueryTool,
+        FabricCreateTool,
+        FabricStatsTool,
+        InstinctProposeTool,
+        InstinctPendingTool,
+        InstinctAuditTool,
     ]
     _EE_NAMES = {cls.__name__: cls for cls in _EE_TOOLS}
 except ImportError:

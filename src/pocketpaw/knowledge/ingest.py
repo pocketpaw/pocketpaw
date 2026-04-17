@@ -2,6 +2,7 @@
 
 Supports: plain text, URLs, PDFs, images (OCR), docx, text-based files.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -51,7 +52,13 @@ async def ingest_url(url: str) -> RawDoc:
     clean = ""
     try:
         import trafilatura
-        clean = trafilatura.extract(html, output_format="markdown", include_links=True, include_tables=True) or ""
+
+        clean = (
+            trafilatura.extract(
+                html, output_format="markdown", include_links=True, include_tables=True
+            )
+            or ""
+        )
     except ImportError:
         pass
 
@@ -103,7 +110,20 @@ async def ingest_file(file_path: str) -> RawDoc:
         content_type = "docx"
 
     # Text-based files
-    elif suffix in (".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".html", ".xml", ".log", ".py", ".js", ".ts"):
+    elif suffix in (
+        ".txt",
+        ".md",
+        ".csv",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".html",
+        ".xml",
+        ".log",
+        ".py",
+        ".js",
+        ".ts",
+    ):
         text = path.read_text(encoding="utf-8", errors="replace")
         content_type = suffix.lstrip(".")
 
@@ -130,15 +150,18 @@ async def ingest_file(file_path: str) -> RawDoc:
 
 # ── Extractors ──
 
+
 def _extract_pdf(path: Path) -> str:
     try:
         import pypdf
+
         reader = pypdf.PdfReader(str(path))
         return "\n\n".join(p.extract_text() or "" for p in reader.pages)
     except ImportError:
         pass
     try:
         import pdfplumber
+
         with pdfplumber.open(str(path)) as pdf:
             return "\n\n".join(p.extract_text() or "" for p in pdf.pages)
     except ImportError:
@@ -147,8 +170,9 @@ def _extract_pdf(path: Path) -> str:
 
 def _extract_image(path: Path) -> str:
     try:
-        from PIL import Image
         import pytesseract
+        from PIL import Image
+
         return pytesseract.image_to_string(Image.open(str(path)))
     except ImportError:
         raise ImportError("Install Pillow + pytesseract: pip install Pillow pytesseract")
@@ -157,6 +181,7 @@ def _extract_image(path: Path) -> str:
 def _extract_docx(path: Path) -> str:
     try:
         import docx
+
         doc = docx.Document(str(path))
         return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
     except ImportError:

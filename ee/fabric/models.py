@@ -10,14 +10,18 @@ from pydantic import BaseModel, Field
 
 
 def _gen_id(prefix: str) -> str:
-    import time, random, string
+    import random
+    import string
+    import time
+
     ts = hex(int(time.time() * 1000))[2:]
-    rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     return f"{prefix}-{ts}-{rand}"
 
 
 class PropertyDef(BaseModel):
     """Definition of a property on an object type."""
+
     name: str
     type: str = "string"  # string, number, boolean, date, enum
     required: bool = False
@@ -28,6 +32,7 @@ class PropertyDef(BaseModel):
 
 class ObjectType(BaseModel):
     """Defines a category of business objects (Customer, Order, Product)."""
+
     id: str = Field(default_factory=lambda: _gen_id("ot"))
     name: str
     description: str = ""
@@ -40,6 +45,7 @@ class ObjectType(BaseModel):
 
 class FabricObject(BaseModel):
     """An instance of an ObjectType."""
+
     id: str = Field(default_factory=lambda: _gen_id("obj"))
     type_id: str
     type_name: str = ""
@@ -52,6 +58,7 @@ class FabricObject(BaseModel):
 
 class FabricLink(BaseModel):
     """A directional relationship between two objects."""
+
     id: str = Field(default_factory=lambda: _gen_id("lnk"))
     from_object_id: str
     to_object_id: str
@@ -62,6 +69,7 @@ class FabricLink(BaseModel):
 
 class FabricQuery(BaseModel):
     """Query parameters for finding objects."""
+
     type_name: str | None = None
     type_id: str | None = None
     filters: dict[str, Any] = Field(default_factory=dict)
@@ -73,6 +81,7 @@ class FabricQuery(BaseModel):
 
 class FabricQueryResult(BaseModel):
     """Result of a fabric query."""
+
     objects: list[FabricObject]
     total: int
     links: list[FabricLink] = Field(default_factory=list)

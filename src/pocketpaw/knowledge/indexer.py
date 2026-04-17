@@ -5,10 +5,10 @@ Runs after compilation to maintain the index.json:
 - Backlinks: article A mentions article B's title → bidirectional link
 - Categories: unique set across all articles
 """
+
 from __future__ import annotations
 
 import logging
-import re
 
 from pocketpaw.knowledge.models import Concept, KnowledgeIndex, WikiArticle
 
@@ -70,7 +70,10 @@ def rebuild_index(scope: str, articles: list[WikiArticle]) -> KnowledgeIndex:
 
     logger.info(
         "Index rebuilt for %s: %d articles, %d concepts, %d categories",
-        scope, len(articles), len(concept_map), len(all_categories),
+        scope,
+        len(articles),
+        len(concept_map),
+        len(all_categories),
     )
     return index
 

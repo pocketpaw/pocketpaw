@@ -137,6 +137,7 @@ class WebSocketAdapter(BaseChannelAdapter):
             # Persist user message to MongoDB (cloud persistence bridge)
             try:
                 from ee.cloud.shared.chat_persistence import save_user_message
+
                 await save_user_message(chat_id, content)
             except ImportError:
                 pass  # ee/cloud not available

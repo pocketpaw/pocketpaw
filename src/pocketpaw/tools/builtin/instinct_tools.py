@@ -1,7 +1,6 @@
 # Instinct tools — agent tools for the decision pipeline.
 # Created: 2026-03-28 — Lets the agent propose actions, check pending, read audit.
 
-import json
 import logging
 from typing import Any
 
@@ -14,6 +13,7 @@ def _get_instinct_store():
     """Lazy import to avoid circular deps and missing ee/ module."""
     try:
         from ee.api import get_instinct_store
+
         return get_instinct_store()
     except ImportError:
         return None
@@ -80,15 +80,23 @@ class InstinctProposeTool(BaseTool):
             "required": ["pocket_id", "title", "recommendation"],
         }
 
-    async def execute(self, pocket_id: str, title: str, recommendation: str,
-                      description: str = "", priority: str = "medium",
-                      category: str = "workflow", reason: str = "") -> str:
+    async def execute(
+        self,
+        pocket_id: str,
+        title: str,
+        recommendation: str,
+        description: str = "",
+        priority: str = "medium",
+        category: str = "workflow",
+        reason: str = "",
+    ) -> str:
         store = _get_instinct_store()
         if not store:
             return "Instinct is not available (enterprise feature)."
 
         try:
-            from ee.instinct.models import ActionTrigger, ActionCategory, ActionPriority
+            from ee.instinct.models import ActionCategory, ActionPriority, ActionTrigger
+
             action = await store.propose(
                 pocket_id=pocket_id,
                 title=title,

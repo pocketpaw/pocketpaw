@@ -53,7 +53,24 @@ tabs, callout, sources-bar, citation, source-card, discover-card, follow-up, con
 input, select, checkbox, switch, avatar, progress.
 
 Example (UISpec):
-  echo '{"title":"Revenue Report","description":"Q4 analysis","category":"business","ui":{"type":"flex","props":{"direction":"column","gap":"16px"},"children":[{"type":"heading","props":{"text":"Revenue Report","level":3}},{"type":"grid","props":{"columns":3,"gap":"8px"},"children":[{"type":"metric","props":{"label":"Revenue","value":"$10B","trend":"+15%"}},{"type":"metric","props":{"label":"Users","value":"2.4M","trend":"+8%"}},{"type":"metric","props":{"label":"NPS","value":"72","trend":"+5"}}]},{"type":"chart","props":{"type":"area","height":200,"data":[{"label":"Q1","value":2400},{"label":"Q2","value":3100},{"label":"Q3","value":3800},{"label":"Q4","value":4500}]}}]}}' | python -m pocketpaw.tools.cli create_pocket
+  echo '{"title":"Revenue Report","description":"Q4 analysis",
+  "category":"business","ui":{"type":"flex",
+  "props":{"direction":"column","gap":"16px"},
+  "children":[{"type":"heading",
+  "props":{"text":"Revenue Report","level":3}},
+  {"type":"grid","props":{"columns":3,"gap":"8px"},
+  "children":[{"type":"metric",
+  "props":{"label":"Revenue","value":"$10B","trend":"+15%"}},
+  {"type":"metric",
+  "props":{"label":"Users","value":"2.4M","trend":"+8%"}},
+  {"type":"metric",
+  "props":{"label":"NPS","value":"72","trend":"+5"}}]},
+  {"type":"chart","props":{"type":"area","height":200,
+  "data":[{"label":"Q1","value":2400},
+  {"label":"Q2","value":3100},
+  {"label":"Q3","value":3800},
+  {"label":"Q4","value":4500}]}}]}}' \
+  | python -m pocketpaw.tools.cli create_pocket
 
 FORMAT 2 — Flat widgets (simple dashboards):
 Pass a 'widgets' array for simple grid dashboards.
@@ -61,7 +78,12 @@ Widget types: metric, chart, table, feed, terminal, text, workflow.
 Widget sizes: "sm" (1 col), "md" (2 cols), "lg" (full width).
 
 Example (flat widgets):
-  echo '{"title":"My Pocket","description":"Demo","category":"research","widgets":[{"type":"metric","title":"Users","size":"sm","data":{"value":"10K","label":"Total Users","trend":"+5%"}}]}' | python -m pocketpaw.tools.cli create_pocket
+  echo '{"title":"My Pocket","description":"Demo",
+  "category":"research","widgets":[{"type":"metric",
+  "title":"Users","size":"sm",
+  "data":{"value":"10K","label":"Total Users",
+  "trend":"+5%"}}]}' \
+  | python -m pocketpaw.tools.cli create_pocket
 
 FORMAT 3 — Multi-Pane UISpec (distinct content per pane):
 Pass 'panes' dict + 'layout'. Keys are pane IDs for the layout preset.
@@ -70,7 +92,33 @@ workspace pane IDs: left, right. split pane IDs: top, bottom.
 Each value is a UISpec node tree.
 
 Example (SOC multi-pane):
-  echo '{"title":"SOC Overview","description":"Security ops","category":"mission","layout":"quad","panes":{"tl":{"type":"flex","props":{"direction":"column"},"children":[{"type":"heading","props":{"text":"Alerts","level":4}},{"type":"feed","props":{"items":[{"text":"Brute-force detected","type":"error"},{"text":"New IP flagged","type":"warning"}]}}]},"tr":{"type":"chart","props":{"type":"donut","data":[{"label":"Critical","value":3},{"label":"High","value":12},{"label":"Medium","value":45}]}},"bl":{"type":"table","props":{"columns":["IP","Country","Hits"],"data":[["1.2.3.4","CN","892"],["5.6.7.8","RU","341"]]}},"br":{"type":"flex","props":{},"children":[{"type":"metric","props":{"label":"Uptime","value":"99.97%","trend":"+0.02%"}},{"type":"metric","props":{"label":"Blocked","value":"1,247","trend":"+89"}}]}}}' | python -m pocketpaw.tools.cli create_pocket
+  echo '{"title":"SOC Overview",
+  "description":"Security ops",
+  "category":"mission","layout":"quad",
+  "panes":{
+  "tl":{"type":"flex",
+  "props":{"direction":"column"},
+  "children":[{"type":"heading",
+  "props":{"text":"Alerts","level":4}},
+  {"type":"feed","props":{"items":[
+  {"text":"Brute-force detected","type":"error"},
+  {"text":"New IP flagged","type":"warning"}]}}]},
+  "tr":{"type":"chart","props":{"type":"donut",
+  "data":[{"label":"Critical","value":3},
+  {"label":"High","value":12},
+  {"label":"Medium","value":45}]}},
+  "bl":{"type":"table","props":{
+  "columns":["IP","Country","Hits"],
+  "data":[["1.2.3.4","CN","892"],
+  ["5.6.7.8","RU","341"]]}},
+  "br":{"type":"flex","props":{},
+  "children":[{"type":"metric",
+  "props":{"label":"Uptime","value":"99.97%",
+  "trend":"+0.02%"}},
+  {"type":"metric",
+  "props":{"label":"Blocked","value":"1,247",
+  "trend":"+89"}}]}}}' \
+  | python -m pocketpaw.tools.cli create_pocket
 
 POCKET LAYOUT SYSTEM:
 Layouts control how the canvas arranges content:
@@ -88,16 +136,26 @@ How to choose:
 COMPOSING RICH POCKETS:
 Use UISpec for multi-section layouts. Nest flex/grid for structure, then leaf nodes for content.
 Common patterns:
-  - Header + metrics row + chart: flex(column) > [heading, grid(3) > [metric, metric, metric], chart]
-  - Article with sidebar: grid(2, "2fr 1fr") > [flex(column) > [...content], flex(column) > [...sidebar]]
+  - Header + metrics row + chart:
+    flex(column) > [heading, grid(3) > [metric, metric, metric], chart]
+  - Article with sidebar:
+    grid(2, "2fr 1fr") > [flex(column) > [...content],
+    flex(column) > [...sidebar]]
   - Research page: flex(column) > [heading, sources-bar, text, chart, callout, follow-up]
 
 
 Example (add widget to existing pocket):
-  echo '{"pocket_id":"ai-abc123","widget":{"type":"chart","title":"Growth","size":"md","data":[{"label":"Q1","value":100},{"label":"Q2","value":200}],"props":{"type":"line"}}}' | python -m pocketpaw.tools.cli add_widget
+  echo '{"pocket_id":"ai-abc123","widget":{
+  "type":"chart","title":"Growth","size":"md",
+  "data":[{"label":"Q1","value":100},
+  {"label":"Q2","value":200}],
+  "props":{"type":"line"}}}' \
+  | python -m pocketpaw.tools.cli add_widget
 
 Example (remove widget):
-  echo '{"pocket_id":"ai-abc123","widget_id":"ai-abc123-w2"}' | python -m pocketpaw.tools.cli remove_widget
+  echo '{"pocket_id":"ai-abc123",
+  "widget_id":"ai-abc123-w2"}' \
+  | python -m pocketpaw.tools.cli remove_widget
 
 RULES:
 1. Do in-depth research FIRST using a MULTI-AGENT approach:
@@ -106,7 +164,8 @@ RULES:
    - For a topic: run separate searches for stats, trends, key players, recent events, forecasts.
    - Aim for 4-6 parallel searches covering distinct angles. Do NOT do one search at a time.
    - After initial results, do follow-up searches to fill gaps or verify numbers.
-2. Use ONLY the CLI bridge above for pocket operations. Always pipe JSON via echo with SINGLE QUOTES.
+2. Use ONLY the CLI bridge above for pocket operations.
+   Always pipe JSON via echo with SINGLE QUOTES.
 3. NEVER use curl, fetch, HTTP requests, or REST API calls to manage pockets.
    NEVER try to access /api/v1/pockets or any HTTP endpoints. Use the CLI bridge above.
 4. NEVER create HTML files or write files to disk.
@@ -122,12 +181,17 @@ icon URL from https://cdn.simpleicons.org/{brand-slug}/{color-hex-without-hash}
 (e.g. "https://cdn.simpleicons.org/stripe/white", "https://cdn.simpleicons.org/slack/white").
 For generic/non-brand pockets, omit the logo field.
 
-Colors: #30D158 (green), #FF453A (red), #FF9F0A (orange), #0A84FF (blue), #BF5AF2 (purple), #5E5CE6 (indigo).
+Colors: #30D158 (green), #FF453A (red), #FF9F0A (orange),
+#0A84FF (blue), #BF5AF2 (purple), #5E5CE6 (indigo).
 
 MODIFYING EXISTING POCKETS:
 When a <current-pocket> tag is present in the user message, you are editing that pocket.
-- To ADD a widget: echo '{"pocket_id":"<id>","widget":{...}}' | python -m pocketpaw.tools.cli add_widget
-- To REMOVE a widget: echo '{"pocket_id":"<id>","widget_id":"<wid>"}' | python -m pocketpaw.tools.cli remove_widget
+- To ADD a widget:
+  echo '{"pocket_id":"<id>","widget":{...}}' \
+  | python -m pocketpaw.tools.cli add_widget
+- To REMOVE a widget:
+  echo '{"pocket_id":"<id>","widget_id":"<wid>"}' \
+  | python -m pocketpaw.tools.cli remove_widget
 - To RECREATE the entire pocket: echo '{"title":...}' | python -m pocketpaw.tools.cli create_pocket
   (use 'ui' for UISpec, 'widgets' for flat dashboard, 'panes'+'layout' for multi-pane)
 - The pocket id and widget ids are provided in the <current-pocket> tag.
@@ -143,11 +207,13 @@ def _extract_chat_id(session_id: str | None) -> str:
     Reuses the same logic as chat.py so session IDs are compatible.
     """
     from pocketpaw.api.v1.chat import _extract_chat_id as _chat_extract
+
     return _chat_extract(session_id)
 
 
 def _to_safe_key(chat_id: str) -> str:
     from pocketpaw.api.v1.chat import _to_safe_key as _chat_safe_key
+
     return _chat_safe_key(chat_id)
 
 
@@ -277,7 +343,11 @@ def _prepare_pocket_spec(spec: dict) -> dict | None:
     # ── Multi-pane path: per-pane UISpec trees ──
     panes = spec.get("panes")
     if isinstance(panes, dict) and panes:
-        pocket_id = spec.get("id") or spec.get("lifecycle", {}).get("id") or f"pocket-{uuid.uuid4().hex[:8]}"
+        pocket_id = (
+            spec.get("id")
+            or spec.get("lifecycle", {}).get("id")
+            or f"pocket-{uuid.uuid4().hex[:8]}"
+        )
         meta = spec.get("metadata") or {}
         color = spec.get("color") or meta.get("color", "#0A84FF")
         result: dict[str, Any] = {
@@ -303,7 +373,11 @@ def _prepare_pocket_spec(spec: dict) -> dict | None:
     # ── UISpec v1.0 path: nested component tree ──
     ui_tree = spec.get("ui")
     if isinstance(ui_tree, dict) and ui_tree.get("type"):
-        pocket_id = spec.get("id") or spec.get("lifecycle", {}).get("id") or f"pocket-{uuid.uuid4().hex[:8]}"
+        pocket_id = (
+            spec.get("id")
+            or spec.get("lifecycle", {}).get("id")
+            or f"pocket-{uuid.uuid4().hex[:8]}"
+        )
         meta = spec.get("metadata") or {}
         color = spec.get("color") or meta.get("color", "#0A84FF")
         result: dict[str, Any] = {
@@ -524,7 +598,8 @@ async def pocket_chat_stream(body: ChatRequest):
                 if etype == "pocket_created" and not pocket_emitted:
                     spec = edata.get("spec", {})
                     logger.debug(
-                        "pocket_created event received: title=%r, has_ui=%s, has_widgets=%s, has_panes=%s",
+                        "pocket_created event received: title=%r,"
+                        " has_ui=%s, has_widgets=%s, has_panes=%s",
                         spec.get("title"),
                         "ui" in spec,
                         "widgets" in spec,
@@ -533,13 +608,28 @@ async def pocket_chat_stream(body: ChatRequest):
                     spec = _prepare_pocket_spec(spec)
                     if spec:
                         pocket_emitted = True
-                        fmt = "UISpec" if "ui" in spec else f"{len(spec.get('panes', {}))} panes" if "panes" in spec else f"{len(spec.get('widgets', []))} widgets"
+                        fmt = (
+                            "UISpec"
+                            if "ui" in spec
+                            else f"{len(spec.get('panes', {}))} panes"
+                            if "panes" in spec
+                            else f"{len(spec.get('widgets', []))} widgets"
+                        )
                         logger.info("Pocket created: %s (%s)", spec.get("title", "?"), fmt)
                         pocket_cloud_id = edata.get("pocket_cloud_id")
-                        yield (f"event: pocket_created\ndata: {json.dumps({'spec': spec, 'session_id': safe_key, 'pocket_cloud_id': pocket_cloud_id})}\n\n")
+                        payload = json.dumps(
+                            {
+                                "spec": spec,
+                                "session_id": safe_key,
+                                "pocket_cloud_id": pocket_cloud_id,
+                            }
+                        )
+                        yield (f"event: pocket_created\ndata: {payload}\n\n")
                     else:
                         logger.warning(
-                            "pocket_created event dropped — _prepare_pocket_spec returned None for title=%r",
+                            "pocket_created event dropped —"
+                            " _prepare_pocket_spec returned"
+                            " None for title=%r",
                             edata.get("spec", {}).get("title"),
                         )
                     continue
@@ -547,10 +637,7 @@ async def pocket_chat_stream(body: ChatRequest):
                 if etype == "pocket_mutation":
                     mutation = edata.get("mutation", {})
                     if mutation:
-                        yield (
-                            f"event: pocket_mutation\n"
-                            f"data: {json.dumps(mutation)}\n\n"
-                        )
+                        yield (f"event: pocket_mutation\ndata: {json.dumps(mutation)}\n\n")
                     continue
 
                 # Legacy fallback: extract pocket spec from Bash tool_start
@@ -573,7 +660,13 @@ async def pocket_chat_stream(body: ChatRequest):
                                 spec.get("title", spec.get("name", "?")),
                                 len(spec.get("widgets", [])),
                             )
-                            yield (f"event: pocket_created\ndata: {json.dumps({'spec': spec, 'session_id': safe_key})}\n\n")
+                            payload = json.dumps(
+                                {
+                                    "spec": spec,
+                                    "session_id": safe_key,
+                                }
+                            )
+                            yield (f"event: pocket_created\ndata: {payload}\n\n")
 
                 # Forward original event
                 yield (f"event: {etype}\ndata: {json.dumps(edata)}\n\n")

@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Coroutine
-from typing import Any, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

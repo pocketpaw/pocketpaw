@@ -1,4 +1,5 @@
 """Knowledge engine data models."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -124,7 +125,9 @@ class KnowledgeIndex:
     def from_dict(data: dict) -> KnowledgeIndex:
         concepts = {}
         for k, v in data.get("concepts", {}).items():
-            concepts[k] = Concept(name=v["name"], articles=v.get("articles", []), category=v.get("category"))
+            concepts[k] = Concept(
+                name=v["name"], articles=v.get("articles", []), category=v.get("category")
+            )
         return KnowledgeIndex(
             scope=data.get("scope", ""),
             articles=data.get("articles", {}),
