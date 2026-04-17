@@ -613,3 +613,19 @@ class TestNotificationAPI:
         # Mark as read
         response = client.post(f"/api/mission-control/notifications/{notification_id}/read")
         assert response.status_code == 200
+
+    def test_list_all_notifications_uses_public_method(self, client):
+        """Test that listing notifications without agent_id returns all notifications."""
+        response = client.get("/api/mission-control/notifications")
+        assert response.status_code == 200
+        data = response.json()
+        assert "notifications" in data
+        assert "count" in data
+        assert isinstance(data["notifications"], list)
+
+    def test_list_all_notifications_respects_limit(self, client):
+        """Test that listing all notifications respects the limit parameter."""
+        response = client.get("/api/mission-control/notifications", params={"limit": 5})
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["notifications"]) <= 5
