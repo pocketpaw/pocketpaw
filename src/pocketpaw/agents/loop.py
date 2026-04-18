@@ -14,11 +14,15 @@ Updated: feat/pocketpaw-cognitive-engine
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pocketpaw.bus.queue import MessageBus
 
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
@@ -33,10 +37,17 @@ from pocketpaw.security.redact import redact_output
 
 logger = logging.getLogger(__name__)
 
-# Number of history messages (user + assistant turns) at which a compact
-# identity reminder is appended to the system prompt.  The reminder nudges
-# the model back toward the configured identity without a full re-injection.
-_IDENTITY_REINFORCE_THRESHOLD = 20
+# Number of messages after which periodic identity reinforcement occurs.
+# Re-injects the full <identity> block every N messages to prevent personality drift.
+_IDENTITY_REINFORCE_INTERVAL = 5
+
+
+def _reinforce_identity(system_prompt: str, identity: str, message_count: int) -> str:
+    """Reinforce identity by re-injecting it periodically."""
+    if message_count > 0 and message_count % _IDENTITY_REINFORCE_INTERVAL == 0:
+        return system_prompt + f"\n\n{identity}"
+    return system_prompt
+
 
 # How long (seconds) a session lock must be idle before it is eligible for
 # garbage collection.  1 hour is generous enough to cover any in-flight work
@@ -57,6 +68,177 @@ _GENERATED_PATH_RE = re.compile(
 def _extract_media_paths(text: str) -> list[str]:
     """Extract media file paths from <!-- media:/path --> tags in text."""
     return _MEDIA_TAG_RE.findall(text)
+
+
+def _extract_pocket_json(content: str) -> dict | None:
+    """Extract a ``{"pocket_event": ...}`` JSON object from tool output.
+
+    The tool returns ``{json}\\n\\nhuman message``, but the ``\\n\\n``
+    separator may be lost when the SDK joins TextBlocks with spaces.
+    Use brace-matching to find the outermost JSON object reliably.
+    """
+    start = content.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(content)):
+        ch = content[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(content[start : i + 1])
+                except (json.JSONDecodeError, ValueError):
+                    return None
+    return None
+
+
+async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None:
+    """Create pocket + session in MongoDB. Returns pocket _id or None on failure."""
+    try:
+        from ee.cloud.models.session import Session
+        from ee.cloud.models.user import User
+        from ee.cloud.models.workspace import Workspace
+
+        # Find user + workspace from existing cloud data
+        # Try to find user from any existing session, or get the first active user
+        user = await User.find_one()
+        if not user:
+            logger.warning("Cannot create pocket — no user in DB")
+            return None
+        user_id = str(user.id)
+
+        workspace = await Workspace.find_one(Workspace.owner == user_id)
+        if not workspace:
+            # Try any workspace the user belongs to
+            workspace = await Workspace.find_one()
+        if not workspace:
+            logger.warning("Cannot create pocket — no workspace in DB")
+            return None
+        workspace_id = str(workspace.id)
+
+        # Create pocket
+        from ee.cloud.pockets.schemas import CreatePocketRequest
+        from ee.cloud.pockets.service import PocketService
+
+        meta = spec.get("metadata", {})
+        pocket = await PocketService.create(
+            workspace_id,
+            user_id,
+            CreatePocketRequest(
+                name=spec.get("title") or spec.get("name") or "Untitled",
+                description=spec.get("description", ""),
+                type=meta.get("category", "custom"),
+                icon="sparkles",
+                color=meta.get("color", "#0A84FF"),
+                rippleSpec=spec,
+            ),
+        )
+        pocket_id = str(pocket["_id"])
+
+        # Create session linked to this pocket
+        safe_key = session_key.replace(":", "_") if session_key else ""
+        if safe_key:
+            existing = await Session.find_one(Session.sessionId == safe_key)
+            if existing:
+                existing.pocket = pocket_id
+                await existing.save()
+            else:
+                from datetime import UTC, datetime
+
+                session = Session(
+                    sessionId=safe_key,
+                    workspace=workspace_id,
+                    owner=user_id,
+                    title=spec.get("title") or "New Chat",
+                    pocket=pocket_id,
+                    lastActivity=datetime.now(UTC),
+                )
+                await session.insert()
+
+        logger.info("Created pocket %s + session %s in MongoDB", pocket_id, safe_key)
+        return pocket_id
+    except Exception:
+        logger.warning("Failed to create pocket/session in MongoDB", exc_info=True)
+        return None
+
+
+async def _publish_pocket_event(bus: "MessageBus", content: str, session_key: str) -> None:
+    """Detect pocket event JSON in tool output and publish a dedicated SystemEvent.
+
+    Pocket tools return output as: ``{json}\\n\\nhuman message``.
+    The JSON block has a ``pocket_event`` key (``"created"`` or ``"mutation"``).
+    """
+    # Fast path: skip content that can't contain a pocket event.
+    if '"pocket_event"' not in content:
+        return
+    data = _extract_pocket_json(content)
+    if not data or "pocket_event" not in data:
+        return
+
+    evt_type = data["pocket_event"]
+    spec = data.get("spec", {})
+    logger.info(
+        "Pocket event detected: type=%s, title=%r, has_ui=%s, has_widgets=%s, has_panes=%s",
+        evt_type,
+        spec.get("title"),
+        "ui" in spec,
+        "widgets" in spec,
+        "panes" in spec,
+    )
+    if evt_type == "created":
+        # Create pocket + session in MongoDB right here
+        pocket_cloud_id = await _create_pocket_and_session(spec, session_key)
+        await bus.publish_system(
+            SystemEvent(
+                event_type="pocket_created",
+                data={
+                    "spec": spec,
+                    "session_key": session_key,
+                    "pocket_cloud_id": pocket_cloud_id,
+                },
+            )
+        )
+    elif evt_type == "mutation":
+        await bus.publish_system(
+            SystemEvent(
+                event_type="pocket_mutation",
+                data={"mutation": data.get("mutation", {}), "session_key": session_key},
+            )
+        )
+
+
+def _extract_pocket_tool_policy(content: str) -> dict[str, bool] | None:
+    """Extract toolPolicy from [context:pocket] marker in message content."""
+    import json as _json
+
+    marker = "[context:pocket] "
+    idx = content.find(marker)
+    if idx < 0:
+        return None
+    json_start = idx + len(marker)
+    nl = content.find("\n", json_start)
+    json_str = content[json_start:nl] if nl > 0 else content[json_start:]
+    try:
+        ctx = _json.loads(json_str)
+        return ctx.get("toolPolicy")
+    except (ValueError, KeyError):
+        return None
 
 
 def _extract_generated_paths(text: str) -> list[str]:
@@ -145,7 +327,9 @@ class AgentLoop:
                 engine = PocketPawCognitiveEngine(
                     backend_provider=lambda: (
                         self._get_router()._backend if self._router is not None else None
-                    )
+                    ),
+                    model=settings.soul_cognitive_model,
+                    api_key=settings.anthropic_api_key or "",
                 )
 
                 self._soul_manager = SoulManager(settings)
@@ -153,6 +337,11 @@ class AgentLoop:
                 if self._soul_manager.bootstrap_provider:
                     self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
                 self._soul_manager.start_auto_save()
+
+                # Register as global singleton so API endpoints can access it
+                import pocketpaw.soul.manager as _sm
+
+                _sm._manager = self._soul_manager
             except Exception:
                 logger.exception("Soul initialization failed, continuing without soul")
                 self._soul_manager = None
@@ -461,12 +650,15 @@ class AgentLoop:
                     )
                     content = pii_result.sanitized_text
 
-            # 1. Store User Message
+            # 1. Store User Message (strip bulky transient context from stored metadata)
+            store_meta = {
+                k: v for k, v in (message.metadata or {}).items() if k != "pocket_system_context"
+            }
             await self.memory.add_to_session(
                 session_key=session_key,
                 role="user",
                 content=content,
-                metadata=message.metadata,
+                metadata=store_meta,
             )
 
             # 1b. Inject inbound media file paths so the agent can use them
@@ -530,20 +722,20 @@ class AgentLoop:
                     exc_info=True,
                 )
 
-            # 2b. Emit thinking event
             # 2b. Periodic identity reinforcement for long conversations.
-            # When the session has accumulated many turns the model may start
-            # drifting from the identity defined in <identity> block.
-            # Appending a compact reminder keeps the agent on-character without
-            # a full re-injection (which would waste context window).
-            if len(history) >= _IDENTITY_REINFORCE_THRESHOLD:
-                system_prompt += (
-                    "\n\n<identity-reminder>\n"
-                    "Regardless of conversation length, you remain the agent described in the "
-                    "<identity> block above. Maintain your defined personality, tone, and "
-                    "communication style consistently throughout this conversation.\n"
-                    "</identity-reminder>"
-                )
+            # Re-inject the full identity block every 5 messages to prevent drift.
+            try:
+                session_entries = await self.memory._store.get_session(session_key)
+                message_count = len(session_entries)
+            except (AttributeError, TypeError):
+                # Handle mocked memory store in tests
+                message_count = 0
+
+            bootstrap_context = self.context_builder.bootstrap.get_context()
+            if asyncio.iscoroutine(bootstrap_context):
+                bootstrap_context = await bootstrap_context
+            identity_block = bootstrap_context.to_identity_block()
+            system_prompt = _reinforce_identity(system_prompt, identity_block, message_count)
 
             # 2c. Emit agent_start + thinking events
             agent_started = True
@@ -554,8 +746,35 @@ class AgentLoop:
                 SystemEvent(event_type="thinking", data={"session_key": session_key})
             )
 
+            # Per-pocket tool policy — deny tools from disabled categories
+            pocket_tool_policy = _extract_pocket_tool_policy(content)
+            pocket_deny_tools: list[str] = []
+            if pocket_tool_policy:
+                from pocketpaw.constants.tool_categories import (
+                    CATEGORY_DIRECT_TOOLS,
+                    CATEGORY_TO_GROUPS,
+                )
+                from pocketpaw.tools.policy import TOOL_GROUPS
+
+                for cat_id, enabled in pocket_tool_policy.items():
+                    if not enabled:
+                        for grp in CATEGORY_TO_GROUPS.get(cat_id, []):
+                            pocket_deny_tools.extend(TOOL_GROUPS.get(grp, []))
+                        pocket_deny_tools.extend(CATEGORY_DIRECT_TOOLS.get(cat_id, []))
+
             # 3. Run through AgentRouter (handles all backends)
             router = self._get_router()
+            _saved_policy = None
+            if pocket_deny_tools and hasattr(router, "_registry") and router._registry:
+                from pocketpaw.tools.policy import ToolPolicy
+
+                _saved_policy = router._registry._policy  # Save to restore after request
+                scoped_policy = ToolPolicy(
+                    profile=self.settings.tool_profile or "full",
+                    deny=pocket_deny_tools,
+                )
+                router._registry.set_policy(scoped_policy)
+
             full_response = ""
             media_paths: list[str] = []
             cancelled = False
@@ -689,6 +908,9 @@ class AgentLoop:
                                 },
                             )
                         )
+                        # Detect pocket events in tool output and publish
+                        # dedicated SystemEvents for the SSE handler.
+                        await _publish_pocket_event(self.bus, econtent, session_key)
                         media_paths.extend(_extract_media_paths(econtent))
 
                     elif etype == "error":
@@ -721,6 +943,9 @@ class AgentLoop:
                 logger.info("Stream cancelled for session %s", session_key)
             finally:
                 await run_iter.aclose()
+                # Restore global tool policy after per-pocket scoped request
+                if _saved_policy is not None and hasattr(router, "_registry") and router._registry:
+                    router._registry.set_policy(_saved_policy)
 
             # 4. Send stream end marker (with any media files detected)
             # Fallback: if no media tags found in tool_result chunks,
@@ -934,8 +1159,9 @@ class AgentLoop:
                 # v0.2.8+: Include bond state if available
                 if hasattr(soul, "bond") and soul.bond:
                     try:
+                        bond = soul.bond
                         event_data["bond"] = (
-                            soul.bond.model_dump() if hasattr(soul.bond, "model_dump") else str(soul.bond)
+                            bond.model_dump() if hasattr(bond, "model_dump") else str(bond)
                         )
                     except Exception:
                         pass
@@ -979,6 +1205,7 @@ class AgentLoop:
         """Build a CognitiveEngine for soul, backed by the active agent backend."""
         try:
             from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
+
             return PocketPawCognitiveEngine(
                 backend_provider=lambda: (
                     self._get_router()._backend if self._router is not None else None

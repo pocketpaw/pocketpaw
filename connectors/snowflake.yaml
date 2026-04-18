@@ -1,0 +1,102 @@
+# Snowflake connector — cloud data warehouse queries and management.
+# Created: 2026-03-30
+
+name: snowflake
+display_name: Snowflake
+type: database
+icon: snowflake
+
+auth:
+  method: basic
+  credentials:
+    - name: SNOWFLAKE_ACCOUNT
+      description: Snowflake account identifier (e.g. xy12345.us-east-1)
+      required: true
+    - name: SNOWFLAKE_USER
+      description: Snowflake username
+      required: true
+    - name: SNOWFLAKE_PASSWORD
+      description: Snowflake password
+      required: true
+    - name: SNOWFLAKE_WAREHOUSE
+      description: Default warehouse name
+      required: false
+    - name: SNOWFLAKE_DATABASE
+      description: Default database name
+      required: false
+    - name: SNOWFLAKE_SCHEMA
+      description: Default schema (e.g. PUBLIC)
+      required: false
+
+actions:
+  - name: execute_query
+    description: Execute a SQL query against Snowflake
+    method: LOCAL
+    params:
+      query: { type: string, required: true, description: "SQL query to execute" }
+      warehouse: { type: string, description: "Warehouse to use (overrides default)" }
+      database: { type: string, description: "Database to use" }
+      schema: { type: string, description: "Schema to use" }
+      limit: { type: integer, default: 100 }
+    trust_level: confirm
+
+  - name: list_databases
+    description: List all accessible databases
+    method: LOCAL
+    params:
+      query: { type: string, default: "SHOW DATABASES" }
+    trust_level: auto
+
+  - name: list_schemas
+    description: List schemas in a database
+    method: LOCAL
+    params:
+      database: { type: string, required: true }
+      query: { type: string, default: "SHOW SCHEMAS IN DATABASE {database}" }
+    trust_level: auto
+
+  - name: list_tables
+    description: List tables in a schema
+    method: LOCAL
+    params:
+      database: { type: string, required: true }
+      schema: { type: string, default: "PUBLIC" }
+      query: { type: string, default: "SHOW TABLES IN {database}.{schema}" }
+    trust_level: auto
+
+  - name: describe_table
+    description: Get column definitions for a table
+    method: LOCAL
+    params:
+      table: { type: string, required: true, description: "Fully qualified table name (db.schema.table)" }
+      query: { type: string, default: "DESCRIBE TABLE {table}" }
+    trust_level: auto
+
+  - name: preview_table
+    description: Preview rows from a table
+    method: LOCAL
+    params:
+      table: { type: string, required: true }
+      limit: { type: integer, default: 20 }
+      query: { type: string, default: "SELECT * FROM {table} LIMIT {limit}" }
+    trust_level: auto
+
+  - name: list_warehouses
+    description: List available warehouses
+    method: LOCAL
+    params:
+      query: { type: string, default: "SHOW WAREHOUSES" }
+    trust_level: auto
+
+  - name: query_history
+    description: View recent query history
+    method: LOCAL
+    params:
+      limit: { type: integer, default: 20 }
+      query: { type: string, default: "SELECT query_id, query_text, database_name, schema_name, warehouse_name, execution_status, total_elapsed_time, rows_produced, start_time FROM table(information_schema.query_history()) ORDER BY start_time DESC LIMIT {limit}" }
+    trust_level: auto
+
+sync:
+  table: null
+  schedule: manual
+  mapping: {}

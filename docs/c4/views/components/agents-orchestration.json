@@ -1,0 +1,33 @@
+{
+  "level": "component",
+  "title": "Components -- Agents \u0026 Orchestration",
+  "description": "Component-level view of Agents \u0026 Orchestration",
+  "elements": [
+    "agents",
+    "agentsmd",
+    "soul",
+    "mcp"
+  ],
+  "relationships": [
+    {
+      "source": "agents",
+      "target": "agents-orchestration",
+      "description": "Core agent orchestration and lifecycle management"
+    },
+    {
+      "source": "agents",
+      "target": "skills-tools",
+      "description": "Agents execute skills and tools to accomplish tasks"
+    },
+    {
+      "source": "agents",
+      "target": "llm-inference",
+      "description": "Agents use LLM inference for reasoning and decision-making"
+    },
+    {
+      "source": "agents",
+      "target": "knowledge-memory",
+      "description": "Agents retrieve context from knowledge base and memory systems"
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+# GCP connector — Google Cloud Platform via gcloud CLI.
+# Created: 2026-04-01
+# Wraps gcloud CLI (Google Cloud SDK) for projects, storage, pubsub,
+# cloud run, secrets, logging, compute, and IAM operations.
+
+name: gcp
+display_name: Google Cloud Platform
+type: cloud
+icon: cloud
+
+auth:
+  method: none  # gcloud CLI uses its own auth (gcloud auth login)
+  credentials:
+    - name: GCP_PROJECT
+      description: "GCP project ID (optional, uses default if not set)"
+      required: false
+    - name: GCP_REGION
+      description: "Default region (e.g., us-central1)"
+      required: false
+
+actions:
+  # -- Projects --
+  - name: list_projects
+    description: List all accessible GCP projects
+    method: LOCAL
+    trust_level: auto
+
+  - name: get_project
+    description: Get details of a specific GCP project
+    method: LOCAL
+    params:
+      project_id: { type: string, required: true, description: "GCP project ID" }
+    trust_level: auto
+
+  # -- Cloud Storage --
+  - name: storage_list_buckets
+    description: List Cloud Storage buckets in the project
+    method: LOCAL
+    trust_level: auto
+
+  - name: storage_list_objects
+    description: List objects in a Cloud Storage bucket
+    method: LOCAL
+    params:
+      bucket: { type: string, required: true, description: "Bucket name (without gs:// prefix)" }
+      prefix: { type: string, description: "Object name prefix filter" }
+    trust_level: auto
+
+  - name: storage_get_object
+    description: Read the contents of a Cloud Storage object
+    method: LOCAL
+    params:
+      bucket: { type: string, required: true, description: "Bucket name" }
+      path: { type: string, required: true, description: "Object path within the bucket" }
+    trust_level: auto
+
+  - name: storage_copy
+    description: Copy a file to/from Cloud Storage
+    method: LOCAL
+    params:
+      src: { type: string, required: true, description: "Source path (local or gs://bucket/path)" }
+      dest: { type: string, required: true, description: "Destination path (local or gs://bucket/path)" }
+    trust_level: confirm
+
+  - name: storage_delete
+    description: Delete an object from Cloud Storage
+    method: LOCAL
+    params:
+      bucket: { type: string, required: true, description: "Bucket name" }
+      path: { type: string, required: true, description: "Object path to delete" }
+    trust_level: restricted
+
+  # -- Pub/Sub --
+  - name: pubsub_list_topics
+    description: List Pub/Sub topics in the project
+    method: LOCAL
+    trust_level: auto
+
+  - name: pubsub_list_subscriptions
+    description: List Pub/Sub subscriptions in the project
+    method: LOCAL
+    trust_level: auto
+
+  - name: pubsub_publish
+    description: Publish a message to a Pub/Sub topic
+    method: LOCAL
+    params:
+      topic: { type: string, required: true, description: "Topic name or full resource path" }
+      message: { type: string, required: true, description: "Message body to publish" }
+    trust_level: confirm
+
+  # -- Cloud Run --
+  - name: run_list_services
+    description: List Cloud Run services
+    method: LOCAL
+    trust_level: auto
+
+  - name: run_describe_service
+    description: Get details of a Cloud Run service
+    method: LOCAL
+    params:
+      name: { type: string, required: true, description: "Service name" }
+    trust_level: auto
+
+  - name: run_list_revisions
+    description: List Cloud Run revisions
+    method: LOCAL
+    trust_level: auto
+
+  # -- Secret Manager --
+  - name: secrets_list
+    description: List secrets in Secret Manager
+    method: LOCAL
+    trust_level: auto
+
+  - name: secrets_get
+    description: Access the latest version of a secret
+    method: LOCAL
+    params:
+      name: { type: string, required: true, description: "Secret name" }
+    trust_level: confirm
+
+  - name: secrets_create
+    description: Create a new secret in Secret Manager
+    method: LOCAL
+    params:
+      name: { type: string, required: true, description: "Secret name to create" }
+    trust_level: restricted
+
+  # -- Logging --
+  - name: logs_read
+    description: Read log entries from Cloud Logging
+    method: LOCAL
+    params:
+      filter: { type: string, description: "Log filter expression (e.g., resource.type=cloud_run_revision)" }
+      limit: { type: integer, default: 50, description: "Maximum number of entries to return" }
+    trust_level: auto
+
+  # -- Compute Engine --
+  - name: compute_list_instances
+    description: List Compute Engine VM instances
+    method: LOCAL
+    trust_level: auto
+
+  - name: compute_describe_instance
+    description: Get details of a Compute Engine VM instance
+    method: LOCAL
+    params:
+      name: { type: string, required: true, description: "Instance name" }
+      zone: { type: string, description: "Zone (e.g., us-central1-a)" }
+    trust_level: auto
+
+  # -- IAM --
+  - name: iam_list_accounts
+    description: List IAM service accounts in the project
+    method: LOCAL
+    trust_level: auto
+
+sync:
+  table: null
+  schedule: manual
+  mapping: {}

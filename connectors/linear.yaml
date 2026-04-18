@@ -1,0 +1,109 @@
+# Linear connector — modern issue tracking & project management.
+# Created: 2026-03-30
+
+name: linear
+display_name: Linear
+type: project-management
+icon: triangle
+
+auth:
+  method: bearer
+  credentials:
+    - name: LINEAR_API_KEY
+      description: Linear API key (Settings → API → Personal API keys)
+      required: true
+
+actions:
+  - name: list_issues
+    description: List issues assigned to you or filtered by team/project
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        default: "{ issues(first: 25, orderBy: updatedAt) { nodes { id identifier title state { name } assignee { name } priority priorityLabel createdAt updatedAt } } }"
+    trust_level: auto
+
+  - name: list_my_issues
+    description: List issues assigned to the authenticated user
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        default: "{ viewer { assignedIssues(first: 25, orderBy: updatedAt) { nodes { id identifier title state { name } priority priorityLabel project { name } createdAt } } } }"
+    trust_level: auto
+
+  - name: list_teams
+    description: List all teams in the workspace
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        default: "{ teams { nodes { id name key description } } }"
+    trust_level: auto
+
+  - name: list_projects
+    description: List all projects
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        default: "{ projects(first: 50, orderBy: updatedAt) { nodes { id name state startDate targetDate progress lead { name } } } }"
+    trust_level: auto
+
+  - name: search_issues
+    description: Search issues by query string
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        required: true
+        description: 'GraphQL query using issueSearch, e.g. { issueSearch(query: "bug") { nodes { identifier title state { name } } } }'
+    trust_level: auto
+
+  - name: create_issue
+    description: Create a new Linear issue
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        required: true
+        description: 'Mutation: mutation { issueCreate(input: {teamId: "...", title: "...", description: "..."}) { issue { id identifier title } } }'
+    trust_level: confirm
+
+  - name: update_issue_state
+    description: Update issue status/state
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        required: true
+        description: 'Mutation: mutation { issueUpdate(id: "...", input: {stateId: "..."}) { issue { id identifier state { name } } } }'
+    trust_level: confirm
+
+  - name: list_cycles
+    description: List active and upcoming cycles (sprints)
+    method: POST
+    url: https://api.linear.app/graphql
+    body:
+      query:
+        type: string
+        default: '{ cycles(first: 10, orderBy: createdAt, filter: { completedAt: { null: true } }) { nodes { id name number startsAt endsAt progress { total completed } } } }'
+    trust_level: auto
+
+sync:
+  table: linear_issues
+  schedule: every_15m
+  mapping:
+    id: id
+    identifier: identifier
+    title: title
+    status: state.name
+    assignee: assignee.name
+    priority: priorityLabel

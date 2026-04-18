@@ -1,0 +1,107 @@
+# Shopify connector — e-commerce store data (orders, products, customers).
+# Created: 2026-03-30
+
+name: shopify
+display_name: Shopify
+type: ecommerce
+icon: shopping-bag
+
+auth:
+  method: bearer
+  credentials:
+    - name: SHOPIFY_STORE_URL
+      description: Shopify store URL (e.g. your-store.myshopify.com)
+      required: true
+    - name: SHOPIFY_ACCESS_TOKEN
+      description: Shopify Admin API access token
+      required: true
+
+actions:
+  - name: list_orders
+    description: List recent orders
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/orders.json"
+    params:
+      status: { type: string, enum: [open, closed, cancelled, any], default: any }
+      limit: { type: integer, default: 25 }
+      financial_status: { type: string, enum: [authorized, pending, paid, refunded, voided, any] }
+    trust_level: auto
+
+  - name: list_products
+    description: List products in the store
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/products.json"
+    params:
+      limit: { type: integer, default: 25 }
+      status: { type: string, enum: [active, archived, draft] }
+      collection_id: { type: string }
+    trust_level: auto
+
+  - name: list_customers
+    description: List customers
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/customers.json"
+    params:
+      limit: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: search_customers
+    description: Search customers by query
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/customers/search.json"
+    params:
+      query: { type: string, required: true, description: "Search query (email, name, etc.)" }
+      limit: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: get_order
+    description: Get detailed order information
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/orders/{order_id}.json"
+    params:
+      order_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: list_inventory
+    description: List inventory levels
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels.json"
+    params:
+      location_ids: { type: string, required: true, description: "Comma-separated location IDs" }
+      limit: { type: integer, default: 50 }
+    trust_level: auto
+
+  - name: get_shop_info
+    description: Get store information and settings
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/shop.json"
+    trust_level: auto
+
+  - name: list_collections
+    description: List product collections
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/custom_collections.json"
+    params:
+      limit: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: count_orders
+    description: Get order count with optional filters
+    method: GET
+    url: "https://{SHOPIFY_STORE_URL}/admin/api/2024-01/orders/count.json"
+    params:
+      status: { type: string, enum: [open, closed, any], default: any }
+      financial_status: { type: string, enum: [authorized, pending, paid, refunded, voided, any] }
+      created_at_min: { type: string, description: "ISO 8601 date" }
+    trust_level: auto
+
+sync:
+  table: shopify_orders
+  schedule: every_15m
+  mapping:
+    id: id
+    order_number: order_number
+    total_price: total_price
+    status: financial_status
+    customer_email: email
+    created: created_at

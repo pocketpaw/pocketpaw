@@ -144,7 +144,7 @@ class TestScreenshotTool:
         mock_pyautogui.screenshot.side_effect = OSError("No display")
         with (
             patch.object(screenshot, "PYAUTOGUI_AVAILABLE", True),
-            patch.object(screenshot, "pyautogui", mock_pyautogui),
+            patch.object(screenshot, "pyautogui", mock_pyautogui, create=True),
         ):
             result = screenshot.take_screenshot()
             assert isinstance(result, str)

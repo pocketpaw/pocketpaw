@@ -211,6 +211,20 @@ class TestOpenAIAgentsInit:
         assert "active_sessions" in status
 
 
+class TestSessionDBPathLazy:
+    """Ensure _SESSION_DB path is resolved lazily, not at module import time."""
+
+    def test_session_db_path_resolves_lazily(self):
+        """_get_session_db_path evaluates Path.home() at call time, not import time."""
+        from pocketpaw.agents.openai_agents import _get_session_db_path
+
+        with patch("pocketpaw.agents.openai_agents.Path") as mock_path:
+            fake_home = MagicMock()
+            mock_path.home.return_value = fake_home
+            _get_session_db_path()
+            mock_path.home.assert_called_once()
+
+
 class TestOpenAIAgentsSessions:
     """Tests for native SQLiteSession integration."""
 
@@ -239,6 +253,43 @@ class TestOpenAIAgentsSessions:
                 session = backend._get_or_create_session("test-session-1")
                 assert session is mock_session
                 assert "test-session-1" in backend._sessions
+                # Verify session_key is passed to isolate per-user sessions (#853)
+                call_args = mock_cls.call_args
+                assert len(call_args.args) == 2 or "session_id" in (call_args.kwargs or {})
+                assert call_args.args[1] == "test-session-1"
+
+    def test_different_keys_get_different_sessions(self):
+        """Different session_keys produce separate SQLiteSession instances (#853)."""
+        from pocketpaw.agents.openai_agents import OpenAIAgentsBackend
+
+        backend = OpenAIAgentsBackend(Settings())
+        backend._sqlite_session_available = True
+
+        session_a = MagicMock(name="session_a")
+        session_b = MagicMock(name="session_b")
+
+        with patch(
+            "pocketpaw.agents.openai_agents.SQLiteSession",
+            create=True,
+        ) as mock_cls:
+            with patch.dict(
+                "sys.modules",
+                {
+                    "agents.extensions.persistence": MagicMock(
+                        SQLiteSession=mock_cls,
+                    ),
+                },
+            ):
+                mock_cls.side_effect = [session_a, session_b]
+                result_a = backend._get_or_create_session("user-alice")
+                result_b = backend._get_or_create_session("user-bob")
+
+                assert result_a is session_a
+                assert result_b is session_b
+                assert result_a is not result_b
+                # Each call must include the correct session_key
+                assert mock_cls.call_args_list[0].args[1] == "user-alice"
+                assert mock_cls.call_args_list[1].args[1] == "user-bob"
 
     def test_session_reused(self):
         """Same session_key returns the same cached session."""

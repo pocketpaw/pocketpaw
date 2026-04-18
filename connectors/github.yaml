@@ -1,0 +1,136 @@
+# GitHub connector — repositories, issues, PRs, and code search.
+# Created: 2026-03-30
+
+name: github
+display_name: GitHub
+type: developer
+icon: git-branch
+
+auth:
+  method: bearer
+  headers:
+    Accept: application/vnd.github+json
+    X-GitHub-Api-Version: "2022-11-28"
+  credentials:
+    - name: GITHUB_TOKEN
+      description: GitHub personal access token (classic or fine-grained)
+      required: true
+
+actions:
+  - name: list_repos
+    description: List repositories for the authenticated user
+    method: GET
+    url: https://api.github.com/user/repos
+    params:
+      sort: { type: string, enum: [created, updated, pushed, full_name], default: updated }
+      per_page: { type: integer, default: 100 }
+      page: { type: integer, default: 1, description: "Page number for pagination" }
+      type: { type: string, enum: [all, owner, public, private, member], default: all }
+    trust_level: auto
+
+  - name: list_org_repos
+    description: List repositories for an organization
+    method: GET
+    url: https://api.github.com/orgs/{org}/repos
+    params:
+      org: { type: string, required: true, description: "Organization name" }
+      per_page: { type: integer, default: 100 }
+      page: { type: integer, default: 1, description: "Page number for pagination" }
+      sort: { type: string, enum: [created, updated, pushed, full_name], default: updated }
+    trust_level: auto
+
+  - name: list_issues
+    description: List issues for a repository
+    method: GET
+    url: https://api.github.com/repos/{owner}/{repo}/issues
+    params:
+      owner: { type: string, required: true }
+      repo: { type: string, required: true }
+      state: { type: string, enum: [open, closed, all], default: open }
+      labels: { type: string, description: "Comma-separated label names" }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_pull_requests
+    description: List pull requests for a repository
+    method: GET
+    url: https://api.github.com/repos/{owner}/{repo}/pulls
+    params:
+      owner: { type: string, required: true }
+      repo: { type: string, required: true }
+      state: { type: string, enum: [open, closed, all], default: open }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: search_code
+    description: Search code across GitHub repositories
+    method: GET
+    url: https://api.github.com/search/code
+    params:
+      q: { type: string, required: true, description: "Search query (e.g. 'filename:config.yaml org:myorg')" }
+      per_page: { type: integer, default: 20 }
+    trust_level: auto
+
+  - name: search_issues
+    description: Search issues and PRs across repositories
+    method: GET
+    url: https://api.github.com/search/issues
+    params:
+      q: { type: string, required: true, description: "Search query (e.g. 'is:issue is:open label:bug repo:owner/repo')" }
+      per_page: { type: integer, default: 20 }
+    trust_level: auto
+
+  - name: get_repo
+    description: Get repository details
+    method: GET
+    url: https://api.github.com/repos/{owner}/{repo}
+    params:
+      owner: { type: string, required: true }
+      repo: { type: string, required: true }
+    trust_level: auto
+
+  - name: create_issue
+    description: Create a new issue
+    method: POST
+    url: https://api.github.com/repos/{owner}/{repo}/issues
+    params:
+      owner: { type: string, required: true }
+      repo: { type: string, required: true }
+    body:
+      title: { type: string, required: true }
+      body: { type: string }
+      labels: { type: object, description: "Array of label names" }
+      assignees: { type: object, description: "Array of usernames" }
+    trust_level: confirm
+
+  - name: list_actions_runs
+    description: List recent GitHub Actions workflow runs
+    method: GET
+    url: https://api.github.com/repos/{owner}/{repo}/actions/runs
+    params:
+      owner: { type: string, required: true }
+      repo: { type: string, required: true }
+      status: { type: string, enum: [completed, in_progress, queued, failure, success] }
+      per_page: { type: integer, default: 10 }
+    trust_level: auto
+
+  - name: list_releases
+    description: List releases for a repository
+    method: GET
+    url: https://api.github.com/repos/{owner}/{repo}/releases
+    params:
+      owner: { type: string, required: true }
+      repo: { type: string, required: true }
+      per_page: { type: integer, default: 10 }
+    trust_level: auto
+
+sync:
+  table: github_repos
+  schedule: every_30m
+  mapping:
+    id: id
+    name: full_name
+    description: description
+    stars: stargazers_count
+    language: language
+    updated: updated_at

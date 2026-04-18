@@ -168,7 +168,6 @@ class TestBuildOpenAIFunctionTools:
         assert kwargs["params_json_schema"] == {
             "type": "object",
             "properties": {},
-            "required": [],
         }
 
 

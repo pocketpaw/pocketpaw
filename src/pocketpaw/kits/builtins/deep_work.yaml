@@ -1,0 +1,60 @@
+# Deep Work Pocket — AI-driven project planning and execution dashboard.
+# Created: 2026-03-21
+meta:
+  name: "Deep Work"
+  author: "PocketPaw"
+  version: "1.0.0"
+  description: "Plan goals, decompose into tasks, and let agents execute with dependency-aware scheduling"
+  category: general
+  icon: brain
+  tags: [deep-work, planning, projects, goals, autonomous]
+  built_in: true
+
+layout:
+  columns: 2
+  sections:
+    - title: "Project Overview"
+      span: full
+      panels:
+        - id: metrics
+          type: metrics-row
+          items:
+            - { label: "Active Projects", source: "api:stats", field: "projects.active", format: "number" }
+            - { label: "Tasks Running", source: "api:stats", field: "tasks.by_status.in_progress", format: "number" }
+            - { label: "Completed", source: "api:stats", field: "tasks.by_status.done", format: "number" }
+            - { label: "Agents Working", source: "api:stats", field: "agents.active", format: "number" }
+
+    - title: "Projects"
+      span: full
+      panels:
+        - id: kanban
+          type: kanban
+          columns:
+            - { key: "planning", label: "Planning", color: "gray" }
+            - { key: "executing", label: "Executing", color: "blue" }
+            - { key: "paused", label: "Paused", color: "orange" }
+            - { key: "completed", label: "Done", color: "green" }
+          source: "api:tasks"
+          card_fields: [title, priority, task_type]
+
+    - title: "Daily Standup"
+      span: left
+      panels:
+        - id: standup
+          type: feed
+          source: "api:standup"
+          max_items: 20
+
+    - title: "Deliverables"
+      span: right
+      panels:
+        - id: docs
+          type: table
+          source: "api:documents"
+          columns:
+            - { key: "title", label: "Title" }
+            - { key: "type", label: "Type" }
+            - { key: "author_id", label: "Author" }
+            - { key: "updated_at", label: "Updated" }
+
+workflows: {}

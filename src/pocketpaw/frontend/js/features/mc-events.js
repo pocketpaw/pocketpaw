@@ -102,7 +102,7 @@ window.PocketPaw.McEvents = {
              * Handle Mission Control WebSocket events
              */
             handleMCEvent(data) {
-                const eventType = data.event_type;
+                const eventType = data.event || data.event_type;
                 const eventData = data.data || {};
 
                 if (eventType === 'mc_task_started') {
@@ -291,7 +291,7 @@ window.PocketPaw.McEvents = {
              * Handle Deep Work WebSocket events
              */
             handleDWEvent(data) {
-                const eventType = data.event_type;
+                const eventType = data.event || data.event_type;
                 const eventData = data.data || {};
 
                 if (eventType === 'dw_planning_phase') {

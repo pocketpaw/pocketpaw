@@ -1,0 +1,112 @@
+# Intercom connector — customer messaging and engagement platform.
+# Created: 2026-03-30
+
+name: intercom
+display_name: Intercom
+type: support
+icon: message-circle
+
+auth:
+  method: bearer
+  credentials:
+    - name: INTERCOM_ACCESS_TOKEN
+      description: Intercom access token (Settings → Integrations → Developer Hub)
+      required: true
+
+actions:
+  - name: list_conversations
+    description: List recent conversations
+    method: GET
+    url: https://api.intercom.io/conversations
+    params:
+      per_page: { type: integer, default: 20 }
+      sort_field: { type: string, default: "updated_at" }
+      sort_order: { type: string, enum: [ascending, descending], default: descending }
+    trust_level: auto
+
+  - name: search_conversations
+    description: Search conversations by query
+    method: POST
+    url: https://api.intercom.io/conversations/search
+    body:
+      query:
+        type: object
+        required: true
+        description: "{field: 'source.body', operator: '~', value: 'search term'}"
+      pagination: { type: object, default: { per_page: 20 } }
+    trust_level: auto
+
+  - name: get_conversation
+    description: Get a specific conversation with messages
+    method: GET
+    url: https://api.intercom.io/conversations/{conversation_id}
+    params:
+      conversation_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: list_contacts
+    description: List contacts (users and leads)
+    method: GET
+    url: https://api.intercom.io/contacts
+    params:
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: search_contacts
+    description: Search contacts by email, name, or other fields
+    method: POST
+    url: https://api.intercom.io/contacts/search
+    body:
+      query:
+        type: object
+        required: true
+        description: "{field: 'email', operator: '=', value: 'user@example.com'}"
+    trust_level: auto
+
+  - name: reply_to_conversation
+    description: Send a reply to a conversation
+    method: POST
+    url: https://api.intercom.io/conversations/{conversation_id}/reply
+    params:
+      conversation_id: { type: string, required: true }
+    body:
+      message_type: { type: string, default: "comment" }
+      type: { type: string, default: "admin" }
+      admin_id: { type: string, required: true }
+      body: { type: string, required: true }
+    trust_level: confirm
+
+  - name: create_contact
+    description: Create a new contact
+    method: POST
+    url: https://api.intercom.io/contacts
+    body:
+      role: { type: string, enum: [user, lead], default: "user" }
+      email: { type: string, required: true }
+      name: { type: string }
+      phone: { type: string }
+      custom_attributes: { type: object }
+    trust_level: confirm
+
+  - name: list_tags
+    description: List all tags
+    method: GET
+    url: https://api.intercom.io/tags
+    trust_level: auto
+
+  - name: list_segments
+    description: List customer segments
+    method: GET
+    url: https://api.intercom.io/segments
+    trust_level: auto
+
+sync:
+  table: intercom_conversations
+  schedule: every_15m
+  mapping:
+    id: id
+    title: source.subject
+    state: state
+    assignee: assignee.name
+    created: created_at
+    updated: updated_at

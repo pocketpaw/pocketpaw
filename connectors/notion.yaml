@@ -1,0 +1,105 @@
+# Notion connector — workspace pages, databases, and knowledge base.
+# Created: 2026-03-30
+
+name: notion
+display_name: Notion
+type: knowledge
+icon: book-open
+
+auth:
+  method: bearer
+  headers:
+    Notion-Version: "2022-06-28"
+  credentials:
+    - name: NOTION_API_KEY
+      description: Notion integration token (internal integration secret)
+      required: true
+
+actions:
+  - name: search
+    description: Search across all Notion pages and databases
+    method: POST
+    url: https://api.notion.com/v1/search
+    body:
+      query: { type: string, description: "Search term" }
+      filter: { type: object, description: "{property: 'object', value: 'page'|'database'}" }
+      page_size: { type: integer, default: 10 }
+    trust_level: auto
+
+  - name: list_databases
+    description: List all databases shared with the integration
+    method: POST
+    url: https://api.notion.com/v1/search
+    body:
+      filter: { type: object, default: { property: "object", value: "database" } }
+      page_size: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: query_database
+    description: Query a Notion database with filters and sorts
+    method: POST
+    url: https://api.notion.com/v1/databases/{database_id}/query
+    params:
+      database_id: { type: string, required: true, description: "Database UUID" }
+    body:
+      filter: { type: object, description: "Notion filter object" }
+      sorts: { type: object, description: "Sort criteria" }
+      page_size: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: get_page
+    description: Retrieve a Notion page and its properties
+    method: GET
+    url: https://api.notion.com/v1/pages/{page_id}
+    params:
+      page_id: { type: string, required: true, description: "Page UUID" }
+    trust_level: auto
+
+  - name: get_page_content
+    description: Get the block content (body) of a page
+    method: GET
+    url: https://api.notion.com/v1/blocks/{block_id}/children
+    params:
+      block_id: { type: string, required: true, description: "Page or block UUID" }
+      page_size: { type: integer, default: 100 }
+    trust_level: auto
+
+  - name: create_page
+    description: Create a new page in a database or as a child of another page
+    method: POST
+    url: https://api.notion.com/v1/pages
+    body:
+      parent: { type: object, required: true, description: "{database_id: '...'} or {page_id: '...'}" }
+      properties: { type: object, required: true, description: "Page properties matching the database schema" }
+      children: { type: object, description: "Block content for the page body" }
+    trust_level: confirm
+
+  - name: update_page
+    description: Update page properties
+    method: PATCH
+    url: https://api.notion.com/v1/pages/{page_id}
+    params:
+      page_id: { type: string, required: true }
+    body:
+      properties: { type: object, required: true, description: "Properties to update" }
+    trust_level: confirm
+
+  - name: append_blocks
+    description: Append content blocks to a page
+    method: PATCH
+    url: https://api.notion.com/v1/blocks/{block_id}/children
+    params:
+      block_id: { type: string, required: true, description: "Parent page/block UUID" }
+    body:
+      children: { type: object, required: true, description: "Array of block objects to append" }
+    trust_level: confirm
+
+sync:
+  table: notion_pages
+  schedule: every_30m
+  mapping:
+    id: id
+    title: properties.title
+    url: url
+    created: created_time
+    updated: last_edited_time

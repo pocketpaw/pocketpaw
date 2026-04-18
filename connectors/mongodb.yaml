@@ -1,0 +1,121 @@
+# MongoDB connector — document database.
+# Created: 2026-03-30
+# NOTE: This YAML defines the connector metadata (icon, credentials, display).
+# Actual execution is handled by the native MongoDBAdapter, not the YAML REST engine.
+
+name: mongodb
+display_name: MongoDB
+type: database
+icon: database
+
+auth:
+  method: none
+  credentials:
+    - name: MONGO_URI
+      description: Full connection URI (mongodb://... or mongodb+srv://...). If provided, host/port/user/pass are ignored.
+      required: false
+    - name: MONGO_HOST
+      description: MongoDB host (default localhost)
+      required: false
+    - name: MONGO_PORT
+      description: MongoDB port (default 27017)
+      required: false
+    - name: MONGO_DATABASE
+      description: Database name
+      required: true
+    - name: MONGO_USER
+      description: Username (if auth enabled)
+      required: false
+    - name: MONGO_PASSWORD
+      description: Password
+      required: false
+
+actions:
+  - name: list_collections
+    description: List all collections in the database
+    method: LOCAL
+    trust_level: auto
+
+  - name: find
+    description: Query documents in a collection
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      filter: { type: object, description: "MongoDB query filter (JSON)" }
+      limit: { type: integer, default: 20 }
+      sort: { type: object, description: "Sort spec, e.g. {\"created\": -1}" }
+    trust_level: auto
+
+  - name: find_one
+    description: Get a single document by filter or _id
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      filter: { type: object, required: true }
+    trust_level: auto
+
+  - name: count
+    description: Count documents in a collection
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      filter: { type: object }
+    trust_level: auto
+
+  - name: distinct
+    description: Get distinct values for a field
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      field: { type: string, required: true }
+    trust_level: auto
+
+  - name: aggregate
+    description: Run an aggregation pipeline
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      pipeline: { type: object, required: true, description: "Aggregation pipeline array" }
+    trust_level: confirm
+
+  - name: collection_stats
+    description: Get stats for all collections (doc count, size)
+    method: LOCAL
+    trust_level: auto
+
+  - name: indexes
+    description: List indexes on a collection
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+    trust_level: auto
+
+  - name: insert_one
+    description: Insert a document
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      document: { type: object, required: true }
+    trust_level: confirm
+
+  - name: update_many
+    description: Update documents matching a filter
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      filter: { type: object, required: true }
+      update: { type: object, required: true }
+    trust_level: confirm
+
+  - name: delete_many
+    description: Delete documents matching a filter
+    method: LOCAL
+    params:
+      collection: { type: string, required: true }
+      filter: { type: object, required: true }
+    trust_level: restricted
+
+sync:
+  table: null
+  schedule: manual
+  mapping: {}

@@ -1,14 +1,34 @@
 # Settings router — GET/PUT settings (REST alternative to WS-only).
 # Created: 2026-02-20
+# Updated: 2026-04-09 — GET /settings now filters SECRET_FIELDS so API keys
+# and tokens are never returned over REST, matching the mask applied by
+# Settings.to_safe_dict() and the WS settings_get handler.
 
 from __future__ import annotations
 
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from pocketpaw.api.deps import require_scope
+from pocketpaw.credentials import SECRET_FIELDS
+
+# Security-critical fields that MUST NOT be modified via the REST API.
+# These fields control file-system boundaries, permission checks, prompt-injection
+# scanning, and other safety guardrails.  They can only be changed by editing the
+# config file or environment variables directly.
+_IMMUTABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "file_jail_path",
+        "bypass_permissions",
+        "trust_level",
+        "injection_scan_enabled",
+        "guardian_enabled",
+        "localhost_auth_bypass",
+        "pii_scan_enabled",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,20 +40,27 @@ _settings_lock = asyncio.Lock()
 
 @router.get("/settings", dependencies=[Depends(require_scope("settings:read", "settings:write"))])
 async def get_settings():
-    """Get current settings (non-secret fields)."""
+    """Get current settings (non-secret fields).
+
+    Secret fields (API keys, tokens, passwords — see ``SECRET_FIELDS``) are
+    never returned over REST. Clients that need to know whether a key is
+    configured should check the corresponding ``*_configured`` boolean on
+    the health or status endpoint instead.
+    """
+    from pathlib import Path
+
     from pocketpaw.config import Settings
 
     settings = Settings.load()
-    # Return all non-secret fields as a dict
-    data = {}
+    data: dict = {}
     for field_name in settings.model_fields:
-        val = getattr(settings, field_name, None)
-        # Skip internal/secret fields
+        # Skip dunder/internal fields
         if field_name.startswith("_"):
             continue
-        # Convert Path objects to strings
-        from pathlib import Path
-
+        # Never return secrets over REST
+        if field_name in SECRET_FIELDS:
+            continue
+        val = getattr(settings, field_name, None)
         if isinstance(val, Path):
             val = str(val)
         data[field_name] = val
@@ -63,6 +90,14 @@ async def update_settings(request: Request):
                 is_valid, warning = validate_api_key(field, value)
                 if not is_valid:
                     warnings.append(warning)
+
+    # Block writes to security-critical fields
+    blocked = _IMMUTABLE_FIELDS.intersection(settings_data)
+    if blocked:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Field(s) {', '.join(sorted(blocked))} cannot be modified via the API",
+        )
 
     async with _settings_lock:
         settings = Settings.load()

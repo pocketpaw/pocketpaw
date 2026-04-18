@@ -29,6 +29,7 @@ import base64
 import io
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 try:
@@ -117,8 +118,25 @@ TEMPLATES_DIR = FRONTEND_DIR / "templates"
 # Initialize Templates
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await startup_event()
+    yield
+    await shutdown_event()
+
+
+async def startup_event():
+    await _startup_event(_start_channel_adapter_fn=_start_channel_adapter)
+
+
+async def shutdown_event():
+    await _shutdown_event(_stop_channel_adapter_fn=_stop_channel_adapter)
+
+
 # Create FastAPI app
 app = FastAPI(
+    lifespan=lifespan,
     title="PocketPaw API",
     description="Self-hosted AI agent — REST API for external clients and the web dashboard.",
     version="1.0.0",
@@ -189,6 +207,17 @@ app.include_router(mission_control_router, prefix="/api/mission-control")
 
 app.include_router(deep_work_router, prefix="/api/deep-work")
 
+# Mount enterprise cloud module FIRST (takes priority over core v1 routers)
+try:
+    from ee.cloud import mount_cloud
+
+    mount_cloud(app)
+    logger.info("Enterprise cloud module mounted successfully")
+except ImportError as exc:
+    logger.debug("Enterprise cloud module not available: %s", exc)
+except Exception:
+    logger.warning("Cloud module mount failed", exc_info=True)
+
 # Mount API v1 routers at /api/v1/ (canonical) — see api/v1/__init__.py
 mount_v1_routers(app)
 
@@ -199,6 +228,10 @@ try:
     _a2a_register_routes(app)
 except Exception as _a2a_exc:
     logger.warning("A2A Protocol unavailable — skipping router mount: %s", _a2a_exc)
+
+# Mount Socket.IO for enterprise real-time group chat
+# NOTE: Socket.IO ASGI wrapper is applied AFTER all routes/middleware are registered.
+# See bottom of file: the module-level `app` is replaced with the wrapped version.
 
 # Mount channel management router (webhooks, extras, channel status/toggle)
 app.include_router(channels_router)
@@ -218,16 +251,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup_event():
-    await _startup_event(_start_channel_adapter_fn=_start_channel_adapter)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await _shutdown_event(_stop_channel_adapter_fn=_stop_channel_adapter)
 
 
 # ==================== MCP Server API ====================
@@ -505,91 +528,21 @@ async def search_skills_library(q: str = "", limit: int = 30):
 @app.post("/api/skills/install")
 async def install_skill(request: Request):
     """Install a skill by cloning its GitHub repo and copying the skill directory."""
-    import shutil
-    import tempfile
-    from pathlib import Path
-
     from fastapi.responses import JSONResponse
+
+    from pocketpaw.skills.installer import SkillInstallError, install_skill_from_source
 
     data = await request.json()
     source = data.get("source", "").strip()
-    if not source:
-        return JSONResponse({"error": "Missing 'source' field"}, status_code=400)
-
-    if ".." in source or ";" in source or "|" in source or "&" in source:
-        return JSONResponse({"error": "Invalid source format"}, status_code=400)
-
-    parts = source.split("/")
-    if len(parts) < 2:
-        return JSONResponse(
-            {"error": "Source must be owner/repo or owner/repo/skill"}, status_code=400
-        )
-
-    owner, repo = parts[0], parts[1]
-    skill_name = parts[2] if len(parts) >= 3 else None
-
-    install_dir = Path.home() / ".agents" / "skills"
-    install_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proc = await asyncio.create_subprocess_exec(
-                "git",
-                "clone",
-                "--depth=1",
-                f"https://github.com/{owner}/{repo}.git",
-                tmpdir,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-            if proc.returncode != 0:
-                err = stderr.decode(errors="replace").strip()
-                return JSONResponse({"error": f"Clone failed: {err}"}, status_code=500)
-
-            tmp = Path(tmpdir)
-
-            # Find skill directories containing SKILL.md.
-            # Repos may store skills at root level or inside a skills/ subdirectory.
-            skill_dirs: list[tuple[str, Path]] = []
-
-            if skill_name:
-                for candidate in [tmp / skill_name, tmp / "skills" / skill_name]:
-                    if (candidate / "SKILL.md").exists():
-                        skill_dirs.append((skill_name, candidate))
-                        break
-            else:
-                for scan_dir in [tmp, tmp / "skills"]:
-                    if not scan_dir.is_dir():
-                        continue
-                    for item in sorted(scan_dir.iterdir()):
-                        if item.is_dir() and (item / "SKILL.md").exists():
-                            skill_dirs.append((item.name, item))
-
-            if not skill_dirs:
-                return JSONResponse(
-                    {"error": f"No SKILL.md found for '{skill_name or source}'"},
-                    status_code=404,
-                )
-
-            installed = []
-            for name, src_dir in skill_dirs:
-                dest = install_dir / name
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(src_dir, dest)
-                installed.append(name)
-
-            loader = get_skill_loader()
-            loader.reload()
-            return {"status": "ok", "installed": installed}
-
-    except TimeoutError:
-        return JSONResponse({"error": "Clone timed out (30s)"}, status_code=504)
-    except Exception as exc:
+        installed = await install_skill_from_source(source)
+        return {"status": "ok", "installed": installed}
+    except SkillInstallError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    except Exception:
         logger.exception("Skill install failed")
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return JSONResponse({"error": "Skill install failed"}, status_code=500)
 
 
 @app.post("/api/skills/remove")
@@ -1365,13 +1318,7 @@ async def export_session(id: str = "", format: str = "json"):
 async def get_long_term_memory(limit: int = 50):
     """Get long-term memories."""
     manager = get_memory_manager()
-    # Access store directly for filtered query, or use get_by_type if exposed
-    # Manager doesn't expose get_by_type publicly in facade
-    # (it used _store.get_by_type in get_context_for_agent)
-    # So we use filtered search or we should expose it.
-    # For now, let's use _store hack or add method to manager?
-    # I'll rely on a new Manager method or _store for now to keep it simple.
-    items = await manager._store.get_by_type(MemoryType.LONG_TERM, limit=limit)
+    items = await manager.get_by_type(MemoryType.LONG_TERM, limit=limit)
     return [
         {
             "id": item.id,
@@ -1391,6 +1338,38 @@ async def delete_long_term_memory(entry_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="Memory entry not found")
     return {"ok": True}
+
+
+@app.patch("/api/memory/long_term/{entry_id}")
+async def update_long_term_memory(entry_id: str, request: Request):
+    """Update a long-term memory entry by ID."""
+    data = await request.json()
+    content = data.get("content")
+    tags = data.get("tags")
+
+    manager = get_memory_manager()
+    updated = await manager.update_memory(entry_id, content=content, tags=tags)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Memory entry not found or update unsupported")
+    return {"ok": True}
+
+
+@app.get("/api/memory/graph")
+async def get_memory_graph(q: str = "", limit: int = 200):
+    """Get lightweight knowledge graph snapshot for memory visualization."""
+    manager = get_memory_manager()
+    return await manager.get_graph_snapshot(query=q or None, limit=max(1, min(limit, 500)))
+
+
+@app.post("/api/memory/prune")
+async def prune_memory(request: Request):
+    """Prune old memories and clean orphan vector/graph records."""
+    data = await request.json()
+    days = int(data.get("older_than_days", 30))
+    days = max(1, min(days, 3650))
+
+    manager = get_memory_manager()
+    return await manager.prune_memories(older_than_days=days)
 
 
 @app.get("/api/audit")
@@ -1708,16 +1687,34 @@ async def save_memory_settings(request: Request):
 async def get_memory_stats():
     """Get memory backend statistics."""
     manager = get_memory_manager()
-    store = manager._store
+    try:
+        return await manager.get_memory_stats()
+    except (AttributeError, TypeError):
+        pass
 
-    if hasattr(store, "get_memory_stats"):
-        return await store.get_memory_stats()
+    store = getattr(manager, "_store", None)
+    if store and hasattr(store, "get_memory_stats"):
+        stats_result = store.get_memory_stats()
+        if hasattr(stats_result, "__await__"):
+            return await stats_result
+        return stats_result
 
-    # File backend basic stats
     return {
         "backend": "file",
-        "total_memories": "N/A (use mem0 for stats)",
+        "total_memories": 0,
+        "session_memories": 0,
+        "long_term_memories": 0,
     }
+
+
+@app.get("/api/memory/graph.svg")
+async def get_memory_graph_svg(q: str = "", limit: int = 200, width: int = 800, height: int = 400):
+    """Get SVG visualization of the memory knowledge graph."""
+    from fastapi.responses import Response
+
+    manager = get_memory_manager()
+    svg = await manager.get_graph_svg(query=q or None, limit=limit, width=width, height=height)
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 def run_dashboard(
@@ -1806,6 +1803,21 @@ def run_dashboard(
                 logger.error("Max restart limit (%d) reached, exiting.", _MAX_RESTARTS)
                 break
             logger.info("Restarting server with updated settings...")
+
+
+# ---------------------------------------------------------------------------
+# Wrap FastAPI app with Socket.IO ASGI middleware (enterprise real-time chat)
+# Must be AFTER all routes and middleware are registered.
+# ---------------------------------------------------------------------------
+try:
+    from ee.cloud.socketio_server import wrap_asgi_app
+
+    app = wrap_asgi_app(app)
+    logger.info("Socket.IO ASGI wrapper applied")
+except ImportError:
+    pass
+except Exception as _sio_exc:
+    logger.warning("Socket.IO wrapper failed: %s", _sio_exc)
 
 
 if __name__ == "__main__":

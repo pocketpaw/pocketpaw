@@ -1,0 +1,115 @@
+# Jira connector — Atlassian project & issue tracking.
+# Created: 2026-03-30
+
+name: jira
+display_name: Jira
+type: project-management
+icon: kanban
+
+auth:
+  method: basic
+  credentials:
+    - name: JIRA_BASE_URL
+      description: Jira instance URL (e.g. https://yourorg.atlassian.net)
+      required: true
+    - name: JIRA_EMAIL
+      description: Atlassian account email
+      required: true
+    - name: JIRA_API_TOKEN
+      description: Atlassian API token (create at id.atlassian.net/manage-profile/security/api-tokens)
+      required: true
+
+actions:
+  - name: search_issues
+    description: Search issues using JQL
+    method: GET
+    url: "{JIRA_BASE_URL}/rest/api/3/search"
+    params:
+      jql: { type: string, required: true, description: "JQL query (e.g. project = PROJ AND status != Done)" }
+      maxResults: { type: integer, default: 25 }
+      fields: { type: string, default: "summary,status,assignee,priority,created,updated,issuetype" }
+    trust_level: auto
+
+  - name: get_issue
+    description: Get a specific issue by key
+    method: GET
+    url: "{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
+    params:
+      issue_key: { type: string, required: true, description: "Issue key (e.g. PROJ-123)" }
+    trust_level: auto
+
+  - name: list_projects
+    description: List all accessible projects
+    method: GET
+    url: "{JIRA_BASE_URL}/rest/api/3/project"
+    params:
+      maxResults: { type: integer, default: 50 }
+    trust_level: auto
+
+  - name: list_sprints
+    description: List sprints for a board
+    method: GET
+    url: "{JIRA_BASE_URL}/rest/agile/1.0/board/{board_id}/sprint"
+    params:
+      board_id: { type: integer, required: true }
+      state: { type: string, enum: [active, future, closed], default: active }
+    trust_level: auto
+
+  - name: create_issue
+    description: Create a new Jira issue
+    method: POST
+    url: "{JIRA_BASE_URL}/rest/api/3/issue"
+    body:
+      fields:
+        type: object
+        required: true
+        description: "{project: {key: 'PROJ'}, summary: '...', issuetype: {name: 'Task'}, description: {...}}"
+    trust_level: confirm
+
+  - name: transition_issue
+    description: Move an issue to a new status
+    method: POST
+    url: "{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/transitions"
+    params:
+      issue_key: { type: string, required: true }
+    body:
+      transition:
+        type: object
+        required: true
+        description: "{id: 'transition_id'}"
+    trust_level: confirm
+
+  - name: add_comment
+    description: Add a comment to an issue
+    method: POST
+    url: "{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
+    params:
+      issue_key: { type: string, required: true }
+    body:
+      body:
+        type: object
+        required: true
+        description: "Atlassian Document Format comment body"
+    trust_level: confirm
+
+  - name: assign_issue
+    description: Assign an issue to a user
+    method: PUT
+    url: "{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/assignee"
+    params:
+      issue_key: { type: string, required: true }
+    body:
+      accountId: { type: string, required: true, description: "Atlassian account ID of the assignee" }
+    trust_level: confirm
+
+sync:
+  table: jira_issues
+  schedule: every_15m
+  mapping:
+    id: id
+    key: key
+    summary: fields.summary
+    status: fields.status.name
+    assignee: fields.assignee.displayName
+    priority: fields.priority.name
+    type: fields.issuetype.name

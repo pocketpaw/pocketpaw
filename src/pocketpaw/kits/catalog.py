@@ -1,7 +1,7 @@
-"""PawKit Catalog — curated registry of installable command center kits.
+"""PawKit Catalog — curated registry of installable Pocket types.
 
-Provides a catalog of pre-configured dashboard kits that users can browse
-and install from the Kit Store in the desktop client.
+Provides a catalog of pre-configured Pockets (living dashboards) that users
+can browse and install from the Pocket Store.
 
 Pattern mirrors src/pocketpaw/mcp/presets.py.
 """
@@ -31,6 +31,26 @@ class KitCatalogEntry:
 # ---------------------------------------------------------------------------
 
 _CATALOG: list[KitCatalogEntry] = [
+    KitCatalogEntry(
+        id="mission-control",
+        name="Mission Control",
+        description="Monitor agents, delegate tasks, and track multi-agent workflows",
+        icon="radio-tower",
+        category="general",
+        author="PocketPaw",
+        tags=["agents", "orchestration", "mission-control", "multi-agent"],
+        preview="Agent roster, task kanban, activity feed, fleet metrics",
+    ),
+    KitCatalogEntry(
+        id="deep-work",
+        name="Deep Work",
+        description="Plan goals, decompose into tasks, and let agents execute autonomously",
+        icon="brain",
+        category="general",
+        author="PocketPaw",
+        tags=["deep-work", "planning", "projects", "goals", "autonomous"],
+        preview="Project kanban, daily standup, deliverables table, agent metrics",
+    ),
     KitCatalogEntry(
         id="project-orchestrator",
         name="Project Orchestrator",
@@ -78,6 +98,8 @@ _CATALOG_BY_ID: dict[str, KitCatalogEntry] = {e.id: e for e in _CATALOG}
 
 # Map catalog kit IDs to their bundled YAML filenames
 _BUILTIN_YAMLS: dict[str, str] = {
+    "mission-control": "mission_control.yaml",
+    "deep-work": "deep_work.yaml",
     "project-orchestrator": "project_orchestrator.yaml",
     "research-hub": "research_hub.yaml",
     "sprint-tracker": "sprint_tracker.yaml",

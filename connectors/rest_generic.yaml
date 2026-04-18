@@ -1,0 +1,71 @@
+# Generic REST connector — connect any REST API with user-defined endpoints.
+# Created: 2026-03-27
+# Updated: 2026-03-30 — Added PUT, PATCH, DELETE methods and header support.
+
+name: rest_generic
+display_name: REST API
+type: api
+icon: globe
+auth:
+  method: bearer
+  credentials:
+    - name: BASE_URL
+      description: Base URL for the API (e.g. https://api.example.com)
+      required: true
+    - name: API_TOKEN
+      description: Bearer token or API key
+      required: false
+    - name: CUSTOM_HEADER_NAME
+      description: Custom header name (e.g. X-Api-Key) — if your API uses non-Bearer auth
+      required: false
+    - name: CUSTOM_HEADER_VALUE
+      description: Custom header value
+      required: false
+
+actions:
+  - name: get_endpoint
+    description: Make a GET request to any endpoint
+    method: GET
+    params:
+      path: { type: string, required: true, description: "API path (e.g. /users)" }
+      query: { type: object, description: "Query parameters as key=value" }
+    trust_level: auto
+
+  - name: post_endpoint
+    description: Make a POST request with JSON body
+    method: POST
+    params:
+      path: { type: string, required: true }
+    body:
+      data: { type: object, description: "JSON request body" }
+    trust_level: confirm
+
+  - name: put_endpoint
+    description: Make a PUT request to replace a resource
+    method: PUT
+    params:
+      path: { type: string, required: true }
+    body:
+      data: { type: object, description: "JSON request body" }
+    trust_level: confirm
+
+  - name: patch_endpoint
+    description: Make a PATCH request to partially update a resource
+    method: PATCH
+    params:
+      path: { type: string, required: true }
+    body:
+      data: { type: object, description: "JSON request body" }
+    trust_level: confirm
+
+  - name: delete_endpoint
+    description: Make a DELETE request to remove a resource
+    method: DELETE
+    params:
+      path: { type: string, required: true }
+    trust_level: restricted
+
+sync:
+  table: api_data
+  schedule: manual
+  mapping: {}

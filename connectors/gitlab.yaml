@@ -1,0 +1,108 @@
+# GitLab connector — repositories, issues, merge requests, and CI/CD.
+# Created: 2026-03-30
+
+name: gitlab
+display_name: GitLab
+type: developer
+icon: git-merge
+
+auth:
+  method: bearer
+  credentials:
+    - name: GITLAB_TOKEN
+      description: GitLab personal access token
+      required: true
+    - name: GITLAB_BASE_URL
+      description: GitLab instance URL (default api.gitlab.com for cloud)
+      required: false
+
+actions:
+  - name: list_projects
+    description: List projects accessible to the authenticated user
+    method: GET
+    url: https://gitlab.com/api/v4/projects
+    params:
+      membership: { type: boolean, default: true }
+      order_by: { type: string, enum: [id, name, created_at, updated_at, last_activity_at], default: last_activity_at }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_issues
+    description: List issues for a project
+    method: GET
+    url: https://gitlab.com/api/v4/projects/{project_id}/issues
+    params:
+      project_id: { type: string, required: true, description: "Project ID or URL-encoded path" }
+      state: { type: string, enum: [opened, closed, all], default: opened }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_merge_requests
+    description: List merge requests for a project
+    method: GET
+    url: https://gitlab.com/api/v4/projects/{project_id}/merge_requests
+    params:
+      project_id: { type: string, required: true }
+      state: { type: string, enum: [opened, closed, merged, all], default: opened }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_pipelines
+    description: List CI/CD pipelines for a project
+    method: GET
+    url: https://gitlab.com/api/v4/projects/{project_id}/pipelines
+    params:
+      project_id: { type: string, required: true }
+      status: { type: string, enum: [running, pending, success, failed, canceled, skipped] }
+      per_page: { type: integer, default: 20 }
+    trust_level: auto
+
+  - name: get_pipeline_jobs
+    description: List jobs in a specific pipeline
+    method: GET
+    url: https://gitlab.com/api/v4/projects/{project_id}/pipelines/{pipeline_id}/jobs
+    params:
+      project_id: { type: string, required: true }
+      pipeline_id: { type: integer, required: true }
+    trust_level: auto
+
+  - name: search_projects
+    description: Search for projects by name
+    method: GET
+    url: https://gitlab.com/api/v4/projects
+    params:
+      search: { type: string, required: true }
+      per_page: { type: integer, default: 20 }
+    trust_level: auto
+
+  - name: create_issue
+    description: Create a new project issue
+    method: POST
+    url: https://gitlab.com/api/v4/projects/{project_id}/issues
+    params:
+      project_id: { type: string, required: true }
+    body:
+      title: { type: string, required: true }
+      description: { type: string }
+      labels: { type: string, description: "Comma-separated label names" }
+      assignee_ids: { type: object, description: "Array of user IDs" }
+    trust_level: confirm
+
+  - name: list_environments
+    description: List deployment environments
+    method: GET
+    url: https://gitlab.com/api/v4/projects/{project_id}/environments
+    params:
+      project_id: { type: string, required: true }
+      per_page: { type: integer, default: 20 }
+    trust_level: auto
+
+sync:
+  table: gitlab_projects
+  schedule: every_30m
+  mapping:
+    id: id
+    name: path_with_namespace
+    description: description
+    stars: star_count
+    updated: last_activity_at

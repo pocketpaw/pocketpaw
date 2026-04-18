@@ -1,0 +1,114 @@
+# Salesforce connector — enterprise CRM data integration.
+# Created: 2026-03-30
+
+name: salesforce
+display_name: Salesforce
+type: crm
+icon: cloud
+
+auth:
+  method: bearer
+  credentials:
+    - name: SF_ACCESS_TOKEN
+      description: Salesforce OAuth access token
+      required: true
+    - name: SF_INSTANCE_URL
+      description: Salesforce instance URL (e.g. https://yourorg.salesforce.com)
+      required: true
+
+actions:
+  - name: query_soql
+    description: Run a SOQL query against Salesforce
+    method: GET
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/query"
+    params:
+      q: { type: string, required: true, description: "SOQL query (e.g. SELECT Id, Name FROM Account LIMIT 10)" }
+    trust_level: auto
+
+  - name: list_accounts
+    description: List Salesforce accounts (companies)
+    method: GET
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/query"
+    params:
+      q: { type: string, default: "SELECT Id, Name, Industry, Website, AnnualRevenue, NumberOfEmployees FROM Account ORDER BY LastModifiedDate DESC LIMIT 25" }
+    trust_level: auto
+
+  - name: list_contacts
+    description: List Salesforce contacts
+    method: GET
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/query"
+    params:
+      q: { type: string, default: "SELECT Id, FirstName, LastName, Email, Phone, AccountId, Title FROM Contact ORDER BY LastModifiedDate DESC LIMIT 25" }
+    trust_level: auto
+
+  - name: list_opportunities
+    description: List open sales opportunities
+    method: GET
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/query"
+    params:
+      q: { type: string, default: "SELECT Id, Name, StageName, Amount, CloseDate, AccountId, Probability FROM Opportunity WHERE IsClosed = false ORDER BY CloseDate ASC LIMIT 25" }
+    trust_level: auto
+
+  - name: list_leads
+    description: List recent leads
+    method: GET
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/query"
+    params:
+      q: { type: string, default: "SELECT Id, FirstName, LastName, Email, Company, Status, LeadSource FROM Lead WHERE IsConverted = false ORDER BY CreatedDate DESC LIMIT 25" }
+    trust_level: auto
+
+  - name: list_cases
+    description: List support cases
+    method: GET
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/query"
+    params:
+      q: { type: string, default: "SELECT Id, CaseNumber, Subject, Status, Priority, ContactId, AccountId FROM Case WHERE IsClosed = false ORDER BY CreatedDate DESC LIMIT 25" }
+    trust_level: auto
+
+  - name: create_lead
+    description: Create a new lead in Salesforce
+    method: POST
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/sobjects/Lead"
+    body:
+      FirstName: { type: string }
+      LastName: { type: string, required: true }
+      Email: { type: string }
+      Company: { type: string, required: true }
+      Phone: { type: string }
+      LeadSource: { type: string }
+    trust_level: confirm
+
+  - name: create_contact
+    description: Create a new contact
+    method: POST
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/sobjects/Contact"
+    body:
+      FirstName: { type: string }
+      LastName: { type: string, required: true }
+      Email: { type: string }
+      Phone: { type: string }
+      AccountId: { type: string }
+      Title: { type: string }
+    trust_level: confirm
+
+  - name: update_opportunity_stage
+    description: Update the stage of an opportunity
+    method: PATCH
+    url: "{SF_INSTANCE_URL}/services/data/v59.0/sobjects/Opportunity/{opportunity_id}"
+    params:
+      opportunity_id: { type: string, required: true, description: "Opportunity record ID" }
+    body:
+      StageName: { type: string, required: true }
+      Amount: { type: number }
+      CloseDate: { type: string }
+    trust_level: confirm
+
+sync:
+  table: salesforce_accounts
+  schedule: every_15m
+  mapping:
+    id: Id
+    name: Name
+    industry: Industry
+    website: Website
+    revenue: AnnualRevenue

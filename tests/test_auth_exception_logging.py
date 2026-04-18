@@ -43,6 +43,11 @@ def auth_test_client():
     from starlette.testclient import TestClient
 
     from pocketpaw.dashboard import app
+    from pocketpaw.security.rate_limiter import api_limiter, auth_limiter
+
+    # Reset rate-limiter state so tests are not affected by prior requests
+    auth_limiter._buckets.clear()
+    api_limiter._buckets.clear()
 
     return TestClient(app, raise_server_exceptions=False)
 

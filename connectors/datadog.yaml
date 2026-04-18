@@ -1,0 +1,114 @@
+# Datadog connector — monitoring, APM, and observability.
+# Created: 2026-03-30
+
+name: datadog
+display_name: Datadog
+type: observability
+icon: activity
+
+auth:
+  method: api_key
+  credentials:
+    - name: DD_API_KEY
+      description: Datadog API key
+      required: true
+    - name: DD_APP_KEY
+      description: Datadog application key
+      required: true
+    - name: DD_SITE
+      description: Datadog site (e.g. datadoghq.com, datadoghq.eu, us5.datadoghq.com)
+      required: false
+
+actions:
+  - name: list_monitors
+    description: List configured monitors and their statuses
+    method: GET
+    url: https://api.datadoghq.com/api/v1/monitor
+    params:
+      page_size: { type: integer, default: 25 }
+      group_states: { type: string, default: "alert,warn,no data" }
+    trust_level: auto
+
+  - name: search_monitors
+    description: Search monitors by query
+    method: GET
+    url: https://api.datadoghq.com/api/v1/monitor/search
+    params:
+      query: { type: string, required: true, description: "Search query (e.g. tag:env:production status:alert)" }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: query_metrics
+    description: Query time-series metrics
+    method: GET
+    url: https://api.datadoghq.com/api/v1/query
+    params:
+      query: { type: string, required: true, description: "Datadog metrics query (e.g. avg:system.cpu.user{env:production})" }
+      from: { type: integer, required: true, description: "Start timestamp (epoch seconds)" }
+      to: { type: integer, required: true, description: "End timestamp (epoch seconds)" }
+    trust_level: auto
+
+  - name: list_events
+    description: List recent events
+    method: GET
+    url: https://api.datadoghq.com/api/v1/events
+    params:
+      start: { type: integer, required: true, description: "Start timestamp (epoch seconds)" }
+      end: { type: integer, required: true, description: "End timestamp (epoch seconds)" }
+      priority: { type: string, enum: [normal, low] }
+    trust_level: auto
+
+  - name: list_dashboards
+    description: List all dashboards
+    method: GET
+    url: https://api.datadoghq.com/api/v1/dashboard
+    trust_level: auto
+
+  - name: list_hosts
+    description: List infrastructure hosts
+    method: GET
+    url: https://api.datadoghq.com/api/v1/hosts
+    params:
+      count: { type: integer, default: 25 }
+      filter: { type: string, description: "Filter by hostname, tag, etc." }
+    trust_level: auto
+
+  - name: list_downtimes
+    description: List scheduled downtimes
+    method: GET
+    url: https://api.datadoghq.com/api/v1/downtime
+    trust_level: auto
+
+  - name: search_logs
+    description: Search logs
+    method: POST
+    url: https://api.datadoghq.com/api/v2/logs/events/search
+    body:
+      filter:
+        type: object
+        required: true
+        description: "{query: '@service:web-app status:error', from: 'now-1h', to: 'now'}"
+      page: { type: object, default: { limit: 25 } }
+    trust_level: auto
+
+  - name: mute_monitor
+    description: Mute a monitor
+    method: POST
+    url: https://api.datadoghq.com/api/v1/monitor/{monitor_id}/mute
+    params:
+      monitor_id: { type: integer, required: true }
+    body:
+      end: { type: integer, description: "End timestamp for the mute (epoch seconds)" }
+      scope: { type: string, description: "Scope to mute (e.g. env:staging)" }
+    trust_level: confirm
+
+sync:
+  table: datadog_monitors
+  schedule: every_5m
+  mapping:
+    id: id
+    name: name
+    type: type
+    status: overall_state
+    query: query
+    updated: modified

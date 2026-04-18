@@ -1,0 +1,100 @@
+# HubSpot connector — CRM, marketing, and sales data.
+# Created: 2026-03-30
+
+name: hubspot
+display_name: HubSpot
+type: crm
+icon: target
+
+auth:
+  method: bearer
+  credentials:
+    - name: HUBSPOT_ACCESS_TOKEN
+      description: HubSpot private app access token
+      required: true
+
+actions:
+  - name: list_contacts
+    description: List CRM contacts
+    method: GET
+    url: https://api.hubapi.com/crm/v3/objects/contacts
+    params:
+      limit: { type: integer, default: 20 }
+      properties: { type: string, default: "firstname,lastname,email,phone,company,lifecyclestage" }
+    trust_level: auto
+
+  - name: list_companies
+    description: List CRM companies
+    method: GET
+    url: https://api.hubapi.com/crm/v3/objects/companies
+    params:
+      limit: { type: integer, default: 20 }
+      properties: { type: string, default: "name,domain,industry,annualrevenue,numberofemployees" }
+    trust_level: auto
+
+  - name: list_deals
+    description: List sales deals
+    method: GET
+    url: https://api.hubapi.com/crm/v3/objects/deals
+    params:
+      limit: { type: integer, default: 20 }
+      properties: { type: string, default: "dealname,amount,dealstage,closedate,pipeline" }
+    trust_level: auto
+
+  - name: list_tickets
+    description: List support tickets
+    method: GET
+    url: https://api.hubapi.com/crm/v3/objects/tickets
+    params:
+      limit: { type: integer, default: 20 }
+      properties: { type: string, default: "subject,content,hs_pipeline_stage,hs_ticket_priority,createdate" }
+    trust_level: auto
+
+  - name: search_contacts
+    description: Search contacts by query
+    method: POST
+    url: https://api.hubapi.com/crm/v3/objects/contacts/search
+    body:
+      query: { type: string, required: true, description: "Search term (name, email, etc.)" }
+      limit: { type: integer, default: 10 }
+    trust_level: auto
+
+  - name: create_contact
+    description: Create a new CRM contact
+    method: POST
+    url: https://api.hubapi.com/crm/v3/objects/contacts
+    body:
+      properties:
+        type: object
+        required: true
+        description: "Contact properties: {firstname, lastname, email, phone, company}"
+    trust_level: confirm
+
+  - name: create_deal
+    description: Create a new sales deal
+    method: POST
+    url: https://api.hubapi.com/crm/v3/objects/deals
+    body:
+      properties:
+        type: object
+        required: true
+        description: "Deal properties: {dealname, amount, dealstage, pipeline, closedate}"
+    trust_level: confirm
+
+  - name: list_owners
+    description: List HubSpot users/owners
+    method: GET
+    url: https://api.hubapi.com/crm/v3/owners
+    params:
+      limit: { type: integer, default: 50 }
+    trust_level: auto
+
+sync:
+  table: hubspot_contacts
+  schedule: every_15m
+  mapping:
+    id: id
+    email: properties.email
+    first_name: properties.firstname
+    last_name: properties.lastname
+    company: properties.company

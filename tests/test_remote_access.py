@@ -1,49 +1,31 @@
-import shutil
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from pocketpaw.config import get_access_token, get_config_dir
+from pocketpaw.config import get_access_token
 
 # Import app and config logic
 from pocketpaw.dashboard import app
 
 
-# Mock config dir specifically for tests to avoid messing with real token
+# Mock config dir to use tmp_path — avoids race conditions under parallel test runs.
+# Patches every call site so get_access_token / get_token_path resolve to tmp_path.
 @pytest.fixture
 def mock_config(tmp_path):
-    # Override HOME or specific paths?
-    # Easier to mock get_config_dir for the duration of the test,
-    # but that's hard if imported.
-    # Instead, we'll back up existing token if any, and restore.
-
-    config_dir = get_config_dir()
-    token_path = config_dir / "access_token"
-    backup_path = config_dir / "access_token.bak"
-
-    had_token = False
-    if token_path.exists():
-        shutil.move(token_path, backup_path)
-        had_token = True
-
-    yield
-
-    # Restore
-    if token_path.exists():
-        token_path.unlink()
-
-    if had_token:
-        shutil.move(backup_path, token_path)
+    with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+        # Clear any cached token so it regenerates under tmp_path
+        token_path = tmp_path / "access_token"
+        token_path.unlink(missing_ok=True)
+        yield
 
 
-def test_token_generation(mock_config):
+def test_token_generation(mock_config, tmp_path):
     """Test that a token is generated if missing."""
-    settings_dir = get_config_dir()
-    token_path = settings_dir / "access_token"
+    token_path = tmp_path / "access_token"
 
     # Ensure clean state
-    if token_path.exists():
-        token_path.unlink()
+    token_path.unlink(missing_ok=True)
 
     token = get_access_token()
     assert token is not None
@@ -93,19 +75,22 @@ def test_auth_middleware_allow_query_param(mock_config):
     assert response.status_code == 200
 
 
-def test_qr_endpoint_open():
-    """Test QR endpoint is open (no auth required to GET it implies login flow,
-    but wait, we generate the QR *inside* the dashboard for the user to scan?
-    Or is it public?
-    Actually, usually the QR is displayed on the HOST device (localhost),
-    so the user is already on the machine.
-    Remote user logic:
-    We need access to /api/qr to show it on the dashboard.
-    Dashboard is loaded via localhost.
-    So /api/qr should be allowed locally?
-    Auth middleware allows /api/qr.
+def test_qr_endpoint_requires_auth():
+    """Test that /api/qr returns 401 without authentication.
+
+    Fixes #854 — the QR endpoint was previously exempt from auth,
+    allowing any network-reachable client to obtain a valid session token.
     """
     client = TestClient(app)
     response = client.get("/api/qr")
+    assert response.status_code == 401
+
+
+def test_qr_endpoint_allowed_with_auth(mock_config):
+    """Test that /api/qr returns a PNG image when authenticated."""
+    token = get_access_token()
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/api/qr", headers=headers)
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"

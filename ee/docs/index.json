@@ -1,0 +1,2796 @@
+{
+  "scope": "paw-enterprise",
+  "articles": {
+    "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations": {
+      "summary": "Event-driven bridge that listens for chat messages in groups, evaluates whether each agent should respond based on its respond_mode (silent, auto, mention_only, smart), and streams agent responses back to the group via WebSocket. Also handles ripple spec extraction and auto-pocket creation from agent output.",
+      "title": "Agent Bridge — Routing Chat Messages to AI Agents in Group Conversations"
+    },
+    "agent-configuration-document-model": {
+      "summary": "Defines the `Agent` document (stored in MongoDB's `agents` collection) and its embedded `AgentConfig` model. Agents are configuration-only records — they define how an AI agent behaves but don't handle execution. Includes Soul Protocol integration fields for personality and memory.",
+      "title": "Agent Configuration Document Model"
+    },
+    "agent-knowledge-service-eecloudagentsknowledgepy": {
+      "summary": "A thin service wrapper that scopes the core KnowledgeEngine to individual agents. Each agent gets its own isolated knowledge namespace via `agent:{agent_id}` scoping, enabling per-agent text, URL, and file ingestion plus search.",
+      "title": "Agent Knowledge Service (ee/cloud/agents/knowledge.py)"
+    },
+    "agents-domain-business-logic-service-eecloudagentsservicepy": {
+      "summary": "The stateless service layer for agent CRUD operations, enforcing business rules like slug uniqueness, owner-only mutations, and multi-level visibility-based discovery. Uses Beanie ODM for MongoDB persistence.",
+      "title": "Agents Domain Business Logic Service (ee/cloud/agents/service.py)"
+    },
+    "agents-domain-fastapi-router-eecloudagentsrouterpy": {
+      "summary": "The HTTP API layer for agent management in PocketPaw Enterprise Cloud. Provides CRUD operations, backend discovery, agent discovery with visibility rules, and a full knowledge base management API (text/URL/file ingestion, search, upload, clear).",
+      "title": "Agents Domain FastAPI Router (ee/cloud/agents/router.py)"
+    },
+    "agents-domain-package-init-eecloudagents": {
+      "summary": "Minimal package init that re-exports the agents router. Exists solely to make `ee.cloud.agents.router` importable as `ee.cloud.agents`.",
+      "title": "Agents Domain Package Init (ee/cloud/agents/)"
+    },
+    "agents-domain-pydantic-schemas-eecloudagentsschemaspy": {
+      "summary": "Pydantic request and response models for the agents domain API. Defines validation rules for agent creation, updates, and discovery, including soul customization fields (archetype, values, OCEAN personality scores).",
+      "title": "Agents Domain Pydantic Schemas (ee/cloud/agents/schemas.py)"
+    },
+    "audit-module-placeholder-eeaudit": {
+      "summary": "Placeholder package for enhanced compliance logging in PocketPaw Enterprise. Currently empty — planned to extend the Instinct audit log with export formats, retention policies, and compliance reporting.",
+      "title": "Audit Module Placeholder (ee/audit/)"
+    },
+    "auth-domain-fastapi-router-eecloudauthrouterpy": {
+      "summary": "The HTTP routing layer for authentication in PocketPaw Enterprise Cloud. Mounts fastapi-users' built-in auth routes for both cookie and bearer backends, adds registration, and provides profile management and workspace switching endpoints.",
+      "title": "Auth Domain FastAPI Router (ee/cloud/auth/router.py)"
+    },
+    "auth-domain-package-init-with-backward-compatible-re-exports-eecloudauth": {
+      "summary": "Re-exports all public auth symbols from core.py and the router. Exists for backward compatibility so code importing from `ee.cloud.auth` directly continues to work after the module was split into core.py, router.py, and service.py.",
+      "title": "Auth Domain Package Init with Backward-Compatible Re-exports (ee/cloud/auth/)"
+    },
+    "auth-domain-requestresponse-schemas": {
+      "summary": "Pydantic schemas for the authentication domain, covering profile updates, workspace selection, and user response serialization. These schemas define the API contract between the frontend and the auth service layer.",
+      "title": "Auth Domain Request/Response Schemas"
+    },
+    "auth-service-profile-and-workspace-business-logic": {
+      "summary": "Stateless service class encapsulating authentication-related business logic: profile retrieval, profile updates, and workspace switching. Follows the PocketPaw pattern of static async methods on a service class.",
+      "title": "Auth Service — Profile and Workspace Business Logic"
+    },
+    "automations-module-placeholder-eeautomations": {
+      "summary": "Placeholder package for time-based and data-driven triggers in PocketPaw Enterprise. Currently empty — designed for event-driven automation rules like inventory alerts and scheduled report generation.",
+      "title": "Automations Module Placeholder (ee/automations/)"
+    },
+    "chat-domain-package-init": {
+      "summary": "Package initializer for the chat domain that re-exports the router. This allows the main application to import the chat router directly from the package.",
+      "title": "Chat Domain Package Init"
+    },
+    "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb": {
+      "summary": "Subscribes to PocketPaw's message bus outbound channel to capture agent streaming responses and persist them to MongoDB. Also provides save_user_message() for the WebSocket adapter to persist user messages. Ensures all chat history is durable regardless of which chat system originated the message.",
+      "title": "Chat Persistence Bridge — Syncing Runtime WebSocket Messages to MongoDB"
+    },
+    "chat-router-rest-endpoints-and-websocket-handler": {
+      "summary": "The chat domain's HTTP and WebSocket layer. REST routes under `/chat` are license-gated and cover groups, messages, pins, search, and DMs. The WebSocket endpoint at `/ws/cloud` authenticates via JWT query param and dispatches typed JSON messages for real-time chat.",
+      "title": "Chat Router — REST Endpoints and WebSocket Handler"
+    },
+    "chat-schemas-rest-and-websocket-message-contracts": {
+      "summary": "Pydantic schemas defining the data contracts for the entire chat domain: group CRUD requests, message operations, cursor-based pagination responses, and typed WebSocket inbound/outbound message formats.",
+      "title": "Chat Schemas — REST and WebSocket Message Contracts"
+    },
+    "chat-service-group-and-message-business-logic": {
+      "summary": "The core business logic for the chat domain, split into GroupService (group CRUD, membership, agent management, DMs) and MessageService (send, edit, delete, reactions, threading, pins, search). Enforces authorization rules, emits events, and handles cursor-based pagination.",
+      "title": "Chat Service — Group and Message Business Logic"
+    },
+    "cloud-database-backward-compatibility-re-export": {
+      "summary": "A thin compatibility shim that re-exports database functions from `ee.cloud.shared.db`. Exists to preserve import paths after the database module was moved to the shared package.",
+      "title": "Cloud Database Backward Compatibility Re-export"
+    },
+    "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module": {
+      "summary": "Defines a structured exception hierarchy for the cloud module with machine-readable error codes and HTTP status codes. All cloud domains raise these instead of raw HTTPException, ensuring consistent error handling, logging, and API response formatting.",
+      "title": "Cloud Error Hierarchy — Unified Exception Types for the Cloud Module"
+    },
+    "cloud-models-package-beanie-document-registry": {
+      "summary": "Re-exports all cloud document models and defines the `ALL_DOCUMENTS` list required for Beanie ODM initialization. This central registry ensures all document classes are discovered when the database connection starts.",
+      "title": "Cloud Models Package — Beanie Document Registry"
+    },
+    "cloud-module-entrypoint-and-router-mounting-eecloudinitpy": {
+      "summary": "The central mounting function for PocketPaw Enterprise Cloud. `mount_cloud()` wires up all domain routers (auth, workspace, agents, chat, pockets, sessions), registers error handlers, event handlers, agent bridges, WebSocket endpoints, and manages the agent pool lifecycle.",
+      "title": "Cloud Module Entrypoint and Router Mounting (ee/cloud/__init__.py)"
+    },
+    "cloud-permission-guards-workspace-roles-and-pocket-access-levels": {
+      "summary": "Defines ordered enum hierarchies for workspace roles (member/admin/owner) and pocket access levels (view/comment/edit/owner), along with guard functions that raise Forbidden when a user lacks sufficient privilege. This module centralizes authorization checks so that every service method can enforce permissions with a single function call.",
+      "title": "Cloud Permission Guards: Workspace Roles and Pocket Access Levels"
+    },
+    "cloud-workspace-package-init": {
+      "summary": "Re-exports the workspace router so that importing ee.cloud.workspace gives immediate access to the FastAPI router. This is a standard Python package init with no business logic.",
+      "title": "Cloud Workspace Package Init"
+    },
+    "comment-document-threaded-comments-on-pockets": {
+      "summary": "Defines the `Comment` document model for threaded comments that can target pockets, widgets, or agents. Supports threading via a parent comment reference, @mentions, and comment resolution for task-like workflows.",
+      "title": "Comment Document — Threaded Comments on Pockets"
+    },
+    "cross-domain-event-handlers-for-cloud-side-effects": {
+      "summary": "Registers handlers for domain events (invite.accepted, message.sent, pocket.shared, member.removed) that trigger cross-domain side effects like auto-adding users to groups, creating notifications, and cleaning up memberships on workspace removal.",
+      "title": "Cross-Domain Event Handlers for Cloud Side Effects"
+    },
+    "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy": {
+      "summary": "The authentication foundation for PocketPaw Enterprise Cloud. Implements JWT-based auth with dual transports (cookie for browsers, bearer for API/Tauri), user lifecycle management via fastapi-users, and idempotent admin seeding for first-run setup.",
+      "title": "Enterprise Auth Core — JWT, User Management, and Admin Seeding (ee/cloud/auth/core.py)"
+    },
+    "enterprise-extensions-package-root-initpy": {
+      "summary": "The top-level __init__.py for PocketPaw's Enterprise Extensions (ee/) package. It serves as a module directory listing licensed enterprise features including Fabric, Instinct, Automations, and Audit subsystems.",
+      "title": "Enterprise Extensions Package Root (__init__.py)"
+    },
+    "enterprise-license-validation-system": {
+      "summary": "Cryptographic license validation for PocketPaw Enterprise features. Supports Ed25519 signatures for production and HMAC-SHA256 for self-hosted deployments. Provides FastAPI dependencies for gating endpoints behind valid licenses and specific feature flags.",
+      "title": "Enterprise License Validation System"
+    },
+    "fabric-data-models-ontology-types-objects-links-and-queries": {
+      "summary": "Pydantic models defining the Fabric ontology schema — PropertyDef for type-level property definitions, ObjectType for business object categories, FabricObject for instances, FabricLink for directional relationships, and FabricQuery/FabricQueryResult for querying. All IDs are generated client-side with time-based prefixed strings.",
+      "title": "Fabric Data Models: Ontology Types, Objects, Links, and Queries"
+    },
+    "fabric-package-init-ontology-layer-public-api": {
+      "summary": "Package init for the Fabric ontology layer that re-exports all public types (ObjectType, PropertyDef, FabricObject, FabricLink, FabricQuery) and the FabricStore. Fabric maps raw data into typed business objects with relationships so agents can reason across data.",
+      "title": "Fabric Package Init: Ontology Layer Public API"
+    },
+    "fabric-rest-api-router-object-types-objects-links-and-queries": {
+      "summary": "FastAPI router exposing CRUD endpoints for the Fabric ontology layer — define object types, create/query objects, create links between objects, and retrieve store statistics. Each request creates a fresh FabricStore instance pointing at the user's local SQLite database.",
+      "title": "Fabric REST API Router: Object Types, Objects, Links, and Queries"
+    },
+    "fabricstore-async-sqlite-persistence-for-the-ontology-layer": {
+      "summary": "Async SQLite store implementing CRUD operations for object types, objects, and links in the Fabric ontology. Uses aiosqlite for non-blocking database access, lazy schema initialization, and JSON serialization for nested properties. Supports graph-style queries via link traversal.",
+      "title": "FabricStore: Async SQLite Persistence for the Ontology Layer"
+    },
+    "fastapi-dependencies-for-cloud-authentication-and-authorization": {
+      "summary": "Provides reusable FastAPI dependency functions that extract the authenticated user, user ID, and workspace ID from JWT tokens. Also includes a require_role dependency factory for role-based access control on workspace operations.",
+      "title": "FastAPI Dependencies for Cloud Authentication and Authorization"
+    },
+    "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage": {
+      "summary": "Beanie document model that stores file metadata in MongoDB while actual file bytes live in S3, GCS, or local storage. Acts as the indirection layer between the application and multi-cloud object storage providers.",
+      "title": "FileObj Model: Cloud File Metadata with Pre-Signed URL Storage"
+    },
+    "group-model-multi-user-chat-channels-with-ai-agent-participants": {
+      "summary": "Beanie document model for chat groups/channels that support both human members and AI agent participants. Groups are workspace-scoped and support Slack-like features including public/private/DM types, pinned messages, and agent response modes.",
+      "title": "Group Model: Multi-User Chat Channels with AI Agent Participants"
+    },
+    "in-process-async-event-bus-for-cross-domain-communication": {
+      "summary": "Provides a simple pub/sub event bus that allows cloud domains to react to events from other domains without importing each other directly. Handlers are awaited sequentially with per-handler error isolation to prevent one failing handler from breaking others.",
+      "title": "In-Process Async Event Bus for Cross-Domain Communication"
+    },
+    "instinct-data-models-actions-triggers-context-and-audit-entries": {
+      "summary": "Pydantic models and StrEnum types defining the Instinct decision pipeline's data structures. Covers the full action lifecycle from proposal through execution/failure, plus audit entries that create an immutable compliance log of every decision made.",
+      "title": "Instinct Data Models: Actions, Triggers, Context, and Audit Entries"
+    },
+    "instinct-package-init-decision-pipeline-public-api": {
+      "summary": "Package init for the Instinct decision pipeline that re-exports all action models (Action, ActionStatus, ActionCategory, ActionPriority, ActionTrigger, ActionContext), audit types (AuditCategory, AuditEntry), and the InstinctStore. Instinct implements the human-in-the-loop decision loop: agent proposes, human approves, action executes, feedback captured.",
+      "title": "Instinct Package Init: Decision Pipeline Public API"
+    },
+    "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints": {
+      "summary": "FastAPI router for the Instinct decision pipeline, exposing endpoints to propose actions, approve/reject them, list pending and filtered actions, query the audit log, and export audit data as JSON for compliance. Uses a lazy singleton store from the main API module.",
+      "title": "Instinct REST API Router: Action Lifecycle and Audit Log Endpoints"
+    },
+    "instinct-store-singleton-accessor-eeapipy": {
+      "summary": "Provides a lazy-initialized singleton accessor for the InstinctStore, which backs the Instinct decision pipeline. This module exists so that core agent tools can import a stable entry point without coupling to the internal store implementation.",
+      "title": "Instinct Store Singleton Accessor (ee/api.py)"
+    },
+    "instinctstore-async-sqlite-persistence-for-the-decision-pipeline": {
+      "summary": "Async SQLite store managing the full action lifecycle (propose, approve, reject, execute, fail) and an immutable audit log. Every state transition automatically creates an audit entry, ensuring a complete compliance trail. Uses the same lazy-schema and connection-per-operation patterns as FabricStore.",
+      "title": "InstinctStore: Async SQLite Persistence for the Decision Pipeline"
+    },
+    "invite-model-workspace-membership-invitations-with-expiry": {
+      "summary": "Beanie document model for workspace invitations sent via email. Supports role-based access, 7-day expiry, revocation, and optional auto-join to a specific group on acceptance.",
+      "title": "Invite Model: Workspace Membership Invitations with Expiry"
+    },
+    "message-model-group-chat-messages-with-mentions-reactions-and-threading": {
+      "summary": "Beanie document model for chat messages within groups. Supports @mentions (users, agents, everyone), file/image/pocket attachments, emoji reactions, threaded replies, soft deletion, and edit tracking.",
+      "title": "Message Model: Group Chat Messages with Mentions, Reactions, and Threading"
+    },
+    "mongodb-connection-and-beanie-odm-initialization": {
+      "summary": "Manages the MongoDB connection lifecycle for the cloud module. Initializes the Beanie ODM with all document models on startup and provides a clean shutdown path. Uses a module-level singleton client pattern.",
+      "title": "MongoDB Connection and Beanie ODM Initialization"
+    },
+    "notification-model-in-app-user-notifications-with-source-tracking": {
+      "summary": "Beanie document model for in-app notifications delivered to users. Supports multiple notification types (mentions, replies, invites, agent completions), read/unread state, optional expiry, and a polymorphic source reference.",
+      "title": "Notification Model: In-App User Notifications with Source Tracking"
+    },
+    "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture": {
+      "summary": "Beanie document models for Pockets (customizable workspaces) and their embedded Widgets. Pockets are the core collaboration primitive in PocketPaw Enterprise, supporting team members, AI agents, configurable widgets with grid positioning, ripple specs, and multi-tier sharing (private, workspace, public, share links).",
+      "title": "Pocket and Widget Models: Workspace Canvases with Embedded Widget Architecture"
+    },
+    "pockets-package-init-router-re-export": {
+      "summary": "Package initializer that re-exports the pockets router for clean import paths. Allows other modules to import the router as `from ee.cloud.pockets import router` instead of the full submodule path.",
+      "title": "Pockets Package Init: Router Re-Export"
+    },
+    "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions": {
+      "summary": "FastAPI router defining the complete REST API surface for the Pockets domain. Covers pocket CRUD, widget management (add/update/remove/reorder), team and agent assignment, share link generation and access, collaborator management, and pocket-scoped session creation. All endpoints require a valid license and authenticated user context.",
+      "title": "Pockets Router: FastAPI REST API for Pocket CRUD, Widgets, Sharing, and Sessions"
+    },
+    "pockets-schemas-request-and-response-models-for-the-pockets-api": {
+      "summary": "Pydantic request and response schemas for the Pockets domain API. Defines validation rules for pocket creation (with inline agents, widgets, and ripple specs), updates, widget management, sharing controls, and collaborator management. Uses camelCase aliases to bridge the Python backend and JavaScript frontend conventions.",
+      "title": "Pockets Schemas: Request and Response Models for the Pockets API"
+    },
+    "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration": {
+      "summary": "Stateless service class containing all business logic for the Pockets domain. Handles pocket CRUD, widget lifecycle (add/update/remove/reorder), share link generation and access, collaborator management, team and agent assignment, and session linking. Enforces ownership and edit-access authorization with dedicated guard functions.",
+      "title": "PocketService: Business Logic for Pocket CRUD, Widgets, Sharing, and Collaboration"
+    },
+    "ripple-spec-normalizer-for-ai-generated-pocket-definitions": {
+      "summary": "Normalizes AI-generated rippleSpec dictionaries before they are persisted, ensuring consistent envelope fields (version, lifecycle, title, color, metadata) and generating widget IDs when missing. This module acts as a defensive layer between unpredictable LLM output and the storage layer.",
+      "title": "Ripple Spec Normalizer for AI-Generated Pocket Definitions"
+    },
+    "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract": {
+      "summary": "Beanie document model for chat sessions scoped to pockets, groups, or agents. Sessions track metadata (title, message count, last activity) in MongoDB while actual message content is stored separately in the Python runtime. Uses camelCase field aliases to match the frontend API contract.",
+      "title": "Session Model: Pocket-Scoped Chat Sessions with camelCase Frontend Contract"
+    },
+    "session-service-business-logic-for-session-lifecycle-management": {
+      "summary": "Stateless service class encapsulating all session business logic including CRUD, pocket-scoped queries, history retrieval from multiple backends, and activity tracking. Enforces ownership checks and emits domain events on session creation.",
+      "title": "Session Service — Business Logic for Session Lifecycle Management"
+    },
+    "sessions-api-router-crud-and-runtime-session-management": {
+      "summary": "FastAPI router providing CRUD endpoints for chat sessions, plus specialized runtime endpoints that bridge PocketPaw's file-based session store with the cloud API. All endpoints require a valid enterprise license via the require_license dependency.",
+      "title": "Sessions API Router — CRUD and Runtime Session Management"
+    },
+    "sessions-domain-pydantic-schemas": {
+      "summary": "Request and response Pydantic models for the sessions API. Defines CreateSessionRequest (with optional pocket/group/agent linking), UpdateSessionRequest, and SessionResponse for frontend consumption.",
+      "title": "Sessions Domain Pydantic Schemas"
+    },
+    "sessions-package-initialization": {
+      "summary": "Package init file that re-exports the sessions FastAPI router. This enables the cloud app to mount the sessions domain by importing from the package root.",
+      "title": "Sessions Package Initialization"
+    },
+    "shared-module-package-initialization": {
+      "summary": "Package init for the shared cross-cutting concerns module. Contains only a docstring — serves as a namespace marker for utilities used across all cloud domains.",
+      "title": "Shared Module Package Initialization"
+    },
+    "timestampeddocument-base-model-with-automatic-timestamps": {
+      "summary": "Base Beanie document class that automatically manages `createdAt` and `updatedAt` timestamps using Beanie's event hook system. All cloud domain documents inherit from this class.",
+      "title": "TimestampedDocument — Base Model with Automatic Timestamps"
+    },
+    "user-model-enterprise-users-with-oauth-and-multi-workspace-membership": {
+      "summary": "Beanie document model for enterprise users, built on top of fastapi-users-db-beanie. Supports OAuth accounts (Google, GitHub), multi-workspace membership with per-workspace roles, presence status, and avatar profiles.",
+      "title": "User Model: Enterprise Users with OAuth and Multi-Workspace Membership"
+    },
+    "websocket-connection-manager-for-real-time-chat": {
+      "summary": "Manages WebSocket connection lifecycle, user-to-connection mapping (supporting multi-tab/device), message routing to group members, typing indicators with auto-expiry, and presence tracking with grace periods. Exposed as a module-level singleton.",
+      "title": "WebSocket Connection Manager for Real-Time Chat"
+    },
+    "workspace-domain-pydantic-schemas-requests-and-responses": {
+      "summary": "Defines Pydantic models for all workspace API request and response payloads. Includes input validation such as slug format enforcement and role value constraints via regex patterns.",
+      "title": "Workspace Domain Pydantic Schemas: Requests and Responses"
+    },
+    "workspace-model-organization-level-tenant-with-plan-and-settings": {
+      "summary": "Beanie document model for organization workspaces — the top-level tenant boundary in PocketPaw Enterprise. Each workspace has a unique slug, an owner, a licensing plan (team/business/enterprise), seat limits, and configurable settings including default agent and data retention.",
+      "title": "Workspace Model: Organization-Level Tenant with Plan and Settings"
+    },
+    "workspace-rest-api-router-crud-members-and-invites": {
+      "summary": "FastAPI router defining all workspace HTTP endpoints — workspace CRUD, member management, and invite lifecycle. All routes require a valid license (via require_license dependency) and authenticated user (via current_user), with the single exception of invite validation which is public.",
+      "title": "Workspace REST API Router: CRUD, Members, and Invites"
+    },
+    "workspace-service-business-logic-for-crud-members-and-invites": {
+      "summary": "Stateless service class containing all workspace business logic — workspace lifecycle, member role management, and invite flow with seat-limit enforcement. Uses Beanie ODM for MongoDB operations and emits domain events via an event bus for cross-cutting concerns like notifications.",
+      "title": "Workspace Service: Business Logic for CRUD, Members, and Invites"
+    }
+  },
+  "concepts": {
+    "__init__.py": {
+      "name": "__init__.py",
+      "articles": [
+        "pockets-package-init-router-re-export"
+      ]
+    },
+    "_gen_id": {
+      "name": "_gen_id",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries"
+      ]
+    },
+    "_update_status": {
+      "name": "_update_status",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "access control": {
+      "name": "access control",
+      "articles": [
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "action": {
+      "name": "Action",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries",
+        "instinct-package-init-decision-pipeline-public-api"
+      ]
+    },
+    "action lifecycle": {
+      "name": "action lifecycle",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "actioncategory": {
+      "name": "ActionCategory",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "actioncontext": {
+      "name": "ActionContext",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "actionpriority": {
+      "name": "ActionPriority",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "actionstatus": {
+      "name": "ActionStatus",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "actiontrigger": {
+      "name": "ActionTrigger",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "activity tracking": {
+      "name": "activity tracking",
+      "articles": [
+        "session-service-business-logic-for-session-lifecycle-management",
+        "sessions-api-router-crud-and-runtime-session-management"
+      ]
+    },
+    "addcollaboratorrequest": {
+      "name": "AddCollaboratorRequest",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "addwidgetrequest": {
+      "name": "AddWidgetRequest",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "admin seeding": {
+      "name": "admin seeding",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy"
+      ]
+    },
+    "agent": {
+      "name": "Agent",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "agent bridge": {
+      "name": "agent bridge",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "agent configuration": {
+      "name": "agent configuration",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "agent creation": {
+      "name": "agent creation",
+      "articles": [
+        "agents-domain-pydantic-schemas-eecloudagentsschemaspy"
+      ]
+    },
+    "agent crud": {
+      "name": "agent CRUD",
+      "articles": [
+        "agents-domain-fastapi-router-eecloudagentsrouterpy"
+      ]
+    },
+    "agent management": {
+      "name": "agent management",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "agent pool": {
+      "name": "agent pool",
+      "articles": [
+        "cloud-module-entrypoint-and-router-mounting-eecloudinitpy"
+      ]
+    },
+    "agent scoping": {
+      "name": "agent scoping",
+      "articles": [
+        "agent-knowledge-service-eecloudagentsknowledgepy"
+      ]
+    },
+    "agentconfig": {
+      "name": "AgentConfig",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "agents domain": {
+      "name": "agents domain",
+      "articles": [
+        "agents-domain-package-init-eecloudagents"
+      ]
+    },
+    "agentservice": {
+      "name": "AgentService",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy"
+      ]
+    },
+    "ai output normalization": {
+      "name": "AI output normalization",
+      "articles": [
+        "ripple-spec-normalizer-for-ai-generated-pocket-definitions"
+      ]
+    },
+    "aiosqlite": {
+      "name": "aiosqlite",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer",
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "all_documents": {
+      "name": "ALL_DOCUMENTS",
+      "articles": [
+        "cloud-models-package-beanie-document-registry"
+      ]
+    },
+    "apirouter": {
+      "name": "APIRouter",
+      "articles": [
+        "fabric-rest-api-router-object-types-objects-links-and-queries",
+        "workspace-rest-api-router-crud-members-and-invites"
+      ]
+    },
+    "approval workflow": {
+      "name": "approval workflow",
+      "articles": [
+        "instinct-package-init-decision-pipeline-public-api"
+      ]
+    },
+    "approve": {
+      "name": "approve",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "approve/reject": {
+      "name": "approve/reject",
+      "articles": [
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints"
+      ]
+    },
+    "async event handling": {
+      "name": "async event handling",
+      "articles": [
+        "in-process-async-event-bus-for-cross-domain-communication"
+      ]
+    },
+    "async sqlite": {
+      "name": "async SQLite",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "asyncmongoclient": {
+      "name": "AsyncMongoClient",
+      "articles": [
+        "mongodb-connection-and-beanie-odm-initialization"
+      ]
+    },
+    "attachment": {
+      "name": "Attachment",
+      "articles": [
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading"
+      ]
+    },
+    "audit": {
+      "name": "audit",
+      "articles": [
+        "audit-module-placeholder-eeaudit",
+        "enterprise-extensions-package-root-initpy"
+      ]
+    },
+    "audit export": {
+      "name": "audit export",
+      "articles": [
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints"
+      ]
+    },
+    "audit log": {
+      "name": "audit log",
+      "articles": [
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints",
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "auditcategory": {
+      "name": "AuditCategory",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "auditentry": {
+      "name": "AuditEntry",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries",
+        "instinct-package-init-decision-pipeline-public-api"
+      ]
+    },
+    "auth domain": {
+      "name": "auth domain",
+      "articles": [
+        "auth-domain-package-init-with-backward-compatible-re-exports-eecloudauth"
+      ]
+    },
+    "auth router": {
+      "name": "auth router",
+      "articles": [
+        "auth-domain-fastapi-router-eecloudauthrouterpy"
+      ]
+    },
+    "auth schemas": {
+      "name": "auth schemas",
+      "articles": [
+        "auth-domain-requestresponse-schemas"
+      ]
+    },
+    "authorization": {
+      "name": "authorization",
+      "articles": [
+        "fastapi-dependencies-for-cloud-authentication-and-authorization",
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "authorization guards": {
+      "name": "authorization guards",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "authservice": {
+      "name": "AuthService",
+      "articles": [
+        "auth-service-profile-and-workspace-business-logic"
+      ]
+    },
+    "auto-expiry": {
+      "name": "auto-expiry",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "auto-pocket creation": {
+      "name": "auto-pocket creation",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "automations": {
+      "name": "automations",
+      "articles": [
+        "automations-module-placeholder-eeautomations",
+        "enterprise-extensions-package-root-initpy"
+      ]
+    },
+    "backend discovery": {
+      "name": "backend discovery",
+      "articles": [
+        "agents-domain-fastapi-router-eecloudagentsrouterpy"
+      ]
+    },
+    "backward compatibility": {
+      "name": "backward compatibility",
+      "articles": [
+        "auth-domain-package-init-with-backward-compatible-re-exports-eecloudauth",
+        "cloud-database-backward-compatibility-re-export"
+      ]
+    },
+    "basemodel": {
+      "name": "BaseModel",
+      "articles": [
+        "auth-domain-requestresponse-schemas"
+      ]
+    },
+    "batch ingestion": {
+      "name": "batch ingestion",
+      "articles": [
+        "agents-domain-fastapi-router-eecloudagentsrouterpy"
+      ]
+    },
+    "beanie": {
+      "name": "Beanie",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants",
+        "invite-model-workspace-membership-invitations-with-expiry",
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract"
+      ]
+    },
+    "beanie document": {
+      "name": "Beanie document",
+      "articles": [
+        "agent-configuration-document-model",
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage",
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "beanie odm": {
+      "name": "Beanie ODM",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy",
+        "cloud-models-package-beanie-document-registry",
+        "mongodb-connection-and-beanie-odm-initialization",
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "beaniebaseuser": {
+      "name": "BeanieBaseUser",
+      "articles": [
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "bearer auth": {
+      "name": "bearer auth",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy"
+      ]
+    },
+    "bearer login": {
+      "name": "bearer login",
+      "articles": [
+        "auth-domain-fastapi-router-eecloudauthrouterpy"
+      ]
+    },
+    "before_event": {
+      "name": "before_event",
+      "articles": [
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "bidirectional link traversal": {
+      "name": "bidirectional link traversal",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "broadcast": {
+      "name": "broadcast",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "broadcast pattern": {
+      "name": "broadcast pattern",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler"
+      ]
+    },
+    "business objects": {
+      "name": "business objects",
+      "articles": [
+        "fabric-package-init-ontology-layer-public-api"
+      ]
+    },
+    "camelcase alias": {
+      "name": "camelCase alias",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture",
+        "pockets-schemas-request-and-response-models-for-the-pockets-api",
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract"
+      ]
+    },
+    "cascade delete": {
+      "name": "cascade delete",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "chat": {
+      "name": "chat",
+      "articles": [
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading"
+      ]
+    },
+    "chat channel": {
+      "name": "chat channel",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants"
+      ]
+    },
+    "chat domain": {
+      "name": "chat domain",
+      "articles": [
+        "chat-domain-package-init"
+      ]
+    },
+    "chat persistence": {
+      "name": "chat persistence",
+      "articles": [
+        "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb"
+      ]
+    },
+    "chat session": {
+      "name": "chat session",
+      "articles": [
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract"
+      ]
+    },
+    "check_pocket_access": {
+      "name": "check_pocket_access",
+      "articles": [
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "check_workspace_role": {
+      "name": "check_workspace_role",
+      "articles": [
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "clouderror": {
+      "name": "CloudError",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "collaborator": {
+      "name": "collaborator",
+      "articles": [
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions"
+      ]
+    },
+    "collaborators": {
+      "name": "collaborators",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture"
+      ]
+    },
+    "comment": {
+      "name": "Comment",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "commentauthor": {
+      "name": "CommentAuthor",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "commenttarget": {
+      "name": "CommentTarget",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "compliance": {
+      "name": "compliance",
+      "articles": [
+        "audit-module-placeholder-eeaudit",
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints",
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "compound index": {
+      "name": "compound index",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants",
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading",
+        "notification-model-in-app-user-notifications-with-source-tracking",
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract"
+      ]
+    },
+    "conflicterror": {
+      "name": "ConflictError",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "connection lifecycle": {
+      "name": "connection lifecycle",
+      "articles": [
+        "mongodb-connection-and-beanie-odm-initialization",
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "connectionmanager": {
+      "name": "ConnectionManager",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "cookie auth": {
+      "name": "cookie auth",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy"
+      ]
+    },
+    "cookie login": {
+      "name": "cookie login",
+      "articles": [
+        "auth-domain-fastapi-router-eecloudauthrouterpy"
+      ]
+    },
+    "createdat": {
+      "name": "createdAt",
+      "articles": [
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "creategrouprequest": {
+      "name": "CreateGroupRequest",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    },
+    "createinviterequest": {
+      "name": "CreateInviteRequest",
+      "articles": [
+        "workspace-domain-pydantic-schemas-requests-and-responses"
+      ]
+    },
+    "createpocketrequest": {
+      "name": "CreatePocketRequest",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "createsessionrequest": {
+      "name": "CreateSessionRequest",
+      "articles": [
+        "sessions-domain-pydantic-schemas"
+      ]
+    },
+    "createworkspacerequest": {
+      "name": "CreateWorkspaceRequest",
+      "articles": [
+        "workspace-domain-pydantic-schemas-requests-and-responses"
+      ]
+    },
+    "cross-cutting concerns": {
+      "name": "cross-cutting concerns",
+      "articles": [
+        "shared-module-package-initialization"
+      ]
+    },
+    "cross-domain side effects": {
+      "name": "cross-domain side effects",
+      "articles": [
+        "cross-domain-event-handlers-for-cloud-side-effects"
+      ]
+    },
+    "crud": {
+      "name": "CRUD",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy",
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions"
+      ]
+    },
+    "cryptographic verification": {
+      "name": "cryptographic verification",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "current_user": {
+      "name": "current_user",
+      "articles": [
+        "workspace-rest-api-router-crud-members-and-invites"
+      ]
+    },
+    "cursor pagination": {
+      "name": "cursor pagination",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler",
+        "chat-schemas-rest-and-websocket-message-contracts",
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "cursorpage": {
+      "name": "CursorPage",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    },
+    "database initialization": {
+      "name": "database initialization",
+      "articles": [
+        "cloud-database-backward-compatibility-re-export",
+        "mongodb-connection-and-beanie-odm-initialization"
+      ]
+    },
+    "decision lifecycle": {
+      "name": "decision lifecycle",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "decision pipeline": {
+      "name": "decision pipeline",
+      "articles": [
+        "instinct-package-init-decision-pipeline-public-api"
+      ]
+    },
+    "defensive parsing": {
+      "name": "defensive parsing",
+      "articles": [
+        "ripple-spec-normalizer-for-ai-generated-pocket-definitions"
+      ]
+    },
+    "deferred import": {
+      "name": "deferred import",
+      "articles": [
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints",
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions"
+      ]
+    },
+    "denormalization": {
+      "name": "denormalization",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "denormalized counter": {
+      "name": "denormalized counter",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants",
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract"
+      ]
+    },
+    "dependency factory": {
+      "name": "dependency factory",
+      "articles": [
+        "fastapi-dependencies-for-cloud-authentication-and-authorization"
+      ]
+    },
+    "dependency injection": {
+      "name": "dependency injection",
+      "articles": [
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions"
+      ]
+    },
+    "discovery": {
+      "name": "discovery",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy"
+      ]
+    },
+    "dm deduplication": {
+      "name": "DM deduplication",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "dms": {
+      "name": "DMs",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler"
+      ]
+    },
+    "document registry": {
+      "name": "document registry",
+      "articles": [
+        "cloud-models-package-beanie-document-registry"
+      ]
+    },
+    "domain events": {
+      "name": "domain events",
+      "articles": [
+        "in-process-async-event-bus-for-cross-domain-communication"
+      ]
+    },
+    "domain-driven design": {
+      "name": "domain-driven design",
+      "articles": [
+        "cloud-module-entrypoint-and-router-mounting-eecloudinitpy"
+      ]
+    },
+    "dual lookup": {
+      "name": "dual lookup",
+      "articles": [
+        "session-service-business-logic-for-session-lifecycle-management"
+      ]
+    },
+    "dual transport": {
+      "name": "dual transport",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy"
+      ]
+    },
+    "dynamic sql": {
+      "name": "dynamic SQL",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "ed25519": {
+      "name": "Ed25519",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "ee package": {
+      "name": "ee package",
+      "articles": [
+        "enterprise-extensions-package-root-initpy"
+      ]
+    },
+    "embedded models": {
+      "name": "embedded models",
+      "articles": [
+        "cloud-models-package-beanie-document-registry"
+      ]
+    },
+    "embedded subdocument": {
+      "name": "embedded subdocument",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture"
+      ]
+    },
+    "enterprise extensions": {
+      "name": "enterprise extensions",
+      "articles": [
+        "enterprise-extensions-package-root-initpy"
+      ]
+    },
+    "enterprise gating": {
+      "name": "enterprise gating",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "enum hierarchy": {
+      "name": "enum hierarchy",
+      "articles": [
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "envelope fields": {
+      "name": "envelope fields",
+      "articles": [
+        "ripple-spec-normalizer-for-ai-generated-pocket-definitions"
+      ]
+    },
+    "error handler": {
+      "name": "error handler",
+      "articles": [
+        "cloud-module-entrypoint-and-router-mounting-eecloudinitpy"
+      ]
+    },
+    "error hierarchy": {
+      "name": "error hierarchy",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "error isolation": {
+      "name": "error isolation",
+      "articles": [
+        "in-process-async-event-bus-for-cross-domain-communication"
+      ]
+    },
+    "event bus": {
+      "name": "event bus",
+      "articles": [
+        "chat-service-group-and-message-business-logic",
+        "in-process-async-event-bus-for-cross-domain-communication",
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration",
+        "session-service-business-logic-for-session-lifecycle-management"
+      ]
+    },
+    "event bus subscription": {
+      "name": "event bus subscription",
+      "articles": [
+        "cross-domain-event-handlers-for-cloud-side-effects"
+      ]
+    },
+    "event handlers": {
+      "name": "event handlers",
+      "articles": [
+        "cross-domain-event-handlers-for-cloud-side-effects"
+      ]
+    },
+    "event hooks": {
+      "name": "event hooks",
+      "articles": [
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "event-driven": {
+      "name": "event-driven",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations",
+        "automations-module-placeholder-eeautomations"
+      ]
+    },
+    "event_bus": {
+      "name": "event_bus",
+      "articles": [
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "expiry": {
+      "name": "expiry",
+      "articles": [
+        "invite-model-workspace-membership-invitations-with-expiry"
+      ]
+    },
+    "fabric": {
+      "name": "fabric",
+      "articles": [
+        "enterprise-extensions-package-root-initpy",
+        "fabric-package-init-ontology-layer-public-api"
+      ]
+    },
+    "fabric router": {
+      "name": "Fabric router",
+      "articles": [
+        "fabric-rest-api-router-object-types-objects-links-and-queries"
+      ]
+    },
+    "fabriclink": {
+      "name": "FabricLink",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries",
+        "fabric-package-init-ontology-layer-public-api"
+      ]
+    },
+    "fabricobject": {
+      "name": "FabricObject",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries",
+        "fabric-package-init-ontology-layer-public-api"
+      ]
+    },
+    "fabricquery": {
+      "name": "FabricQuery",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries"
+      ]
+    },
+    "fabricqueryresult": {
+      "name": "FabricQueryResult",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries"
+      ]
+    },
+    "fabricstore": {
+      "name": "FabricStore",
+      "articles": [
+        "fabric-package-init-ontology-layer-public-api",
+        "fabric-rest-api-router-object-types-objects-links-and-queries",
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "fastapi dependencies": {
+      "name": "FastAPI dependencies",
+      "articles": [
+        "fastapi-dependencies-for-cloud-authentication-and-authorization",
+        "workspace-rest-api-router-crud-members-and-invites"
+      ]
+    },
+    "fastapi dependency": {
+      "name": "FastAPI dependency",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "fastapi router": {
+      "name": "FastAPI router",
+      "articles": [
+        "agents-domain-fastapi-router-eecloudagentsrouterpy",
+        "chat-router-rest-endpoints-and-websocket-handler",
+        "cloud-module-entrypoint-and-router-mounting-eecloudinitpy",
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions",
+        "sessions-api-router-crud-and-runtime-session-management"
+      ]
+    },
+    "fastapi-users": {
+      "name": "fastapi-users",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy",
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "fastapi-users routes": {
+      "name": "fastapi-users routes",
+      "articles": [
+        "auth-domain-fastapi-router-eecloudauthrouterpy"
+      ]
+    },
+    "feature flags": {
+      "name": "feature flags",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "field_validator": {
+      "name": "field_validator",
+      "articles": [
+        "workspace-domain-pydantic-schemas-requests-and-responses"
+      ]
+    },
+    "file metadata": {
+      "name": "file metadata",
+      "articles": [
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage"
+      ]
+    },
+    "file upload": {
+      "name": "file upload",
+      "articles": [
+        "agents-domain-fastapi-router-eecloudagentsrouterpy"
+      ]
+    },
+    "fileobj": {
+      "name": "FileObj",
+      "articles": [
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage"
+      ]
+    },
+    "forbidden": {
+      "name": "Forbidden",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module",
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "from_attributes": {
+      "name": "from_attributes",
+      "articles": [
+        "auth-domain-requestresponse-schemas"
+      ]
+    },
+    "fsl license": {
+      "name": "FSL license",
+      "articles": [
+        "enterprise-extensions-package-root-initpy"
+      ]
+    },
+    "gcs": {
+      "name": "GCS",
+      "articles": [
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage"
+      ]
+    },
+    "gdpr": {
+      "name": "GDPR",
+      "articles": [
+        "audit-module-placeholder-eeaudit"
+      ]
+    },
+    "get_profile": {
+      "name": "get_profile",
+      "articles": [
+        "auth-service-profile-and-workspace-business-logic"
+      ]
+    },
+    "grace period": {
+      "name": "grace period",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "group": {
+      "name": "Group",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants"
+      ]
+    },
+    "group auto-join": {
+      "name": "group auto-join",
+      "articles": [
+        "cross-domain-event-handlers-for-cloud-side-effects"
+      ]
+    },
+    "group management": {
+      "name": "group management",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler"
+      ]
+    },
+    "group messaging": {
+      "name": "group messaging",
+      "articles": [
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading"
+      ]
+    },
+    "groupagent": {
+      "name": "GroupAgent",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants"
+      ]
+    },
+    "groupresponse": {
+      "name": "GroupResponse",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    },
+    "groupservice": {
+      "name": "GroupService",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "history proxy": {
+      "name": "history proxy",
+      "articles": [
+        "sessions-api-router-crud-and-runtime-session-management"
+      ]
+    },
+    "history retrieval": {
+      "name": "history retrieval",
+      "articles": [
+        "session-service-business-logic-for-session-lifecycle-management"
+      ]
+    },
+    "hmac-sha256": {
+      "name": "HMAC-SHA256",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "http status codes": {
+      "name": "HTTP status codes",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "human-in-the-loop": {
+      "name": "human-in-the-loop",
+      "articles": [
+        "instinct-package-init-decision-pipeline-public-api"
+      ]
+    },
+    "idempotency guard": {
+      "name": "idempotency guard",
+      "articles": [
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "idempotent": {
+      "name": "idempotent",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy"
+      ]
+    },
+    "in-app notifications": {
+      "name": "in-app notifications",
+      "articles": [
+        "notification-model-in-app-user-notifications-with-source-tracking"
+      ]
+    },
+    "in-memory cache": {
+      "name": "in-memory cache",
+      "articles": [
+        "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb"
+      ]
+    },
+    "instinct": {
+      "name": "instinct",
+      "articles": [
+        "enterprise-extensions-package-root-initpy",
+        "instinct-package-init-decision-pipeline-public-api"
+      ]
+    },
+    "instinct pipeline": {
+      "name": "instinct pipeline",
+      "articles": [
+        "instinct-store-singleton-accessor-eeapipy"
+      ]
+    },
+    "instinct router": {
+      "name": "Instinct router",
+      "articles": [
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints"
+      ]
+    },
+    "instinctstore": {
+      "name": "InstinctStore",
+      "articles": [
+        "instinct-package-init-decision-pipeline-public-api",
+        "instinct-store-singleton-accessor-eeapipy",
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "invite": {
+      "name": "Invite",
+      "articles": [
+        "invite-model-workspace-membership-invitations-with-expiry"
+      ]
+    },
+    "invite lifecycle": {
+      "name": "invite lifecycle",
+      "articles": [
+        "workspace-rest-api-router-crud-members-and-invites"
+      ]
+    },
+    "invite token": {
+      "name": "invite token",
+      "articles": [
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "json columns": {
+      "name": "JSON columns",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "jwt": {
+      "name": "JWT",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy"
+      ]
+    },
+    "jwt authentication": {
+      "name": "JWT authentication",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler",
+        "fastapi-dependencies-for-cloud-authentication-and-authorization"
+      ]
+    },
+    "knowledge ingestion": {
+      "name": "knowledge ingestion",
+      "articles": [
+        "agents-domain-fastapi-router-eecloudagentsrouterpy"
+      ]
+    },
+    "knowledge injection": {
+      "name": "knowledge injection",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "knowledgeengine": {
+      "name": "KnowledgeEngine",
+      "articles": [
+        "agent-knowledge-service-eecloudagentsknowledgepy"
+      ]
+    },
+    "knowledgeservice": {
+      "name": "KnowledgeService",
+      "articles": [
+        "agent-knowledge-service-eecloudagentsknowledgepy"
+      ]
+    },
+    "lazy initialization": {
+      "name": "lazy initialization",
+      "articles": [
+        "instinct-store-singleton-accessor-eeapipy"
+      ]
+    },
+    "lazy singleton": {
+      "name": "lazy singleton",
+      "articles": [
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints"
+      ]
+    },
+    "license gate": {
+      "name": "license gate",
+      "articles": [
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions",
+        "sessions-api-router-crud-and-runtime-session-management"
+      ]
+    },
+    "license gating": {
+      "name": "license gating",
+      "articles": [
+        "agents-domain-fastapi-router-eecloudagentsrouterpy",
+        "chat-router-rest-endpoints-and-websocket-handler"
+      ]
+    },
+    "license validation": {
+      "name": "license validation",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "licensepayload": {
+      "name": "LicensePayload",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "licensing": {
+      "name": "licensing",
+      "articles": [
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "lifecycle events": {
+      "name": "lifecycle events",
+      "articles": [
+        "cloud-module-entrypoint-and-router-mounting-eecloudinitpy"
+      ]
+    },
+    "links api": {
+      "name": "links API",
+      "articles": [
+        "fabric-rest-api-router-object-types-objects-links-and-queries"
+      ]
+    },
+    "literal type": {
+      "name": "Literal type",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    },
+    "loop prevention": {
+      "name": "loop prevention",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "loose coupling": {
+      "name": "loose coupling",
+      "articles": [
+        "in-process-async-event-bus-for-cross-domain-communication"
+      ]
+    },
+    "machine-readable error codes": {
+      "name": "machine-readable error codes",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "mark_executed": {
+      "name": "mark_executed",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "mark_failed": {
+      "name": "mark_failed",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "member management": {
+      "name": "member management",
+      "articles": [
+        "workspace-rest-api-router-crud-members-and-invites",
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "membership cleanup": {
+      "name": "membership cleanup",
+      "articles": [
+        "cross-domain-event-handlers-for-cloud-side-effects"
+      ]
+    },
+    "membership management": {
+      "name": "membership management",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "mention": {
+      "name": "Mention",
+      "articles": [
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading"
+      ]
+    },
+    "mention notifications": {
+      "name": "mention notifications",
+      "articles": [
+        "cross-domain-event-handlers-for-cloud-side-effects"
+      ]
+    },
+    "mentions": {
+      "name": "mentions",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "message": {
+      "name": "Message",
+      "articles": [
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading"
+      ]
+    },
+    "message bus": {
+      "name": "message bus",
+      "articles": [
+        "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb"
+      ]
+    },
+    "message dispatch": {
+      "name": "message dispatch",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler"
+      ]
+    },
+    "message routing": {
+      "name": "message routing",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "messageresponse": {
+      "name": "MessageResponse",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    },
+    "messageservice": {
+      "name": "MessageService",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "model re-exports": {
+      "name": "model re-exports",
+      "articles": [
+        "cloud-models-package-beanie-document-registry"
+      ]
+    },
+    "mongodb": {
+      "name": "MongoDB",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy",
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage",
+        "mongodb-connection-and-beanie-odm-initialization"
+      ]
+    },
+    "mongodb collections": {
+      "name": "MongoDB collections",
+      "articles": [
+        "cloud-models-package-beanie-document-registry"
+      ]
+    },
+    "mount_cloud": {
+      "name": "mount_cloud",
+      "articles": [
+        "cloud-module-entrypoint-and-router-mounting-eecloudinitpy"
+      ]
+    },
+    "multi-cloud": {
+      "name": "multi-cloud",
+      "articles": [
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage"
+      ]
+    },
+    "multi-tab support": {
+      "name": "multi-tab support",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "multi-workspace": {
+      "name": "multi-workspace",
+      "articles": [
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "n+1 queries": {
+      "name": "N+1 queries",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "normalizer": {
+      "name": "normalizer",
+      "articles": [
+        "ripple-spec-normalizer-for-ai-generated-pocket-definitions"
+      ]
+    },
+    "notfound": {
+      "name": "NotFound",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "notification": {
+      "name": "Notification",
+      "articles": [
+        "notification-model-in-app-user-notifications-with-source-tracking"
+      ]
+    },
+    "notifications": {
+      "name": "notifications",
+      "articles": [
+        "cross-domain-event-handlers-for-cloud-side-effects"
+      ]
+    },
+    "notificationsource": {
+      "name": "NotificationSource",
+      "articles": [
+        "notification-model-in-app-user-notifications-with-source-tracking"
+      ]
+    },
+    "oauth": {
+      "name": "OAuth",
+      "articles": [
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "oauthaccount": {
+      "name": "OAuthAccount",
+      "articles": [
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "object storage": {
+      "name": "object storage",
+      "articles": [
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage"
+      ]
+    },
+    "object types api": {
+      "name": "object types API",
+      "articles": [
+        "fabric-rest-api-router-object-types-objects-links-and-queries"
+      ]
+    },
+    "objecttype": {
+      "name": "ObjectType",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries",
+        "fabric-package-init-ontology-layer-public-api"
+      ]
+    },
+    "ocean model": {
+      "name": "OCEAN model",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "ocean personality": {
+      "name": "OCEAN personality",
+      "articles": [
+        "agents-domain-pydantic-schemas-eecloudagentsschemaspy"
+      ]
+    },
+    "ontology layer": {
+      "name": "ontology layer",
+      "articles": [
+        "fabric-package-init-ontology-layer-public-api"
+      ]
+    },
+    "ontology models": {
+      "name": "ontology models",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries"
+      ]
+    },
+    "ontology persistence": {
+      "name": "ontology persistence",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "owner authorization": {
+      "name": "owner authorization",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy"
+      ]
+    },
+    "ownership enforcement": {
+      "name": "ownership enforcement",
+      "articles": [
+        "session-service-business-logic-for-session-lifecycle-management"
+      ]
+    },
+    "ownership protection": {
+      "name": "ownership protection",
+      "articles": [
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "package init": {
+      "name": "package init",
+      "articles": [
+        "agents-domain-package-init-eecloudagents",
+        "auth-domain-package-init-with-backward-compatible-re-exports-eecloudauth",
+        "chat-domain-package-init",
+        "cloud-workspace-package-init",
+        "sessions-package-initialization",
+        "shared-module-package-initialization"
+      ]
+    },
+    "package initialization": {
+      "name": "package initialization",
+      "articles": [
+        "pockets-package-init-router-re-export"
+      ]
+    },
+    "partial update": {
+      "name": "partial update",
+      "articles": [
+        "auth-domain-requestresponse-schemas",
+        "auth-service-profile-and-workspace-business-logic",
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "permission guard": {
+      "name": "permission guard",
+      "articles": [
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "personality model": {
+      "name": "personality model",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "plan": {
+      "name": "plan",
+      "articles": [
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "pocket": {
+      "name": "Pocket",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture"
+      ]
+    },
+    "pocket definition": {
+      "name": "pocket definition",
+      "articles": [
+        "ripple-spec-normalizer-for-ai-generated-pocket-definitions"
+      ]
+    },
+    "pocket response serialization": {
+      "name": "pocket response serialization",
+      "articles": [
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "pocket-scoped": {
+      "name": "pocket-scoped",
+      "articles": [
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract"
+      ]
+    },
+    "pocketaccess": {
+      "name": "PocketAccess",
+      "articles": [
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "pocketresponse": {
+      "name": "PocketResponse",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "pockets": {
+      "name": "pockets",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "pocketservice": {
+      "name": "PocketService",
+      "articles": [
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions",
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "polymorphic reference": {
+      "name": "polymorphic reference",
+      "articles": [
+        "notification-model-in-app-user-notifications-with-source-tracking"
+      ]
+    },
+    "pre-signed url": {
+      "name": "pre-signed URL",
+      "articles": [
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage"
+      ]
+    },
+    "presence": {
+      "name": "presence",
+      "articles": [
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "presence tracking": {
+      "name": "presence tracking",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "profile management": {
+      "name": "profile management",
+      "articles": [
+        "auth-domain-fastapi-router-eecloudauthrouterpy"
+      ]
+    },
+    "profileupdaterequest": {
+      "name": "ProfileUpdateRequest",
+      "articles": [
+        "auth-domain-requestresponse-schemas"
+      ]
+    },
+    "propertydef": {
+      "name": "PropertyDef",
+      "articles": [
+        "fabric-data-models-ontology-types-objects-links-and-queries"
+      ]
+    },
+    "propose": {
+      "name": "propose",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "propose action": {
+      "name": "propose action",
+      "articles": [
+        "instinct-rest-api-router-action-lifecycle-and-audit-log-endpoints"
+      ]
+    },
+    "pub/sub": {
+      "name": "pub/sub",
+      "articles": [
+        "in-process-async-event-bus-for-cross-domain-communication"
+      ]
+    },
+    "pydantic": {
+      "name": "Pydantic",
+      "articles": [
+        "auth-domain-requestresponse-schemas",
+        "fabric-data-models-ontology-types-objects-links-and-queries"
+      ]
+    },
+    "pydantic schema": {
+      "name": "Pydantic schema",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "pydantic schemas": {
+      "name": "Pydantic schemas",
+      "articles": [
+        "agents-domain-pydantic-schemas-eecloudagentsschemaspy",
+        "chat-schemas-rest-and-websocket-message-contracts",
+        "sessions-domain-pydantic-schemas",
+        "workspace-domain-pydantic-schemas-requests-and-responses"
+      ]
+    },
+    "query api": {
+      "name": "query API",
+      "articles": [
+        "fabric-rest-api-router-object-types-objects-links-and-queries"
+      ]
+    },
+    "rag": {
+      "name": "RAG",
+      "articles": [
+        "agent-knowledge-service-eecloudagentsknowledgepy"
+      ]
+    },
+    "rbac": {
+      "name": "RBAC",
+      "articles": [
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "re-export": {
+      "name": "re-export",
+      "articles": [
+        "agents-domain-package-init-eecloudagents",
+        "auth-domain-package-init-with-backward-compatible-re-exports-eecloudauth",
+        "cloud-database-backward-compatibility-re-export",
+        "cloud-workspace-package-init",
+        "pockets-package-init-router-re-export",
+        "sessions-package-initialization"
+      ]
+    },
+    "reaction": {
+      "name": "Reaction",
+      "articles": [
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading"
+      ]
+    },
+    "read receipts": {
+      "name": "read receipts",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler"
+      ]
+    },
+    "read state": {
+      "name": "read state",
+      "articles": [
+        "notification-model-in-app-user-notifications-with-source-tracking"
+      ]
+    },
+    "reject": {
+      "name": "reject",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "request models": {
+      "name": "request models",
+      "articles": [
+        "agents-domain-pydantic-schemas-eecloudagentsschemaspy"
+      ]
+    },
+    "request validation": {
+      "name": "request validation",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api",
+        "workspace-domain-pydantic-schemas-requests-and-responses"
+      ]
+    },
+    "require_feature": {
+      "name": "require_feature",
+      "articles": [
+        "enterprise-license-validation-system"
+      ]
+    },
+    "require_license": {
+      "name": "require_license",
+      "articles": [
+        "enterprise-license-validation-system",
+        "workspace-rest-api-router-crud-members-and-invites"
+      ]
+    },
+    "resolution": {
+      "name": "resolution",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "respond mode": {
+      "name": "respond mode",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "respond_mode": {
+      "name": "respond_mode",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants"
+      ]
+    },
+    "retention": {
+      "name": "retention",
+      "articles": [
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "retention policies": {
+      "name": "retention policies",
+      "articles": [
+        "audit-module-placeholder-eeaudit"
+      ]
+    },
+    "ripple normalization": {
+      "name": "ripple normalization",
+      "articles": [
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "ripple spec": {
+      "name": "ripple spec",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture",
+        "ripple-spec-normalizer-for-ai-generated-pocket-definitions"
+      ]
+    },
+    "ripple spec extraction": {
+      "name": "ripple spec extraction",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "role-based access": {
+      "name": "role-based access",
+      "articles": [
+        "invite-model-workspace-membership-invitations-with-expiry"
+      ]
+    },
+    "role-based access control": {
+      "name": "role-based access control",
+      "articles": [
+        "fastapi-dependencies-for-cloud-authentication-and-authorization"
+      ]
+    },
+    "router": {
+      "name": "router",
+      "articles": [
+        "cloud-workspace-package-init",
+        "pockets-package-init-router-re-export"
+      ]
+    },
+    "router re-export": {
+      "name": "router re-export",
+      "articles": [
+        "chat-domain-package-init"
+      ]
+    },
+    "runtime sessions": {
+      "name": "runtime sessions",
+      "articles": [
+        "sessions-api-router-crud-and-runtime-session-management"
+      ]
+    },
+    "runtime to cloud sync": {
+      "name": "runtime to cloud sync",
+      "articles": [
+        "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb"
+      ]
+    },
+    "s3": {
+      "name": "S3",
+      "articles": [
+        "fileobj-model-cloud-file-metadata-with-pre-signed-url-storage"
+      ]
+    },
+    "scheduling": {
+      "name": "scheduling",
+      "articles": [
+        "automations-module-placeholder-eeautomations"
+      ]
+    },
+    "schema initialization": {
+      "name": "schema initialization",
+      "articles": [
+        "fabricstore-async-sqlite-persistence-for-the-ontology-layer"
+      ]
+    },
+    "search": {
+      "name": "search",
+      "articles": [
+        "agent-knowledge-service-eecloudagentsknowledgepy"
+      ]
+    },
+    "seat limit": {
+      "name": "seat limit",
+      "articles": [
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "seatlimiterror": {
+      "name": "SeatLimitError",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "seats": {
+      "name": "seats",
+      "articles": [
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "sendmessagerequest": {
+      "name": "SendMessageRequest",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    },
+    "session": {
+      "name": "Session",
+      "articles": [
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract"
+      ]
+    },
+    "session auto-creation": {
+      "name": "session auto-creation",
+      "articles": [
+        "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb"
+      ]
+    },
+    "session crud": {
+      "name": "session CRUD",
+      "articles": [
+        "sessions-api-router-crud-and-runtime-session-management"
+      ]
+    },
+    "session key format": {
+      "name": "session key format",
+      "articles": [
+        "session-service-business-logic-for-session-lifecycle-management"
+      ]
+    },
+    "session key formats": {
+      "name": "session key formats",
+      "articles": [
+        "sessions-api-router-crud-and-runtime-session-management"
+      ]
+    },
+    "session linking": {
+      "name": "session linking",
+      "articles": [
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration",
+        "sessions-domain-pydantic-schemas"
+      ]
+    },
+    "sessionresponse": {
+      "name": "SessionResponse",
+      "articles": [
+        "sessions-domain-pydantic-schemas"
+      ]
+    },
+    "sessions domain": {
+      "name": "sessions domain",
+      "articles": [
+        "sessions-package-initialization"
+      ]
+    },
+    "sessionservice": {
+      "name": "SessionService",
+      "articles": [
+        "session-service-business-logic-for-session-lifecycle-management"
+      ]
+    },
+    "set_active_workspace": {
+      "name": "set_active_workspace",
+      "articles": [
+        "auth-service-profile-and-workspace-business-logic"
+      ]
+    },
+    "setworkspacerequest": {
+      "name": "SetWorkspaceRequest",
+      "articles": [
+        "auth-domain-requestresponse-schemas"
+      ]
+    },
+    "share link": {
+      "name": "share link",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture",
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions",
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "shared module": {
+      "name": "shared module",
+      "articles": [
+        "shared-module-package-initialization"
+      ]
+    },
+    "sharelinkrequest": {
+      "name": "ShareLinkRequest",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "shim module": {
+      "name": "shim module",
+      "articles": [
+        "cloud-database-backward-compatibility-re-export"
+      ]
+    },
+    "singleton": {
+      "name": "singleton",
+      "articles": [
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "singleton pattern": {
+      "name": "singleton pattern",
+      "articles": [
+        "in-process-async-event-bus-for-cross-domain-communication",
+        "instinct-store-singleton-accessor-eeapipy",
+        "mongodb-connection-and-beanie-odm-initialization"
+      ]
+    },
+    "slug": {
+      "name": "slug",
+      "articles": [
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "slug generation": {
+      "name": "slug generation",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "slug uniqueness": {
+      "name": "slug uniqueness",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy"
+      ]
+    },
+    "slug validation": {
+      "name": "slug validation",
+      "articles": [
+        "workspace-domain-pydantic-schemas-requests-and-responses"
+      ]
+    },
+    "smart relevance": {
+      "name": "smart relevance",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "soc2": {
+      "name": "SOC2",
+      "articles": [
+        "audit-module-placeholder-eeaudit"
+      ]
+    },
+    "soft delete": {
+      "name": "soft delete",
+      "articles": [
+        "chat-service-group-and-message-business-logic",
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading",
+        "session-model-pocket-scoped-chat-sessions-with-camelcase-frontend-contract",
+        "session-service-business-logic-for-session-lifecycle-management",
+        "sessions-domain-pydantic-schemas",
+        "workspace-model-organization-level-tenant-with-plan-and-settings",
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "soul customization": {
+      "name": "soul customization",
+      "articles": [
+        "agents-domain-pydantic-schemas-eecloudagentsschemaspy"
+      ]
+    },
+    "soul observation": {
+      "name": "soul observation",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "soul protocol": {
+      "name": "Soul Protocol",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "sqlite": {
+      "name": "SQLite",
+      "articles": [
+        "instinct-store-singleton-accessor-eeapipy"
+      ]
+    },
+    "sqlite path": {
+      "name": "SQLite path",
+      "articles": [
+        "fabric-rest-api-router-object-types-objects-links-and-queries"
+      ]
+    },
+    "state management": {
+      "name": "state management",
+      "articles": [
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "state transitions": {
+      "name": "state transitions",
+      "articles": [
+        "instinctstore-async-sqlite-persistence-for-the-decision-pipeline"
+      ]
+    },
+    "stateless service": {
+      "name": "stateless service",
+      "articles": [
+        "auth-service-profile-and-workspace-business-logic",
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "stream accumulation": {
+      "name": "stream accumulation",
+      "articles": [
+        "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb"
+      ]
+    },
+    "streaming response": {
+      "name": "streaming response",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "strenum": {
+      "name": "StrEnum",
+      "articles": [
+        "instinct-data-models-actions-triggers-context-and-audit-entries"
+      ]
+    },
+    "tenant": {
+      "name": "tenant",
+      "articles": [
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "text ingestion": {
+      "name": "text ingestion",
+      "articles": [
+        "agent-knowledge-service-eecloudagentsknowledgepy"
+      ]
+    },
+    "thin controller": {
+      "name": "thin controller",
+      "articles": [
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions"
+      ]
+    },
+    "threaded comments": {
+      "name": "threaded comments",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "threading": {
+      "name": "threading",
+      "articles": [
+        "message-model-group-chat-messages-with-mentions-reactions-and-threading"
+      ]
+    },
+    "timestampeddocument": {
+      "name": "TimestampedDocument",
+      "articles": [
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "timezone-aware datetime": {
+      "name": "timezone-aware datetime",
+      "articles": [
+        "invite-model-workspace-membership-invitations-with-expiry"
+      ]
+    },
+    "toggle reaction": {
+      "name": "toggle reaction",
+      "articles": [
+        "chat-service-group-and-message-business-logic"
+      ]
+    },
+    "token": {
+      "name": "token",
+      "articles": [
+        "invite-model-workspace-membership-invitations-with-expiry"
+      ]
+    },
+    "token_urlsafe": {
+      "name": "token_urlsafe",
+      "articles": [
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "triggers": {
+      "name": "triggers",
+      "articles": [
+        "automations-module-placeholder-eeautomations"
+      ]
+    },
+    "trust level": {
+      "name": "trust level",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "typing indicators": {
+      "name": "typing indicators",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler",
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "update_profile": {
+      "name": "update_profile",
+      "articles": [
+        "auth-service-profile-and-workspace-business-logic"
+      ]
+    },
+    "updatedat": {
+      "name": "updatedAt",
+      "articles": [
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "updatepocketrequest": {
+      "name": "UpdatePocketRequest",
+      "articles": [
+        "pockets-schemas-request-and-response-models-for-the-pockets-api"
+      ]
+    },
+    "updatesessionrequest": {
+      "name": "UpdateSessionRequest",
+      "articles": [
+        "sessions-domain-pydantic-schemas"
+      ]
+    },
+    "upsert": {
+      "name": "upsert",
+      "articles": [
+        "session-service-business-logic-for-session-lifecycle-management"
+      ]
+    },
+    "url ingestion": {
+      "name": "URL ingestion",
+      "articles": [
+        "agent-knowledge-service-eecloudagentsknowledgepy"
+      ]
+    },
+    "user": {
+      "name": "User",
+      "articles": [
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "user model": {
+      "name": "User model",
+      "articles": [
+        "auth-service-profile-and-workspace-business-logic"
+      ]
+    },
+    "usermanager": {
+      "name": "UserManager",
+      "articles": [
+        "enterprise-auth-core-jwt-user-management-and-admin-seeding-eecloudauthcorepy"
+      ]
+    },
+    "userresponse": {
+      "name": "UserResponse",
+      "articles": [
+        "auth-domain-requestresponse-schemas"
+      ]
+    },
+    "utc timestamps": {
+      "name": "UTC timestamps",
+      "articles": [
+        "timestampeddocument-base-model-with-automatic-timestamps"
+      ]
+    },
+    "validation": {
+      "name": "validation",
+      "articles": [
+        "agents-domain-pydantic-schemas-eecloudagentsschemaspy"
+      ]
+    },
+    "validationerror": {
+      "name": "ValidationError",
+      "articles": [
+        "cloud-error-hierarchy-unified-exception-types-for-the-cloud-module"
+      ]
+    },
+    "visibility": {
+      "name": "visibility",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture"
+      ]
+    },
+    "visibility rules": {
+      "name": "visibility rules",
+      "articles": [
+        "agents-domain-business-logic-service-eecloudagentsservicepy"
+      ]
+    },
+    "websocket": {
+      "name": "WebSocket",
+      "articles": [
+        "chat-router-rest-endpoints-and-websocket-handler",
+        "cloud-module-entrypoint-and-router-mounting-eecloudinitpy",
+        "websocket-connection-manager-for-real-time-chat"
+      ]
+    },
+    "websocket bridge": {
+      "name": "WebSocket bridge",
+      "articles": [
+        "chat-persistence-bridge-syncing-runtime-websocket-messages-to-mongodb"
+      ]
+    },
+    "websocket broadcast": {
+      "name": "WebSocket broadcast",
+      "articles": [
+        "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
+      ]
+    },
+    "widget": {
+      "name": "Widget",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture"
+      ]
+    },
+    "widget crud": {
+      "name": "widget CRUD",
+      "articles": [
+        "pocketservice-business-logic-for-pocket-crud-widgets-sharing-and-collaboration"
+      ]
+    },
+    "widget id generation": {
+      "name": "widget ID generation",
+      "articles": [
+        "ripple-spec-normalizer-for-ai-generated-pocket-definitions"
+      ]
+    },
+    "widget management": {
+      "name": "widget management",
+      "articles": [
+        "pockets-router-fastapi-rest-api-for-pocket-crud-widgets-sharing-and-sessions"
+      ]
+    },
+    "widgetposition": {
+      "name": "WidgetPosition",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture"
+      ]
+    },
+    "widgets": {
+      "name": "widgets",
+      "articles": [
+        "comment-document-threaded-comments-on-pockets"
+      ]
+    },
+    "workspace": {
+      "name": "workspace",
+      "articles": [
+        "group-model-multi-user-chat-channels-with-ai-agent-participants",
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "workspace canvas": {
+      "name": "workspace canvas",
+      "articles": [
+        "pocket-and-widget-models-workspace-canvases-with-embedded-widget-architecture"
+      ]
+    },
+    "workspace context": {
+      "name": "workspace context",
+      "articles": [
+        "fastapi-dependencies-for-cloud-authentication-and-authorization"
+      ]
+    },
+    "workspace crud": {
+      "name": "workspace CRUD",
+      "articles": [
+        "workspace-rest-api-router-crud-members-and-invites"
+      ]
+    },
+    "workspace invitation": {
+      "name": "workspace invitation",
+      "articles": [
+        "invite-model-workspace-membership-invitations-with-expiry"
+      ]
+    },
+    "workspace scoping": {
+      "name": "workspace scoping",
+      "articles": [
+        "agent-configuration-document-model"
+      ]
+    },
+    "workspace switching": {
+      "name": "workspace switching",
+      "articles": [
+        "auth-domain-fastapi-router-eecloudauthrouterpy"
+      ]
+    },
+    "workspacemembership": {
+      "name": "WorkspaceMembership",
+      "articles": [
+        "user-model-enterprise-users-with-oauth-and-multi-workspace-membership"
+      ]
+    },
+    "workspaceresponse": {
+      "name": "WorkspaceResponse",
+      "articles": [
+        "workspace-domain-pydantic-schemas-requests-and-responses"
+      ]
+    },
+    "workspacerole": {
+      "name": "WorkspaceRole",
+      "articles": [
+        "cloud-permission-guards-workspace-roles-and-pocket-access-levels"
+      ]
+    },
+    "workspaceservice": {
+      "name": "WorkspaceService",
+      "articles": [
+        "workspace-service-business-logic-for-crud-members-and-invites"
+      ]
+    },
+    "workspacesettings": {
+      "name": "WorkspaceSettings",
+      "articles": [
+        "workspace-model-organization-level-tenant-with-plan-and-settings"
+      ]
+    },
+    "wsinbound": {
+      "name": "WsInbound",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    },
+    "wsoutbound": {
+      "name": "WsOutbound",
+      "articles": [
+        "chat-schemas-rest-and-websocket-message-contracts"
+      ]
+    }
+  },
+  "categories": [
+    "AI Agents",
+    "AI integration",
+    "API",
+    "API Layer",
+    "API contracts",
+    "API design",
+    "API schemas",
+    "Authentication",
+    "Authorization",
+    "Business Logic",
+    "Cloud Storage",
+    "Collaboration",
+    "Data Layer",
+    "FastAPI",
+    "Identity",
+    "Messaging",
+    "Models",
+    "Multi-Tenancy",
+    "Notifications",
+    "Package Structure",
+    "Pockets",
+    "Pydantic models",
+    "REST API",
+    "REST endpoints",
+    "Routing",
+    "SQLite",
+    "Schemas",
+    "Service Layer",
+    "Sessions",
+    "Soul Protocol",
+    "Validation",
+    "WebSocket",
+    "Workspace Management",
+    "agents",
+    "architecture",
+    "async",
+    "audit",
+    "auth",
+    "authentication",
+    "authorization",
+    "automation",
+    "base classes",
+    "business logic",
+    "chat",
+    "cloud",
+    "collaboration",
+    "comments",
+    "compatibility",
+    "compliance",
+    "configuration",
+    "data access",
+    "data modeling",
+    "data models",
+    "data normalization",
+    "database",
+    "decision pipeline",
+    "design patterns",
+    "domain events",
+    "enterprise",
+    "error handling",
+    "event handling",
+    "event system",
+    "fabric",
+    "human-in-the-loop",
+    "infrastructure",
+    "instinct",
+    "invites",
+    "knowledge management",
+    "licensing",
+    "models",
+    "notifications",
+    "ontology",
+    "package structure",
+    "persistence",
+    "planned features",
+    "pockets",
+    "real-time",
+    "routing",
+    "schemas",
+    "security",
+    "services",
+    "sessions",
+    "shared",
+    "shared utilities",
+    "storage",
+    "validation",
+    "workspace"
+  ]
+}

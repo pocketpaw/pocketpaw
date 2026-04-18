@@ -92,7 +92,7 @@ def _extract_root_error(exc: BaseException) -> str:
     leaves: list[BaseException] = []
 
     def _collect(e: BaseException) -> None:
-        if isinstance(e, (ExceptionGroup, BaseExceptionGroup)):
+        if isinstance(e, ExceptionGroup | BaseExceptionGroup):
             for sub in e.exceptions:
                 _collect(sub)
         elif e.__cause__:
@@ -184,12 +184,31 @@ class MCPManager:
         - Dynamic client registration as fallback
         - PKCE authorization code flow
         - Token refresh
+        - Compatibility for token endpoints that return 201 on success
         """
+        from types import MethodType
+
         from mcp.client.auth import OAuthClientProvider
+        from mcp.client.auth.exceptions import OAuthTokenError
+        from mcp.client.auth.utils import handle_token_response_scopes
         from mcp.shared.auth import OAuthClientMetadata
 
         from pocketpaw.config import Settings
         from pocketpaw.mcp.oauth_store import MCPTokenStorage
+
+        async def _handle_token_response_compat(self, response) -> None:
+            """Accept both 200 and 201 for token exchange success."""
+            if response.status_code not in (200, 201):
+                body = await response.aread()
+                body_text = body.decode("utf-8")
+                raise OAuthTokenError(
+                    f"Token exchange failed ({response.status_code}): {body_text}"
+                )
+
+            token_response = await handle_token_response_scopes(response)
+            self.context.current_tokens = token_response
+            self.context.update_token_expiry(token_response)
+            await self.context.storage.set_tokens(token_response)
 
         settings = Settings.load()
         port = settings.web_port or 8888
@@ -247,7 +266,7 @@ class MCPManager:
             finally:
                 _oauth_pending.pop(state, None)
 
-        return OAuthClientProvider(
+        auth = OAuthClientProvider(
             server_url=config.url,
             client_metadata=client_metadata,
             storage=storage,
@@ -255,6 +274,11 @@ class MCPManager:
             callback_handler=callback_handler,
             client_metadata_url=cimd_url,
         )
+
+        # Keep compatibility local to this integration without introducing a wrapper class.
+        auth._handle_token_response = MethodType(_handle_token_response_compat, auth)
+        auth._handle_refresh_response = MethodType(_handle_token_response_compat, auth)
+        return auth
 
     async def start_server(self, config: MCPServerConfig) -> bool:
         """Start an MCP server and initialize its session.

@@ -1,6 +1,7 @@
 # Tool CLI dispatcher — allows agent to call any builtin tool via Bash.
 #
 # Updated: 2026-02-17 — added health_check, error_log, config_doctor tools
+# Updated: 2026-03-27 — added add_widget, remove_widget tools
 #
 # Usage:
 #   python -m pocketpaw.tools.cli <tool_name> '<json_args>'
@@ -18,11 +19,17 @@ import json
 import sys
 
 from pocketpaw.tools.builtin import (
+    AddWidgetTool,
     CalendarCreateTool,
     CalendarListTool,
     CalendarPrepTool,
     ClearSessionTool,
     ConfigDoctorTool,
+    ConnectorActionsTool,
+    ConnectorConnectTool,
+    ConnectorExecuteTool,
+    ConnectorListTool,
+    CreatePocketTool,
     CreateSkillTool,
     DelegateToClaudeCodeTool,
     DeleteSessionTool,
@@ -55,6 +62,7 @@ from pocketpaw.tools.builtin import (
     RedditSearchTool,
     RedditTrendingTool,
     RememberTool,
+    RemoveWidgetTool,
     RenameSessionTool,
     ResearchTool,
     SpeechToTextTool,
@@ -122,6 +130,13 @@ _TOOLS = {
         ConfigDoctorTool(),
         OpenExplorerTool(),
         DiscordCLITool(),
+        CreatePocketTool(),
+        AddWidgetTool(),
+        RemoveWidgetTool(),
+        ConnectorListTool(),
+        ConnectorActionsTool(),
+        ConnectorConnectTool(),
+        ConnectorExecuteTool(),
     ]
 }
 
@@ -153,8 +168,14 @@ def main() -> None:
         print(f"Available: {', '.join(sorted(_TOOLS))}", file=sys.stderr)
         sys.exit(1)
 
-    # Parse JSON args
-    args_str = sys.argv[2] if len(sys.argv) > 2 else "{}"
+    # Parse JSON args — prefer stdin to avoid bash $-expansion issues with CLI args
+    args_str = ""
+    if len(sys.argv) > 2 and sys.argv[2] != "-":
+        args_str = sys.argv[2]
+    elif not sys.stdin.isatty():
+        args_str = sys.stdin.read().strip()
+    if not args_str:
+        args_str = "{}"
     try:
         args = json.loads(args_str)
     except json.JSONDecodeError as e:

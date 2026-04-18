@@ -1,0 +1,113 @@
+# Confluence connector — Atlassian wiki & documentation platform.
+# Created: 2026-03-30
+
+name: confluence
+display_name: Confluence
+type: knowledge
+icon: file-text
+
+auth:
+  method: basic
+  credentials:
+    - name: CONFLUENCE_BASE_URL
+      description: Confluence instance URL (e.g. https://yourorg.atlassian.net/wiki)
+      required: true
+    - name: CONFLUENCE_EMAIL
+      description: Atlassian account email
+      required: true
+    - name: CONFLUENCE_API_TOKEN
+      description: Atlassian API token
+      required: true
+
+actions:
+  - name: search
+    description: Search Confluence content using CQL
+    method: GET
+    url: "{CONFLUENCE_BASE_URL}/rest/api/content/search"
+    params:
+      cql: { type: string, required: true, description: "CQL query (e.g. type=page AND text~'search term')" }
+      limit: { type: integer, default: 25 }
+      expand: { type: string, default: "space,version,ancestors" }
+    trust_level: auto
+
+  - name: list_spaces
+    description: List all accessible spaces
+    method: GET
+    url: "{CONFLUENCE_BASE_URL}/rest/api/space"
+    params:
+      limit: { type: integer, default: 25 }
+      type: { type: string, enum: [global, personal] }
+    trust_level: auto
+
+  - name: get_page
+    description: Get a specific page by ID
+    method: GET
+    url: "{CONFLUENCE_BASE_URL}/rest/api/content/{page_id}"
+    params:
+      page_id: { type: string, required: true }
+      expand: { type: string, default: "body.storage,version,space,ancestors" }
+    trust_level: auto
+
+  - name: get_page_children
+    description: List child pages of a page
+    method: GET
+    url: "{CONFLUENCE_BASE_URL}/rest/api/content/{page_id}/child/page"
+    params:
+      page_id: { type: string, required: true }
+      limit: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_space_pages
+    description: List pages in a specific space
+    method: GET
+    url: "{CONFLUENCE_BASE_URL}/rest/api/content"
+    params:
+      spaceKey: { type: string, required: true, description: "Space key (e.g. TEAM)" }
+      limit: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: create_page
+    description: Create a new Confluence page
+    method: POST
+    url: "{CONFLUENCE_BASE_URL}/rest/api/content"
+    body:
+      type: { type: string, default: "page" }
+      title: { type: string, required: true }
+      space: { type: object, required: true, description: "{key: 'SPACEKEY'}" }
+      body: { type: object, required: true, description: "{storage: {value: '<p>HTML content</p>', representation: 'storage'}}" }
+      ancestors: { type: object, description: "[{id: 'parent_page_id'}]" }
+    trust_level: confirm
+
+  - name: update_page
+    description: Update an existing Confluence page
+    method: PUT
+    url: "{CONFLUENCE_BASE_URL}/rest/api/content/{page_id}"
+    params:
+      page_id: { type: string, required: true }
+    body:
+      version: { type: object, required: true, description: "{number: current_version + 1}" }
+      title: { type: string, required: true }
+      type: { type: string, default: "page" }
+      body: { type: object, required: true, description: "{storage: {value: '<p>Updated HTML</p>', representation: 'storage'}}" }
+    trust_level: confirm
+
+  - name: get_page_comments
+    description: Get comments on a page
+    method: GET
+    url: "{CONFLUENCE_BASE_URL}/rest/api/content/{page_id}/child/comment"
+    params:
+      page_id: { type: string, required: true }
+      limit: { type: integer, default: 25 }
+      expand: { type: string, default: "body.storage,version" }
+    trust_level: auto
+
+sync:
+  table: confluence_pages
+  schedule: every_30m
+  mapping:
+    id: id
+    title: title
+    space: space.key
+    url: _links.webui
+    version: version.number
+    updated: version.when

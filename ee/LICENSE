@@ -1,0 +1,27 @@
+Functional Source License, Version 1.1, Apache 2.0 Future License
+
+Licensor:  Qbtrix Inc.
+Software:  PocketPaw Enterprise Extensions
+
+Use Limitation:
+You may use this software for any purpose except competing with
+PocketPaw or offering it as a managed service.
+
+Change Date: Four years from the date the software is released.
+Change License: Apache License, Version 2.0
+
+For full FSL terms, see: https://fsl.software/
+
+---
+
+The code in this directory (ee/) is licensed separately from the
+rest of the PocketPaw repository, which is under the Apache 2.0 license.
+
+Enterprise features include:
+- Fabric (ontology layer)
+- Instinct (decision pipeline)
+- Automations (triggers and schedules)
+- Audit (enhanced compliance logging)
+
+These features require a PocketPaw Enterprise license for production use.
+After the Change Date, this code converts to Apache 2.0.

@@ -83,7 +83,19 @@ class MCPTokenStorage:
         if not client_data:
             return None
         try:
-            return OAuthClientInformationFull.model_validate(client_data)
+            client_info = OAuthClientInformationFull.model_validate(client_data)
+
+            # Some OAuth servers return a client_secret but omit
+            # token_endpoint_auth_method in registration responses.
+            # In that case, default to client_secret_post so token exchange
+            # includes the secret instead of failing with 4xx errors.
+            if client_info.token_endpoint_auth_method is None:
+                inferred_auth_method = "client_secret_post" if client_info.client_secret else "none"
+                client_info = client_info.model_copy(
+                    update={"token_endpoint_auth_method": inferred_auth_method}
+                )
+
+            return client_info
         except Exception as e:
             logger.warning("Failed to parse MCP OAuth client info for %s: %s", self._server_name, e)
             return None

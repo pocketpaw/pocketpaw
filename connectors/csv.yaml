@@ -1,0 +1,72 @@
+# CSV connector — import local CSV/Excel/JSON files into pocket.db.
+# Created: 2026-03-27
+# Updated: 2026-03-30 — Added JSON/Parquet import, preview, query, export, and stats actions.
+
+name: csv
+display_name: File Import
+type: file
+icon: file-spreadsheet
+auth:
+  method: none
+  credentials: []
+
+actions:
+  - name: import_file
+    description: Import a CSV, Excel, JSON, or Parquet file into a pocket table
+    method: LOCAL
+    params:
+      file_path: { type: string, required: true, description: "Path to the file (CSV, XLSX, JSON, Parquet)" }
+      table_name: { type: string, description: "Target table name (defaults to filename)" }
+      delimiter: { type: string, default: ",", description: "Column delimiter (CSV only)" }
+      has_header: { type: boolean, default: true }
+      encoding: { type: string, default: "utf-8" }
+      sheet_name: { type: string, description: "Sheet name for Excel files (defaults to first sheet)" }
+    trust_level: auto
+
+  - name: list_tables
+    description: List imported tables in this pocket
+    method: LOCAL
+    trust_level: auto
+
+  - name: preview_table
+    description: Preview rows from an imported table
+    method: LOCAL
+    params:
+      table_name: { type: string, required: true }
+      limit: { type: integer, default: 20 }
+    trust_level: auto
+
+  - name: table_stats
+    description: Get row count, column types, and basic stats for a table
+    method: LOCAL
+    params:
+      table_name: { type: string, required: true }
+    trust_level: auto
+
+  - name: query_table
+    description: Run a SQL query against imported tables
+    method: LOCAL
+    params:
+      query: { type: string, required: true, description: "SQL query (e.g. SELECT * FROM my_table WHERE amount > 100)" }
+    trust_level: auto
+
+  - name: drop_table
+    description: Remove an imported table from the pocket
+    method: LOCAL
+    params:
+      table_name: { type: string, required: true }
+    trust_level: confirm
+
+  - name: export_table
+    description: Export a table to CSV file
+    method: LOCAL
+    params:
+      table_name: { type: string, required: true }
+      output_path: { type: string, required: true, description: "Path for the exported file" }
+      format: { type: string, enum: [csv, json], default: csv }
+    trust_level: auto
+
+sync:
+  table: null
+  schedule: manual
+  mapping: {}

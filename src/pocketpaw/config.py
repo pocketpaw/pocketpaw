@@ -1,9 +1,10 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-04-10: Removed old pocketclaw migration warning — fully shifted to pocketpaw.
+  - 2026-04-04: Added soul_cognitive_model setting for cheaper cognitive processing.
   - 2026-03-16: Use Literal types for whatsapp_mode, tts_provider, stt_provider (#638).
   - 2026-02-17: Added health_check_on_startup field for Health Engine.
-  - 2026-02-14: Add migration warning for old ~/.pocketclaw/ config dir and POCKETCLAW_ env vars.
   - 2026-02-06: Secrets stored encrypted via CredentialStore; auto-migrate plaintext keys.
   - 2026-02-06: Harden file/directory permissions (700 dir, 600 files).
   - 2026-02-02: Added claude_agent_sdk to agent_backend options.
@@ -96,44 +97,11 @@ def _chmod_safe(path: Path, mode: int) -> None:
         pass
 
 
-_OLD_CONFIG_WARNING_SHOWN = False
-
-
-def _warn_old_config() -> None:
-    """Print a one-time warning if the old ~/.pocketclaw/ config dir or env vars exist."""
-    import os
-
-    global _OLD_CONFIG_WARNING_SHOWN  # noqa: PLW0603
-    if _OLD_CONFIG_WARNING_SHOWN:
-        return
-    _OLD_CONFIG_WARNING_SHOWN = True
-
-    old_dir = Path.home() / ".pocketclaw"
-    if old_dir.exists():
-        logger.warning(
-            "Found old config directory at ~/.pocketclaw/. "
-            "PocketPaw now uses ~/.pocketpaw/. "
-            "To keep your settings, run:\n"
-            "  cp -r ~/.pocketclaw/* ~/.pocketpaw/\n"
-            "Then remove the old directory when you're satisfied everything works."
-        )
-
-    # Check for old POCKETCLAW_ env vars
-    old_vars = [k for k in os.environ if k.startswith("POCKETCLAW_")]
-    if old_vars:
-        logger.warning(
-            "Found old POCKETCLAW_* environment variables: %s. "
-            "Rename them to POCKETPAW_* (e.g. POCKETPAW_ANTHROPIC_API_KEY).",
-            ", ".join(old_vars),
-        )
-
-
 def get_config_dir() -> Path:
     """Get the config directory, creating if needed."""
     config_dir = Path.home() / ".pocketpaw"
     config_dir.mkdir(exist_ok=True)
     _chmod_safe(config_dir, 0o700)
-    _warn_old_config()
     return config_dir
 
 
@@ -363,12 +331,26 @@ class Settings(BaseSettings):
     memory_backend: str = Field(
         default="file",
         description=(
-            "Memory backend: 'file' (simple markdown), "
-            "'mem0' (semantic with LLM), 'vector' (ChromaDB)"
+            "Memory backend: 'file' (markdown + optional vector retrieval) or "
+            "'mem0' (semantic with LLM)"
         ),
     )
     vectordb_path: str = Field(
         default="~/.pocketpaw/chroma_db", description="Storage path for the vector database"
+    )
+    vectordb_embedding_provider: str = Field(
+        default="default",
+        description=(
+            "Embedding provider: 'default' (sentence-transformers), 'openai', 'huggingface'"
+        ),
+    )
+    vectordb_embedding_model: str = Field(
+        default="all-MiniLM-L6-v2",
+        description=(
+            "Embedding model name. For HuggingFace: any model ID"
+            " (e.g. 'BAAI/bge-small-en-v1.5')."
+            " For OpenAI: 'text-embedding-3-small'"
+        ),
     )
     memory_use_inference: bool = Field(
         default=True, description="Use LLM to extract facts from memories (only for mem0 backend)"
@@ -406,6 +388,30 @@ class Settings(BaseSettings):
     file_auto_learn: bool = Field(
         default=False,
         description="Auto-extract facts from conversations for file memory backend (uses Haiku)",
+    )
+    file_vector_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable vector indexing and semantic retrieval for file memory backend "
+            "(opt-in). Also enables knowledge graph extraction with conservative "
+            "regex patterns and heuristic filtering."
+        ),
+    )
+    vector_store: str = Field(
+        default="sqlite-vec",
+        description="Vector store for file memory backend: 'sqlite-vec', 'chromadb', or 'qdrant'",
+    )
+    embedding_provider: str = Field(
+        default="ollama",
+        description="Embedding provider for file memory backend (default: ollama)",
+    )
+    embedding_model: str = Field(
+        default="nomic-embed-text",
+        description="Embedding model for file memory semantic retrieval",
+    )
+    embedding_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Embedding provider base URL (for ollama)",
     )
 
     # Session History Compaction
@@ -784,7 +790,7 @@ class Settings(BaseSettings):
 
     # Soul Protocol
     soul_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable soul-protocol for persistent AI identity, memory, and emotion",
     )
     soul_name: str = Field(
@@ -842,6 +848,31 @@ class Settings(BaseSettings):
             "auto_regen: passive energy recovery rate."
         ),
     )
+    kb_scope: str = Field(
+        default="",
+        description=(
+            "Knowledge base scope to query via the `kb` CLI (github.com/qbtrix/kb-go). "
+            "When set and the kb binary is on PATH, relevant articles are injected "
+            "into the agent system prompt alongside soul memories. Empty = disabled."
+        ),
+    )
+    kb_binary: str = Field(
+        default="kb",
+        description="Path to the kb binary (default: `kb` on PATH)",
+    )
+    kb_limit: int = Field(
+        default=3,
+        description="Number of top articles to inject from kb search (default: 3)",
+    )
+
+    soul_cognitive_model: str = Field(
+        default="",
+        description=(
+            "Model to use for soul cognitive processing (sentiment, significance, "
+            "fact/entity extraction). Empty = use main agent backend. Set to a cheaper "
+            "model like 'claude-haiku-4-5-20251001' to reduce cost. Requires anthropic SDK."
+        ),
+    )
 
     notification_channels: list[str] = Field(
         default_factory=list,
@@ -891,6 +922,8 @@ class Settings(BaseSettings):
         Runs format validation on API keys before saving; logs warnings but
         never blocks or raises.
         """
+        # TODO: When adding new sensitive fields, ensure they are included in SECRET_FIELDS in
+        # pocketpaw/credentials.py to prevent plaintext storage.
         from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 
         config_path = get_config_path()

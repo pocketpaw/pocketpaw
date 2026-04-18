@@ -23,7 +23,7 @@ import logging
 from typing import Any
 
 from pocketpaw.tools.policy import ToolPolicy
-from pocketpaw.tools.protocol import BaseTool, normalize_schema
+from pocketpaw.tools.protocol import BaseTool
 from pocketpaw.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -126,8 +126,14 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
 
         defn = tool.definition
 
-        # Reuse the shared schema normalizer so zero-arg tools survive strict OpenAI validation.
-        params_schema = normalize_schema(defn.parameters or {"type": "object"})
+        # Sanitize JSON schema: strict providers (e.g. Groq) reject schemas
+        # where 'required' is present but 'properties' is empty or missing.
+        params_schema = dict(defn.parameters) if defn.parameters else {"type": "object"}
+        props = params_schema.get("properties")
+        if not props and "required" in params_schema:
+            params_schema.pop("required")
+        if "properties" not in params_schema:
+            params_schema["properties"] = {}
 
         ft = FunctionTool(
             name=defn.name,
@@ -386,7 +392,12 @@ def get_tool_instructions_compact(settings: Any, backend: str = "opencode") -> s
         "# PocketPaw Tools",
         "",
         "You have access to the following PocketPaw tools.",
-        "To use a tool, run: `python -m pocketpaw.tools.cli <tool_name> '<json_args>'`",
+        "To use a tool, pipe JSON via stdin (avoids bash $-expansion issues):",
+        "```",
+        "echo '<json_args>' | python -m pocketpaw.tools.cli <tool_name>",
+        "```",
+        "IMPORTANT: Always use single quotes around JSON to prevent bash from",
+        "expanding $ signs in values like prices ($74.30) or currency amounts.",
         "",
     ]
     for tool_name in sorted(allowed):

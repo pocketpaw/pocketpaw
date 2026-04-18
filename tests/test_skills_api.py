@@ -247,8 +247,9 @@ class TestSkillsRESTEndpoints:
         mock_proc.returncode = 0
 
         with (
-            patch("pocketpaw.dashboard.asyncio") as mock_asyncio,
-            patch("pocketpaw.dashboard.get_skill_loader", return_value=mock_loader),
+            patch("pocketpaw.skills.installer.asyncio") as mock_asyncio,
+            patch("pocketpaw.skills.installer.get_skill_loader", return_value=mock_loader),
+            patch("pocketpaw.skills.installer.get_audit_logger"),
             tempfile.TemporaryDirectory() as fake_home,
         ):
             mock_asyncio.create_subprocess_exec = AsyncMock(return_value=mock_proc)
@@ -278,7 +279,7 @@ class TestSkillsRESTEndpoints:
 
             # Patch install dir to use temp dir
             install_path = Path(fake_home) / ".agents" / "skills"
-            with patch("pathlib.Path.home", return_value=Path(fake_home)):
+            with patch("pocketpaw.skills.installer.INSTALL_DIR", install_path):
                 from pocketpaw.dashboard import install_skill
 
                 result = await install_skill(request)
@@ -296,7 +297,7 @@ class TestSkillsRESTEndpoints:
         mock_proc.returncode = 128
 
         with (
-            patch("pocketpaw.dashboard.asyncio") as mock_asyncio,
+            patch("pocketpaw.skills.installer.asyncio") as mock_asyncio,
         ):
             mock_asyncio.create_subprocess_exec = AsyncMock(return_value=mock_proc)
             mock_asyncio.subprocess = asyncio.subprocess

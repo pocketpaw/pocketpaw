@@ -22,7 +22,7 @@ from typing import Any
 from pocketpaw.agents.backend import BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
-from pocketpaw.security.rails import DANGEROUS_SUBSTRINGS as DANGEROUS_PATTERNS
+from pocketpaw.security.rails import is_substring_blocked
 from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
@@ -214,12 +214,10 @@ class ClaudeSDKBackend:
             if pattern.search(command):
                 return pattern.pattern
 
-        # Secondary: substring matching (catches simple literal fragments)
-        command_lower = command.lower()
-        for pattern in DANGEROUS_PATTERNS:
-            if pattern.lower() in command_lower:
-                return pattern
-        return None
+        # Secondary: substring matching (catches simple literal fragments).
+        # is_substring_blocked() applies .lower() on both sides so that
+        # uppercase variants like "SUDO RM" are caught (OWASP A01).
+        return is_substring_blocked(command)
 
     # Patterns that indicate an OS-level "open file" command.
     _FILE_OPEN_PATTERNS = [
@@ -350,8 +348,17 @@ class ClaudeSDKBackend:
             logger.debug(f"✅ Allowed command: {command[:50]}...")
             return {}
         except Exception as e:
-            logger.error(f"Hook callback error (allowing command): {e}")
-            return {}
+            logger.error(f"Hook callback error (blocking command as precaution): {e}")
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "Safety hook encountered an internal error — "
+                        "blocking command as a precaution"
+                    ),
+                }
+            }
 
     def _extract_text_from_message(self, message: Any) -> str:
         """Extract text content from an AssistantMessage.
@@ -417,6 +424,20 @@ class ClaudeSDKBackend:
                 )
         return tools
 
+    # MCP servers whose functionality is already provided by Claude Code's
+    # built-in WebSearch tool.  Passing these causes duplicate/conflicting
+    # search behaviour and wastes context on redundant tool definitions.
+    _BUILTIN_SEARCH_MCP_NAMES = frozenset(
+        {
+            "brave-search",
+            "tavily-search",
+            "exa-search",
+            "Brave Search",
+            "Tavily Search",
+            "Exa Search",
+        }
+    )
+
     def _get_mcp_servers(self) -> dict[str, dict]:
         """Load enabled MCP server configs, filtered by tool policy.
 
@@ -424,6 +445,9 @@ class ClaudeSDKBackend:
         transport types: stdio, sse, and http — each with its own
         TypedDict shape (McpStdioServerConfig, McpSSEServerConfig,
         McpHttpServerConfig).
+
+        Web search MCP servers (Tavily, Brave, Exa) are excluded because
+        Claude Code already provides a built-in WebSearch tool.
         """
         try:
             from pocketpaw.mcp.config import load_mcp_config
@@ -434,6 +458,11 @@ class ClaudeSDKBackend:
         servers: dict[str, dict] = {}
         for cfg in configs:
             if not cfg.enabled:
+                continue
+            if cfg.name in self._BUILTIN_SEARCH_MCP_NAMES:
+                logger.info(
+                    "MCP server '%s' skipped — Claude Code has built-in WebSearch", cfg.name
+                )
                 continue
             if not self._policy.is_mcp_server_allowed(cfg.name):
                 logger.info("MCP server '%s' blocked by tool policy", cfg.name)
@@ -460,127 +489,6 @@ class ClaudeSDKBackend:
 
             servers[cfg.name] = entry
         return servers
-
-    @staticmethod
-    def _merge_consecutive_roles(messages: list[dict]) -> list[dict]:
-        """Merge consecutive messages with the same role for API compliance.
-
-        The Anthropic API requires alternating user/assistant roles.
-        Consecutive same-role messages are concatenated with newlines.
-        """
-        if not messages:
-            return []
-        merged: list[dict] = [messages[0].copy()]
-        for msg in messages[1:]:
-            if msg["role"] == merged[-1]["role"]:
-                merged[-1]["content"] += "\n" + msg["content"]
-            else:
-                merged.append(msg.copy())
-        return merged
-
-    async def _fast_chat(
-        self,
-        message: str,
-        *,
-        system_prompt: str,
-        history: list[dict] | None = None,
-        model: str,
-    ) -> AsyncIterator[AgentEvent]:
-        """Direct Anthropic API path for simple messages.
-
-        Bypasses the Claude CLI subprocess entirely, saving ~1.5-3s of
-        process fork + Node.js startup + CLI initialization overhead.
-        No tools are provided (simple messages don't need them).
-        """
-        try:
-            import time
-
-            from pocketpaw.llm.client import resolve_llm_client
-
-            t0 = time.monotonic()
-            llm = resolve_llm_client(self.settings)
-            client = llm.create_anthropic_client()
-            t1 = time.monotonic()
-            logger.info("Fast-path: client created in %.0fms", (t1 - t0) * 1000)
-
-            # Build API messages from history + current message
-            api_messages: list[dict] = []
-            if history:
-                for msg in history:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    if role in ("user", "assistant") and content:
-                        api_messages.append({"role": role, "content": content})
-            api_messages.append({"role": "user", "content": message})
-
-            # Merge consecutive same-role messages for API compliance
-            api_messages = self._merge_consecutive_roles(api_messages)
-
-            logger.info(
-                "Fast-path: calling %s (system=%d chars, msgs=%d)",
-                model,
-                len(system_prompt),
-                len(api_messages),
-            )
-            t2 = time.monotonic()
-
-            # Respect provider max_tokens (e.g. DeepSeek caps at 8192)
-            provider = self.settings.claude_sdk_provider or "anthropic"
-            if provider == "litellm" and self.settings.litellm_max_tokens > 0:
-                fast_max_tokens = self.settings.litellm_max_tokens
-            elif provider == "openai_compatible" and self.settings.openai_compatible_max_tokens > 0:
-                fast_max_tokens = self.settings.openai_compatible_max_tokens
-            else:
-                fast_max_tokens = 4096
-
-            async with client.messages.stream(
-                model=model,
-                system=system_prompt,
-                messages=api_messages,
-                max_tokens=fast_max_tokens,
-            ) as stream:
-                t3 = time.monotonic()
-                logger.info("Fast-path: stream opened in %.0fms", (t3 - t2) * 1000)
-                first_token = True
-                async for text in stream.text_stream:
-                    if first_token:
-                        t4 = time.monotonic()
-                        logger.info(
-                            "Fast-path: first token in %.0fms (total %.0fms)",
-                            (t4 - t3) * 1000,
-                            (t4 - t0) * 1000,
-                        )
-                        first_token = False
-                    if self._stop_flag:
-                        logger.info("Fast-path: stop flag set, breaking stream")
-                        break
-                    yield AgentEvent(type="message", content=text)
-
-                # Extract usage from the final message
-                final_msg = stream.get_final_message()
-                if final_msg and hasattr(final_msg, "usage") and final_msg.usage:
-                    u = final_msg.usage
-                    yield AgentEvent(
-                        type="token_usage",
-                        content="",
-                        metadata={
-                            "input_tokens": getattr(u, "input_tokens", 0),
-                            "output_tokens": getattr(u, "output_tokens", 0),
-                            "cached_input_tokens": getattr(u, "cache_read_input_tokens", 0)
-                            + getattr(u, "cache_creation_input_tokens", 0),
-                            "model": model,
-                            "backend": "claude_agent_sdk",
-                        },
-                    )
-
-            yield AgentEvent(type="done", content="")
-
-        except Exception as e:
-            from pocketpaw.llm.client import resolve_llm_client
-
-            llm = resolve_llm_client(self.settings)
-            logger.error("Fast-path API error: %s", e)
-            yield AgentEvent(type="error", content=llm.format_api_error(e))
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
         """Get or create a persistent ClaudeSDKClient.
@@ -752,7 +660,7 @@ class ClaudeSDKBackend:
             # ── API key check for Anthropic provider ──────────────
             # Skip if using a non-Anthropic provider, or if the active
             # provider is claude_code (it handles OAuth auth via its CLI).
-            is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
+            _is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
             is_non_anthropic = (
                 llm.is_ollama
                 or llm.is_openai_compatible
@@ -760,36 +668,34 @@ class ClaudeSDKBackend:
                 or llm.is_litellm
                 or llm.is_openrouter
             )
-            if not is_non_anthropic:
-                has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
-                if not has_api_key and not is_claude_code_provider:
-                    yield AgentEvent(
-                        type="error",
-                        content=(
-                            "**API key required** -- The Claude SDK backend needs "
-                            "an Anthropic API key.\n\n"
-                            "**How to fix:**\n"
-                            "1. Get an API key at "
-                            "[console.anthropic.com](https://console.anthropic.com/settings/keys)\n"
-                            "2. Add it in **Settings > API Keys > Anthropic API Key**\n"
-                            "3. Or set the `ANTHROPIC_API_KEY` environment variable\n\n"
-                            "*Alternatively, switch to **Ollama (Local)** in Settings "
-                            "> General for free local inference.*"
-                        ),
-                    )
-                    return
+            # if not is_non_anthropic:
+            #     has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
+            #     if not has_api_key and not is_claude_code_provider:
+            #         yield AgentEvent(
+            #             type="error",
+            #             content=(
+            #                 "**API key required** -- The Claude SDK backend needs "
+            #                 "an Anthropic API key.\n\n"
+            #                 "**How to fix:**\n"
+            #                 "1. Get an API key at "
+            #                 "[console.anthropic.com](https://console.anthropic.com/settings/keys)\n"
+            #                 "2. Add it in **Settings > API Keys > Anthropic API Key**\n"
+            #                 "3. Or set the `ANTHROPIC_API_KEY` environment variable\n\n"
+            #                 "*Alternatively, switch to **Ollama (Local)** in Settings "
+            #                 "> General for free local inference.*"
+            #             ),
+            #         )
+            #         return
 
-            # Smart model routing — classify BEFORE prompt composition so we
-            # can skip tool instructions for SIMPLE messages and dispatch to
-            # the fast-path (direct API) for simple queries.
-            is_simple = False
+            # Smart model routing — classify complexity to pick the model tier.
+            # All messages go through the Claude Code CLI subprocess, which
+            # handles conversation compaction automatically (PreCompact hook).
             selection = None
             if self.settings.smart_routing_enabled and not is_non_anthropic:
-                from pocketpaw.agents.model_router import ModelRouter, TaskComplexity
+                from pocketpaw.agents.model_router import ModelRouter
 
                 model_router = ModelRouter(self.settings)
                 selection = model_router.classify(message)
-                is_simple = selection.complexity == TaskComplexity.SIMPLE
                 logger.info(
                     "Smart routing: %s -> %s (%s)",
                     selection.complexity.value,
@@ -797,23 +703,40 @@ class ClaudeSDKBackend:
                     selection.reason,
                 )
 
-            # Fast path: bypass CLI subprocess entirely for simple messages.
-            # Uses the Anthropic API directly (requires API key, already enforced above).
-            has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
-            if is_simple and selection is not None and has_api_key:
-                identity = system_prompt or _DEFAULT_IDENTITY
-                async for event in self._fast_chat(
-                    message,
-                    system_prompt=identity,
-                    history=history,
-                    model=selection.model,
-                ):
-                    yield event
-                return
-
             # System prompt — instructions are now part of identity
             # (injected by BootstrapContext.to_system_prompt() via INSTRUCTIONS.md)
             identity = system_prompt or _DEFAULT_IDENTITY
+
+            # Inject connector instructions so the agent can use data sources
+            try:
+                from pocketpaw.connectors.registry import ConnectorRegistry
+
+                reg = ConnectorRegistry()
+                if reg.available:
+                    names = ", ".join(c["name"] for c in reg.available)
+                    identity += (
+                        "\n\n# Data Connectors\n"
+                        f"Available connectors: {names}\n"
+                        "To manage connectors, use Bash to call the local API:\n"
+                        "- List: curl -s http://localhost:8888/api/v1/connectors\n"
+                        "- Detail: curl -s http://localhost:8888/api/v1/connectors/<name>\n"
+                        "- Connect: curl -s -X POST "
+                        "http://localhost:8888/api/v1/connectors/connect "
+                        "-H 'Content-Type: application/json' "
+                        '-d \'{"connector_name":"<name>","config":{...}}\'\n'
+                        "- Execute: curl -s -X POST "
+                        "http://localhost:8888/api/v1/connectors/execute "
+                        "-H 'Content-Type: application/json' "
+                        '-d \'{"connector_name":"<name>","action":"<action>"'
+                        ',"params":{...}}\'\n'
+                        "- Disconnect: curl -s -X POST "
+                        "http://localhost:8888/api/v1/connectors/disconnect "
+                        "-H 'Content-Type: application/json' "
+                        '-d \'{"connector_name":"<name>"}\'\n'
+                    )
+            except Exception:
+                pass  # Don't break agent if connector registry fails
+
             # The persistent ClaudeSDKClient maintains conversation history
             # natively across query() calls, so we do NOT inject history into
             # the system prompt for that path. History is only appended for
@@ -1088,7 +1011,7 @@ class ClaudeSDKBackend:
                                     )
                                 else:
                                     continue
-                                if result_text and "<!-- media:" in result_text:
+                                if result_text:
                                     yield AgentEvent(
                                         type="tool_result",
                                         content=result_text,

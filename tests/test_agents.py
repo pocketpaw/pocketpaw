@@ -95,6 +95,31 @@ class TestClaudeAgentSDK:
         assert sdk._is_dangerous_command("ls -la") is None
         assert sdk._is_dangerous_command("cat file.txt") is None
 
+    @pytest.mark.asyncio
+    async def test_dangerous_hook_fails_closed_on_exception(self):
+        """Hook must block (not allow) commands when an internal error occurs.
+
+        Regression test for GH-852: a RuntimeError inside the hook previously
+        returned {} (allow). After the fix it must return a deny decision.
+        """
+        from unittest.mock import patch
+
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        sdk = ClaudeSDKBackend(Settings())
+
+        input_data = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
+
+        # Inject a RuntimeError into _is_dangerous_command so the outer
+        # except clause fires.
+        with patch.object(sdk, "_is_dangerous_command", side_effect=RuntimeError("boom")):
+            result = await sdk._block_dangerous_hook(input_data, None, None)
+
+        # Must deny, not allow
+        hook_output = result.get("hookSpecificOutput", {})
+        assert hook_output.get("permissionDecision") == "deny"
+        assert "internal error" in hook_output.get("permissionDecisionReason", "").lower()
+
     def test_sdk_has_system_prompt(self):
         from pocketpaw.agents.claude_sdk import _DEFAULT_IDENTITY
 
@@ -107,10 +132,10 @@ class TestClaudeAgentSDK:
         assert "PocketPaw Tools" in _DEFAULT_INSTRUCTIONS
 
     def test_sdk_has_dangerous_patterns(self):
-        from pocketpaw.agents.claude_sdk import DANGEROUS_PATTERNS
+        from pocketpaw.security.rails import DANGEROUS_SUBSTRINGS
 
-        assert isinstance(DANGEROUS_PATTERNS, list)
-        assert "rm -rf /" in DANGEROUS_PATTERNS
+        assert isinstance(DANGEROUS_SUBSTRINGS, list)
+        assert "rm -rf /" in DANGEROUS_SUBSTRINGS
 
     @pytest.mark.asyncio
     async def test_sdk_status(self):

@@ -123,12 +123,17 @@ class ProactiveDaemon:
         Called when an intention trigger fires.
 
         Args:
-            intention: The intention that was triggered
+            intention: The intention that was triggered. May contain a
+                       ``_stale_session`` key when fired by a stale-session trigger.
         """
+        session_meta: dict | None = intention.pop("_stale_session", None)
         logger.info(f"Intention triggered: {intention['name']}")
 
-        # Execute and stream results
-        await self.executor.execute_and_stream(intention)
+        # Execute and stream results — catch all errors so APScheduler doesn't crash
+        try:
+            await self.executor.execute_and_stream(intention, session_meta=session_meta)
+        except Exception as e:
+            logger.error(f"Intention trigger failed for {intention['name']}: {e}")
 
     # ==================== Intention Management API ====================
 
@@ -251,7 +256,7 @@ class ProactiveDaemon:
         """
         intention = self.intention_store.get_by_id(intention_id)
         if intention:
-            await self.executor.execute_and_stream(intention)
+            await self.executor.execute_and_stream(intention, session_meta=None)
         else:
             logger.error(f"Intention not found: {intention_id}")
 

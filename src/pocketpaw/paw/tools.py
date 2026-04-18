@@ -331,11 +331,20 @@ class SoulForgetTool(BaseTool):
             "properties": {
                 "query": {"type": "string", "description": "Content query to match for deletion"},
                 "entity": {"type": "string", "description": "Entity name to forget"},
-                "before_date": {"type": "string", "description": "ISO 8601 date — forget older memories"},
+                "before_date": {
+                    "type": "string",
+                    "description": "ISO 8601 date — forget older memories",
+                },
             },
         }
 
-    async def execute(self, query: str = "", entity: str = "", before_date: str = "", **kw: Any) -> str:
+    async def execute(
+        self,
+        query: str = "",
+        entity: str = "",
+        before_date: str = "",
+        **kw: Any,
+    ) -> str:
         if not query and not entity and not before_date:
             return self._error("Provide at least one of 'query', 'entity', or 'before_date'.")
         try:
@@ -343,11 +352,14 @@ class SoulForgetTool(BaseTool):
                 result = await self._soul.forget_entity(entity)
             elif before_date and hasattr(self._soul, "forget_before"):
                 from datetime import datetime
+
                 result = await self._soul.forget_before(datetime.fromisoformat(before_date))
             elif query and hasattr(self._soul, "forget"):
                 result = await self._soul.forget(query)
             else:
-                return self._error("No valid forget operation. Provide a non-empty query, entity, or before_date.")
+                return self._error(
+                    "No valid forget operation. Provide a non-empty query, entity, or before_date."
+                )
             total = result.get("total", "unknown") if isinstance(result, dict) else str(result)
             return self._success(f"Forgotten {total} memories. {json.dumps(result, default=str)}")
         except Exception as e:
@@ -377,7 +389,14 @@ class SoulCoreMemoryTool(BaseTool):
             if not hasattr(self._soul, "get_core_memory"):
                 return self._error("Requires soul-protocol >= 0.2.8.")
             cm = self._soul.get_core_memory()
-            data = cm.model_dump() if hasattr(cm, "model_dump") else {"persona": getattr(cm, "persona", ""), "human": getattr(cm, "human", "")}
+            data = (
+                cm.model_dump()
+                if hasattr(cm, "model_dump")
+                else {
+                    "persona": getattr(cm, "persona", ""),
+                    "human": getattr(cm, "human", ""),
+                }
+            )
             return json.dumps(data, indent=2, default=str)
         except Exception as e:
             return self._error(f"Failed: {e}")
@@ -395,7 +414,10 @@ class SoulContextTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Get relevant soul context for a topic — returns state, memories, and self-model insights."
+        return (
+            "Get relevant soul context for a topic — "
+            "returns state, memories, and self-model insights."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -403,7 +425,11 @@ class SoulContextTool(BaseTool):
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "Topic to get context for"},
-                "max_memories": {"type": "integer", "description": "Max memories (default: 5)", "default": 5},
+                "max_memories": {
+                    "type": "integer",
+                    "description": "Max memories (default: 5)",
+                    "default": 5,
+                },
             },
             "required": ["prompt"],
         }

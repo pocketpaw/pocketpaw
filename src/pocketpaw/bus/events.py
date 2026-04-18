@@ -25,6 +25,7 @@ class Channel(StrEnum):
     WEBHOOK = "webhook"
     A2A = "a2a"
     SYSTEM = "system"  # Internal (subagents, intentions)
+    ENTERPRISE = "enterprise"
 
 
 @dataclass(frozen=True)

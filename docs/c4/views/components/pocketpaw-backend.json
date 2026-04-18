@@ -1,0 +1,23 @@
+{
+  "level": "component",
+  "title": "Components -- Pocketpaw Backend",
+  "description": "Component-level view of Pocketpaw Backend",
+  "elements": [
+    "api",
+    "v1",
+    "security",
+    "oauth2"
+  ],
+  "relationships": [
+    {
+      "source": "api",
+      "target": "security",
+      "description": "Validates all API requests using OAuth2 and JWT authentication"
+    },
+    {
+      "source": "cli",
+      "target": "api",
+      "description": "CLI communicates with backend API for system management"
+    }
+  ]
+}

@@ -2,9 +2,13 @@
 # Created: 2026-02-20
 #
 # Extracted from dashboard.py auth endpoints.
+# Updated: 2026-04-09 — use hmac.compare_digest for master-token comparisons
+# to close the timing-oracle gap left open by PR #875 (which only hardened
+# session_tokens.py, missing the raw master-token check sites here).
 
 from __future__ import annotations
 
+import hmac
 import io
 import logging
 
@@ -38,7 +42,7 @@ async def exchange_session_token(request: Request):
         auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
     )
     master = get_access_token()
-    if bearer != master:
+    if not hmac.compare_digest(bearer, master):
         raise HTTPException(status_code=401, detail="Invalid master token")
 
     settings = Settings.load()
@@ -72,7 +76,7 @@ async def cookie_login(request: Request):
     submitted = body.get("token", "").strip()
     master = get_access_token()
 
-    is_valid = submitted == master
+    is_valid = hmac.compare_digest(submitted, master)
     # Accept OAuth2 access tokens (ppat_*)
     if not is_valid and submitted.startswith("ppat_"):
         try:
@@ -121,7 +125,11 @@ async def cookie_logout():
 
 @router.get("/qr")
 async def get_qr_code(request: Request):
-    """Generate QR login code."""
+    """Generate QR login code.
+
+    Requires authentication — the caller must already have a valid session.
+    Generates a short-lived (60 s) pairing token embedded in the QR URL.
+    """
     from pocketpaw.security.rate_limiter import auth_limiter
 
     client_ip = request.client.host if request.client else "unknown"
@@ -139,7 +147,8 @@ async def get_qr_code(request: Request):
     tunnel = get_tunnel_manager()
     status = tunnel.get_status()
 
-    qr_token = create_session_token(get_access_token(), ttl_hours=1)
+    # Short-lived pairing token (60 seconds) — scoped to the QR pairing flow
+    qr_token = create_session_token(get_access_token(), ttl_hours=0, ttl_seconds=60)
 
     if status.get("active") and status.get("url"):
         login_url = f"{status['url']}/?token={qr_token}"

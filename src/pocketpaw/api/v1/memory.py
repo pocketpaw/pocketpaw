@@ -34,7 +34,7 @@ async def get_long_term_memory(limit: int = Query(50, ge=1, le=500)):
     from pocketpaw.memory import MemoryType, get_memory_manager
 
     manager = get_memory_manager()
-    items = await manager._store.get_by_type(MemoryType.LONG_TERM, limit=limit)
+    items = await manager.get_by_type(MemoryType.LONG_TERM, limit=limit)
     return [
         MemoryEntry(
             id=item.id,

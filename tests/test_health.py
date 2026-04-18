@@ -281,7 +281,10 @@ class TestCheckConfigPermissions:
         config_path.chmod(0o600)
         with patch(_P_CONFIG_PATH, return_value=config_path):
             r = check_config_permissions()
-            assert r.status == "ok"
+            if sys.platform == "win32":
+                assert r.status == "warning"
+            else:
+                assert r.status == "ok"
 
     @pytest.mark.skipif(
         sys.platform == "win32",

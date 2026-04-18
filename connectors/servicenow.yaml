@@ -1,0 +1,128 @@
+# ServiceNow connector — IT service management (ITSM) and operations.
+# Created: 2026-03-30
+
+name: servicenow
+display_name: ServiceNow
+type: itsm
+icon: settings
+
+auth:
+  method: basic
+  credentials:
+    - name: SNOW_INSTANCE_URL
+      description: ServiceNow instance URL (e.g. https://yourorg.service-now.com)
+      required: true
+    - name: SNOW_USERNAME
+      description: ServiceNow username
+      required: true
+    - name: SNOW_PASSWORD
+      description: ServiceNow password
+      required: true
+
+actions:
+  - name: list_incidents
+    description: List IT incidents
+    method: GET
+    url: "{SNOW_INSTANCE_URL}/api/now/table/incident"
+    params:
+      sysparm_limit: { type: integer, default: 25 }
+      sysparm_query: { type: string, default: "active=true^ORDERBYDESCsys_updated_on", description: "ServiceNow encoded query" }
+      sysparm_display_value: { type: boolean, default: true }
+      sysparm_fields: { type: string, default: "number,short_description,state,priority,assigned_to,category,opened_at,sys_updated_on" }
+    trust_level: auto
+
+  - name: get_incident
+    description: Get a specific incident by number or sys_id
+    method: GET
+    url: "{SNOW_INSTANCE_URL}/api/now/table/incident/{sys_id}"
+    params:
+      sys_id: { type: string, required: true, description: "Incident sys_id or number" }
+      sysparm_display_value: { type: boolean, default: true }
+    trust_level: auto
+
+  - name: list_change_requests
+    description: List change requests
+    method: GET
+    url: "{SNOW_INSTANCE_URL}/api/now/table/change_request"
+    params:
+      sysparm_limit: { type: integer, default: 25 }
+      sysparm_query: { type: string, default: "active=true^ORDERBYDESCsys_updated_on" }
+      sysparm_display_value: { type: boolean, default: true }
+      sysparm_fields: { type: string, default: "number,short_description,state,type,risk,assigned_to,start_date,end_date" }
+    trust_level: auto
+
+  - name: list_service_requests
+    description: List service requests (catalog items)
+    method: GET
+    url: "{SNOW_INSTANCE_URL}/api/now/table/sc_request"
+    params:
+      sysparm_limit: { type: integer, default: 25 }
+      sysparm_query: { type: string, default: "active=true^ORDERBYDESCsys_updated_on" }
+      sysparm_display_value: { type: boolean, default: true }
+    trust_level: auto
+
+  - name: list_problems
+    description: List problem records
+    method: GET
+    url: "{SNOW_INSTANCE_URL}/api/now/table/problem"
+    params:
+      sysparm_limit: { type: integer, default: 25 }
+      sysparm_query: { type: string, default: "active=true^ORDERBYDESCsys_updated_on" }
+      sysparm_display_value: { type: boolean, default: true }
+    trust_level: auto
+
+  - name: create_incident
+    description: Create a new incident
+    method: POST
+    url: "{SNOW_INSTANCE_URL}/api/now/table/incident"
+    body:
+      short_description: { type: string, required: true }
+      description: { type: string }
+      urgency: { type: integer, enum: [1, 2, 3], default: 2, description: "1=High, 2=Medium, 3=Low" }
+      impact: { type: integer, enum: [1, 2, 3], default: 2 }
+      category: { type: string }
+      assignment_group: { type: string }
+    trust_level: confirm
+
+  - name: update_incident
+    description: Update an incident
+    method: PATCH
+    url: "{SNOW_INSTANCE_URL}/api/now/table/incident/{sys_id}"
+    params:
+      sys_id: { type: string, required: true }
+    body:
+      state: { type: integer, description: "1=New, 2=InProgress, 3=OnHold, 6=Resolved, 7=Closed" }
+      work_notes: { type: string }
+      assigned_to: { type: string }
+    trust_level: confirm
+
+  - name: list_cmdb_servers
+    description: List CMDB server configuration items
+    method: GET
+    url: "{SNOW_INSTANCE_URL}/api/now/table/cmdb_ci_server"
+    params:
+      sysparm_limit: { type: integer, default: 25 }
+      sysparm_display_value: { type: boolean, default: true }
+      sysparm_fields: { type: string, default: "name,ip_address,os,operational_status,environment" }
+    trust_level: auto
+
+  - name: search_knowledge
+    description: Search the knowledge base
+    method: GET
+    url: "{SNOW_INSTANCE_URL}/api/now/table/kb_knowledge"
+    params:
+      sysparm_query: { type: string, required: true, description: "Encoded query (e.g. short_descriptionLIKEpassword reset)" }
+      sysparm_limit: { type: integer, default: 10 }
+    trust_level: auto
+
+sync:
+  table: snow_incidents
+  schedule: every_15m
+  mapping:
+    id: sys_id
+    number: number
+    description: short_description
+    state: state
+    priority: priority
+    assigned_to: assigned_to
+    updated: sys_updated_on

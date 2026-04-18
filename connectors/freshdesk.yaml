@@ -1,0 +1,111 @@
+# Freshdesk connector — customer support and helpdesk.
+# Created: 2026-03-30
+
+name: freshdesk
+display_name: Freshdesk
+type: support
+icon: life-buoy
+
+auth:
+  method: api_key
+  credentials:
+    - name: FRESHDESK_DOMAIN
+      description: Freshdesk domain (e.g. yourcompany in yourcompany.freshdesk.com)
+      required: true
+    - name: FRESHDESK_API_KEY
+      description: Freshdesk API key (Profile Settings → Your API Key)
+      required: true
+
+actions:
+  - name: list_tickets
+    description: List support tickets with optional filters
+    method: GET
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/tickets"
+    params:
+      filter: { type: string, enum: [new_and_my_open, watching, spam, deleted], default: "new_and_my_open" }
+      order_by: { type: string, enum: [created_at, due_by, updated_at], default: updated_at }
+      order_type: { type: string, enum: [asc, desc], default: desc }
+      per_page: { type: integer, default: 30 }
+    trust_level: auto
+
+  - name: search_tickets
+    description: Search tickets using Freshdesk query language
+    method: GET
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/search/tickets"
+    params:
+      query: { type: string, required: true, description: "Search query (e.g. \"status:2 AND priority:3\")" }
+    trust_level: auto
+
+  - name: get_ticket
+    description: Get ticket details including conversations
+    method: GET
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/tickets/{ticket_id}"
+    params:
+      ticket_id: { type: integer, required: true }
+      include: { type: string, default: "conversations,requester,stats" }
+    trust_level: auto
+
+  - name: create_ticket
+    description: Create a new support ticket
+    method: POST
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/tickets"
+    body:
+      subject: { type: string, required: true }
+      description: { type: string, required: true }
+      email: { type: string, required: true }
+      priority: { type: integer, enum: [1, 2, 3, 4], default: 1, description: "1=Low, 2=Medium, 3=High, 4=Urgent" }
+      status: { type: integer, enum: [2, 3, 4, 5], default: 2, description: "2=Open, 3=Pending, 4=Resolved, 5=Closed" }
+      type: { type: string, description: "Ticket type (e.g. Incident, Problem, Request)" }
+    trust_level: confirm
+
+  - name: reply_to_ticket
+    description: Add a reply to a ticket
+    method: POST
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/tickets/{ticket_id}/reply"
+    params:
+      ticket_id: { type: integer, required: true }
+    body:
+      body: { type: string, required: true, description: "Reply content (HTML)" }
+    trust_level: confirm
+
+  - name: update_ticket
+    description: Update ticket properties
+    method: PUT
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/tickets/{ticket_id}"
+    params:
+      ticket_id: { type: integer, required: true }
+    body:
+      status: { type: integer }
+      priority: { type: integer }
+      agent_id: { type: integer }
+      group_id: { type: integer }
+    trust_level: confirm
+
+  - name: list_agents
+    description: List helpdesk agents
+    method: GET
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/agents"
+    params:
+      per_page: { type: integer, default: 50 }
+    trust_level: auto
+
+  - name: list_contacts
+    description: List customer contacts
+    method: GET
+    url: "https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/contacts"
+    params:
+      per_page: { type: integer, default: 30 }
+    trust_level: auto
+
+sync:
+  table: freshdesk_tickets
+  schedule: every_15m
+  mapping:
+    id: id
+    subject: subject
+    status: status
+    priority: priority
+    requester: requester_id
+    agent: responder_id
+    created: created_at
+    updated: updated_at

@@ -1,0 +1,83 @@
+# BigQuery connector — Google Cloud data warehouse.
+# Created: 2026-03-30
+
+name: bigquery
+display_name: Google BigQuery
+type: database
+icon: database
+
+auth:
+  method: bearer
+  credentials:
+    - name: GCP_SERVICE_ACCOUNT_KEY
+      description: GCP service account JSON key (base64-encoded or file path)
+      required: true
+    - name: GCP_PROJECT_ID
+      description: Google Cloud project ID
+      required: true
+
+actions:
+  - name: execute_query
+    description: Execute a SQL query against BigQuery
+    method: LOCAL
+    params:
+      query: { type: string, required: true, description: "Standard SQL query" }
+      project_id: { type: string, description: "GCP project ID (overrides default)" }
+      max_results: { type: integer, default: 100 }
+      use_legacy_sql: { type: boolean, default: false }
+    trust_level: confirm
+
+  - name: list_datasets
+    description: List datasets in the project
+    method: LOCAL
+    params:
+      project_id: { type: string }
+    trust_level: auto
+
+  - name: list_tables
+    description: List tables in a dataset
+    method: LOCAL
+    params:
+      dataset_id: { type: string, required: true }
+      project_id: { type: string }
+    trust_level: auto
+
+  - name: describe_table
+    description: Get schema for a table
+    method: LOCAL
+    params:
+      dataset_id: { type: string, required: true }
+      table_id: { type: string, required: true }
+      project_id: { type: string }
+    trust_level: auto
+
+  - name: preview_table
+    description: Preview rows from a table
+    method: LOCAL
+    params:
+      dataset_id: { type: string, required: true }
+      table_id: { type: string, required: true }
+      limit: { type: integer, default: 20 }
+    trust_level: auto
+
+  - name: list_jobs
+    description: List recent query jobs
+    method: LOCAL
+    params:
+      project_id: { type: string }
+      max_results: { type: integer, default: 20 }
+      state_filter: { type: string, enum: [done, pending, running] }
+    trust_level: auto
+
+  - name: get_job
+    description: Get details of a specific job
+    method: LOCAL
+    params:
+      job_id: { type: string, required: true }
+      project_id: { type: string }
+    trust_level: auto
+
+sync:
+  table: null
+  schedule: manual
+  mapping: {}

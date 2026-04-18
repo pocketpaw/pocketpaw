@@ -13,18 +13,15 @@ Created: feat/pocketpaw-cognitive-engine
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.soul.cognitive import (
-    _COGNITIVE_SESSION_KEY,
     _COGNITIVE_SYSTEM_PROMPT,
     PocketPawCognitiveEngine,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,7 +80,7 @@ async def test_pocketpaw_engine_passes_correct_params():
 
     assert received["message"] == prompt
     assert received["system_prompt"] == _COGNITIVE_SYSTEM_PROMPT
-    assert received["session_key"] == _COGNITIVE_SESSION_KEY
+    assert received["session_key"].startswith("__cognitive__")
 
 
 @pytest.mark.asyncio
@@ -272,7 +269,7 @@ async def test_soul_manager_initialize_no_engine_works(tmp_path):
     mock_soul_cls.birth = mock_birth
 
     manager = SoulManager(settings)
-    result = await manager._birth_soul(mock_soul_cls, engine=None)
+    await manager._birth_soul(mock_soul_cls, engine=None)
 
     assert "engine" not in captured_kwargs
 
@@ -337,9 +334,7 @@ async def test_agent_loop_wires_cognitive_engine_on_start():
                 "sys.modules",
                 {
                     "pocketpaw.soul.manager": MagicMock(SoulManager=lambda s: mock_soul_manager),
-                    "pocketpaw.soul.cognitive": MagicMock(
-                        PocketPawCognitiveEngine=MockEngine
-                    ),
+                    "pocketpaw.soul.cognitive": MagicMock(PocketPawCognitiveEngine=MockEngine),
                 },
             ),
         ):

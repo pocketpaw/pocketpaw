@@ -9,8 +9,74 @@ if TYPE_CHECKING:
 
 # Note: We no longer inherit from VectorStoreProtocol here.
 # The @runtime_checkable on the protocol handles the check automatically.
+def _get_embedding_function(provider: str = "default", model: str = "all-MiniLM-L6-v2"):
+    """Build a Chroma embedding function based on config.
+
+    Providers:
+        - "default": Chroma's built-in SentenceTransformer (all-MiniLM-L6-v2)
+        - "huggingface": Any HuggingFace model ID (e.g. BAAI/bge-small-en-v1.5)
+        - "openai": OpenAI embedding models (requires OPENAI_API_KEY)
+        - "google": Gemini Embedding 2 (requires GOOGLE_API_KEY) — multimodal: text + images
+        - "voyage": Voyage AI models (requires VOYAGE_API_KEY) — multimodal support
+    """
+    import os
+
+    if provider == "openai":
+        try:
+            from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+
+            return OpenAIEmbeddingFunction(
+                api_key=os.environ.get("OPENAI_API_KEY", ""),
+                model_name=model or "text-embedding-3-small",
+            )
+        except ImportError:
+            pass
+
+    if provider == "google":
+        try:
+            from chromadb.utils.embedding_functions import GoogleGenerativeAiEmbeddingFunction
+
+            return GoogleGenerativeAiEmbeddingFunction(
+                api_key=os.environ.get("GOOGLE_API_KEY", ""),
+                model_name=model or "models/gemini-embedding-exp-03-07",
+                task_type="RETRIEVAL_DOCUMENT",
+            )
+        except ImportError:
+            pass
+
+    if provider == "voyage":
+        try:
+            from chromadb.utils.embedding_functions import VoyageAIEmbeddingFunction
+
+            return VoyageAIEmbeddingFunction(
+                api_key=os.environ.get("VOYAGE_API_KEY", ""),
+                model_name=model or "voyage-multimodal-3",
+            )
+        except ImportError:
+            pass
+
+    if provider == "huggingface" or (provider == "default" and model != "all-MiniLM-L6-v2"):
+        try:
+            from chromadb.utils.embedding_functions import (
+                SentenceTransformerEmbeddingFunction,
+            )
+
+            return SentenceTransformerEmbeddingFunction(model_name=model)
+        except ImportError:
+            pass
+
+    # Default: Chroma's built-in (all-MiniLM-L6-v2)
+    return None
+
+
 class ChromaAdapter:
-    def __init__(self, path: str | Path | None = None, collection_name: str = "pocketpaw_memory"):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        collection_name: str = "pocketpaw_memory",
+        embedding_provider: str = "default",
+        embedding_model: str = "all-MiniLM-L6-v2",
+    ):
         try:
             import chromadb
         except ImportError:
@@ -30,15 +96,25 @@ class ChromaAdapter:
         # 3. Convert to string only when passing to the chromadb client
         self.client = chromadb.PersistentClient(path=str(target_path))
 
-        self.collection = self.client.get_or_create_collection(name=collection_name)
+        # 4. Build embedding function from config
+        ef = _get_embedding_function(embedding_provider, embedding_model)
+        kwargs: dict = {"name": collection_name}
+        if ef is not None:
+            kwargs["embedding_function"] = ef
+
+        self.collection = self.client.get_or_create_collection(**kwargs)
 
     @classmethod
     def from_settings(cls, settings: "Settings") -> "ChromaAdapter":
         """
         Factory method to create an adapter instance using the
-        vectordb_path defined in the project settings.
+        vectordb_path and embedding config from project settings.
         """
-        return cls(path=settings.vectordb_path)
+        return cls(
+            path=settings.vectordb_path,
+            embedding_provider=getattr(settings, "vectordb_embedding_provider", "default"),
+            embedding_model=getattr(settings, "vectordb_embedding_model", "all-MiniLM-L6-v2"),
+        )
 
     async def add(self, doc_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
         """Adds or updates a document using upsert."""

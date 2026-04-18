@@ -18,6 +18,16 @@ class FileContext(BaseModel):
     source: str | None = None
 
 
+class PocketContext(BaseModel):
+    """Pocket context sent from the desktop client for pocket-scoped chat."""
+
+    id: str
+    name: str
+    widgets: list[dict] = []
+    tool_policy: dict = {}
+    model: str | None = None
+
+
 class ChatRequest(BaseModel):
     """Send a message for processing."""
 
@@ -25,6 +35,16 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     media: list[str] = []
     file_context: FileContext | None = None
+    pocket_context: PocketContext | None = None
+
+    # Enterprise overrides (all optional, ignored in community mode)
+    agent_id: str | None = None
+    workspace_id: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tools: list[str] | None = None
+    soul_path: str | None = None
+    channel: str | None = None  # "enterprise" for NestJS requests
 
 
 class ChatChunk(BaseModel):

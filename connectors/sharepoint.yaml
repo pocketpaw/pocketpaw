@@ -1,0 +1,116 @@
+# SharePoint connector — Microsoft 365 document management and intranet.
+# Created: 2026-03-30
+
+name: sharepoint
+display_name: SharePoint
+type: knowledge
+icon: folder-open
+
+auth:
+  method: bearer
+  credentials:
+    - name: MS_ACCESS_TOKEN
+      description: Microsoft Graph API access token (delegated or application)
+      required: true
+    - name: MS_TENANT_ID
+      description: Azure AD tenant ID (optional, for token refresh)
+      required: false
+
+actions:
+  - name: list_sites
+    description: List SharePoint sites accessible to the user
+    method: GET
+    url: https://graph.microsoft.com/v1.0/sites
+    params:
+      search: { type: string, description: "Search term to filter sites" }
+    trust_level: auto
+
+  - name: get_site
+    description: Get a specific SharePoint site
+    method: GET
+    url: https://graph.microsoft.com/v1.0/sites/{site_id}
+    params:
+      site_id: { type: string, required: true, description: "Site ID or hostname:path format" }
+    trust_level: auto
+
+  - name: list_drives
+    description: List document libraries (drives) in a site
+    method: GET
+    url: https://graph.microsoft.com/v1.0/sites/{site_id}/drives
+    params:
+      site_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: list_files
+    description: List files and folders in a drive or folder
+    method: GET
+    url: https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/root/children
+    params:
+      site_id: { type: string, required: true }
+      drive_id: { type: string, required: true }
+      folder_path: { type: string, default: "root", description: "Folder path or 'root'" }
+    trust_level: auto
+
+  - name: search_files
+    description: Search for files across SharePoint
+    method: GET
+    url: https://graph.microsoft.com/v1.0/search/query
+    params:
+      query: { type: string, required: true, description: "Search query" }
+    trust_level: auto
+
+  - name: get_file_content
+    description: Download a file's content
+    method: GET
+    url: https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/items/{item_id}/content
+    params:
+      site_id: { type: string, required: true }
+      drive_id: { type: string, required: true }
+      item_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: list_lists
+    description: List SharePoint lists in a site
+    method: GET
+    url: https://graph.microsoft.com/v1.0/sites/{site_id}/lists
+    params:
+      site_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: list_items
+    description: Get items from a SharePoint list
+    method: GET
+    url: https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items
+    params:
+      site_id: { type: string, required: true }
+      list_id: { type: string, required: true }
+      expand: { type: string, default: "fields" }
+    trust_level: auto
+
+  - name: search_content
+    description: Full-text search across all SharePoint content
+    method: POST
+    url: https://graph.microsoft.com/v1.0/search/query
+    body:
+      requests:
+        type: object
+        required: true
+        description: "[{entityTypes: ['driveItem', 'listItem', 'site'], query: {queryString: '...'}}]"
+    trust_level: auto
+
+  - name: list_recent_files
+    description: List recently accessed files
+    method: GET
+    url: https://graph.microsoft.com/v1.0/me/drive/recent
+    trust_level: auto
+
+sync:
+  table: sharepoint_files
+  schedule: every_30m
+  mapping:
+    id: id
+    name: name
+    path: parentReference.path
+    size: size
+    modified_by: lastModifiedBy.user.displayName
+    updated: lastModifiedDateTime

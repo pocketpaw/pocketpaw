@@ -1,0 +1,124 @@
+# Zendesk connector — customer support tickets and knowledge base.
+# Created: 2026-03-30
+
+name: zendesk
+display_name: Zendesk
+type: support
+icon: headphones
+
+auth:
+  method: basic
+  credentials:
+    - name: ZENDESK_SUBDOMAIN
+      description: Zendesk subdomain (e.g. yourcompany in yourcompany.zendesk.com)
+      required: true
+    - name: ZENDESK_EMAIL
+      description: Agent email address
+      required: true
+    - name: ZENDESK_API_TOKEN
+      description: Zendesk API token (Admin → Channels → API)
+      required: true
+
+actions:
+  - name: list_tickets
+    description: List recent support tickets
+    method: GET
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets"
+    params:
+      sort_by: { type: string, enum: [created_at, updated_at, priority, status], default: updated_at }
+      sort_order: { type: string, enum: [asc, desc], default: desc }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: search_tickets
+    description: Search tickets by query
+    method: GET
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search"
+    params:
+      query: { type: string, required: true, description: "Search query (e.g. status:open priority:high)" }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: get_ticket
+    description: Get a specific ticket with comments
+    method: GET
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}"
+    params:
+      ticket_id: { type: integer, required: true }
+    trust_level: auto
+
+  - name: list_ticket_comments
+    description: Get all comments/replies on a ticket
+    method: GET
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}/comments"
+    params:
+      ticket_id: { type: integer, required: true }
+      per_page: { type: integer, default: 50 }
+    trust_level: auto
+
+  - name: create_ticket
+    description: Create a new support ticket
+    method: POST
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets"
+    body:
+      ticket:
+        type: object
+        required: true
+        description: "{subject: '...', description: '...', priority: 'normal', type: 'incident', tags: [...]}"
+    trust_level: confirm
+
+  - name: update_ticket
+    description: Update a ticket (status, priority, assignee, etc.)
+    method: PUT
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}"
+    params:
+      ticket_id: { type: integer, required: true }
+    body:
+      ticket:
+        type: object
+        required: true
+        description: "{status: 'pending', priority: 'high', assignee_id: 123}"
+    trust_level: confirm
+
+  - name: add_ticket_comment
+    description: Add a comment/reply to a ticket
+    method: PUT
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}"
+    params:
+      ticket_id: { type: integer, required: true }
+    body:
+      ticket:
+        type: object
+        required: true
+        description: "{comment: {body: '...', public: true}}"
+    trust_level: confirm
+
+  - name: list_users
+    description: List Zendesk users (agents and end-users)
+    method: GET
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/users"
+    params:
+      role: { type: string, enum: [end-user, agent, admin] }
+      per_page: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: ticket_metrics
+    description: Get ticket metrics and SLA data
+    method: GET
+    url: "https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}/metrics"
+    params:
+      ticket_id: { type: integer, required: true }
+    trust_level: auto
+
+sync:
+  table: zendesk_tickets
+  schedule: every_15m
+  mapping:
+    id: id
+    subject: subject
+    status: status
+    priority: priority
+    requester: requester_id
+    assignee: assignee_id
+    created: created_at
+    updated: updated_at

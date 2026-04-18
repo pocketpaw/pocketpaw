@@ -53,8 +53,7 @@ def find_free_port() -> int:
 
 def run_dashboard(port: int):
     """Run the dashboard server in a subprocess."""
-    import uvicorn
-
+    import uvicorn  # noqa: I001
     from pocketpaw.dashboard import app
 
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

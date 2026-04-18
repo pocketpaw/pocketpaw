@@ -1,0 +1,155 @@
+# Stripe connector — payment data integration.
+# Created: 2026-03-27
+# Updated: 2026-03-30 — Added subscriptions, balance transactions, payouts, disputes, refunds.
+
+name: stripe
+display_name: Stripe
+type: payment
+icon: credit-card
+auth:
+  method: api_key
+  credentials:
+    - name: STRIPE_API_KEY
+      description: Stripe secret key (sk_...)
+      required: true
+
+actions:
+  - name: list_invoices
+    description: List recent invoices
+    method: GET
+    url: https://api.stripe.com/v1/invoices
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      status: { type: string, enum: [draft, open, paid, void, uncollectible] }
+      customer: { type: string, description: "Filter by customer ID" }
+    trust_level: auto
+
+  - name: list_customers
+    description: List customers
+    method: GET
+    url: https://api.stripe.com/v1/customers
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      email: { type: string, description: "Filter by email" }
+    trust_level: auto
+
+  - name: list_subscriptions
+    description: List active subscriptions
+    method: GET
+    url: https://api.stripe.com/v1/subscriptions
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      status: { type: string, enum: [active, past_due, canceled, unpaid, trialing, all], default: active }
+      customer: { type: string, description: "Filter by customer ID" }
+    trust_level: auto
+
+  - name: list_charges
+    description: List recent charges/payments
+    method: GET
+    url: https://api.stripe.com/v1/charges
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      customer: { type: string }
+    trust_level: auto
+
+  - name: list_balance_transactions
+    description: List balance transactions (funds movement)
+    method: GET
+    url: https://api.stripe.com/v1/balance_transactions
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      type: { type: string, enum: [charge, refund, adjustment, payout, transfer] }
+    trust_level: auto
+
+  - name: get_balance
+    description: Get current account balance
+    method: GET
+    url: https://api.stripe.com/v1/balance
+    trust_level: auto
+
+  - name: list_payouts
+    description: List payouts to your bank account
+    method: GET
+    url: https://api.stripe.com/v1/payouts
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      status: { type: string, enum: [pending, paid, failed, canceled] }
+    trust_level: auto
+
+  - name: list_disputes
+    description: List payment disputes
+    method: GET
+    url: https://api.stripe.com/v1/disputes
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_refunds
+    description: List refunds
+    method: GET
+    url: https://api.stripe.com/v1/refunds
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      charge: { type: string, description: "Filter by charge ID" }
+    trust_level: auto
+
+  - name: list_products
+    description: List products in your catalog
+    method: GET
+    url: https://api.stripe.com/v1/products
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      active: { type: boolean }
+    trust_level: auto
+
+  - name: list_prices
+    description: List prices for products
+    method: GET
+    url: https://api.stripe.com/v1/prices
+    content_type: form
+    params:
+      limit: { type: integer, default: 25 }
+      product: { type: string, description: "Filter by product ID" }
+      active: { type: boolean }
+    trust_level: auto
+
+  - name: create_invoice
+    description: Create a new invoice
+    method: POST
+    url: https://api.stripe.com/v1/invoices
+    content_type: form
+    body:
+      customer: { type: string, required: true }
+      description: { type: string }
+      days_until_due: { type: integer, default: 30 }
+    trust_level: confirm
+
+  - name: create_refund
+    description: Create a refund for a charge
+    method: POST
+    url: https://api.stripe.com/v1/refunds
+    content_type: form
+    body:
+      charge: { type: string, required: true, description: "Charge ID to refund" }
+      amount: { type: integer, description: "Amount in cents (partial refund). Omit for full refund." }
+      reason: { type: string, enum: [duplicate, fraudulent, requested_by_customer] }
+    trust_level: restricted
+
+sync:
+  table: stripe_invoices
+  schedule: every_15m
+  mapping:
+    id: id
+    amount: amount_due
+    status: status
+    customer: customer
+    created: created

@@ -1,0 +1,136 @@
+# Firebase connector — wraps Firebase CLI (firebase-tools) for project management,
+# Firestore, Auth, Hosting, Cloud Functions, Remote Config, and Extensions.
+# Created: 2026-04-01
+
+name: firebase
+display_name: Firebase
+type: cloud
+icon: flame
+
+auth:
+  method: none  # Firebase CLI uses its own auth (firebase login)
+  credentials:
+    - name: FIREBASE_PROJECT
+      description: "Firebase project ID (optional, uses default if not set)"
+      required: false
+
+actions:
+  # -- Project Management --
+  - name: list_projects
+    description: List all Firebase projects you have access to
+    method: LOCAL
+    trust_level: auto
+
+  - name: get_project
+    description: Get details of a specific Firebase project
+    method: LOCAL
+    params:
+      project_id: { type: string, required: true, description: "Firebase project ID" }
+    trust_level: auto
+
+  # -- Firestore --
+  - name: firestore_list_collections
+    description: List Firestore indexes and collection info for the project
+    method: LOCAL
+    params:
+      database: { type: string, description: "Database ID (defaults to (default))" }
+    trust_level: auto
+
+  - name: firestore_databases_list
+    description: List all Firestore databases in the project
+    method: LOCAL
+    trust_level: auto
+
+  - name: firestore_get
+    description: Get a Firestore document or collection at the given path
+    method: LOCAL
+    params:
+      path: { type: string, required: true, description: "Document path (e.g. users/uid123)" }
+      database: { type: string, description: "Database ID (defaults to (default))" }
+    trust_level: auto
+
+  - name: firestore_delete
+    description: Delete a Firestore document at the given path
+    method: LOCAL
+    params:
+      path: { type: string, required: true, description: "Document path to delete" }
+      recursive: { type: boolean, default: false, description: "Recursively delete subcollections" }
+      database: { type: string, description: "Database ID (defaults to (default))" }
+    trust_level: confirm
+
+  - name: firestore_export
+    description: Export Firestore data to a GCS bucket
+    method: LOCAL
+    params:
+      destination: { type: string, required: true, description: "GCS bucket URI (gs://bucket-name)" }
+      collection_ids: { type: string, description: "Comma-separated collection IDs to export" }
+      database: { type: string, description: "Database ID (defaults to (default))" }
+    trust_level: confirm
+
+  # -- Authentication --
+  - name: auth_list_users
+    description: Export user accounts from Firebase Auth as JSON
+    method: LOCAL
+    params:
+      format: { type: string, enum: [json, csv], default: json, description: "Output format" }
+    trust_level: auto
+
+  - name: auth_import_users
+    description: Import users into Firebase Auth from a data file
+    method: LOCAL
+    params:
+      data_file: { type: string, required: true, description: "Path to CSV or JSON user data file" }
+    trust_level: restricted
+
+  # -- Hosting --
+  - name: hosting_list_sites
+    description: List all Firebase Hosting sites in the project
+    method: LOCAL
+    trust_level: auto
+
+  - name: hosting_deploy
+    description: Deploy to Firebase Hosting
+    method: LOCAL
+    params:
+      site: { type: string, description: "Specific hosting site to deploy to" }
+    trust_level: restricted
+
+  # -- Cloud Functions --
+  - name: functions_list
+    description: List all deployed Cloud Functions in the project
+    method: LOCAL
+    trust_level: auto
+
+  - name: functions_log
+    description: View recent Cloud Functions logs
+    method: LOCAL
+    params:
+      function_name: { type: string, description: "Filter logs to a specific function" }
+      limit: { type: integer, default: 50, description: "Number of log entries to fetch" }
+    trust_level: auto
+
+  - name: functions_deploy
+    description: Deploy Cloud Functions to Firebase
+    method: LOCAL
+    params:
+      function_name: { type: string, description: "Deploy only a specific function" }
+    trust_level: restricted
+
+  # -- Remote Config --
+  - name: remoteconfig_get
+    description: Get the current Remote Config template for the project
+    method: LOCAL
+    params:
+      version_number: { type: string, description: "Specific version number to fetch" }
+    trust_level: auto
+
+  # -- Extensions --
+  - name: extensions_list
+    description: List installed Firebase Extensions in the project
+    method: LOCAL
+    trust_level: auto
+
+sync:
+  table: null
+  schedule: manual
+  mapping: {}

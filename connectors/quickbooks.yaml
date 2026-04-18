@@ -1,0 +1,122 @@
+# QuickBooks Online connector — accounting, invoices, and financial data.
+# Created: 2026-03-30
+
+name: quickbooks
+display_name: QuickBooks Online
+type: accounting
+icon: receipt
+
+auth:
+  method: bearer
+  credentials:
+    - name: QBO_ACCESS_TOKEN
+      description: QuickBooks OAuth 2.0 access token
+      required: true
+    - name: QBO_REALM_ID
+      description: QuickBooks company/realm ID
+      required: true
+    - name: QBO_ENVIRONMENT
+      description: Environment (sandbox or production)
+      required: false
+
+actions:
+  - name: list_invoices
+    description: List invoices
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/query"
+    params:
+      query: { type: string, default: "SELECT * FROM Invoice WHERE Balance > '0' ORDERBY DueDate" }
+      max_results: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_customers
+    description: List customers
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/query"
+    params:
+      query: { type: string, default: "SELECT * FROM Customer WHERE Active = true ORDERBY DisplayName" }
+      max_results: { type: integer, default: 50 }
+    trust_level: auto
+
+  - name: list_bills
+    description: List vendor bills
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/query"
+    params:
+      query: { type: string, default: "SELECT * FROM Bill WHERE Balance > '0' ORDERBY DueDate" }
+      max_results: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_expenses
+    description: List recent expenses/purchases
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/query"
+    params:
+      query: { type: string, default: "SELECT * FROM Purchase ORDERBY TxnDate DESC" }
+      max_results: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: list_accounts
+    description: List chart of accounts
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/query"
+    params:
+      query: { type: string, default: "SELECT * FROM Account WHERE Active = true ORDERBY AccountType" }
+    trust_level: auto
+
+  - name: profit_loss
+    description: Get Profit & Loss report
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/reports/ProfitAndLoss"
+    params:
+      start_date: { type: string, description: "Start date (YYYY-MM-DD)" }
+      end_date: { type: string, description: "End date (YYYY-MM-DD)" }
+      summarize_column_by: { type: string, enum: [Total, Month, Week, Days], default: Total }
+    trust_level: auto
+
+  - name: balance_sheet
+    description: Get Balance Sheet report
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/reports/BalanceSheet"
+    params:
+      date: { type: string, description: "As-of date (YYYY-MM-DD)" }
+      summarize_column_by: { type: string, enum: [Total, Month, Week], default: Total }
+    trust_level: auto
+
+  - name: query
+    description: Run a custom QuickBooks query
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/query"
+    params:
+      query: { type: string, required: true, description: "QuickBooks SQL-like query (e.g. SELECT * FROM Invoice WHERE TotalAmt > '1000')" }
+    trust_level: confirm
+
+  - name: list_vendors
+    description: List vendors
+    method: GET
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/query"
+    params:
+      query: { type: string, default: "SELECT * FROM Vendor WHERE Active = true ORDERBY DisplayName" }
+    trust_level: auto
+
+  - name: create_invoice
+    description: Create a new invoice
+    method: POST
+    url: "https://quickbooks.api.intuit.com/v3/company/{QBO_REALM_ID}/invoice"
+    body:
+      CustomerRef: { type: object, required: true, description: "{value: 'customer_id'}" }
+      Line: { type: object, required: true, description: "Array of line items" }
+      DueDate: { type: string }
+    trust_level: confirm
+
+sync:
+  table: qbo_invoices
+  schedule: every_30m
+  mapping:
+    id: Id
+    doc_number: DocNumber
+    customer: CustomerRef.name
+    total: TotalAmt
+    balance: Balance
+    due_date: DueDate
+    status: Balance

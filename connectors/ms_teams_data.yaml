@@ -1,0 +1,95 @@
+# Microsoft Teams connector (data source) — search messages, channels, and teams.
+# Created: 2026-03-30
+# NOTE: This is the Teams *data connector* for querying workspace data.
+# The Teams *channel adapter* (bus/adapters/teams_adapter.py) handles real-time messaging.
+
+name: ms_teams_data
+display_name: Microsoft Teams (Data)
+type: communication
+icon: users
+
+auth:
+  method: bearer
+  credentials:
+    - name: MS_ACCESS_TOKEN
+      description: Microsoft Graph API access token
+      required: true
+
+actions:
+  - name: list_teams
+    description: List teams the user has joined
+    method: GET
+    url: https://graph.microsoft.com/v1.0/me/joinedTeams
+    trust_level: auto
+
+  - name: list_channels
+    description: List channels in a team
+    method: GET
+    url: https://graph.microsoft.com/v1.0/teams/{team_id}/channels
+    params:
+      team_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: channel_messages
+    description: Get recent messages from a channel
+    method: GET
+    url: https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages
+    params:
+      team_id: { type: string, required: true }
+      channel_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: list_chats
+    description: List recent 1:1 and group chats
+    method: GET
+    url: https://graph.microsoft.com/v1.0/me/chats
+    params:
+      $top: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: chat_messages
+    description: Get messages from a chat
+    method: GET
+    url: https://graph.microsoft.com/v1.0/chats/{chat_id}/messages
+    params:
+      chat_id: { type: string, required: true }
+      $top: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: search_messages
+    description: Search across all Teams messages
+    method: POST
+    url: https://graph.microsoft.com/v1.0/search/query
+    body:
+      requests:
+        type: object
+        required: true
+        description: "[{entityTypes: ['chatMessage'], query: {queryString: 'search term'}}]"
+    trust_level: auto
+
+  - name: list_team_members
+    description: List members of a team
+    method: GET
+    url: https://graph.microsoft.com/v1.0/teams/{team_id}/members
+    params:
+      team_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: send_channel_message
+    description: Send a message to a Teams channel
+    method: POST
+    url: https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages
+    params:
+      team_id: { type: string, required: true }
+      channel_id: { type: string, required: true }
+    body:
+      body:
+        type: object
+        required: true
+        description: "{contentType: 'text', content: 'Message text'}"
+    trust_level: confirm
+
+sync:
+  table: teams_messages
+  schedule: manual
+  mapping: {}

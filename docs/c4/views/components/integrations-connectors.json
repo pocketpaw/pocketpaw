@@ -1,0 +1,23 @@
+{
+  "level": "component",
+  "title": "Components -- Integrations \u0026 Connectors",
+  "description": "Component-level view of Integrations \u0026 Connectors",
+  "elements": [
+    "integrations",
+    "connectors",
+    "adapters",
+    "providers"
+  ],
+  "relationships": [
+    {
+      "source": "connectors",
+      "target": "integrations-connectors",
+      "description": "Platform connectors for Slack, Discord, and Telegram messaging"
+    },
+    {
+      "source": "adapters",
+      "target": "integrations-connectors",
+      "description": "Protocol adapters normalize external APIs to internal interfaces"
+    }
+  ]
+}

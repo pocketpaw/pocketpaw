@@ -151,7 +151,10 @@ async def websocket_handler(
             "present" if cookie_token else "missing",
             is_localhost,
         )
-        await websocket.close(code=4003, reason="Unauthorized")
+        await websocket.close(
+            code=4003,
+            reason="Unauthorized: invalid or missing authentication token",
+        )
         return
 
     await websocket.accept()
@@ -477,6 +480,16 @@ async def websocket_handler(
                     # Memory settings
                     if data.get("memory_backend"):
                         settings.memory_backend = data["memory_backend"]
+                    if "file_vector_enabled" in data:
+                        settings.file_vector_enabled = bool(data["file_vector_enabled"])
+                    if data.get("vector_store"):
+                        settings.vector_store = data["vector_store"]
+                    if data.get("embedding_provider"):
+                        settings.embedding_provider = data["embedding_provider"]
+                    if data.get("embedding_model"):
+                        settings.embedding_model = data["embedding_model"]
+                    if data.get("embedding_base_url"):
+                        settings.embedding_base_url = data["embedding_base_url"]
                     if "mem0_auto_learn" in data:
                         settings.mem0_auto_learn = bool(data["mem0_auto_learn"])
                     if data.get("mem0_llm_provider"):
@@ -777,6 +790,11 @@ async def websocket_handler(
                             "selfAuditEnabled": settings.self_audit_enabled,
                             "selfAuditSchedule": settings.self_audit_schedule,
                             "memoryBackend": settings.memory_backend,
+                            "fileVectorEnabled": settings.file_vector_enabled,
+                            "vectorStore": settings.vector_store,
+                            "embeddingProvider": settings.embedding_provider,
+                            "embeddingModel": settings.embedding_model,
+                            "embeddingBaseUrl": settings.embedding_base_url,
                             "mem0AutoLearn": settings.mem0_auto_learn,
                             "mem0LlmProvider": settings.mem0_llm_provider,
                             "mem0LlmModel": settings.mem0_llm_model,

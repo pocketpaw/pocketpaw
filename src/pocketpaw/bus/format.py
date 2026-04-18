@@ -19,7 +19,32 @@ from pocketpaw.bus.events import Channel
 # Empty string → channel supports standard Markdown, no hint needed.
 # ---------------------------------------------------------------------------
 CHANNEL_FORMAT_HINTS: dict[Channel, str] = {
-    Channel.WEBSOCKET: "",
+    Channel.WEBSOCKET: (
+        "Format: Standard Markdown + Interactive UI.\n"
+        "The client supports rendering rich interactive UI from JSON specs.\n"
+        "When your response benefits from visual presentation (dashboards, cards, "
+        "lists, tables, forms, metrics, charts), wrap a JSON spec in a ```ui-spec code block.\n"
+        "Example:\n"
+        "```ui-spec\n"
+        '{"intent": "dashboard", "title": "Overview", "data": {"type": "inline", '
+        '"items": [{"label": "Revenue", "value": "$12k"}]}}\n'
+        "```\n"
+        'For raw widget trees use: {"type": "container", "children": [...]}\n'
+        "Supported widget types: container, flex, grid, card, text, heading, button, "
+        "input, select, checkbox, switch, chart, image, badge, progress, metric, tabs.\n"
+        'Chart format: {"type": "chart", "chartType": "line|bar|area|pie", "title": "...", '
+        '"data": [{"label": "Jan", "value": 100}, ...], "colors": ["#3b82f6"]}\n'
+        'Metric format: {"type": "metric", "label": "Revenue", "value": "$12k"}\n'
+        'Grid format: {"type": "grid", "columns": 3, "gap": 12, "children": [...]}\n'
+        "Widget props go at the same level as type, e.g. "
+        '{"type": "heading", "level": 2, "text": "Hi"}\n'
+        "Rules:\n"
+        "- Only use ui-spec when visual presentation genuinely "
+        "helps — don't force it for simple text answers.\n"
+        "- You can mix text and ui-spec blocks in one response.\n"
+        "- The JSON must be valid. Do not wrap in additional markdown.\n"
+        "- Keep specs concise — the client renders them as interactive components."
+    ),
     Channel.DISCORD: (
         "Format: Discord Markdown.\n"
         "- Bold: **text**, Italic: *text* or _text_, Strikethrough: ~~text~~\n"

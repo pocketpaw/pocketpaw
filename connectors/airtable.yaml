@@ -1,0 +1,102 @@
+# Airtable connector — spreadsheet-database hybrid for structured data.
+# Created: 2026-03-30
+
+name: airtable
+display_name: Airtable
+type: database
+icon: table
+
+auth:
+  method: bearer
+  credentials:
+    - name: AIRTABLE_TOKEN
+      description: Airtable personal access token (airtable.com/create/tokens)
+      required: true
+
+actions:
+  - name: list_bases
+    description: List all accessible Airtable bases
+    method: GET
+    url: https://api.airtable.com/v0/meta/bases
+    trust_level: auto
+
+  - name: list_tables
+    description: List tables in a base with their fields
+    method: GET
+    url: https://api.airtable.com/v0/meta/bases/{base_id}/tables
+    params:
+      base_id: { type: string, required: true, description: "Base ID (starts with app...)" }
+    trust_level: auto
+
+  - name: list_records
+    description: List records from a table
+    method: GET
+    url: https://api.airtable.com/v0/{base_id}/{table_id}
+    params:
+      base_id: { type: string, required: true }
+      table_id: { type: string, required: true, description: "Table name or ID" }
+      maxRecords: { type: integer, default: 25 }
+      view: { type: string, description: "View name or ID" }
+      filterByFormula: { type: string, description: "Airtable formula filter (e.g. {Status} = 'Active')" }
+      sort: { type: object, description: "[{field: 'Name', direction: 'asc'}]" }
+    trust_level: auto
+
+  - name: get_record
+    description: Get a specific record by ID
+    method: GET
+    url: https://api.airtable.com/v0/{base_id}/{table_id}/{record_id}
+    params:
+      base_id: { type: string, required: true }
+      table_id: { type: string, required: true }
+      record_id: { type: string, required: true }
+    trust_level: auto
+
+  - name: create_record
+    description: Create a new record in a table
+    method: POST
+    url: https://api.airtable.com/v0/{base_id}/{table_id}
+    params:
+      base_id: { type: string, required: true }
+      table_id: { type: string, required: true }
+    body:
+      fields: { type: object, required: true, description: "Field values (e.g. {Name: '...', Status: 'Active'})" }
+    trust_level: confirm
+
+  - name: update_record
+    description: Update an existing record
+    method: PATCH
+    url: https://api.airtable.com/v0/{base_id}/{table_id}/{record_id}
+    params:
+      base_id: { type: string, required: true }
+      table_id: { type: string, required: true }
+      record_id: { type: string, required: true }
+    body:
+      fields: { type: object, required: true, description: "Fields to update" }
+    trust_level: confirm
+
+  - name: search_records
+    description: Search records with a formula filter
+    method: GET
+    url: https://api.airtable.com/v0/{base_id}/{table_id}
+    params:
+      base_id: { type: string, required: true }
+      table_id: { type: string, required: true }
+      filterByFormula: { type: string, required: true, description: "Airtable formula (e.g. SEARCH('term', {Name}))" }
+      maxRecords: { type: integer, default: 25 }
+    trust_level: auto
+
+  - name: create_records_batch
+    description: Create multiple records at once (up to 10)
+    method: POST
+    url: https://api.airtable.com/v0/{base_id}/{table_id}
+    params:
+      base_id: { type: string, required: true }
+      table_id: { type: string, required: true }
+    body:
+      records: { type: object, required: true, description: "Array of {fields: {...}} objects (max 10)" }
+    trust_level: confirm
+
+sync:
+  table: airtable_records
+  schedule: every_15m
+  mapping: {}

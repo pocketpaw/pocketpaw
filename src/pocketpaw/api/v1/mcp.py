@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -198,11 +199,33 @@ async def install_mcp_preset(request: Request):
     connected = await mgr.start_server(config)
     tools = mgr.discover_tools(config.name) if connected else []
 
+    # Auto-install GWS CLI agent skills when the google-workspace preset is enabled
+    if preset_id == "google-workspace":
+        asyncio.create_task(_install_gws_skills())
+
     return {
         "status": "ok",
         "connected": connected,
         "tools": [{"name": t.name, "description": t.description} for t in tools],
     }
+
+
+async def _install_gws_skills() -> None:
+    """Auto-install Google Workspace CLI agent skills (fire-and-forget)."""
+    try:
+        from pocketpaw.skills import get_skill_loader
+        from pocketpaw.skills.installer import install_skills_from_github
+
+        installed = await install_skills_from_github(
+            owner="googleworkspace",
+            repo="cli",
+            prefix_filter="gws-",
+            timeout=60,
+        )
+        get_skill_loader().reload()
+        logger.info("Auto-installed %d GWS skills", len(installed))
+    except Exception:
+        logger.warning("GWS skill auto-install failed (non-blocking)", exc_info=True)
 
 
 @router.get("/mcp/oauth/callback")

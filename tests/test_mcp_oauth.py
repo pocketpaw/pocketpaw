@@ -8,9 +8,11 @@ import asyncio
 import sys
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from pocketpaw.mcp.config import MCPServerConfig
+from pocketpaw.mcp.manager import MCPManager
 from pocketpaw.mcp.presets import get_all_presets, get_preset, preset_to_config
 
 # ======================================================================
@@ -46,6 +48,105 @@ class TestMCPTokenStorage:
         result = await storage.get_client_info()
         assert result is None
 
+
+class TestOAuthCompatProvider:
+    @pytest.fixture
+    def storage(self, tmp_path):
+        with patch("pocketpaw.mcp.oauth_store.get_config_dir", return_value=tmp_path):
+            from pocketpaw.mcp.oauth_store import MCPTokenStorage
+
+            return MCPTokenStorage("test-server")
+
+    async def test_accepts_201_token_response(self):
+        from mcp.shared.auth import OAuthToken
+
+        class _Storage:
+            def __init__(self):
+                self.saved = None
+
+            async def get_tokens(self):
+                return None
+
+            async def set_tokens(self, tokens):
+                self.saved = tokens
+
+            async def get_client_info(self):
+                return None
+
+            async def set_client_info(self, _client_info):
+                return None
+
+        storage = _Storage()
+        provider = MCPManager._make_oauth_auth(
+            MCPServerConfig(
+                name="supabase",
+                transport="http",
+                url="https://mcp.supabase.com/mcp",
+                oauth=True,
+            )
+        )
+        provider.context.storage = storage
+
+        response = httpx.Response(
+            status_code=201,
+            content=(
+                '{"access_token":"sbp_oauth_token","refresh_token":"r1",'
+                '"expires_in":86400,"token_type":"Bearer"}'
+            ),
+        )
+
+        await provider._handle_token_response(response)
+
+        assert isinstance(provider.context.current_tokens, OAuthToken)
+        assert provider.context.current_tokens.access_token == "sbp_oauth_token"
+        assert storage.saved is not None
+        assert storage.saved.access_token == "sbp_oauth_token"
+
+    async def test_accepts_201_refresh_response(self):
+        from mcp.shared.auth import OAuthToken
+
+        class _Storage:
+            def __init__(self):
+                self.saved = None
+
+            async def get_tokens(self):
+                return None
+
+            async def set_tokens(self, tokens):
+                self.saved = tokens
+
+            async def get_client_info(self):
+                return None
+
+            async def set_client_info(self, _client_info):
+                return None
+
+        storage = _Storage()
+        provider = MCPManager._make_oauth_auth(
+            MCPServerConfig(
+                name="supabase",
+                transport="http",
+                url="https://mcp.supabase.com/mcp",
+                oauth=True,
+            )
+        )
+        provider.context.storage = storage
+
+        response = httpx.Response(
+            status_code=201,
+            content=(
+                '{"access_token":"sbp_refreshed_token","refresh_token":"r2",'
+                '"expires_in":86400,"token_type":"Bearer"}'
+            ),
+        )
+
+        await provider._handle_refresh_response(response)
+
+        assert isinstance(provider.context.current_tokens, OAuthToken)
+        assert provider.context.current_tokens.access_token == "sbp_refreshed_token"
+        assert storage.saved is not None
+        assert storage.saved.access_token == "sbp_refreshed_token"
+
     async def test_set_and_get_client_info(self, storage):
         from mcp.shared.auth import OAuthClientInformationFull
 
@@ -60,6 +161,20 @@ class TestMCPTokenStorage:
         assert loaded is not None
         assert loaded.client_id == "cid_123"
         assert loaded.client_secret == "secret_456"
+
+    async def test_get_client_info_infers_auth_method_when_secret_exists(self, storage, tmp_path):
+        path = tmp_path / "mcp_oauth" / "test-server.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"client_info": {"redirect_uris": ["http://localhost:8888/api/mcp/oauth/callback"], '
+            '"grant_types": ["authorization_code", "refresh_token"], '
+            '"response_types": ["code"], "client_id": "cid", '
+            '"client_secret": "secret", "token_endpoint_auth_method": null}}'
+        )
+
+        loaded = await storage.get_client_info()
+        assert loaded is not None
+        assert loaded.token_endpoint_auth_method == "client_secret_post"
 
     async def test_tokens_and_client_info_coexist(self, storage):
         """Both tokens and client info can be stored in the same file."""

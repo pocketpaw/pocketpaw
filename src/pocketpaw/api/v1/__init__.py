@@ -1,5 +1,9 @@
 # API v1 router aggregation.
 # Created: 2026-02-20
+# Updated: 2026-03-30 — Added Automations router (enterprise, rule-based pocket automations).
+# Updated: 2026-04-16 (feat/fleet-rest-router) — Added Fleet router so
+#   paw-enterprise's InstallFleetPanel can call GET /api/v1/fleet/templates
+#   and POST /api/v1/fleet/install against a running pocketpaw instance.
 #
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
@@ -42,6 +46,19 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.metrics", "router", "Metrics"),
     ("pocketpaw.api.v1.agent_status", "router", "Status"),
     ("pocketpaw.api.v1.soul", "router", "Soul"),
+    ("pocketpaw.api.v1.pockets", "router", "Pockets"),
+    ("pocketpaw.api.v1.connectors", "router", "Connectors"),
+    ("pocketpaw.api.v1.tools", "router", "Tools"),
+    ("pocketpaw.api.v1.oauth_integrations", "router", "OAuth Integrations"),
+    ("pocketpaw.audit.router", "router", "Audit"),
+]
+
+# Enterprise API routes (require ee/ module) — skipped silently when ee/ is absent.
+_EE_ROUTERS: list[tuple[str, str, str]] = [
+    ("ee.fabric.router", "router", "Fabric"),
+    ("ee.fleet.router", "router", "Fleet"),
+    ("ee.instinct.router", "router", "Instinct"),
+    ("pocketpaw.ee.automations.router", "router", "Automations"),
 ]
 
 
@@ -73,3 +90,15 @@ def mount_v1_routers(app: FastAPI) -> None:
                 )
                 raise
             logger.warning("Failed to mount v1 router %s", module_path, exc_info=True)
+
+    # Enterprise routers — optional, never critical
+    for module_path, attr_name, tag in _EE_ROUTERS:
+        try:
+            mod = importlib.import_module(module_path)
+            router: APIRouter = getattr(mod, attr_name)
+            app.include_router(router, prefix="/api/v1")
+            logger.debug("Mounted ee router: %s (%s)", module_path, tag)
+        except ImportError:
+            logger.debug("Skipping ee router %s (ee/ not available)", module_path)
+        except Exception:
+            logger.warning("Failed to mount ee router %s", module_path, exc_info=True)
