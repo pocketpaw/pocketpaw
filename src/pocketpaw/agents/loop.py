@@ -371,6 +371,36 @@ class AgentLoop:
                 self._router = AgentRouter(Settings.load())
         return self._router
 
+    async def _generate_and_emit_title(self, session_key: str, first_message: str) -> None:
+        """Generate a chat title from ``first_message`` and publish a
+        ``session_titled`` SystemEvent. Best-effort; never raises."""
+        try:
+            from pocketpaw.memory.titler import generate_title
+
+            title = await generate_title(
+                first_message,
+                model=self.settings.chat_title_model,
+                api_key=self.settings.anthropic_api_key or None,
+            )
+            if not title:
+                return
+            # session_key is "channel:chat_id" — expose the safe_key form
+            # ("channel_chat_id") so web clients can correlate with their
+            # session_id directly.
+            safe_key = session_key.replace(":", "_")
+            await self.bus.publish_system(
+                SystemEvent(
+                    event_type="session_titled",
+                    data={
+                        "session_key": session_key,
+                        "session_id": safe_key,
+                        "title": title,
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("session titling failed for %s", session_key, exc_info=True)
+
     async def process_message(self, message: InboundMessage) -> None:
         """Public entry point — run the full processing pipeline on one
         message without going through the bus consumer.
@@ -740,12 +770,31 @@ class AgentLoop:
             store_meta = {
                 k: v for k, v in (message.metadata or {}).items() if k != "pocket_system_context"
             }
+            # Detect first-message state *before* persisting so titler can fire once.
+            is_first_message = False
+            try:
+                prior = await self.memory._store.get_session(session_key)
+                is_first_message = len(prior) == 0
+            except (AttributeError, TypeError):
+                is_first_message = False
+
             await self.memory.add_to_session(
                 session_key=session_key,
                 role="user",
                 content=content,
                 metadata=store_meta,
             )
+
+            # 1a. Fire-and-forget chat title generation on the first user message.
+            # Publishes a ``session_titled`` SystemEvent; persistence is the
+            # caller's responsibility (cloud: Mongo; OSS: in-memory/SSE only).
+            if is_first_message:
+                from pocketpaw.features import chat_titles_enabled
+
+                if chat_titles_enabled(self.settings):
+                    asyncio.create_task(
+                        self._generate_and_emit_title(session_key, content)
+                    )
 
             # 1b. Inject inbound media file paths so the agent can use them
             # Also detect whether this is a voice message so we can auto-TTS the reply.

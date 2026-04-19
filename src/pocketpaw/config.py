@@ -586,6 +586,19 @@ class Settings(BaseSettings):
         default=True, description="Extend log scrubber with PII patterns (when pii_scan_enabled)"
     )
 
+    # Chat Title Generation (Haiku-backed, first-message naming)
+    chat_title_generation_enabled: bool = Field(
+        default=False,
+        description=(
+            "Auto-generate a short title for a chat from its first user message."
+            " Uses a Haiku model; fires a session_titled SystemEvent on completion."
+        ),
+    )
+    chat_title_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Model used by the chat title generator (Anthropic).",
+    )
+
     # Smart Model Routing
     smart_routing_enabled: bool = Field(
         default=False,
