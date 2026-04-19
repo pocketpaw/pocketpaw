@@ -21,15 +21,13 @@ from typing import Any
 
 import pytest
 from soul_protocol.engine.journal import open_journal
-from soul_protocol.engine.retrieval import (
-    InMemoryCredentialBroker,
-    RetrievalRouter,
-)
 from soul_protocol.spec.journal import Actor
 from soul_protocol.spec.retrieval import (
     CandidateSource,
     RetrievalRequest,
 )
+
+from pocketpaw.retrieval import InMemoryCredentialBroker, RetrievalRouter
 
 from pocketpaw.connectors.drive import (
     DriveAuthError,
@@ -356,11 +354,12 @@ class TestDriveSourceAdapter:
         candidates = adapter.query(request, credential=None)
 
         assert len(candidates) == 2
+        # 0.3.2 promotes dicts with kind="dataref" into typed DataRef.
         payload = candidates[0].content
-        assert payload["kind"] == "dataref"
-        assert payload["source"] == "drive"
-        assert payload["id"] == "file_1"
-        assert payload["scopes"] == ["org:sales:*"]
+        assert payload.kind == "dataref"
+        assert payload.source == "drive"
+        assert payload.id == "file_1"
+        assert payload.scopes == ["org:sales:*"]
         # First candidate must rank higher than the second under position scoring.
         assert candidates[0].score is not None
         assert candidates[1].score is not None
@@ -418,12 +417,12 @@ class TestDriveSourceAdapter:
 
         assert len(candidates) == 1
         payload = candidates[0].content
-        assert payload["revision_id"] == "rev-mid"
+        assert payload.revision_id == "rev-mid"
         assert candidates[0].as_of == _ts(2026, 4, 1, 0)
         assert fake.revision_calls == [("file_1", _ts(2026, 4, 1, 0))]
 
     def test_query_uses_credential_token_when_provided(self) -> None:
-        from soul_protocol.engine.retrieval import InMemoryCredentialBroker
+        from pocketpaw.retrieval import InMemoryCredentialBroker
 
         broker = InMemoryCredentialBroker()
         credential = broker.acquire("drive", ["org:sales:*"])
@@ -467,7 +466,7 @@ class TestDriveSourceAdapter:
 
 class TestResolveBearerToken:
     def test_credential_wins_over_env(self) -> None:
-        from soul_protocol.engine.retrieval import InMemoryCredentialBroker
+        from pocketpaw.retrieval import InMemoryCredentialBroker
 
         broker = InMemoryCredentialBroker()
         cred = broker.acquire("drive", ["org:sales:*"])
@@ -527,7 +526,7 @@ class TestRouterIntegration:
 
         # Router produced candidates with the DataRef shape.
         assert len(result.candidates) == 2
-        assert result.candidates[0].content["kind"] == "dataref"
+        assert result.candidates[0].content.kind == "dataref"
         assert result.sources_queried == ["drive"]
         assert result.sources_failed == []
 

@@ -4762,10 +4762,10 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'dev'", specifier = ">=1.20.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
     { name = "slowapi", marker = "extra == 'enterprise'", specifier = ">=0.1.9" },
-    { name = "soul-protocol", extras = ["engine"], specifier = ">=0.3.1" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", specifier = ">=0.3.0" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", specifier = ">=0.3.0" },
-    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", specifier = ">=0.3.0" },
+    { name = "soul-protocol", extras = ["engine"], editable = "../soul-protocol" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all'", editable = "../soul-protocol" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'all-tools'", editable = "../soul-protocol" },
+    { name = "soul-protocol", extras = ["engine"], marker = "extra == 'soul'", editable = "../soul-protocol" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'databases'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'mysql'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'postgresql'", specifier = ">=2.0.0" },
@@ -6412,7 +6412,7 @@ wheels = [
 [[package]]
 name = "soul-protocol"
 version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../soul-protocol" }
 dependencies = [
     { name = "click" },
     { name = "cryptography" },
@@ -6420,7 +6420,32 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b6/e7/1799cfc9c83c0a12b7e3d403190d01794c2c685917ec63bb3c4741183ca7/soul_protocol-0.3.1.tar.gz", hash = "sha256:1885b4878b09f3ff766080d13edb698581d564353cdb04ed8f186a5ade0d786d", size = 1506135, upload-time = "2026-04-14T18:32:03.919Z" }
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40.0" },
+    { name = "anthropic", marker = "extra == 'llm'", specifier = ">=0.40.0" },
+    { name = "click", specifier = ">=8.0" },
+    { name = "cryptography", specifier = ">=41.0" },
+    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0" },
+    { name = "httpx", marker = "extra == 'ollama'", specifier = ">=0.27" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
+    { name = "networkx", marker = "extra == 'graph'", specifier = ">=3.0" },
+    { name = "numpy", marker = "extra == 'vector'", specifier = ">=1.24" },
+    { name = "ollama", marker = "extra == 'embeddings-ollama'", specifier = ">=0.4.0" },
+    { name = "openai", marker = "extra == 'embeddings-openai'", specifier = ">=1.0.0" },
+    { name = "openai", marker = "extra == 'llm'", specifier = ">=1.0.0" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "sentence-transformers", marker = "extra == 'embeddings-st'", specifier = ">=2.0.0" },
+    { name = "soul-protocol", extras = ["mcp", "graph", "vector", "llm", "lcm", "embeddings-st", "embeddings-openai", "embeddings-ollama"], marker = "extra == 'all'" },
+]
+provides-extras = ["engine", "mcp", "dspy", "graph", "vector", "anthropic", "openai", "ollama", "litellm", "llm", "lcm", "embeddings-st", "embeddings-openai", "embeddings-ollama", "dev", "all"]
 
 [[package]]
 name = "soupsieve"

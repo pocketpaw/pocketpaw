@@ -30,8 +30,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from soul_protocol.engine.retrieval import Credential
-from soul_protocol.spec.retrieval import RetrievalCandidate, RetrievalRequest
+from soul_protocol.spec.retrieval import Credential, RetrievalCandidate, RetrievalRequest
 
 from .auth import resolve_bearer_token
 from .client import DriveClient, DriveFile, DriveRevision

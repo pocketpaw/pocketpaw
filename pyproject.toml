@@ -407,3 +407,16 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--ignore=tests/cloud --ignore=tests/e2e"
+
+# ---------------------------------------------------------------------------
+# Local dogfood override — REMOVE BEFORE RELEASE
+# ---------------------------------------------------------------------------
+# feat/receive-retrieval-infra lands ahead of soul-protocol 0.3.2 publishing
+# to PyPI. Until that publish, uv resolves soul-protocol from the sibling
+# ../soul-protocol checkout so the new spec/retrieval surface (Credential,
+# CredentialBroker, SourceAdapter, RetrievalError hierarchy) is importable.
+# When 0.3.2 is on PyPI: (a) bump the soul-protocol pin in [project]
+# dependencies to ^0.3.2, (b) DELETE this section, (c) `uv lock --upgrade
+# soul-protocol`. CI will fail on this branch until the pin is swapped.
+[tool.uv.sources]
+soul-protocol = { path = "../soul-protocol", editable = true }
