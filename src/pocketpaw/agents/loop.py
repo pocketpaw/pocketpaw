@@ -354,6 +354,10 @@ class AgentLoop:
         # Soul Protocol (optional)
         self._soul_manager: Any = None  # SoulManager | None
 
+        # Strong refs to fire-and-forget background tasks (chat titling, etc.)
+        # so the event loop doesn't GC them mid-flight.
+        self._bg_tasks: set[asyncio.Task] = set()
+
         self._running = False
 
     def _get_router(self) -> AgentRouter:
@@ -792,9 +796,11 @@ class AgentLoop:
                 from pocketpaw.features import chat_titles_enabled
 
                 if chat_titles_enabled(self.settings):
-                    asyncio.create_task(
+                    task = asyncio.create_task(
                         self._generate_and_emit_title(session_key, content)
                     )
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
 
             # 1b. Inject inbound media file paths so the agent can use them
             # Also detect whether this is a voice message so we can auto-TTS the reply.
