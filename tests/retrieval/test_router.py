@@ -40,10 +40,10 @@ from soul_protocol.spec.retrieval import (
 
 from pocketpaw.retrieval import (
     InMemoryCredentialBroker,
-    MockAdapter,
     ProjectionAdapter,
     RetrievalRouter,
 )
+from pocketpaw.retrieval.adapters import MockAdapter
 
 
 # -- fixtures -------------------------------------------------------------

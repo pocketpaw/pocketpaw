@@ -37,12 +37,6 @@ from soul_protocol.spec.retrieval import (
 
 DEFAULT_TTL_S: float = 300.0
 
-# Back-compat alias for tests / callers that imported the private helper from
-# this module before it moved into the public journal module. The semantics
-# are the same; see `soul_protocol.engine.journal.scope.scopes_overlap` for
-# the pinned policy (wildcard-grant vs specific-requester AND vice versa).
-_scopes_overlap = scopes_overlap
-
 
 class InMemoryCredentialBroker:
     """Reference broker. Not persistent, not distributed — fine for
