@@ -162,6 +162,16 @@ class _APISessionBridge:
                         "data": {"mutation": data.get("mutation", {})},
                     }
                 )
+            elif evt.event_type == "session_titled":
+                await self.queue.put(
+                    {
+                        "event": "session_titled",
+                        "data": {
+                            "session_id": data.get("session_id", ""),
+                            "title": data.get("title", ""),
+                        },
+                    }
+                )
             elif evt.event_type == "error":
                 await self.queue.put(
                     {"event": "error", "data": {"detail": data.get("message", "")}}
