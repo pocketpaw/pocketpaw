@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 from ee.cloud.uploads.models import FileUpload
 from pocketpaw.uploads.file_store import FileRecord
@@ -60,6 +62,43 @@ class MongoFileStore:
             chat_id=doc.chat_id,
             created=doc.createdAt or datetime.now(UTC),
         )
+
+    async def iter_by_workspace(
+        self,
+        workspace: str,
+        *,
+        include_deleted: bool = False,
+        limit: int = 500,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield upload docs for a workspace as plain dicts.
+
+        Used by the unified files module (ee/cloud/files) to surface the
+        chat-source slice. Keeps the shape minimal — callers convert to their
+        own row types.
+        """
+        query: list[Any] = [FileUpload.workspace == workspace]
+        if not include_deleted:
+            query.append(FileUpload.deleted_at == None)  # noqa: E711
+        cursor = FileUpload.find(*query).limit(limit)
+        async for doc in cursor:
+            created = doc.createdAt
+            updated = getattr(doc, "updatedAt", None) or created
+            yield {
+                "file_id": doc.file_id,
+                "filename": doc.filename,
+                "mime": doc.mime,
+                "size": doc.size,
+                # Legacy keys (workspace/owner) retained for back-compat.
+                "workspace": doc.workspace,
+                "owner": doc.owner,
+                # Canonical keys used by ee.cloud.files providers.
+                "workspace_id": doc.workspace,
+                "owner_id": doc.owner,
+                "chat_id": doc.chat_id,
+                "created_at": created,
+                "updated_at": updated,
+                "tags": list(getattr(doc, "tags", []) or []),
+            }
 
     async def soft_delete_scoped(self, file_id: str, workspace: str) -> None:
         doc = await FileUpload.find_one(
