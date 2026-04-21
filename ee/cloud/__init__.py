@@ -98,6 +98,113 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(uploads_router, prefix="/api/v1")
     app.include_router(notifications_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
+
+    # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
+    # inline (instead of via build_router's ctx_factory) so the routes can
+    # use the canonical `Depends(current_active_user)` auth chain without
+    # resolving fastapi-users dependencies manually from the Request.
+    from typing import Any as _Any
+
+    from fastapi import APIRouter as _APIRouter
+    from fastapi import Depends as _Depends
+    from fastapi import HTTPException as _HTTPException
+    from fastapi import Query as _Query
+
+    from ee.cloud.auth.core import current_active_user as _current_active_user
+    from ee.cloud.files.abac_config import load_rules as _load_abac_rules
+    from ee.cloud.files.browse import browse_mount as _browse_mount
+    from ee.cloud.files.errors import FilesError as _FilesError
+    from ee.cloud.files.errors import MountNotFound as _MountNotFound
+    from ee.cloud.files.mounts_config import load_mounts as _load_mounts
+    from ee.cloud.files.providers.kb import KbProvider as _KbProvider
+    from ee.cloud.files.providers.uploads import UploadsProvider as _UploadsProvider
+    from ee.cloud.files.registry import ProviderRegistry as _ProviderRegistry
+    from ee.cloud.files.schemas import RequestContext as _RequestContext
+    from ee.cloud.files.tree import CachedTreeBuilder as _CachedTreeBuilder
+    from ee.cloud.models.user import User as _User
+    from ee.cloud.uploads.mongo_store import MongoFileStore as _UploadsStore
+
+    class _NoopKbService:
+        async def list_documents(self, workspace_id: str, *, limit: int = 500):
+            return []
+
+        async def get_document(self, doc_id: str, *, workspace_id: str):
+            raise KeyError(doc_id)
+
+    _files_registry = _ProviderRegistry(configs=_load_mounts())
+    _files_registry.register(_UploadsProvider(store=_UploadsStore()))
+    _files_registry.register(_KbProvider(service=_NoopKbService()))
+    _files_rules = _load_abac_rules()
+    _files_tree_builder = _CachedTreeBuilder(
+        registry=_files_registry, rules=_files_rules
+    )
+
+    def _files_ctx_from_user(user: _User) -> _RequestContext:
+        role = ""
+        for ws in getattr(user, "workspaces", []) or []:
+            ws_id = getattr(ws, "workspace", None) or getattr(
+                ws, "workspace_id", None
+            )
+            if ws_id == user.activeWorkspace:
+                role = getattr(ws, "role", "") or ""
+                break
+        return _RequestContext(
+            user_id=str(user.id),
+            workspace_id=user.activeWorkspace,
+            attributes={"role": role},
+        )
+
+    _files_v2 = _APIRouter(prefix="/files", tags=["Files"])
+
+    @_files_v2.get("/tree")
+    async def _files_get_tree(
+        workspace_id: str | None = _Query(None),
+        user: _User = _Depends(_current_active_user),
+    ) -> dict[str, _Any]:
+        ctx = _files_ctx_from_user(user)
+        if workspace_id is not None and workspace_id != ctx.workspace_id:
+            raise _HTTPException(
+                status_code=403, detail="files.workspace_mismatch"
+            )
+        tree, warnings = await _files_tree_builder.build(
+            ctx=ctx, collect_warnings=True
+        )
+        return {**tree.model_dump(), "warnings": warnings}
+
+    @_files_v2.get("/browse")
+    async def _files_get_browse(
+        mount: str = _Query(...),
+        cursor: str | None = _Query(None),
+        limit: int = _Query(50, ge=1, le=500),
+        workspace_id: str | None = _Query(None),
+        user: _User = _Depends(_current_active_user),
+    ) -> dict[str, _Any]:
+        ctx = _files_ctx_from_user(user)
+        if workspace_id is not None and workspace_id != ctx.workspace_id:
+            raise _HTTPException(
+                status_code=403, detail="files.workspace_mismatch"
+            )
+        variables = {"workspace_id": ctx.workspace_id or ""}
+        try:
+            page = await _browse_mount(
+                ctx=ctx,
+                registry=_files_registry,
+                rules=_files_rules,
+                mount_path=mount,
+                variables=variables,
+                cursor=cursor,
+                limit=limit,
+                filters={},
+            )
+        except _MountNotFound:
+            raise _HTTPException(
+                status_code=404, detail="files.mount_not_found"
+            ) from None
+        except _FilesError as e:
+            raise _HTTPException(status_code=e.http_status, detail=e.code) from e
+        return page.model_dump()
+
+    app.include_router(_files_v2, prefix="/api/v1")
     # paw_print lives outside ee/cloud/ but is mounted alongside the cloud
     # routers so the admin UI (paw-enterprise /pockets/<id> Paw Print tab) can
     # reach /api/v1/paw-print/* without a second app setup entry point.

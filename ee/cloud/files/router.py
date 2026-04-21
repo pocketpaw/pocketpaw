@@ -92,7 +92,7 @@ def build_router(
     *,
     registry: ProviderRegistry,
     rules: AbacRuleSet,
-    ctx_factory: Callable[[Request], RequestContext],
+    ctx_factory: Callable[[Request], RequestContext | Any],
     tree_builder: CachedTreeBuilder | None = None,
 ) -> APIRouter:
     """Files Tab v2 tree/browse endpoints.
@@ -100,16 +100,29 @@ def build_router(
     Separate from the module-level ``router`` because tree/browse need a
     composed provider registry and ABAC rule set — see
     ``bootstrap.build_files_router`` for the concrete wiring.
+
+    ``ctx_factory`` may be sync OR async — if it returns an awaitable,
+    the handler will await it. This lets real wiring resolve the
+    authenticated user from the request session without forcing every
+    test harness to declare an async lambda.
     """
+    import inspect
+
     v2 = APIRouter(prefix="/files", tags=["Files"])
     cached = tree_builder or CachedTreeBuilder(registry=registry, rules=rules)
+
+    async def _resolve_ctx(request: Request) -> RequestContext:
+        result = ctx_factory(request)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     @v2.get("/tree")
     async def get_tree(
         request: Request,
         workspace_id: str | None = Query(None),
     ) -> dict[str, Any]:
-        ctx = ctx_factory(request)
+        ctx = await _resolve_ctx(request)
         if workspace_id is not None and workspace_id != ctx.workspace_id:
             raise HTTPException(status_code=403, detail="files.workspace_mismatch")
         tree, warnings = await cached.build(ctx=ctx, collect_warnings=True)
@@ -123,7 +136,7 @@ def build_router(
         limit: int = Query(50, ge=1, le=500),
         workspace_id: str | None = Query(None),
     ) -> dict[str, Any]:
-        ctx = ctx_factory(request)
+        ctx = await _resolve_ctx(request)
         if workspace_id is not None and workspace_id != ctx.workspace_id:
             raise HTTPException(status_code=403, detail="files.workspace_mismatch")
         variables = {"workspace_id": ctx.workspace_id or ""}
