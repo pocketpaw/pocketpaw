@@ -38,7 +38,10 @@ async def test_get_tree_returns_folder_nodes():
     reg.register(FakeProvider("uploads", mounts=[_mount("uploads", "/My Files", True, 10)]))
 
     app = FastAPI()
-    app.include_router(build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory))
+    app.include_router(
+        build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory),
+        prefix="/api/v1",
+    )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.get("/api/v1/files/tree")
@@ -59,7 +62,10 @@ async def test_get_browse_returns_entries(make_entry):
     reg.register(FakeProvider("uploads", entries=[entry]))
 
     app = FastAPI()
-    app.include_router(build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory))
+    app.include_router(
+        build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory),
+        prefix="/api/v1",
+    )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.get("/api/v1/files/browse", params={"mount": "/My Files"})
@@ -73,7 +79,10 @@ async def test_get_browse_returns_entries(make_entry):
 async def test_get_browse_unknown_mount_is_404():
     reg = ProviderRegistry(configs=[])
     app = FastAPI()
-    app.include_router(build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory))
+    app.include_router(
+        build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory),
+        prefix="/api/v1",
+    )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.get("/api/v1/files/browse", params={"mount": "/nope"})
     assert r.status_code == 404
@@ -90,7 +99,10 @@ async def test_get_browse_workspace_mismatch_is_403(make_entry):
     reg.register(FakeProvider("uploads", entries=[]))
 
     app = FastAPI()
-    app.include_router(build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory))
+    app.include_router(
+        build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory),
+        prefix="/api/v1",
+    )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.get(
             "/api/v1/files/browse",
@@ -104,7 +116,10 @@ async def test_get_browse_workspace_mismatch_is_403(make_entry):
 async def test_get_tree_workspace_mismatch_is_403():
     reg = ProviderRegistry(configs=[])
     app = FastAPI()
-    app.include_router(build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory))
+    app.include_router(
+        build_router(registry=reg, rules=AbacRuleSet(), ctx_factory=_ctx_factory),
+        prefix="/api/v1",
+    )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.get("/api/v1/files/tree", params={"workspace_id": "ws_other"})
     assert r.status_code == 403

@@ -30,7 +30,8 @@ async def test_bootstrap_tree_endpoint_works():
             ctx_factory=lambda req: RequestContext(
                 user_id="u", workspace_id="ws_1", attributes={"role": "member"}
             ),
-        )
+        ),
+        prefix="/api/v1",
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         r = await c.get("/api/v1/files/tree")
