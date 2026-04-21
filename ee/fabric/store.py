@@ -1,5 +1,8 @@
 # Fabric store — async SQLite operations for the ontology layer.
 # Created: 2026-03-28 — CRUD for object types, objects, and links.
+# Updated: 2026-04-19 (Cluster C / PR3) — Added list_links() for the new
+#   GET /api/v1/fabric/links endpoint that the Links sub-tab in
+#   PocketDataPanel now consumes instead of its hardcoded placeholder.
 
 from __future__ import annotations
 
@@ -260,6 +263,51 @@ class FabricStore:
             await db.commit()
         return lnk
 
+    async def list_links(
+        self,
+        from_id: str | None = None,
+        to_id: str | None = None,
+        link_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[FabricLink], int]:
+        """List links with optional filters on endpoints and link_type.
+
+        Returns ``(links, total)`` where ``total`` is the unpaginated count.
+        All filter arguments are bound parameters — no query-string
+        concatenation, so SQL injection through link_type is not possible.
+        """
+        conditions: list[str] = []
+        params: list[Any] = []
+        if from_id:
+            conditions.append("from_object_id = ?")
+            params.append(from_id)
+        if to_id:
+            conditions.append("to_object_id = ?")
+            params.append(to_id)
+        if link_type:
+            conditions.append("link_type = ?")
+            params.append(link_type)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT COUNT(*) AS cnt FROM fabric_links {where}", params
+            ) as cur:
+                row = await cur.fetchone()
+                total = row["cnt"] if row else 0
+
+            async with db.execute(
+                f"SELECT * FROM fabric_links {where}"
+                " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ) as cur:
+                links = [self._row_to_link(row) async for row in cur]
+
+        return links, total
+
     async def unlink(self, link_id: str) -> None:
         await self._ensure_schema()
         async with self._conn() as db:
@@ -384,4 +432,13 @@ class FabricStore:
             properties=json.loads(row["properties"]) if row["properties"] else {},
             source_connector=row["source_connector"],
             source_id=row["source_id"],
+        )
+
+    def _row_to_link(self, row: Any) -> FabricLink:
+        return FabricLink(
+            id=row["id"],
+            from_object_id=row["from_object_id"],
+            to_object_id=row["to_object_id"],
+            link_type=row["link_type"],
+            properties=json.loads(row["properties"]) if row["properties"] else {},
         )

@@ -2,6 +2,13 @@
 # Each action maps to the minimum role/access required and the stable
 # machine-readable `code` emitted on denial. Tests iterate ACTIONS to
 # guarantee every guarded operation is covered.
+#
+# Updated: 2026-04-19 (fix/fleet-install-auth-guard) — registered
+# ``fleet.install`` at ``WorkspaceRole.ADMIN`` with deny code
+# ``workspace.insufficient_role``. This lets the fleet router call
+# ``check_workspace_action`` (which already audits denials via
+# ``log_denial``) instead of hand-rolling the role check — closes the
+# P0 auth-bypass flagged in docs/plans/cluster-D-reality.md.
 
 from __future__ import annotations
 
@@ -121,6 +128,11 @@ ACTIONS: dict[str, ActionRule] = {
     # Billing
     "billing.view": ActionRule(WorkspaceRole.ADMIN, "billing.admin_only"),
     "billing.manage": ActionRule(WorkspaceRole.OWNER, "billing.owner_only"),
+    # Fleet — spawning agents + pockets is a workspace-admin action.
+    # Previously the install route had no auth guard at all, so any
+    # authenticated caller could install into any workspace
+    # (docs/plans/cluster-D-reality.md#106-112, P0 fix 2026-04-19).
+    "fleet.install": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
 }
 
 

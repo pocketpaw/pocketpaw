@@ -1,3 +1,9 @@
+# ee/cloud/models/agent.py — Agent configuration document (not execution).
+# Updated 2026-04-19 (feat/cluster-d-agent-scope-picker): added
+# ``scopes: list[str]`` to AgentConfig so ScopePicker assignments persist.
+# The field is a plain list of hierarchical scope tags (``org:sales:*``)
+# validated at the schema boundary via scope_rules.normalise_and_validate.
+
 """Agent configuration document."""
 
 from __future__ import annotations
@@ -16,6 +22,9 @@ class AgentConfig(BaseModel):
     trust_level: int = Field(default=3, ge=1, le=5)
     temperature: float = Field(default=0.7, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=1)
+    # Scope assignment — hierarchical tags that bound the agent's retrieval
+    # surface. Empty list == "no scope narrowing" (agent sees whole workspace).
+    scopes: list[str] = Field(default_factory=list)
     # Soul integration
     soul_enabled: bool = True
     soul_persona: str = ""

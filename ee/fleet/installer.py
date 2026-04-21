@@ -13,6 +13,18 @@
 # summary at the end. The journal parameter is opt-in so existing callers
 # (tests, CLI without an org) keep working unchanged. Emission errors are
 # logged and swallowed — the journal is observability, not control flow.
+# Updated: 2026-04-19 (fix/fleet-install-auth-guard) — P0 path-traversal
+# clamp. ``load_fleet`` previously fell through to ``Path(path_or_name)``
+# for any string that did not match a bundled template, which let a
+# workspace admin pass ``"../../etc/passwd"`` and have the server read +
+# attempt to parse arbitrary files. String inputs (the only code path the
+# REST router can reach) are now resolved against ``_BUNDLED_DIR`` and
+# rejected with a generic ``FileNotFoundError`` if they escape that
+# directory — the error never echoes the attempted filesystem path, so a
+# 4xx response leaks nothing about disk state. ``Path`` instances keep
+# the unclamped behaviour because they only come from trusted
+# programmatic callers (tests, scripts); the router never reaches that
+# branch.
 
 from __future__ import annotations
 
@@ -54,13 +66,27 @@ def list_bundled_fleets() -> list[str]:
 def load_fleet(path_or_name: str | Path) -> FleetTemplate:
     """Load a FleetTemplate from a YAML/JSON file or a bundled name.
 
-    If the argument is one of the bundled fleet names, resolves to the
-    packaged YAML. Otherwise treats it as a filesystem path.
+    String arguments are treated as bundled template names and are clamped
+    to ``_BUNDLED_DIR``. A name that would resolve outside the bundled
+    directory (e.g. ``"../../etc/passwd"`` or ``"/etc/passwd"``) or a name
+    with no matching bundled file raises ``FileNotFoundError`` with a
+    generic "not found" message that never echoes the attempted
+    filesystem path. This is the only code path the REST router can
+    reach, so a misbehaving caller cannot coerce the server into reading
+    arbitrary files.
+
+    ``Path`` instances remain an unclamped, trusted API for programmatic
+    callers (tests, scripts). The router only ever passes strings, so
+    this branch is not reachable from untrusted input.
     """
     if isinstance(path_or_name, str):
-        bundled = _BUNDLED_DIR / f"{path_or_name}.yaml"
-        if bundled.exists():
-            return _load_from_path(bundled)
+        bundled_dir = _BUNDLED_DIR.resolve()
+        candidate = (bundled_dir / f"{path_or_name}.yaml").resolve()
+        # ``is_relative_to`` catches both ``..`` traversal and absolute
+        # paths (``/etc/passwd`` resolves outside ``bundled_dir``).
+        if not candidate.is_relative_to(bundled_dir) or not candidate.exists():
+            raise FileNotFoundError(f"Fleet template not found: {path_or_name}")
+        return _load_from_path(candidate)
     p = Path(path_or_name)
     if not p.exists():
         raise FileNotFoundError(f"Fleet template not found: {path_or_name}")

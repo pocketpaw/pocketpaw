@@ -196,6 +196,10 @@ async def test_delete_emits_workspace_deleted_and_invalidates_cache():
     ws = _make_workspace()
     resolver_mock = MagicMock()
 
+    user_cls = MagicMock()
+    # No other members — the cascade loop is a no-op.
+    user_cls.find = MagicMock(return_value=SimpleNamespace(to_list=AsyncMock(return_value=[])))
+
     with (
         patch("ee.cloud.workspace.service.emit", new=fake_emit),
         patch("ee.cloud.workspace.service.get_resolver", lambda: resolver_mock),
@@ -203,6 +207,7 @@ async def test_delete_emits_workspace_deleted_and_invalidates_cache():
             "ee.cloud.workspace.service.Workspace.get",
             new=AsyncMock(return_value=ws),
         ),
+        patch("ee.cloud.workspace.service.User", new=user_cls),
         patch(
             "ee.cloud.workspace.service.PydanticObjectId",
             new=lambda x: x,
@@ -214,6 +219,61 @@ async def test_delete_emits_workspace_deleted_and_invalidates_cache():
     assert len(events) == 1
     assert events[0].data == {"workspace_id": "w1"}
     resolver_mock.invalidate_workspace.assert_called_once_with("w1")
+
+
+@pytest.mark.asyncio
+async def test_delete_cascades_membership_cleanup():
+    """Delete must strip the workspace out of every member + clear
+    active_workspace on users who had the deleted workspace selected."""
+    from ee.cloud.workspace.service import WorkspaceService
+
+    _, fake_emit = _capture_emits()
+    owner = _make_user("u1")
+    ws = _make_workspace(owner="u1")
+    resolver_mock = MagicMock()
+
+    # Two other members, both with the deleted workspace as active.
+    member_a = _make_user("u2")
+    member_a.workspaces = [
+        _make_membership("w1", role="member"),
+        _make_membership("w2", role="member"),
+    ]
+    member_a.active_workspace = "w1"
+
+    member_b = _make_user("u3")
+    member_b.workspaces = [_make_membership("w1", role="admin")]
+    member_b.active_workspace = "w1"
+
+    user_cls = MagicMock()
+    user_cls.find = MagicMock(
+        return_value=SimpleNamespace(to_list=AsyncMock(return_value=[member_a, member_b]))
+    )
+
+    with (
+        patch("ee.cloud.workspace.service.emit", new=fake_emit),
+        patch("ee.cloud.workspace.service.get_resolver", lambda: resolver_mock),
+        patch(
+            "ee.cloud.workspace.service.Workspace.get",
+            new=AsyncMock(return_value=ws),
+        ),
+        patch("ee.cloud.workspace.service.User", new=user_cls),
+        patch(
+            "ee.cloud.workspace.service.PydanticObjectId",
+            new=lambda x: x,
+        ),
+    ):
+        await WorkspaceService.delete("w1", owner)
+
+    # Member A had another workspace — active should shift, membership dropped.
+    assert [m.workspace for m in member_a.workspaces] == ["w2"]
+    assert member_a.active_workspace == "w2"
+    member_a.save.assert_called_once()
+
+    # Member B had only the deleted workspace — active resets to None so the
+    # first-run modal fires on their next login.
+    assert member_b.workspaces == []
+    assert member_b.active_workspace is None
+    member_b.save.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,10 @@
 # Uses stdlib sqlite3 (no extra deps). Async interface via run_in_executor.
 # Stores entries in pocket.db-adjacent audit_log table with indexes for
 # pocket_id, category, and timestamp queries.
+# Updated: 2026-04-19 (Cluster C / PR4) — Added search_entries() with
+#   workspace_id rollup + bound-param LIKE over action/description/context.
+#   The injection regression test (tests/test_audit_fts_security.py) proves
+#   a crafted ``q`` cannot corrupt the audit_log table.
 
 from __future__ import annotations
 
@@ -39,6 +43,36 @@ CREATE INDEX IF NOT EXISTS idx_audit_category  ON audit_log(category);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_actor     ON audit_log(actor);
 """
+
+
+def _fts_escape(term: str) -> str:
+    """Lower-case + wildcard-escape a search term for SQLite LIKE.
+
+    SQLite LIKE uses ``%`` (any sequence) and ``_`` (single char). A caller
+    supplying a query string like ``"admin_"`` would otherwise match
+    ``admin1``, ``admin2``, etc. and subtly leak row existence. Backslash
+    is our escape char (matching the ``ESCAPE '\\'`` clause in the SQL),
+    so we also escape the backslash itself first.
+    """
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped.lower()}%"
+
+
+def _entries_to_csv_bytes(entries: list[AuditEntry]) -> bytes:
+    fieldnames = [
+        "id", "timestamp", "pocket_id", "actor", "action", "category",
+        "description", "context", "ai_recommendation", "outcome", "status", "metadata",
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for entry in entries:
+        writer.writerow(entry.to_db_row())
+    return buf.getvalue().encode("utf-8")
+
+
+def _entries_to_json_bytes(entries: list[AuditEntry]) -> bytes:
+    return json.dumps([e.model_dump() for e in entries], default=str).encode("utf-8")
 
 
 class AuditStore:
@@ -113,6 +147,74 @@ class AuditStore:
             conn.commit()
         logger.debug("audit: logged %s by %s (%s)", action, actor, entry.id)
         return entry.id
+
+    async def search_entries(
+        self,
+        workspace_id: str | None = None,
+        pocket_id: str | None = None,
+        category: str | None = None,
+        actor: str | None = None,
+        q: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        limit: int = 200,
+    ) -> list[AuditEntry]:
+        """Search audit entries across pockets with optional full-text ``q``.
+
+        The ``q`` clause matches (case-insensitive) against action,
+        description, and the JSON-encoded context column. Every filter is
+        bound via parameters — no concatenation, so SQL injection is not a
+        vector. Wildcards in ``q`` are escaped (underscore and percent) so
+        a caller cannot exploit LIKE semantics to exfiltrate rows.
+
+        ``workspace_id`` is matched against the JSON field
+        ``context.workspace_id`` so callers can roll up across every
+        pocket in an org without a schema migration. Legacy entries that
+        never persisted the field will simply not match — intentional.
+        """
+        self._ensure_schema()
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if pocket_id is not None:
+            conditions.append("pocket_id = ?")
+            params.append(pocket_id)
+        if category is not None:
+            conditions.append("category = ?")
+            params.append(category)
+        if actor is not None:
+            conditions.append("actor = ?")
+            params.append(actor)
+        if date_from is not None:
+            conditions.append("timestamp >= ?")
+            params.append(date_from.isoformat())
+        if date_to is not None:
+            conditions.append("timestamp <= ?")
+            params.append(date_to.isoformat())
+        if workspace_id is not None:
+            # JSON comparison using SQLite's json_extract. Parameter
+            # binding handles the value; the column name is a literal.
+            conditions.append(
+                "COALESCE(json_extract(context, '$.workspace_id'), '') = ?"
+            )
+            params.append(workspace_id)
+        if q is not None and q.strip():
+            needle = _fts_escape(q.strip())
+            conditions.append(
+                "(LOWER(action) LIKE ? ESCAPE '\\' "
+                "OR LOWER(description) LIKE ? ESCAPE '\\' "
+                "OR LOWER(context) LIKE ? ESCAPE '\\')"
+            )
+            params.extend([needle, needle, needle])
+
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        sql = f"SELECT * FROM audit_log {where} ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        return [AuditEntry.from_db_row(dict(row)) for row in rows]
 
     async def query_entries(
         self,

@@ -1,5 +1,8 @@
 # ee/fabric/router.py — FastAPI router for the Fabric ontology API.
 # Created: 2026-03-28 — CRUD endpoints for object types, objects, links, queries, stats.
+# Updated: 2026-04-19 (Cluster C / PR3) — Added GET /fabric/objects and
+#   GET /fabric/links list endpoints so the Objects/Links sub-tabs in
+#   PocketDataPanel render real data instead of the Brew & Co. mock.
 
 from __future__ import annotations
 
@@ -7,10 +10,17 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from ee.fabric.models import FabricObject, FabricQuery, FabricQueryResult, ObjectType, PropertyDef
+from ee.fabric.models import (
+    FabricLink,
+    FabricObject,
+    FabricQuery,
+    FabricQueryResult,
+    ObjectType,
+    PropertyDef,
+)
 from ee.fabric.store import FabricStore
 
 logger = logging.getLogger(__name__)
@@ -70,6 +80,54 @@ async def define_type(req: DefineTypeRequest):
         icon=req.icon,
         color=req.color,
     )
+
+
+class ObjectsListResponse(BaseModel):
+    objects: list[FabricObject]
+    total: int
+
+
+class LinksListResponse(BaseModel):
+    links: list[FabricLink]
+    total: int
+
+
+@router.get("/fabric/objects", response_model=ObjectsListResponse)
+async def list_objects(
+    type_id: str | None = Query(None, description="Filter by object type id"),
+    type_name: str | None = Query(None, description="Filter by object type name (case-insensitive)"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> ObjectsListResponse:
+    """List objects with optional type filter.
+
+    Wraps ``FabricStore.query()`` so we inherit its parameter binding. The
+    ``type_id`` / ``type_name`` filters go through ``FabricQuery``, which
+    concatenates only whitelisted column names — user input flows exclusively
+    through bound parameters.
+    """
+    q = FabricQuery(type_id=type_id, type_name=type_name, limit=limit, offset=offset)
+    result = await _store().query(q)
+    return ObjectsListResponse(objects=result.objects, total=result.total)
+
+
+@router.get("/fabric/links", response_model=LinksListResponse)
+async def list_links(
+    from_id: str | None = Query(None, description="Filter by source object id"),
+    to_id: str | None = Query(None, description="Filter by destination object id"),
+    link_type: str | None = Query(None, description="Filter by link type"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> LinksListResponse:
+    """List links between objects with optional endpoint + type filters."""
+    links, total = await _store().list_links(
+        from_id=from_id,
+        to_id=to_id,
+        link_type=link_type,
+        limit=limit,
+        offset=offset,
+    )
+    return LinksListResponse(links=links, total=total)
 
 
 @router.post("/fabric/objects", response_model=FabricObject, status_code=201)

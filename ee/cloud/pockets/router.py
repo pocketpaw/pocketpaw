@@ -1,11 +1,33 @@
-"""Pockets domain — FastAPI router."""
+"""Pockets domain — FastAPI router.
+
+Updated: 2026-04-19 (Cluster B Sub-PR #3) — Added three new routes that
+close UI-TESTING-GUIDE §11 gap B5 (no widget layout save/share):
+
+    POST /pockets/{id}/export-layout   — return the pocket's layout as YAML
+    POST /pockets/templates            — save a YAML template to "My templates"
+    GET  /pockets/templates            — list the workspace's user templates
+
+The YAML + in-process store live in ee.cloud.pockets.layouts. Export is
+pure. Template storage is workspace-scoped and in-process for now; the
+REST contract matches the MongoDB-backed version that Wave 4 will ship.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from starlette.responses import Response
 
 from ee.cloud.license import require_license
+from ee.cloud.pockets.layouts import (
+    UserPocketTemplate,
+    UserTemplateStore,
+    export_layout_yaml,
+    get_user_template_store,
+    parse_layout_yaml,
+)
 from ee.cloud.pockets.schemas import (
     AddCollaboratorRequest,
     AddWidgetRequest,
@@ -25,6 +47,128 @@ from ee.cloud.shared.deps import (
 )
 
 router = APIRouter(prefix="/pockets", tags=["Pockets"], dependencies=[Depends(require_license)])
+
+
+# ---------------------------------------------------------------------------
+# Layout export + user templates — Cluster B Sub-PR #3.
+# ---------------------------------------------------------------------------
+
+
+class ExportLayoutRequest(BaseModel):
+    """Optional overrides on the metadata block of the exported YAML.
+
+    The pocket's own name / description / category seed the defaults —
+    the override fields let the operator ship the template under a
+    different display name without renaming the source pocket. Empty
+    fields fall back to the pocket's values.
+    """
+
+    name: str | None = None
+    description: str | None = None
+    category: str | None = None
+
+
+class ExportLayoutResponse(BaseModel):
+    pocket_id: str
+    yaml: str
+
+
+class CreateTemplateRequest(BaseModel):
+    """Body for POST /pockets/templates.
+
+    ``yaml_source`` is the YAML a previous /export-layout call produced
+    or a hand-authored equivalent. ``name`` / ``description`` /
+    ``category`` are required on the template row even when the YAML
+    carries them — the store indexes on those fields for the gallery.
+    """
+
+    name: str = Field(min_length=1, max_length=100)
+    description: str = ""
+    category: str = "custom"
+    yaml_source: str = Field(min_length=1)
+
+
+class UserTemplateResponse(BaseModel):
+    id: str
+    workspace_id: str
+    owner_id: str
+    name: str
+    description: str
+    category: str
+    spec: dict
+    created_at: str
+
+
+@router.post("/{pocket_id}/export-layout", response_model=ExportLayoutResponse)
+async def export_layout(
+    pocket_id: str,
+    body: ExportLayoutRequest | None = None,
+    user_id: str = Depends(current_user_id),
+) -> ExportLayoutResponse:
+    """Serialise this pocket's layout as YAML.
+
+    Read-only, safe on any pocket the caller can fetch. The YAML is
+    deterministic (sort_keys=True) so a round-trip save-then-create
+    reproduces the original layout byte-identically — the PR's e2e
+    test depends on that guarantee.
+    """
+
+    body = body or ExportLayoutRequest()
+    pocket = await PocketService.get(pocket_id, user_id)
+    widgets_dump = pocket.get("widgets") or []
+    yaml_text = export_layout_yaml(
+        pocket_id=pocket_id,
+        name=body.name or pocket.get("name", ""),
+        description=body.description or pocket.get("description", ""),
+        category=body.category or pocket.get("type", "custom"),
+        ripple_spec=pocket.get("rippleSpec"),
+        widgets=widgets_dump,
+    )
+    return ExportLayoutResponse(pocket_id=pocket_id, yaml=yaml_text)
+
+
+@router.post("/templates", response_model=UserTemplateResponse)
+async def create_user_template(
+    body: CreateTemplateRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+    store: UserTemplateStore = Depends(get_user_template_store),
+) -> UserTemplateResponse:
+    """Persist a user-defined YAML template under the caller's workspace.
+
+    The template shows up in PocketTemplates's "My templates" category
+    once Cluster B's frontend wires the read side. Malformed YAML
+    returns 400 with a human-readable message instead of 500 — the UI
+    surfaces the error inline on the Save-as-template dialog.
+    """
+
+    try:
+        spec = parse_layout_yaml(body.yaml_source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    row = store.save(
+        UserPocketTemplate(
+            id=uuid4().hex,
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=body.name,
+            description=body.description,
+            category=body.category,
+            spec=spec,
+        ),
+    )
+    return UserTemplateResponse(**row.to_dict())
+
+
+@router.get("/templates", response_model=list[UserTemplateResponse])
+async def list_user_templates(
+    workspace_id: str = Depends(current_workspace_id),
+    store: UserTemplateStore = Depends(get_user_template_store),
+) -> list[UserTemplateResponse]:
+    """List user-defined templates for the caller's active workspace."""
+
+    return [UserTemplateResponse(**row.to_dict()) for row in store.list_for_workspace(workspace_id)]
 
 # ---------------------------------------------------------------------------
 # CRUD

@@ -557,6 +557,42 @@ class TestQueryAudit:
         entries = await store.query_audit(event="action_approved")
         assert all(e.event == "action_approved" for e in entries)
 
+    @pytest.mark.asyncio
+    async def test_query_audit_filter_by_actor(self, store: InstinctStore) -> None:
+        """Per-agent reasoning viewer: filter audit by the actor who
+        logged the entry (e.g. ``agent:abc123`` from an automated
+        proposal vs ``user:alice`` from an admin approval)."""
+        await store.log(
+            actor="agent:robot-1",
+            event="reasoning_trace",
+            description="Trace from agent 1",
+            pocket_id="actor-pocket",
+        )
+        await store.log(
+            actor="agent:robot-2",
+            event="reasoning_trace",
+            description="Trace from agent 2",
+            pocket_id="actor-pocket",
+        )
+        await store.log(
+            actor="user:alice",
+            event="review",
+            description="Human review",
+            pocket_id="actor-pocket",
+        )
+
+        agent1_only = await store.query_audit(actor="agent:robot-1")
+        assert len(agent1_only) == 1
+        assert agent1_only[0].actor == "agent:robot-1"
+
+        user_only = await store.query_audit(actor="user:alice")
+        assert len(user_only) == 1
+        assert user_only[0].actor == "user:alice"
+
+        # No-actor-filter returns everything we logged above.
+        everything = await store.query_audit(pocket_id="actor-pocket", limit=10)
+        assert len(everything) == 3
+
 
 class TestQueryAuditByCategory:
     """test_query_audit_by_category — filter audit entries by category."""

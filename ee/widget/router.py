@@ -14,6 +14,18 @@
 # lookup. Scope falls back to ``["org:*"]`` when the actor carries no
 # ``scope_context`` — the UI's anonymous-session path passes an empty
 # list.
+# Updated: 2026-04-19 (Cluster B Sub-PR #2) — Added the write-side for
+# the existing /widgets/cooccurrence read endpoint. Two new routes:
+#
+#   - POST /widgets/cooccurrence/accept  — operator accepted a suggested
+#     widget pairing. Emits ``widget.cooccurrence.accepted``.
+#   - POST /widgets/cooccurrence/dismiss — operator dismissed a suggested
+#     pairing. Emits ``widget.cooccurrence.dismissed``.
+#
+# Both are thin writers that journal one event and return the same ack
+# shape as POST /widgets/track. The SuggestedWidgetsFeed in paw-enterprise
+# has shipped the accept/dismiss buttons since PR #74 but they were
+# client-local only; with these endpoints the decisions now persist.
 #
 # Reads hit the in-memory projection; writes happen via
 # WidgetJournalStore from pocketpaw callsites (this endpoint, the
@@ -160,6 +172,25 @@ class WidgetInteractionAck(BaseModel):
     ok: bool
     event_id: UUID
     seq: int
+
+
+class CooccurrenceDecisionRequest(BaseModel):
+    """Payload for ``POST /widgets/cooccurrence/accept|dismiss``.
+
+    The feed surfaces a suggestion with a stable ``signature``; the
+    write side echoes that signature back so the journal event pins
+    the exact pair the operator saw, not a freshly recomputed one.
+    ``actor`` is the operator — mirrors ``WidgetInteractionRequest`` so
+    the UI can share one actor-builder across both endpoints.
+    """
+
+    signature: str = Field(min_length=1)
+    widget_a: str = Field(min_length=1)
+    widget_b: str = Field(min_length=1)
+    actor: Actor
+    pocket_id: str | None = None
+    reason: str = ""
+    correlation_id: UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +378,81 @@ async def post_widget_interaction(
         ok=True,
         event_id=entry.id,
         seq=seq,
+    )
+
+
+async def _post_cooccurrence_decision(
+    *,
+    decision: str,
+    request: CooccurrenceDecisionRequest,
+    journal: Journal,
+) -> WidgetInteractionAck:
+    """Shared implementation for both decision routes — the only thing
+    that differs between accept and dismiss is the action name. Scope
+    falls back to ``["org:*"]`` under the same rules as /widgets/track
+    so anonymous session actors (which pass ``scope_context=[]``) don't
+    hit the journal's non-empty-scope invariant.
+    """
+
+    store = _get_store(journal)
+    scope = list(request.actor.scope_context) if request.actor.scope_context else ["org:*"]
+    entry = await store.log_cooccurrence_decision(
+        decision=decision,
+        scope=scope,
+        signature=request.signature,
+        widget_a=request.widget_a,
+        widget_b=request.widget_b,
+        pocket_id=request.pocket_id,
+        reason=request.reason,
+        actor=request.actor,
+        correlation_id=request.correlation_id,
+    )
+    seq = getattr(entry, "seq", None)
+    return WidgetInteractionAck(
+        ok=True,
+        event_id=entry.id,
+        seq=int(seq) if seq is not None else 0,
+    )
+
+
+@router.post("/widgets/cooccurrence/accept", response_model=WidgetInteractionAck)
+async def post_cooccurrence_accept(
+    request: CooccurrenceDecisionRequest,
+    journal: Journal = Depends(get_journal),
+) -> WidgetInteractionAck:
+    """Operator accepted a suggested widget pairing. Emits
+    ``widget.cooccurrence.accepted`` onto the org journal so the feed
+    can learn from the signal on subsequent reads.
+
+    The SuggestedWidgetsFeed in paw-enterprise (#74) has been rendering
+    accept/dismiss buttons since it shipped; this route closes the loop
+    so the decisions persist. Before this endpoint the buttons were
+    client-local only — refreshing the page re-surfaced every rejected
+    pair.
+    """
+
+    return await _post_cooccurrence_decision(
+        decision="accepted",
+        request=request,
+        journal=journal,
+    )
+
+
+@router.post("/widgets/cooccurrence/dismiss", response_model=WidgetInteractionAck)
+async def post_cooccurrence_dismiss(
+    request: CooccurrenceDecisionRequest,
+    journal: Journal = Depends(get_journal),
+) -> WidgetInteractionAck:
+    """Operator dismissed a suggested widget pairing. Emits
+    ``widget.cooccurrence.dismissed`` onto the org journal. The feed
+    uses the presence of a dismissed event (keyed by signature) to
+    suppress the pair on future fetches.
+    """
+
+    return await _post_cooccurrence_decision(
+        decision="dismissed",
+        request=request,
+        journal=journal,
     )
 
 

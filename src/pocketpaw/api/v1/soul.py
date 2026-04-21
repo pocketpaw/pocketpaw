@@ -325,6 +325,100 @@ async def soul_forget(body: dict):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Soul memory lister (cluster-d-agent-reasoning-viewer-plus-soul-memory).
+# ``POST /soul/recall`` is a similarity search — fine for "what did the
+# soul remember about topic X" but useless for the AgentSoulTab's episodic
+# timeline. This GET adds a chronological, tier-filtered pager so the UI
+# can render recent events without inventing a query.
+# ---------------------------------------------------------------------------
+
+
+_ALLOWED_TIERS = frozenset({"episodic", "semantic", "procedural"})
+
+
+def _collect_tier_entries(soul, tier: str, limit: int) -> list[dict]:
+    """Return the most recent ``limit`` entries from a soul-memory tier.
+
+    The soul-protocol memory manager exposes private ``_episodic``,
+    ``_semantic``, and ``_procedural`` stores with ``.entries()`` /
+    ``.facts()`` iterators. We read them directly (no write side effects)
+    and cap the slice so a well-aged soul doesn't flood the response.
+    """
+
+    mm = getattr(soul, "_memory", None)
+    if mm is None:
+        return []
+
+    if tier == "episodic":
+        store = getattr(mm, "_episodic", None)
+        if store is None or not hasattr(store, "entries"):
+            return []
+        # Episodic stores list newest-first in most builds; reverse-slice
+        # is safe regardless — the guarantee we need is "most recent N".
+        entries = list(store.entries())
+    elif tier == "semantic":
+        store = getattr(mm, "_semantic", None)
+        if store is None:
+            return []
+        iterator = (
+            store.facts() if hasattr(store, "facts") else getattr(store, "entries", lambda: [])()
+        )
+        entries = list(iterator)
+    elif tier == "procedural":
+        store = getattr(mm, "_procedural", None)
+        if store is None or not hasattr(store, "entries"):
+            return []
+        entries = list(store.entries())
+    else:  # pragma: no cover — covered by _ALLOWED_TIERS guard
+        return []
+
+    # Normalise to dicts — soul-protocol's MemoryEntry is a pydantic model
+    # but some older stores still hand back plain strings.
+    bounded = entries[:limit]
+    out: list[dict] = []
+    for entry in bounded:
+        if hasattr(entry, "model_dump"):
+            out.append(entry.model_dump(mode="json"))
+        elif isinstance(entry, dict):
+            out.append(entry)
+        else:
+            out.append({"content": str(entry)})
+    return out
+
+
+@router.get("/soul/memories")
+async def list_soul_memories(tier: str = "episodic", limit: int = 20):
+    """Return the most recent ``limit`` memories from the given tier.
+
+    Tiers: ``episodic`` (default) | ``semantic`` | ``procedural``. Any
+    other tier string is rejected with a clear error so the UI can fall
+    back cleanly. ``limit`` is clamped to [1, 200] server-side — the
+    frontend pager can only grow the list by paging deeper, not by
+    asking for a gigantic slab in a single round-trip.
+    """
+    if tier not in _ALLOWED_TIERS:
+        return {
+            "error": (
+                f"Unknown tier '{tier}'. Valid tiers: "
+                f"{', '.join(sorted(_ALLOWED_TIERS))}"
+            )
+        }
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+
+    from pocketpaw.soul.manager import get_soul_manager
+
+    mgr = get_soul_manager()
+    if mgr is None or mgr.soul is None:
+        return {"tier": tier, "memories": [], "total": 0}
+
+    memories = _collect_tier_entries(mgr.soul, tier, limit)
+    return {"tier": tier, "memories": memories, "total": len(memories)}
+
+
 @router.post("/soul/export")
 async def export_soul():
     """Save the current soul to its .soul file."""

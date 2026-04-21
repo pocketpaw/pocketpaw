@@ -1,4 +1,11 @@
-"""Agents domain — business logic service."""
+"""Agents domain — business logic service.
+
+Updated 2026-04-19 (feat/cluster-d-agent-scope-picker): create/update now
+pass the new ``scopes`` field through to ``AgentConfig``, and a dedicated
+``get_scopes`` / ``set_scopes`` pair backs the ``/agents/{id}/scope``
+endpoint. ``set_scopes`` re-applies the scope validator so a direct
+service call (e.g. a fleet installer) can't store an unvalidated list.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,7 @@ from ee.cloud.agents.schemas import (
     DiscoverRequest,
     UpdateAgentRequest,
 )
+from ee.cloud.agents.scope_rules import normalise_and_validate_scopes
 from ee.cloud.models.agent import Agent, AgentConfig
 from ee.cloud.shared.errors import ConflictError, Forbidden, NotFound
 from ee.cloud.shared.time import iso_utc
@@ -62,6 +70,8 @@ class AgentService:
             config_data["tools"] = body.tools
         if body.trust_level is not None:
             config_data["trust_level"] = body.trust_level
+        if body.scopes is not None:
+            config_data["scopes"] = body.scopes
         if body.soul_values is not None:
             config_data["soul_values"] = body.soul_values
         if body.soul_ocean is not None:
@@ -153,6 +163,7 @@ class AgentService:
                 ("max_tokens", body.max_tokens),
                 ("tools", body.tools),
                 ("trust_level", body.trust_level),
+                ("scopes", body.scopes),
                 ("soul_enabled", body.soul_enabled),
                 ("soul_archetype", body.soul_archetype),
                 ("soul_values", body.soul_values),
@@ -169,6 +180,40 @@ class AgentService:
 
         await agent.save()
         return _agent_response(agent)
+
+    @staticmethod
+    async def get_scopes(agent_id: str) -> list[str]:
+        """Return the stored scope list for an agent.
+
+        Used by ``GET /agents/{id}/scope``. No auth check here — the
+        router applies ``require_agent_owner_or_admin`` before reaching
+        the service; downstream callers (service-to-service) should apply
+        their own checks.
+        """
+        agent = await Agent.get(PydanticObjectId(agent_id))
+        if not agent:
+            raise NotFound("agent", agent_id)
+        return list(agent.config.scopes)
+
+    @staticmethod
+    async def set_scopes(agent_id: str, scopes: list[str]) -> list[str]:
+        """Replace the stored scope list for an agent, re-normalising and
+        validating server-side. Returns the stored list.
+
+        The endpoint wrapping this method re-applies the same validator
+        via the ``ScopeAssignmentRequest`` Pydantic model; the extra call
+        here makes the service safe to call from fleet installers or a
+        future CLI without depending on the REST body validation.
+        """
+        cleaned = normalise_and_validate_scopes(scopes)
+        agent = await Agent.get(PydanticObjectId(agent_id))
+        if not agent:
+            raise NotFound("agent", agent_id)
+        current = agent.config.model_dump()
+        current["scopes"] = cleaned
+        agent.config = AgentConfig(**current)
+        await agent.save()
+        return list(agent.config.scopes)
 
     @staticmethod
     async def delete(agent_id: str, user_id: str) -> None:

@@ -1,42 +1,91 @@
-"""Files API routes. Legacy /api/v1/files kept intact; /tree + /browse added."""
+"""EE /files router — unified workspace files listing + v2 tree/browse.
+
+The module-level ``router`` keeps the Cluster E sub-PR 4 contract
+intact: ``GET /files`` returns a single list the paw-enterprise
+FilesPanel renders without caring which origin each row came from.
+
+Files Tab v2 (this PR) layers tree/browse endpoints on top via
+``build_router`` — a factory that composes a ProviderRegistry + ABAC
+rule set + request-context factory. ``build_files_router`` in
+``bootstrap.py`` wires the concrete providers.
+"""
+
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from ee.cloud.files.abac_config import AbacRuleSet
 from ee.cloud.files.browse import browse_mount
 from ee.cloud.files.errors import FilesError, MountNotFound
-from ee.cloud.files.mongo_store import MongoFileStore
 from ee.cloud.files.registry import ProviderRegistry
 from ee.cloud.files.schemas import RequestContext
 from ee.cloud.files.service import UnifiedFilesService
 from ee.cloud.files.tree import CachedTreeBuilder
-from ee.cloud.shared.deps import current_workspace_id
-from ee.cloud.uploads.mongo_store import MongoFileStore as UploadsStore
+from ee.cloud.license import require_license
+from ee.cloud.shared.deps import current_user_id, current_workspace_id
 
-router = APIRouter(prefix="/api/v1/files", tags=["files"])
+logger = logging.getLogger(__name__)
 
-# Module-level singleton — mirrors ee/cloud/uploads/router.py pattern.
-_UPLOADS_STORE = UploadsStore()
+router = APIRouter(
+    prefix="/files",
+    tags=["Files"],
+    dependencies=[Depends(require_license)],
+)
 
-
-def _service() -> UnifiedFilesService:
-    return UnifiedFilesService(MongoFileStore(_UPLOADS_STORE))
+_SVC = UnifiedFilesService()
 
 
 @router.get("")
 async def list_files(
-    workspace_id: str = Query(...),
-    source: str = Query("all"),
-    current_ws: str = Depends(current_workspace_id),
-    svc: UnifiedFilesService = Depends(_service),
-) -> dict:
-    if workspace_id != current_ws:
-        raise HTTPException(status_code=403, detail="files.workspace_mismatch")
-    return await svc.list(workspace_id, source=source)
+    workspace_id: str | None = Query(None),
+    source: Literal["chat", "local", "drive"] | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    user_id: str = Depends(current_user_id),
+    current_workspace: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """List files in the caller's current workspace.
+
+    ``workspace_id`` is accepted for explicitness but must match the
+    caller's current workspace — cross-workspace listing is rejected.
+    """
+    if workspace_id and workspace_id != current_workspace:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "workspace.mismatch",
+                "message": "Cannot list files outside your current workspace.",
+            },
+        )
+
+    files, warnings = await _SVC.list_unified(
+        current_workspace, source=source, limit=limit
+    )
+
+    return JSONResponse(
+        content={
+            "workspace_id": current_workspace,
+            "source": source or "all",
+            "files": [
+                {
+                    "id": f.id,
+                    "source": f.source,
+                    "filename": f.filename,
+                    "mime": f.mime,
+                    "size": f.size,
+                    "url": f.url,
+                    "created": f.created.isoformat() if f.created else None,
+                    "chat_id": f.chat_id,
+                }
+                for f in files
+            ],
+            "warnings": warnings,
+        }
+    )
 
 
 def build_router(
@@ -46,10 +95,16 @@ def build_router(
     ctx_factory: Callable[[Request], RequestContext],
     tree_builder: CachedTreeBuilder | None = None,
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/v1/files", tags=["files"])
+    """Files Tab v2 tree/browse endpoints.
+
+    Separate from the module-level ``router`` because tree/browse need a
+    composed provider registry and ABAC rule set — see
+    ``bootstrap.build_files_router`` for the concrete wiring.
+    """
+    v2 = APIRouter(prefix="/files", tags=["Files"])
     cached = tree_builder or CachedTreeBuilder(registry=registry, rules=rules)
 
-    @router.get("/tree")
+    @v2.get("/tree")
     async def get_tree(
         request: Request,
         workspace_id: str | None = Query(None),
@@ -60,7 +115,7 @@ def build_router(
         tree, warnings = await cached.build(ctx=ctx, collect_warnings=True)
         return {**tree.model_dump(), "warnings": warnings}
 
-    @router.get("/browse")
+    @v2.get("/browse")
     async def get_browse(
         request: Request,
         mount: str = Query(...),
@@ -89,4 +144,4 @@ def build_router(
             raise HTTPException(status_code=e.http_status, detail=e.code) from e
         return page.model_dump()
 
-    return router
+    return v2

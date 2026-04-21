@@ -1,7 +1,12 @@
 """Bridge between cloud chat events and the PocketPaw agent pool.
 
-Changes: Replaced inline pocket creation with PocketService.create_from_ripple_spec()
-to reduce coupling. Pocket creation logic now lives in the pockets domain.
+Changes:
+- 2026-04-19: Forward ``Message.attachments`` through ``on_message_for_agents``
+  and ``_run_agent_response`` so channel agents see filename/mime/size context.
+  Matches the DM path's shape (``Attached files:`` block appended to the user
+  prompt before ``pool.run``); keeps ``pool.run``'s signature unchanged.
+- Replaced inline pocket creation with PocketService.create_from_ripple_spec()
+  to reduce coupling. Pocket creation logic now lives in the pockets domain.
 
 Responsibilities (focused orchestrator):
 1. Checks each agent's respond_mode (silent, auto, mention_only, smart)
@@ -70,6 +75,10 @@ async def _dispatch_agent_responses(data: dict) -> None:
     content = data.get("content", "")
     mentions = data.get("mentions", [])
     workspace_id = data.get("workspace_id", "")
+    # Attachments ride the ``message.sent`` payload so channel agents see the
+    # same filename/mime/size context DM agents already get. Defaults to ``[]``
+    # so emit sites that don't populate it (legacy or test) stay compatible.
+    attachments = data.get("attachments", []) or []
     # Reply metadata — used to skip ``auto``-mode agents when the message is
     # a directed reply to another human (or to a different agent). Absent
     # for top-level messages.
@@ -121,6 +130,7 @@ async def _dispatch_agent_responses(data: dict) -> None:
                     workspace_id=workspace_id,
                     user_message=content,
                     group_members=group.members,
+                    attachments=attachments,
                 )
             )
 
@@ -226,19 +236,77 @@ async def _smart_relevance_check(agent_id: str, content: str) -> bool:
         return False
 
 
+def _format_bytes(n: int | None) -> str:
+    """Compact human-readable byte size (``12.3 KB``).
+
+    Mirrors the helper used on the DM path so channel prompts render file
+    sizes the same way. ``None`` / unknown returns an empty string.
+    """
+    if not isinstance(n, int) or n < 0:
+        return ""
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(n)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return ""
+
+
+def _augment_message_with_attachments(
+    content: str, attachments: list[dict] | None
+) -> str:
+    """Append an ``Attached files`` block to ``content`` so agents see context.
+
+    Attachment dicts come off the ``message.sent`` event payload. Each entry
+    is permissive: ``name``, ``url``, ``meta.mime``, ``meta.size``. Missing
+    fields degrade gracefully — an attachment with only a name still shows up,
+    which is better than silently dropping it like the pre-fix behavior did.
+    """
+    if not attachments:
+        return content
+    lines: list[str] = []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        name = att.get("name") or "file"
+        meta = att.get("meta") or {}
+        mime = meta.get("mime") or att.get("type") or "application/octet-stream"
+        size_str = _format_bytes(meta.get("size"))
+        url = att.get("url", "")
+        meta_suffix = f", {size_str}" if size_str else ""
+        location = f" at {url}" if url else ""
+        lines.append(f"- {name} ({mime}{meta_suffix}){location}")
+    if not lines:
+        return content
+    return f"{content}\n\nAttached files:\n" + "\n".join(lines)
+
+
 async def _run_agent_response(
     agent_id: str,
     group_id: str,
     workspace_id: str,
     user_message: str,
     group_members: list[str],
+    attachments: list[dict] | None = None,
 ) -> None:
-    """Run an agent's response and stream it to the group."""
+    """Run an agent's response and stream it to the group.
+
+    ``attachments`` carries the triggering user message's files (shape matches
+    ``ee.cloud.models.message.Attachment``: ``type``, ``url``, ``name``,
+    ``meta``). They're formatted into ``user_message`` before ``pool.run`` so
+    the agent sees filename/mime/size the same way it does on the DM path.
+    """
     from ee.cloud.models.message import Attachment, Message
     from pocketpaw.agents.pool import get_agent_pool
 
     pool = get_agent_pool()
     session_key = f"cloud:{group_id}:{agent_id}"
+
+    # Match the DM path's shape (``src/pocketpaw/agents/loop.py``) — append an
+    # "Attached files" block to the prompt so agents can reason about channel
+    # uploads. Kept inline so ``pool.run``'s signature stays untouched.
+    user_message = _augment_message_with_attachments(user_message, attachments)
 
     logger.info("Agent bridge: running response for agent %s in group %s", agent_id, group_id)
 

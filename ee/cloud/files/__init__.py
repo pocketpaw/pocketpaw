@@ -1,8 +1,8 @@
-"""Files aggregation module."""
+"""Files aggregation module — unified /files endpoint + Files Tab v2 (tree/browse)."""
 
 from ee.cloud.files.bootstrap import build_files_router
 from ee.cloud.files.registry import FolderProvider, ProviderRegistry
-from ee.cloud.files.router import build_router
+from ee.cloud.files.router import build_router, router  # noqa: F401
 from ee.cloud.files.schemas import (
     Capability,
     FileEntry,
@@ -31,4 +31,5 @@ __all__ = [
     "SearchQuery",
     "build_files_router",
     "build_router",
+    "router",
 ]

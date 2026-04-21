@@ -14,24 +14,76 @@
 # the dep was never called (it's always resolved; the router decides
 # whether to forward it).
 #
+# Updated: 2026-04-19 (fix/fleet-install-auth-guard) — added the fake
+# ``current_active_user`` override so tests can exercise the new P0
+# auth guard on ``POST /fleet/install``. The override reads
+# ``X-Test-User`` (missing → 401) and ``X-Test-Workspaces``
+# (``<ws_id>:<role>,...``) to shape the fake user's ``workspaces`` list
+# that ``resolve_workspace_role`` inspects. All existing install tests
+# now send an admin header + ``workspace_id`` so the happy paths still
+# exercise the real pipeline, and the new ``TestInstallFleetAuth``
+# class covers 401 (no auth), 403 (non-member), and 403 (insufficient
+# role) alongside the 200 admin path.
+#
 # Mocks the soul-protocol + connector + pocket factories out at the
 # ee.fleet.router seam so these tests stay hermetic — no filesystem
 # journal writes to the real data dir, no mongo, no soul-protocol runtime.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 from soul_protocol.engine.journal import open_journal
 
+from ee.cloud.auth import current_active_user
 from ee.fleet import FleetTemplate
 from ee.fleet.router import router
 from ee.journal_dep import get_journal, reset_journal_cache
+
+# ---------------------------------------------------------------------------
+# Shared constants used across install tests — the default admin workspace
+# lets existing happy-path tests remain concise while still exercising the
+# auth guard end-to-end.
+# ---------------------------------------------------------------------------
+
+WORKSPACE_ID = "ws-admin"
+OTHER_WORKSPACE_ID = "ws-other"
+ADMIN_AUTH_HEADERS = {
+    "X-Test-User": "user-admin",
+    "X-Test-Workspaces": f"{WORKSPACE_ID}:admin",
+}
+
+
+@dataclass
+class _FakeMembership:
+    """Minimal shape ``resolve_workspace_role`` duck-types on — needs
+    ``.workspace`` and ``.role`` attributes. Using a dataclass rather
+    than a ``MagicMock`` keeps equality + repr readable in test output.
+    """
+
+    workspace: str
+    role: str
+
+
+@dataclass
+class _FakeUser:
+    """Stand-in for ``ee.cloud.models.user.User`` used only by the
+    header-driven ``current_active_user`` override below.
+
+    The guard code only touches ``.id`` and ``.workspaces`` so a tiny
+    dataclass is enough — pulling in Beanie/fastapi-users for tests
+    would force a Mongo connection we do not need.
+    """
+
+    id: str
+    workspaces: list[_FakeMembership] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures — app, client, and a fake fleet factory stack so we never boot
@@ -62,10 +114,43 @@ def journal_path(tmp_path: Path) -> Path:
     return tmp_path / "router_journal.db"
 
 
+async def _fake_current_user(
+    x_test_user: str | None = Header(default=None),
+    x_test_workspaces: str | None = Header(default=None),
+) -> _FakeUser:
+    """Header-driven replacement for ``current_active_user``.
+
+    The real dep pulls a JWT off the cookie/bearer transport and hits
+    Mongo through fastapi-users — both overkill for router tests. This
+    stand-in returns a ``_FakeUser`` whose ``workspaces`` list mirrors
+    the ``X-Test-Workspaces`` header (``ws1:admin,ws2:member``) so
+    individual test cases can vary membership + role without touching
+    the app or router.
+
+    When ``X-Test-User`` is absent we raise 401 to mirror fastapi-users'
+    behaviour — that is what exercises the "unauthenticated → 401"
+    branch of the auth guard.
+    """
+
+    if not x_test_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    memberships: list[_FakeMembership] = []
+    if x_test_workspaces:
+        for entry in x_test_workspaces.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            ws_id, _, role = entry.partition(":")
+            memberships.append(_FakeMembership(workspace=ws_id, role=role or "member"))
+
+    return _FakeUser(id=x_test_user, workspaces=memberships)
+
+
 @pytest.fixture
 def app(journal_path: Path) -> FastAPI:
-    """FastAPI app with the fleet router mounted + ``get_journal``
-    overridden to write into a tmp-path journal.
+    """FastAPI app with the fleet router mounted + the ``get_journal``
+    and ``current_active_user`` deps overridden.
 
     Using ``dependency_overrides`` is the canonical FastAPI pattern for
     swapping collaborators in tests — it exercises the real Depends
@@ -75,6 +160,7 @@ def app(journal_path: Path) -> FastAPI:
     a = FastAPI()
     a.include_router(router)
     a.dependency_overrides[get_journal] = lambda: open_journal(journal_path)
+    a.dependency_overrides[current_active_user] = _fake_current_user
     return a
 
 
@@ -227,7 +313,12 @@ class TestInstallFleet:
 
         resp = client.post(
             "/fleet/install",
-            json={"template_name": "sales-fleet", "journal": False},
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+            headers=ADMIN_AUTH_HEADERS,
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -251,7 +342,12 @@ class TestInstallFleet:
 
         resp = client.post(
             "/fleet/install",
-            json={"template_name": "sales-fleet", "journal": True},
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": True,
+            },
+            headers=ADMIN_AUTH_HEADERS,
         )
         assert resp.status_code == 200
 
@@ -277,7 +373,12 @@ class TestInstallFleet:
 
         resp = client.post(
             "/fleet/install",
-            json={"template_name": "sales-fleet", "journal": False},
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+            headers=ADMIN_AUTH_HEADERS,
         )
         assert resp.status_code == 200
 
@@ -292,7 +393,12 @@ class TestInstallFleet:
 
         resp = client.post(
             "/fleet/install",
-            json={"template_name": "does-not-exist", "journal": False},
+            json={
+                "template_name": "does-not-exist",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+            headers=ADMIN_AUTH_HEADERS,
         )
         assert resp.status_code == 404
         assert "does-not-exist" in resp.json()["detail"]
@@ -302,7 +408,11 @@ class TestInstallFleet:
         before the installer is even considered.
         """
 
-        resp = client.post("/fleet/install", json={})
+        resp = client.post(
+            "/fleet/install",
+            json={},
+            headers=ADMIN_AUTH_HEADERS,
+        )
         assert resp.status_code == 422
 
     def test_actor_spec_is_forwarded_to_installer(
@@ -320,6 +430,7 @@ class TestInstallFleet:
             "/fleet/install",
             json={
                 "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
                 "journal": True,
                 "actor": {
                     "kind": "user",
@@ -327,6 +438,7 @@ class TestInstallFleet:
                     "scope_context": ["org:sales:*"],
                 },
             },
+            headers=ADMIN_AUTH_HEADERS,
         )
         assert resp.status_code == 200
 
@@ -335,6 +447,143 @@ class TestInstallFleet:
         for event in events:
             assert event.actor.kind == "user"
             assert event.actor.id == "user-123"
+
+
+# ---------------------------------------------------------------------------
+# POST /fleet/install — auth guard regression tests (P0 security fix).
+#
+# Before 2026-04-19 the route had no ``current_user`` dep and no workspace
+# scope check, so any caller could spawn agents + pockets into any
+# workspace — see cluster-D-reality.md line 108. These three cases lock
+# the fix in place: 401 when unauthenticated, 403 when authenticated but
+# not a member of the target workspace, 403 when a member below admin.
+# The 200 path sits alongside ``TestInstallFleet`` above — repeated here
+# as the explicit "admin succeeds" symmetric check against the denials.
+# ---------------------------------------------------------------------------
+
+
+class TestInstallFleetAuth:
+    def test_unauthenticated_returns_401(
+        self,
+        client: TestClient,
+        patch_install_fleet,
+    ) -> None:
+        """No auth header → ``current_active_user`` raises 401 before the
+        installer ever runs. The installer mock must not be called — a
+        401 that still spawned side effects would be worse than no guard.
+        """
+
+        resp = client.post(
+            "/fleet/install",
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+        )
+        assert resp.status_code == 401
+        assert patch_install_fleet.call_count == 0
+
+    def test_authed_non_member_returns_403(
+        self,
+        client: TestClient,
+        patch_install_fleet,
+    ) -> None:
+        """A logged-in user who is not a member of the target workspace
+        gets 403 with the canonical ``workspace.not_member`` code. The
+        installer is not invoked — this is the core fix for the P0
+        (previously any authenticated caller could install into any
+        workspace).
+        """
+
+        resp = client.post(
+            "/fleet/install",
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": OTHER_WORKSPACE_ID,
+                "journal": False,
+            },
+            headers={
+                "X-Test-User": "intruder",
+                "X-Test-Workspaces": f"{WORKSPACE_ID}:owner",
+            },
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "workspace.not_member"
+        assert patch_install_fleet.call_count == 0
+
+    def test_authed_member_below_admin_returns_403(
+        self,
+        client: TestClient,
+        patch_install_fleet,
+    ) -> None:
+        """Workspace members below ``admin`` can browse but cannot spawn
+        fleets — a member-role caller gets 403 with the
+        ``workspace.insufficient_role`` code, and the installer is never
+        reached.
+        """
+
+        resp = client.post(
+            "/fleet/install",
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+            headers={
+                "X-Test-User": "regular-member",
+                "X-Test-Workspaces": f"{WORKSPACE_ID}:member",
+            },
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "workspace.insufficient_role"
+        assert patch_install_fleet.call_count == 0
+
+    def test_authed_admin_succeeds(
+        self,
+        client: TestClient,
+        patch_install_fleet,
+    ) -> None:
+        """Admin of the target workspace reaches the installer — the
+        symmetric happy path against the denial cases above.
+        """
+
+        resp = client.post(
+            "/fleet/install",
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+            headers=ADMIN_AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert patch_install_fleet.call_count == 1
+
+    def test_authed_owner_succeeds(
+        self,
+        client: TestClient,
+        patch_install_fleet,
+    ) -> None:
+        """Owner sits above admin in the role hierarchy and must also
+        pass the guard — without this assertion a buggy ``<`` comparison
+        could silently deny owners.
+        """
+
+        resp = client.post(
+            "/fleet/install",
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+            headers={
+                "X-Test-User": "user-owner",
+                "X-Test-Workspaces": f"{WORKSPACE_ID}:owner",
+            },
+        )
+        assert resp.status_code == 200
+        assert patch_install_fleet.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +606,12 @@ class TestResponseShape:
 
         resp = client.post(
             "/fleet/install",
-            json={"template_name": "sales-fleet", "journal": False},
+            json={
+                "template_name": "sales-fleet",
+                "workspace_id": WORKSPACE_ID,
+                "journal": False,
+            },
+            headers=ADMIN_AUTH_HEADERS,
         )
         assert resp.status_code == 200
         pydantic_warnings = [w for w in recwarn.list if "pydantic" in str(w.category).lower()]

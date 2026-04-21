@@ -1,4 +1,12 @@
-"""EE /uploads router — workspace-scoped upload endpoints."""
+"""EE /uploads router — workspace-scoped upload endpoints.
+
+2026-04-19 (Cluster E sub-PR 3): added ``GET /uploads/{id}/download-url``
+as an explicitly-named alias for the existing ``/grant`` endpoint. The
+alias returns the same signed-URL-or-cookie-URL payload plus a
+short-lived ``expires_at`` and a ``filename`` that the FE can use as the
+default save-as name. The underlying service enforces workspace scope +
+per-file adapter auth; nothing extra leaks through the alias.
+"""
 
 from __future__ import annotations
 
@@ -66,6 +74,39 @@ async def upload(
     return {
         "uploaded": [_record_to_dict(r) for r in result.uploaded],
         "failed": [asdict(f) for f in result.failed],
+    }
+
+
+@router.get("/{file_id}/download-url")
+async def download_url(
+    file_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Return a short-TTL download URL for ``file_id``.
+
+    Cluster E sub-PR 3 alias of ``/grant``. The payload shape matches —
+    ``{url, expires_at}`` — with an extra ``filename`` so the FE's
+    "Save As" dialog opens with a sensible default. Workspace scope is
+    enforced by ``EEUploadService.presigned_get``; the alias does not
+    relax any check.
+    """
+    import time
+
+    from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
+
+    try:
+        rec, presigned = await _SVC.presigned_get(
+            file_id, user_id, workspace, DEFAULT_TTL_SECONDS
+        )
+    except NotFound as e:
+        raise HTTPException(status_code=404, detail="not found") from e
+
+    url = presigned or f"/api/v1/uploads/{file_id}"
+    return {
+        "url": url,
+        "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
+        "filename": rec.filename,
     }
 
 

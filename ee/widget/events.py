@@ -20,6 +20,21 @@
 #     dedup correctness across any query longer than 6 tokens. See
 #     cooccurrence_signature below.
 #
+# Updated: 2026-04-19 (Cluster B Sub-PR #2) — added two new action names
+# for the SuggestedWidgetsFeed accept/dismiss writers:
+#
+#   - ``widget.cooccurrence.accepted`` — operator accepted the pairing
+#     suggestion. The projection treats this as a strong positive signal
+#     for the pair (promotes it on the graduation curve).
+#   - ``widget.cooccurrence.dismissed`` — operator dismissed the pairing.
+#     The projection suppresses the signature on subsequent reads so the
+#     feed doesn't re-surface a rejected pair.
+#
+# These are separate from the existing ``widget.interaction.recorded``
+# action so the read-side (GET /widgets/cooccurrence) can filter purely
+# on cooccurrence-lifecycle events without walking the entire interaction
+# stream.
+#
 # Action namespace extensions are allowed per soul-protocol's v0.3.1
 # catalog policy (custom namespaces are permitted for domain extensions
 # that don't conflict with reserved prefixes). Pinned as constants so the
@@ -45,6 +60,8 @@ from typing import Any
 ACTION_WIDGET_INTERACTION_RECORDED = "widget.interaction.recorded"
 ACTION_WIDGET_GRADUATED = "widget.graduated"
 ACTION_WIDGET_COOCCURRENCE_DETECTED = "widget.cooccurrence.detected"
+ACTION_WIDGET_COOCCURRENCE_ACCEPTED = "widget.cooccurrence.accepted"
+ACTION_WIDGET_COOCCURRENCE_DISMISSED = "widget.cooccurrence.dismissed"
 
 WIDGET_ACTION_PREFIX = "widget."
 
@@ -52,6 +69,8 @@ ALL_WIDGET_ACTIONS = (
     ACTION_WIDGET_INTERACTION_RECORDED,
     ACTION_WIDGET_GRADUATED,
     ACTION_WIDGET_COOCCURRENCE_DETECTED,
+    ACTION_WIDGET_COOCCURRENCE_ACCEPTED,
+    ACTION_WIDGET_COOCCURRENCE_DISMISSED,
 )
 
 
@@ -184,6 +203,33 @@ def widget_graduated_payload(
         "interactions_in_window": int(interactions_in_window),
         "window_days": int(window_days),
         "previous_tier": previous_tier,
+        "pocket_id": pocket_id,
+        "reason": reason,
+    }
+
+
+def widget_cooccurrence_decision_payload(
+    *,
+    signature: str,
+    widget_a: str,
+    widget_b: str,
+    pocket_id: str | None = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Payload for ``widget.cooccurrence.accepted`` and ``widget.cooccurrence.dismissed``.
+
+    Both writers share one shape because the only thing that changes
+    between them is the action name — the projection looks up the most
+    recent decision for a signature and treats it as either "surface
+    this pair" or "hide this pair". ``reason`` is optional free-text the
+    UI may pass if the operator adds context on dismiss (future surface;
+    today the feed fires with ``reason=""``).
+    """
+
+    return {
+        "signature": signature,
+        "widget_a": widget_a,
+        "widget_b": widget_b,
         "pocket_id": pocket_id,
         "reason": reason,
     }

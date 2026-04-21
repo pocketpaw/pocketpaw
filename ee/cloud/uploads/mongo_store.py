@@ -1,4 +1,10 @@
-"""Mongo-backed metadata store, workspace-scoped."""
+"""Mongo-backed metadata store, workspace-scoped.
+
+2026-04-19 (Cluster E sub-PR 4): added ``list_by_workspace`` so the
+unified files endpoint can pull chat-sourced uploads alongside local
+filesystem entries. Soft-deleted rows are skipped. Results are capped
+to keep the unified list cheap.
+"""
 
 from __future__ import annotations
 
@@ -99,6 +105,34 @@ class MongoFileStore:
                 "updated_at": updated,
                 "tags": list(getattr(doc, "tags", []) or []),
             }
+
+    async def list_by_workspace(
+        self,
+        workspace: str,
+        *,
+        limit: int = 200,
+        chat_id: str | None = None,
+    ) -> list[FileRecord]:
+        """Return live (non-deleted) file records in a workspace.
+
+        Newest first. When ``chat_id`` is supplied, narrow further to the
+        uploads that originated in that chat. The workspace filter always
+        applies — cross-workspace bleed is not allowed through this API.
+        """
+        capped = max(1, min(limit, 500))
+        query: dict = {
+            "workspace": workspace,
+            "deleted_at": None,
+        }
+        if chat_id:
+            query["chat_id"] = chat_id
+        docs = (
+            await FileUpload.find(query)
+            .sort([("createdAt", -1)])
+            .limit(capped)
+            .to_list()
+        )
+        return [r for r in (self._to_record(d) for d in docs) if r is not None]
 
     async def soft_delete_scoped(self, file_id: str, workspace: str) -> None:
         doc = await FileUpload.find_one(

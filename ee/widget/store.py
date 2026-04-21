@@ -39,10 +39,13 @@ from soul_protocol.engine.journal import Journal
 from soul_protocol.spec.journal import Actor, EventEntry
 
 from ee.widget.events import (
+    ACTION_WIDGET_COOCCURRENCE_ACCEPTED,
     ACTION_WIDGET_COOCCURRENCE_DETECTED,
+    ACTION_WIDGET_COOCCURRENCE_DISMISSED,
     ACTION_WIDGET_GRADUATED,
     ACTION_WIDGET_INTERACTION_RECORDED,
     cooccurrence_signature,
+    widget_cooccurrence_decision_payload,
     widget_cooccurrence_payload,
     widget_graduated_payload,
     widget_interaction_payload,
@@ -280,6 +283,68 @@ class WidgetJournalStore:
         )
         entry = self._build_entry(
             action=ACTION_WIDGET_COOCCURRENCE_DETECTED,
+            scope=scope,
+            actor=actor or self._default_cooccurrence_actor,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+        self._journal.append(entry)
+        self._projection.apply(entry)
+        return entry
+
+    async def log_cooccurrence_decision(
+        self,
+        *,
+        decision: str,
+        scope: list[str],
+        signature: str,
+        widget_a: str,
+        widget_b: str,
+        pocket_id: str | None = None,
+        reason: str = "",
+        actor: Actor | None = None,
+        correlation_id: UUID | None = None,
+    ) -> EventEntry:
+        """Emit one ``widget.cooccurrence.accepted`` or ``...dismissed`` event.
+
+        ``decision`` must be "accepted" or "dismissed" — the writer rejects
+        anything else so a typo in a future caller can't quietly land as a
+        third category the projection doesn't know about. Both shapes share
+        the same payload (signature + pair + pocket) because the only thing
+        that changes is the action name, and the projection keys off the
+        action to decide how to update the suggestion state.
+
+        Signature is passed in (rather than recomputed from the pair) so
+        the write side matches whatever signature the read side surfaced
+        to the operator. If the feed shipped a suggestion with signature X
+        and the operator dismissed it, the dismiss event must carry X —
+        not a freshly-recomputed signature that may have changed because
+        the tokenisation logic was updated between surface and dismiss.
+        """
+
+        _require_scope(scope)
+        _require_str("signature", signature)
+        _require_str("widget_a", widget_a)
+        _require_str("widget_b", widget_b)
+        if decision not in ("accepted", "dismissed"):
+            raise ValueError(
+                f"decision must be 'accepted' or 'dismissed', got {decision!r}",
+            )
+
+        action = (
+            ACTION_WIDGET_COOCCURRENCE_ACCEPTED
+            if decision == "accepted"
+            else ACTION_WIDGET_COOCCURRENCE_DISMISSED
+        )
+        payload = widget_cooccurrence_decision_payload(
+            signature=signature,
+            widget_a=widget_a,
+            widget_b=widget_b,
+            pocket_id=pocket_id,
+            reason=reason,
+        )
+        entry = self._build_entry(
+            action=action,
             scope=scope,
             actor=actor or self._default_cooccurrence_actor,
             correlation_id=correlation_id,

@@ -1,6 +1,12 @@
 # Refactored: Split from service.py — contains MessageService class and message-related
 # helper functions. Added create_agent_message() static method for use by agent_bridge
 # instead of creating Message documents directly.
+# 2026-04-19: ``message.sent`` event now carries ``attachments`` so agent_bridge
+# can surface filename/mime/size into the channel agent prompt (fixes silent
+# attachment drop on the channel path — DM path already had this).
+# 2026-04-19 (Cluster E sub-PR 2): added `search_workspace_messages` which
+# scopes to groups the caller is a member of and to public/channel rooms in
+# the workspace, escapes the query with re.escape, and caps at 100 hits.
 
 """Chat domain — message business logic (CRUD, reactions, threads, pins, search)."""
 
@@ -195,6 +201,12 @@ class MessageService:
                 "sender_type": "user",
                 "content": body.content,
                 "mentions": body.mentions,
+                # Attachments ride on the event so ``agent_bridge`` can inject
+                # filename / mime / size into the agent prompt. Mirrors the DM
+                # path's file-awareness contract; raw dicts match
+                # ``body.attachments``'s shape and downstream handlers no-op on
+                # unknown keys.
+                "attachments": body.attachments,
                 "workspace_id": group.workspace,
                 **reply_meta,
             },
@@ -543,6 +555,68 @@ class MessageService:
             )
             .sort([("createdAt", -1)])
             .limit(50)
+            .to_list()
+        )
+        return [_message_response(m) for m in messages]
+
+    @staticmethod
+    async def search_workspace_messages(
+        workspace_id: str,
+        user_id: str,
+        query: str,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Full-text-ish search across the workspace, honoring per-group scope.
+
+        The caller sees hits only from:
+          * public / channel groups in ``workspace_id`` (any workspace member
+            can read these), plus
+          * private / dm groups where the caller is an explicit member.
+
+        Agent DMs are private groups with one member, so this also catches
+        the user's own agent conversations.
+
+        The query is escaped with ``re.escape`` before being fed to Mongo
+        ``$regex`` so operators like ``.``, ``$``, and ``(`` become literal
+        characters — no injection, no ReDoS via pathological expressions.
+        Capped at 100 results to stop a wide query from paging the whole
+        journal into memory.
+        """
+        from ee.cloud.models.group import Group
+
+        capped = max(1, min(limit, 100))
+        if not query or not query.strip():
+            return []
+
+        # 1. Resolve the set of group ids the caller is allowed to read in
+        #    this workspace. One small index-friendly query, not N per hit.
+        groups = await Group.find(
+            {
+                "workspace": workspace_id,
+                "archived": False,
+                "$or": [
+                    {"type": {"$in": ["public", "channel"]}},
+                    {"members": user_id},
+                ],
+            }
+        ).to_list()
+        group_ids = [str(g.id) for g in groups]
+        if not group_ids:
+            return []
+
+        # 2. Escape the query + run the scoped regex search.
+        escaped = re.escape(query.strip())
+        messages = (
+            await Message.find(
+                {
+                    "context_type": "group",
+                    "group": {"$in": group_ids},
+                    "deleted": False,
+                    "content": {"$regex": escaped, "$options": "i"},
+                }
+            )
+            .sort([("createdAt", -1)])
+            .limit(capped)
             .to_list()
         )
         return [_message_response(m) for m in messages]

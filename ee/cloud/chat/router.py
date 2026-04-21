@@ -2,10 +2,26 @@
 
 REST routes live under ``/chat`` and require an enterprise license.
 The WebSocket endpoint at ``/ws/cloud`` authenticates via JWT query param.
+
+Updated 2026-04-19 (Task 19, Cluster A sub-PR 4): presence events are now
+emitted on WS connect and disconnect. PresenceOnline fires immediately when
+a user's first socket accepts; PresenceOffline fires after the existing
+30s grace window so quick reloads don't flap the online indicator.
+
+Updated 2026-04-20: on connect, also send the new socket a snapshot of
+currently-online workspace peers. Without this, a user who joins after
+their peers are already online never learns they're there — the server
+only broadcasts presence deltas, not the current set.
+
+2026-04-19 (Cluster E sub-PR 2): added ``GET /chat/messages/search`` — a
+workspace-wide message search that delegates to
+``MessageService.search_workspace_messages`` and inherits its per-group
+scope filter.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -27,13 +43,16 @@ from ee.cloud.chat.schemas import (
 )
 from ee.cloud.chat.service import GroupService, MessageService
 from ee.cloud.chat.unread_service import UnreadService
-from ee.cloud.chat.ws import manager
+from ee.cloud.chat.ws import PRESENCE_GRACE_SECONDS, manager
 from ee.cloud.license import get_license, require_license
+from ee.cloud.realtime.emit import emit
+from ee.cloud.realtime.events import PresenceOffline, PresenceOnline
 from ee.cloud.shared.deps import (
     current_user_id,
     current_workspace_id,
     require_group_action,
 )
+from ee.cloud.workspace.service import WorkspaceService
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +315,25 @@ async def search_messages(
     return await MessageService.search_messages(group_id, user_id, q)
 
 
+@_licensed.get("/messages/search")
+async def search_workspace_messages(
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(50, ge=1, le=100),
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Workspace-wide message search.
+
+    Results are scoped to groups the caller can already read: public /
+    channel groups in the workspace plus private / DM groups where the
+    caller is a member. The query is regex-escaped before it hits Mongo,
+    and capped at 100 results. Cluster E sub-PR 2.
+    """
+    return await MessageService.search_workspace_messages(
+        workspace_id, user_id, q, limit=limit
+    )
+
+
 # ---------------------------------------------------------------------------
 # DMs
 # ---------------------------------------------------------------------------
@@ -444,9 +482,29 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4001, reason="Invalid token")
         return
 
-    # Accept and register connection
+    # Accept and register connection. If this was the user's first active
+    # socket, announce them as online so every workspace peer's UI flips
+    # the presence dot immediately.
     await websocket.accept()
+    was_offline_before = not manager.is_online(user_id)
     await manager.connect(websocket, user_id)
+    if was_offline_before:
+        await emit(PresenceOnline(data={"user_id": user_id}))
+
+    # Send a one-shot snapshot of currently-online peers to THIS socket so the
+    # client's presence store is seeded before any deltas arrive. Goes directly
+    # to the socket (not the bus) because the payload is addressed to this
+    # connection only. Without it, a late joiner sees only their own dot until
+    # someone else flaps online/offline.
+    try:
+        peer_ids = await WorkspaceService.list_peer_ids(user_id)
+        for peer_id in peer_ids:
+            if manager.is_online(peer_id):
+                await websocket.send_json(
+                    {"type": "presence.online", "data": {"user_id": peer_id}}
+                )
+    except Exception:
+        logger.exception("Failed to send presence snapshot to user=%s", user_id)
 
     try:
         while True:
@@ -479,8 +537,40 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     finally:
         last_user = await manager.disconnect(websocket)
         if last_user:
-            # Start grace period before marking offline
-            pass  # Presence broadcast handled by event handlers (Task 19)
+            # Kick off the grace-period offline broadcast. We delay a fixed
+            # window (`PRESENCE_GRACE_SECONDS`) so quick page reloads don't
+            # flap the online indicator. ``manager.connect`` cancels the
+            # pending task on reconnect so the offline event never fires if
+            # the user came back within the window.
+            await _schedule_presence_offline(last_user)
+
+
+async def _schedule_presence_offline(user_id: str) -> None:
+    """Queue a delayed ``presence.offline`` broadcast.
+
+    Registers the task with ``manager._offline_tasks`` so ``ConnectionManager.connect``
+    automatically cancels it when the user reconnects within the grace window.
+    """
+
+    async def _emit_after_delay() -> None:
+        try:
+            await asyncio.sleep(PRESENCE_GRACE_SECONDS)
+            # If the user reconnected while we were asleep the manager would
+            # have cancelled this task; double-check before emitting so races
+            # on shutdown don't ship a stale offline event.
+            if manager.is_online(user_id):
+                return
+            await emit(PresenceOffline(data={"user_id": user_id}))
+        except asyncio.CancelledError:
+            # Reconnect within the grace window — the manager cancels us.
+            raise
+
+    # Cancel any pending offline task (shouldn't happen normally, but belt
+    # and braces) and register the new one.
+    prev = manager._offline_tasks.pop(user_id, None)
+    if prev:
+        prev.cancel()
+    manager._offline_tasks[user_id] = asyncio.create_task(_emit_after_delay())
 
 
 # ---------------------------------------------------------------------------

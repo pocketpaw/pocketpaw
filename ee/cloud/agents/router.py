@@ -1,4 +1,11 @@
-"""Agents domain — FastAPI router."""
+"""Agents domain — FastAPI router.
+
+Updated 2026-04-19 (feat/cluster-d-agent-scope-picker): added
+``GET /agents/{id}/scope`` + ``PATCH /agents/{id}/scope`` for the
+ScopePicker UI. PATCH re-validates and re-normalises the payload server
+side — the frontend normaliseScope helper is treated as a UX nicety, not
+a security boundary.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,8 @@ from starlette.responses import Response
 from ee.cloud.agents.schemas import (
     CreateAgentRequest,
     DiscoverRequest,
+    ScopeAssignmentRequest,
+    ScopeAssignmentResponse,
     UpdateAgentRequest,
 )
 from ee.cloud.agents.service import AgentService
@@ -260,3 +269,47 @@ async def clear_knowledge(agent_id: str):
 
     await KnowledgeService.clear(agent_id)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Scope assignment — read + write the scope tag list on an agent.
+# Both endpoints require the caller to be the agent owner or a workspace
+# admin (``require_agent_owner_or_admin``). PATCH additionally re-runs the
+# scope validator server-side via ``ScopeAssignmentRequest`` so a direct
+# API call cannot bypass the frontend ScopePicker's normaliseScope guard.
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{agent_id}/scope",
+    response_model=ScopeAssignmentResponse,
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
+async def get_agent_scope(agent_id: str) -> ScopeAssignmentResponse:
+    """Return the scope tags currently assigned to an agent.
+
+    Empty list means "no scope narrowing" — the agent sees everything in
+    its workspace. Non-empty list bounds retrieval + fabric queries.
+    """
+    scopes = await AgentService.get_scopes(agent_id)
+    return ScopeAssignmentResponse(agent_id=agent_id, scopes=scopes)
+
+
+@router.patch(
+    "/{agent_id}/scope",
+    response_model=ScopeAssignmentResponse,
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
+async def set_agent_scope(
+    agent_id: str,
+    body: ScopeAssignmentRequest,
+) -> ScopeAssignmentResponse:
+    """Replace the agent's scope assignment (full-list swap).
+
+    The request body is validated + normalised by
+    ``ScopeAssignmentRequest``; the service re-applies the validator so a
+    fleet installer calling ``set_scopes`` directly gets the same
+    guarantees.
+    """
+    updated = await AgentService.set_scopes(agent_id, body.scopes)
+    return ScopeAssignmentResponse(agent_id=agent_id, scopes=updated)

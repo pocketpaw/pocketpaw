@@ -58,6 +58,10 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.oauth_integrations", "router", "OAuth Integrations"),
     ("pocketpaw.api.v1.uploads", "router", "Uploads"),
     ("pocketpaw.audit.router", "router", "Audit"),
+    # Cluster C / PR4 — canonical runtime audit surface. `/audit` stays as
+    # a deprecated alias in audit.router and `/instinct/audit` stays in
+    # ee.instinct.router; both forward semantically to this one.
+    ("pocketpaw.audit.runtime_router", "router", "Runtime Audit"),
 ]
 
 # Enterprise API routes (require ee/ module) — skipped silently when ee/ is absent.

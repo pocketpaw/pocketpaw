@@ -390,8 +390,17 @@ class InstinctStore:
         pocket_id: str | None = None,
         category: str | None = None,
         event: str | None = None,
+        actor: str | None = None,
         limit: int = 100,
     ) -> list[AuditEntry]:
+        """Query audit entries with optional filters.
+
+        ``actor`` accepts the full colon-qualified identity string the
+        audit table stores (``agent:abc123``, ``user:alice``, etc.). It
+        is an exact match, not a LIKE — callers who need prefix matching
+        should filter in Python on the returned list. Added 2026-04-19
+        for the AgentReasoningTab's per-agent view.
+        """
         conditions: list[str] = []
         params: list[Any] = []
         if pocket_id:
@@ -403,6 +412,9 @@ class InstinctStore:
         if event:
             conditions.append("event = ?")
             params.append(event)
+        if actor:
+            conditions.append("actor = ?")
+            params.append(actor)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
