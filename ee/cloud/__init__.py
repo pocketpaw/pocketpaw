@@ -3,6 +3,9 @@
 Updated: Added kb (knowledge base) domain router to mount_cloud().
 Updated: 2026-04-19 (Cluster C / PR1) — Mounted ee.cloud.kb.knowledge_router,
     which exposes GET /api/v1/knowledge/articles as a workspace-level aggregate.
+Updated: 2026-04-19 (Cluster B) — Added pocket journal SSE stream router to
+    mount_cloud() — feeds the RippleGraphWidget with a live, pocket-scoped
+    slice of the org journal.
 
 Domains: auth, workspace, chat, pockets, sessions, agents, kb, knowledge.
 Each has router.py (thin), service.py (logic), schemas.py (validation).
@@ -74,6 +77,17 @@ def mount_cloud(app: FastAPI) -> None:
 
     from ee.cloud.files.router import router as files_router
     from ee.cloud.kb.knowledge_router import router as knowledge_router
+
+    # Pocket journal SSE stream — feeds the RippleGraphWidget (Cluster B §11).
+    # Lives alongside pockets_router rather than inside it so the main pocket
+    # CRUD router stays focused on documents while the stream has its own
+    # lifecycle (long-lived connection, polling loop, separate error paths).
+    from ee.cloud.pockets.journal_stream_router import (
+        router as pockets_journal_stream_router,
+    )
+
+    app.include_router(pockets_journal_stream_router, prefix="/api/v1")
+
     from ee.cloud.kb.router import router as kb_router
     from ee.cloud.notifications.router import router as notifications_router
     from ee.cloud.uploads.router import router as uploads_router
