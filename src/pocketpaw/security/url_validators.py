@@ -7,6 +7,19 @@ import ipaddress
 import os
 from urllib.parse import urlsplit
 
+# Pre-load .env into os.environ at import time. Without this,
+# POCKETPAW_ALLOW_INTERNAL_URLS set in .env is only read by pydantic-settings
+# into Settings fields — it never reaches os.environ, so the validator below
+# (which uses os.getenv) would miss the opt-in and block every localhost URL
+# even when the operator set the flag. python-dotenv is an indirect dep via
+# pydantic-settings; fall back silently if it's somehow unavailable.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv(override=False)
+except Exception:  # pragma: no cover — dotenv is optional
+    pass
+
 _ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 # Loopback + link-local + RFC1918 + carrier-grade NAT — blocked unless the
