@@ -17,14 +17,17 @@ from ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
+FileFolder: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
-    global FileUpload
+    global FileUpload, FileFolder
     if FileUpload is None:
+        from ee.cloud.uploads.models import FileFolder as _FileFolder
         from ee.cloud.uploads.models import FileUpload as _FileUpload
 
         FileUpload = _FileUpload
+        FileFolder = _FileFolder
     return FileUpload
 
 __all__ = [
@@ -34,6 +37,7 @@ __all__ = [
     "Comment",
     "CommentAuthor",
     "CommentTarget",
+    "FileFolder",
     "FileObj",
     "FileUpload",
     "Group",
@@ -68,6 +72,7 @@ def get_all_documents():
         Notification,
         FileObj,
         FileUpload,
+        FileFolder,
         Workspace,
         Invite,
         Group,

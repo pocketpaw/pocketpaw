@@ -59,6 +59,28 @@ class EEUploadService:
         # Use a null meta under OSS service so we control Mongo writes here
         self._oss = UploadService(adapter=adapter, meta=_NullMeta(), cfg=cfg)  # type: ignore[arg-type]
 
+    async def _assert_can_write(
+        self,
+        rec: FileRecord,
+        requester_id: str,
+        workspace: str,
+    ) -> None:
+        """Gate a write on a file record.
+
+        Owner OR workspace admin/owner only. Chat-member does NOT grant
+        write. Mirrors :meth:`_assert_can_read` but does not fall through
+        silently — callers translate the raised exception to a 403.
+        """
+        if rec.owner_id == requester_id:
+            return
+        if self._is_workspace_admin is not None:
+            try:
+                if await self._is_workspace_admin(requester_id, workspace):
+                    return
+            except Exception:
+                pass
+        raise PermissionError("files.forbidden")
+
     async def _assert_can_read(
         self,
         rec: FileRecord,
@@ -96,8 +118,11 @@ class EEUploadService:
         owner_id: str,
         chat_id: str | None,
         workspace: str,
+        folder_path: str = "/",
     ) -> FileRecord:
-        result = await self.upload_many([file], owner_id, chat_id, workspace)
+        result = await self.upload_many(
+            [file], owner_id, chat_id, workspace, folder_path=folder_path
+        )
         if result.failed:
             f = result.failed[0]
             _raise(f.code, f.reason)
@@ -109,12 +134,15 @@ class EEUploadService:
         owner_id: str,
         chat_id: str | None,
         workspace: str,
+        folder_path: str = "/",
     ) -> BulkUploadResult:
         # Delegate validation + adapter writes; metadata is discarded inside OSS
         result = await self._oss.upload_many(files, owner_id, chat_id)
         # Persist each successful record in Mongo with workspace scoping
         for rec in result.uploaded:
-            await self._meta.save_scoped(rec, workspace=workspace)
+            await self._meta.save_scoped(
+                rec, workspace=workspace, folder_path=folder_path
+            )
             # Only chat-scoped uploads are realtime-broadcastable; avatars
             # and knowledge uploads aren't rendered in chat timelines.
             if rec.chat_id:

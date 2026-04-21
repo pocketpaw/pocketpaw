@@ -19,7 +19,13 @@ from pocketpaw.uploads.file_store import FileRecord
 class MongoFileStore:
     """Workspace-scoped metadata store for EE uploads."""
 
-    async def save_scoped(self, record: FileRecord, workspace: str) -> None:
+    async def save_scoped(
+        self,
+        record: FileRecord,
+        workspace: str,
+        *,
+        folder_path: str = "/",
+    ) -> None:
         doc = FileUpload(
             file_id=record.id,
             storage_key=record.storage_key,
@@ -29,8 +35,80 @@ class MongoFileStore:
             workspace=workspace,
             owner=record.owner_id,
             chat_id=record.chat_id,
+            folder_path=folder_path or "/",
         )
         await doc.insert()
+
+    async def get_doc_scoped(
+        self, file_id: str, workspace: str
+    ) -> FileUpload | None:
+        return await FileUpload.find_one(
+            FileUpload.file_id == file_id,
+            FileUpload.workspace == workspace,
+            FileUpload.deleted_at == None,  # noqa: E711
+        )
+
+    async def rewrite_folder_prefix(
+        self,
+        workspace: str,
+        old_prefix: str,
+        new_prefix: str,
+    ) -> int:
+        """Rewrite ``folder_path`` on every live file under ``old_prefix``.
+
+        Handles the row AT ``old_prefix`` (``folder_path == old_prefix``)
+        plus strict descendants (``folder_path`` starts with ``old_prefix + "/"``).
+        Returns count updated. Retry-safe: files already under ``new_prefix``
+        are left alone.
+        """
+        if old_prefix == new_prefix:
+            return 0
+        count = 0
+        cursor = FileUpload.find(
+            FileUpload.workspace == workspace,
+            FileUpload.deleted_at == None,  # noqa: E711
+        )
+        async for d in cursor:
+            fp = d.folder_path or "/"
+            if fp == old_prefix:
+                d.folder_path = new_prefix
+                await d.save()
+                count += 1
+            elif old_prefix != "/" and fp.startswith(old_prefix + "/"):
+                d.folder_path = new_prefix + fp[len(old_prefix):]
+                await d.save()
+                count += 1
+        return count
+
+    async def soft_delete_under_prefix(
+        self, workspace: str, prefix: str
+    ) -> int:
+        """Soft-delete every live file under ``prefix`` (at or below)."""
+        count = 0
+        now = datetime.now(UTC)
+        cursor = FileUpload.find(
+            FileUpload.workspace == workspace,
+            FileUpload.deleted_at == None,  # noqa: E711
+        )
+        async for d in cursor:
+            fp = d.folder_path or "/"
+            if fp == prefix or (prefix != "/" and fp.startswith(prefix + "/")):
+                d.deleted_at = now
+                await d.save()
+                count += 1
+        return count
+
+    async def count_under_prefix(self, workspace: str, prefix: str) -> int:
+        count = 0
+        cursor = FileUpload.find(
+            FileUpload.workspace == workspace,
+            FileUpload.deleted_at == None,  # noqa: E711
+        )
+        async for d in cursor:
+            fp = d.folder_path or "/"
+            if fp == prefix or (prefix != "/" and fp.startswith(prefix + "/")):
+                count += 1
+        return count
 
     async def get_scoped(self, file_id: str, workspace: str) -> FileRecord | None:
         doc = await FileUpload.find_one(
@@ -101,6 +179,7 @@ class MongoFileStore:
                 "workspace_id": doc.workspace,
                 "owner_id": doc.owner,
                 "chat_id": doc.chat_id,
+                "folder_path": getattr(doc, "folder_path", None) or "/",
                 "created_at": created,
                 "updated_at": updated,
                 "tags": list(getattr(doc, "tags", []) or []),

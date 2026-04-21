@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -6,6 +7,23 @@ import pytest
 from ee.cloud.files.providers.uploads import UploadsProvider
 from ee.cloud.files.schemas import RequestContext
 from tests.cloud.files.test_provider_contract import ProviderContract
+
+
+class _StubFolders:
+    """In-memory folder store stub with the two methods the provider uses."""
+
+    def __init__(self, folders=None):
+        self._by_parent = folders or {}
+
+    async def list_children_folders(self, workspace, parent_path):
+        return self._by_parent.get(parent_path, [])
+
+    async def get_by_id(self, workspace, folder_id):
+        for kids in self._by_parent.values():
+            for f in kids:
+                if f.folder_id == folder_id:
+                    return f
+        return None
 
 
 class TestUploadsProviderContract(ProviderContract):
@@ -94,6 +112,92 @@ async def test_uploads_provider_baseline_rbac_owner_is_manage():
         updated_at=_dt.now(UTC),
         source_ref={},
         capabilities=["read", "download", "rename", "delete"],
+    )
+    perm = p.baseline_rbac(ctx, e)
+    assert perm.read and perm.write and perm.manage
+
+
+@pytest.mark.asyncio
+async def test_uploads_provider_lists_folders_and_files_side_by_side():
+    store = MagicMock()
+    now = datetime.now(UTC)
+
+    async def _iter(workspace_id, *, include_deleted=False, limit=500):
+        yield {
+            "file_id": "f1",
+            "filename": "root.txt",
+            "mime": "text/plain",
+            "size": 3,
+            "owner_id": "u1",
+            "workspace_id": "ws",
+            "folder_path": "/",
+            "created_at": now,
+            "updated_at": now,
+            "tags": [],
+        }
+        yield {
+            "file_id": "f2",
+            "filename": "nested.txt",
+            "mime": "text/plain",
+            "size": 3,
+            "owner_id": "u1",
+            "workspace_id": "ws",
+            "folder_path": "/reports",
+            "created_at": now,
+            "updated_at": now,
+            "tags": [],
+        }
+
+    store.iter_by_workspace = _iter
+
+    folder = SimpleNamespace(
+        folder_id="F1",
+        workspace="ws",
+        owner="u1",
+        path="/reports",
+        name="reports",
+        created_at=now,
+        updated_at=now,
+    )
+    folders = _StubFolders({"/": [folder]})
+    p = UploadsProvider(store=store, folder_store=folders)
+    ctx = RequestContext(user_id="u1", workspace_id="ws", attributes={})
+    page = await p.list_entries(ctx, "/My Files", None, 50, {})
+    ids = [e.id for e in page.items]
+    assert "uploads:folder:F1" in ids
+    assert "uploads:f1" in ids
+    # The nested file should NOT appear at root.
+    assert "uploads:f2" not in ids
+    # Folder entry mime + capabilities.
+    folder_entry = next(e for e in page.items if e.id == "uploads:folder:F1")
+    assert folder_entry.mime == "application/x-directory"
+    assert "download" not in folder_entry.capabilities
+    assert folder_entry.mount_path == "/My Files/reports"
+
+
+@pytest.mark.asyncio
+async def test_uploads_provider_admin_manage_on_other_user_folder():
+    store = MagicMock()
+    p = UploadsProvider(store=store, folder_store=_StubFolders())
+    ctx = RequestContext(user_id="admin", workspace_id="ws", attributes={"role": "admin"})
+    from ee.cloud.files.schemas import FileEntry
+
+    now = datetime.now(UTC)
+    e = FileEntry(
+        id="uploads:folder:F1",
+        provider_id="uploads",
+        mount_path="/My Files/stuff",
+        name="stuff",
+        mime="application/x-directory",
+        size=0,
+        owner_id="someone_else",
+        workspace_id="ws",
+        scope="personal",
+        tags=[],
+        created_at=now,
+        updated_at=now,
+        source_ref={"kind": "folder"},
+        capabilities=["read", "rename", "delete"],
     )
     perm = p.baseline_rbac(ctx, e)
     assert perm.read and perm.write and perm.manage

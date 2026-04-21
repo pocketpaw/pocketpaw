@@ -31,9 +31,9 @@ async def beanie_upload_db():
     db.list_collection_names = _safe  # type: ignore[method-assign]
 
     # Import after db creation to avoid circular imports
-    from ee.cloud.uploads.models import FileUpload
+    from ee.cloud.uploads.models import FileFolder, FileUpload
 
-    await init_beanie(database=db, document_models=[FileUpload])
+    await init_beanie(database=db, document_models=[FileUpload, FileFolder])
     yield db
 
 
