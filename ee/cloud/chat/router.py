@@ -45,14 +45,19 @@ from ee.cloud.chat.service import GroupService, MessageService
 from ee.cloud.chat.unread_service import UnreadService
 from ee.cloud.chat.ws import PRESENCE_GRACE_SECONDS, manager
 from ee.cloud.license import get_license, require_license
+from ee.cloud.models.user import User
 from ee.cloud.realtime.emit import emit
 from ee.cloud.realtime.events import PresenceOffline, PresenceOnline
 from ee.cloud.shared.deps import (
+    current_user,
     current_user_id,
     current_workspace_id,
     require_group_action,
 )
+from ee.cloud.shared.errors import Forbidden as CloudForbidden
 from ee.cloud.workspace.service import WorkspaceService
+from pocketpaw.ee.guards.deps import check_workspace_action
+from pocketpaw.ee.guards.rbac import Forbidden as GuardForbidden
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +75,17 @@ _licensed = APIRouter(prefix="/chat", dependencies=[Depends(require_license)])
 @_licensed.post("/groups")
 async def create_group(
     body: CreateGroupRequest,
+    user: User = Depends(current_user),
     workspace_id: str = Depends(current_workspace_id),
-    user_id: str = Depends(current_user_id),
 ):
-    return await GroupService.create_group(workspace_id, user_id, body)
+    # Workspace-visible rooms (channels/public) are admin-only; private and DM
+    # are available to any workspace member.
+    action = "channel.create" if body.type in ("channel", "public") else "group.create"
+    try:
+        check_workspace_action(user, workspace_id, action)
+    except GuardForbidden as exc:
+        raise CloudForbidden(exc.code, exc.detail or "Access denied") from exc
+    return await GroupService.create_group(workspace_id, str(user.id), body)
 
 
 @_licensed.get("/groups")

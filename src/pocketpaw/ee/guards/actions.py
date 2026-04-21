@@ -98,6 +98,7 @@ ACTIONS: dict[str, ActionRule] = {
     # Group (chat)
     "group.view": ActionRule(GroupRole.VIEW, "group.not_member"),
     "group.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "channel.create": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "group.post": ActionRule(GroupRole.MEMBER, "group.view_only"),
     "group.admin": ActionRule(GroupRole.ADMIN, "group.not_admin"),
     "group.delete": ActionRule(GroupRole.OWNER, "group.not_owner"),
