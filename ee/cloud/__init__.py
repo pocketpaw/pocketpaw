@@ -103,7 +103,7 @@ def mount_cloud(app: FastAPI) -> None:
     # inline (instead of via build_router's ctx_factory) so the routes can
     # use the canonical `Depends(current_active_user)` auth chain without
     # resolving fastapi-users dependencies manually from the Request.
-    from typing import Any as _Any
+    from typing import Any
 
     from fastapi import APIRouter as _APIRouter
     from fastapi import Depends as _Depends
@@ -160,7 +160,7 @@ def mount_cloud(app: FastAPI) -> None:
     async def _files_get_tree(
         workspace_id: str | None = _Query(None),
         user: _User = _Depends(_current_active_user),
-    ) -> dict[str, _Any]:
+    ) -> dict[str, Any]:
         ctx = _files_ctx_from_user(user)
         if workspace_id is not None and workspace_id != ctx.workspace_id:
             raise _HTTPException(
@@ -178,7 +178,7 @@ def mount_cloud(app: FastAPI) -> None:
         limit: int = _Query(50, ge=1, le=500),
         workspace_id: str | None = _Query(None),
         user: _User = _Depends(_current_active_user),
-    ) -> dict[str, _Any]:
+    ) -> dict[str, Any]:
         ctx = _files_ctx_from_user(user)
         if workspace_id is not None and workspace_id != ctx.workspace_id:
             raise _HTTPException(
