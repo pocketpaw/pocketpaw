@@ -145,12 +145,12 @@ def mount_cloud(app: FastAPI) -> None:
             ws_id = getattr(ws, "workspace", None) or getattr(
                 ws, "workspace_id", None
             )
-            if ws_id == user.activeWorkspace:
+            if ws_id == user.active_workspace:
                 role = getattr(ws, "role", "") or ""
                 break
         return _RequestContext(
             user_id=str(user.id),
-            workspace_id=user.activeWorkspace,
+            workspace_id=user.active_workspace,
             attributes={"role": role},
         )
 
