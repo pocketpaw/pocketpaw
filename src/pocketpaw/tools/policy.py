@@ -202,14 +202,13 @@ class ToolPolicy:
         return result
 
     def _resolve(self) -> set[str]:
-        """Build the final allowed set from profile + explicit allow list."""
-        # Start with the profile
-        try:
-            profile_set = self.resolve_profile(self.profile)
-        except ValueError:
-            logger.warning("Unknown profile '%s', falling back to 'full'", self.profile)
-            profile_set = set()  # full = no restrictions
+        """Build the final allowed set from profile + explicit allow list.
 
-        # Merge in explicit allow list
+        Raises ValueError when the profile name is not recognised. The
+        previous silent fallback to ``set()`` (equivalent to the ``full``
+        profile) meant a typo in ``tool_profile`` lifted all restrictions —
+        see issue #889.
+        """
+        profile_set = self.resolve_profile(self.profile)
         explicit = self._expand_names(self._allow_raw)
         return profile_set | explicit

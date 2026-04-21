@@ -948,9 +948,21 @@ class AgentLoop:
             )
             try:
                 async for event in run_iter:
-                    etype = event.type
-                    econtent = event.content
-                    meta = event.metadata or {}
+                    etype = getattr(event, "type", None) or (
+                        event.get("type") if isinstance(event, dict) else None
+                    )
+                    econtent = getattr(event, "content", None) or (
+                        event.get("content", "") if isinstance(event, dict) else ""
+                    )
+                    meta = (
+                        getattr(event, "metadata", None)
+                        or (event.get("metadata") if isinstance(event, dict) else None)
+                        or {}
+                    )
+
+                    if not etype:
+                        logger.warning("Received malformed agent event (no type): %s", event)
+                        continue
 
                     if etype == "message":
                         full_response += econtent

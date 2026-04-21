@@ -104,6 +104,18 @@ from pocketpaw.security.redact import safe_install_error
 from pocketpaw.skills import get_skill_loader
 from pocketpaw.tunnel import get_tunnel_manager
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    await _startup_event()
+
+    yield
+
+    # shutdown
+    await _shutdown_event()
+
+
 logger = logging.getLogger(__name__)
 
 # Module-level uvicorn server reference (set by run_dashboard, read by restart_server)
@@ -251,6 +263,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def startup_event():
+    await _startup_event(_start_channel_adapter_fn=_start_channel_adapter)
+
+
+async def shutdown_event():
+    await _shutdown_event(_stop_channel_adapter_fn=_stop_channel_adapter)
 
 
 # ==================== MCP Server API ====================

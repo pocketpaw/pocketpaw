@@ -38,12 +38,16 @@ class TestSpeechToTextToolSchema:
 
 
 @pytest.fixture
-def _mock_settings():
+def _mock_settings(tmp_path):
     settings = MagicMock()
     settings.openai_api_key = "test-key"
     settings.stt_model = "whisper-1"
     settings.stt_provider = "openai"
-    with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=settings):
+    settings.file_jail_path = tmp_path
+    with (
+        patch("pocketpaw.tools.builtin.stt.get_settings", return_value=settings),
+        patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True),
+    ):
         yield settings
 
 
@@ -56,10 +60,33 @@ async def test_stt_no_api_key(tmp_path):
     settings = MagicMock()
     settings.openai_api_key = None
     settings.stt_provider = "openai"
-    with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=settings):
+    settings.file_jail_path = tmp_path
+    with (
+        patch("pocketpaw.tools.builtin.stt.get_settings", return_value=settings),
+        patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True),
+    ):
         result = await tool.execute(audio_file=str(audio_file))
     assert result.startswith("Error:")
     assert "API key" in result
+
+
+async def test_stt_file_jail_rejects_outside_path(tmp_path):
+    """Files outside the jail directory must be rejected."""
+    from pocketpaw.tools.builtin.stt import SpeechToTextTool
+
+    tool = SpeechToTextTool()
+    jail = tmp_path / "jail"
+    jail.mkdir()
+    outside = tmp_path / "outside.mp3"
+    outside.write_bytes(b"\x00" * 100)
+
+    settings = MagicMock()
+    settings.file_jail_path = jail
+    with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=settings):
+        result = await tool.execute(audio_file=str(outside))
+
+    assert result.startswith("Error:")
+    assert "Access denied" in result or "outside" in result
 
 
 async def test_stt_file_not_found(_mock_settings):
@@ -215,7 +242,10 @@ async def test_elevenlabs_stt_success(tmp_path):
     mock_resp.json.return_value = {"text": "Hello from ElevenLabs STT"}
     mock_resp.raise_for_status = MagicMock()
 
-    with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings):
+    with (
+        patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings),
+        patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True),
+    ):
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_resp)
@@ -256,7 +286,10 @@ async def test_elevenlabs_stt_with_language(tmp_path):
     mock_resp.json.return_value = {"text": "Hola desde ElevenLabs"}
     mock_resp.raise_for_status = MagicMock()
 
-    with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings):
+    with (
+        patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings),
+        patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True),
+    ):
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_resp)
@@ -288,7 +321,10 @@ async def test_elevenlabs_stt_no_api_key(tmp_path):
     mock_settings.stt_provider = "elevenlabs"
     mock_settings.elevenlabs_api_key = None
 
-    with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings):
+    with (
+        patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings),
+        patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True),
+    ):
         result = await tool.execute(audio_file=str(audio_file))
 
     assert result.startswith("Error:")
@@ -314,7 +350,10 @@ async def test_elevenlabs_stt_api_error(tmp_path):
     mock_resp.status_code = 401
     mock_resp.request = MagicMock()
 
-    with patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings):
+    with (
+        patch("pocketpaw.tools.builtin.stt.get_settings", return_value=mock_settings),
+        patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True),
+    ):
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(

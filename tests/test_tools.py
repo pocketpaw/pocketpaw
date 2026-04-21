@@ -160,7 +160,8 @@ class TestConfig:
 
         monkeypatch.delenv("POCKETPAW_LLM_PROVIDER", raising=False)
         monkeypatch.delenv("POCKETPAW_OLLAMA_HOST", raising=False)
-        settings = Settings()
+        monkeypatch.delenv("POCKETPAW_AGENT_BACKEND", raising=False)
+        settings = Settings(_env_file=None)
 
         assert settings.agent_backend == "claude_agent_sdk"  # New default
         assert settings.llm_provider == "auto"

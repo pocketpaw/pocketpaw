@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from pocketpaw.config import Settings, get_access_token, regenerate_token
 from pocketpaw.dashboard_state import _LOCALHOST_ADDRS, _PROXY_HEADERS
+from pocketpaw.http_utils import is_request_secure
 from pocketpaw.security.rate_limiter import api_limiter, auth_limiter
 from pocketpaw.security.session_tokens import create_session_token, verify_session_token
 from pocketpaw.tunnel import get_tunnel_manager
@@ -393,13 +394,18 @@ async def _auth_dispatch(request: Request) -> Response | None:
     current_token = get_access_token()
 
     is_valid = False
+    # full_access means "bypass scope checks" (issue #888). Set by the
+    # master/session/cookie/localhost paths — NOT by API key or OAuth auth.
+    request.state.full_access = False
 
     # 1. Check Query Param (master token or session token)
     if token:
         if hmac.compare_digest(token, current_token):
             is_valid = True
+            request.state.full_access = True
         elif ":" in token and verify_session_token(token, current_token):
             is_valid = True
+            request.state.full_access = True
 
     # 2. Check Header
     elif auth_header:
@@ -408,8 +414,10 @@ async def _auth_dispatch(request: Request) -> Response | None:
         )
         if hmac.compare_digest(bearer_value, current_token):
             is_valid = True
+            request.state.full_access = True
         elif ":" in bearer_value and verify_session_token(bearer_value, current_token):
             is_valid = True
+            request.state.full_access = True
 
     # 3. Check HTTP-only session cookie
     if not is_valid:
@@ -417,8 +425,10 @@ async def _auth_dispatch(request: Request) -> Response | None:
         if cookie_token:
             if hmac.compare_digest(cookie_token, current_token):
                 is_valid = True
+                request.state.full_access = True
             elif ":" in cookie_token and verify_session_token(cookie_token, current_token):
                 is_valid = True
+                request.state.full_access = True
 
     # 4. Check API key (pp_* prefix)
     if not is_valid:
@@ -481,6 +491,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
     # 6. Allow genuine localhost (not tunneled proxies)
     if not is_valid and _is_genuine_localhost(request):
         is_valid = True
+        request.state.full_access = True
 
     # 7. Short-lived signed grant for uploaded files.
     # Minted by the authed ``/uploads/{id}/grant`` endpoint; lets the bytes be
@@ -599,6 +610,7 @@ async def cookie_login(request: Request):
         samesite="lax",
         path="/",
         max_age=max_age,
+        secure=is_request_secure(request),
     )
     return response
 

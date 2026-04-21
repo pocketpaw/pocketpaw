@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from pocketpaw.config import get_config_dir, get_settings
+from pocketpaw.tools.fetch import is_safe_path
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,13 @@ class OCRTool(BaseTool):
     ) -> str:
         settings = get_settings()
 
-        image_file = Path(image_path).expanduser()
+        image_file = Path(image_path).expanduser().resolve()
+
+        # Security: check file jail
+        jail = get_settings().file_jail_path.resolve()
+        if not is_safe_path(image_file, jail):
+            return self._error(f"Access denied: {image_path} is outside allowed directory")
+
         if not image_file.exists():
             return self._error(f"File not found: {image_file}")
 

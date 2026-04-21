@@ -37,11 +37,15 @@ class TestOCRToolSchema:
 
 
 @pytest.fixture
-def _mock_settings():
+def _mock_settings(tmp_path):
     settings = MagicMock()
     settings.openai_api_key = "test-key"
     settings.ocr_provider = "openai"
-    with patch("pocketpaw.tools.builtin.ocr.get_settings", return_value=settings):
+    settings.file_jail_path = tmp_path
+    with (
+        patch("pocketpaw.tools.builtin.ocr.get_settings", return_value=settings),
+        patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True),
+    ):
         yield settings
 
 
@@ -52,6 +56,25 @@ async def test_ocr_file_not_found(_mock_settings):
     result = await tool.execute(image_path="/nonexistent/image.png")
     assert result.startswith("Error:")
     assert "not found" in result
+
+
+async def test_ocr_file_jail_rejects_outside_path(tmp_path):
+    """Files outside the jail directory must be rejected."""
+    from pocketpaw.tools.builtin.ocr import OCRTool
+
+    tool = OCRTool()
+    jail = tmp_path / "jail"
+    jail.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+
+    settings = MagicMock()
+    settings.file_jail_path = jail
+    with patch("pocketpaw.tools.builtin.ocr.get_settings", return_value=settings):
+        result = await tool.execute(image_path=str(outside))
+
+    assert result.startswith("Error:")
+    assert "Access denied" in result or "outside" in result
 
 
 async def test_ocr_unsupported_format(_mock_settings, tmp_path):
@@ -133,7 +156,11 @@ async def test_ocr_no_api_key_no_tesseract(tmp_path):
     settings = MagicMock()
     settings.openai_api_key = None
     settings.ocr_provider = "openai"
-    with patch("pocketpaw.tools.builtin.ocr.get_settings", return_value=settings):
+    settings.file_jail_path = tmp_path
+    with (
+        patch("pocketpaw.tools.builtin.ocr.get_settings", return_value=settings),
+        patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True),
+    ):
         # Mock pytesseract as not installed
         with patch.dict("sys.modules", {"pytesseract": None}):
             result = await tool.execute(image_path=str(img))

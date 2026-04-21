@@ -111,8 +111,12 @@ class AuditLogger:
 
     def log(self, event: AuditEvent) -> None:
         """Write an event to the audit log."""
+        from pocketpaw.security.scrub import scrub_event_dict
+
         try:
             event_dict = asdict(event)
+            # Always scrub before persisting or fanning out (#890).
+            event_dict = scrub_event_dict(event_dict)
             if self._pii_filter_enabled:
                 event_dict = self._filter_pii(event_dict)
             with open(self.log_path, "a", encoding="utf-8") as f:
@@ -123,8 +127,17 @@ class AuditLogger:
                 except Exception:
                     pass
         except Exception as e:
-            # Fallback to system logger if audit fails (critical failure)
-            logger.critical(f"FAILED TO WRITE AUDIT LOG: {e} | Event: {event}")
+            # Fallback to system logger if audit fails. Scrub the event so
+            # credentials in params/command don't ride along to syslog (#893).
+            try:
+                safe = scrub_event_dict(asdict(event))
+            except Exception:
+                safe = {"id": getattr(event, "id", "?"), "action": getattr(event, "action", "?")}
+            logger.critical(
+                "FAILED TO WRITE AUDIT LOG: %s | Event: %s",
+                e,
+                json.dumps(safe, default=str),
+            )
 
     def log_tool_use(
         self,

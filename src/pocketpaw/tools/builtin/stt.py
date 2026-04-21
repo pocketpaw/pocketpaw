@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from pocketpaw.config import get_config_dir, get_settings
+from pocketpaw.tools.fetch import is_safe_path
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,13 @@ class SpeechToTextTool(BaseTool):
     async def execute(
         self, audio_file: str, language: str | None = None, mode: str | None = None
     ) -> str:
-        audio_path = Path(audio_file).expanduser()
+        audio_path = Path(audio_file).expanduser().resolve()
+
+        # Security: check file jail
+        jail = get_settings().file_jail_path.resolve()
+        if not is_safe_path(audio_path, jail):
+            return self._error(f"Access denied: {audio_file} is outside allowed directory")
+
         if not audio_path.exists():
             return self._error(f"Audio file not found: {audio_path}")
 

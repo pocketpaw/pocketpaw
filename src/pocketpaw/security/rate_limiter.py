@@ -12,6 +12,7 @@ No external dependencies — pure stdlib.
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 __all__ = [
@@ -73,6 +74,10 @@ class RateLimiter:
         self.rate = rate
         self.capacity = capacity
         self._buckets: dict[str, _Bucket] = {}
+        # Guards the whole check-and-decrement so that concurrent requests
+        # can't both see `tokens >= 1.0` and both decrement (issue #891).
+        # The operation is O(1), so the lock is near-zero cost in practice.
+        self._lock = threading.Lock()
 
     def allow(self, key: str) -> bool:
         """Return True if the request is allowed, consuming one token."""
@@ -82,33 +87,34 @@ class RateLimiter:
         """Check rate limit and return detailed info with header values."""
         now = time.monotonic()
 
-        if key not in self._buckets:
-            self._buckets[key] = _Bucket(self.capacity, now)
+        with self._lock:
+            if key not in self._buckets:
+                self._buckets[key] = _Bucket(self.capacity, now)
+            bucket = self._buckets[key]
 
-        bucket = self._buckets[key]
+            # Refill tokens since last check
+            elapsed = now - bucket.last_refill
+            bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.rate)
+            bucket.last_refill = now
 
-        # Refill tokens since last check
-        elapsed = now - bucket.last_refill
-        bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.rate)
-        bucket.last_refill = now
+            if bucket.tokens >= 1.0:
+                bucket.tokens -= 1.0
+                remaining = int(bucket.tokens)
+                reset_after = (self.capacity - bucket.tokens) / self.rate if self.rate > 0 else 0
+                return RateLimitInfo(True, self.capacity, remaining, reset_after)
 
-        if bucket.tokens >= 1.0:
-            bucket.tokens -= 1.0
-            remaining = int(bucket.tokens)
-            reset_after = (self.capacity - bucket.tokens) / self.rate if self.rate > 0 else 0
-            return RateLimitInfo(True, self.capacity, remaining, reset_after)
-
-        # Denied — compute time until next token
-        reset_after = (1.0 - bucket.tokens) / self.rate if self.rate > 0 else 1.0
-        return RateLimitInfo(False, self.capacity, 0, reset_after)
+            # Denied — compute time until next token
+            reset_after = (1.0 - bucket.tokens) / self.rate if self.rate > 0 else 1.0
+            return RateLimitInfo(False, self.capacity, 0, reset_after)
 
     def cleanup(self, max_age: float = 3600.0) -> int:
         """Remove stale entries older than *max_age* seconds. Returns count removed."""
         now = time.monotonic()
-        stale = [k for k, b in self._buckets.items() if now - b.last_refill > max_age]
-        for k in stale:
-            del self._buckets[k]
-        return len(stale)
+        with self._lock:
+            stale = [k for k, b in self._buckets.items() if now - b.last_refill > max_age]
+            for k in stale:
+                del self._buckets[k]
+            return len(stale)
 
 
 # Pre-configured limiter instances

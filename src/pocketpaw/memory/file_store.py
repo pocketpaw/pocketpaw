@@ -2386,17 +2386,29 @@ class FileMemoryStore:
     ) -> list[MemoryEntry]:
         """Get all memories of a specific type.
 
-        For LONG_TERM type, accepts optional user_id kwarg to scope retrieval.
+        Both LONG_TERM and DAILY are user-scoped when a ``user_id`` kwarg is
+        provided (DAILY scoping is new in the #887 fix). The two types differ
+        on how they handle entries with no ``user_id`` in metadata:
+
+        * LONG_TERM falls back to ``"default"`` — matches the original store
+          behaviour where unscoped long-term notes live in the owner's space.
+        * DAILY treats missing ``user_id`` as system-wide (visible to every
+          user). This preserves pre-fix daily notes after an upgrade instead
+          of hiding them from everyone.
         """
         user_id = kwargs.get("user_id")
         results = []
         for e in self._index.values():
             if e.type != memory_type:
                 continue
-            # Scope LONG_TERM to user_id if provided
             if user_id and memory_type == MemoryType.LONG_TERM:
                 entry_uid = e.metadata.get("user_id", "default")
                 if entry_uid != user_id:
+                    continue
+            elif user_id and memory_type == MemoryType.DAILY:
+                entry_uid = e.metadata.get("user_id")
+                # Legacy (pre-fix) daily notes lack user_id — show to all.
+                if entry_uid is not None and entry_uid != user_id:
                     continue
             results.append(e)
             if len(results) >= limit:

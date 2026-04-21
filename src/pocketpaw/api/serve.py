@@ -10,6 +10,19 @@ the dashboard mode.
 """
 
 import logging
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app):
+    from pocketpaw.dashboard_lifecycle import shutdown_event, startup_event
+
+    # startup
+    await startup_event()
+
+    # shutdown
+    await shutdown_event()
+
 
 logger = logging.getLogger(__name__)
 

@@ -2,6 +2,9 @@
 # Created: 2026-02-02
 # Updated: 2026-02-25 — Strengthen param validation: also reject None for required params.
 # Updated: 2026-03-29 — Also reject empty/whitespace-only strings for required params (#793).
+# Updated: 2026-04-16 — Debug log scrubs params so that credentials in tool
+# inputs don't leak to stdout if DEBUG logging is on (#890 belt-and-braces;
+# the audit write is already scrubbed centrally in AuditLogger.log).
 
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import logging
 from typing import Any
 
 from pocketpaw.security import AuditSeverity, get_audit_logger
+from pocketpaw.security.scrub import scrub_params
 from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
 
@@ -136,7 +140,7 @@ class ToolRegistry:
 
         timeout = getattr(tool, "timeout", DEFAULT_TOOL_TIMEOUT)
         try:
-            logger.debug(f"🔧 Executing {name} with {params}")
+            logger.debug("🔧 Executing %s with %s", name, scrub_params(params))
             result = await asyncio.wait_for(tool.execute(**params), timeout=timeout)
 
             # Audit Log: Success

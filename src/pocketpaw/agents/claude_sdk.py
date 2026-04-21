@@ -294,9 +294,13 @@ class ClaudeSDKBackend:
 
             matched = self._is_dangerous_command(command)
             if matched:
-                logger.warning(f"🛑 BLOCKED dangerous command: {command[:100]}")
-                logger.warning(f"   └─ Matched pattern: {matched}")
-                # Audit log the blocked command
+                # Scrub before logging — dangerous commands routinely carry
+                # Authorization headers or API keys inline (#893).
+                from pocketpaw.security.scrub import scrub_command
+
+                safe_command = scrub_command(command)
+                logger.warning("🛑 BLOCKED dangerous command: %s", safe_command[:100])
+                logger.warning("   └─ Matched pattern: %s", matched)
                 try:
                     from pocketpaw.security.audit import (
                         AuditEvent,
@@ -311,7 +315,7 @@ class ClaudeSDKBackend:
                             action="dangerous_command_blocked",
                             target="bash",
                             status="block",
-                            command=command[:500],
+                            command=safe_command[:500],
                             matched_pattern=matched,
                         )
                     )

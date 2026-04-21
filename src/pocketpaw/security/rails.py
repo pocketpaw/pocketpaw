@@ -64,8 +64,12 @@ DANGEROUS_PATTERNS: list[str] = [
     # -- Reverse shells --
     r"\bnc\b.*-e\s+/bin/(ba)?sh",  # nc -e /bin/sh
     r"bash\s+-i\s+>&\s+/dev/tcp/",  # bash -i >& /dev/tcp/
-    r"python[23]?\s+-c\s+.*socket.*connect",  # Python reverse shell
-    r"perl\s+-e\s+.*socket.*INET",  # Perl reverse shell
+    # Python / Perl reverse shell — bounded to avoid ReDoS (#895). The
+    # previous `.*socket.*connect` chain had two unbounded `.*` quantifiers
+    # which backtrack pathologically on long inputs. Bounded `.{0,500}`
+    # matches the typical one-liner without exponential cost.
+    r"python[23]?\s+-c\s+.{0,500}?socket.{0,200}?connect",
+    r"perl\s+-e\s+.{0,500}?socket.{0,200}?INET",
     r"ruby\s+-rsocket\s+-e",  # Ruby reverse shell
     # -- Crontab / scheduled task injection --
     r"crontab\s+-[elr]",  # crontab edit/list/remove

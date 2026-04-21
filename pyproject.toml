@@ -408,3 +408,6 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--ignore=tests/cloud --ignore=tests/e2e"
+markers = [
+    "enforce_scope: opt a test out of the global _TESTING_FULL_ACCESS bypass so require_scope fails closed as in production",
+]

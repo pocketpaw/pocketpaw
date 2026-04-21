@@ -1,6 +1,10 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-04-16: SSRF guard on URL config fields — opencode_base_url,
+    litellm_api_base, openai_compatible_base_url, mem0_ollama_base_url,
+    embedding_base_url, signal_api_url, mcp_client_metadata_url are now
+    validated by security.url_validators.validate_external_url. Closes #703.
   - 2026-04-10: Removed old pocketclaw migration warning — fully shifted to pocketpaw.
   - 2026-04-04: Added soul_cognitive_model setting for cheaper cognitive processing.
   - 2026-03-16: Use Literal types for whatsapp_mode, tts_provider, stt_provider (#638).
@@ -19,10 +23,16 @@ import logging
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import AfterValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from pocketpaw.security.url_validators import validate_external_url
+
+# Shorthand for Settings URL fields that must be safe from SSRF (#703).
+# Applies scheme + loopback/RFC1918 guards from security.url_validators.
+ExternalUrl = Annotated[str, AfterValidator(validate_external_url)]
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +260,7 @@ class Settings(BaseSettings):
     )
 
     # OpenCode Settings
-    opencode_base_url: str = Field(
+    opencode_base_url: ExternalUrl = Field(
         default="http://localhost:4096",
         description="OpenCode server URL",
     )
@@ -263,7 +273,7 @@ class Settings(BaseSettings):
     )
 
     # LiteLLM Proxy / SDK Configuration
-    litellm_api_base: str = Field(
+    litellm_api_base: ExternalUrl = Field(
         default="http://localhost:4000",
         description="LiteLLM proxy server URL (used when any backend provider is set to 'litellm')",
     )
@@ -294,7 +304,7 @@ class Settings(BaseSettings):
     )
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
     ollama_model: str = Field(default="llama3.2", description="Ollama model to use")
-    openai_compatible_base_url: str = Field(
+    openai_compatible_base_url: ExternalUrl = Field(
         default="",
         description="Base URL for OpenAI-compatible endpoint (LiteLLM, OpenRouter, vLLM, etc.)",
     )
@@ -377,7 +387,7 @@ class Settings(BaseSettings):
         default="qdrant",
         description="Vector store for mem0: 'qdrant' or 'chroma'",
     )
-    mem0_ollama_base_url: str = Field(
+    mem0_ollama_base_url: ExternalUrl = Field(
         default="http://localhost:11434",
         description="Ollama base URL for mem0 (when using ollama provider)",
     )
@@ -409,7 +419,7 @@ class Settings(BaseSettings):
         default="nomic-embed-text",
         description="Embedding model for file memory semantic retrieval",
     )
-    embedding_base_url: str = Field(
+    embedding_base_url: ExternalUrl = Field(
         default="http://localhost:11434",
         description="Embedding provider base URL (for ollama)",
     )
@@ -705,7 +715,7 @@ class Settings(BaseSettings):
     )
 
     # Signal
-    signal_api_url: str = Field(
+    signal_api_url: ExternalUrl = Field(
         default="http://localhost:8080", description="Signal-cli REST API URL"
     )
     signal_phone_number: str | None = Field(
@@ -790,7 +800,7 @@ class Settings(BaseSettings):
     )
 
     # MCP OAuth
-    mcp_client_metadata_url: str = Field(
+    mcp_client_metadata_url: ExternalUrl = Field(
         default="",
         description="CIMD URL for MCP OAuth (optional, for servers without dynamic registration)",
     )

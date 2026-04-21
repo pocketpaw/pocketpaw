@@ -23,6 +23,8 @@ def _mock_settings(**overrides):
         "openai_api_key": "test-openai-key",
         "elevenlabs_api_key": None,
         "stt_model": "whisper-1",
+        # file_jail_path is expected to be overridden per-test via tmp_path
+        "file_jail_path": None,
     }
     defaults.update(overrides)
     m = MagicMock()
@@ -256,9 +258,12 @@ class TestSarvamSTT:
 
         return SpeechToTextTool()
 
+    @patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.stt.get_settings")
-    async def test_no_api_key_returns_error(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(sarvam_api_key=None, stt_provider="sarvam")
+    async def test_no_api_key_returns_error(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(
+            sarvam_api_key=None, stt_provider="sarvam", file_jail_path=tmp_path
+        )
         audio_file = tmp_path / "test.wav"
         audio_file.write_bytes(b"\x00" * 100)
         tool = self._make_tool()
@@ -266,18 +271,22 @@ class TestSarvamSTT:
         assert "error" in result.lower()
         assert "SARVAM_API_KEY" in result
 
+    @patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.stt.get_settings")
-    async def test_file_not_found(self, mock_gs):
-        mock_gs.return_value = _mock_settings(stt_provider="sarvam")
+    async def test_file_not_found(self, mock_gs, _safe):
+        from pathlib import Path
+
+        mock_gs.return_value = _mock_settings(stt_provider="sarvam", file_jail_path=Path("/tmp"))
         tool = self._make_tool()
         result = await tool.execute(audio_file="/nonexistent/file.wav")
         assert "error" in result.lower()
         assert "not found" in result.lower()
 
+    @patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.stt._get_transcripts_dir")
     @patch("pocketpaw.tools.builtin.stt.get_settings")
-    async def test_success_mock(self, mock_gs, mock_tdir, tmp_path):
-        mock_gs.return_value = _mock_settings(stt_provider="sarvam")
+    async def test_success_mock(self, mock_gs, mock_tdir, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(stt_provider="sarvam", file_jail_path=tmp_path)
         mock_tdir.return_value = tmp_path
 
         audio_file = tmp_path / "test.wav"
@@ -301,10 +310,11 @@ class TestSarvamSTT:
 
         assert "यह एक टेस्ट है" in result
 
+    @patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.stt._get_transcripts_dir")
     @patch("pocketpaw.tools.builtin.stt.get_settings")
-    async def test_mode_translit(self, mock_gs, mock_tdir, tmp_path):
-        mock_gs.return_value = _mock_settings(stt_provider="sarvam")
+    async def test_mode_translit(self, mock_gs, mock_tdir, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(stt_provider="sarvam", file_jail_path=tmp_path)
         mock_tdir.return_value = tmp_path
 
         audio_file = tmp_path / "test.wav"
@@ -330,9 +340,10 @@ class TestSarvamSTT:
         assert "yeh ek test hai" in result
         assert "mode=translit" in result
 
+    @patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.stt.get_settings")
-    async def test_stt_http_error(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(stt_provider="sarvam")
+    async def test_stt_http_error(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(stt_provider="sarvam", file_jail_path=tmp_path)
 
         audio_file = tmp_path / "test.wav"
         audio_file.write_bytes(b"\x00" * 100)
@@ -359,9 +370,10 @@ class TestSarvamSTT:
         assert "error" in result.lower()
         assert "429" in result
 
+    @patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.stt.get_settings")
-    async def test_no_speech_detected(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(stt_provider="sarvam")
+    async def test_no_speech_detected(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(stt_provider="sarvam", file_jail_path=tmp_path)
 
         audio_file = tmp_path / "silence.wav"
         audio_file.write_bytes(b"\x00" * 100)
@@ -383,9 +395,10 @@ class TestSarvamSTT:
 
         assert "no speech" in result.lower()
 
+    @patch("pocketpaw.tools.builtin.stt.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.stt.get_settings")
-    async def test_unknown_provider_error(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(stt_provider="invalid")
+    async def test_unknown_provider_error(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(stt_provider="invalid", file_jail_path=tmp_path)
         audio_file = tmp_path / "test.wav"
         audio_file.write_bytes(b"\x00" * 100)
         tool = self._make_tool()
@@ -407,9 +420,12 @@ class TestSarvamOCR:
 
         return OCRTool()
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_no_api_key_returns_error(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(sarvam_api_key=None, ocr_provider="sarvam")
+    async def test_no_api_key_returns_error(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(
+            sarvam_api_key=None, ocr_provider="sarvam", file_jail_path=tmp_path
+        )
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG" + b"\x00" * 100)
         tool = self._make_tool()
@@ -417,17 +433,21 @@ class TestSarvamOCR:
         assert "error" in result.lower()
         assert "SARVAM_API_KEY" in result
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_file_not_found(self, mock_gs):
-        mock_gs.return_value = _mock_settings(ocr_provider="sarvam")
+    async def test_file_not_found(self, mock_gs, _safe):
+        from pathlib import Path
+
+        mock_gs.return_value = _mock_settings(ocr_provider="sarvam", file_jail_path=Path("/tmp"))
         tool = self._make_tool()
         result = await tool.execute(image_path="/nonexistent/file.png")
         assert "error" in result.lower()
         assert "not found" in result.lower()
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_unsupported_format(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(ocr_provider="sarvam")
+    async def test_unsupported_format(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(ocr_provider="sarvam", file_jail_path=tmp_path)
         f = tmp_path / "test.xyz"
         f.write_bytes(b"\x00" * 100)
         tool = self._make_tool()
@@ -435,10 +455,11 @@ class TestSarvamOCR:
         assert "error" in result.lower()
         assert "unsupported" in result.lower()
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr._get_ocr_output_dir")
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_success_mock(self, mock_gs, mock_odir, tmp_path):
-        mock_gs.return_value = _mock_settings(ocr_provider="sarvam")
+    async def test_success_mock(self, mock_gs, mock_odir, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(ocr_provider="sarvam", file_jail_path=tmp_path)
         ocr_out = tmp_path / "ocr_out"
         ocr_out.mkdir()
         mock_odir.return_value = ocr_out
@@ -467,10 +488,11 @@ class TestSarvamOCR:
         assert "Extracted text here" in result
         assert "document.png" in result
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr._get_ocr_output_dir")
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_pdf_support(self, mock_gs, mock_odir, tmp_path):
-        mock_gs.return_value = _mock_settings(ocr_provider="sarvam")
+    async def test_pdf_support(self, mock_gs, mock_odir, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(ocr_provider="sarvam", file_jail_path=tmp_path)
         ocr_out = tmp_path / "ocr_out"
         ocr_out.mkdir()
         mock_odir.return_value = ocr_out
@@ -492,10 +514,11 @@ class TestSarvamOCR:
 
         assert "PDF text content" in result
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_openai_rejects_pdf(self, mock_gs, tmp_path):
+    async def test_openai_rejects_pdf(self, mock_gs, _safe, tmp_path):
         """OpenAI Vision does not support PDF — should return helpful error."""
-        mock_gs.return_value = _mock_settings(ocr_provider="openai")
+        mock_gs.return_value = _mock_settings(ocr_provider="openai", file_jail_path=tmp_path)
         pdf = tmp_path / "test.pdf"
         pdf.write_bytes(b"%PDF" + b"\x00" * 100)
         tool = self._make_tool()
@@ -503,9 +526,10 @@ class TestSarvamOCR:
         assert "error" in result.lower()
         assert "sarvam" in result.lower()
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_sdk_not_installed(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(ocr_provider="sarvam")
+    async def test_sdk_not_installed(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(ocr_provider="sarvam", file_jail_path=tmp_path)
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG" + b"\x00" * 100)
         tool = self._make_tool()
@@ -514,9 +538,10 @@ class TestSarvamOCR:
             result = await tool.execute(image_path=str(img))
         assert "error" in result.lower()
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_no_text_detected(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(ocr_provider="sarvam")
+    async def test_no_text_detected(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(ocr_provider="sarvam", file_jail_path=tmp_path)
         ocr_out = tmp_path / "ocr_out"
         ocr_out.mkdir()
 
@@ -536,9 +561,10 @@ class TestSarvamOCR:
 
         assert "no text" in result.lower()
 
+    @patch("pocketpaw.tools.builtin.ocr.is_safe_path", return_value=True)
     @patch("pocketpaw.tools.builtin.ocr.get_settings")
-    async def test_unknown_provider_error(self, mock_gs, tmp_path):
-        mock_gs.return_value = _mock_settings(ocr_provider="invalid")
+    async def test_unknown_provider_error(self, mock_gs, _safe, tmp_path):
+        mock_gs.return_value = _mock_settings(ocr_provider="invalid", file_jail_path=tmp_path)
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG" + b"\x00" * 100)
         tool = self._make_tool()

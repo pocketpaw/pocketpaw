@@ -140,14 +140,12 @@ class TestToolPolicyDeny:
 
 
 class TestToolPolicyFallback:
-    """Test unknown profile fallback."""
+    """Unknown profile names fail closed (#889) — previously they silently
+    fell back to 'full', which lifted every tool restriction on a typo."""
 
-    def test_unknown_profile_falls_back_to_full(self):
-        """Unknown profile logs a warning and acts like 'full'."""
-        policy = ToolPolicy(profile="nonexistent_profile")
-        # Should allow everything (full fallback)
-        assert policy.is_tool_allowed("shell") is True
-        assert policy.is_tool_allowed("browser") is True
+    def test_unknown_profile_raises(self):
+        with pytest.raises(ValueError, match="Unknown tool profile"):
+            ToolPolicy(profile="nonexistent_profile")
 
 
 class TestFilterToolNames:
