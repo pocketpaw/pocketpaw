@@ -40,7 +40,38 @@ _ROOT = Path.home() / ".pocketpaw" / "uploads"
 _CFG = UploadSettings(local_root=_ROOT)
 _ADAPTER = build_adapter(_ROOT)
 _META = MongoFileStore()
-_SVC = EEUploadService(adapter=_ADAPTER, meta=_META, cfg=_CFG)
+
+
+async def _is_chat_member(chat_id: str, user_id: str, _workspace: str) -> bool:
+    """Return True if ``user_id`` is a member of the chat group.
+
+    Reuses ``GroupService.list_member_ids`` which handles missing/invalid
+    ids gracefully (returns ``[]``). The workspace arg is accepted for
+    interface symmetry but not used — membership is the authoritative signal
+    and the upstream ``get_scoped(workspace=workspace)`` already binds the
+    file to the workspace.
+    """
+    from ee.cloud.chat.group_service import GroupService
+
+    members = await GroupService.list_member_ids(chat_id)
+    return user_id in members
+
+
+async def _is_workspace_admin(user_id: str, workspace: str) -> bool:
+    """Return True if ``user_id`` is an owner/admin of ``workspace``."""
+    from ee.cloud.workspace.service import WorkspaceService
+
+    admins = await WorkspaceService.list_admin_ids(workspace)
+    return user_id in admins
+
+
+_SVC = EEUploadService(
+    adapter=_ADAPTER,
+    meta=_META,
+    cfg=_CFG,
+    is_chat_member=_is_chat_member,
+    is_workspace_admin=_is_workspace_admin,
+)
 
 router = APIRouter(
     prefix="/uploads",
