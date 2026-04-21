@@ -616,3 +616,190 @@ class TestResponseShape:
         assert resp.status_code == 200
         pydantic_warnings = [w for w in recwarn.list if "pydantic" in str(w.category).lower()]
         assert not pydantic_warnings, [str(w) for w in pydantic_warnings]
+
+
+# ---------------------------------------------------------------------------
+# Installed-fleet listing + uninstall (cluster-d-fleet-ui-wire-up).
+# The tests don't exercise the full install-then-uninstall pipeline end to
+# end (that would require Agent + Pocket Beanie collections, which would
+# drag a Mongo connection into a router test). Instead we seed the journal
+# directly with ``fleet.installed`` entries so we're testing the router's
+# contract: auth, filter, idempotent uninstall, journal write.
+# ---------------------------------------------------------------------------
+
+
+def _seed_install_event(journal_path: Path, *, install_id: str, fleet: str, scope: list[str]):
+    """Append a single ``fleet.installed`` event to the journal at
+    ``journal_path`` so the list endpoint has something to return.
+
+    Returns the EventEntry for read-back in the tests.
+    """
+    from datetime import UTC, datetime
+    from uuid import UUID, uuid4
+
+    from soul_protocol.engine.journal import open_journal
+    from soul_protocol.spec.journal import Actor, EventEntry
+
+    with open_journal(journal_path) as j:
+        entry = EventEntry(
+            id=uuid4(),
+            ts=datetime.now(UTC),
+            actor=Actor(kind="user", id="user-admin", scope_context=list(scope)),
+            action="fleet.installed",
+            scope=list(scope),
+            correlation_id=UUID(install_id),
+            payload={
+                "fleet": fleet,
+                "soul_id": "did:soul:fake",
+                "pocket_id": "pkt-fake",
+                "succeeded": True,
+                "step_count": 3,
+                "failed_steps": [],
+            },
+        )
+        committed = j.append(entry)
+    return committed
+
+
+class TestInstalledFleetsListing:
+    def test_unauthenticated_list_returns_401(self, client: TestClient) -> None:
+        resp = client.get(f"/fleet/installed?workspace_id={WORKSPACE_ID}")
+        assert resp.status_code == 401
+
+    def test_non_admin_list_returns_403(self, client: TestClient) -> None:
+        resp = client.get(
+            f"/fleet/installed?workspace_id={WORKSPACE_ID}",
+            headers={
+                "X-Test-User": "user-member",
+                "X-Test-Workspaces": f"{WORKSPACE_ID}:member",
+            },
+        )
+        assert resp.status_code == 403
+
+    def test_empty_list_is_ok(self, client: TestClient) -> None:
+        resp = client.get(
+            f"/fleet/installed?workspace_id={WORKSPACE_ID}",
+            headers=ADMIN_AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"installed": [], "total": 0}
+
+    def test_seeded_install_surfaces_in_list(
+        self, client: TestClient, journal_path: Path
+    ) -> None:
+        import uuid as _uuid
+
+        install_id = str(_uuid.uuid4())
+        _seed_install_event(
+            journal_path,
+            install_id=install_id,
+            fleet="sales-fleet",
+            scope=[f"workspace:{WORKSPACE_ID}"],
+        )
+
+        resp = client.get(
+            f"/fleet/installed?workspace_id={WORKSPACE_ID}",
+            headers=ADMIN_AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["installed"][0]["install_id"] == install_id
+        assert body["installed"][0]["fleet"] == "sales-fleet"
+        assert body["installed"][0]["succeeded"] is True
+
+
+class TestUninstallFleet:
+    def test_unauthenticated_uninstall_returns_401(self, client: TestClient) -> None:
+        import uuid as _uuid
+
+        resp = client.delete(
+            f"/fleet/installed/{_uuid.uuid4()}?workspace_id={WORKSPACE_ID}",
+        )
+        assert resp.status_code == 401
+
+    def test_non_admin_uninstall_returns_403(self, client: TestClient) -> None:
+        import uuid as _uuid
+
+        resp = client.delete(
+            f"/fleet/installed/{_uuid.uuid4()}?workspace_id={WORKSPACE_ID}",
+            headers={
+                "X-Test-User": "user-member",
+                "X-Test-Workspaces": f"{WORKSPACE_ID}:member",
+            },
+        )
+        assert resp.status_code == 403
+
+    def test_malformed_install_id_returns_400(self, client: TestClient) -> None:
+        resp = client.delete(
+            f"/fleet/installed/not-a-uuid?workspace_id={WORKSPACE_ID}",
+            headers=ADMIN_AUTH_HEADERS,
+        )
+        assert resp.status_code == 400
+
+    def test_idempotent_when_install_missing(self, client: TestClient) -> None:
+        """Uninstall against a never-seen id is a no-op, not a 404. Retries
+        after network flake should not flip to error."""
+        import uuid as _uuid
+
+        resp = client.delete(
+            f"/fleet/installed/{_uuid.uuid4()}?workspace_id={WORKSPACE_ID}",
+            headers=ADMIN_AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["journalled"] is False
+        assert body["soft_archived_agents"] == []
+        assert body["soft_archived_pockets"] == []
+
+    def test_scope_mismatch_returns_403(
+        self, client: TestClient, journal_path: Path
+    ) -> None:
+        """An install scoped to workspace A cannot be torn down by an
+        admin of workspace B, even if the install_id is correct."""
+        import uuid as _uuid
+
+        install_id = str(_uuid.uuid4())
+        _seed_install_event(
+            journal_path,
+            install_id=install_id,
+            fleet="sales-fleet",
+            scope=[f"workspace:{OTHER_WORKSPACE_ID}"],
+        )
+
+        resp = client.delete(
+            f"/fleet/installed/{install_id}?workspace_id={WORKSPACE_ID}",
+            headers=ADMIN_AUTH_HEADERS,
+        )
+        assert resp.status_code == 403
+
+    def test_uninstall_journals_event(
+        self, client: TestClient, journal_path: Path
+    ) -> None:
+        import uuid as _uuid
+
+        install_id = str(_uuid.uuid4())
+        _seed_install_event(
+            journal_path,
+            install_id=install_id,
+            fleet="sales-fleet",
+            scope=[f"workspace:{WORKSPACE_ID}"],
+        )
+
+        resp = client.delete(
+            f"/fleet/installed/{install_id}?workspace_id={WORKSPACE_ID}",
+            headers=ADMIN_AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["journalled"] is True
+        assert body["fleet"] == "sales-fleet"
+
+        # Confirm the journal now holds a fleet.uninstalled with the same
+        # correlation_id as the install.
+        from soul_protocol.engine.journal import open_journal
+
+        with open_journal(journal_path) as j:
+            uninstalls = j.query(action="fleet.uninstalled", limit=10)
+        assert len(uninstalls) == 1
+        assert str(uninstalls[0].correlation_id) == install_id
