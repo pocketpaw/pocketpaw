@@ -304,7 +304,7 @@ async def create_task(request: CreateTaskRequest) -> dict[str, Any]:
     # Associate with project if project_id is provided
     if request.project_id:
         task.project_id = request.project_id
-        await manager._store.save_task(task)
+        await manager.save_task(task)
         # Add to project's task_ids list
         project = await manager.get_project(request.project_id)
         if project and task.id not in project.task_ids:
@@ -384,7 +384,7 @@ async def update_task(task_id: str, request: UpdateTaskRequest) -> dict[str, Any
         await manager.update_task_status(task_id, TaskStatus(request.status))
         task = await manager.get_task(task_id)
     else:
-        await manager._store.save_task(task)
+        await manager.save_task(task)
 
     return {"task": task.to_dict() if task else None}
 
@@ -393,7 +393,7 @@ async def update_task(task_id: str, request: UpdateTaskRequest) -> dict[str, Any
 async def delete_task(task_id: str) -> SuccessResponse:
     """Delete a task."""
     manager = get_mission_control_manager()
-    deleted = await manager._store.delete_task(task_id)
+    deleted = await manager.delete_task(task_id)
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -532,7 +532,7 @@ async def attach_document(task_id: str, request: AttachDocumentRequest) -> dict[
 
     # Link document to task
     document.task_id = task_id
-    await manager._store.save_document(document)
+    await manager.save_document(document)
 
     return {
         "document": document.to_dict(),
@@ -618,7 +618,7 @@ async def update_document(document_id: str, request: UpdateDocumentRequest) -> d
 async def delete_document(document_id: str) -> SuccessResponse:
     """Delete a document."""
     manager = get_mission_control_manager()
-    deleted = await manager._store.delete_document(document_id)
+    deleted = await manager.delete_document(document_id)
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -637,11 +637,11 @@ async def get_activity_feed(
     task_id: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """Get the activity feed."""
+    """Get the activity feed.""" 
     manager = get_mission_control_manager()
 
     if agent_id or task_id:
-        activities = await manager._store.get_activities(
+        activities = await manager.get_activities(
             agent_id=agent_id,
             task_id=task_id,
             limit=limit,
