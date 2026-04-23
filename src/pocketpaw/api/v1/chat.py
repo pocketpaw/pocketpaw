@@ -3,6 +3,9 @@
 # Updated: 2026-03-09 — Reduce blocking chat timeout from 3600s to 300s
 # Updated: 2026-02-25 — Tighten SSE session filter: block events without session_key
 #   instead of silently passing them through to all clients.
+# Updated: 2026-04-22 — Thread cloud user + active_workspace from the
+#   authenticated request into ``InboundMessage.metadata`` so agent-created
+#   pockets land under the caller, not the first user in the DB.
 #
 # Enables external clients to send messages and receive responses via HTTP.
 # SSE streaming reuses the entire AgentLoop pipeline via _APISessionBridge.
@@ -13,12 +16,56 @@ import asyncio
 import json
 import logging
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.chat import ChatRequest, ChatResponse
+
+# ── Optional ee.cloud auth wiring ──────────────────────────────────────
+# When the enterprise cloud module is mounted, we want to read the caller's
+# authenticated user + active workspace off the JWT so agent-created pockets
+# route to the right tenant. When it isn't mounted (self-hosted OSS, CLI,
+# Telegram), we fall back to a no-op dep that yields ``(None, None)`` — the
+# downstream pocket creator keeps its current first-user heuristic.
+try:
+    from ee.cloud.auth.core import current_optional_user as _cloud_optional_user
+
+    _CLOUD_AUTH_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    _cloud_optional_user = None  # type: ignore[assignment]
+    _CLOUD_AUTH_AVAILABLE = False
+
+
+def _noop_user_dep() -> None:
+    """Zero-dependency placeholder. Used when ee.cloud is not mounted so
+    that ``resolve_cloud_context`` keeps a uniform signature either way —
+    FastAPI happily resolves a dep that takes no sub-deps and returns None."""
+    return None
+
+
+# Pick the real cloud dep when it's importable, else a no-op that just
+# yields ``None``. Keeping the callable identity stable lets the single
+# ``resolve_cloud_context`` definition below work in both environments
+# without conditional signatures (mypy is happier this way too).
+_effective_user_dep = _cloud_optional_user if _CLOUD_AUTH_AVAILABLE else _noop_user_dep
+
+
+async def resolve_cloud_context(
+    user: Any = Depends(_effective_user_dep),
+) -> tuple[str | None, str | None]:
+    """Extract ``(user_id, active_workspace)`` from the cloud JWT session.
+
+    Returns ``(None, None)`` when the caller is unauthenticated or when
+    ``ee.cloud`` is not mounted at all — preserves CLI / Telegram /
+    self-hosted behaviour.
+    """
+    if user is None:
+        return None, None
+    return str(user.id), getattr(user, "active_workspace", None)
+
 
 logger = logging.getLogger(__name__)
 
@@ -194,10 +241,18 @@ class _APISessionBridge:
             bus.unsubscribe_system(self._system_cb)
 
 
-async def _build_inbound_message(chat_request: ChatRequest):
+async def _build_inbound_message(
+    chat_request: ChatRequest,
+    cloud_ctx: tuple[str | None, str | None] = (None, None),
+):
     """Build an InboundMessage for ``chat_request`` — shared by the bus
     dispatch path (default loop) and the direct-call path (per-agent loop).
     Returns ``(chat_id, InboundMessage)``.
+
+    ``cloud_ctx`` carries the caller's ``(user_id, active_workspace)`` when
+    the request was authenticated via the cloud JWT. When both are None we
+    leave metadata untouched so non-cloud callers (CLI, Telegram, Discord,
+    self-hosted) behave identically to before.
     """
     from pocketpaw.bus.events import Channel, InboundMessage
     from pocketpaw.uploads.resolver import resolve_media_with_records
@@ -209,6 +264,16 @@ async def _build_inbound_message(chat_request: ChatRequest):
         meta["file_context"] = chat_request.file_context.model_dump(exclude_none=True)
     if chat_request.agent_id:
         meta["agent_id"] = chat_request.agent_id
+
+    # Thread the authenticated user + active workspace through to the agent
+    # loop so downstream code (agent pocket creation, audit logging, etc.)
+    # can attribute work to the correct tenant. Omit keys when absent so
+    # the fallback branches downstream can still trigger.
+    cloud_user_id, cloud_workspace_id = cloud_ctx
+    if cloud_user_id:
+        meta["cloud_user_id"] = cloud_user_id
+    if cloud_workspace_id:
+        meta["cloud_workspace_id"] = cloud_workspace_id
 
     # Resolve ``/api/v1/uploads/{id}`` URLs to (path, FileRecord) pairs so the
     # agent prompt can carry filename / mime / size, not just a bare disk path.
@@ -271,17 +336,23 @@ async def _build_inbound_message(chat_request: ChatRequest):
     return chat_id, msg
 
 
-async def _send_message(chat_request: ChatRequest) -> str:
+async def _send_message(
+    chat_request: ChatRequest,
+    cloud_ctx: tuple[str | None, str | None] = (None, None),
+) -> str:
     """Dispatch the message to the default loop (via bus) or to a per-agent
     loop directly when ``chat_request.agent_id`` is set.
 
     Per-agent loops bypass the bus consumer to avoid racing with the
     default loop for InboundMessages. Outbound events still flow through
     the bus so the SSE bridge sees them unchanged.
+
+    ``cloud_ctx`` is the ``(user_id, active_workspace)`` pair resolved from
+    the cloud JWT, propagated through to ``InboundMessage.metadata``.
     """
     from pocketpaw.bus import get_message_bus
 
-    chat_id, msg = await _build_inbound_message(chat_request)
+    chat_id, msg = await _build_inbound_message(chat_request, cloud_ctx=cloud_ctx)
 
     if chat_request.agent_id:
         try:
@@ -302,7 +373,10 @@ async def _send_message(chat_request: ChatRequest) -> str:
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_send(body: ChatRequest):
+async def chat_send(
+    body: ChatRequest,
+    cloud_ctx: tuple[str | None, str | None] = Depends(resolve_cloud_context),
+):
     """Send a message and get the complete response (non-streaming)."""
     chat_id = _extract_chat_id(body.session_id)
     bridge = _APISessionBridge(chat_id)
@@ -315,7 +389,8 @@ async def chat_send(body: ChatRequest):
             media=body.media,
             file_context=body.file_context,
             agent_id=body.agent_id,
-        )
+        ),
+        cloud_ctx=cloud_ctx,
     )
 
     # Collect all chunks until stream_end
@@ -350,7 +425,10 @@ async def chat_send(body: ChatRequest):
 
 
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest):
+async def chat_stream(
+    body: ChatRequest,
+    cloud_ctx: tuple[str | None, str | None] = Depends(resolve_cloud_context),
+):
     """Send a message and receive SSE stream back."""
     chat_id = _extract_chat_id(body.session_id)
     safe_key = _to_safe_key(chat_id)
@@ -401,7 +479,8 @@ async def chat_stream(body: ChatRequest):
             media=body.media,
             file_context=body.file_context,
             agent_id=body.agent_id,
-        )
+        ),
+        cloud_ctx=cloud_ctx,
     )
 
     async def _event_generator():

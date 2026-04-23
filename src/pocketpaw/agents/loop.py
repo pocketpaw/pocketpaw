@@ -108,22 +108,62 @@ def _extract_pocket_json(content: str) -> dict | None:
     return None
 
 
-async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None:
-    """Create pocket + session in MongoDB. Returns pocket _id or None on failure."""
+async def _create_pocket_and_session(
+    spec: dict,
+    session_key: str,
+    user_id: str | None = None,
+    workspace_id: str | None = None,
+) -> str | None:
+    """Create pocket + session in MongoDB. Returns pocket _id or None on failure.
+
+    ``user_id`` / ``workspace_id`` come from the caller's authenticated
+    context (threaded down from the chat endpoint via ``InboundMessage.metadata``).
+    When either is missing we fall back to the legacy heuristics —
+    ``user.active_workspace`` first, then first-owned workspace, then any
+    workspace — so self-hosted single-user deployments (CLI, Telegram) that
+    have no JWT auth still work.
+    """
     try:
         from ee.cloud.models.session import Session
         from ee.cloud.models.user import User
         from ee.cloud.models.workspace import Workspace
 
-        # Find user + workspace from existing cloud data
-        # Try to find user from any existing session, or get the first active user
-        user = await User.find_one()
+        # ── User selection ──────────────────────────────────────────────
+        # Prefer an explicitly-threaded user id from the chat context so
+        # agent-created pockets land under the caller, not whichever user
+        # happens to come first out of Mongo.
+        user = None
+        if user_id:
+            try:
+                from beanie import PydanticObjectId
+
+                user = await User.get(PydanticObjectId(user_id))
+            except Exception:  # noqa: BLE001
+                logger.warning("Invalid cloud_user_id %r; falling back to first user", user_id)
+                user = None
+        if not user:
+            user = await User.find_one()
         if not user:
             logger.warning("Cannot create pocket — no user in DB")
             return None
         user_id = str(user.id)
 
-        workspace = await Workspace.find_one(Workspace.owner == user_id)
+        # ── Workspace selection ─────────────────────────────────────────
+        # Priority: explicit workspace_id (from JWT) → user.active_workspace
+        # → first owned workspace → any workspace. Without this chain the
+        # pocket lands in whichever workspace Mongo returns first, which
+        # is almost never the one the user has open in the UI.
+        workspace = None
+        target_ws = workspace_id or getattr(user, "active_workspace", None)
+        if target_ws:
+            try:
+                from beanie import PydanticObjectId
+
+                workspace = await Workspace.get(PydanticObjectId(target_ws))
+            except Exception:  # noqa: BLE001
+                workspace = None
+        if not workspace:
+            workspace = await Workspace.find_one(Workspace.owner == user_id)
         if not workspace:
             # Try any workspace the user belongs to
             workspace = await Workspace.find_one()
@@ -178,7 +218,12 @@ async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None
         return None
 
 
-async def _publish_pocket_event(bus: "MessageBus", content: str, session_key: str) -> None:
+async def _publish_pocket_event(
+    bus: "MessageBus",
+    content: str,
+    session_key: str,
+    metadata: dict | None = None,
+) -> None:
     """Detect pocket event JSON in tool output and publish a dedicated SystemEvent.
 
     Two shapes are recognised:
@@ -200,6 +245,11 @@ async def _publish_pocket_event(bus: "MessageBus", content: str, session_key: st
        manual reload. (The Mongo-side ``PocketUpdated`` realtime event
        fired in the subprocess can't reach the parent process's
        WebSocket connection manager — this is the bridge.)
+
+    ``metadata`` is the originating ``InboundMessage.metadata`` — for
+    shape 1 we read ``cloud_user_id`` / ``cloud_workspace_id`` so the
+    created pocket is attributed to the caller rather than the first
+    user in the DB.
     """
     # Cheap rejection — neither shape can be in the content otherwise.
     if '"pocket_event"' not in content and '"pocket"' not in content:
@@ -248,8 +298,18 @@ async def _publish_pocket_event(bus: "MessageBus", content: str, session_key: st
         "panes" in spec,
     )
     if evt_type == "created":
-        # Create pocket + session in MongoDB right here
-        pocket_cloud_id = await _create_pocket_and_session(spec, session_key)
+        # Create pocket + session in MongoDB right here. Pull the caller's
+        # identity out of the inbound metadata so multi-user / multi-
+        # workspace deployments route the pocket to the right tenant.
+        meta = metadata or {}
+        cloud_user_id = meta.get("cloud_user_id")
+        cloud_workspace_id = meta.get("cloud_workspace_id")
+        pocket_cloud_id = await _create_pocket_and_session(
+            spec,
+            session_key,
+            user_id=cloud_user_id,
+            workspace_id=cloud_workspace_id,
+        )
         await bus.publish_system(
             SystemEvent(
                 event_type="pocket_created",
@@ -881,9 +941,7 @@ class AgentLoop:
                 from pocketpaw.features import chat_titles_enabled
 
                 if chat_titles_enabled(self.settings):
-                    task = asyncio.create_task(
-                        self._generate_and_emit_title(session_key, content)
-                    )
+                    task = asyncio.create_task(self._generate_and_emit_title(session_key, content))
                     self._bg_tasks.add(task)
                     task.add_done_callback(self._bg_tasks.discard)
 
@@ -1169,8 +1227,13 @@ class AgentLoop:
                             )
                         )
                         # Detect pocket events in tool output and publish
-                        # dedicated SystemEvents for the SSE handler.
-                        await _publish_pocket_event(self.bus, econtent, session_key)
+                        # dedicated SystemEvents for the SSE handler. Pass
+                        # the inbound metadata so cloud_user_id /
+                        # cloud_workspace_id (threaded in from the chat
+                        # endpoint) reach the pocket creator.
+                        await _publish_pocket_event(
+                            self.bus, econtent, session_key, message.metadata
+                        )
                         media_paths.extend(_extract_media_paths(econtent))
 
                     elif etype == "error":
