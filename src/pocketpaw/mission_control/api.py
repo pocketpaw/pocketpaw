@@ -637,7 +637,7 @@ async def get_activity_feed(
     task_id: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """Get the activity feed.""" 
+    """Get the activity feed."""
     manager = get_mission_control_manager()
 
     if agent_id or task_id:
