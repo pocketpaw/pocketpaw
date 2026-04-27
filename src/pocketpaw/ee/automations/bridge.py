@@ -6,6 +6,10 @@
 #   Rule no longer exists. Tests that don't isolate ``~/.pocketpaw/`` left
 #   stale entries that re-saved on every cron fire and registered phantom
 #   jobs with the trigger engine on every restart.
+# Updated: 2026-04-27 — Escape the ``[auto]`` token in the prune-summary
+#   log message. The dashboard's Rich console handler treats ``[auto]``
+#   as a markup tag and swallows it, leaving readers with a confusing
+#   ``Pruned N orphan  intentions`` (double space, no prefix).
 
 """
 bridge.py — Syncs enterprise automation rules to core daemon intentions.
@@ -155,5 +159,7 @@ def prune_orphan_auto_intentions() -> int:
         pruned += 1
 
     if pruned:
-        logger.info("Pruned %d orphan [auto] intentions on startup", pruned)
+        # Escape the brackets so Rich's console handler doesn't parse
+        # ``[auto]`` as a markup tag and swallow the prefix in the output.
+        logger.info("Pruned %d orphan \\[auto] intentions on startup", pruned)
     return pruned
