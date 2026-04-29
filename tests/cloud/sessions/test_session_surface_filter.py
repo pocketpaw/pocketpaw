@@ -72,7 +72,9 @@ async def test_list_for_owner_filters_by_surface() -> None:
         CreateSessionRequest(title="from pockets", surface="pocket_creation"),
     )
     await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="legacy")  # surface=None
+        _ctx(),
+        "w1",
+        CreateSessionRequest(title="legacy"),  # surface=None
     )
 
     chat_only = await sessions_service.list_for_owner(_ctx(), "w1", surface="chat")
@@ -98,7 +100,9 @@ async def test_list_for_owner_without_filter_returns_all() -> None:
         CreateSessionRequest(title="from pockets", surface="pocket_creation"),
     )
     await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="legacy")  # surface=None
+        _ctx(),
+        "w1",
+        CreateSessionRequest(title="legacy"),  # surface=None
     )
 
     all_sessions = await sessions_service.list_for_owner(_ctx(), "w1")

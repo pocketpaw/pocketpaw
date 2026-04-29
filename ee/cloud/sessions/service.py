@@ -74,6 +74,7 @@ def _to_domain(doc: _SessionDoc) -> DomainSession:
         last_activity=doc.lastActivity,
         created_at=getattr(doc, "createdAt", datetime.now(UTC)),  # type: ignore[arg-type]
         deleted_at=doc.deleted_at,
+        surface=getattr(doc, "surface", None),
     )
 
 
@@ -104,9 +105,7 @@ async def create(
     sid = body.session_id or f"websocket_{uuid.uuid4().hex[:12]}"
 
     if body.session_id:
-        existing_doc = await _SessionDoc.find_one(
-            _SessionDoc.sessionId == body.session_id
-        )
+        existing_doc = await _SessionDoc.find_one(_SessionDoc.sessionId == body.session_id)
         if existing_doc is not None:
             patched: dict = {}
             if body.pocket_id and body.pocket_id != existing_doc.pocket:
@@ -117,13 +116,15 @@ async def create(
                 if existing_doc.context_type == "session":
                     existing_doc.context_type = "pocket"
                 patched["pocket_id"] = body.pocket_id
-            if (
-                body.title
-                and body.title != "New Chat"
-                and body.title != existing_doc.title
-            ):
+            if body.title and body.title != "New Chat" and body.title != existing_doc.title:
                 existing_doc.title = body.title
                 patched["title"] = body.title
+            # Stamp ``surface`` only when missing — it tags the *origin* of
+            # the session so a re-link from a different surface shouldn't
+            # rewrite history.
+            if body.surface and getattr(existing_doc, "surface", None) is None:
+                existing_doc.surface = body.surface
+                patched["surface"] = body.surface
             if patched:
                 await existing_doc.save()
                 await emit(
@@ -153,6 +154,7 @@ async def create(
         pocket=body.pocket_id,
         group=body.group_id,
         agent=body.agent_id,
+        surface=body.surface,
     )
     await doc.insert()
     session = _to_domain(doc)
@@ -182,14 +184,27 @@ async def create(
 
 
 async def list_for_owner(
-    ctx: RequestContext, workspace_id: str
+    ctx: RequestContext,
+    workspace_id: str,
+    *,
+    surface: str | None = None,
 ) -> list[DomainSession]:
+    """List the caller's sessions in ``workspace_id``.
+
+    ``surface`` (when provided) restricts the listing to rows stamped with
+    that originating surface (``"chat"`` / ``"files"`` / ``"pocket_creation"``).
+    Passing ``None`` (the default) preserves legacy behavior — every row
+    returns, including pre-fix rows that have ``surface=None``.
+    """
+    filters: list[Any] = [
+        _SessionDoc.workspace == workspace_id,
+        _SessionDoc.owner == ctx.user_id,
+        _SessionDoc.deleted_at == None,  # noqa: E711
+    ]
+    if surface is not None:
+        filters.append(_SessionDoc.surface == surface)
     docs = (
-        await _SessionDoc.find(
-            _SessionDoc.workspace == workspace_id,
-            _SessionDoc.owner == ctx.user_id,
-            _SessionDoc.deleted_at == None,  # noqa: E711
-        )
+        await _SessionDoc.find(*filters)
         .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
         .to_list()
     )
@@ -212,9 +227,7 @@ async def list_by_agent(
     return [_to_domain(d) for d in docs]
 
 
-async def list_for_pocket(
-    ctx: RequestContext, pocket_id: str
-) -> list[DomainSession]:
+async def list_for_pocket(ctx: RequestContext, pocket_id: str) -> list[DomainSession]:
     docs = (
         await _SessionDoc.find(
             _SessionDoc.pocket == pocket_id,
@@ -292,9 +305,7 @@ async def delete(ctx: RequestContext, session_id: str) -> None:
     )
 
 
-async def link_pocket(
-    workspace_id: str, session_id_str: str, pocket_id: str
-) -> None:
+async def link_pocket(workspace_id: str, session_id_str: str, pocket_id: str) -> None:
     """Link a session (looked up by its sessionId string) to a pocket.
 
     Used by ``pockets/service.create_pocket`` when called with
@@ -329,11 +340,21 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
     session = await _fetch_owned(session_id, user_id)
 
     if session.context_type == "session":
+        # Prefix-match on session_key so reads stay aligned with whatever
+        # ``target_agent_id`` the SSE writer used at write time. The writer
+        # builds ``cloud:session:{session.id}:{target_agent_id}`` per stream;
+        # ``Session.agent`` is backfilled best-effort and may lag (or stay
+        # None when the backfill save fails). Matching the literal stored
+        # ``session.agent`` would miss those rows entirely — symptom: user
+        # sees their optimistic message with no agent reply.
+        import re
+
+        prefix = f"cloud:session:{session.id}:"
         messages = (
             await Message.find(
                 {
                     "context_type": "session",
-                    "session_key": f"cloud:session:{session.id}:{session.agent}",
+                    "session_key": {"$regex": f"^{re.escape(prefix)}"},
                 }
             )
             .sort("createdAt")
@@ -387,9 +408,7 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
     # session_key shapes; preserved verbatim from the legacy implementation.
     pocket_candidate_keys = [session.sessionId]
     if session.pocket and session.agent:
-        pocket_candidate_keys.append(
-            f"cloud:pocket:{session.pocket}:{session.agent}"
-        )
+        pocket_candidate_keys.append(f"cloud:pocket:{session.pocket}:{session.agent}")
     or_clauses: list[dict[str, Any]] = [
         {"context_type": "pocket", "session_key": {"$in": pocket_candidate_keys}}
     ]
@@ -401,12 +420,7 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
             }
         )
 
-    messages = (
-        await Message.find({"$or": or_clauses})
-        .sort("createdAt")
-        .limit(limit)
-        .to_list()
-    )
+    messages = await Message.find({"$or": or_clauses}).sort("createdAt").limit(limit).to_list()
     return {
         "messages": [
             {
@@ -501,16 +515,23 @@ async def ensure_for_agent_scope(
             return None
         if doc is None:
             return None
-        # Backfill Session.agent when the session was created without one
-        # so the read-side ``cloud:session:{sid}:{agent}`` history key
-        # matches the write side.
+        # Backfill Session.agent when the session was created without one.
+        # The read-side history query no longer keys on ``Session.agent``
+        # (it prefix-matches ``cloud:session:{sid}:`` so any writer-supplied
+        # agent id matches), but persisting the field still keeps the
+        # sidebar's per-agent grouping correct. Log at warning so a recurring
+        # save failure shows up in dashboard logs — historically this failure
+        # mode caused the "user message with no agent reply" symptom and went
+        # undetected for too long.
         if not getattr(doc, "agent", None) and target_agent_id:
             doc.agent = target_agent_id
             try:
                 await doc.save()
             except Exception:
-                logger.debug(
-                    "Session.agent backfill failed for %s",
+                logger.warning(
+                    "Session.agent backfill failed for %s — read path uses "
+                    "prefix-match so history still resolves, but downstream "
+                    "consumers grouping by agent may misroute",
                     doc.sessionId,
                     exc_info=True,
                 )
@@ -556,9 +577,7 @@ async def auto_create_pocket_session(
         title="Chat",
     )
     await doc.insert()
-    logger.info(
-        "auto-created pocket session: sessionId=%s owner=%s", session_key, user.id
-    )
+    logger.info("auto-created pocket session: sessionId=%s owner=%s", session_key, user.id)
     return doc
 
 

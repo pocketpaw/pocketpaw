@@ -70,6 +70,7 @@ SESSION_RESPONSE_KEYS = frozenset(
         "pocket",
         "group",
         "agent",
+        "surface",  # added: which UI surface minted this session
         "messageCount",
         "lastActivity",
         "createdAt",

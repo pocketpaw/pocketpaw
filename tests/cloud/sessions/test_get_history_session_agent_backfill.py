@@ -53,9 +53,7 @@ async def test_get_history_returns_messages_when_session_agent_is_null() -> None
     """
     # Create a session-scope row with no agent attached — exactly the state
     # left behind when ``_ensure_scope_session`` silently fails its save.
-    session = await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="t")
-    )
+    session = await sessions_service.create(_ctx(), "w1", CreateSessionRequest(title="t"))
     assert session.context_type == "session"
     assert session.agent is None  # the precondition the bug depends on
 
