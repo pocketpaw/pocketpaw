@@ -124,3 +124,24 @@ class TestPruneOrphanAutoIntentions:
 
     def test_no_intentions_is_a_noop(self, isolated_stores) -> None:
         assert prune_orphan_auto_intentions() == 0
+
+    def test_prune_emits_only_summary_log(self, isolated_stores, caplog) -> None:
+        """Prune must not log every deletion individually — only the summary."""
+        import logging
+
+        intention_store, _ = isolated_stores
+        for i in range(5):
+            _add_auto_intention(intention_store, f"Orphan {i}")
+
+        with caplog.at_level(logging.INFO):
+            pruned = prune_orphan_auto_intentions()
+
+        assert pruned == 5
+        delete_lines = [r for r in caplog.records if "Deleted intention" in r.message]
+        summary_lines = [
+            r
+            for r in caplog.records
+            if "Pruned" in r.message and "orphan" in r.message
+        ]
+        assert delete_lines == [], "per-item delete log must be suppressed during prune"
+        assert len(summary_lines) == 1, "expected exactly one summary line"

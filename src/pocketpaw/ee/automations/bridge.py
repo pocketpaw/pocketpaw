@@ -151,7 +151,9 @@ def prune_orphan_auto_intentions() -> int:
             continue
         if intention["id"] in valid_ids:
             continue
-        intention_store.delete(intention["id"])
+        # quiet=True suppresses the per-item ``Deleted intention: ...`` INFO
+        # log. The summary line below is the only output we want at boot.
+        intention_store.delete(intention["id"], quiet=True)
         pruned += 1
 
     if pruned:
