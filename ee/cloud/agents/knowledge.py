@@ -1,18 +1,24 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-04-30 — File extraction routed through the pluggable
+#   ee/cloud/extraction chain (LocalExtractor preserves the previous pypdf
+#   / python-docx / pytesseract behaviour; cloud adapters slot in via
+#   POCKETPAW_EXTRACTION_CHAIN). Stage 1.A of "Files as Knowledge".
 # Updated: 2026-04-07 — Switched from Python knowledge_base package to kb Go binary.
 # Heavy extraction (PDF, OCR, URL) done in Python, piped as text to kb.
 # All other operations delegate to subprocess calls.
 """Agent knowledge service — thin wrapper over the `kb` Go binary.
 
 The kb binary (github.com/qbtrix/kb-go) handles compilation, search, indexing,
-and storage. This wrapper handles heavy extraction (PDF, URL, OCR, DOCX) in
-Python and pipes extracted text to kb via stdin.
+and storage. URL extraction stays inline (trafilatura). File extraction is
+routed through `ee.cloud.extraction.build_chain` so cloud captioning can be
+configured without touching this file.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import subprocess
 from pathlib import Path
@@ -154,36 +160,19 @@ async def _extract_url(url: str) -> str:
 
 
 async def _extract_file(file_path: str) -> str:
-    """Extract text from PDF, DOCX, or image files."""
+    """Extract text via the configured extraction chain.
+
+    Behaviour parity with the previous suffix-routed pypdf/python-docx/
+    pytesseract helper is preserved by `LocalExtractor`, which is always
+    available as the offline fallback. Chain config (`extraction_chain`,
+    `extraction_per_mime`) lives on `Settings`.
+    """
+    from ee.cloud.extraction import build_chain
+    from pocketpaw.config import get_settings
+
     path = Path(file_path)
-    suffix = path.suffix.lower()
-
-    if suffix == ".pdf":
-        try:
-            from pypdf import PdfReader
-
-            reader = PdfReader(file_path)
-            return "\n".join(p.extract_text() or "" for p in reader.pages)
-        except ImportError:
-            raise RuntimeError("pypdf not installed — run: pip install pypdf")
-
-    if suffix in (".docx", ".doc"):
-        try:
-            from docx import Document
-
-            doc = Document(file_path)
-            return "\n".join(p.text for p in doc.paragraphs)
-        except ImportError:
-            raise RuntimeError("python-docx not installed — run: pip install python-docx")
-
-    if suffix in (".png", ".jpg", ".jpeg"):
-        try:
-            import pytesseract
-            from PIL import Image
-
-            return pytesseract.image_to_string(Image.open(file_path))
-        except ImportError:
-            raise RuntimeError("pytesseract not installed — run: pip install pytesseract Pillow")
-
-    # Fallback: read as text
-    return path.read_text(encoding="utf-8", errors="replace")
+    mime, _ = mimetypes.guess_type(file_path)
+    mime = mime or "application/octet-stream"
+    chain = build_chain(get_settings())
+    result = await chain.run(path, mime)
+    return result.text

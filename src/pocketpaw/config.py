@@ -941,6 +941,41 @@ class Settings(BaseSettings):
         description="Number of top articles to inject from kb search (default: 3)",
     )
 
+    # File extraction chain (Phase 1, "Files as Knowledge")
+    extraction_chain: list[str] = Field(
+        default_factory=lambda: ["local"],
+        description=(
+            "Ordered list of extraction adapter names "
+            "(e.g. ['gemini-flash', 'local']). The chain runs first-match-wins "
+            "per MIME, with offline fallback to 'local'. Set via "
+            "POCKETPAW_EXTRACTION_CHAIN as a JSON array."
+        ),
+    )
+    extraction_per_mime: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-MIME adapter override map (e.g. {'image/png': 'gemini-flash'}). "
+            "Wins over the chain order. Set via POCKETPAW_EXTRACTION_PER_MIME "
+            "as a JSON object."
+        ),
+    )
+    extraction_offline_fallback: str = Field(
+        default="local",
+        description=(
+            "Adapter name used when the chosen adapter requires network and "
+            "the host is offline. Today the chain hardcodes LocalExtractor as "
+            "fallback; this setting reserves the env key for future overrides."
+        ),
+    )
+    gemini_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Google Gemini API key for the gemini-flash extraction adapter. "
+            "Read from POCKETPAW_GEMINI_API_KEY. When unset, the gemini-flash "
+            "adapter is silently skipped during chain construction."
+        ),
+    )
+
     soul_cognitive_model: str = Field(
         default="",
         description=(
