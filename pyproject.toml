@@ -541,3 +541,84 @@ forbidden_modules = [
     "ee.cloud.models.user",
     "ee.cloud.models.agent",
 ]
+
+# ---------------------------------------------------------------------------
+# Pockets-builder isolation contracts — keep the new builder package
+# self-contained and prevent the cycle with ee.cloud.chat.
+# ---------------------------------------------------------------------------
+
+[[tool.importlinter.contracts]]
+name = "Pockets builder — no internal import from outside"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.pockets.router",
+    "ee.cloud.pockets.dto",
+    "ee.cloud.pockets.domain",
+    "ee.cloud.pockets.service",
+    "ee.cloud.pockets.agent_context",
+    "ee.cloud.pockets.layouts",
+    "ee.cloud.chat.agent_router",
+    "ee.cloud.chat.agent_service",
+]
+forbidden_modules = [
+    "ee.cloud.pockets.builder.service",
+    "ee.cloud.pockets.builder.providers",
+    "ee.cloud.pockets.builder.prompts",
+    "ee.cloud.pockets.builder.dto",
+]
+
+[[tool.importlinter.contracts]]
+name = "Pockets builder — no eager import from ee.cloud.chat (cycle prevention)"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.pockets.builder.providers",
+    "ee.cloud.pockets.builder.prompts",
+    "ee.cloud.pockets.builder.domain",
+    "ee.cloud.pockets.builder.dto",
+]
+forbidden_modules = [
+    "ee.cloud.chat.agent_router",
+    "ee.cloud.chat.agent_service",
+    "ee.cloud.chat.message_service",
+    "ee.cloud.chat.ws",
+]
+# ``service.py`` is allowed two narrow lazy imports inside function bodies
+# — ``push_sse_event`` and ``push_pocket_mutation`` from ``agent_service``
+# — to push frontend SSE frames without taking a module-level dependency.
+# These lazy imports are intentional and tested in test_sse_sequence.py.
+
+[[tool.importlinter.contracts]]
+name = "Pockets builder — no Beanie document writes outside pockets.service"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.pockets.builder",
+    "ee.cloud.pockets.builder.service",
+    "ee.cloud.pockets.builder.providers",
+    "ee.cloud.pockets.builder.prompts",
+    "ee.cloud.pockets.builder.domain",
+    "ee.cloud.pockets.builder.dto",
+]
+forbidden_modules = [
+    "ee.cloud.models.pocket",
+    "ee.cloud.models.session",
+    "ee.cloud.models.user",
+]
+
+[[tool.importlinter.contracts]]
+name = "Pockets builder — must not import the MCP binding it replaces"
+type = "forbidden"
+allow_indirect_imports = "false"
+source_modules = [
+    "ee.cloud.pockets.builder",
+    "ee.cloud.pockets.builder.service",
+    "ee.cloud.pockets.builder.providers",
+    "ee.cloud.pockets.builder.prompts",
+    "ee.cloud.pockets.builder.domain",
+    "ee.cloud.pockets.builder.dto",
+]
+forbidden_modules = [
+    "pocketpaw.agents.sdk_mcp_pocket",
+]

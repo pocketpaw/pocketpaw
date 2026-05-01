@@ -625,15 +625,15 @@ def build_context_block(ctx: ScopeContext) -> str:
     and how to render rich UI back to the client.
 
     Three pocket modes drive different prompt blocks:
-    - ``pocket_create`` intent → emit the OSS pocket-creation prompt
-      (intent classification, formats, hard rules) prefixed with a
-      cloud-mode preamble that maps the CLI bridge invocations to the
-      MCP tools.
+    - ``pocket_create`` intent → handled natively by ``ee.cloud.pockets.builder``
+      before the normal agent run. We deliberately skip injecting the OSS
+      pocket-creation prompt and the MCP cloud preamble so the agent isn't
+      told to reach for tools that the builder already owns.
     - Active pocket attached → emit the OSS pocket-interaction prompt
       with the same cloud-mode preamble + the ripple-inline hint.
     - Plain chat (DM, group, free session) → ripple-inline hint only.
     """
-    interaction_ctx, creation_ctx = _load_oss_pocket_contexts()
+    interaction_ctx, _creation_ctx = _load_oss_pocket_contexts()
 
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
     parts = [
@@ -641,8 +641,9 @@ def build_context_block(ctx: ScopeContext) -> str:
         f"<participants>{member_list}</participants>",
     ]
     if ctx.intent == "pocket_create":
-        preamble = _CLOUD_POCKET_TOOL_PREAMBLE.format(pocket_id="<new-pocket>")
-        parts.append(preamble + (creation_ctx or ""))
+        # The pockets-builder owns this turn — short-circuit to the bare
+        # scope/participants block.  No MCP preamble, no creation prompt;
+        # the builder runs structured-output calls before the agent does.
         return "\n".join(parts)
     if ctx.pocket_id:
         if interaction_ctx:

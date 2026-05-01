@@ -374,6 +374,78 @@ async def _run_agent_stream(
 
     full_text = ""
     cancelled = False
+
+    # ----------------------------------------------------------------------
+    # Builder dispatch — pockets-builder owns native pocket creation /
+    # update intent for every backend (Anthropic, OpenAI, Ollama, Codex,
+    # Copilot, deep_agents, opencode).  Runs BEFORE pool.run; if the
+    # builder finishes with success or error it short-circuits the rest of
+    # the stream.  When the classifier returns ``intent=none``, we fall
+    # through to the normal pool.run path.
+    # ----------------------------------------------------------------------
+    pocket_intent_handled = False
+    try:
+        async for builder_event, builder_done in _dispatch_builder(
+            ctx, body, instance, cancel_event, _drain_side_channel
+        ):
+            for ev in _drain_side_channel():
+                yield ev
+            if cancel_event.is_set():
+                cancelled = True
+                break
+            # Internal ``_sentinel`` marker tells the SSE loop the builder
+            # finished without a fresh frame to forward — used after the
+            # trailing ``chunk`` so we don't double-emit.
+            if builder_event[0] != "_sentinel":
+                yield builder_event
+                if builder_event[0] == "chunk":
+                    chunk_content = builder_event[1].get("content", "")
+                    if isinstance(chunk_content, str):
+                        full_text += chunk_content
+            if builder_done:
+                pocket_intent_handled = True
+                break
+    except Exception:
+        logger.exception(
+            "pockets-builder dispatch failed for agent=%s", ctx.target_agent_id
+        )
+        # Fall through to the normal pool.run path — the user shouldn't
+        # be left without a reply because of a builder bug.
+
+    if cancelled or pocket_intent_handled:
+        # Builder owned this turn (success / error) or user cancelled.
+        # Persist the confirmation chunk if any was accumulated so the
+        # conversation history reflects what was created.
+        try:
+            detach_sse_event_sink(sink_token)
+        except Exception:
+            pass
+        try:
+            detach_agent_identity(identity_tokens)
+        except Exception:
+            pass
+        if cancelled or not full_text.strip():
+            yield (
+                "stream_end",
+                {
+                    "assistant_message_id": None,
+                    "usage": {},
+                    "cancelled": cancelled,
+                },
+            )
+        else:
+            assistant_msg = await _persist_assistant_message(ctx, full_text, [])
+            yield (
+                "stream_end",
+                {
+                    "assistant_message_id": str(assistant_msg.id),
+                    "usage": {},
+                    "cancelled": False,
+                },
+            )
+        await _broadcast_agent_typing(ctx, active=False)
+        return
+
     try:
         async for event in pool.run(
             ctx.target_agent_id,
@@ -481,6 +553,131 @@ async def _run_agent_stream(
         "stream_end",
         {"assistant_message_id": assistant_id, "usage": {}, "cancelled": False},
     )
+
+
+# ---------------------------------------------------------------------------
+# Pockets-builder dispatch helpers
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_builder(
+    ctx: ScopeContext,
+    body: CloudAgentChatRequest,
+    instance: Any,
+    cancel_event: asyncio.Event,
+    drain_side_channel: Any,
+) -> AsyncIterator[tuple[tuple[str, dict[str, Any]], bool]]:
+    """Run the pockets-builder against the user's message.
+
+    Yields ``((event_name, data), done)`` tuples — the SSE handler
+    forwards the inner tuple as an SSE frame and stops iterating when
+    ``done`` is True.  ``done == True`` for terminal builder events
+    (``pocket.created``, ``pocket.updated``, ``error``) so the SSE
+    handler skips the normal ``pool.run`` path.
+    """
+    from pocketpaw.config import Settings
+
+    from ee.cloud.pockets.builder import BuildRequest, run_intent_from_message
+
+    settings = Settings.load()
+    provider = _derive_provider_from_instance(instance, settings)
+
+    # Carry the frontend's ``ctx.intent`` hint into the builder so the
+    # classifier call is skipped when the user is already in pocket-create
+    # / pocket-update mode (saves one LLM round-trip).
+    intent_hint: str | None = None
+    if ctx.intent in ("pocket_create", "pocket_update"):
+        intent_hint = ctx.intent
+
+    session_mongo_id = (
+        ctx.scope_id if ctx.kind is ScopeKind.SESSION else None
+    )
+
+    build_req = BuildRequest(
+        user_message=body.content,
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        session_mongo_id=session_mongo_id,
+        pocket_id=ctx.pocket_id,
+        provider=provider,
+        intent_hint=intent_hint,
+    )
+
+    saw_create_or_update_intent = False
+    saw_terminal_event = False
+    async for builder_event in run_intent_from_message(build_req, settings=settings):
+        if cancel_event.is_set():
+            return
+        name = builder_event.name
+        data = builder_event.data
+        if name == "intent.detected":
+            intent = data.get("intent")
+            if intent == "none":
+                # Not a pocket intent — fall through to pool.run without
+                # surfacing the ``intent.detected`` frame to the client.
+                return
+            saw_create_or_update_intent = True
+            yield ((name, data), False)
+            continue
+        if name in ("pocket.created", "pocket.updated", "error"):
+            # Terminal event — yield with done=False so the SSE loop keeps
+            # iterating long enough to forward the trailing confirmation
+            # ``chunk`` (which the builder emits AFTER pocket.created).
+            saw_terminal_event = True
+            yield ((name, data), False)
+            continue
+        # spec.building, chunk, anything else
+        yield ((name, data), False)
+
+    # Generator exhausted — if any pocket intent was handled (terminal
+    # event seen, or update/create in flight), tell the SSE loop to skip
+    # the normal ``pool.run`` path.  We yield a sentinel so the caller
+    # exits cleanly without an extra event.
+    if saw_terminal_event or saw_create_or_update_intent:
+        # Sentinel emit: no SSE frame, just signal done.
+        yield (("_sentinel", {}), True)
+
+
+def _derive_provider_from_instance(instance: Any, settings: Any) -> str:
+    """Map an agent pool instance to the builder provider string.
+
+    The instance carries an ``AgentBackend`` object on ``backend``;
+    we derive the provider from the backend class name plus the
+    relevant ``*_provider`` setting on ``Settings`` so multi-provider
+    backends (Claude SDK, OpenAI Agents) route to the correct path.
+    """
+    backend_obj = getattr(instance, "backend", None)
+    backend_name = type(backend_obj).__name__.lower() if backend_obj is not None else ""
+
+    if "claude" in backend_name or "anthropic" in backend_name:
+        sub = (getattr(settings, "claude_sdk_provider", "") or "").lower()
+        if sub in ("ollama",):
+            return "ollama"
+        return "anthropic"
+    if "openaiagents" in backend_name or "openai" in backend_name:
+        sub = (getattr(settings, "openai_agents_provider", "") or "").lower()
+        if sub in ("ollama",):
+            return "ollama"
+        if sub in ("openai_compatible", "openai-compatible"):
+            return "openai_compatible"
+        return "openai"
+    if "codex" in backend_name:
+        return "codex_cli"
+    if "copilot" in backend_name:
+        return "copilot_sdk"
+    if "deep" in backend_name:
+        model_str = (getattr(settings, "deep_agents_model", "") or "")
+        return model_str.split(":")[0] if ":" in model_str else "anthropic"
+    if "opencode" in backend_name:
+        return "opencode"
+    if "ollama" in backend_name:
+        return "ollama"
+    # Safe fallback by reachable key.
+    if getattr(settings, "anthropic_api_key", None):
+        return "anthropic"
+    if getattr(settings, "openai_api_key", None):
+        return "openai"
+    return "other"
 
 
 # ---------------------------------------------------------------------------

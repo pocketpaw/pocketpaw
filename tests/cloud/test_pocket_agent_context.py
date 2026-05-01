@@ -376,7 +376,12 @@ def test_build_context_block_pocket_mode_does_not_raise_on_format_braces():
     assert "{type, props, children}" in block
 
 
-def test_build_context_block_pocket_create_intent_uses_creation_context():
+def test_build_context_block_pocket_create_intent_skips_mcp_preamble():
+    """When ``ctx.intent == 'pocket_create'``, the pockets-builder owns
+    the turn — ``build_context_block`` MUST NOT inject the MCP cloud
+    preamble or the OSS creation prompt, otherwise the agent reaches for
+    tools the builder already replaced.  Only the bare scope/participants
+    block is emitted."""
     from ee.cloud.chat.agent_service import (
         ScopeContext,
         ScopeKind,
@@ -393,8 +398,8 @@ def test_build_context_block_pocket_create_intent_uses_creation_context():
         intent="pocket_create",
     )
     block = build_context_block(ctx)
-    # Sanity: cloud preamble is present and didn't crash on format-braces.
-    assert "<cloud-pocket-tools>" in block
+    assert "<cloud-pocket-tools>" not in block
+    assert "<scope>session s1</scope>" in block
 
 
 def test_normalizer_lifts_raw_ui_node_under_ui_field():
