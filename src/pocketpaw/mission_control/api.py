@@ -393,7 +393,8 @@ async def update_task(task_id: str, request: UpdateTaskRequest) -> dict[str, Any
 async def delete_task(task_id: str) -> SuccessResponse:
     """Delete a task."""
     manager = get_mission_control_manager()
-    deleted = await manager._store.delete_task(task_id)
+    # deleted = await manager._store.delete_task(task_id)
+    deleted = await manager.delete_task(task_id)
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -618,7 +619,8 @@ async def update_document(document_id: str, request: UpdateDocumentRequest) -> d
 async def delete_document(document_id: str) -> SuccessResponse:
     """Delete a document."""
     manager = get_mission_control_manager()
-    deleted = await manager._store.delete_document(document_id)
+    # deleted = await manager._store.delete_document(document_id)
+    deleted = await manager.delete_document(document_id)
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -641,7 +643,7 @@ async def get_activity_feed(
     manager = get_mission_control_manager()
 
     if agent_id or task_id:
-        activities = await manager._store.get_activities(
+        activities = await manager.get_activities(
             agent_id=agent_id,
             task_id=task_id,
             limit=limit,
