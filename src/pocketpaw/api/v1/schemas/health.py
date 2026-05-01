@@ -14,6 +14,8 @@ class HealthSummary(BaseModel):
     check_count: int = 0
     issues: list[dict] = []
     error: str | None = None
+    active_backend: str | None = None
+    fallback_backends: list[str] = []
 
 
 class HealthErrorEntry(BaseModel):
