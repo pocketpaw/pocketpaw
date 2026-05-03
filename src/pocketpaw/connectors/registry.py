@@ -43,7 +43,7 @@ class AnyAdapter(Protocol):
 _SQL_CONNECTORS: set[str] = {"postgresql", "mysql", "mssql", "sqlite"}
 _NOSQL_CONNECTORS: set[str] = {"mongodb"}
 _CLI_CONNECTORS: set[str] = {"firebase", "gcp"}
-_NATIVE_COMM_CONNECTORS: set[str] = {"gmail", "gcalendar", "gdocs"}  # PR-3..5; Drive lands in PR-6
+_NATIVE_COMM_CONNECTORS: set[str] = {"gmail", "gcalendar", "gdocs", "drive"}  # PR-3..6
 
 
 def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
@@ -87,6 +87,10 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
                 from pocketpaw.connectors.adapters.gdocs import GoogleDocsConnector
 
                 return GoogleDocsConnector()
+            if connector_name == "drive":
+                from pocketpaw.connectors.adapters.gdrive import GoogleDriveConnector
+
+                return GoogleDriveConnector()
         except Exception:
             return None
     return None
