@@ -34,13 +34,20 @@ class AnyAdapter(Protocol):
 
 # Connectors handled by native Python adapters instead of YAML/REST.
 # SQL databases use DatabaseAdapter, MongoDB uses MongoDBAdapter.
+# CLI connectors (firebase, gcp) are subprocess-based and execute
+# locally — see ee/cloud/connectors/CHARTER.md §6.2 for the local-agent
+# bus dispatch the cloud router uses.
+# Native communication connectors (gmail, gcalendar, gdocs, gdrive)
+# wrap a stateful Python client (OAuth, MIME, etc.) and live in
+# pocketpaw/connectors/adapters/.
 _SQL_CONNECTORS: set[str] = {"postgresql", "mysql", "mssql", "sqlite"}
 _NOSQL_CONNECTORS: set[str] = {"mongodb"}
 _CLI_CONNECTORS: set[str] = {"firebase", "gcp"}
+_NATIVE_COMM_CONNECTORS: set[str] = {"gmail"}  # PR-3; Calendar/Docs/Drive land in PR-4..6
 
 
 def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
-    """Create a native adapter for database connectors."""
+    """Create a native adapter for database / CLI / communication connectors."""
     if connector_name in _SQL_CONNECTORS:
         try:
             from pocketpaw.connectors.db_adapter import DatabaseAdapter
@@ -64,6 +71,14 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
             from pocketpaw.connectors.firebase_adapter import FirebaseAdapter
 
             return FirebaseAdapter()
+        except Exception:
+            return None
+    if connector_name in _NATIVE_COMM_CONNECTORS:
+        try:
+            if connector_name == "gmail":
+                from pocketpaw.connectors.adapters.gmail import GmailConnector
+
+                return GmailConnector()
         except Exception:
             return None
     return None

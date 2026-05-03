@@ -70,22 +70,33 @@ async def test_widget_recipes_empty_when_nothing_enabled(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_widget_recipes_empty_for_yaml_connectors(client: AsyncClient):
-    """YAML connectors return [] from widgets() in Phase 1.
-
-    Native connectors override widgets() in PR-3+; this test pins the
-    Phase 1 default behaviour so a future regression that accidentally
-    exposes recipes from REST connectors is caught.
-    """
-    catalog = (await client.get("/api/v1/cloud/connectors")).json()
-    name = catalog[0]["name"]
+    """Pure YAML connectors (no native adapter) return [] from widgets()."""
+    # Pick a known YAML-only connector from the catalog (stripe is REST-only).
     await client.post(
-        f"/api/v1/cloud/connectors/{name}/enable",
+        "/api/v1/cloud/connectors/stripe/enable",
         json={"scope": "workspace"},
     )
     resp = await client.get("/api/v1/cloud/connectors/widget-recipes")
     assert resp.status_code == 200
-    # YAML connectors don't ship recipes yet — list stays empty.
-    assert resp.json() == []
+    # Stripe ships no recipes in Phase 1 — list excludes its rows.
+    rows = resp.json()
+    assert all(r["connector"] != "stripe" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_widget_recipes_includes_gmail_when_enabled(client: AsyncClient):
+    """Gmail (native adapter, PR-3) contributes 3 recipes to the rail."""
+    await client.post(
+        "/api/v1/cloud/connectors/gmail/enable",
+        json={"scope": "workspace"},
+    )
+    resp = await client.get("/api/v1/cloud/connectors/widget-recipes")
+    assert resp.status_code == 200
+    rows = resp.json()
+    gmail_rows = [r for r in rows if r["connector"] == "gmail"]
+    titles = sorted(r["title"] for r in gmail_rows)
+    assert titles == ["Email Stats", "Important Emails", "Inbox"]
+    assert all(r["connector_display_name"] == "Gmail" for r in gmail_rows)
 
 
 # ---------------------------------------------------------------------------

@@ -349,14 +349,17 @@ async def list_widget_recipes(workspace_id: str) -> list[WidgetRecipeResponse]:
 def _adapter_for_definition(defn, name: str):
     """Build an adapter without connecting — for static metadata reads.
 
-    For native adapters (db / firebase / gcp / mongo) we'd ideally have
-    a "metadata-only" constructor. For Phase 1 we just instantiate the
-    YAML adapter (it provides the default ``widgets() -> []``); native
-    overrides land in PR-3 onward when each native adapter adopts the
-    protocol explicitly.
+    Prefers the native adapter when ``ConnectorRegistry`` knows one
+    (Gmail in PR-3; Calendar / Docs / Drive in PR-4..6; firebase / gcp
+    in PR-9). Falls back to ``DirectRESTAdapter`` for YAML-only
+    connectors.
     """
+    from pocketpaw.connectors.registry import _create_native_adapter
     from pocketpaw.connectors.yaml_engine import DirectRESTAdapter
 
+    native = _create_native_adapter(name)
+    if native is not None:
+        return native
     return DirectRESTAdapter(defn)
 
 

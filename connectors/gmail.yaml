@@ -1,0 +1,72 @@
+# Gmail connector — REST API over OAuth bearer token.
+# Created: 2026-05-03 — Phase 1 PR-3.
+# This YAML carries the catalog metadata + the action manifest. The
+# runtime wiring lives in src/pocketpaw/connectors/adapters/gmail.py
+# (GmailConnector) which wraps the existing GmailClient from
+# src/pocketpaw/integrations/gmail.py. The 8 hand-written tool classes
+# in src/pocketpaw/tools/builtin/gmail.py stay in place for Phase 1 —
+# their LLM-tuned response formatting is preserved verbatim.
+#
+# A future PR (3.5 or later) replaces those tool classes with
+# generated ones via tools.builtin.connector_tools.connector_tools_for(c).
+# Snapshot tests in tests/connectors/test_gmail_connector.py pin the
+# action names + descriptions so the replacement is byte-identical.
+
+name: gmail
+display_name: Gmail
+type: communication
+icon: mail
+
+auth:
+  method: oauth2
+  credentials:
+    - name: GOOGLE_OAUTH_TOKEN
+      description: OAuth access token with https://mail.google.com/ scope
+      required: true
+
+actions:
+  - name: gmail_search
+    description: Search Gmail for emails matching a query (Gmail search syntax).
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: gmail_read
+    description: Read the full body of a single Gmail message by ID.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: gmail_send
+    description: Send an email from the authenticated account.
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: gmail_list_labels
+    description: List all labels in the mailbox.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: gmail_create_label
+    description: Create a new label.
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: gmail_modify
+    description: Add or remove labels on a message.
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: gmail_trash
+    description: Move a message to Trash.
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: gmail_batch_modify
+    description: Apply label changes to many messages at once.
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: gmail_summary
+    description: Aggregate inbox stats (unread, today, avg reply time) for the Email Stats widget.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
