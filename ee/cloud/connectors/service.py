@@ -18,16 +18,20 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from ee.cloud._core.errors import NotFound, ValidationError
+from ee.cloud._core.errors import CloudError, NotFound, ValidationError
 from ee.cloud.connectors.domain import AvailableConnector, WorkspaceConnector
 from ee.cloud.connectors.dto import (
     ConnectorDetailResponse,
     ConnectorResponse,
     EnableConnectorRequest,
+    ExecuteActionRequest,
+    ExecuteActionResponse,
     UpdateConnectorConfigRequest,
+    WidgetRecipeResponse,
 )
 from ee.cloud.models.connector import WorkspaceConnector as _WCDoc
 from ee.cloud.shared.events import event_bus
+from pocketpaw.connectors.protocol import ExecutionMode
 
 logger = logging.getLogger(__name__)
 
@@ -288,11 +292,169 @@ async def record_sync(
     return _doc_to_domain(doc, display_name=a.display_name, type_=a.type, icon=a.icon)
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 PR-2 — widget recipes + action execution
+# ---------------------------------------------------------------------------
+
+
+async def list_widget_recipes(workspace_id: str) -> list[WidgetRecipeResponse]:
+    """Flatten widget recipes across every connector enabled for this workspace.
+
+    Read-only, tenant-filtered. Frontend AddWidgetPicker calls this to
+    populate the "From connectors" rail. Disabled connectors contribute
+    zero recipes.
+    """
+    enabled_docs = await _WCDoc.find(
+        _WCDoc.workspace == workspace_id, _WCDoc.enabled == True  # noqa: E712 — Beanie expects ==
+    ).to_list()
+    if not enabled_docs:
+        return []
+
+    reg = _get_registry()
+    available = {a.name: a for a in _available_from_registry()}
+    recipes: list[WidgetRecipeResponse] = []
+    for doc in enabled_docs:
+        a = available.get(doc.name)
+        if a is None:
+            continue
+        # Each connector exposes recipes via its adapter; the registry
+        # holds adapter instances per-pocket. For workspace-level recipe
+        # listing we instantiate from the YAML def or a native adapter
+        # without connecting — recipes are static metadata.
+        defn = reg.get_definition(doc.name)
+        if defn is None:
+            continue
+        adapter = _adapter_for_definition(defn, doc.name)
+        try:
+            adapter_recipes = await adapter.widgets()
+        except Exception as exc:  # noqa: BLE001 — bad adapter shouldn't fail the whole list
+            logger.warning("widgets() raised for %s: %s", doc.name, exc)
+            continue
+        for r in adapter_recipes or []:
+            recipes.append(
+                WidgetRecipeResponse(
+                    connector=doc.name,
+                    connector_display_name=a.display_name,
+                    title=getattr(r, "title", str(r)),
+                    display_type=getattr(r, "display_type", "stats"),
+                    action=getattr(r, "action", ""),
+                    params=getattr(r, "params", {}) or {},
+                    default_size=getattr(r, "default_size", "col-1 row-1"),
+                    description=getattr(r, "description", ""),
+                ),
+            )
+    return recipes
+
+
+def _adapter_for_definition(defn, name: str):
+    """Build an adapter without connecting — for static metadata reads.
+
+    For native adapters (db / firebase / gcp / mongo) we'd ideally have
+    a "metadata-only" constructor. For Phase 1 we just instantiate the
+    YAML adapter (it provides the default ``widgets() -> []``); native
+    overrides land in PR-3 onward when each native adapter adopts the
+    protocol explicitly.
+    """
+    from pocketpaw.connectors.yaml_engine import DirectRESTAdapter
+
+    return DirectRESTAdapter(defn)
+
+
+async def execute(
+    workspace_id: str,
+    name: str,
+    body: ExecuteActionRequest,
+    *,
+    user_id: str | None = None,
+) -> ExecuteActionResponse:
+    """Execute one connector action with mode-aware dispatch.
+
+    - ``cloud`` actions run in-process via the adapter.
+    - ``local`` actions are forwarded to the user's pocketpaw runtime
+      via ``connector.exec.requested`` on the chat WebSocket bus. PR-9
+      lands the runtime listener; for now the dispatch returns a
+      ``CloudError(503, "connector.local_agent_unavailable", ...)`` so
+      callers see a clear "needs PR-9" signal instead of a silent fail.
+    - ``sandbox`` actions raise 501 — reserved for a future PR.
+
+    Tenancy: caller passes ``workspace_id`` from ``current_workspace_id``.
+    The cloud router enforces auth; this function trusts ``workspace_id``
+    is the right scope.
+    """
+    body = ExecuteActionRequest.model_validate(body)
+    available = {a.name: a for a in _available_from_registry()}
+    if name not in available:
+        raise NotFound("connector", name)
+
+    reg = _get_registry()
+    defn = reg.get_definition(name)
+    if defn is None:
+        raise NotFound("connector", name)
+
+    adapter = _adapter_for_definition(defn, name)
+    schemas = await adapter.actions()
+    schema = next((s for s in schemas if s.name == body.action), None)
+    if schema is None:
+        raise NotFound("connector.action", body.action)
+
+    mode = schema.execution_mode
+
+    if mode == ExecutionMode.SANDBOX:
+        raise CloudError(
+            501,
+            "connector.sandbox_not_implemented",
+            "sandbox execution is reserved for a future PR — see CHARTER.md §3 out of scope",
+        )
+
+    if mode == ExecutionMode.LOCAL:
+        # PR-2: the bus listener doesn't exist yet (lands in PR-9).
+        # Emit the request anyway so subscribers in tests can observe
+        # the dispatch contract; return a structured 503 that the
+        # frontend can show as "open your local PocketPaw".
+        await event_bus.emit(
+            "connector.exec.requested",
+            {
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "connector": name,
+                "action": body.action,
+                "params": body.params,
+                "scope": body.scope,
+                "requires_binary": schema.requires_binary,
+            },
+        )
+        raise CloudError(
+            503,
+            "connector.local_agent_unavailable",
+            "this action runs on your local PocketPaw runtime, "
+            "which isn't connected. Open your local app and retry.",
+        )
+
+    # CLOUD path — run in-process. Connect first if needed, using the
+    # workspace's saved config from the connector entity.
+    doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
+    config = dict(doc.config) if doc else {}
+    pocket_key = body.pocket_id or workspace_id
+    if not adapter._connected:  # noqa: SLF001 — adapter API doesn't expose is_connected
+        await adapter.connect(pocket_key, config)
+
+    result = await adapter.execute(body.action, body.params)
+    return ExecuteActionResponse(
+        success=result.success,
+        data=result.data,
+        error=result.error,
+        records_affected=result.records_affected,
+        execution_mode=ExecutionMode.CLOUD.value,
+    )
+
+
 __all__ = [
     "disable_connector",
     "enable_connector",
+    "execute",
     "get_connector",
     "list_connectors",
+    "list_widget_recipes",
     "record_sync",
     "update_config",
 ]

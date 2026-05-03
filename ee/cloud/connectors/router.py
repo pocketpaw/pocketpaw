@@ -14,10 +14,13 @@ from ee.cloud.connectors.dto import (
     ConnectorDetailResponse,
     ConnectorResponse,
     EnableConnectorRequest,
+    ExecuteActionRequest,
+    ExecuteActionResponse,
     UpdateConnectorConfigRequest,
+    WidgetRecipeResponse,
 )
 from ee.cloud.license import require_license
-from ee.cloud.shared.deps import current_workspace_id
+from ee.cloud.shared.deps import current_user_id, current_workspace_id
 
 # Mounted under /api/v1/cloud/connectors (not /api/v1/connectors) so it
 # does NOT shadow the legacy pocket-scoped routes in
@@ -44,6 +47,37 @@ async def list_connectors(
     into "Connected" vs "Available" rails on its own.
     """
     return await connectors_service.list_connectors(workspace_id)
+
+
+@router.get("/widget-recipes", response_model=list[WidgetRecipeResponse])
+async def list_widget_recipes(
+    workspace_id: str = Depends(current_workspace_id),
+) -> list[WidgetRecipeResponse]:
+    """Default home widgets every enabled connector contributes.
+
+    Feeds the AddWidgetPicker's "From connectors" rail. Disabled
+    connectors return zero recipes. Frontend compiles each recipe to a
+    Ripple UISpec at render time.
+    """
+    return await connectors_service.list_widget_recipes(workspace_id)
+
+
+@router.post("/{name}/execute", response_model=ExecuteActionResponse)
+async def execute_action(
+    name: str,
+    body: ExecuteActionRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> ExecuteActionResponse:
+    """Execute one connector action with mode-aware dispatch.
+
+    - ``cloud`` actions run in-process and return immediately.
+    - ``local`` actions forward to the user's pocketpaw runtime via the
+      chat WebSocket bus (PR-9 lands the listener; today returns 503
+      ``connector.local_agent_unavailable``).
+    - ``sandbox`` actions return 501 — reserved.
+    """
+    return await connectors_service.execute(workspace_id, name, body, user_id=user_id)
 
 
 @router.get("/{name}", response_model=ConnectorDetailResponse)
