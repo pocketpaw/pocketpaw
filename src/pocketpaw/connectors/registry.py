@@ -43,7 +43,7 @@ class AnyAdapter(Protocol):
 _SQL_CONNECTORS: set[str] = {"postgresql", "mysql", "mssql", "sqlite"}
 _NOSQL_CONNECTORS: set[str] = {"mongodb"}
 _CLI_CONNECTORS: set[str] = {"firebase", "gcp"}
-_NATIVE_COMM_CONNECTORS: set[str] = {"gmail"}  # PR-3; Calendar/Docs/Drive land in PR-4..6
+_NATIVE_COMM_CONNECTORS: set[str] = {"gmail", "gcalendar"}  # PR-3..4; Docs/Drive land in PR-5..6
 
 
 def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
@@ -79,6 +79,10 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
                 from pocketpaw.connectors.adapters.gmail import GmailConnector
 
                 return GmailConnector()
+            if connector_name == "gcalendar":
+                from pocketpaw.connectors.adapters.gcalendar import GoogleCalendarConnector
+
+                return GoogleCalendarConnector()
         except Exception:
             return None
     return None
