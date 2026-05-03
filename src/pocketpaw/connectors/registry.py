@@ -43,7 +43,9 @@ class AnyAdapter(Protocol):
 _SQL_CONNECTORS: set[str] = {"postgresql", "mysql", "mssql", "sqlite"}
 _NOSQL_CONNECTORS: set[str] = {"mongodb"}
 _CLI_CONNECTORS: set[str] = {"firebase", "gcp"}
-_NATIVE_COMM_CONNECTORS: set[str] = {"gmail", "gcalendar", "gdocs", "drive"}  # PR-3..6
+_NATIVE_COMM_CONNECTORS: set[str] = {
+    "gmail", "gcalendar", "gdocs", "drive", "reddit", "spotify",
+}  # PR-3..7
 
 
 def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
@@ -91,6 +93,14 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
                 from pocketpaw.connectors.adapters.gdrive import GoogleDriveConnector
 
                 return GoogleDriveConnector()
+            if connector_name == "reddit":
+                from pocketpaw.connectors.adapters.reddit import RedditConnector
+
+                return RedditConnector()
+            if connector_name == "spotify":
+                from pocketpaw.connectors.adapters.spotify import SpotifyConnector
+
+                return SpotifyConnector()
         except Exception:
             return None
     return None
