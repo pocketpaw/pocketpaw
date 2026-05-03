@@ -106,6 +106,13 @@ After Phase 1:
 - Connector-level rate limiting, circuit breaking, retries. The
   `core/runtime` retry/circuit breaker layer (per Linear backlog notes
   on infra PR review patterns) handles that.
+- **`ExecutionMode.SANDBOX`** — ephemeral container per invocation with
+  workspace-scoped service-account creds. Needed for prod database
+  CLIs (`psql`, `mongosh`) and untrusted code execution. Defer until a
+  Nerve client genuinely needs DB-CLI widgets running 24/7. Phase 1
+  ships only `cloud` and `local` modes. The protocol enum carries
+  `SANDBOX` from day one so a future PR is purely runtime, not a
+  schema change.
 - New connectors. Phase 1 ships zero net-new connectors; we only unify
   what exists.
 
@@ -122,7 +129,11 @@ After Phase 1:
 
 The existing `ConnectorProtocol` in
 `src/pocketpaw/connectors/protocol.py` is the starting point and is
-mostly correct. Phase 1 adds `widgets()` and clarifies a few semantics.
+mostly correct. Phase 1 adds `widgets()`, `health()`, `ConnectorScope`,
+and **`ExecutionMode`** on the action schema. The `ExecutionMode` axis
+exists because CLI-based connectors (`firebase`, `gcp`, `gh`, `kubectl`,
+…) cannot execute in the cloud's FastAPI process — there's no clean way
+to multi-tenant per-workspace `gcloud` configs on a shared host.
 
 ```python
 class Connector(Protocol):
@@ -138,6 +149,26 @@ class Connector(Protocol):
     async def sync(self, scope: ConnectorScope) -> SyncResult: ...
     async def schema(self) -> dict: ...
     async def health(self, scope: ConnectorScope) -> ConnectorHealth: ...
+```
+
+`ActionSchema` gains two fields so the runtime knows where each action
+is allowed to execute:
+
+```python
+class ExecutionMode(StrEnum):
+    CLOUD = "cloud"        # runs in the FastAPI process (REST APIs, in-process logic)
+    LOCAL = "local"        # runs in the user's pocketpaw runtime (CLI tools)
+    SANDBOX = "sandbox"    # ephemeral container per call (deferred — see Out of scope)
+
+
+class ActionSchema:
+    name: str
+    description: str
+    method: str
+    params: list[ParamSpec]
+    trust_level: TrustLevel
+    execution_mode: ExecutionMode = ExecutionMode.CLOUD   # NEW
+    requires_binary: str | None = None                    # NEW — "gcloud", "firebase", "gh", …
 ```
 
 Notes on the change from today's protocol:
@@ -156,9 +187,15 @@ Notes on the change from today's protocol:
    last execute() — fragile. Explicit health check keeps the UI honest.
 4. **`IngestAdapter.permissions()` stays as-is.** It's already correct
    for Fabric scope inheritance.
+5. **`ExecutionMode` + `requires_binary` are new on `ActionSchema`.**
+   YAML connectors default to `cloud` (no behaviour change). CLI
+   adapters (`firebase`, `gcp`) declare `local` per action with the
+   binary they shell out to. The cloud router refuses to execute
+   `local` actions in-process — it forwards them to the local-agent
+   bus instead (see §6.2 below).
 
-`AuthSpec`, `ActionSchema`, `ActionResult`, `ConnectionResult`,
-`SyncResult`, `IngestACL` exist already and are reused without change.
+`AuthSpec`, `ActionResult`, `ConnectionResult`, `SyncResult`,
+`IngestACL` exist already and are reused without change.
 
 ## 5 — Layers in their final shape
 
@@ -241,6 +278,80 @@ your pockets" + generative paths.
 async def connector_step(c: Connector, action: str, params: dict, scope: ConnectorScope) -> StepResult: ...
 ```
 
+### 6.2 — CLI connectors and the local-agent bus
+
+`firebase`, `gcp`, `gh`, `kubectl`, and any future CLI-driven connectors
+cannot execute on the cloud's FastAPI host — there's no way to multi-tenant
+per-workspace `gcloud` configs cleanly on a shared server. Their
+`ActionSchema.execution_mode` is `local`, and execution flows through the
+user's already-running pocketpaw runtime via the existing chat WebSocket
+bus.
+
+**Path for a local action:**
+
+```
+Frontend  →  POST /api/v1/cloud/connectors/{name}/execute
+                  {action, params, scope, request_id}
+                       ↓
+          ee/cloud/connectors/service.execute()
+                       ↓
+      inspects action.execution_mode
+       ┌──────────┴──────────┐
+   cloud                    local
+     ↓                        ↓
+  adapter.execute()      publish "connector.exec.requested"
+  in-process             onto chat WS to (workspace_id, user_id)
+  return result            ↓
+                         user's local pocketpaw runtime
+                         picks up, runs gcloud/firebase
+                         publishes "connector.exec.completed"
+                           {request_id, result}
+                           ↓
+                         service correlates by request_id,
+                         resolves the awaiting future,
+                         returns 200 + result to caller
+```
+
+**Bus topics added (Phase 1):**
+
+- `connector.exec.requested` — cloud → local-agent
+  `{request_id, workspace_id, connector, action, params, scope}`
+- `connector.exec.completed` — local-agent → cloud
+  `{request_id, success, result?, error?}`
+
+The transport reuses the chat WebSocket (`InProcessBus` + the existing
+client→server channel `ChatPill` already has). No new socket, no new
+auth — the agent that runs the user's chat IS the agent that runs the
+CLI. One persistent connection, one identity.
+
+**Failure modes:**
+
+- *User offline / runtime not running.* Cloud router times out at 30s,
+  returns `503 connector.local_agent_unavailable`. Frontend shows
+  "Open your local PocketPaw to run this widget."
+- *Binary not installed on user's machine.* Local agent introspects
+  `action.requires_binary`, fails fast with
+  `connector.binary_missing`. Frontend shows "Install `gcloud` to use
+  Firebase widgets" with a link to setup docs.
+- *Cloud service is offline.* Local actions don't fire because they
+  originate from the cloud router. Read-only home widgets fall back
+  to last-known cached values (cached `last_sync_status` already in
+  the entity).
+
+**What the local agent needs (PR-9 deliverable):**
+
+Listener bound at boot in `pocketpaw/runtime/connector_bus.py` that:
+
+1. Subscribes to `connector.exec.requested` for messages addressed to
+   the local user_id.
+2. Looks up the connector adapter from the local registry.
+3. Calls `adapter.execute(action, params, scope)` on the running host
+   (the user's machine has gcloud/firebase configured).
+4. Publishes `connector.exec.completed` with the result.
+
+This wiring already mirrors how chat messages flow today — the streaming
+chunks come in over the same WS, just on a different topic.
+
 ## 7 — OAuth + token store
 
 The existing `integrations/oauth.py` + `integrations/token_store.py`
@@ -279,8 +390,15 @@ Migration order, by risk:
 6. **Drive directory subpackage merge** — `src/pocketpaw/connectors/drive/`
    folds into `adapters/gdrive.py` (or stays if it's substantially bigger).
 7. **Native adapters renamed** — `db_adapter.py` → `adapters/db.py`,
-   `firebase_adapter.py` → `adapters/firebase.py`, etc.
-8. **Phase 1 sealed.** Protocol stable, all consumers reading from one
+   `firebase_adapter.py` → `adapters/firebase.py`, etc. Each declares
+   `execution_mode=local` on its actions and includes
+   `requires_binary` (`firebase` / `gcloud`).
+8. **Local-agent bus listener** — `pocketpaw/runtime/connector_bus.py`
+   lands in the runtime. Subscribes to `connector.exec.requested`,
+   runs CLI adapters against the user's machine, publishes
+   `connector.exec.completed`. The cloud router's
+   `local`-mode dispatch becomes operational.
+9. **Phase 1 sealed.** Protocol stable, all consumers reading from one
    registry, no behaviour change to the agent or to existing UIs.
 
 Each migration step is a single PR. Captain reviews before merge.
@@ -306,6 +424,18 @@ Each migration step is a single PR. Captain reviews before merge.
    higher-level `WidgetRecipe` that compiles to UISpec at render time?**
    Recipe gives us a stable contract that survives Ripple version bumps.
    Strong vote for Recipe.
+
+### Resolved by captain (2026-05-03)
+
+- **Local mode requires the user's pocketpaw runtime to be online.**
+  Same constraint Slack/iMessage live with. CLI widgets show a
+  "needs local agent" banner when the agent isn't connected.
+- **`SANDBOX` execution mode deferred.** Ships when a Nerve client
+  needs DB-CLI widgets running 24/7. Enum carries `SANDBOX` from day
+  one so the future PR is runtime-only, not a schema change.
+- **Local-agent bus reuses the existing chat WebSocket.** Two new
+  topics (`connector.exec.requested` / `connector.exec.completed`),
+  one persistent socket, one identity. No new transport.
 
 ## 10 — Phase 2 preview (informational, not committed)
 
@@ -334,21 +464,27 @@ connectors, community-extensible, agent-native."
 
 ## 11 — Phase 1 acceptance criteria
 
-Phase 1 is done when **all five** are true:
+Phase 1 is done when **all six** are true:
 
 1. Every existing connector — Gmail, Calendar, Docs, Drive, Reddit, Spotify,
    30 YAML — implements `Connector`. Registry returns them all.
-2. The home widget picker reads `GET /api/v1/connectors/widget-recipes`
+2. The home widget picker reads `GET /api/v1/cloud/connectors/widget-recipes`
    and shows real recipes from at least three connectors (Gmail target).
 3. The agent's tool list generates from `connector_tools_for(c)`. Snapshot
    tests pin the existing 18 Google tool names + descriptions.
 4. ConnectorPanel.svelte's `getConnectors()` reads from
-   `GET /api/v1/connectors` (cloud router) instead of whatever it talks
-   to today.
+   `GET /api/v1/cloud/connectors` (cloud router) for workspace-level
+   state. `PocketDataPanel` keeps reading the legacy `/api/v1/connectors`
+   path for pocket-scoped operations until its own migration PR.
 5. `pocketpaw/integrations/` is empty (or holds only `oauth_integrations`
    the API endpoint). The body has moved into `connectors/adapters/`.
+6. **CLI connectors (firebase, gcp) execute via the local-agent bus.**
+   Cloud router refuses `local`-mode actions in-process and forwards
+   them to `connector.exec.requested`. The local pocketpaw runtime's
+   `connector_bus.py` listener completes them. End-to-end test pins
+   the round-trip.
 
-When these five hold for two weeks with zero hotfixes, Phase 2
+When these six hold for two weeks with zero hotfixes, Phase 2
 extraction can start.
 
 ---
