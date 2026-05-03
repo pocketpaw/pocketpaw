@@ -81,6 +81,21 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(pockets_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
 
+    # Phase 1 PR-8: register the connector bus listener so local-mode
+    # CLI actions (firebase, gcp, …) get picked up by the in-process
+    # runtime. In multi-tenant deployments this becomes a cross-process
+    # listener once Task 33 ships RedisBus; the contract is identical.
+    try:
+        from pocketpaw.runtime.connector_bus import register_listener
+
+        register_listener()
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "connector bus listener failed to register", exc_info=True,
+        )
+
     from ee.cloud.files.router import router as files_router
     from ee.cloud.kb.knowledge_router import router as knowledge_router
 
