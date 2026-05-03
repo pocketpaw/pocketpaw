@@ -67,6 +67,7 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.agents.router import router as agents_router
     from ee.cloud.auth.router import router as auth_router
     from ee.cloud.chat.router import router as chat_router
+    from ee.cloud.connectors.router import router as connectors_router
     from ee.cloud.license import get_license_info
     from ee.cloud.pockets.router import router as pockets_router
     from ee.cloud.sessions.router import router as sessions_router
@@ -76,6 +77,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(workspace_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
 
