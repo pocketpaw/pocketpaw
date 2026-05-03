@@ -86,9 +86,14 @@ After Phase 1:
 6. **OAuth consolidation** — the existing `integrations/oauth.py` +
    `token_store.py` become the single OAuth surface for all connectors,
    regardless of layer of origin.
-7. **`/api/v1/connectors` REST router** in `ee/cloud/connectors/router.py`
-   replacing whatever `getConnectors()` reads today (verify in
-   `paw-enterprise/src/lib/components/os/ConnectorPanel.svelte`).
+7. **`/api/v1/cloud/connectors` REST router** in `ee/cloud/connectors/router.py`.
+   Lives under `/cloud/` to coexist with the legacy pocket-scoped routes
+   at `/api/v1/connectors` (`connect / disconnect / execute / status`,
+   used by `PocketDataPanel`). Frontend home-widget integration calls
+   the new `/cloud/connectors` path; `PocketDataPanel` keeps using the
+   legacy path. Long-term, when PR-2 lands `Connector.widgets()` and
+   we migrate `PocketDataPanel` to consume the cloud entity directly,
+   the legacy path retires.
 
 ### Out of scope (defer to Phase 2 / 3)
 

@@ -75,7 +75,7 @@ async def client_b(mongo_db) -> AsyncClient:  # noqa: ARG001
 @pytest.mark.asyncio
 async def test_list_returns_registry_catalog(client_a: AsyncClient):
     """List returns every connector the registry knows about, all disabled by default."""
-    resp = await client_a.get("/api/v1/connectors")
+    resp = await client_a.get("/api/v1/cloud/connectors")
     assert resp.status_code == 200
     rows = resp.json()
     assert isinstance(rows, list)
@@ -94,15 +94,18 @@ async def test_list_returns_registry_catalog(client_a: AsyncClient):
 async def test_list_reflects_enable(client_a: AsyncClient):
     """After /enable, the connector flips to enabled=true / status=connected."""
     # Pick an arbitrary connector from the registry.
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
 
-    enable = await client_a.post(f"/api/v1/connectors/{name}/enable", json={"scope": "workspace"})
+    enable = await client_a.post(
+        f"/api/v1/cloud/connectors/{name}/enable",
+        json={"scope": "workspace"},
+    )
     assert enable.status_code == 200
     assert enable.json()["enabled"] is True
     assert enable.json()["status"] == "connected"
 
-    listed = (await client_a.get("/api/v1/connectors")).json()
+    listed = (await client_a.get("/api/v1/cloud/connectors")).json()
     row = next(r for r in listed if r["name"] == name)
     assert row["enabled"] is True
     assert row["status"] == "connected"
@@ -117,13 +120,13 @@ async def test_list_reflects_enable(client_a: AsyncClient):
 @pytest.mark.asyncio
 async def test_workspace_isolation(client_a: AsyncClient, client_b: AsyncClient):
     """Enabling a connector in workspace A leaves workspace B untouched."""
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
 
-    await client_a.post(f"/api/v1/connectors/{name}/enable", json={"scope": "workspace"})
+    await client_a.post(f"/api/v1/cloud/connectors/{name}/enable", json={"scope": "workspace"})
 
-    a_rows = (await client_a.get("/api/v1/connectors")).json()
-    b_rows = (await client_b.get("/api/v1/connectors")).json()
+    a_rows = (await client_a.get("/api/v1/cloud/connectors")).json()
+    b_rows = (await client_b.get("/api/v1/cloud/connectors")).json()
 
     assert next(r for r in a_rows if r["name"] == name)["enabled"] is True
     assert next(r for r in b_rows if r["name"] == name)["enabled"] is False
@@ -137,7 +140,7 @@ async def test_workspace_isolation(client_a: AsyncClient, client_b: AsyncClient)
 @pytest.mark.asyncio
 async def test_enable_unknown_connector_404(client_a: AsyncClient):
     resp = await client_a.post(
-        "/api/v1/connectors/this-is-not-a-real-connector/enable",
+        "/api/v1/cloud/connectors/this-is-not-a-real-connector/enable",
         json={"scope": "workspace"},
     )
     assert resp.status_code == 404
@@ -147,10 +150,10 @@ async def test_enable_unknown_connector_404(client_a: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_enable_pocket_scope_requires_pocket_id(client_a: AsyncClient):
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
     resp = await client_a.post(
-        f"/api/v1/connectors/{name}/enable",
+        f"/api/v1/cloud/connectors/{name}/enable",
         json={"scope": "pocket"},  # pocket_id missing
     )
     assert resp.status_code == 422
@@ -159,10 +162,10 @@ async def test_enable_pocket_scope_requires_pocket_id(client_a: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_enable_user_scope_requires_user_id(client_a: AsyncClient):
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
     resp = await client_a.post(
-        f"/api/v1/connectors/{name}/enable",
+        f"/api/v1/cloud/connectors/{name}/enable",
         json={"scope": "user"},  # user_id missing
     )
     assert resp.status_code == 422
@@ -176,10 +179,10 @@ async def test_enable_user_scope_requires_user_id(client_a: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_disable_flips_status(client_a: AsyncClient):
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
-    await client_a.post(f"/api/v1/connectors/{name}/enable", json={"scope": "workspace"})
-    resp = await client_a.post(f"/api/v1/connectors/{name}/disable")
+    await client_a.post(f"/api/v1/cloud/connectors/{name}/enable", json={"scope": "workspace"})
+    resp = await client_a.post(f"/api/v1/cloud/connectors/{name}/disable")
     assert resp.status_code == 200
     assert resp.json()["enabled"] is False
     assert resp.json()["status"] == "disconnected"
@@ -188,9 +191,9 @@ async def test_disable_flips_status(client_a: AsyncClient):
 @pytest.mark.asyncio
 async def test_disable_idempotent_when_not_enabled(client_a: AsyncClient):
     """Disabling a never-enabled connector returns the disconnected row, not 404."""
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
-    resp = await client_a.post(f"/api/v1/connectors/{name}/disable")
+    resp = await client_a.post(f"/api/v1/cloud/connectors/{name}/disable")
     assert resp.status_code == 200
     assert resp.json()["enabled"] is False
 
@@ -202,27 +205,27 @@ async def test_disable_idempotent_when_not_enabled(client_a: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_update_config_merges(client_a: AsyncClient):
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
     await client_a.post(
-        f"/api/v1/connectors/{name}/enable",
+        f"/api/v1/cloud/connectors/{name}/enable",
         json={"scope": "workspace", "config": {"a": 1, "b": 2}},
     )
     resp = await client_a.patch(
-        f"/api/v1/connectors/{name}/config",
+        f"/api/v1/cloud/connectors/{name}/config",
         json={"config": {"b": 99, "c": 3}},
     )
     assert resp.status_code == 200
-    detail = (await client_a.get(f"/api/v1/connectors/{name}")).json()
+    detail = (await client_a.get(f"/api/v1/cloud/connectors/{name}")).json()
     assert detail["config"] == {"a": 1, "b": 99, "c": 3}
 
 
 @pytest.mark.asyncio
 async def test_update_config_404_when_not_enabled(client_a: AsyncClient):
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
     resp = await client_a.patch(
-        f"/api/v1/connectors/{name}/config",
+        f"/api/v1/cloud/connectors/{name}/config",
         json={"config": {"a": 1}},
     )
     assert resp.status_code == 404
@@ -235,9 +238,9 @@ async def test_update_config_404_when_not_enabled(client_a: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_get_detail_includes_actions(client_a: AsyncClient):
-    catalog = (await client_a.get("/api/v1/connectors")).json()
+    catalog = (await client_a.get("/api/v1/cloud/connectors")).json()
     name = catalog[0]["name"]
-    resp = await client_a.get(f"/api/v1/connectors/{name}")
+    resp = await client_a.get(f"/api/v1/cloud/connectors/{name}")
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == name
@@ -246,5 +249,5 @@ async def test_get_detail_includes_actions(client_a: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_get_detail_404(client_a: AsyncClient):
-    resp = await client_a.get("/api/v1/connectors/not-real")
+    resp = await client_a.get("/api/v1/cloud/connectors/not-real")
     assert resp.status_code == 404

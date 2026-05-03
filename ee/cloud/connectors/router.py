@@ -19,8 +19,15 @@ from ee.cloud.connectors.dto import (
 from ee.cloud.license import require_license
 from ee.cloud.shared.deps import current_workspace_id
 
+# Mounted under /api/v1/cloud/connectors (not /api/v1/connectors) so it
+# does NOT shadow the legacy pocket-scoped routes in
+# src/pocketpaw/api/v1/connectors.py. The legacy routes (connect /
+# disconnect / execute / status) remain the source of truth for
+# pocket-bound connector instances; this cloud router owns the
+# workspace-level enabled/disabled state used by the home widgets
+# (and, eventually, automations and soul memory).
 router = APIRouter(
-    prefix="/connectors",
+    prefix="/cloud/connectors",
     tags=["Connectors"],
     dependencies=[Depends(require_license)],
 )
