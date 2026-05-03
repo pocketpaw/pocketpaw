@@ -150,9 +150,7 @@ async def _path_for_extraction(
             async for chunk in adapter.open(storage_key):
                 tmp.write(chunk)
         except Exception:
-            logger.exception(
-                "stream-to-temp failed for storage_key=%r", storage_key
-            )
+            logger.exception("stream-to-temp failed for storage_key=%r", storage_key)
             yield None
             return
         finally:
@@ -174,9 +172,7 @@ def _resolve_local_path(storage_key: str) -> Path | None:
     try:
         return adapter.local_path(storage_key)
     except Exception:
-        logger.exception(
-            "local_path lookup failed for storage_key=%r", storage_key
-        )
+        logger.exception("local_path lookup failed for storage_key=%r", storage_key)
         return None
 
 
