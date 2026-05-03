@@ -3,7 +3,7 @@
 # One row per (workspace, connector_name) tracking the enabled state, last
 # sync timestamp, scope (pocket | workspace | user) the OAuth token was
 # granted at, and a free-form config blob the connector adapter reads on
-# execute. Token bytes themselves stay in src/pocketpaw/integrations/
+# execute. Token bytes themselves stay in src/pocketpaw/clients/
 # token_store.py for Phase 1 — only the *reference* + scope live here.
 
 from __future__ import annotations

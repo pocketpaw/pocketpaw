@@ -62,7 +62,7 @@ async def oauth_authorize(service: str = Query("google_gmail")):
                 detail="Google OAuth Client ID not configured. Set it in Settings first.",
             )
 
-    from pocketpaw.integrations.oauth import OAuthManager
+    from pocketpaw.clients.oauth import OAuthManager
 
     manager = OAuthManager()
     redirect_uri = f"http://localhost:{settings.web_port}/api/v1/oauth/integrations/callback"
@@ -94,9 +94,9 @@ async def oauth_callback(
         return HTMLResponse("<h2>Missing authorization code</h2>")
 
     try:
+        from pocketpaw.clients.oauth import OAuthManager
+        from pocketpaw.clients.token_store import TokenStore
         from pocketpaw.config import Settings
-        from pocketpaw.integrations.oauth import OAuthManager
-        from pocketpaw.integrations.token_store import TokenStore
 
         settings = Settings.load()
         manager = OAuthManager(TokenStore())

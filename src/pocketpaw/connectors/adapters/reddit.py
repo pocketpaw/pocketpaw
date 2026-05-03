@@ -117,7 +117,7 @@ class RedditConnector:
         ]
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
-        from pocketpaw.integrations.reddit import RedditClient
+        from pocketpaw.clients.reddit import RedditClient
 
         try:
             client = RedditClient()

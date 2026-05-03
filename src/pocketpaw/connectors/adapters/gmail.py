@@ -4,7 +4,7 @@
 # schema / widgets / health) so the home widget picker can read recipes
 # from /api/v1/cloud/connectors/widget-recipes and the cloud router can
 # proxy execute calls. Wraps the existing GmailClient at
-# src/pocketpaw/integrations/gmail.py — that client owns the OAuth
+# src/pocketpaw/clients/gmail.py — that client owns the OAuth
 # refresh, MIME construction, and base64 encoding.
 #
 # The 8 hand-written agent tool classes at
@@ -72,7 +72,7 @@ class GmailConnector:
 
     async def connect(self, pocket_id: str, config: dict[str, Any]) -> ConnectionResult:
         try:
-            from pocketpaw.integrations.gmail import GmailClient
+            from pocketpaw.clients.gmail import GmailClient
 
             client = GmailClient()
             # Touch the token store so a missing token surfaces immediately.
@@ -233,7 +233,7 @@ class GmailConnector:
         ]
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -350,7 +350,7 @@ class GmailConnector:
     async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
         """Cheap health check — pings list_labels (auth-only round-trip)."""
         try:
-            from pocketpaw.integrations.gmail import GmailClient
+            from pocketpaw.clients.gmail import GmailClient
 
             client = GmailClient()
             await client.list_labels()

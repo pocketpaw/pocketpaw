@@ -45,7 +45,7 @@ class SpotifyConnector:
 
     async def connect(self, pocket_id: str, config: dict[str, Any]) -> ConnectionResult:
         try:
-            from pocketpaw.integrations.spotify import SpotifyClient
+            from pocketpaw.clients.spotify import SpotifyClient
 
             client = SpotifyClient()
             await client._get_token()  # noqa: SLF001
@@ -132,7 +132,7 @@ class SpotifyConnector:
         ]
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
-        from pocketpaw.integrations.spotify import SpotifyClient
+        from pocketpaw.clients.spotify import SpotifyClient
 
         try:
             client = SpotifyClient()
@@ -186,7 +186,7 @@ class SpotifyConnector:
 
     async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
         try:
-            from pocketpaw.integrations.spotify import SpotifyClient
+            from pocketpaw.clients.spotify import SpotifyClient
 
             client = SpotifyClient()
             await client._get_token()  # noqa: SLF001

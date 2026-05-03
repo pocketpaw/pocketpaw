@@ -14,7 +14,6 @@ from pocketpaw.connectors.protocol import (
     TrustLevel,
 )
 
-
 # ---------------------------------------------------------------------------
 # Reddit
 # ---------------------------------------------------------------------------
@@ -51,7 +50,7 @@ async def test_reddit_no_default_widgets():
 async def test_reddit_search_caps_limit():
     c = RedditConnector()
     with patch(
-        "pocketpaw.integrations.reddit.RedditClient.search",
+        "pocketpaw.clients.reddit.RedditClient.search",
         new=AsyncMock(return_value=[]),
     ) as mock:
         await c.execute("reddit_search", {"query": "x", "limit": 999})
@@ -122,7 +121,7 @@ async def test_spotify_widget_recipes():
 async def test_spotify_search_caps_limit():
     c = SpotifyConnector()
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient.search",
+        "pocketpaw.clients.spotify.SpotifyClient.search",
         new=AsyncMock(return_value=[]),
     ) as mock:
         await c.execute("spotify_search", {"query": "x", "limit": 999})
@@ -133,7 +132,7 @@ async def test_spotify_search_caps_limit():
 async def test_spotify_now_playing_handles_nothing_playing():
     c = SpotifyConnector()
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient.now_playing",
+        "pocketpaw.clients.spotify.SpotifyClient.now_playing",
         new=AsyncMock(return_value=None),
     ):
         result = await c.execute("spotify_now_playing", {})

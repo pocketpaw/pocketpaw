@@ -1,7 +1,7 @@
 # GoogleCalendarConnector — native adapter wrapping CalendarClient.
 # Created: 2026-05-03 — Phase 1 PR-4 (follows the GmailConnector
 # pattern). Wraps the existing CalendarClient at
-# src/pocketpaw/integrations/gcalendar.py — that client owns OAuth +
+# src/pocketpaw/clients/gcalendar.py — that client owns OAuth +
 # RFC 3339 datetime serialization.
 #
 # Action surface mirrors the 3 hand-written tools in
@@ -55,7 +55,7 @@ class GoogleCalendarConnector:
 
     async def connect(self, pocket_id: str, config: dict[str, Any]) -> ConnectionResult:
         try:
-            from pocketpaw.integrations.gcalendar import CalendarClient
+            from pocketpaw.clients.gcalendar import CalendarClient
 
             client = CalendarClient()
             await client._get_token()  # noqa: SLF001
@@ -152,7 +152,7 @@ class GoogleCalendarConnector:
         ]
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
-        from pocketpaw.integrations.gcalendar import CalendarClient
+        from pocketpaw.clients.gcalendar import CalendarClient
 
         try:
             client = CalendarClient()
@@ -251,7 +251,7 @@ class GoogleCalendarConnector:
 
     async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
         try:
-            from pocketpaw.integrations.gcalendar import CalendarClient
+            from pocketpaw.clients.gcalendar import CalendarClient
 
             client = CalendarClient()
             now = datetime.now(UTC)

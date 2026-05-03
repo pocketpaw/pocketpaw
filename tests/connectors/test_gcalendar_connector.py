@@ -77,7 +77,7 @@ async def test_widget_recipes():
 async def test_health_ok_when_list_events_succeeds():
     c = GoogleCalendarConnector()
     with patch(
-        "pocketpaw.integrations.gcalendar.CalendarClient.list_events",
+        "pocketpaw.clients.gcalendar.CalendarClient.list_events",
         new=AsyncMock(return_value=[]),
     ):
         h = await c.health()
@@ -89,7 +89,7 @@ async def test_health_ok_when_list_events_succeeds():
 async def test_health_error_when_list_events_raises():
     c = GoogleCalendarConnector()
     with patch(
-        "pocketpaw.integrations.gcalendar.CalendarClient.list_events",
+        "pocketpaw.clients.gcalendar.CalendarClient.list_events",
         new=AsyncMock(side_effect=RuntimeError("token expired")),
     ):
         h = await c.health()
@@ -102,7 +102,7 @@ async def test_execute_list_delegates_to_client():
     c = GoogleCalendarConnector()
     sample = [{"summary": "Standup", "start": "now", "end": "later"}]
     with patch(
-        "pocketpaw.integrations.gcalendar.CalendarClient.list_events",
+        "pocketpaw.clients.gcalendar.CalendarClient.list_events",
         new=AsyncMock(return_value=sample),
     ):
         result = await c.execute("calendar_list", {"days_ahead": 1, "max_results": 5})
@@ -121,7 +121,7 @@ async def test_execute_summary_aggregates():
 
     mock = AsyncMock(side_effect=[today, week])
     with patch(
-        "pocketpaw.integrations.gcalendar.CalendarClient.list_events",
+        "pocketpaw.clients.gcalendar.CalendarClient.list_events",
         new=mock,
     ):
         result = await c.execute("calendar_summary", {})

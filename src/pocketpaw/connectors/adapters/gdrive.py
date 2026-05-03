@@ -54,7 +54,7 @@ class GoogleDriveConnector:
 
     async def connect(self, pocket_id: str, config: dict[str, Any]) -> ConnectionResult:
         try:
-            from pocketpaw.integrations.gdrive import DriveClient
+            from pocketpaw.clients.gdrive import DriveClient
 
             client = DriveClient()
             await client._get_token()  # noqa: SLF001
@@ -149,7 +149,7 @@ class GoogleDriveConnector:
         ]
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
-        from pocketpaw.integrations.gdrive import DriveClient
+        from pocketpaw.clients.gdrive import DriveClient
 
         try:
             client = DriveClient()
@@ -211,7 +211,7 @@ class GoogleDriveConnector:
 
     async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
         try:
-            from pocketpaw.integrations.gdrive import DriveClient
+            from pocketpaw.clients.gdrive import DriveClient
 
             client = DriveClient()
             await client.list_files(max_results=1)

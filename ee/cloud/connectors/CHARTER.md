@@ -23,7 +23,7 @@ Connectors live in four places today, and three of them duplicate work:
 |---|---|---|
 | YAML specs | `pocketpaw/connectors/*.yaml` | Declarative — 30 connectors, drives KB ingestion |
 | YAML runtime + native adapters | `src/pocketpaw/connectors/{protocol,registry,yaml_engine,db_adapter,firebase_adapter,gcp_adapter,mongo_adapter,drive/}.py` | `ConnectorProtocol`, registry, `DirectRESTAdapter` |
-| Direct integrations | `src/pocketpaw/integrations/{gmail,gcalendar,gdocs,gdrive,oauth,token_store,reddit,spotify}.py` | HTTP clients for Google Workspace + Reddit + Spotify |
+| Direct integrations | `src/pocketpaw/clients/{gmail,gcalendar,gdocs,gdrive,oauth,token_store,reddit,spotify}.py` | HTTP clients for Google Workspace + Reddit + Spotify |
 | Agent tools | `src/pocketpaw/tools/builtin/{gmail,calendar,gdocs,gdrive}.py` | LLM-facing wrappers over the direct integrations |
 
 Drive lives in **all four** layers. Gmail lives in three (no YAML).
@@ -75,7 +75,7 @@ After Phase 1:
 4. **Tenanted state at `ee/cloud/connectors/`** — 4-file shape
    (`domain.py / dto.py / service.py / router.py`) tracking which
    connectors a workspace has enabled, per-workspace OAuth tokens
-   (referenced not stored — token bytes stay in `integrations/token_store.py`),
+   (referenced not stored — token bytes stay in `clients/token_store.py`),
    sync status, and per-connector config.
 5. **Consumer adapters** — thin functions that map registry entries to
    each consumer's interface:
@@ -83,7 +83,7 @@ After Phase 1:
    - `kb.sources.connector_source_for(c) -> SourceAdapter`
    - `home.widget_recipes_for(c) -> list[WidgetRecipe]`
    - `automations.connector_step_for(c) -> RoutineStep`
-6. **OAuth consolidation** — the existing `integrations/oauth.py` +
+6. **OAuth consolidation** — the existing `clients/oauth.py` +
    `token_store.py` become the single OAuth surface for all connectors,
    regardless of layer of origin.
 7. **`/api/v1/cloud/connectors` REST router** in `ee/cloud/connectors/router.py`.
@@ -354,7 +354,7 @@ chunks come in over the same WS, just on a different topic.
 
 ## 7 — OAuth + token store
 
-The existing `integrations/oauth.py` + `integrations/token_store.py`
+The existing `clients/oauth.py` + `clients/token_store.py`
 become the single OAuth surface, moved to
 `src/pocketpaw/connectors/{oauth,token_store}.py`. No protocol change.
 
@@ -476,7 +476,7 @@ Phase 1 is done when **all six** are true:
    `GET /api/v1/cloud/connectors` (cloud router) for workspace-level
    state. `PocketDataPanel` keeps reading the legacy `/api/v1/connectors`
    path for pocket-scoped operations until its own migration PR.
-5. `pocketpaw/integrations/` is empty (or holds only `oauth_integrations`
+5. `pocketpaw/clients/` is empty (or holds only `oauth_integrations`
    the API endpoint). The body has moved into `connectors/adapters/`.
 6. **CLI connectors (firebase, gcp) execute via the local-agent bus.**
    Cloud router refuses `local`-mode actions in-process and forwards
@@ -503,14 +503,14 @@ extraction can start.
 
 ## Appendix B — Files this charter implies will move (Phase 1)
 
-- `src/pocketpaw/integrations/gmail.py` → `src/pocketpaw/connectors/adapters/gmail.py`
-- `src/pocketpaw/integrations/gcalendar.py` → `src/pocketpaw/connectors/adapters/gcalendar.py`
-- `src/pocketpaw/integrations/gdocs.py` → `src/pocketpaw/connectors/adapters/gdocs.py`
-- `src/pocketpaw/integrations/gdrive.py` → `src/pocketpaw/connectors/adapters/gdrive.py`
-- `src/pocketpaw/integrations/reddit.py` → `src/pocketpaw/connectors/adapters/reddit.py`
-- `src/pocketpaw/integrations/spotify.py` → `src/pocketpaw/connectors/adapters/spotify.py`
-- `src/pocketpaw/integrations/oauth.py` → `src/pocketpaw/connectors/oauth.py`
-- `src/pocketpaw/integrations/token_store.py` → `src/pocketpaw/connectors/token_store.py`
+- `src/pocketpaw/clients/gmail.py` → `src/pocketpaw/connectors/adapters/gmail.py`
+- `src/pocketpaw/clients/gcalendar.py` → `src/pocketpaw/connectors/adapters/gcalendar.py`
+- `src/pocketpaw/clients/gdocs.py` → `src/pocketpaw/connectors/adapters/gdocs.py`
+- `src/pocketpaw/clients/gdrive.py` → `src/pocketpaw/connectors/adapters/gdrive.py`
+- `src/pocketpaw/clients/reddit.py` → `src/pocketpaw/connectors/adapters/reddit.py`
+- `src/pocketpaw/clients/spotify.py` → `src/pocketpaw/connectors/adapters/spotify.py`
+- `src/pocketpaw/clients/oauth.py` → `src/pocketpaw/connectors/oauth.py`
+- `src/pocketpaw/clients/token_store.py` → `src/pocketpaw/connectors/token_store.py`
 - `src/pocketpaw/connectors/db_adapter.py` → `src/pocketpaw/connectors/adapters/db.py`
 - `src/pocketpaw/connectors/firebase_adapter.py` → `src/pocketpaw/connectors/adapters/firebase.py`
 - `src/pocketpaw/connectors/gcp_adapter.py` → `src/pocketpaw/connectors/adapters/gcp.py`

@@ -48,7 +48,7 @@ class GoogleDocsConnector:
 
     async def connect(self, pocket_id: str, config: dict[str, Any]) -> ConnectionResult:
         try:
-            from pocketpaw.integrations.gdocs import DocsClient
+            from pocketpaw.clients.gdocs import DocsClient
 
             client = DocsClient()
             await client._get_token()  # noqa: SLF001
@@ -119,7 +119,7 @@ class GoogleDocsConnector:
         ]
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
-        from pocketpaw.integrations.gdocs import DocsClient
+        from pocketpaw.clients.gdocs import DocsClient
 
         try:
             client = DocsClient()
@@ -164,7 +164,7 @@ class GoogleDocsConnector:
 
     async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
         try:
-            from pocketpaw.integrations.gdocs import DocsClient
+            from pocketpaw.clients.gdocs import DocsClient
 
             client = DocsClient()
             await client.search_docs("", max_results=1)

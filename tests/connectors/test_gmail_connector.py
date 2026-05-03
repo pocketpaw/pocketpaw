@@ -136,7 +136,7 @@ async def test_widget_recipes():
 async def test_health_ok_when_list_labels_succeeds():
     c = GmailConnector()
     with patch(
-        "pocketpaw.integrations.gmail.GmailClient.list_labels",
+        "pocketpaw.clients.gmail.GmailClient.list_labels",
         new=AsyncMock(return_value=[{"id": "INBOX"}]),
     ):
         h = await c.health()
@@ -148,7 +148,7 @@ async def test_health_ok_when_list_labels_succeeds():
 async def test_health_error_when_list_labels_raises():
     c = GmailConnector()
     with patch(
-        "pocketpaw.integrations.gmail.GmailClient.list_labels",
+        "pocketpaw.clients.gmail.GmailClient.list_labels",
         new=AsyncMock(side_effect=RuntimeError("missing token")),
     ):
         h = await c.health()
@@ -166,7 +166,7 @@ async def test_health_error_when_list_labels_raises():
 async def test_execute_search_delegates_to_client():
     c = GmailConnector()
     with patch(
-        "pocketpaw.integrations.gmail.GmailClient.search",
+        "pocketpaw.clients.gmail.GmailClient.search",
         new=AsyncMock(return_value=[{"id": "m1"}, {"id": "m2"}]),
     ) as mock:
         result = await c.execute("gmail_search", {"query": "is:unread", "max_results": 5})
@@ -179,7 +179,7 @@ async def test_execute_search_delegates_to_client():
 async def test_execute_search_caps_max_results_at_20():
     c = GmailConnector()
     with patch(
-        "pocketpaw.integrations.gmail.GmailClient.search",
+        "pocketpaw.clients.gmail.GmailClient.search",
         new=AsyncMock(return_value=[]),
     ) as mock:
         await c.execute("gmail_search", {"query": "x", "max_results": 999})
@@ -190,7 +190,7 @@ async def test_execute_search_caps_max_results_at_20():
 async def test_execute_summary_aggregates_two_searches():
     c = GmailConnector()
     with patch(
-        "pocketpaw.integrations.gmail.GmailClient.search",
+        "pocketpaw.clients.gmail.GmailClient.search",
         new=AsyncMock(return_value=[{"id": "m1"}]),
     ):
         result = await c.execute("gmail_summary", {})
@@ -212,7 +212,7 @@ async def test_execute_unknown_action():
 async def test_execute_runtime_error_returns_failure():
     c = GmailConnector()
     with patch(
-        "pocketpaw.integrations.gmail.GmailClient.search",
+        "pocketpaw.clients.gmail.GmailClient.search",
         new=AsyncMock(side_effect=RuntimeError("auth expired")),
     ):
         result = await c.execute("gmail_search", {"query": "x"})

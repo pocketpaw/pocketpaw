@@ -61,7 +61,7 @@ async def test_widget_recipes():
 async def test_execute_list_caps_at_100():
     c = GoogleDriveConnector()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient.list_files",
+        "pocketpaw.clients.gdrive.DriveClient.list_files",
         new=AsyncMock(return_value=[]),
     ) as mock:
         await c.execute("drive_list", {"max_results": 999})
@@ -72,7 +72,7 @@ async def test_execute_list_caps_at_100():
 async def test_health_ok():
     c = GoogleDriveConnector()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient.list_files",
+        "pocketpaw.clients.gdrive.DriveClient.list_files",
         new=AsyncMock(return_value=[]),
     ):
         h = await c.health()

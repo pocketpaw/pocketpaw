@@ -57,7 +57,7 @@ async def test_widget_recipes():
 async def test_execute_search_caps_at_50():
     c = GoogleDocsConnector()
     with patch(
-        "pocketpaw.integrations.gdocs.DocsClient.search_docs",
+        "pocketpaw.clients.gdocs.DocsClient.search_docs",
         new=AsyncMock(return_value=[]),
     ) as mock:
         await c.execute("docs_search", {"query": "x", "max_results": 999})
@@ -68,7 +68,7 @@ async def test_execute_search_caps_at_50():
 async def test_health_ok():
     c = GoogleDocsConnector()
     with patch(
-        "pocketpaw.integrations.gdocs.DocsClient.search_docs",
+        "pocketpaw.clients.gdocs.DocsClient.search_docs",
         new=AsyncMock(return_value=[]),
     ):
         h = await c.health()

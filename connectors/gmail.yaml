@@ -3,7 +3,7 @@
 # This YAML carries the catalog metadata + the action manifest. The
 # runtime wiring lives in src/pocketpaw/connectors/adapters/gmail.py
 # (GmailConnector) which wraps the existing GmailClient from
-# src/pocketpaw/integrations/gmail.py. The 8 hand-written tool classes
+# src/pocketpaw/clients/gmail.py. The 8 hand-written tool classes
 # in src/pocketpaw/tools/builtin/gmail.py stay in place for Phase 1 —
 # their LLM-tuned response formatting is preserved verbatim.
 #
