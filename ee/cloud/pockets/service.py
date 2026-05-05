@@ -270,15 +270,22 @@ async def get(pocket_id: str, user_id: str) -> dict:
         from ee.cloud import ripple_sources  # noqa: F401  — register sources
         from ee.cloud.ripple_resolver import ResolveCtx, resolve_ripple_spec
 
-        resolved = await resolve_ripple_spec(
-            pocket.ripple_spec,
-            ResolveCtx(
-                workspace_id=doc.workspace,
-                user_id=user_id,
-                pocket_id=str(doc.id),
-            ),
-        )
-        pocket = dataclasses.replace(pocket, ripple_spec=resolved)
+        try:
+            resolved = await resolve_ripple_spec(
+                pocket.ripple_spec,
+                ResolveCtx(
+                    workspace_id=doc.workspace,
+                    user_id=user_id,
+                    pocket_id=str(doc.id),
+                ),
+            )
+            pocket = dataclasses.replace(pocket, ripple_spec=resolved)
+        except Exception:
+            logger.warning(
+                "ripple_resolver: resolve failed for pocket %s; returning raw spec",
+                pocket_id,
+                exc_info=True,
+            )
     return pocket_to_wire_dict(pocket)
 
 

@@ -94,3 +94,24 @@ async def test_get_with_no_ripple_spec_does_not_crash():
         out = await pocket_service.get(pocket_id="pocket-1", user_id="u1")
     # Wire dict shape may vary, but the call must not raise.
     assert "rippleSpec" in out or out.get("rippleSpec") is None
+
+
+async def test_get_falls_back_to_raw_spec_when_resolver_raises():
+    """Plan contract: resolver failure must NOT raise from get. Fall back to raw spec."""
+    spec = {"state": {"all": {"$source": "workspace.pockets"}}}
+
+    with (
+        patch(
+            "ee.cloud.pockets.service._fetch_pocket",
+            new=AsyncMock(return_value=_fake_doc(spec)),
+        ),
+        patch(
+            "ee.cloud.ripple_resolver.resolve_ripple_spec",
+            new=AsyncMock(side_effect=RuntimeError("walker exploded")),
+        ),
+    ):
+        # Must not raise — the get function's try/except catches and falls through.
+        out = await pocket_service.get(pocket_id="pocket-1", user_id="u1")
+
+    # Raw (unresolved) spec is returned.
+    assert out["rippleSpec"]["state"]["all"] == {"$source": "workspace.pockets"}
