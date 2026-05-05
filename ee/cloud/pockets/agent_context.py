@@ -98,18 +98,63 @@ async def _validate_ripple_spec(ripple_spec: dict[str, Any] | None) -> None:
         logger.debug("ripple manifest validation skipped (non-fatal)", exc_info=True)
 
 
-def _push_replace(pocket_view: dict[str, Any]) -> None:
+async def _resolved_view_for_frontend(pocket_view: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``pocket_view`` with rippleSpec ``$source`` markers
+    resolved against the active stream's user/workspace context.
+
+    Used before any SSE push to the frontend. The agent itself sees raw
+    markers (so it preserves them on edit) — only the rendering surface
+    needs resolution. Falls back to the raw view on resolver failure or
+    when ContextVars aren't set.
+    """
+    spec = pocket_view.get("rippleSpec")
+    if not spec:
+        return pocket_view
+    try:
+        from ee.cloud.chat.agent_service import current_user_id, current_workspace_id
+
+        workspace_id = current_workspace_id()
+        user_id = current_user_id()
+    except Exception:
+        return pocket_view
+    if not workspace_id or not user_id:
+        return pocket_view
+    try:
+        from ee.cloud import ripple_sources  # noqa: F401  — register sources
+        from ee.cloud.ripple_resolver import ResolveCtx, resolve_ripple_spec
+
+        resolved = await resolve_ripple_spec(
+            spec,
+            ResolveCtx(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                pocket_id=str(pocket_view.get("_id", "")),
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "ripple_resolver: resolve failed for pocket %s; pushing raw spec",
+            pocket_view.get("_id", ""),
+            exc_info=True,
+        )
+        return pocket_view
+    return {**pocket_view, "rippleSpec": resolved}
+
+
+async def _push_replace(pocket_view: dict[str, Any]) -> None:
     """Push a ``pocket_mutation`` event for a successful update / widget
     change. Imported lazily so the cloud-chat dependency stays optional
-    for callers that never go through the SSE path."""
+    for callers that never go through the SSE path. The frontend gets a
+    resolved spec; the agent's caller still has the raw view."""
+    resolved = await _resolved_view_for_frontend(pocket_view)
     try:
         from ee.cloud.chat.agent_service import push_pocket_mutation
 
         push_pocket_mutation(
             {
                 "action": "replace",
-                "pocket_id": pocket_view.get("_id", ""),
-                "pocket": pocket_view,
+                "pocket_id": resolved.get("_id", ""),
+                "pocket": resolved,
             }
         )
     except Exception:
@@ -141,7 +186,7 @@ async def update_pocket_for_agent(
     )
     if err is not None:
         return {"ok": False, "error": err}
-    _push_replace(view)
+    await _push_replace(view)
     return {"ok": True, "pocket": view}
 
 
@@ -150,7 +195,7 @@ async def add_widget_for_agent(pocket_id: str, widget: dict[str, Any]) -> dict[s
     view, err = await pockets_service.agent_add_widget(pocket_id, widget)
     if err is not None:
         return {"ok": False, "error": err}
-    _push_replace(view)
+    await _push_replace(view)
     return {"ok": True, "pocket": view}
 
 
@@ -161,7 +206,7 @@ async def update_widget_for_agent(
     view, err = await pockets_service.agent_update_widget(pocket_id, widget_id, fields)
     if err is not None:
         return {"ok": False, "error": err}
-    _push_replace(view)
+    await _push_replace(view)
     return {"ok": True, "pocket": view}
 
 
@@ -170,7 +215,7 @@ async def remove_widget_for_agent(pocket_id: str, widget_id: str) -> dict[str, A
     view, err = await pockets_service.agent_remove_widget(pocket_id, widget_id)
     if err is not None:
         return {"ok": False, "error": err}
-    _push_replace(view)
+    await _push_replace(view)
     return {"ok": True, "pocket": view}
 
 
@@ -249,18 +294,20 @@ async def create_pocket_for_agent(
                     )
                 )
             except Exception:
-                logger.debug(
-                    "SessionUpdated emit after pocket-link failed", exc_info=True
-                )
+                logger.debug("SessionUpdated emit after pocket-link failed", exc_info=True)
 
     # Push a ``pocket_created`` SSE event onto the active stream so the
     # frontend mounts the new pocket without waiting for a sidebar refresh.
+    # Resolve $source markers for the frontend payload; the agent's
+    # return value below still has the raw view so it can preserve markers
+    # on subsequent edits.
     try:
+        view_for_frontend = await _resolved_view_for_frontend(view)
         push_sse_event(
             "pocket_created",
             {
                 "pocket_id": pocket_id,
-                "pocket": view,
+                "pocket": view_for_frontend,
                 "session_id": session_mongo_id,
             },
         )
