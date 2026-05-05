@@ -725,6 +725,7 @@ def _assemble_interaction(*, mcp: bool) -> str:
         _TOOLS_MCP if mcp else _TOOLS_CLI,
         _WORKFLOW_INTERACTION_MCP if mcp else _WORKFLOW_INTERACTION_CLI,
         _INTERACTIVE_DEFAULT_BLOCK,
+        _STATE_SOURCES_BLOCK,
         RIPPLE_DESIGN_RULES,
     ]
     return "\n".join(parts) + "\n"

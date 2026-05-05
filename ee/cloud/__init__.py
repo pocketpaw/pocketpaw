@@ -63,6 +63,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Global error handler — extracted to ee.cloud._core.http
     add_error_handler(app)
 
+    # Eager-import ripple_sources so @register decorators run at startup
+    # rather than on first pocket get(). Keeps ``_REGISTRY`` populated
+    # for any startup self-checks that inspect it.
+    import ee.cloud.ripple_sources  # noqa: F401
+
     # Import and mount domain routers
     from ee.cloud.agents.router import router as agents_router
     from ee.cloud.auth.router import router as auth_router
@@ -93,7 +98,8 @@ def mount_cloud(app: FastAPI) -> None:
         import logging as _logging
 
         _logging.getLogger(__name__).warning(
-            "connector bus listener failed to register", exc_info=True,
+            "connector bus listener failed to register",
+            exc_info=True,
         )
 
     from ee.cloud.files.router import router as files_router

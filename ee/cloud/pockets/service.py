@@ -728,7 +728,13 @@ async def is_member(pocket_id: str, user_id: str) -> bool:
 
 async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     """Read-only fetch — returns ``(view_dict, None)`` on success or
-    ``(None, error)`` on failure."""
+    ``(None, error)`` on failure.
+
+    Note: $source markers in rippleSpec are intentionally NOT resolved
+    here. The agent must see raw markers so that on edit it preserves
+    them; resolving would let the agent bake a snapshot of live data
+    into the spec, defeating the marker mechanism. Resolution happens
+    only in ``service.get`` (the user-facing read path)."""
     doc, err = await _agent_load_doc(pocket_id)
     if err:
         return None, err
