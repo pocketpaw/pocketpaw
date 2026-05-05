@@ -141,9 +141,7 @@ def _build_widget_doc(payload: dict) -> _WidgetDoc:
         icon=payload.get("icon", ""),
         color=payload.get("color", ""),
         span=payload.get("span", "col-span-1"),
-        dataSourceType=payload.get(
-            "dataSourceType", payload.get("data_source_type", "static")
-        ),
+        dataSourceType=payload.get("dataSourceType", payload.get("data_source_type", "static")),
         config=payload.get("config", {}),
         props=payload.get("props", {}),
         data=payload.get("data"),
@@ -178,9 +176,7 @@ def _pocket_event_payload(doc: _PocketDoc) -> dict:
     return payload
 
 
-async def _mutate_list_field(
-    pocket_id: str, field: str, value: str, action: str
-) -> Pocket:
+async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str) -> Pocket:
     """Append/remove a string value on shared_with / team / agents.
     Idempotent in both directions. Emits ``PocketUpdated`` when the doc
     actually changes (no-op mutations stay silent)."""
@@ -255,7 +251,13 @@ async def list_pockets(workspace_id: str, user_id: str) -> list[dict]:
 
 
 async def get(pocket_id: str, user_id: str) -> dict:
-    """Get a single pocket. Access check: owner, shared_with, or workspace-visible."""
+    """Get a single pocket. Access check: owner, shared_with, or workspace-visible.
+
+    rippleSpec $source markers are resolved on read against the calling user's
+    workspace context.
+    """
+    import dataclasses
+
     doc = await _fetch_pocket(pocket_id)
     pocket = _pocket_to_domain(doc)
     if (
@@ -264,6 +266,19 @@ async def get(pocket_id: str, user_id: str) -> dict:
         and pocket.visibility == "private"
     ):
         raise Forbidden("pocket.access_denied", "You do not have access to this pocket")
+    if pocket.ripple_spec:
+        from ee.cloud import ripple_sources  # noqa: F401  — register sources
+        from ee.cloud.ripple_resolver import ResolveCtx, resolve_ripple_spec
+
+        resolved = await resolve_ripple_spec(
+            pocket.ripple_spec,
+            ResolveCtx(
+                workspace_id=doc.workspace,
+                user_id=user_id,
+                pocket_id=str(doc.id),
+            ),
+        )
+        pocket = dataclasses.replace(pocket, ripple_spec=resolved)
     return pocket_to_wire_dict(pocket)
 
 
@@ -523,9 +538,7 @@ async def access_via_share_link(token: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def add_collaborator(
-    pocket_id: str, user_id: str, body: AddCollaboratorRequest
-) -> None:
+async def add_collaborator(pocket_id: str, user_id: str, body: AddCollaboratorRequest) -> None:
     doc = await _fetch_pocket(pocket_id)
     pocket = _pocket_to_domain(doc)
     _check_domain_owner(pocket, user_id)
@@ -748,9 +761,7 @@ async def agent_update(
     return _agent_view_dict(doc), None
 
 
-async def agent_add_widget(
-    pocket_id: str, widget: dict
-) -> tuple[dict | None, str | None]:
+async def agent_add_widget(pocket_id: str, widget: dict) -> tuple[dict | None, str | None]:
     if not isinstance(widget, dict):
         return None, "widget must be a JSON object"
     doc, err = await _agent_load_doc(pocket_id)
@@ -797,9 +808,7 @@ async def agent_update_widget(
     return _agent_view_dict(doc), None
 
 
-async def agent_remove_widget(
-    pocket_id: str, widget_id: str
-) -> tuple[dict | None, str | None]:
+async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | None, str | None]:
     doc, err = await _agent_load_doc(pocket_id)
     if err:
         return None, err
