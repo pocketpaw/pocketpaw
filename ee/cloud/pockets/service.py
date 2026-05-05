@@ -435,7 +435,7 @@ async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> di
     doc.widgets.append(widget)
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
-    return pocket_to_wire_dict(_pocket_to_domain(doc))
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def update_widget(
@@ -463,7 +463,7 @@ async def update_widget(
         widget.assignedAgent = body.assigned_agent
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
-    return pocket_to_wire_dict(_pocket_to_domain(doc))
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
@@ -476,7 +476,7 @@ async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
         raise NotFound("widget", widget_id)
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
-    return pocket_to_wire_dict(_pocket_to_domain(doc))
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -> dict:
@@ -507,7 +507,7 @@ async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -
     doc.widgets = [widgets_by_id[wid] for wid in ordered]
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
-    return pocket_to_wire_dict(_pocket_to_domain(doc))
+    return await _resolved_wire_dict(doc, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -601,15 +601,17 @@ async def remove_collaborator(pocket_id: str, user_id: str, target_user_id: str)
 async def add_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
-    updated = await _mutate_list_field(pocket_id, "team", member_id, "add")
-    return pocket_to_wire_dict(updated)
+    await _mutate_list_field(pocket_id, "team", member_id, "add")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def remove_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
-    updated = await _mutate_list_field(pocket_id, "team", member_id, "remove")
-    return pocket_to_wire_dict(updated)
+    await _mutate_list_field(pocket_id, "team", member_id, "remove")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -620,15 +622,17 @@ async def remove_team_member(pocket_id: str, user_id: str, member_id: str) -> di
 async def add_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
-    updated = await _mutate_list_field(pocket_id, "agents", agent_id, "add")
-    return pocket_to_wire_dict(updated)
+    await _mutate_list_field(pocket_id, "agents", agent_id, "add")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def remove_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
-    updated = await _mutate_list_field(pocket_id, "agents", agent_id, "remove")
-    return pocket_to_wire_dict(updated)
+    await _mutate_list_field(pocket_id, "agents", agent_id, "remove")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
 
 
 # ---------------------------------------------------------------------------
