@@ -1,0 +1,37 @@
+# Google Calendar connector — REST over OAuth bearer.
+# Created: 2026-05-03 — Phase 1 PR-4. Same shape as gmail.yaml.
+# Native runtime in src/pocketpaw/connectors/adapters/gcalendar.py.
+
+name: gcalendar
+display_name: Google Calendar
+type: communication
+icon: calendar
+
+auth:
+  method: oauth2
+  credentials:
+    - name: GOOGLE_OAUTH_TOKEN
+      description: OAuth access token with https://www.googleapis.com/auth/calendar scope
+      required: true
+
+actions:
+  - name: calendar_list
+    description: List upcoming calendar events.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: calendar_create
+    description: Create a new calendar event.
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: calendar_prep
+    description: Briefing for the next upcoming meeting.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: calendar_summary
+    description: Aggregate calendar stats (today / this week / busy hours) for the home widget.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud

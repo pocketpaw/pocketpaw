@@ -8,6 +8,11 @@ Files Tab v2 (this PR) layers tree/browse endpoints on top via
 ``build_router`` — a factory that composes a ProviderRegistry + ABAC
 rule set + request-context factory. ``build_files_router`` in
 ``bootstrap.py`` wires the concrete providers.
+
+2026-05-03 (Stage 3.E "Files as Knowledge"): ``GET /files`` accepts
+``pocket_id``. Members see the pocket's files; non-members get a 403.
+Without ``pocket_id`` the listing returns workspace-scoped rows only —
+pocket files don't bleed into the workspace Files panel.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ _SVC = UnifiedFilesService()
 async def list_files(
     workspace_id: str | None = Query(None),
     source: Literal["chat", "local", "drive"] | None = Query(None),
+    pocket_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     user_id: str = Depends(current_user_id),
     current_workspace: str = Depends(current_workspace_id),
@@ -52,6 +58,12 @@ async def list_files(
 
     ``workspace_id`` is accepted for explicitness but must match the
     caller's current workspace — cross-workspace listing is rejected.
+
+    Stage 3.E: when ``pocket_id`` is set, the caller must be a pocket
+    member (owner / team / shared / workspace-visible). Non-members get
+    a 403 ``files.pocket_forbidden``. Without ``pocket_id`` the listing
+    is workspace-scoped — pocket files never bleed into the workspace
+    Files panel.
     """
     if workspace_id and workspace_id != current_workspace:
         return JSONResponse(
@@ -62,11 +74,29 @@ async def list_files(
             },
         )
 
-    files, warnings = await _SVC.list_unified(current_workspace, source=source, limit=limit)
+    if pocket_id:
+        from ee.cloud.pockets import service as pockets_service
+
+        try:
+            allowed = await pockets_service.is_member(
+                pocket_id=pocket_id, user_id=user_id
+            )
+        except Exception:
+            allowed = False
+        if not allowed:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "files.pocket_forbidden"},
+            )
+
+    files, warnings = await _SVC.list_unified(
+        current_workspace, source=source, limit=limit, pocket_id=pocket_id
+    )
 
     return JSONResponse(
         content={
             "workspace_id": current_workspace,
+            "pocket_id": pocket_id,
             "source": source or "all",
             "files": [
                 {

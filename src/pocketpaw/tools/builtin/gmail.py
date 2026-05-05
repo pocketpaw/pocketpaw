@@ -47,7 +47,7 @@ class GmailSearchTool(BaseTool):
         }
 
     async def execute(self, query: str, max_results: int = 5) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -102,7 +102,7 @@ class GmailReadTool(BaseTool):
         }
 
     async def execute(self, message_id: str) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -159,7 +159,7 @@ class GmailSendTool(BaseTool):
         }
 
     async def execute(self, to: str, subject: str, body: str) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -192,7 +192,7 @@ class GmailListLabelsTool(BaseTool):
         return {"type": "object", "properties": {}}
 
     async def execute(self) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -231,7 +231,7 @@ class GmailCreateLabelTool(BaseTool):
         }
 
     async def execute(self, name: str) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -286,7 +286,7 @@ class GmailModifyTool(BaseTool):
         add_labels: list[str] | None = None,
         remove_labels: list[str] | None = None,
     ) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -324,7 +324,7 @@ class GmailTrashTool(BaseTool):
         }
 
     async def execute(self, message_id: str) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()
@@ -379,7 +379,7 @@ class GmailBatchModifyTool(BaseTool):
         add_labels: list[str] | None = None,
         remove_labels: list[str] | None = None,
     ) -> str:
-        from pocketpaw.integrations.gmail import GmailClient
+        from pocketpaw.clients.gmail import GmailClient
 
         try:
             client = GmailClient()

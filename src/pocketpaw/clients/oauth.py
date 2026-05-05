@@ -10,7 +10,7 @@ import urllib.parse
 
 import httpx
 
-from pocketpaw.integrations.token_store import OAuthTokens, TokenStore
+from pocketpaw.clients.token_store import OAuthTokens, TokenStore
 
 logger = logging.getLogger(__name__)
 

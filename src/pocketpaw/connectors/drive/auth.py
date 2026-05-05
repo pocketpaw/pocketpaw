@@ -10,7 +10,7 @@
 # Precedence order (first non-empty wins):
 #   1. ``Credential.token`` from the broker (zero-copy federation).
 #   2. ``GOOGLE_OAUTH_TOKEN`` env var (local dev / CI).
-#   3. ``pocketpaw.integrations.oauth.OAuthManager`` (existing token store
+#   3. ``pocketpaw.clients.oauth.OAuthManager`` (existing token store
 #      populated by the OAuth flow in the dashboard).
 #
 # TODO(hardening): we inherit ``OAuthManager``'s current contract, which
@@ -59,9 +59,9 @@ def resolve_bearer_token(
     try:
         import asyncio
 
+        from pocketpaw.clients.oauth import OAuthManager
+        from pocketpaw.clients.token_store import TokenStore
         from pocketpaw.config import get_settings
-        from pocketpaw.integrations.oauth import OAuthManager
-        from pocketpaw.integrations.token_store import TokenStore
     except Exception as e:  # pragma: no cover - defensive
         raise DriveAuthError(
             "no Drive bearer token available (credential empty, env unset, OAuth store unavailable)"

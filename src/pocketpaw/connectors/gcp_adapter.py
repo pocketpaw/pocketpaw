@@ -11,13 +11,17 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from pocketpaw.connectors.firebase_adapter import _local_action
 from pocketpaw.connectors.protocol import (
     ActionResult,
     ActionSchema,
     ConnectionResult,
+    ConnectorHealth,
+    ConnectorScope,
     ConnectorStatus,
     SyncResult,
     TrustLevel,
+    WidgetRecipe,
 )
 from pocketpaw.connectors.yaml_engine import ConnectorDef
 
@@ -125,7 +129,11 @@ class GCPAdapter:
         return True
 
     async def actions(self) -> list[ActionSchema]:
-        """Return action schemas from the YAML definition if available."""
+        """Return action schemas from the YAML definition if available.
+
+        Phase 1 PR-8: every action is stamped with execution_mode=LOCAL
+        and requires_binary="gcloud" via _local_action().
+        """
         if self._def:
             schemas = []
             for act in self._def.actions:
@@ -141,9 +149,9 @@ class GCPAdapter:
                         trust_level=TrustLevel(act.get("trust_level", "confirm")),
                     )
                 )
-            return schemas
+            return [_local_action(s, "gcloud") for s in schemas]
         # Fallback: return hardcoded action list
-        return self._hardcoded_actions()
+        return [_local_action(s, "gcloud") for s in self._hardcoded_actions()]
 
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
         """Execute a gcloud CLI command for the given action."""
@@ -168,6 +176,48 @@ class GCPAdapter:
 
     async def schema(self) -> dict[str, Any]:
         return {"table": None, "mapping": {}, "schedule": "manual"}
+
+    # -- Phase 1 PR-8 protocol additions ------------------------------------------
+
+    async def widgets(self) -> list[WidgetRecipe]:
+        """No default home widgets for GCP — admin-only ops."""
+        return []
+
+    async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
+        """Check whether the gcloud CLI is reachable."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._gcloud or "gcloud", "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except TimeoutError:
+                proc.kill()
+                return ConnectorHealth(
+                    ok=False,
+                    status=ConnectorStatus.ERROR,
+                    message="gcloud --version timed out",
+                )
+            ok = proc.returncode == 0
+            return ConnectorHealth(
+                ok=ok,
+                status=ConnectorStatus.CONNECTED if ok else ConnectorStatus.ERROR,
+                message="gcloud CLI reachable" if ok else "gcloud CLI not on PATH",
+            )
+        except FileNotFoundError:
+            return ConnectorHealth(
+                ok=False,
+                status=ConnectorStatus.ERROR,
+                message="gcloud binary missing",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectorHealth(
+                ok=False,
+                status=ConnectorStatus.ERROR,
+                message=str(exc),
+            )
 
     # -- Internal helpers --
 

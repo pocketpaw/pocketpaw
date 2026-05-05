@@ -31,7 +31,7 @@ def _stub_settings(monkeypatch, **overrides: Any) -> None:
 async def test_multiple_scopes_each_queried_with_header(monkeypatch):
     calls: list[dict[str, Any]] = []
 
-    async def fake_fetch(*, binary, query, scope, limit):
+    async def fake_fetch(*, binary, query, scope, limit, query_vec_path=None):
         calls.append({"binary": binary, "query": query, "scope": scope, "limit": limit})
         return f"result-for-{scope}"
 
@@ -59,7 +59,7 @@ async def test_per_scope_limit_floor_is_one(monkeypatch):
     """When ``kb_limit < len(scopes)`` per-scope budget floors at 1."""
     captured: list[int] = []
 
-    async def fake_fetch(*, binary, query, scope, limit):  # noqa: ARG001
+    async def fake_fetch(*, binary, query, scope, limit, query_vec_path=None):  # noqa: ARG001
         captured.append(limit)
         return ""
 
@@ -77,7 +77,7 @@ async def test_per_scope_limit_floor_is_one(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_one_scope_errors_other_returns(monkeypatch):
-    async def fake_fetch(*, binary, query, scope, limit):  # noqa: ARG001
+    async def fake_fetch(*, binary, query, scope, limit, query_vec_path=None):  # noqa: ARG001
         if scope == "workspace:w1":
             return "good content"
         return ""  # the other scope returned empty
@@ -118,7 +118,7 @@ async def test_blank_scope_strings_filtered(monkeypatch):
     """Whitespace-only scope entries are dropped before the per-scope split."""
     captured: list[str] = []
 
-    async def fake_fetch(*, binary, query, scope, limit):  # noqa: ARG001
+    async def fake_fetch(*, binary, query, scope, limit, query_vec_path=None):  # noqa: ARG001
         captured.append(scope)
         return f"hit-{scope}"
 

@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from pocketpaw.integrations.oauth import PROVIDERS, OAuthManager
-from pocketpaw.integrations.token_store import OAuthTokens, TokenStore
+from pocketpaw.clients.oauth import PROVIDERS, OAuthManager
+from pocketpaw.clients.token_store import OAuthTokens, TokenStore
 
 # ---------------------------------------------------------------------------
 # TokenStore
@@ -17,7 +17,7 @@ from pocketpaw.integrations.token_store import OAuthTokens, TokenStore
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    monkeypatch.setattr("pocketpaw.integrations.token_store._get_oauth_dir", lambda: tmp_path)
+    monkeypatch.setattr("pocketpaw.clients.token_store._get_oauth_dir", lambda: tmp_path)
     return TokenStore()
 
 

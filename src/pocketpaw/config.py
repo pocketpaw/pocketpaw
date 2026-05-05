@@ -1,6 +1,9 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-04-30: Added pluggable embedding adapter settings — ``kb_vectors_enabled``,
+    ``embedding_adapter``, ``embedding_dim``, ``embedding_monthly_cap_usd``,
+    ``vertex_project_id``, ``vertex_location``. Stage 2.D of "Files as Knowledge".
   - 2026-04-30: Added ``kb_scopes`` (list[str]) for multi-scope KB queries.
     ``kb_scope`` (single string) is now a deprecation shim — when set and
     ``kb_scopes`` is empty, it copies forward and emits DeprecationWarning.
@@ -969,6 +972,63 @@ class Settings(BaseSettings):
             "Google Gemini API key for the gemini-flash extraction adapter. "
             "Read from POCKETPAW_GEMINI_API_KEY. When unset, the gemini-flash "
             "adapter is silently skipped during chain construction."
+        ),
+    )
+
+    # Embedding adapter (Phase 2, "Files as Knowledge" Stage 2.D)
+    kb_vectors_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vector-embedding pipeline. When False the "
+            "FileReady listener stops after text-ingest and the chat path "
+            "skips interleaved-image queries. Set via POCKETPAW_KB_VECTORS_ENABLED."
+        ),
+    )
+    embedding_adapter: str = Field(
+        default="",
+        description=(
+            "Embedding adapter name. Empty disables embeddings even when "
+            "kb_vectors_enabled is True. Supported: "
+            "'vertex-gemini-embedding-2' (preview, 3072-dim, multimodal), "
+            "'vertex-mm-001' (GA, 1408-dim, text+image). Set via "
+            "POCKETPAW_EMBEDDING_ADAPTER."
+        ),
+    )
+    embedding_dim: int = Field(
+        default=1024,
+        gt=0,
+        description=(
+            "Target output dim. vertex-gemini-embedding-2 uses Matryoshka "
+            "truncation; vertex-mm-001 snaps to the closest valid native "
+            "dim (128/256/512/1408). All vectors in a single kb-go scope "
+            "must agree on this value. Set via POCKETPAW_EMBEDDING_DIM."
+        ),
+    )
+    embedding_monthly_cap_usd: float = Field(
+        default=10.0,
+        ge=0,
+        description=(
+            "Soft monthly USD cap for embedding spend. When the running "
+            "total would exceed this, the listener falls back to "
+            "extraction-only (text still ingests, vector skipped). 0 "
+            "disables the cap. Persisted at ~/.pocketpaw/embedding_cost.json. "
+            "NOT a billing source — real billing comes from the provider's "
+            "dashboard. Set via POCKETPAW_EMBEDDING_MONTHLY_CAP_USD."
+        ),
+    )
+    vertex_project_id: str | None = Field(
+        default=None,
+        description=(
+            "GCP project id for vertex-mm-001 (the multimodalembedding@001 "
+            "adapter). When unset, the adapter is silently skipped during "
+            "factory construction. Set via POCKETPAW_VERTEX_PROJECT_ID."
+        ),
+    )
+    vertex_location: str | None = Field(
+        default=None,
+        description=(
+            "GCP region for vertex-mm-001 (default: us-central1 when "
+            "unset). Set via POCKETPAW_VERTEX_LOCATION."
         ),
     )
 

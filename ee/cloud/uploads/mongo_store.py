@@ -4,6 +4,12 @@
 unified files endpoint can pull chat-sourced uploads alongside local
 filesystem entries. Soft-deleted rows are skipped. Results are capped
 to keep the unified list cheap.
+2026-05-03 (Stage 3.E "Files as Knowledge"): ``save_scoped`` now
+accepts ``pocket_id`` so pocket uploads carry the metadata column
+through to ``FileUpload``. Reads grew a ``pocket_id`` filter on
+``list_by_workspace`` and a symmetric ``iter_by_pocket`` for the
+unified files panel. Storage layout is unchanged; partitioning is
+metadata-only (Captain Option A).
 """
 
 from __future__ import annotations
@@ -16,6 +22,25 @@ from ee.cloud.uploads.models import FileUpload
 from pocketpaw.uploads.file_store import FileRecord
 
 
+class _Sentinel:
+    """Distinct type for the ``pocket_id IS None`` filter sentinel.
+
+    Plain ``None`` already means "don't filter" on the legacy
+    ``list_by_workspace`` API; we need a separate value so callers can
+    explicitly ask for workspace-only rows (``pocket_id is None``) without
+    overloading ``None`` to mean both.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging only
+        return "LIST_WORKSPACE_ONLY"
+
+
+LIST_WORKSPACE_ONLY = _Sentinel()
+"""Sentinel: pass as ``pocket_id`` to filter rows where ``pocket_id IS None``."""
+
+
 class MongoFileStore:
     """Workspace-scoped metadata store for EE uploads."""
 
@@ -25,6 +50,7 @@ class MongoFileStore:
         workspace: str,
         *,
         folder_path: str = "/",
+        pocket_id: str | None = None,
     ) -> None:
         doc = FileUpload(
             file_id=record.id,
@@ -36,6 +62,7 @@ class MongoFileStore:
             owner=record.owner_id,
             chat_id=record.chat_id,
             folder_path=folder_path or "/",
+            pocket_id=pocket_id,
         )
         await doc.insert()
 
@@ -187,12 +214,21 @@ class MongoFileStore:
         *,
         limit: int = 200,
         chat_id: str | None = None,
+        pocket_id: str | None | _Sentinel = None,
     ) -> list[FileRecord]:
         """Return live (non-deleted) file records in a workspace.
 
         Newest first. When ``chat_id`` is supplied, narrow further to the
         uploads that originated in that chat. The workspace filter always
         applies — cross-workspace bleed is not allowed through this API.
+
+        ``pocket_id`` is tri-state:
+        - ``None`` (default): no pocket filter applied (legacy behaviour;
+          returns workspace-scoped + pocket-scoped rows alike).
+        - A string id: filter to rows scoped to that pocket.
+        - ``LIST_WORKSPACE_ONLY`` sentinel: filter to ``pocket_id IS None``
+          rows (workspace-scoped uploads only — what the workspace Files
+          panel surfaces).
         """
         capped = max(1, min(limit, 500))
         query: dict = {
@@ -201,8 +237,62 @@ class MongoFileStore:
         }
         if chat_id:
             query["chat_id"] = chat_id
+        if pocket_id is LIST_WORKSPACE_ONLY:
+            query["pocket_id"] = None
+        elif isinstance(pocket_id, str):
+            query["pocket_id"] = pocket_id
         docs = await FileUpload.find(query).sort([("createdAt", -1)]).limit(capped).to_list()
         return [r for r in (self._to_record(d) for d in docs) if r is not None]
+
+    async def iter_by_pocket(
+        self,
+        workspace: str,
+        pocket_id: str,
+        *,
+        include_deleted: bool = False,
+        limit: int = 500,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield upload docs for a single pocket as plain dicts.
+
+        Symmetric with :meth:`iter_by_workspace`. Used by the unified
+        files endpoint when the FE asks for a pocket-scoped listing.
+        Always includes a workspace filter so cross-workspace bleed is
+        impossible via this API.
+        """
+        query: list[Any] = [
+            FileUpload.workspace == workspace,
+            FileUpload.pocket_id == pocket_id,
+        ]
+        if not include_deleted:
+            query.append(FileUpload.deleted_at == None)  # noqa: E711
+        cursor = FileUpload.find(*query).limit(limit)
+        async for doc in cursor:
+            created = doc.createdAt
+            updated = getattr(doc, "updatedAt", None) or created
+            yield {
+                "file_id": doc.file_id,
+                "filename": doc.filename,
+                "mime": doc.mime,
+                "size": doc.size,
+                "workspace": doc.workspace,
+                "owner": doc.owner,
+                "workspace_id": doc.workspace,
+                "owner_id": doc.owner,
+                "chat_id": doc.chat_id,
+                "pocket_id": doc.pocket_id,
+                "folder_path": getattr(doc, "folder_path", None) or "/",
+                "created_at": created,
+                "updated_at": updated,
+                "tags": list(getattr(doc, "tags", []) or []),
+            }
+
+    async def count_by_pocket(self, workspace: str, pocket_id: str) -> int:
+        """Count live (non-deleted) files in a pocket. Cheap, one query."""
+        return await FileUpload.find(
+            FileUpload.workspace == workspace,
+            FileUpload.pocket_id == pocket_id,
+            FileUpload.deleted_at == None,  # noqa: E711
+        ).count()
 
     async def soft_delete_scoped(self, file_id: str, workspace: str) -> None:
         doc = await FileUpload.find_one(

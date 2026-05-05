@@ -10,9 +10,9 @@ from typing import Any
 
 import httpx
 
+from pocketpaw.clients.oauth import OAuthManager
+from pocketpaw.clients.token_store import TokenStore
 from pocketpaw.config import get_settings
-from pocketpaw.integrations.oauth import OAuthManager
-from pocketpaw.integrations.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
 

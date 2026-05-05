@@ -327,6 +327,35 @@ async def _run_agent_stream(
         logger.debug("backend.info() unavailable on agent %s", ctx.target_agent_id, exc_info=True)
     scope_block = build_context_block(ctx, backend_name=backend_name)
 
+    # Stage 3.E: pull KB context with per-request scope priority
+    # (pocket > agent > workspace). The per-request resolver lives on
+    # ``AgentContextBuilder`` so the OSS / channel paths share the same
+    # logic, just with a static ``settings.kb_scopes`` fallback. We
+    # prepend the result to the scope block so the agent sees ``###
+    # From <scope>`` sections alongside the participants tag.
+    try:
+        from pocketpaw.bootstrap.context_builder import (
+            AgentContextBuilder,
+            KbContext,
+        )
+
+        kb_block = await AgentContextBuilder._get_kb_context(
+            body.content,
+            kb_ctx=KbContext(
+                pocket_id=ctx.pocket_id,
+                agent_id=ctx.target_agent_id,
+                workspace_id=ctx.workspace_id,
+            ),
+        )
+    except Exception:
+        # KB context is best-effort — a transient kb-go / Mongo blip never
+        # blocks the chat reply. Log at debug for the failure trail.
+        logger.debug("KB context fetch failed for cloud chat", exc_info=True)
+        kb_block = ""
+
+    if kb_block:
+        scope_block = f"{scope_block}\n\n{kb_block}"
+
     await _broadcast_agent_typing(ctx, active=True)
 
     stream_start_payload: dict[str, Any] = {

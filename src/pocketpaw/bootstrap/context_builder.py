@@ -1,6 +1,18 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-05-03 - Stage 3.E "Files as Knowledge". Added ``KbContext``
+dataclass + ``_resolve_kb_scopes`` so per-request callers (the cloud chat
+path) can prioritise pocket > agent > workspace ahead of the static
+``settings.kb_scopes`` fallback. ``_get_kb_context`` accepts an optional
+``kb_ctx``; the existing channel + CLI paths continue to use the static
+list with no change in behaviour.
+Updated: 2026-04-30 - Stage 2.D "Files as Knowledge". _get_kb_context now
+accepts ``image_bytes`` for the chat-with-image path. When set and a
+multimodal embedder is configured, it embeds (text + image) once,
+caches the resulting vector to a temp file, and runs each scope's kb
+search in hybrid mode (BM25 + cosine via RRF). When unset (the common
+case) the call shape stays identical to the Phase 1 BM25-only path.
 Updated: 2026-04-30 - Multi-scope KB injection (Stage 1.B "Files as
 Knowledge"). _get_kb_context now reads ``settings.kb_scopes`` (list) and
 queries each scope independently, dividing the token budget by scope count
@@ -22,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+from dataclasses import dataclass
 
 from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
 from pocketpaw.bootstrap.protocol import BootstrapProviderProtocol
@@ -30,6 +43,43 @@ from pocketpaw.bus.format import CHANNEL_FORMAT_HINTS
 from pocketpaw.memory.manager import MemoryManager, get_memory_manager
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class KbContext:
+    """Per-request context for ``_get_kb_context`` scope resolution.
+
+    Stage 3.E "Files as Knowledge". Cloud chat builds one of these from a
+    ``ScopeContext`` and threads it into the system-prompt builder so KB
+    queries hit the most-specific scope available. Channels and CLI keep
+    using the static ``settings.kb_scopes`` fallback.
+    """
+
+    pocket_id: str | None = None
+    agent_id: str | None = None
+    workspace_id: str | None = None
+
+
+def _resolve_kb_scopes(ctx: KbContext | None, settings) -> list[str]:
+    """Build the prioritised scope list for a request.
+
+    Priority: pocket > agent > workspace > whatever's in ``settings.kb_scopes``.
+    Most-specific wins. The static settings list is the fallback for runtime
+    paths that don't carry a context (CLI, channels without ee/cloud) and for
+    requests that arrive with an empty ``KbContext``.
+    """
+    if ctx is None:
+        return list(settings.kb_scopes or [])
+    scopes: list[str] = []
+    if ctx.pocket_id:
+        scopes.append(f"pocket:{ctx.pocket_id}")
+    if ctx.agent_id:
+        scopes.append(f"agent:{ctx.agent_id}")
+    if ctx.workspace_id:
+        scopes.append(f"workspace:{ctx.workspace_id}")
+    if not scopes:
+        scopes = list(settings.kb_scopes or [])
+    return scopes
 
 
 class _Priority(enum.IntEnum):
@@ -93,6 +143,8 @@ class AgentContextBuilder:
         agents_md_dir: str | None = None,
         metadata: dict | None = None,
         budget_chars: int = _DEFAULT_BUDGET_CHARS,
+        image_bytes: bytes | None = None,
+        kb_ctx: KbContext | None = None,
     ) -> str:
         """Build the complete system prompt.
 
@@ -106,6 +158,18 @@ class AgentContextBuilder:
             agents_md_dir: Directory to search for AGENTS.md (walks up to repo root).
             metadata: Channel-specific metadata (e.g. discord username, guild_id).
             budget_chars: Maximum character budget for the assembled prompt.
+            image_bytes: Optional inline image attached to the chat message.
+                When set together with user_query and a multimodal embedder
+                is configured, the KB context fetch switches to hybrid mode
+                (BM25 + vector cosine fused via RRF). Phase 2 of "Files as
+                Knowledge". When None the call shape is identical to the
+                Phase 1 BM25-only path.
+            kb_ctx: Optional per-request scope context. When set, KB queries
+                resolve scope priority pocket > agent > workspace before
+                falling through to ``settings.kb_scopes``. Stage 3.E of
+                "Files as Knowledge". When None, the static settings list
+                is used unchanged — channel and CLI paths keep working
+                without changes.
         """
         blocks: list[tuple[str, _Priority, str]] = []
 
@@ -120,12 +184,12 @@ class AgentContextBuilder:
             context, memory_context, kb_context = await asyncio.gather(
                 self.bootstrap.get_context(),
                 memory_coro,
-                self._get_kb_context(user_query),
+                self._get_kb_context(user_query, image_bytes=image_bytes, kb_ctx=kb_ctx),
             )
         else:
             context, kb_context = await asyncio.gather(
                 self.bootstrap.get_context(),
-                self._get_kb_context(user_query),
+                self._get_kb_context(user_query, image_bytes=image_bytes, kb_ctx=kb_ctx),
             )
             memory_context = ""
 
@@ -397,15 +461,32 @@ class AgentContextBuilder:
         return "\n\n".join(result_parts)
 
     @staticmethod
-    async def _get_kb_context(user_query: str | None) -> str:
+    async def _get_kb_context(
+        user_query: str | None,
+        *,
+        image_bytes: bytes | None = None,
+        kb_ctx: KbContext | None = None,
+    ) -> str:
         """Fetch relevant articles from the kb-go CLI across configured scopes.
 
-        Each scope in ``settings.kb_scopes`` is queried independently with
+        Each scope in the resolved scope list is queried independently with
         ``kb search <query> --scope <s> --context --limit M`` where
         ``M = max(1, total_limit // len(scopes))``. Results are concatenated
         under ``### From <scope>`` headers so the model can attribute hits.
         Per-scope failures are logged at debug and skipped so one missing
         scope cannot break the prompt build.
+
+        When ``kb_ctx`` is provided (Stage 3.E), scope priority is
+        ``pocket:{id} > agent:{id} > workspace:{id}`` — most-specific wins.
+        Without a ``kb_ctx`` (channel paths, CLI), the static
+        ``settings.kb_scopes`` list is used unchanged.
+
+        When ``image_bytes`` is set and a multimodal embedder is configured,
+        the call shape switches to hybrid mode: a single embedding pass
+        builds the (text + image) query vector and each scope is searched
+        with ``--hybrid --query-vec <vec.json>``. The temp vec file is
+        cleaned up before returning. Embedder failures fall back to the
+        BM25-only path so a transient cloud outage doesn't kill chat.
 
         Returns an empty string when ``user_query`` is empty, when no scopes
         are configured (or only the deprecated ``kb_scope`` is set, see the
@@ -418,10 +499,13 @@ class AgentContextBuilder:
         from pocketpaw.config import get_settings
 
         settings = get_settings()
-        # ``kb_scopes`` is the canonical list. The deprecated single
-        # ``kb_scope`` is folded into the list by the model validator, so
-        # by the time we read settings here we only ever see the list.
-        scopes = [s.strip() for s in (settings.kb_scopes or []) if s and s.strip()]
+        # Stage 3.E: per-request scope resolution wins over the static list.
+        # ``kb_scopes`` (the static list) is the canonical fallback. The
+        # deprecated single ``kb_scope`` is folded into ``kb_scopes`` by
+        # the model validator, so by the time we read settings here we
+        # only ever see the list.
+        raw_scopes = _resolve_kb_scopes(kb_ctx, settings)
+        scopes = [s.strip() for s in raw_scopes if s and s.strip()]
         if not scopes:
             return ""
 
@@ -429,18 +513,90 @@ class AgentContextBuilder:
         total_limit = settings.kb_limit or 3
         per_scope_limit = max(1, total_limit // len(scopes))
 
-        sections: list[str] = []
-        for scope in scopes:
-            section = await AgentContextBuilder._fetch_kb_scope(
-                binary=binary,
-                query=user_query,
-                scope=scope,
-                limit=per_scope_limit,
+        # Stage 2.D: if the user attached an image, embed (text + image) once
+        # and run hybrid searches across scopes. The vec file is shared
+        # across per-scope subprocesses to avoid re-serializing on each call.
+        query_vec_path: str | None = None
+        try:
+            query_vec_path = await AgentContextBuilder._maybe_build_query_vec(
+                user_query=user_query,
+                image_bytes=image_bytes,
+                settings=settings,
             )
-            if section:
-                sections.append(f"### From {scope}\n{section}")
+            sections: list[str] = []
+            for scope in scopes:
+                section = await AgentContextBuilder._fetch_kb_scope(
+                    binary=binary,
+                    query=user_query,
+                    scope=scope,
+                    limit=per_scope_limit,
+                    query_vec_path=query_vec_path,
+                )
+                if section:
+                    sections.append(f"### From {scope}\n{section}")
+        finally:
+            if query_vec_path:
+                import os
+
+                try:
+                    os.unlink(query_vec_path)
+                except OSError:
+                    logger.debug("query-vec cleanup failed for %s", query_vec_path)
 
         return "\n\n".join(sections)
+
+    @staticmethod
+    async def _maybe_build_query_vec(
+        *,
+        user_query: str,
+        image_bytes: bytes | None,
+        settings,
+    ) -> str | None:
+        """Embed (text + image) and write the vector to a temp JSON file.
+
+        Returns the path on success, ``None`` when the embedder isn't
+        configured / can't handle images / fails. The caller is
+        responsible for unlinking the file.
+        """
+        if image_bytes is None:
+            return None
+        if not getattr(settings, "kb_vectors_enabled", False):
+            return None
+
+        try:
+            from ee.cloud.embeddings import build_embedder
+        except Exception:
+            logger.debug("embeddings package unavailable; falling back to BM25")
+            return None
+
+        embedder = build_embedder(settings)
+        if embedder is None or "image" not in embedder.supports_modalities:
+            return None
+
+        try:
+            emb = await embedder.embed_query(text=user_query, image_bytes=image_bytes)
+        except Exception:
+            logger.exception(
+                "query embedding failed; falling back to BM25 for this turn"
+            )
+            return None
+
+        import json
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 — manual lifecycle
+            mode="w",
+            prefix="paw-query-vec-",
+            suffix=".json",
+            delete=False,
+            encoding="utf-8",
+        )
+        try:
+            tmp.write(json.dumps({"vector": emb.vector}))
+            tmp.flush()
+        finally:
+            tmp.close()
+        return tmp.name
 
     @staticmethod
     async def _fetch_kb_scope(
@@ -449,8 +605,24 @@ class AgentContextBuilder:
         query: str,
         scope: str,
         limit: int,
+        query_vec_path: str | None = None,
     ) -> str:
-        """Run ``kb search ... --scope <scope>`` once. Empty on any failure."""
+        """Run ``kb search ... --scope <scope>`` once. Empty on any failure.
+
+        When ``query_vec_path`` is set the call switches to hybrid mode
+        (``--hybrid --query-vec <path> --topk <limit>``). The plain-text
+        ``--context`` flag is dropped in hybrid mode because kb-go's
+        hybrid output is JSON-shaped, so we re-derive the human-readable
+        section from the JSON title + summary fields.
+        """
+        if query_vec_path:
+            return await AgentContextBuilder._fetch_hybrid_scope(
+                binary=binary,
+                query=query,
+                scope=scope,
+                limit=limit,
+                query_vec_path=query_vec_path,
+            )
         try:
             proc = await asyncio.create_subprocess_exec(
                 binary,
@@ -482,6 +654,80 @@ class AgentContextBuilder:
             return ""
 
         return stdout.decode("utf-8", errors="replace").strip()
+
+    @staticmethod
+    async def _fetch_hybrid_scope(
+        *,
+        binary: str,
+        query: str,
+        scope: str,
+        limit: int,
+        query_vec_path: str,
+    ) -> str:
+        """Run ``kb search <query> --hybrid --query-vec <path> --scope <s>``.
+
+        Hybrid kb output is a JSON array of ``{id, title, summary, ...}``
+        rows. We render a compact text section per hit so the system
+        prompt assembler can drop it under ``### From <scope>`` without
+        further processing.
+        """
+        import json
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                "search",
+                query,
+                "--scope",
+                scope,
+                "--hybrid",
+                "--query-vec",
+                query_vec_path,
+                "--topk",
+                str(limit),
+                "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.debug(
+                    "kb hybrid fetch for scope %s timed out after 5s", scope
+                )
+                return ""
+        except FileNotFoundError:
+            logger.debug("kb binary not found at %s — skipping kb injection", binary)
+            return ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "kb hybrid fetch for scope %s failed (non-fatal): %s", scope, exc
+            )
+            return ""
+
+        if proc.returncode != 0:
+            return ""
+
+        try:
+            rows = json.loads(stdout.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(rows, list):
+            return ""
+
+        parts: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = row.get("title") or row.get("id") or ""
+            summary = (row.get("summary") or "").strip()
+            if title and summary:
+                parts.append(f"- {title}\n  {summary}")
+            elif title:
+                parts.append(f"- {title}")
+        return "\n".join(parts)
 
     @staticmethod
     def _load_channel_instructions(channel: Channel) -> str:

@@ -664,6 +664,42 @@ async def is_owner(pocket_id: str, user_id: str) -> bool:
     return doc.owner == user_id
 
 
+async def is_member(pocket_id: str, user_id: str) -> bool:
+    """Return ``True`` if ``user_id`` may read the pocket — owner, team
+    member, explicit shared_with, or any caller when visibility is
+    ``workspace`` / public.
+
+    Mirrors the read-side rule in ``agent_service._resolve_pocket`` so
+    the Files panel filter and the chat scope-resolver agree on who
+    sees a pocket's files. Raises ``NotFound`` if the pocket doesn't
+    exist — callers convert to a 403 / 404 as appropriate.
+
+    Stage 3.E: used by ``files/router.py`` to gate ``GET /files?pocket_id=X``
+    for non-members and by the upload router for the read-side ABAC
+    check (writes go through ``has_edit_access``).
+    """
+    try:
+        pocket_oid = PydanticObjectId(pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("pocket", pocket_id) from exc
+
+    doc = await _PocketDoc.get(pocket_oid)
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+
+    if doc.owner == user_id:
+        return True
+    if user_id in (doc.team or []):
+        return True
+    if user_id in (doc.shared_with or []):
+        return True
+    # Workspace-visible pockets: any workspace caller can read. The
+    # route-level ``current_workspace_id`` dependency already enforced
+    # workspace membership before we got here, so this branch implicitly
+    # requires the caller be in this pocket's workspace.
+    return getattr(doc, "visibility", "workspace") == "workspace"
+
+
 async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     """Read-only fetch — returns ``(view_dict, None)`` on success or
     ``(None, error)`` on failure."""
@@ -866,6 +902,7 @@ __all__ = [
     "generate_share_link",
     "get",
     "has_edit_access",
+    "is_member",
     "is_owner",
     "list_pockets",
     "remove_agent",
