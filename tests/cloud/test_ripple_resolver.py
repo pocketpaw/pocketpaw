@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch  # noqa: F401  # AsyncMock needed in Task 4
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -167,3 +167,17 @@ async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
     query = args[0] if args else kwargs
     assert "workspace" in str(query)
     assert "w1" in str(query)
+
+
+async def test_workspace_members_source_returns_member_list(ctx):
+    import ee.cloud.ripple_sources  # noqa: F401
+
+    with patch(
+        "ee.cloud.ripple_sources._list_workspace_members",
+        new=AsyncMock(return_value=[{"id": "u1"}, {"id": "u2"}]),
+    ):
+        spec = {"state": {"team": {"$source": "workspace.members"}}}
+        out = await resolve_ripple_spec(spec, ctx)
+    # v1 ships ids only; richer hydration (names, avatars, roles) is
+    # tracked for v2 along with a RequestContext-aware path.
+    assert out["state"]["team"] == [{"id": "u1"}, {"id": "u2"}]

@@ -52,3 +52,25 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
         }
         for d in docs
     ]
+
+
+async def _list_workspace_members(workspace_id: str) -> list[dict[str, Any]]:
+    """Indirection so tests can patch a single seam.
+    Implementation calls into ee.cloud.workspace.service — kept private
+    to insulate the resolver from changes in that module's signature.
+
+    v1 returns id-only entries. Richer member fields (name, avatar, role)
+    require a RequestContext-aware path planned for v2.
+    """
+    from ee.cloud.workspace import service as _ws
+
+    member_ids = await _ws.list_member_ids(workspace_id)
+    return [{"id": uid} for uid in member_ids]
+
+
+@register("workspace.members")
+async def _workspace_members(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict[str, Any]]:
+    if not ctx.workspace_id:
+        logger.warning("ripple_resolver: workspace.members called with empty workspace_id")
+        return []
+    return await _list_workspace_members(ctx.workspace_id)
