@@ -150,6 +150,36 @@ pocket.
 </interactive-by-default>
 """
 
+_STATE_SOURCES_BLOCK = """\
+<state-sources>
+For lists or values that should reflect REAL workspace data — pockets in
+this workspace, members of this workspace — do NOT inline literal arrays.
+Emit a `$source` marker and let the server hydrate it on read:
+
+  "state": {
+    "all_pockets": {"$source": "workspace.pockets"},
+    "team":        {"$source": "workspace.members"},
+    "draft":       ""
+  }
+
+The server replaces each marker with live data before the canvas renders.
+Available v1 sources:
+
+- `workspace.pockets`  → list of {id, name, type, icon, color} for every
+  pocket the user can see in this workspace.
+- `workspace.members`  → list of {id} for workspace members. (Richer
+  member fields land in v2.)
+
+Use literal arrays ONLY for canvas-local UI state the user types in
+themselves: `draft` inputs, `next_id` counters, todo rows the user adds
+via the Add button. Never invent business data the user expects to be
+real (bookings, customers, revenue, alerts) — if no source exists, omit
+the widget rather than fabricating rows.
+
+Unknown source names resolve to `null`. Stick to the allowlist above.
+</state-sources>
+"""
+
 
 # ---------------------------------------------------------------------------
 # Tool surface — MCP variant (claude_agent_sdk).
@@ -668,7 +698,7 @@ research FIRST using a MULTI-AGENT approach:
 # ---------------------------------------------------------------------------
 # Final assembly. Each variant ends with the shared design rules block.
 # Order: scope → canvas → list-gate → tools → workflow/creation →
-# interactive-default → examples → research-protocol → design rules.
+# interactive-default → state-sources → examples → research-protocol → design rules.
 # ---------------------------------------------------------------------------
 
 
@@ -680,6 +710,7 @@ def _assemble_creation(*, mcp: bool) -> str:
         _TOOLS_MCP if mcp else _TOOLS_CLI,
         _CREATION_OVERVIEW_MCP if mcp else _CREATION_OVERVIEW_CLI,
         _INTERACTIVE_DEFAULT_BLOCK,
+        _STATE_SOURCES_BLOCK,  # <-- new line, here
         _CREATION_EXAMPLES_MCP if mcp else _CREATION_EXAMPLES_CLI,
         _RESEARCH_PROTOCOL,
         RIPPLE_DESIGN_RULES,
