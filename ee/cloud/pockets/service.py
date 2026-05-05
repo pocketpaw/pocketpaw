@@ -280,7 +280,14 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
 
 
 async def list_pockets(workspace_id: str, user_id: str) -> list[dict]:
-    """List pockets visible to the user (owned, shared_with, or workspace-visible)."""
+    """List pockets visible to the user (owned, shared_with, or workspace-visible).
+
+    Each returned pocket has its rippleSpec ``$source`` markers resolved
+    against ``user_id``'s context — the desktop client renders the canvas
+    directly from this list response, so unresolved markers would surface
+    as empty widgets. Resolution per pocket is independent; sources that
+    fail fall back to raw markers individually (see ``_resolved_wire_dict``).
+    """
     docs = await _PocketDoc.find(
         {
             "workspace": workspace_id,
@@ -291,7 +298,7 @@ async def list_pockets(workspace_id: str, user_id: str) -> list[dict]:
             ],
         }
     ).to_list()
-    return [pocket_to_wire_dict(_pocket_to_domain(d)) for d in docs]
+    return [await _resolved_wire_dict(d, user_id) for d in docs]
 
 
 async def get(pocket_id: str, user_id: str) -> dict:
