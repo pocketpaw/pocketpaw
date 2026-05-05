@@ -76,3 +76,32 @@ async def test_non_string_source_name_returns_none(ctx: ResolveCtx) -> None:
     spec = {"state": {"x": {"$source": 42}}}
     out = await resolve_ripple_spec(spec, ctx)
     assert out == {"state": {"x": None}}
+
+
+async def test_marker_inside_list_replaced(ctx: ResolveCtx) -> None:
+    spec = {
+        "ui": {
+            "type": "flex",
+            "children": [
+                {"type": "page-header", "props": {"title": "x"}},
+                {"$source": "test.echo", "tag": "from-list"},
+            ],
+        }
+    }
+    out = await resolve_ripple_spec(spec, ctx)
+    assert out["ui"]["children"][0] == {"type": "page-header", "props": {"title": "x"}}
+    assert out["ui"]["children"][1] == {"workspace_id": "w1", "args": {"tag": "from-list"}}
+
+
+async def test_multiple_markers_resolved_independently(ctx: ResolveCtx) -> None:
+    spec = {
+        "state": {
+            "ok": {"$source": "test.echo", "n": 1},
+            "boom": {"$source": "test.boom"},
+            "missing": {"$source": "does.not.exist"},
+        }
+    }
+    out = await resolve_ripple_spec(spec, ctx)
+    assert out["state"]["ok"] == {"workspace_id": "w1", "args": {"n": 1}}
+    assert out["state"]["boom"] is None
+    assert out["state"]["missing"] is None
