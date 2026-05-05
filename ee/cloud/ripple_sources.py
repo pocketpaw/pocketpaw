@@ -25,6 +25,13 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
     Visibility filter mirrors pockets.service.list_pockets — owner,
     shared_with, or workspace-visible. The full rippleSpec is excluded
     (would be wasteful and recursive)."""
+    if not ctx.workspace_id or not ctx.user_id:
+        logger.warning(
+            "ripple_resolver: workspace.pockets called with empty ctx (workspace=%r user=%r)",
+            ctx.workspace_id,
+            ctx.user_id,
+        )
+        return []
     docs = await _PocketDoc.find(
         {
             "workspace": ctx.workspace_id,
@@ -45,6 +52,3 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
         }
         for d in docs
     ]
-
-
-__all__ = ["_workspace_pockets"]
