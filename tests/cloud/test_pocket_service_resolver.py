@@ -115,3 +115,46 @@ async def test_get_falls_back_to_raw_spec_when_resolver_raises():
 
     # Raw (unresolved) spec is returned.
     assert out["rippleSpec"]["state"]["all"] == {"$source": "workspace.pockets"}
+
+
+async def test_resolved_wire_dict_resolves_for_given_viewer():
+    """Other boundaries (create return, event payload) call _resolved_wire_dict
+    directly. Verify it resolves with the supplied viewer's context."""
+    import ee.cloud.ripple_sources  # noqa: F401
+
+    spec = {"state": {"all": {"$source": "workspace.pockets"}}}
+    fake = [{"id": "p1", "name": "X", "type": "custom", "icon": "", "color": ""}]
+
+    captured_user_id: list[str] = []
+
+    async def _fake(ctx, args):
+        captured_user_id.append(ctx.user_id)
+        return fake
+
+    with patch.dict("ee.cloud.ripple_resolver._REGISTRY", {"workspace.pockets": _fake}):
+        out = await pocket_service._resolved_wire_dict(_fake_doc(spec), "alice")
+
+    assert out["rippleSpec"]["state"]["all"] == fake
+    assert captured_user_id == ["alice"]
+
+
+async def test_event_payload_resolves_using_owner_as_viewer():
+    """Multi-recipient broadcasts resolve against doc.owner — verifies the
+    create/update WebSocket flow doesn't hand raw markers to the renderer."""
+    import ee.cloud.ripple_sources  # noqa: F401
+
+    spec = {"state": {"all": {"$source": "workspace.pockets"}}}
+    fake = [{"id": "p1", "name": "Owner-View", "type": "custom", "icon": "", "color": ""}]
+
+    captured_user_id: list[str] = []
+
+    async def _fake(ctx, args):
+        captured_user_id.append(ctx.user_id)
+        return fake
+
+    doc = _fake_doc(spec)  # owner="u1" per fixture
+    with patch.dict("ee.cloud.ripple_resolver._REGISTRY", {"workspace.pockets": _fake}):
+        payload = await pocket_service._pocket_event_payload(doc)
+
+    assert payload["pocket"]["rippleSpec"]["state"]["all"] == fake
+    assert captured_user_id == ["u1"]  # doc.owner

@@ -149,7 +149,48 @@ def _build_widget_doc(payload: dict) -> _WidgetDoc:
     )
 
 
-def _pocket_event_payload(doc: _PocketDoc) -> dict:
+async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
+    """Build the wire dict with rippleSpec ``$source`` markers resolved
+    against ``viewer_user_id``'s workspace context.
+
+    Used by every boundary that hands a spec to a renderer:
+    ``service.get`` (REST), ``service.create``/``update`` return values,
+    and ``_pocket_event_payload`` (WebSocket broadcast). Falls back to
+    the raw wire dict on resolver failure — never raises.
+
+    Resolution requires a viewer because sources like ``workspace.pockets``
+    apply per-user visibility filters. For multi-recipient broadcasts,
+    pass the doc's owner; this can over-share owner's private pockets to
+    other recipients (metadata only). Tracked for v2: per-recipient
+    resolution or frontend refetch on event receipt.
+    """
+    import dataclasses
+
+    pocket = _pocket_to_domain(doc)
+    if pocket.ripple_spec:
+        from ee.cloud import ripple_sources  # noqa: F401  — register sources
+        from ee.cloud.ripple_resolver import ResolveCtx, resolve_ripple_spec
+
+        try:
+            resolved = await resolve_ripple_spec(
+                pocket.ripple_spec,
+                ResolveCtx(
+                    workspace_id=doc.workspace,
+                    user_id=viewer_user_id,
+                    pocket_id=str(doc.id),
+                ),
+            )
+            pocket = dataclasses.replace(pocket, ripple_spec=resolved)
+        except Exception:
+            logger.warning(
+                "ripple_resolver: resolve failed for pocket %s; returning raw spec",
+                str(doc.id),
+                exc_info=True,
+            )
+    return pocket_to_wire_dict(pocket)
+
+
+async def _pocket_event_payload(doc: _PocketDoc) -> dict:
     """Build the realtime event payload for a pocket mutation.
 
     Always includes ``recipient_ids`` (owner + shared_with). For
@@ -162,8 +203,11 @@ def _pocket_event_payload(doc: _PocketDoc) -> dict:
     pocket — workspace-visible pockets fan out to every member, and the
     share token is owner-only state. Owners receive the token directly in
     the REST response from ``generate_share_link``.
+
+    rippleSpec ``$source`` markers are resolved using ``doc.owner`` as
+    the viewer. See ``_resolved_wire_dict`` for the v2 follow-up note.
     """
-    pocket_dict = pocket_to_wire_dict(_pocket_to_domain(doc))
+    pocket_dict = await _resolved_wire_dict(doc, doc.owner)
     pocket_dict.pop("shareLinkToken", None)
     pocket_dict.pop("sharedWith", None)
     payload: dict = {
@@ -196,7 +240,7 @@ async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str
             await doc.save()
             changed = True
     if changed:
-        await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return _pocket_to_domain(doc)
 
 
@@ -231,8 +275,8 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     if body.session_id:
         await sessions_service.link_pocket(workspace_id, body.session_id, pocket.id)
 
-    await emit(PocketCreated(data=_pocket_event_payload(doc)))
-    return pocket_to_wire_dict(pocket)
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def list_pockets(workspace_id: str, user_id: str) -> list[dict]:
@@ -256,8 +300,6 @@ async def get(pocket_id: str, user_id: str) -> dict:
     rippleSpec $source markers are resolved on read against the calling user's
     workspace context.
     """
-    import dataclasses
-
     doc = await _fetch_pocket(pocket_id)
     pocket = _pocket_to_domain(doc)
     if (
@@ -266,27 +308,7 @@ async def get(pocket_id: str, user_id: str) -> dict:
         and pocket.visibility == "private"
     ):
         raise Forbidden("pocket.access_denied", "You do not have access to this pocket")
-    if pocket.ripple_spec:
-        from ee.cloud import ripple_sources  # noqa: F401  — register sources
-        from ee.cloud.ripple_resolver import ResolveCtx, resolve_ripple_spec
-
-        try:
-            resolved = await resolve_ripple_spec(
-                pocket.ripple_spec,
-                ResolveCtx(
-                    workspace_id=doc.workspace,
-                    user_id=user_id,
-                    pocket_id=str(doc.id),
-                ),
-            )
-            pocket = dataclasses.replace(pocket, ripple_spec=resolved)
-        except Exception:
-            logger.warning(
-                "ripple_resolver: resolve failed for pocket %s; returning raw spec",
-                pocket_id,
-                exc_info=True,
-            )
-    return pocket_to_wire_dict(pocket)
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dict:
@@ -315,8 +337,8 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     if normalized_spec is not None:
         doc.rippleSpec = normalized_spec
     await doc.save()
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
-    return pocket_to_wire_dict(_pocket_to_domain(doc))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def delete(pocket_id: str, user_id: str) -> None:
@@ -381,7 +403,7 @@ async def create_from_ripple_spec(
         await doc.insert()
         pocket_id = str(doc.id)
         logger.info("Auto-created pocket %s from ripple spec", pocket_id)
-        await emit(PocketCreated(data=_pocket_event_payload(doc)))
+        await emit(PocketCreated(data=await _pocket_event_payload(doc)))
         return pocket_id
     except Exception:
         logger.warning("Failed to auto-create pocket from ripple spec", exc_info=True)
@@ -412,7 +434,7 @@ async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> di
     )
     doc.widgets.append(widget)
     await doc.save()
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -440,7 +462,7 @@ async def update_widget(
     if body.assigned_agent is not None:
         widget.assignedAgent = body.assigned_agent
     await doc.save()
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -453,7 +475,7 @@ async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
     if len(doc.widgets) == before:
         raise NotFound("widget", widget_id)
     await doc.save()
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -484,7 +506,7 @@ async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -
     widgets_by_id = {w.id: w for w in doc.widgets}
     doc.widgets = [widgets_by_id[wid] for wid in ordered]
     await doc.save()
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -808,7 +830,7 @@ async def agent_update(
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -827,7 +849,7 @@ async def agent_add_widget(pocket_id: str, widget: dict) -> tuple[dict | None, s
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -855,7 +877,7 @@ async def agent_update_widget(
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -871,7 +893,7 @@ async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | No
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
-    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -911,7 +933,7 @@ async def agent_create(
         await doc.insert()
     except Exception as exc:  # noqa: BLE001
         return None, None, f"insert failed: {exc}"
-    await emit(PocketCreated(data=_pocket_event_payload(doc)))
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
     return _agent_view_dict(doc), str(doc.id), None
 
 
