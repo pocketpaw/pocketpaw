@@ -55,17 +55,56 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
 
 
 async def _list_workspace_members(workspace_id: str) -> list[dict[str, Any]]:
-    """Indirection so tests can patch a single seam.
-    Implementation calls into ee.cloud.workspace.service — kept private
-    to insulate the resolver from changes in that module's signature.
+    """Return enriched member entries for a workspace.
 
-    v1 returns id-only entries. Richer member fields (name, avatar, role)
-    require a RequestContext-aware path planned for v2.
+    Indirection so tests can patch a single seam. Joins workspace member
+    ids with the User collection to surface name/email/avatar/role —
+    widgets like ``people-picker`` call ``.split()`` on a name, so id-only
+    entries crash the renderer.
+
+    Members with no matching User row are dropped (rare, but possible
+    during async deletion).
     """
+    from beanie import PydanticObjectId
+
+    from ee.cloud.models.user import User
     from ee.cloud.workspace import service as _ws
 
     member_ids = await _ws.list_member_ids(workspace_id)
-    return [{"id": uid} for uid in member_ids]
+    if not member_ids:
+        return []
+
+    object_ids: list[PydanticObjectId] = []
+    for uid in member_ids:
+        try:
+            object_ids.append(PydanticObjectId(uid))
+        except Exception:
+            logger.debug("ripple_resolver: skipping non-ObjectId user_id %r", uid)
+
+    users = await User.find({"_id": {"$in": object_ids}}).to_list()
+    by_id = {str(u.id): u for u in users}
+
+    out: list[dict[str, Any]] = []
+    for uid in member_ids:
+        user = by_id.get(uid)
+        if user is None:
+            continue
+        role = "member"
+        for membership in getattr(user, "workspaces", []) or []:
+            if getattr(membership, "workspace", None) == workspace_id:
+                role = getattr(membership, "role", "member") or "member"
+                break
+        name = (user.full_name or "").strip() or (user.email or "").split("@")[0]
+        out.append(
+            {
+                "id": uid,
+                "name": name,
+                "email": user.email,
+                "avatar": user.avatar or "",
+                "role": role,
+            }
+        )
+    return out
 
 
 @register("workspace.members")

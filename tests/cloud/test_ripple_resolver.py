@@ -169,15 +169,20 @@ async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
     assert "w1" in str(query)
 
 
-async def test_workspace_members_source_returns_member_list(ctx):
+async def test_workspace_members_source_returns_enriched_member_list(ctx):
     import ee.cloud.ripple_sources  # noqa: F401
 
+    enriched = [
+        {"id": "u1", "name": "Alex", "email": "a@x.com", "avatar": "", "role": "owner"},
+        {"id": "u2", "name": "Brit", "email": "b@x.com", "avatar": "", "role": "member"},
+    ]
     with patch(
         "ee.cloud.ripple_sources._list_workspace_members",
-        new=AsyncMock(return_value=[{"id": "u1"}, {"id": "u2"}]),
+        new=AsyncMock(return_value=enriched),
     ):
         spec = {"state": {"team": {"$source": "workspace.members"}}}
         out = await resolve_ripple_spec(spec, ctx)
-    # v1 ships ids only; richer hydration (names, avatars, roles) is
-    # tracked for v2 along with a RequestContext-aware path.
-    assert out["state"]["team"] == [{"id": "u1"}, {"id": "u2"}]
+    # Widgets like people-picker call .split() on name — entries must
+    # include name, otherwise the renderer crashes. See ripple_sources.
+    assert out["state"]["team"] == enriched
+    assert all("name" in m for m in out["state"]["team"])
