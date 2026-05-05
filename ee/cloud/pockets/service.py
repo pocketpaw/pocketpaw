@@ -537,6 +537,8 @@ async def access_via_share_link(token: str) -> dict:
     doc = await _PocketDoc.find_one(_PocketDoc.share_link_token == token)
     if doc is None:
         raise NotFound("pocket", "shared link")
+    # no-resolve: share-link viewers have no auth context to build a ResolveCtx;
+    # $source markers surface raw. v2: resolve with a guest-scoped context.
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
