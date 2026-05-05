@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch  # noqa: F401  # AsyncMock needed in Task 4
+
 import pytest
 
 from ee.cloud.ripple_resolver import ResolveCtx, register, resolve_ripple_spec
@@ -105,3 +107,63 @@ async def test_multiple_markers_resolved_independently(ctx: ResolveCtx) -> None:
     assert out["state"]["ok"] == {"workspace_id": "w1", "args": {"n": 1}}
     assert out["state"]["boom"] is None
     assert out["state"]["missing"] is None
+
+
+async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
+    # Importing the sources module triggers @register side-effects.
+    import ee.cloud.ripple_sources  # noqa: F401
+
+    fake_docs = [
+        type(
+            "D",
+            (),
+            {
+                "id": "p1",
+                "name": "Bookings",
+                "type": "business",
+                "icon": "calendar",
+                "color": "#0A84FF",
+            },
+        )(),
+        type(
+            "D",
+            (),
+            {
+                "id": "p2",
+                "name": "Notes",
+                "type": "deep-work",
+                "icon": "note",
+                "color": "#30D158",
+            },
+        )(),
+    ]
+
+    class _FakeFind:
+        def __init__(self, docs):
+            self._docs = docs
+
+        async def to_list(self):
+            return self._docs
+
+    with patch(
+        "ee.cloud.ripple_sources._PocketDoc.find",
+        return_value=_FakeFind(fake_docs),
+    ) as find_mock:
+        spec = {"state": {"all": {"$source": "workspace.pockets"}}}
+        out = await resolve_ripple_spec(spec, ctx)
+
+    assert out["state"]["all"] == [
+        {
+            "id": "p1",
+            "name": "Bookings",
+            "type": "business",
+            "icon": "calendar",
+            "color": "#0A84FF",
+        },
+        {"id": "p2", "name": "Notes", "type": "deep-work", "icon": "note", "color": "#30D158"},
+    ]
+    # Tenancy invariant: every find call must scope by workspace.
+    args, kwargs = find_mock.call_args
+    query = args[0] if args else kwargs
+    assert "workspace" in str(query)
+    assert "w1" in str(query)
