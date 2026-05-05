@@ -61,17 +61,32 @@ async def _walk(node: Any, ctx: ResolveCtx) -> Any:
 async def _resolve_marker(marker: dict[str, Any], ctx: ResolveCtx) -> Any:
     name = marker.get(SOURCE_KEY)
     if not isinstance(name, str):
-        logger.warning("ripple_resolver: $source value is not a string: %r", name)
+        logger.warning(
+            "ripple_resolver: $source value is not a string: %r (workspace=%s pocket=%s)",
+            name,
+            ctx.workspace_id,
+            ctx.pocket_id,
+        )
         return None
     fn = _REGISTRY.get(name)
     if fn is None:
-        logger.warning("ripple_resolver: unknown $source %r", name)
+        logger.warning(
+            "ripple_resolver: unknown $source %r (workspace=%s pocket=%s)",
+            name,
+            ctx.workspace_id,
+            ctx.pocket_id,
+        )
         return None
     args = {k: v for k, v in marker.items() if k != SOURCE_KEY}
     try:
         return await fn(ctx, args)
     except Exception:
-        logger.exception("ripple_resolver: source %r failed", name)
+        logger.exception(
+            "ripple_resolver: source %r failed (workspace=%s pocket=%s)",
+            name,
+            ctx.workspace_id,
+            ctx.pocket_id,
+        )
         return None
 
 
