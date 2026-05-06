@@ -19,6 +19,13 @@ by the pocket's ABAC (must have edit access via
 ``pockets.service.has_edit_access``) and the resulting ``FileUpload``
 row carries ``pocket_id`` so it's only visible through pocket-scoped
 listings + indexed into ``pocket:{id}`` KB.
+
+2026-05-06 (fix/rbac-connector-upload-guards): ``POST /uploads`` and
+``POST /uploads/folders`` now require ``uploads.write`` (MEMBER) via
+``require_action_any_workspace``. Previously ``current_workspace_id``
+authenticated the caller but did not verify workspace membership, so a
+user with a foreign workspace set as active_workspace could write files
+into it.
 """
 
 from __future__ import annotations
@@ -41,7 +48,11 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 
 from ee.cloud.license import require_license
-from ee.cloud.shared.deps import current_user_id, current_workspace_id
+from ee.cloud.shared.deps import (
+    current_user_id,
+    current_workspace_id,
+    require_action_any_workspace,
+)
 from ee.cloud.shared.time import iso_utc
 from ee.cloud.uploads.folder_store import FolderStore
 from ee.cloud.uploads.mongo_store import MongoFileStore
@@ -113,7 +124,10 @@ def _record_to_dict(rec) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/folders")
+@router.post(
+    "/folders",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
 async def create_folder(
     body: dict = Body(...),
     workspace: str = Depends(current_workspace_id),
@@ -253,7 +267,10 @@ async def delete_folder(
 # ---------------------------------------------------------------------------
 
 
-@router.post("")
+@router.post(
+    "",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
 async def upload(
     files: Annotated[list[UploadFile], File(...)],
     chat_id: Annotated[str | None, Form()] = None,

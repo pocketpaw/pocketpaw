@@ -9,6 +9,12 @@
 # ``check_workspace_action`` (which already audits denials via
 # ``log_denial``) instead of hand-rolling the role check — closes the
 # P0 auth-bypass flagged in docs/plans/cluster-D-reality.md.
+#
+# Updated: 2026-05-06 (fix/rbac-connector-upload-guards) — registered
+# ``connector.execute`` (MEMBER), ``connector.manage`` (ADMIN),
+# ``uploads.write`` (MEMBER), and ``uploads.manage`` (ADMIN) so the
+# connector and uploads routers can use ``require_action_any_workspace``
+# instead of relying solely on ``require_license``.
 
 from __future__ import annotations
 
@@ -134,6 +140,17 @@ ACTIONS: dict[str, ActionRule] = {
     # authenticated caller could install into any workspace
     # (docs/plans/cluster-D-reality.md#106-112, P0 fix 2026-04-19).
     "fleet.install": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Connector — workspace-level connector lifecycle.
+    # execute is MEMBER so any team member can run actions against enabled connectors.
+    # manage (enable/disable/config) is ADMIN because it changes workspace-wide state
+    # visible to all members and can trigger OAuth flows or expose credentials.
+    "connector.execute": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "connector.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Uploads — workspace-scoped file storage.
+    # write is MEMBER so any team member can upload files or create folders.
+    # manage is ADMIN for bulk moves, cross-user deletes, and storage policy changes.
+    "uploads.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "uploads.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Admin — operational endpoints (perf timing dumps, etc.). Owner-only
     # because per-route timing reveals traffic patterns and request
     # cadence that shouldn't be visible to every admin in a workspace.
