@@ -572,7 +572,7 @@ they fit into a tool call. For other widgets, call ``get_widget_spec``.
               {"accessorKey": "done", "header": ""},
               {"accessorKey": "title", "header": "Task"}
             ],
-            "data": "{state.tasks}"
+            "rows": "{state.tasks}"
           }}
         ]
       }
@@ -641,7 +641,7 @@ For other widgets, run ``cloud_get_widget_spec``.
         {"type":"table","props":{
           "columns":[{"accessorKey":"done","header":""},
                      {"accessorKey":"title","header":"Task"}],
-          "data":"{state.tasks}"
+          "rows":"{state.tasks}"
         }}
       ]}
   }}' | python -m pocketpaw.tools.cli cloud_create_pocket -

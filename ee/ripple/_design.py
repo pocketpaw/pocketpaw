@@ -18,7 +18,10 @@ WIDGET_CATALOG = """\
 
 layout      flex, grid, card, container, tabs, accordion, split,
             master-detail, collapsible, separator, page-header, hero,
-            section, app-shell, sidebar, breadcrumb
+            section, app-shell, sidebar, breadcrumb, comparison-layout,
+            map, checklist-layout, entity-detail, form-layout,
+            invoice-layout, location-picker, order-status,
+            report-layout, wizard-layout
 display     heading, text, badge, metric, stat, progress, progress-ring,
             avatar, image, markdown, code-block, code, kbd, icon,
             quote, highlight, definition-list, comparison-table,
@@ -61,16 +64,25 @@ of text rows" rebuild looks worse than the real widget.
   funnel / conversion funnel          → funnel
   org chart / team tree               → org-chart
   pricing / plans / tiers             → pricing-table
-  compare X vs Y / feature compare    → comparison-table
+  compare X vs Y / feature compare    → comparison-layout
   sortable table / data grid          → data-grid
   audit log / activity log            → audit-log
   comments / discussion thread        → comment-thread
   command palette / cmd-k             → command-palette
-  steps / how-to / wizard             → steps (NOT numbered text)
+  steps / how-to                      → steps (NOT numbered text)
   pros vs cons                        → pros-cons
   file tree / folder tree             → tree
   hierarchical table                  → tree-table
   monitoring gauge / dial             → gauge
+  signup / contact / multi-field form → form-layout
+  multi-step setup / onboarding flow  → wizard-layout
+  launch checklist / runbook / pre-flight → checklist-layout
+  quarterly / status report write-up  → report-layout
+  invoice / quote / receipt           → invoice-layout
+  order tracking / shipment status    → order-status
+  record / profile / entity detail page → entity-detail
+  geographic map / locations / route  → map
+  pick a place / address picker       → location-picker
 """
 
 
@@ -95,7 +107,15 @@ canvas. Pick ONE focal widget per pane when the data has a natural shape:
                                          it with 6 stat tiles around it
   pricing / plans                      → one full-pane `pricing-table`
   long discussion                      → one full-pane `comment-thread`
-  big compare matrix                   → one full-pane `comparison-table`
+  big compare matrix                   → one full-pane `comparison-layout`
+  multi-step setup / onboarding        → one full-pane `wizard-layout`
+  launch checklist / runbook           → one full-pane `checklist-layout`
+  invoice / quote / receipt            → one full-pane `invoice-layout`
+  order / shipment tracking            → one full-pane `order-status`
+  record / profile detail page         → one full-pane `entity-detail`
+  signup / contact / multi-field form  → one full-pane `form-layout`
+  quarterly / status report            → one full-pane `report-layout`
+  locations on a map / route           → one full-pane `map`
 
 A pane filled with ONE well-shaped widget reads better than four small
 tiles. Reach for grid-of-tiles ONLY when the answer truly is a small set
@@ -120,7 +140,7 @@ when none fits.
   KPI dashboard (2–6 numbers)   → grid(columns 2|3|4) of `stat` cells
   list of items with state      → `kv-table` (key + value rows) OR
                                    `table` if >3 columns
-  comparison X vs Y             → `comparison-table`
+  comparison X vs Y             → `comparison-layout`
   ranked list / leaderboard     → `table` with rank + name + metric
   code + explanation            → flex(column, gap 12px) of
                                    [code-block, callout(variant=info)]
@@ -132,6 +152,19 @@ when none fits.
   status across many items      → `kanban` if columns are workflow stages,
                                    else `table` with a status badge column
   step-by-step / how-to         → `steps` widget (NOT numbered text)
+  multi-step setup / onboarding → `wizard-layout` (NOT a manual stepper +
+                                   form rebuild)
+  launch checklist / runbook    → `checklist-layout` (NOT a flex of
+                                   checkbox + text rows)
+  signup / contact form         → `form-layout` (sections + fields +
+                                   actions; NOT hand-built flex of inputs)
+  invoice / quote / receipt     → `invoice-layout` (totals + line items)
+  order tracking / shipment     → `order-status` (composes a `map` when
+                                   geo data is supplied)
+  record / profile detail       → `entity-detail` (header + properties +
+                                   tabs; NOT a flex of metric tiles)
+  quarterly report write-up     → `report-layout` (NOT a flex of headings
+                                   + paragraphs)
   pros vs cons                  → `pros-cons`
   attribution / citations       → `source-card` per source, or
                                    `sources-bar` for ≤4 inline sources
@@ -153,6 +186,64 @@ If two recipes both fit, prefer the typed widget (`comparison-table`
 over a hand-built `table`; `steps` over a flex of text rows). The
 catalog is the toolkit — compose with it, don't rebuild its widgets out
 of flex+text.
+"""
+
+
+NO_INVENTED_WIDGETS_RULE = """\
+# NO INVENTED WIDGETS — only emit `type` values from the catalog
+
+The renderer has a CLOSED registry. If you emit `type: "<anything>"` and
+that string isn't in the WIDGET CATALOG above, the renderer prints
+`Unknown widget type: ...` in a red box and the user sees it. There is
+no partial credit for "almost right" — `revenue-card`, `kpi-tile`,
+`metric-card`, `stat-block`, `info-panel`, `summary-box`, `header-card`
+all render as the red error box. There is no fallback.
+
+Hard rules:
+
+1. **Every `type` MUST appear verbatim in the WIDGET CATALOG.** Copy
+   the string. Do not pluralize (`stats` is not `stat`), do not
+   abbreviate (`btn` is not `button`), do not invent compounds
+   (`metric-row`, `chart-card`, `kpi-strip`).
+2. **No custom HTML or JSX.** This is a JSON-spec renderer, not React.
+   You cannot emit `<div>`, `<table>`, `<form>` — only catalog widgets.
+   `style` is an object map of CSS props (subject to THEME RULE), NOT
+   inline HTML.
+3. **No new prop names.** Stick to props returned by `get_widget_spec`
+   for the widget. Inventing `metric.icon`, `stat.unit`, `chart.legend`
+   silently drops on the client — the widget renders without them and
+   the value you computed is invisible.
+4. **No styling-only nodes.** Don't emit a node whose only purpose is
+   to wrap something in inline color or padding. Use the right typed
+   widget (`callout` for emphasis, `card` for grouping, `badge` /
+   `chip` for inline tags) — the typed widget already styles itself.
+
+Compose. Don't extend. The catalog is the language; flex+grid+card is
+the grammar that combines existing words. You never need a new word.
+
+Common rebuild antipatterns and their fixes:
+
+  ❌ flex of [icon, text, badge, text]   → use `metric` or `stat`
+  ❌ grid of card+heading+text+button     → use `pricing-table` or `card`
+                                            with proper props
+  ❌ flex column of {heading, text} pairs → use `definition-list`
+  ❌ flex row of [status-dot, text]
+     repeated 8 times                     → use `data-grid` or `table`
+                                            with a status column
+  ❌ numbered text rows                   → use `steps`
+  ❌ checkbox+text repeated rows          → use `checklist-layout`
+  ❌ flex of stat tiles around a chart    → use the metrics-above-chart
+                                            recipe (grid of stat ABOVE
+                                            full-width chart) — not
+                                            stat tiles wrapping it
+  ❌ "type": "ui-spec" / "ui" / "root"    → these are NOT widget types.
+                                            They're SPEC envelope keys.
+                                            The root NODE has its own
+                                            `type` like `flex` or
+                                            `page-header`.
+
+If a shape isn't in the catalog and isn't expressible by composing
+catalog widgets, OMIT it and tell the user in prose. Do NOT invent.
 """
 
 
@@ -205,13 +296,13 @@ spelled `donut`, NOT `doughnut`:
   - type: bar | line | area | pie | donut | candlestick | sparkline | heatmap | gauge | radar
   - data: [{label, value}] for most. candlestick: {label, open, high, low, close}.
 
-`table` — `columns` are OBJECTS with `accessorKey`; `data` is an array
+`table` — `columns` are OBJECTS with `accessorKey`; `rows` is an array
 of OBJECTS keyed by accessorKey. NEVER pass `columns: [str]` +
 `rows: [[]]` — the cells silently render empty:
   { "type": "table", "props": {
       "columns": [ { "accessorKey": "page",  "header": "Page" },
                    { "accessorKey": "views", "header": "Views" } ],
-      "data": [ { "page": "/home", "views": "8,421" },
+      "rows": [ { "page": "/home", "views": "8,421" },
                 { "page": "/pricing", "views": "5,312" } ]
   }}
 
@@ -525,11 +616,17 @@ clear this bar before you emit it:
 # Convenience splice — the canonical order for embedding the full design
 # language into a surface prompt. Both _inline.py and _pockets.py use
 # this single import so the order stays consistent.
+#
+# Order matters. The catalog comes BEFORE the no-invention rule so the
+# rule can refer to "the catalog above"; the spec-tool rule comes after
+# both so the agent has already learned what's allowed before being
+# told to call the tool for non-free-list types.
 RIPPLE_DESIGN_RULES = "\n".join(
     [
         USE_THE_WIDGET_RULE,
         FULL_PANE_RULE,
         WIDGET_CATALOG,
+        NO_INVENTED_WIDGETS_RULE,
         WIDGET_SPEC_TOOL_RULE,
         CANONICAL_SHAPES,
         INTERACTIVE_STATE_RULE,
@@ -545,6 +642,7 @@ __all__ = [
     "WIDGET_CATALOG",
     "USE_THE_WIDGET_RULE",
     "FULL_PANE_RULE",
+    "NO_INVENTED_WIDGETS_RULE",
     "WIDGET_SPEC_TOOL_RULE",
     "COMPOSITION_COOKBOOK",
     "CANONICAL_SHAPES",
