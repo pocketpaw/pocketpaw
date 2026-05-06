@@ -16,6 +16,11 @@ Public API:
 - ``list_member_ids(workspace_id)``, ``list_admin_ids(workspace_id)``,
   ``list_peer_ids(user_id)`` — used as function refs by the realtime
   audience resolver
+- ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
+  the plan-feature gate dependency; returns "team" on any failure so the
+  dep fails open on plan rather than crashing with a 500.
+
+Changes: added get_workspace_plan helper for plan-feature gate dep.
 """
 
 from __future__ import annotations
@@ -656,12 +661,26 @@ async def seed_default_workspace(
         return None
 
 
+async def get_workspace_plan(workspace_id: str) -> str:
+    """Return the plan tier string for a workspace.
+
+    Used by the plan-feature gate dependency. Returns "team" (the most
+    restrictive plan) as a safe fallback when the workspace cannot be
+    loaded so the guard fails open on plan rather than raising a 500.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        return "team"
+    return doc.plan
+
+
 __all__ = [
     "accept_invite",
     "create",
     "create_invite",
     "delete",
     "get",
+    "get_workspace_plan",
     "legacy_ctx",
     "list_admin_ids",
     "list_for_user",

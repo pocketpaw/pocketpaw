@@ -8,6 +8,8 @@ imports keep working; new code should import from ``_core``.
 The domain-specific guards (group, agent, pocket) remain here. They
 delegate the Beanie loads to their owning entity services so this
 module doesn't import any ``ee.cloud.models.*`` Beanie docs.
+
+Changes: re-export require_plan_feature from _core.deps.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from ee.cloud._core.deps import (
     require_action,
     require_action_any_workspace,
     require_membership,
+    require_plan_feature,
 )
 from ee.cloud._core.errors import Forbidden
 from ee.cloud.auth import current_active_user
@@ -43,6 +46,7 @@ __all__ = [
     "require_agent_owner_or_admin",
     "require_group_action",
     "require_membership",
+    "require_plan_feature",
     "require_pocket_edit",
     "require_pocket_owner",
 ]
