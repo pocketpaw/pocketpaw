@@ -3,6 +3,12 @@
 #   for every successful upload (chat-scoped or workspace-only) and always
 #   carries workspace_id so downstream subscribers (the KB indexer) can route
 #   the file into the right scope without a follow-up Mongo lookup.
+# Updated: 2026-05-03 — Stage 3.E "Files as Knowledge". ``upload_many`` /
+#   ``upload`` now thread ``pocket_id`` from the router through to
+#   ``MongoFileStore.save_scoped`` and into the FileReady event payload.
+#   The KB listener picks up the new key and routes the article into
+#   ``pocket:{id}`` instead of ``workspace:{wid}``. Storage layout is
+#   unchanged — partitioning is metadata-only (Captain Option A).
 """EEUploadService — workspace-scoped upload pipeline on top of the OSS service."""
 
 from __future__ import annotations
@@ -124,9 +130,15 @@ class EEUploadService:
         chat_id: str | None,
         workspace: str,
         folder_path: str = "/",
+        pocket_id: str | None = None,
     ) -> FileRecord:
         result = await self.upload_many(
-            [file], owner_id, chat_id, workspace, folder_path=folder_path
+            [file],
+            owner_id,
+            chat_id,
+            workspace,
+            folder_path=folder_path,
+            pocket_id=pocket_id,
         )
         if result.failed:
             f = result.failed[0]
@@ -140,16 +152,25 @@ class EEUploadService:
         chat_id: str | None,
         workspace: str,
         folder_path: str = "/",
+        pocket_id: str | None = None,
     ) -> BulkUploadResult:
         # Delegate validation + adapter writes; metadata is discarded inside OSS
         result = await self._oss.upload_many(files, owner_id, chat_id)
-        # Persist each successful record in Mongo with workspace scoping.
+        # Persist each successful record in Mongo with workspace + pocket scoping.
         for rec in result.uploaded:
-            await self._meta.save_scoped(rec, workspace=workspace, folder_path=folder_path)
+            await self._meta.save_scoped(
+                rec,
+                workspace=workspace,
+                folder_path=folder_path,
+                pocket_id=pocket_id,
+            )
             # Emit FileReady for every successful upload. Chat-scoped rows
             # carry ``group_id`` so the timeline broadcast still works;
             # workspace-only uploads (avatars, KB files) skip the broadcast
-            # but still fire local subscribers (the KB indexer).
+            # but still fire local subscribers (the KB indexer). Pocket-
+            # scoped uploads carry ``pocket_id`` so the KB listener routes
+            # the article into ``pocket:{id}`` rather than the workspace
+            # pool.
             data: dict = {
                 "workspace_id": workspace,
                 "file_id": rec.id,
@@ -161,6 +182,8 @@ class EEUploadService:
             }
             if rec.chat_id:
                 data["group_id"] = rec.chat_id
+            if pocket_id:
+                data["pocket_id"] = pocket_id
             await emit(FileReady(data=data))
         return result
 

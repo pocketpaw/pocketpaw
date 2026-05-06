@@ -44,7 +44,7 @@ async def test_drive_list_no_auth():
 
     tool = DriveListTool()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient._get_token",
+        "pocketpaw.clients.gdrive.DriveClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute()
@@ -65,7 +65,7 @@ async def test_drive_list_success():
         }
     ]
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient._get_token",
+        "pocketpaw.clients.gdrive.DriveClient._get_token",
         new_callable=AsyncMock,
         return_value="fake-token",
     ):
@@ -90,7 +90,7 @@ async def test_drive_list_empty():
 
     tool = DriveListTool()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient._get_token",
+        "pocketpaw.clients.gdrive.DriveClient._get_token",
         new_callable=AsyncMock,
         return_value="fake-token",
     ):
@@ -114,7 +114,7 @@ async def test_drive_download_no_auth():
 
     tool = DriveDownloadTool()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient._get_token",
+        "pocketpaw.clients.gdrive.DriveClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(file_id="abc123")
@@ -126,7 +126,7 @@ async def test_drive_upload_no_auth():
 
     tool = DriveUploadTool()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient._get_token",
+        "pocketpaw.clients.gdrive.DriveClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(file_path="/tmp/test.txt")
@@ -138,7 +138,7 @@ async def test_drive_upload_file_not_found():
 
     tool = DriveUploadTool()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient._get_token",
+        "pocketpaw.clients.gdrive.DriveClient._get_token",
         new_callable=AsyncMock,
         return_value="fake-token",
     ):
@@ -161,7 +161,7 @@ async def test_drive_share_no_auth():
 
     tool = DriveShareTool()
     with patch(
-        "pocketpaw.integrations.gdrive.DriveClient._get_token",
+        "pocketpaw.clients.gdrive.DriveClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(file_id="abc", email="x@y.com")

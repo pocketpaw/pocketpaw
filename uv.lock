@@ -909,19 +909,20 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.1.56"
+version = "0.1.72"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
+    { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/c1/c7afb1a08cecef0644693ccd9975651e45cf23a50272b94b6eca2c1a7dc8/claude_agent_sdk-0.1.56.tar.gz", hash = "sha256:a95bc14e59f9d6c8e7fa2e6581008a3f24f10e1b57302719823f62cfb5beccdc", size = 121659, upload-time = "2026-04-04T00:56:30.512Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/b7/ce35a79f4891797ef60b5cf437453bf22e3e420f5946007312c9e144f5e0/claude_agent_sdk-0.1.72.tar.gz", hash = "sha256:e737f919301d5fc65a3ebc6f438911b73e237b16fa9fa3061420e79727cfa307", size = 241286, upload-time = "2026-05-01T02:17:34.37Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b0/73/4e3d13c4d43614de35a113c87ec96b3db605baa23f9f5c4a38536837e18e/claude_agent_sdk-0.1.56-py3-none-macosx_11_0_arm64.whl", hash = "sha256:9f5a7c87617101e6bb0f23408104ac6f40f9b5adec91dcfe5b8de5f65a7df73a", size = 58585662, upload-time = "2026-04-04T00:56:34.935Z" },
-    { url = "https://files.pythonhosted.org/packages/1e/6d/78347c2efa1526f1f6e7edecabe636575f622bcaa7921965457f95dd12dc/claude_agent_sdk-0.1.56-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:824f4a10340f46dd26fee8e74aeed4fc64fec95084e327ab1ebb6058b349e1c3", size = 60419564, upload-time = "2026-04-04T00:56:39.64Z" },
-    { url = "https://files.pythonhosted.org/packages/87/c1/708262318926c8393d494a5dcaafd9bc7d6ba547c0a5fad4eff5f9aa0ecd/claude_agent_sdk-0.1.56-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:ff60dedc06b62b52e5937a9a2c4b0ec4ad0dd6764c20be656d01aeb8b11fba1d", size = 71893844, upload-time = "2026-04-04T00:56:44.402Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/4f/24918a596b0d61c3a691af2a9ee52b8c54f1769ce2c5fef1d64350056e53/claude_agent_sdk-0.1.56-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:fe866b2119f69e99d9637acc27b588670c610fed1c4a096287874db5744d029b", size = 72030943, upload-time = "2026-04-04T00:56:49.892Z" },
-    { url = "https://files.pythonhosted.org/packages/f3/d8/5ded242e55f0b5f295d4ee2cbe5ae3bca914eb0a2a291f81e38b68d3ef58/claude_agent_sdk-0.1.56-py3-none-win_amd64.whl", hash = "sha256:5934e082e1ccf975d65cd7412f2eaf2c5ffa6b9019a2ca2a9fb228310df7ddc8", size = 74141451, upload-time = "2026-04-04T00:56:57.683Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/de/098dd15dec8ce3c5ed9c9c2415a290fb5c24ad9cd1214cfc3e20c3be0342/claude_agent_sdk-0.1.72-py3-none-macosx_11_0_arm64.whl", hash = "sha256:3a16ee041db0734e8f82d1fca7bd7c122227c0d8c150a301b365ab3f0a83a27b", size = 63695454, upload-time = "2026-05-01T02:17:38.468Z" },
+    { url = "https://files.pythonhosted.org/packages/55/de/bea82fdd65244bab9cf6aa3492c2b6cc5d97213836730febd89c0a342975/claude_agent_sdk-0.1.72-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:4b3c630b5b07cd4f3d57631d833539b77045937093ec4975f47ee29de6b9a9df", size = 65539313, upload-time = "2026-05-01T02:17:43.129Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/26/78e45a08c4acb262b8f99f6885fb5b96ccf32f27be008610403b86cc3da8/claude_agent_sdk-0.1.72-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:6fd7c6cbab95928ceb39fe82f413bd124e83dc5ed9bf63b6dffb9dc2b83f67bc", size = 76872182, upload-time = "2026-05-01T02:17:48.616Z" },
+    { url = "https://files.pythonhosted.org/packages/58/6d/9641f9a3119adec03d33cb40be8a194801cde0c15b3c497f07e36b38dab1/claude_agent_sdk-0.1.72-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:e2cf7beb573b608832cf2c644b330e51b79cfdab85286f064cf92f8f63c66382", size = 77032401, upload-time = "2026-05-01T02:17:54.322Z" },
+    { url = "https://files.pythonhosted.org/packages/88/a1/35eeda6bac78c5c236c0f3c36fb8634503514ff78ada4e46b77397922ed7/claude_agent_sdk-0.1.72-py3-none-win_amd64.whl", hash = "sha256:9159ac974b496bb50d05027f49b44b76a595f1b4df3bfdef1136b56c95fc956d", size = 78421027, upload-time = "2026-05-01T02:18:00.614Z" },
 ]
 
 [[package]]
@@ -4015,6 +4016,19 @@ wheels = [
 ]
 
 [[package]]
+name = "openai-codex-sdk"
+version = "0.1.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/48/d9/601134e94b83017252d29bbffff85ed86b302ded014165edee8bf70c8558/openai_codex_sdk-0.1.11.tar.gz", hash = "sha256:2cb1ad6bc6318b419802f6f87e1cef2f3987580953d218933def281ff98929ab", size = 20609, upload-time = "2026-01-19T09:59:46.757Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/2e/72ce1e801d0ad668096c7a9250b23d0325a26fe9e6d63788ccf8ddfe3d81/openai_codex_sdk-0.1.11-py3-none-any.whl", hash = "sha256:0575fd99ad3310ead661d8c6d54f5c3bb6b45a6ff99f57377f30f19ea34a3cc0", size = 19743, upload-time = "2026-01-19T09:59:44.866Z" },
+]
+
+[[package]]
 name = "opentelemetry-api"
 version = "1.38.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4540,6 +4554,9 @@ channels = [
     { name = "python-telegram-bot" },
     { name = "slack-bolt" },
 ]
+codex-sdk = [
+    { name = "openai-codex-sdk" },
+]
 copilot-sdk = [
     { name = "github-copilot-sdk" },
 ]
@@ -4762,7 +4779,7 @@ requires-dist = [
     { name = "botbuilder-integration-aiohttp", marker = "extra == 'teams'", specifier = ">=4.16.0" },
     { name = "boto3", marker = "extra == 'enterprise'", specifier = ">=1.34.0" },
     { name = "chromadb", marker = "extra == 'vector'" },
-    { name = "claude-agent-sdk", specifier = ">=0.1.56" },
+    { name = "claude-agent-sdk", specifier = ">=0.1.72" },
     { name = "click", specifier = ">=8.0" },
     { name = "cryptography", specifier = ">=46.0.0" },
     { name = "deepagents", marker = "extra == 'all'", specifier = ">=0.1.0" },
@@ -4849,6 +4866,7 @@ requires-dist = [
     { name = "openai-agents", marker = "extra == 'all'", specifier = ">=0.2.0" },
     { name = "openai-agents", marker = "extra == 'dev'", specifier = ">=0.2.0" },
     { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.2.0" },
+    { name = "openai-codex-sdk", marker = "extra == 'codex-sdk'", specifier = ">=0.1.11" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "playwright", marker = "extra == 'all'", specifier = ">=1.50.0" },
     { name = "playwright", marker = "extra == 'all-tools'", specifier = ">=1.50.0" },
@@ -4910,7 +4928,7 @@ requires-dist = [
     { name = "trafilatura", marker = "extra == 'knowledge'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.31.1" },
 ]
-provides-extras = ["vector", "knowledge", "databases", "postgresql", "mysql", "mongodb", "graph", "dashboard", "telegram", "browser", "desktop", "openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "drive", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "enterprise", "all", "dev"]
+provides-extras = ["vector", "knowledge", "databases", "postgresql", "mysql", "mongodb", "graph", "dashboard", "telegram", "browser", "desktop", "openai-agents", "codex-sdk", "google-adk", "copilot-sdk", "deep-agents", "litellm", "memory", "soul", "discord", "slack", "whatsapp-personal", "matrix", "teams", "gchat", "drive", "image", "extract", "voice", "ocr", "sarvam", "mcp", "recommended", "channels", "all-channels", "all-tools", "all-backends", "enterprise", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -1,4 +1,11 @@
-"""EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter."""
+"""EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
+
+2026-05-03 — Stage 3.E "Files as Knowledge". Added ``pocket_id`` so the
+unified Files panel and the FileReady listener can route a single upload
+into a pocket-scoped KB instead of the workspace pool. ``None`` is the
+right semantic for "workspace upload" (no migration script needed; Beanie
+field-add is backward compatible).
+"""
 
 from __future__ import annotations
 
@@ -30,6 +37,11 @@ class FileUpload(TimestampedDocument):
     # Absolute folder path for the "My Files" mount. Root is ``"/"``.
     # Missing/None on legacy rows → treat as root.
     folder_path: str | None = "/"
+    # Pocket scoping (Stage 3.E). ``None`` = workspace-scoped (default,
+    # the pre-Stage-3.E semantics). When set, the file shows up only in
+    # the pocket's Files panel and gets indexed into ``pocket:{id}`` KB.
+    # Storage layout is unchanged — partitioning is metadata-only.
+    pocket_id: str | None = None
     deleted_at: datetime | None = None
 
     class Settings:
@@ -38,6 +50,9 @@ class FileUpload(TimestampedDocument):
             [("workspace", 1), ("chat_id", 1), ("createdAt", -1)],
             [("workspace", 1), ("owner", 1), ("createdAt", -1)],
             [("workspace", 1), ("folder_path", 1), ("deleted_at", 1)],
+            # Stage 3.E: pocket-scoped queries hit this index. Newest
+            # first because the Files panel orders by ``created`` desc.
+            [("workspace", 1), ("pocket_id", 1), ("createdAt", -1)],
         ]
 
 

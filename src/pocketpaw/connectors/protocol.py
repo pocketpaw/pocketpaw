@@ -2,15 +2,19 @@
 # Created: 2026-03-27 — Protocol-based, async, adapter-agnostic.
 # Updated: 2026-04-13 (Move 7 PR-A) — Added IngestACL + IngestAdapter
 #   alias so the ingest side of the protocol carries source-side ACLs
-#   into Fabric. Adapters that emit documents tagged with inherited
-#   scope keep org permissions intact end-to-end (a private Slack
-#   channel's messages stay private inside Single Brain).
+#   into Fabric.
+# Updated: 2026-05-03 (Phase 1 PR-2) — Added ExecutionMode +
+#   requires_binary on ActionSchema, ConnectorScope tagged union,
+#   WidgetRecipe + ConnectorHealth dataclasses, and widgets() / health()
+#   methods on ConnectorProtocol. See ee/cloud/connectors/CHARTER.md
+#   §4 + §6.2 for the rationale (CLI connectors can't multi-tenant in
+#   cloud, so the runtime needs to know where each action runs).
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 class ConnectorStatus(StrEnum):
@@ -30,6 +34,63 @@ class TrustLevel(StrEnum):
     RESTRICTED = "restricted"  # Requires admin approval
 
 
+class ExecutionMode(StrEnum):
+    """Where a connector action is allowed to execute.
+
+    The cloud router (``ee/cloud/connectors/router.py``) inspects this
+    on each request and dispatches accordingly:
+
+    - ``CLOUD`` — runs in the FastAPI process (default for YAML / REST
+      connectors, in-process logic).
+    - ``LOCAL`` — runs on the user's pocketpaw runtime via the
+      local-agent bus (CLI tools that depend on the user's machine
+      state — gcloud, firebase, gh, kubectl, …). The cloud router
+      forwards the call through ``connector.exec.requested`` on the
+      shared chat WebSocket and awaits ``connector.exec.completed``.
+    - ``SANDBOX`` — reserved. Ephemeral container per invocation with
+      workspace-scoped service-account creds. Implementation deferred
+      until a real client need surfaces (see CHARTER.md §3 out of scope).
+    """
+
+    CLOUD = "cloud"
+    LOCAL = "local"
+    SANDBOX = "sandbox"
+
+
+# ---------------------------------------------------------------------------
+# Connector scope — tagged union resolved at the runtime boundary.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PocketScope:
+    """Scope bound to one pocket. Used by KB ingestion + per-pocket data sources."""
+
+    pocket_id: str
+    workspace_id: str = ""
+    kind: Literal["pocket"] = "pocket"
+
+
+@dataclass(frozen=True)
+class WorkspaceScope:
+    """Scope bound to one workspace. Default for home widgets and automations."""
+
+    workspace_id: str
+    kind: Literal["workspace"] = "workspace"
+
+
+@dataclass(frozen=True)
+class UserScope:
+    """Scope bound to one user. Used for personal email / calendar feeds."""
+
+    user_id: str
+    workspace_id: str = ""  # always present so tenancy works regardless
+    kind: Literal["user"] = "user"
+
+
+ConnectorScope = PocketScope | WorkspaceScope | UserScope
+
+
 @dataclass
 class ConnectionResult:
     """Result of a connect() call."""
@@ -43,13 +104,63 @@ class ConnectionResult:
 
 @dataclass
 class ActionSchema:
-    """Schema for a single connector action."""
+    """Schema for a single connector action.
+
+    ``execution_mode`` (added Phase 1 PR-2) tells the cloud router where
+    this action is allowed to run. YAML connectors default to ``CLOUD``;
+    CLI adapters override per action.
+
+    ``requires_binary`` names the executable the action shells out to
+    (``"gcloud"``, ``"firebase"``, ``"gh"``, …) so the local agent can
+    fail fast with a useful error when the binary is missing.
+    """
 
     name: str
     description: str = ""
     method: str = "GET"
     parameters: dict[str, Any] = field(default_factory=dict)
     trust_level: TrustLevel = TrustLevel.CONFIRM
+    execution_mode: ExecutionMode = ExecutionMode.CLOUD
+    requires_binary: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Health + widget recipes — added Phase 1 PR-2
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConnectorHealth:
+    """Live status snapshot. Returned by ``Connector.health(scope)``.
+
+    The cloud's ConnectorPanel frontend uses this to show a real status
+    badge instead of inferring from the last execute() (which was
+    fragile — see CHARTER.md §4 note 3).
+    """
+
+    ok: bool
+    status: ConnectorStatus
+    message: str = ""
+    checked_at_ms: int = 0  # ms-since-epoch — frontend formats relative
+
+
+@dataclass(frozen=True)
+class WidgetRecipe:
+    """Pre-baked default widget the connector contributes to home dashboards.
+
+    AddWidgetPicker reads these via ``GET /api/v1/cloud/connectors/widget-recipes``
+    to populate the "From connectors" rail. The recipe is a thin spec —
+    title + display type + the action call to make — that compiles to a
+    Ripple UISpec at render time. Survives Ripple version bumps because
+    the recipe shape doesn't pin a UISpec version.
+    """
+
+    title: str
+    display_type: str  # "metric" | "chart" | "table" | "feed" | "stats"
+    action: str  # action name on the connector (e.g. "search")
+    params: dict[str, Any] = field(default_factory=dict)
+    default_size: str = "col-1 row-1"  # grid-span hint
+    description: str = ""
 
 
 @dataclass
@@ -139,6 +250,26 @@ class ConnectorProtocol(Protocol):
 
     async def schema(self) -> dict[str, Any]:
         """Return data schema for pocket.db table mapping."""
+        ...
+
+    # --- Phase 1 PR-2 additions ----------------------------------------------
+
+    async def widgets(self) -> list[WidgetRecipe]:
+        """Return default home widgets the connector contributes.
+
+        Default implementation in ``DirectRESTAdapter`` returns ``[]``;
+        native connectors (Gmail, Calendar, …) override to expose recipes
+        like Inbox, Today's Calendar, Recent Drive activity.
+        """
+        ...
+
+    async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
+        """Live health snapshot for the ConnectorPanel status badge.
+
+        Implementations should be cheap (single auth-check or HEAD/OPTIONS
+        request). Heavy probes belong in a dedicated diagnostics tool,
+        not the per-request status endpoint.
+        """
         ...
 
 

@@ -12,6 +12,13 @@ here). ``POST /uploads/folders``, ``PATCH /uploads/folders/{id}``,
 ``DELETE /uploads/folders/{id}``, ``PATCH /uploads/{file_id}``, plus a
 new ``path`` multipart field on ``POST /uploads`` that auto-creates any
 missing folder chain.
+
+2026-05-03 (Stage 3.E "Files as Knowledge"): ``POST /uploads`` accepts
+an optional ``pocket_id`` form field. When set, the upload is gated
+by the pocket's ABAC (must have edit access via
+``pockets.service.has_edit_access``) and the resulting ``FileUpload``
+row carries ``pocket_id`` so it's only visible through pocket-scoped
+listings + indexed into ``pocket:{id}`` KB.
 """
 
 from __future__ import annotations
@@ -251,6 +258,7 @@ async def upload(
     files: Annotated[list[UploadFile], File(...)],
     chat_id: Annotated[str | None, Form()] = None,
     path: Annotated[str | None, Form()] = None,
+    pocket_id: Annotated[str | None, Form()] = None,
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
@@ -258,6 +266,21 @@ async def upload(
         folder_path = normalize_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    # Stage 3.E ABAC gate: pocket-scoped uploads require edit access on the
+    # target pocket. Owner / shared-with / workspace-visible all grant
+    # write per ``pockets.service.has_edit_access``. Non-members get a 403
+    # with the same code paw-enterprise's pocket UI already handles.
+    if pocket_id:
+        from ee.cloud.pockets import service as pockets_service
+
+        try:
+            allowed = await pockets_service.has_edit_access(
+                pocket_id=pocket_id, user_id=user_id
+            )
+        except Exception:
+            allowed = False
+        if not allowed:
+            raise HTTPException(status_code=403, detail="files.pocket_forbidden")
     # Auto-create missing folder chain (only when not root).
     if folder_path != "/":
         try:
@@ -265,7 +288,14 @@ async def upload(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     try:
-        result = await _SVC.upload_many(files, user_id, chat_id, workspace, folder_path=folder_path)
+        result = await _SVC.upload_many(
+            files,
+            user_id,
+            chat_id,
+            workspace,
+            folder_path=folder_path,
+            pocket_id=pocket_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {

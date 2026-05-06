@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ee.cloud.models.agent import Agent, AgentConfig
 from ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
+from ee.cloud.models.connector import WorkspaceConnector
 from ee.cloud.models.file import FileObj
 from ee.cloud.models.group import Group, GroupAgent
 from ee.cloud.models.invite import Invite
@@ -57,6 +58,7 @@ __all__ = [
     "Widget",
     "WidgetPosition",
     "Workspace",
+    "WorkspaceConnector",
     "WorkspaceMembership",
     "WorkspaceSettings",
 ]
@@ -76,6 +78,7 @@ def get_all_documents():
         FileUpload,
         FileFolder,
         Workspace,
+        WorkspaceConnector,
         Invite,
         Group,
         Message,

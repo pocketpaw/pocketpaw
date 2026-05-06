@@ -20,6 +20,11 @@ from enum import StrEnum
 from typing import Any
 
 from ee.cloud.shared.errors import CloudError, NotFound
+from ee.ripple import (
+    INLINE_RIPPLE_SYSTEM_PROMPT,
+    POCKET_ID_TOKEN,
+    get_pocket_prompts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -452,186 +457,19 @@ def assemble_toolset(ctx: ScopeContext, *, base: list[dict[str, Any]]) -> list[d
 # ---------------------------------------------------------------------------
 
 
-_RIPPLE_HINT = """\
-<ripple>
-You can render rich, interactive UI inline in your chat responses by emitting
-a JSON spec inside a ```ui-spec``` (or ```json```) fenced code block. The
-client renders it as live components in the message bubble.
+def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -> str:
+    """Compact string the agent prompt embeds so the model knows who is
+    here and how to render rich UI back to the client.
 
-Spec shape (UISpec v1.0):
-```ui-spec
-{
-  "version": "1.0",
-  "ui": {
-    "type": "flex",
-    "props": { "direction": "column", "gap": "16px" },
-    "children": [
-      { "type": "heading", "props": { "text": "Overview", "level": 2 } },
-      { "type": "text", "props": { "text": "Summary line.", "size": "sm" } },
-      {
-        "type": "grid",
-        "props": { "columns": 3, "gap": 3 },
-        "children": [
-          { "type": "stat", "props": { "label": "Revenue", "value": 12450, "format": "currency", "deltaPercent": 3.4, "direction": "up-good" } },
-          { "type": "stat", "props": { "label": "Signups", "value": 247, "deltaPercent": 18.2, "direction": "up-good" } },
-          { "type": "stat", "props": { "label": "Churn", "value": 0.034, "format": "percent", "deltaPercent": -0.8, "direction": "down-good" } }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Allowed node types in chat-inline specs: `flex`, `grid`, `heading`, `text`,
-`stat`, `chart`, `table`.
-
-Stat:
-- `stat.format`: "currency" | "percent" (omit for plain numbers).
-- `stat.direction`: "up-good" | "down-good" — controls delta color.
-
-Chart:
-```ui-spec
-{
-  "version": "1.0",
-  "ui": {
-    "type": "chart",
-    "props": {
-      "type": "line",
-      "title": "Monthly Revenue",
-      "data": [
-        { "label": "Jan", "value": 12000 },
-        { "label": "Feb", "value": 15400 },
-        { "label": "Mar", "value": 13200 }
-      ],
-      "colors": ["#3b82f6"],
-      "height": 220
-    }
-  }
-}
-```
-- `type` (chart kind): one of
-  `bar | line | area | pie | donut | candlestick | sparkline | heatmap | gauge | radar`.
-  (You may also write `chartType` at the node level — the renderer
-  translates both, but `props.type` is the canonical Ripple shape.)
-- `data`: array of `{label, value}` for most chart types.
-  - For `candlestick`: each point is `{label, open, high, low, close}`.
-  - For `heatmap` / multi-series: each point may include `series: {a: 1, b: 2}`.
-  - The renderer also accepts Chart.js `{labels, datasets}` and
-    `series: [{name, color, data: [{x, y}]}]`, but `[{label, value}]` is
-    simplest and preferred.
-- `colors`, `height`, `tooltip` optional. `bullColor` / `bearColor` for
-  candlestick.
-
-Table:
-```ui-spec
-{
-  "version": "1.0",
-  "ui": {
-    "type": "table",
-    "props": {
-      "columns": ["Customer", "MRR", "Status"],
-      "data": [
-        { "Customer": "Acme",   "MRR": "$2,400", "Status": "Active" },
-        { "Customer": "Globex", "MRR": "$1,180", "Status": "Trial"  }
-      ],
-      "variant": "default"
-    }
-  }
-}
-```
-- `data`: array of objects keyed by column name (preferred). The renderer
-  also accepts `rows: [["Acme", "$2,400", "Active"], ...]` (array-of-
-  arrays) and zips it against `columns`.
-- `columns`: array of strings, OR objects with
-  `{accessorKey | key, header | label}`.
-- `variant`: `default | compact | striped | minimal`.
-- `statusKey`: optional column key whose value drives a status-dot color.
-- For a titled table, wrap in a `flex` with a `heading` above the table —
-  the Table widget does not render its own title.
-
-Notes:
-- Do NOT include `button` or interactive nodes — chat-inline specs are for
-  display only; interactive surfaces belong on a pocket canvas, not in chat.
-
-When to use:
-- Numeric summaries, dashboards, time-series, comparisons, structured lists.
-- Don't force it for plain text answers — only when visual structure helps.
-- You can mix prose and one ui-spec block in the same response.
-- Top-level keys MUST be `version` and `ui`. The root `ui` is a single node;
-  nest with `children` arrays for `flex`/`grid`. Single-node specs (a lone
-  chart or table) work too — wrap in `flex` if you need a heading + chart.
-</ripple>"""
-
-
-_CLOUD_POCKET_TOOL_PREAMBLE = """\
-<cloud-pocket-tools>
-This conversation runs in cloud mode. Pocket operations go through these
-in-process MCP tools — NOT the Bash ``python -m pocketpaw.tools.cli``
-bridge mentioned below. The CLI bridge does not persist in cloud mode;
-the MCP tools do. Same operations, typed JSON arguments, no shell
-escaping headaches:
-
-- ``mcp__pocketpaw_pocket__get_pocket(pocket_id)`` — replaces
-  ``cli get_pocket``. Returns the full pocket document.
-- ``mcp__pocketpaw_pocket__create_pocket(name, description, type, icon,
-  color, ripple_spec)`` — replaces ``cli create_pocket``. ``ripple_spec``
-  takes either a UISpec node tree (``{{type, props, children}}``) or a
-  ``{{ui: <node>, ...}}`` envelope; the server normalizes either form.
-- ``mcp__pocketpaw_pocket__update_pocket(pocket_id, name?, description?,
-  icon?, color?, ripple_spec?)`` — replaces ``cli create_pocket``-as-
-  rebuild for an existing pocket. Patch only the fields you pass.
-- ``mcp__pocketpaw_pocket__add_widget(pocket_id, widget)`` — replaces
-  ``cli add_widget``.
-- ``mcp__pocketpaw_pocket__update_widget(pocket_id, widget_id, fields)``
-  — patch one widget.
-- ``mcp__pocketpaw_pocket__remove_widget(pocket_id, widget_id)`` —
-  replaces ``cli remove_widget``.
-
-The ``<current-pocket>`` id for this conversation (when one is attached)
-is in the ``<scope>`` tag at the top of this prompt: ``pocket {pocket_id}``.
-Pass that id verbatim as ``pocket_id``. Wherever the guidance below says
-"echo '...' | python -m pocketpaw.tools.cli X", call the matching MCP
-tool with the same JSON fields instead.
-</cloud-pocket-tools>
-
-"""
-
-
-_POCKET_TOOLS_HINT_TEMPLATE = """\
-{preamble}{interaction_context}"""
-
-
-def _load_oss_pocket_contexts() -> tuple[str, str]:
-    """Lazy-import the OSS pocket system prompts so this module stays
-    independent of ``pocketpaw.api.v1.pockets`` import order. Falls back
-    to empty strings if the OSS path isn't reachable (build_context_block
-    will simply render without the rich guidance)."""
-    try:
-        from pocketpaw.api.v1.pockets import (
-            _POCKET_CREATION_CONTEXT,
-            _POCKET_INTERACTION_CONTEXT,
-        )
-
-        return _POCKET_INTERACTION_CONTEXT, _POCKET_CREATION_CONTEXT
-    except Exception:  # noqa: BLE001
-        logger.debug("OSS pocket prompts unavailable", exc_info=True)
-        return "", ""
-
-
-def build_context_block(ctx: ScopeContext) -> str:
-    """Compact string the agent prompt embeds so the model knows who is here
-    and how to render rich UI back to the client.
-
-    Three pocket modes drive different prompt blocks:
-    - ``pocket_create`` intent → emit the OSS pocket-creation prompt
-      (intent classification, formats, hard rules) prefixed with a
-      cloud-mode preamble that maps the CLI bridge invocations to the
-      MCP tools.
-    - Active pocket attached → emit the OSS pocket-interaction prompt
-      with the same cloud-mode preamble + the ripple-inline hint.
-    - Plain chat (DM, group, free session) → ripple-inline hint only.
+    Pocket prompts come from ee.ripple._pockets — the canonical source
+    that backs every pocket surface (cloud chat agent, legacy local
+    pocket router, codex CLI subprocesses). backend_name flips between
+    the in-process MCP variant (claude_agent_sdk) and the shell-CLI
+    variant (codex_cli, opencode, gemini_cli) via get_pocket_prompts.
+    Both variants already embed RIPPLE_DESIGN_RULES at the bottom, so
+    the chat-inline prompt is appended ONLY in plain-chat mode.
     """
-    interaction_ctx, creation_ctx = _load_oss_pocket_contexts()
+    creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
 
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
     parts = [
@@ -639,8 +477,10 @@ def build_context_block(ctx: ScopeContext) -> str:
         f"<participants>{member_list}</participants>",
     ]
     if ctx.intent == "pocket_create":
-        preamble = _CLOUD_POCKET_TOOL_PREAMBLE.format(pocket_id="<new-pocket>")
-        parts.append(preamble + (creation_ctx or ""))
+        # Creation prompt is self-contained — already includes the design
+        # rules block. The chat-inline prompt does NOT belong here; the
+        # agent is asked to BUILD a pocket, not to emit a chat-inline UI.
+        parts.append(creation_prompt)
         return "\n".join(parts)
     if ctx.pocket_id:
         if interaction_ctx:
@@ -652,6 +492,11 @@ def build_context_block(ctx: ScopeContext) -> str:
             )
             parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
     parts.append(_RIPPLE_HINT)
+        parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
+        parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
+        return "\n".join(parts)
+    # Plain chat — the inline ripple prompt already embeds RIPPLE_DESIGN_RULES.
+    parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
     return "\n".join(parts)
 
 

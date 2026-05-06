@@ -65,6 +65,19 @@ class ReactRequest(BaseModel):
     emoji: str = Field(min_length=1, max_length=50)
 
 
+class UpdateUiStateRequest(BaseModel):
+    """Patch the inline-Ripple state for one ui-spec block in a message.
+
+    ``spec_id`` is the spec's position-based key (``spec_0``, ``spec_1``, ...).
+    ``state`` is the full Ripple state map for that spec — last-write-wins
+    on the entire spec_id (no field-level merge), since Ripple's
+    ``onStateChange`` always carries the complete state snapshot.
+    """
+
+    spec_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_\-]+$")
+    state: dict = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # REST — Responses
 # ---------------------------------------------------------------------------

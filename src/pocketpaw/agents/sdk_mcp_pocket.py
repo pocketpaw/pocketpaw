@@ -26,19 +26,23 @@ SERVER_NAME = "pocketpaw_pocket"
 # Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
 # Allowlist entries must use this exact form.
 GET_POCKET_TOOL_ID = f"mcp__{SERVER_NAME}__get_pocket"
+LIST_POCKETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_pockets"
 CREATE_POCKET_TOOL_ID = f"mcp__{SERVER_NAME}__create_pocket"
 UPDATE_POCKET_TOOL_ID = f"mcp__{SERVER_NAME}__update_pocket"
 ADD_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__add_widget"
 UPDATE_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__update_widget"
 REMOVE_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__remove_widget"
+GET_WIDGET_SPEC_TOOL_ID = f"mcp__{SERVER_NAME}__get_widget_spec"
 
 POCKET_TOOL_IDS = (
     GET_POCKET_TOOL_ID,
+    LIST_POCKETS_TOOL_ID,
     CREATE_POCKET_TOOL_ID,
     UPDATE_POCKET_TOOL_ID,
     ADD_WIDGET_TOOL_ID,
     UPDATE_WIDGET_TOOL_ID,
     REMOVE_WIDGET_TOOL_ID,
+    GET_WIDGET_SPEC_TOOL_ID,
 )
 
 
@@ -65,6 +69,27 @@ async def _get_pocket_handler(args: dict) -> dict:
     from ee.cloud.pockets.agent_context import fetch_pocket_for_agent
 
     return _result_payload(await fetch_pocket_for_agent(args.get("pocket_id", "")))
+
+
+async def _list_pockets_handler(args: dict) -> dict:
+    from ee.cloud.pockets.agent_context import list_pockets_for_agent
+
+    result = await list_pockets_for_agent()
+    if not result.get("ok"):
+        return {
+            "content": [{"type": "text", "text": f"Error: {result.get('error')}"}],
+            "is_error": True,
+        }
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {"pockets": result.get("pockets", [])}, separators=(",", ":")
+                ),
+            }
+        ]
+    }
 
 
 async def _update_pocket_handler(args: dict) -> dict:
@@ -125,6 +150,63 @@ async def _remove_widget_handler(args: dict) -> dict:
     )
 
 
+async def _get_widget_spec_handler(args: dict) -> dict:
+    """Fetch the manifest, filter to requested widget types, and return a
+    formatted markdown reference. Backs the ``get_widget_spec`` MCP tool."""
+    from ee.ripple.manifest import format_for_prompt, get_manifest
+    from pocketpaw.config import get_settings
+
+    raw_types = args.get("types") or []
+    if isinstance(raw_types, str):
+        raw_types = [raw_types]
+    requested = [t for t in raw_types if isinstance(t, str) and t]
+    if not requested:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Error: pass `types` as a non-empty array of widget type names.",
+                }
+            ],
+            "is_error": True,
+        }
+
+    settings = get_settings()
+    manifest = await get_manifest(
+        settings.ripple_manifest_url,
+        ttl_seconds=settings.ripple_manifest_ttl_seconds,
+    )
+    if manifest is None:
+        return {
+            "content": [
+                {"type": "text", "text": "Error: ripple manifest unavailable."}
+            ],
+            "is_error": True,
+        }
+
+    widgets = manifest.get("widgets") or []
+    by_type = {w.get("type"): w for w in widgets if w.get("type")}
+    matched = [by_type[t] for t in requested if t in by_type]
+    missing = [t for t in requested if t not in by_type]
+
+    if not matched:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"No matching widgets. Unknown types: {', '.join(missing)}",
+                }
+            ],
+            "is_error": True,
+        }
+
+    block = format_for_prompt({"widgets": matched})
+    if missing:
+        block += f"\n\n_Note: unknown types skipped: {', '.join(missing)}_"
+
+    return {"content": [{"type": "text", "text": block}]}
+
+
 def build_pocket_context_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server, or return None if the SDK is unavailable."""
     try:
@@ -144,6 +226,23 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
     )
     async def get_pocket(args):  # type: ignore[no-untyped-def]
         return await _get_pocket_handler(args)
+
+    @tool(
+        "list_pockets",
+        (
+            "List every pocket in the user's workspace they can access "
+            "(owned, shared, or workspace-visible). Returns id + name + "
+            "description + type + icon + color per pocket — no rippleSpec, "
+            "so the call is cheap. CALL THIS BEFORE ``create_pocket`` to "
+            "see if a similar pocket already exists; the system prompt "
+            "tells you to prefer extending an existing pocket over "
+            "spawning a duplicate. No arguments — workspace identity is "
+            "inferred from the active stream."
+        ),
+        {},
+    )
+    async def list_pockets(args):  # type: ignore[no-untyped-def]
+        return await _list_pockets_handler(args)
 
     @tool(
         "create_pocket",
@@ -229,16 +328,36 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
     async def remove_widget(args):  # type: ignore[no-untyped-def]
         return await _remove_widget_handler(args)
 
+    @tool(
+        "get_widget_spec",
+        (
+            "Get full props, types, and example ui-spec for one or more "
+            "Ripple widgets. Pass ``types`` as an array of widget type names "
+            "(e.g. ``['feed', 'timeline', 'stat']``). Returns a markdown "
+            "reference with each widget's props schema and a runnable example. "
+            "MANDATORY before composing a ui-spec for any widget not in the "
+            "FREE LIST under WIDGET SPEC TOOL RULE — never guess prop names "
+            "or shapes from the widget name. Batch types in a single call. "
+            "Available types are listed under WIDGET CATALOG in the system "
+            "prompt."
+        ),
+        {"types": list},
+    )
+    async def get_widget_spec(args):  # type: ignore[no-untyped-def]
+        return await _get_widget_spec_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
         tools=[
             get_pocket,
+            list_pockets,
             create_pocket,
             update_pocket,
             add_widget,
             update_widget,
             remove_widget,
+            get_widget_spec,
         ],
     )
     return SERVER_NAME, server

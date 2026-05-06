@@ -36,6 +36,52 @@ async def _make_pocket(**fields):
 
 
 # ---------------------------------------------------------------------------
+# list_pockets_for_agent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_pockets_for_agent_returns_visible_pockets(mongo_db):
+    from ee.cloud.chat.agent_service import (
+        attach_agent_identity,
+        detach_agent_identity,
+    )
+    from ee.cloud.pockets.agent_context import list_pockets_for_agent
+
+    # Three pockets: one owned by u1, one workspace-visible, one owned by
+    # someone else AND private — that last one must NOT come back.
+    await _make_pocket(name="Mine", owner="u1")
+    await _make_pocket(name="Shared", owner="u2", visibility="workspace")
+    await _make_pocket(name="Hidden", owner="u2", visibility="private")
+
+    tokens = attach_agent_identity(workspace_id="w1", user_id="u1")
+    try:
+        result = await list_pockets_for_agent()
+    finally:
+        detach_agent_identity(tokens)
+
+    assert result["ok"] is True
+    names = {p["name"] for p in result["pockets"]}
+    assert names == {"Mine", "Shared"}
+    # Compact shape — full rippleSpec is not in the payload.
+    sample = result["pockets"][0]
+    assert set(sample) >= {"id", "name", "description", "type", "icon", "color", "owner"}
+    assert "rippleSpec" not in sample
+
+
+@pytest.mark.asyncio
+async def test_list_pockets_for_agent_errors_outside_stream():
+    """Without an attached SSE stream identity, the helper refuses to
+    list — the agent shouldn't be able to scrape pockets from a context
+    where workspace/user can't be inferred."""
+    from ee.cloud.pockets.agent_context import list_pockets_for_agent
+
+    result = await list_pockets_for_agent()
+    assert result["ok"] is False
+    assert "no active workspace" in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # update_pocket_for_agent
 # ---------------------------------------------------------------------------
 
@@ -392,9 +438,21 @@ def test_build_context_block_pocket_create_intent_uses_creation_context():
         target_agent_id="a1",
         intent="pocket_create",
     )
+    # Default (no backend hint) keeps the shell-CLI variant — codex_cli
+    # and other tool-using backends rely on the ``cloud_*`` CLI surface.
     block = build_context_block(ctx)
-    # Sanity: cloud preamble is present and didn't crash on format-braces.
-    assert "<cloud-pocket-tools>" in block
+    assert "<pocket-creation>" in block
+    assert "cloud_create_pocket" in block
+
+    # claude_agent_sdk wires up the in-process pocket MCP server
+    # (``sdk_mcp_pocket``); its prompt steers the agent at the
+    # ``create_pocket`` MCP tool, which reads identity from per-stream
+    # ContextVars instead of subprocess env vars.
+    mcp_block = build_context_block(ctx, backend_name="claude_agent_sdk")
+    assert "<pocket-creation>" in mcp_block
+    assert "create_pocket(" in mcp_block
+    assert "cloud_create_pocket" not in mcp_block
+    assert "python -m pocketpaw.tools.cli" not in mcp_block
 
 
 def test_normalizer_lifts_raw_ui_node_under_ui_field():
@@ -421,6 +479,163 @@ def test_normalizer_lifts_raw_ui_node_under_ui_field():
     # Envelope fields populated.
     assert out.get("version") == "1.0"
     assert out.get("lifecycle", {}).get("id")
+
+
+def test_normalizer_lifts_each_bind_to_items():
+    """Agents trained on `bind` for kanban/inputs over-apply it to
+    `each` loops, where the right field is `items`. Without `items`,
+    the loop renders zero rows — visible symptom is "header + composer
+    but no list rows below". Walker must lift `bind` → `items` on
+    `each` nodes anywhere in the tree."""
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
+
+    spec = {
+        "state": {"todos": [{"id": "1", "text": "test", "done": False}]},
+        "ui": {
+            "type": "flex",
+            "props": {"direction": "column"},
+            "children": [
+                {
+                    "type": "each",
+                    "bind": "todos",  # ← wrong field name
+                    "children": [
+                        {"type": "text", "props": {"text": "{item.text}"}}
+                    ],
+                }
+            ],
+        },
+    }
+    out = normalize_ripple_spec(spec)
+    assert out is not None
+    each_node = out["ui"]["children"][0]
+    assert each_node["type"] == "each"
+    assert each_node.get("items") == "todos", "bind should lift to items"
+    assert "bind" not in each_node, "bind should not survive on each"
+    # Inner children untouched.
+    assert each_node["children"][0]["type"] == "text"
+
+
+def test_normalizer_preserves_bind_on_value_widgets():
+    """Sanity: the each-fix MUST NOT strip `bind` from value-bound
+    widgets like input, checkbox, kanban — they need it."""
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
+
+    spec = {
+        "state": {"draft": "", "tasks": []},
+        "ui": {
+            "type": "flex",
+            "props": {},
+            "children": [
+                {"type": "input", "bind": "draft", "props": {"placeholder": "..."}},
+                {
+                    "type": "kanban",
+                    "bind": "tasks",
+                    "props": {"columns": [], "columnKey": "status"},
+                },
+                {"type": "checkbox", "bind": "tasks.0.done", "props": {}},
+            ],
+        },
+    }
+    out = normalize_ripple_spec(spec)
+    assert out is not None
+    children = out["ui"]["children"]
+    assert children[0]["bind"] == "draft", "input bind preserved"
+    assert children[1]["bind"] == "tasks", "kanban bind preserved"
+    assert children[2]["bind"] == "tasks.0.done", "checkbox bind preserved"
+
+
+def test_normalizer_lifts_if_condition_alias():
+    """Symmetrical fix: `if.bind` / `if.when` → `if.condition`."""
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
+
+    spec = {
+        "ui": {
+            "type": "if",
+            "when": "{state.signed_in}",  # ← wrong; should be `condition`
+            "children": [{"type": "text", "props": {"text": "Hi"}}],
+        },
+    }
+    out = normalize_ripple_spec(spec)
+    assert out is not None
+    assert out["ui"].get("condition") == "{state.signed_in}"
+    assert "when" not in out["ui"]
+
+
+def test_pocket_wire_dict_normalizes_legacy_root_alias():
+    """Old pockets persisted before the alias safety net have ``root``
+    instead of ``ui`` in MongoDB. ``pocket_to_wire_dict`` must lift it
+    on read so the frontend renders without a DB migration."""
+    from ee.cloud.pockets.domain import Pocket
+    from ee.cloud.pockets.dto import pocket_to_wire_dict
+
+    legacy_spec = {
+        "lifecycle": {"type": "persistent", "id": "pocket-legacy"},
+        "state": {"draft": "", "todos": []},
+        "root": {  # ← agent's wrong field name persisted before the fix
+            "type": "flex",
+            "props": {"direction": "column"},
+            "children": [
+                {"type": "input", "bind": "draft", "props": {}},
+            ],
+        },
+    }
+    pocket = Pocket(
+        id="p1",
+        workspace_id="w1",
+        name="Todos",
+        description="",
+        type="deep-work",
+        icon="check-square",
+        color="#0A84FF",
+        owner="u1",
+        visibility="workspace",
+        team=(),
+        agents=(),
+        widgets=(),
+        ripple_spec=legacy_spec,
+        share_link_token=None,
+        share_link_access="view",
+        shared_with=(),
+    )
+
+    wire = pocket_to_wire_dict(pocket)
+    spec = wire["rippleSpec"]
+    assert spec is not None
+    assert "ui" in spec, "root should have been lifted to ui"
+    assert spec["ui"]["type"] == "flex"
+    assert "root" not in spec, "root should not survive the lift"
+    # State + lifecycle preserved.
+    assert spec["state"]["todos"] == []
+    assert spec["lifecycle"]["id"] == "pocket-legacy"
+
+
+def test_normalizer_lifts_aliased_ui_field():
+    """The agent occasionally invents `root` / `tree` / `view` / `body` /
+    `content` for the renderable tree instead of `ui`. Spec is otherwise
+    valid (state, bind, on_click chains in place) but renderer reads
+    only `ui` and shows "No widgets yet". Normalizer must lift any of
+    these aliases into `ui`."""
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
+
+    for alias in ("root", "tree", "view", "body", "content"):
+        raw = {
+            "state": {"draft": "", "todos": []},
+            alias: {
+                "type": "flex",
+                "props": {"direction": "column"},
+                "children": [
+                    {"type": "input", "bind": "draft", "props": {}},
+                ],
+            },
+        }
+        out = normalize_ripple_spec(raw)
+        assert out is not None, f"alias {alias!r} returned None"
+        assert isinstance(out.get("ui"), dict), f"alias {alias!r} not lifted"
+        assert out["ui"]["type"] == "flex"
+        # State must survive the lift.
+        assert out.get("state", {}).get("draft") == ""
+        # Original alias key should NOT also be present (avoid both ui+root).
+        assert alias not in out, f"alias {alias!r} kept alongside ui"
 
 
 def test_normalizer_passes_through_already_wrapped_ui():

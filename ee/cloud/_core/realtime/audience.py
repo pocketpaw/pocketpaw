@@ -117,6 +117,16 @@ class AudienceResolver:
             return await self._group(d["group_id"])
         if t == "message.sent":
             return [d["sender_id"]]
+        if t == "message.ui_state.updated":
+            # Group-context messages fan out to every group member so a peer
+            # viewing the same room sees the kanban update live. Pocket /
+            # session-context messages are single-owner — the event carries
+            # ``user_id`` and routes only to that user's other tabs.
+            if gid := d.get("group_id"):
+                return await self._group(gid)
+            if uid := d.get("user_id"):
+                return [uid]
+            return []
 
         # --- Workspace ----------------------------------------------------------
         if t in {"workspace.updated", "workspace.deleted", "workspace.member_role"}:
@@ -172,6 +182,20 @@ class AudienceResolver:
             "agent.tool_use",
         }:
             return await self._group(d["group_id"])
+
+        # --- Pockets ------------------------------------------------------------
+        # Audience is computed by the service (it's the only layer that knows
+        # the pocket's visibility + shared_with) and shipped on the event:
+        #   - ``recipient_ids``: explicit list, used for private pockets
+        #   - ``workspace_id``: present for workspace-visible pockets;
+        #     fanned out to every workspace member
+        # ``pocket.deleted`` always carries ``recipient_ids`` (the service
+        # captures it before the doc is dropped).
+        if t in {"pocket.created", "pocket.updated", "pocket.deleted"}:
+            recipients = list(d.get("recipient_ids") or [])
+            if wid := d.get("workspace_id"):
+                recipients.extend(await self._workspace(wid))
+            return list(set(recipients))
 
         # --- Notifications ------------------------------------------------------
         if t in {"notification.new", "notification.read", "notification.cleared"}:

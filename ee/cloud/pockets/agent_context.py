@@ -19,6 +19,35 @@ from ee.cloud.pockets import service as pockets_service
 logger = logging.getLogger(__name__)
 
 
+async def list_pockets_for_agent() -> dict[str, Any]:
+    """Return the workspace's pockets as a compact list, or an error dict.
+
+    Identity (workspace, user) comes from the per-stream ``ContextVar``s
+    set by ``agent_router._run_agent_stream``. The list-before-create
+    gate in the system prompt fires this on every creation flow; the
+    payload is intentionally light (no rippleSpec) so the round-trip
+    is cheap.
+
+    Shape on success: ``{"ok": True, "pockets": [{...}, ...]}``.
+    Shape on failure: ``{"ok": False, "error": "..."}``.
+    """
+    from ee.cloud.chat.agent_service import current_user_id, current_workspace_id
+    from ee.cloud.pockets import service as pockets_service
+
+    workspace_id = current_workspace_id()
+    user_id = current_user_id()
+    if not workspace_id or not user_id:
+        return {
+            "ok": False,
+            "error": (
+                "no active workspace/user — list_pockets can only be called "
+                "from inside a cloud SSE chat stream"
+            ),
+        }
+    pockets = await pockets_service.agent_list(workspace_id, user_id)
+    return {"ok": True, "pockets": pockets}
+
+
 async def fetch_pocket_for_agent(pocket_id: str) -> dict[str, Any]:
     """Return the full pocket document for an agent, or an error dict.
 
@@ -29,6 +58,44 @@ async def fetch_pocket_for_agent(pocket_id: str) -> dict[str, Any]:
     if err is not None:
         return {"ok": False, "error": err}
     return {"ok": True, "pocket": view}
+
+
+async def _validate_ripple_spec(ripple_spec: dict[str, Any] | None) -> None:
+    """Pre-persist guard against agent prop-name drift.
+
+    Fetches the same manifest the ``get_widget_spec`` MCP tool uses,
+    walks the rippleSpec tree, and (a) auto-rewrites known inner-item
+    aliases (e.g. ``feed.items[].title`` -> ``text``) and (b) logs every
+    mismatch at WARN level so we can spot new drift in production.
+
+    Best-effort — if the manifest is unavailable, the spec passes
+    through unchanged. Mutates ``ripple_spec`` in place when aliases
+    apply.
+    """
+    if not isinstance(ripple_spec, dict):
+        return
+    try:
+        from ee.ripple.manifest import get_manifest, validate_against_manifest
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        manifest = await get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        if manifest is None:
+            return
+        issues = validate_against_manifest(ripple_spec, manifest, apply_aliases=True)
+        for issue in issues:
+            logger.warning(
+                "ripple manifest drift: %s (%s) unknown=%s item_issues=%s",
+                issue["path"],
+                issue["type"],
+                issue["unknown_props"],
+                issue["item_issues"],
+            )
+    except Exception:
+        logger.debug("ripple manifest validation skipped (non-fatal)", exc_info=True)
 
 
 def _push_replace(pocket_view: dict[str, Any]) -> None:
@@ -63,6 +130,7 @@ async def update_pocket_for_agent(
     Only fields the caller explicitly provides are touched — passing
     ``None`` (the default) leaves the existing value alone.
     """
+    await _validate_ripple_spec(ripple_spec)
     view, err = await pockets_service.agent_update(
         pocket_id,
         name=name,
@@ -144,6 +212,7 @@ async def create_pocket_for_agent(
             ),
         }
 
+    await _validate_ripple_spec(ripple_spec)
     view, pocket_id, err = await pockets_service.agent_create(
         workspace_id=workspace_id,
         owner_id=user_id,
@@ -205,6 +274,7 @@ __all__ = [
     "add_widget_for_agent",
     "create_pocket_for_agent",
     "fetch_pocket_for_agent",
+    "list_pockets_for_agent",
     "remove_widget_for_agent",
     "update_pocket_for_agent",
     "update_widget_for_agent",

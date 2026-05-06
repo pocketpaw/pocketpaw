@@ -816,8 +816,29 @@ class ClaudeSDKBackend:
             }
 
             # Build options
+            #
+            # Windows note: CreateProcess caps the entire command line at
+            # ~32,767 chars. The SDK passes string ``system_prompt`` inline
+            # via ``--system-prompt``; long KB/identity blobs blow that limit
+            # and surface as a misleading ``CLINotFoundError``. Since SDK
+            # 0.1.72 we can pass a ``SystemPromptFile`` dict instead, which
+            # the CLI reads via ``--system-prompt-file <path>``.
+            system_prompt_arg: Any = final_prompt
+            if os.name == "nt" and len(final_prompt) > 24_000:
+                runtime_dir = Path.home() / ".pocketpaw" / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                prompt_path = runtime_dir / "system_prompt.md"
+                prompt_path.write_text(final_prompt, encoding="utf-8")
+                system_prompt_arg = {"type": "file", "path": str(prompt_path)}
+                logger.info(
+                    "System prompt %d chars exceeds Windows CLI safe limit; "
+                    "passing via --system-prompt-file %s",
+                    len(final_prompt),
+                    prompt_path,
+                )
+
             options_kwargs = {
-                "system_prompt": final_prompt,
+                "system_prompt": system_prompt_arg,
                 "allowed_tools": allowed_tools,
                 "setting_sources": ["user", "project"],
                 "hooks": hooks,

@@ -34,13 +34,22 @@ class AnyAdapter(Protocol):
 
 # Connectors handled by native Python adapters instead of YAML/REST.
 # SQL databases use DatabaseAdapter, MongoDB uses MongoDBAdapter.
+# CLI connectors (firebase, gcp) are subprocess-based and execute
+# locally — see ee/cloud/connectors/CHARTER.md §6.2 for the local-agent
+# bus dispatch the cloud router uses.
+# Native communication connectors (gmail, gcalendar, gdocs, gdrive)
+# wrap a stateful Python client (OAuth, MIME, etc.) and live in
+# pocketpaw/connectors/adapters/.
 _SQL_CONNECTORS: set[str] = {"postgresql", "mysql", "mssql", "sqlite"}
 _NOSQL_CONNECTORS: set[str] = {"mongodb"}
 _CLI_CONNECTORS: set[str] = {"firebase", "gcp"}
+_NATIVE_COMM_CONNECTORS: set[str] = {
+    "gmail", "gcalendar", "gdocs", "drive", "reddit", "spotify",
+}  # PR-3..7
 
 
 def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
-    """Create a native adapter for database connectors."""
+    """Create a native adapter for database / CLI / communication connectors."""
     if connector_name in _SQL_CONNECTORS:
         try:
             from pocketpaw.connectors.db_adapter import DatabaseAdapter
@@ -64,6 +73,34 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
             from pocketpaw.connectors.firebase_adapter import FirebaseAdapter
 
             return FirebaseAdapter()
+        except Exception:
+            return None
+    if connector_name in _NATIVE_COMM_CONNECTORS:
+        try:
+            if connector_name == "gmail":
+                from pocketpaw.connectors.adapters.gmail import GmailConnector
+
+                return GmailConnector()
+            if connector_name == "gcalendar":
+                from pocketpaw.connectors.adapters.gcalendar import GoogleCalendarConnector
+
+                return GoogleCalendarConnector()
+            if connector_name == "gdocs":
+                from pocketpaw.connectors.adapters.gdocs import GoogleDocsConnector
+
+                return GoogleDocsConnector()
+            if connector_name == "drive":
+                from pocketpaw.connectors.adapters.gdrive import GoogleDriveConnector
+
+                return GoogleDriveConnector()
+            if connector_name == "reddit":
+                from pocketpaw.connectors.adapters.reddit import RedditConnector
+
+                return RedditConnector()
+            if connector_name == "spotify":
+                from pocketpaw.connectors.adapters.spotify import SpotifyConnector
+
+                return SpotifyConnector()
         except Exception:
             return None
     return None

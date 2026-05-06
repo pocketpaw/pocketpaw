@@ -33,6 +33,7 @@ from ee.cloud.chat.schemas import (  # noqa: F401
     UpdateGroupAgentRequest,
     UpdateGroupRequest,
     UpdateMemberRoleRequest,
+    UpdateUiStateRequest,
     WsInbound,
     WsOutbound,
 )
@@ -179,6 +180,7 @@ __all__ = [
     "UpdateGroupAgentRequest",
     "UpdateGroupRequest",
     "UpdateMemberRoleRequest",
+    "UpdateUiStateRequest",
     "WsInbound",
     "WsOutbound",
     "group_to_wire_dict",

@@ -41,6 +41,7 @@ from ee.cloud.chat.schemas import (
     UpdateGroupAgentRequest,
     UpdateGroupRequest,
     UpdateMemberRoleRequest,
+    UpdateUiStateRequest,
     WsInbound,
     WsOutbound,
 )
@@ -287,6 +288,23 @@ async def get_thread(
     user_id: str = Depends(current_user_id),
 ):
     return await message_service.get_thread(message_id, user_id)
+
+
+@_licensed.patch("/messages/{message_id}/ui-state")
+async def patch_message_ui_state(
+    message_id: str,
+    body: UpdateUiStateRequest,
+    user_id: str = Depends(current_user_id),
+):
+    """Persist Ripple inline-UI state for a single ``ui-spec`` block.
+
+    Used by chat-inline interactive widgets (kanban drag-drop, form
+    inputs, etc.) so client-side state survives reload. See
+    ``message_service.patch_ui_state`` for authz semantics.
+    """
+    return await message_service.patch_ui_state(
+        message_id, user_id, body.spec_id, body.state
+    )
 
 
 # ---------------------------------------------------------------------------

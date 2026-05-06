@@ -43,6 +43,7 @@ from ee.cloud.realtime.events import (
     MessageNew,
     MessageReaction,
     MessageSent,
+    MessageUiStateUpdated,
     UnreadUpdate,
 )
 from ee.cloud.shared.errors import Forbidden, NotFound
@@ -582,6 +583,130 @@ async def toggle_reaction(message_id: str, user_id: str, emoji: str) -> dict:
     return message_to_wire_dict(domain_msg)
 
 
+async def _resolve_session_for_message(session_key: str):
+    """Find the Session row that owns a Message's ``session_key``.
+
+    Two formats coexist for ``Message.session_key``:
+
+      * Cloud-agent SSE flow writes the composite
+        ``"cloud:session:<session._id>:<agent_id>"`` so memory entries are
+        namespaced per (session, agent). The Session document stores its own
+        ``sessionId`` (a UUID-like string), not this composite — a direct
+        ``sessionId == session_key`` lookup misses.
+      * Bus / memory paths write ``Session.sessionId`` straight (e.g.
+        ``"websocket_abc123"`` or ``"telegram_42"``).
+
+    Try the direct match first (cheap, covers the bus path), then fall back to
+    parsing the composite and resolving by Mongo ``_id``. Returns ``None`` if
+    neither hits.
+    """
+    from ee.cloud.models.session import Session as _SessionDoc
+
+    direct = await _SessionDoc.find_one(_SessionDoc.sessionId == session_key)
+    if direct is not None:
+        return direct
+
+    if session_key.startswith("cloud:session:"):
+        parts = session_key.split(":")
+        # Expected shape: ["cloud", "session", "<oid>", "<agent>"]; agent is
+        # optional historically but the oid slot is always present.
+        if len(parts) >= 3 and parts[2]:
+            try:
+                oid = PydanticObjectId(parts[2])
+            except Exception:
+                return None
+            return await _SessionDoc.get(oid)
+
+    return None
+
+
+async def patch_ui_state(
+    message_id: str,
+    user_id: str,
+    spec_id: str,
+    state: dict,
+) -> dict:
+    """Persist Ripple inline-UI state by splicing it into ``message.content``.
+
+    Why content-mutation rather than a side field: when the agent later reads
+    chat history for context it sees ``message.content`` directly, so the
+    ui-spec JSON inside must reflect the user's interactions — otherwise the
+    model's memory is permanently stuck on the original cards. Storing state
+    on a sibling ``ui_state`` field worked for rendering but lied to the
+    agent. See ``ripple_content_patcher`` for the splice logic.
+
+    Authz follows the message's context:
+      * ``group``  — caller must be a group member.
+      * ``pocket`` / ``session`` — caller must own the linked Session.
+
+    Last-write-wins on the entire ``spec_id`` (no field-level merge);
+    Ripple's ``onStateChange`` always carries the full state snapshot.
+
+    Emits ``message.ui_state.updated`` with routing keys (``group_id`` for
+    group messages, ``user_id`` for pocket/session messages) so other tabs /
+    members of the room re-fetch / re-render content via the WS bridge.
+    """
+    from ee.cloud.chat.ripple_content_patcher import patch_content_with_state
+
+    # Treat malformed ids (e.g. ``m<timestamp>`` placeholders the FE assigns
+    # before the cloud ObjectId arrives) as 404 — InvalidId would otherwise
+    # bubble up to a 500.
+    try:
+        oid = PydanticObjectId(message_id)
+    except Exception as exc:
+        raise NotFound("message", message_id) from exc
+
+    msg = await _MessageDoc.get(oid)
+    if msg is None or msg.deleted:
+        raise NotFound("message", message_id)
+
+    ctx = msg.context_type or "group"
+    if ctx == "group":
+        if not msg.group:
+            raise NotFound("message", message_id)
+        group = await _get_group_or_404(msg.group)
+        _require_group_member(group, user_id)
+        route_key: dict = {"group_id": msg.group}
+    elif ctx in ("pocket", "session"):
+        if not msg.session_key:
+            raise NotFound("message", message_id)
+        sess = await _resolve_session_for_message(msg.session_key)
+        if sess is None:
+            raise NotFound("session", msg.session_key)
+        if sess.owner != user_id:
+            raise Forbidden(
+                "message.not_authorized",
+                "Only the session owner can update inline UI state",
+            )
+        route_key = {"user_id": user_id}
+    else:
+        raise NotFound("message", message_id)
+
+    new_content = patch_content_with_state(msg.content or "", spec_id, state)
+    if new_content is None:
+        # Fence not found / malformed JSON — surface a 404 so the FE can
+        # fall back to in-memory state rather than silently dropping the
+        # patch. (A 500 would be wrong: nothing crashed, the target just
+        # doesn't exist in the document we have.)
+        raise NotFound("ui_spec", f"{message_id}/{spec_id}")
+
+    msg.content = new_content
+    await msg.save()
+
+    await emit(
+        MessageUiStateUpdated(
+            data={
+                "message_id": message_id,
+                "spec_id": spec_id,
+                "state": state,
+                "content": new_content,
+                **route_key,
+            }
+        )
+    )
+    return {"ok": True}
+
+
 async def get_messages(
     group_id: str,
     user_id: str,
@@ -913,6 +1038,7 @@ __all__ = [
     "get_messages",
     "get_thread",
     "list_recent_for_group",
+    "patch_ui_state",
     "persist_assistant_message_for_scope",
     "persist_pocket_memory_message",
     "persist_user_message_for_scope",

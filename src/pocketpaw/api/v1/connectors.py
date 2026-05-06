@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -259,7 +260,7 @@ async def get_connector_detail(connector_name: str, pocket_id: str = "default"):
 @router.post("/connectors/connect", response_model=ConnectResponse)
 async def connect_connector(req: ConnectRequest):
     """Connect to a data source with credentials."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     reg = _get_registry()
     result = await reg.connect(req.pocket_id, req.connector_name, req.config)
@@ -276,7 +277,7 @@ async def connect_connector(req: ConnectRequest):
             pocket_id=req.pocket_id,
             connector_name=req.connector_name,
             cred_state="valid",
-            last_sync=datetime.now(timezone.utc).isoformat(),
+            last_sync=datetime.now(UTC).isoformat(),
             scope=scope,
         )
     return ConnectResponse(
@@ -307,7 +308,7 @@ async def disconnect_connector(req: DisconnectRequest):
 @router.post("/connectors/execute", response_model=ExecuteResponse)
 async def execute_connector_action(req: ExecuteRequest):
     """Execute an action on a connected data source."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     reg = _get_registry()
     adapter = reg.get_adapter(req.pocket_id, req.connector_name)
@@ -322,7 +323,7 @@ async def execute_connector_action(req: ExecuteRequest):
         record_connector_event(
             pocket_id=req.pocket_id,
             connector_name=req.connector_name,
-            last_sync=datetime.now(timezone.utc).isoformat(),
+            last_sync=datetime.now(UTC).isoformat(),
         )
     return ExecuteResponse(
         success=result.success,

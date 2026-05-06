@@ -22,6 +22,12 @@ import secrets
 
 from beanie import PydanticObjectId
 
+from ee.cloud._core.realtime.emit import emit
+from ee.cloud._core.realtime.events import (
+    PocketCreated,
+    PocketDeleted,
+    PocketUpdated,
+)
 from ee.cloud.models.pocket import Pocket as _PocketDoc
 from ee.cloud.models.pocket import Widget as _WidgetDoc
 from ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
@@ -145,23 +151,56 @@ def _build_widget_doc(payload: dict) -> _WidgetDoc:
     )
 
 
+def _pocket_event_payload(doc: _PocketDoc) -> dict:
+    """Build the realtime event payload for a pocket mutation.
+
+    Always includes ``recipient_ids`` (owner + shared_with). For
+    workspace-visible pockets, also includes ``workspace_id`` so the
+    audience resolver fans out to every workspace member. Mirrors the
+    visibility rules used by ``list_pockets`` so a member only ever sees
+    a ``pocket.*`` event for a pocket they could read via REST.
+
+    ``shareLinkToken`` and ``sharedWith`` are stripped from the broadcast
+    pocket — workspace-visible pockets fan out to every member, and the
+    share token is owner-only state. Owners receive the token directly in
+    the REST response from ``generate_share_link``.
+    """
+    pocket_dict = pocket_to_wire_dict(_pocket_to_domain(doc))
+    pocket_dict.pop("shareLinkToken", None)
+    pocket_dict.pop("sharedWith", None)
+    payload: dict = {
+        "pocket_id": str(doc.id),
+        "pocket": pocket_dict,
+        "recipient_ids": [doc.owner, *list(doc.shared_with or [])],
+    }
+    if doc.visibility == "workspace":
+        payload["workspace_id"] = doc.workspace
+    return payload
+
+
 async def _mutate_list_field(
     pocket_id: str, field: str, value: str, action: str
 ) -> Pocket:
     """Append/remove a string value on shared_with / team / agents.
-    Idempotent in both directions."""
+    Idempotent in both directions. Emits ``PocketUpdated`` when the doc
+    actually changes (no-op mutations stay silent)."""
     doc = await _fetch_pocket(pocket_id)
     current: list[str] = list(getattr(doc, field))
+    changed = False
     if action == "add":
         if value not in current:
             current.append(value)
             setattr(doc, field, current)
             await doc.save()
+            changed = True
     else:
         if value in current:
             current.remove(value)
             setattr(doc, field, current)
             await doc.save()
+            changed = True
+    if changed:
+        await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return _pocket_to_domain(doc)
 
 
@@ -196,6 +235,7 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     if body.session_id:
         await sessions_service.link_pocket(workspace_id, body.session_id, pocket.id)
 
+    await emit(PocketCreated(data=_pocket_event_payload(doc)))
     return pocket_to_wire_dict(pocket)
 
 
@@ -253,6 +293,7 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     if normalized_spec is not None:
         doc.rippleSpec = normalized_spec
     await doc.save()
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -269,7 +310,16 @@ async def delete(pocket_id: str, user_id: str) -> None:
             resource_id=str(doc.id),
         )
         raise Forbidden("pocket.not_owner", "Only the pocket owner can perform this action")
+    # Capture audience before delete so receivers can drop the pocket from
+    # their list. The wire dict isn't useful here — only the id is.
+    delete_payload = {
+        "pocket_id": str(doc.id),
+        "recipient_ids": [doc.owner, *list(doc.shared_with or [])],
+    }
+    if doc.visibility == "workspace":
+        delete_payload["workspace_id"] = doc.workspace
     await doc.delete()
+    await emit(PocketDeleted(data=delete_payload))
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +359,7 @@ async def create_from_ripple_spec(
         await doc.insert()
         pocket_id = str(doc.id)
         logger.info("Auto-created pocket %s from ripple spec", pocket_id)
+        await emit(PocketCreated(data=_pocket_event_payload(doc)))
         return pocket_id
     except Exception:
         logger.warning("Failed to auto-create pocket from ripple spec", exc_info=True)
@@ -339,6 +390,7 @@ async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> di
     )
     doc.widgets.append(widget)
     await doc.save()
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -366,6 +418,7 @@ async def update_widget(
     if body.assigned_agent is not None:
         widget.assignedAgent = body.assigned_agent
     await doc.save()
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -378,6 +431,7 @@ async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
     if len(doc.widgets) == before:
         raise NotFound("widget", widget_id)
     await doc.save()
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -408,6 +462,7 @@ async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -
     widgets_by_id = {w.id: w for w in doc.widgets}
     doc.widgets = [widgets_by_id[wid] for wid in ordered]
     await doc.save()
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return pocket_to_wire_dict(_pocket_to_domain(doc))
 
 
@@ -424,6 +479,8 @@ async def generate_share_link(pocket_id: str, user_id: str, access: str) -> dict
     doc.share_link_token = token
     doc.share_link_access = access
     await doc.save()
+    # no-event: share-link state is owner-only; the token comes back inline
+    # in this REST response. Broadcasting would leak the token.
     return {"token": token, "access": access, "url": f"/shared/{token}"}
 
 
@@ -434,6 +491,7 @@ async def revoke_share_link(pocket_id: str, user_id: str) -> None:
     doc.share_link_token = None
     doc.share_link_access = "view"
     await doc.save()
+    # no-event: see ``generate_share_link``.
 
 
 async def update_share_link(pocket_id: str, user_id: str, access: str) -> dict:
@@ -445,6 +503,7 @@ async def update_share_link(pocket_id: str, user_id: str, access: str) -> dict:
 
     doc.share_link_access = access
     await doc.save()
+    # no-event: see ``generate_share_link``.
     return {
         "token": doc.share_link_token,
         "access": access,
@@ -609,6 +668,42 @@ async def is_owner(pocket_id: str, user_id: str) -> bool:
     return doc.owner == user_id
 
 
+async def is_member(pocket_id: str, user_id: str) -> bool:
+    """Return ``True`` if ``user_id`` may read the pocket — owner, team
+    member, explicit shared_with, or any caller when visibility is
+    ``workspace`` / public.
+
+    Mirrors the read-side rule in ``agent_service._resolve_pocket`` so
+    the Files panel filter and the chat scope-resolver agree on who
+    sees a pocket's files. Raises ``NotFound`` if the pocket doesn't
+    exist — callers convert to a 403 / 404 as appropriate.
+
+    Stage 3.E: used by ``files/router.py`` to gate ``GET /files?pocket_id=X``
+    for non-members and by the upload router for the read-side ABAC
+    check (writes go through ``has_edit_access``).
+    """
+    try:
+        pocket_oid = PydanticObjectId(pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("pocket", pocket_id) from exc
+
+    doc = await _PocketDoc.get(pocket_oid)
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+
+    if doc.owner == user_id:
+        return True
+    if user_id in (doc.team or []):
+        return True
+    if user_id in (doc.shared_with or []):
+        return True
+    # Workspace-visible pockets: any workspace caller can read. The
+    # route-level ``current_workspace_id`` dependency already enforced
+    # workspace membership before we got here, so this branch implicitly
+    # requires the caller be in this pocket's workspace.
+    return getattr(doc, "visibility", "workspace") == "workspace"
+
+
 async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     """Read-only fetch — returns ``(view_dict, None)`` on success or
     ``(None, error)`` on failure."""
@@ -616,6 +711,45 @@ async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     if err:
         return None, err
     return _agent_view_dict(doc), None
+
+
+async def agent_list(workspace_id: str, user_id: str) -> list[dict]:
+    """Compact list of pockets the user can see in this workspace.
+
+    Returned shape per pocket: ``{id, name, description, type, icon,
+    color, owner}``. The full ``rippleSpec`` is intentionally excluded —
+    callers (the in-process MCP ``list_pockets`` tool, the
+    ``cloud_list_pockets`` CLI) hit this on every creation flow as the
+    "have we already got one of these?" check, so the payload stays
+    cheap. Visibility rules mirror ``list_pockets``: owned by the user,
+    explicitly shared, or workspace-visible.
+    """
+    if not workspace_id or not user_id:
+        return []
+    docs = await _PocketDoc.find(
+        {
+            "workspace": workspace_id,
+            "$or": [
+                {"owner": user_id},
+                {"shared_with": user_id},
+                {"visibility": "workspace"},
+            ],
+        }
+    ).to_list()
+    out: list[dict] = []
+    for d in docs:
+        out.append(
+            {
+                "id": str(d.id),
+                "name": d.name,
+                "description": d.description or "",
+                "type": d.type or "",
+                "icon": d.icon or "",
+                "color": d.color or "",
+                "owner": d.owner,
+            }
+        )
+    return out
 
 
 async def agent_update(
@@ -646,6 +780,7 @@ async def agent_update(
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -666,6 +801,7 @@ async def agent_add_widget(
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -693,6 +829,7 @@ async def agent_update_widget(
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -710,6 +847,7 @@ async def agent_remove_widget(
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=_pocket_event_payload(doc)))
     return _agent_view_dict(doc), None
 
 
@@ -749,6 +887,7 @@ async def agent_create(
         await doc.insert()
     except Exception as exc:  # noqa: BLE001
         return None, None, f"insert failed: {exc}"
+    await emit(PocketCreated(data=_pocket_event_payload(doc)))
     return _agent_view_dict(doc), str(doc.id), None
 
 
@@ -760,6 +899,7 @@ __all__ = [
     "add_widget",
     "agent_add_widget",
     "agent_create",
+    "agent_list",
     "agent_remove_widget",
     "agent_update",
     "agent_update_widget",
@@ -770,6 +910,7 @@ __all__ = [
     "generate_share_link",
     "get",
     "has_edit_access",
+    "is_member",
     "is_owner",
     "list_pockets",
     "remove_agent",

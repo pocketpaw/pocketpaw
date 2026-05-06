@@ -105,8 +105,15 @@ def pocket_to_wire_dict(p) -> dict:
     """Convert a domain ``Pocket`` (from ``ee.cloud.pockets.domain``) to
     the legacy wire-format dict. Byte-equivalent to the
     ``_pocket_response`` helper in ``service.py``.
+
+    Also applies read-time normalization to ``rippleSpec``: old pockets
+    persisted before the agent-alias safety net (``root`` / ``tree`` /
+    etc. lifted into ``ui``) get fixed in flight without a DB rewrite.
+    The normalizer is idempotent — specs already in the canonical
+    ``{ui, state}`` shape pass through unchanged.
     """
     from ee.cloud._core.time import iso_utc
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
 
     return {
         "_id": p.id,
@@ -121,7 +128,7 @@ def pocket_to_wire_dict(p) -> dict:
         "team": list(p.team),
         "agents": list(p.agents),
         "widgets": [_widget_to_wire(w) for w in p.widgets],
-        "rippleSpec": p.ripple_spec,
+        "rippleSpec": normalize_ripple_spec(p.ripple_spec) if p.ripple_spec else p.ripple_spec,
         "shareLinkToken": p.share_link_token,
         "shareLinkAccess": p.share_link_access,
         "sharedWith": list(p.shared_with),

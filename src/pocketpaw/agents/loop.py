@@ -181,16 +181,62 @@ async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None
 async def _publish_pocket_event(bus: "MessageBus", content: str, session_key: str) -> None:
     """Detect pocket event JSON in tool output and publish a dedicated SystemEvent.
 
-    Pocket tools return output as: ``{json}\\n\\nhuman message``.
-    The JSON block has a ``pocket_event`` key (``"created"`` or ``"mutation"``).
+    Two shapes are recognised:
+
+    1. **Legacy local-mode tools** (``CreatePocketTool`` / ``AddWidgetTool``
+       / ``RemoveWidgetTool`` in ``pocketpaw.tools.builtin.pocket``) return
+       ``{json}\\n\\nhuman message`` where the JSON has a
+       ``pocket_event: "created"|"mutation"`` key. These emit a
+       *mutation instruction* the desktop frontend applies locally — no
+       Mongo writes happen here.
+
+    2. **Cloud CLI commands** (``pocketpaw.tools.cli cloud_*``, used by
+       subprocess agents like Codex) return
+       ``{"ok": true, "pocket": {...full document...}, "pocket_id": "..."}``
+       after a successful Mongo write. The mutation has *already*
+       persisted in the CLI subprocess; we just need to fan a
+       ``pocket_mutation`` SSE event out to the active chat session so
+       paw-enterprise's existing handler refreshes the canvas without a
+       manual reload. (The Mongo-side ``PocketUpdated`` realtime event
+       fired in the subprocess can't reach the parent process's
+       WebSocket connection manager — this is the bridge.)
     """
-    # Fast path: skip content that can't contain a pocket event.
-    if '"pocket_event"' not in content:
+    # Cheap rejection — neither shape can be in the content otherwise.
+    if '"pocket_event"' not in content and '"pocket"' not in content:
         return
     data = _extract_pocket_json(content)
-    if not data or "pocket_event" not in data:
+    if not data:
         return
 
+    # ── Shape 2: cloud CLI response ──
+    if data.get("ok") is True and isinstance(data.get("pocket"), dict):
+        pocket = data["pocket"]
+        pocket_id = data.get("pocket_id") or pocket.get("_id") or pocket.get("id")
+        if not pocket_id:
+            return
+        logger.info(
+            "Cloud pocket write detected: pocket_id=%s, name=%r",
+            pocket_id,
+            pocket.get("name"),
+        )
+        await bus.publish_system(
+            SystemEvent(
+                event_type="pocket_mutation",
+                data={
+                    "mutation": {
+                        "action": "replace",
+                        "pocket_id": pocket_id,
+                        "pocket": pocket,
+                    },
+                    "session_key": session_key,
+                },
+            )
+        )
+        return
+
+    # ── Shape 1: legacy local-mode tool ──
+    if "pocket_event" not in data:
+        return
     evt_type = data["pocket_event"]
     spec = data.get("spec", {})
     logger.info(
@@ -361,18 +407,52 @@ class AgentLoop:
         self._running = False
 
     def _get_router(self) -> AgentRouter:
-        """Get or create the agent router (lazy initialization).
+        """Get or create the agent router.
 
         Per-agent loops honour their captured ``self.settings`` (which
         already carries the agent's backend/model overrides) so we don't
         reload from disk and clobber them on first router access.
+
+        Default loops reload settings on every call and rebuild the
+        router when ``agent_backend`` changes. Without this the user can
+        flip ``agent_backend`` from claude_agent_sdk to codex_cli (or
+        vice-versa) in the dashboard and the running loop keeps using
+        the previously-cached backend until the process restarts.
         """
         if self._router is None:
             if self.agent_id:
                 self._router = AgentRouter(self.settings)
             else:
-                # Default loop: reload settings to pick up config changes.
                 self._router = AgentRouter(Settings.load())
+            return self._router
+
+        # Per-agent loop: don't second-guess agent-specific overrides.
+        if self.agent_id:
+            return self._router
+
+        # Default loop: detect backend changes since last call.
+        fresh_settings = Settings.load()
+        active = getattr(self._router, "_active_backend_name", None)
+        if active != fresh_settings.agent_backend:
+            old = self._router
+            logger.info(
+                "Backend changed: %s -> %s; rebuilding router",
+                active,
+                fresh_settings.agent_backend,
+            )
+            self.settings = fresh_settings
+            self._router = AgentRouter(fresh_settings)
+            # Best-effort cleanup of the previous backend (may own a
+            # subprocess like Codex). Fire-and-forget so we don't block
+            # the next ``run()``.
+            try:
+                task = asyncio.create_task(old.stop())
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+            except RuntimeError:
+                # No running loop (sync caller during shutdown).
+                pass
+
         return self._router
 
     async def _generate_and_emit_title(self, session_key: str, first_message: str) -> None:

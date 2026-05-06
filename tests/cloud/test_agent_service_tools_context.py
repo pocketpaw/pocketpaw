@@ -71,7 +71,9 @@ def test_build_context_block_has_scope_and_members():
 
 
 def test_build_context_block_includes_ripple_hint():
-    """Agents need to know they can emit ui-spec blocks for inline UI."""
+    """Agents need to know they can emit ui-spec blocks for inline UI,
+    including interactive buttons that drive the conversation loop via
+    `chat.send`."""
     ctx = ScopeContext(
         kind=ScopeKind.SESSION,
         scope_id="s1",
@@ -102,6 +104,9 @@ def test_build_context_block_includes_ripple_hint():
         "gauge",
         "radar",
     ):
+    # canonical Ripple shape (props.type), not the legacy chartType alias.
+    for kind in ("bar", "line", "area", "pie", "donut", "candlestick",
+                 "sparkline", "heatmap", "gauge", "radar"):
         assert kind in block, f"chart kind {kind!r} missing from Ripple hint"
     # Candlestick data points need the OHLC shape called out.
     assert "open" in block and "close" in block and "high" in block and "low" in block
@@ -178,3 +183,8 @@ async def test_build_knowledge_context_falls_back_to_scope_block_on_kb_failure()
 
     assert "<scope>group g1</scope>" in out
     assert "<knowledge-base>" not in out
+    # Driven-UI loop — chat.send round-trip must be documented; clicks
+    # round-trip as the user's next message.
+    assert "chat.send" in block, "chat.send target missing from Ripple hint"
+    assert "on_click" in block, "on_click handler missing from Ripple hint"
+    assert "emit" in block, "emit action missing from Ripple hint"
