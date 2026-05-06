@@ -483,15 +483,6 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
         parts.append(creation_prompt)
         return "\n".join(parts)
     if ctx.pocket_id:
-        if interaction_ctx:
-            parts.append(
-                _POCKET_TOOLS_HINT_TEMPLATE.format(
-                    preamble=_CLOUD_POCKET_TOOL_PREAMBLE.format(pocket_id=ctx.pocket_id),
-                    interaction_context=interaction_ctx,
-                )
-            )
-            parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
-    parts.append(_RIPPLE_HINT)
         parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
         parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
         return "\n".join(parts)
@@ -550,13 +541,17 @@ def _file_reference_terms(
 
 
 def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
-    """Return KB scopes to search for cloud-agent prompt context."""
+    """Return KB scopes to search for cloud-agent prompt context.
+
+    Ordered most-specific-first (pocket > agent > workspace) so that
+    the limited KB budget is allocated to the most relevant scope first.
+    """
     scopes: list[str] = []
     seen: set[str] = set()
     for candidate in (
-        f"workspace:{ctx.workspace_id}" if ctx.workspace_id else None,
         f"pocket:{ctx.pocket_id}" if ctx.pocket_id else None,
         f"agent:{ctx.target_agent_id}" if ctx.target_agent_id else None,
+        f"workspace:{ctx.workspace_id}" if ctx.workspace_id else None,
     ):
         if not candidate:
             continue
@@ -579,6 +574,11 @@ async def build_knowledge_context(
     query = (user_message or "").strip()
     refs = _file_reference_terms(attachments=attachments, mentions=mentions)
     if refs:
+        if len(refs) > 12:
+            logger.warning(
+                "_file_reference_terms returned %d terms; truncating to first 12",
+                len(refs),
+            )
         ref_line = ", ".join(refs[:12])
         query = f"{query}\nReferenced uploads: {ref_line}" if query else ref_line
     if not query:

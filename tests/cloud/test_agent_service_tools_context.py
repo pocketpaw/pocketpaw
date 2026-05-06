@@ -92,19 +92,6 @@ def test_build_context_block_includes_ripple_hint():
         assert node in block, f"node type {node!r} missing from Ripple hint"
     # Chart specifics — the agent needs to know all 10 chart kinds + the
     # canonical Ripple shape (props.type), not just the legacy chartType alias.
-    for kind in (
-        "bar",
-        "line",
-        "area",
-        "pie",
-        "donut",
-        "candlestick",
-        "sparkline",
-        "heatmap",
-        "gauge",
-        "radar",
-    ):
-    # canonical Ripple shape (props.type), not the legacy chartType alias.
     for kind in ("bar", "line", "area", "pie", "donut", "candlestick",
                  "sparkline", "heatmap", "gauge", "radar"):
         assert kind in block, f"chart kind {kind!r} missing from Ripple hint"
@@ -183,8 +170,3 @@ async def test_build_knowledge_context_falls_back_to_scope_block_on_kb_failure()
 
     assert "<scope>group g1</scope>" in out
     assert "<knowledge-base>" not in out
-    # Driven-UI loop — chat.send round-trip must be documented; clicks
-    # round-trip as the user's next message.
-    assert "chat.send" in block, "chat.send target missing from Ripple hint"
-    assert "on_click" in block, "on_click handler missing from Ripple hint"
-    assert "emit" in block, "emit action missing from Ripple hint"
