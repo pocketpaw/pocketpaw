@@ -3,6 +3,12 @@
 # Updated: 2026-04-19 (Cluster C / PR3) — Added GET /fabric/objects and
 #   GET /fabric/links list endpoints so the Objects/Links sub-tabs in
 #   PocketDataPanel render real data instead of the Brew & Co. mock.
+# Updated: 2026-05-07 (fix/rbac-guards-fabric-instinct-agent-knowledge) — all
+#   endpoints now require a valid license + workspace membership. Read endpoints
+#   (GET + POST /query) require ``fabric.read`` (MEMBER). Mutation endpoints
+#   (POST /types, /objects, /links) require ``fabric.write`` (MEMBER). Previously
+#   the router had zero auth — any unauthenticated caller could read or modify the
+#   ontology store.
 
 from __future__ import annotations
 
@@ -10,9 +16,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ee.cloud.license import require_license
+from ee.cloud.shared.deps import require_action_any_workspace
 from ee.fabric.models import (
     FabricLink,
     FabricObject,
@@ -25,7 +33,7 @@ from ee.fabric.store import FabricStore
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Fabric"])
+router = APIRouter(tags=["Fabric"], dependencies=[Depends(require_license)])
 
 _DB_PATH = Path.home() / ".pocketpaw" / "fabric.db"
 
@@ -66,12 +74,21 @@ class LinkRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/fabric/types", response_model=list[ObjectType])
+@router.get(
+    "/fabric/types",
+    response_model=list[ObjectType],
+    dependencies=[Depends(require_action_any_workspace("fabric.read"))],
+)
 async def list_types():
     return await _store().list_types()
 
 
-@router.post("/fabric/types", response_model=ObjectType, status_code=201)
+@router.post(
+    "/fabric/types",
+    response_model=ObjectType,
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("fabric.write"))],
+)
 async def define_type(req: DefineTypeRequest):
     return await _store().define_type(
         name=req.name,
@@ -92,7 +109,11 @@ class LinksListResponse(BaseModel):
     total: int
 
 
-@router.get("/fabric/objects", response_model=ObjectsListResponse)
+@router.get(
+    "/fabric/objects",
+    response_model=ObjectsListResponse,
+    dependencies=[Depends(require_action_any_workspace("fabric.read"))],
+)
 async def list_objects(
     type_id: str | None = Query(None, description="Filter by object type id"),
     type_name: str | None = Query(None, description="Filter by object type name (case-insensitive)"),
@@ -111,7 +132,11 @@ async def list_objects(
     return ObjectsListResponse(objects=result.objects, total=result.total)
 
 
-@router.get("/fabric/links", response_model=LinksListResponse)
+@router.get(
+    "/fabric/links",
+    response_model=LinksListResponse,
+    dependencies=[Depends(require_action_any_workspace("fabric.read"))],
+)
 async def list_links(
     from_id: str | None = Query(None, description="Filter by source object id"),
     to_id: str | None = Query(None, description="Filter by destination object id"),
@@ -130,7 +155,12 @@ async def list_links(
     return LinksListResponse(links=links, total=total)
 
 
-@router.post("/fabric/objects", response_model=FabricObject, status_code=201)
+@router.post(
+    "/fabric/objects",
+    response_model=FabricObject,
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("fabric.write"))],
+)
 async def create_object(req: CreateObjectRequest):
     return await _store().create_object(
         type_id=req.type_id,
@@ -140,7 +170,11 @@ async def create_object(req: CreateObjectRequest):
     )
 
 
-@router.get("/fabric/objects/{obj_id}", response_model=FabricObject)
+@router.get(
+    "/fabric/objects/{obj_id}",
+    response_model=FabricObject,
+    dependencies=[Depends(require_action_any_workspace("fabric.read"))],
+)
 async def get_object(obj_id: str):
     obj = await _store().get_object(obj_id)
     if not obj:
@@ -148,12 +182,20 @@ async def get_object(obj_id: str):
     return obj
 
 
-@router.post("/fabric/query", response_model=FabricQueryResult)
+@router.post(
+    "/fabric/query",
+    response_model=FabricQueryResult,
+    dependencies=[Depends(require_action_any_workspace("fabric.read"))],
+)
 async def query_fabric(q: FabricQuery):
     return await _store().query(q)
 
 
-@router.post("/fabric/links", status_code=201)
+@router.post(
+    "/fabric/links",
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("fabric.write"))],
+)
 async def create_link(req: LinkRequest):
     return await _store().link(
         from_id=req.from_id,
@@ -163,6 +205,9 @@ async def create_link(req: LinkRequest):
     )
 
 
-@router.get("/fabric/stats")
+@router.get(
+    "/fabric/stats",
+    dependencies=[Depends(require_action_any_workspace("fabric.read"))],
+)
 async def fabric_stats():
     return await _store().stats()

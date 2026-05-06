@@ -11,15 +11,24 @@
 #   attach decision inputs at propose time. GET /instinct/audit/{id}?hydrate=1
 #   returns the audit entry with the trace's referenced IDs expanded into Fabric
 #   object snapshots, making the "Why?" drawer possible in the UI.
+# Updated: 2026-05-07 (fix/rbac-guards-fabric-instinct-agent-knowledge) — all
+#   endpoints now require a valid license + workspace membership. Read/propose
+#   endpoints require ``instinct.read``/``instinct.propose`` (MEMBER). Approve,
+#   reject, and all audit endpoints require ``instinct.approve``/``instinct.audit``
+#   (ADMIN) — governance actions that trigger automations or record corrections.
+#   Previously the router had zero auth.
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+from ee.cloud.license import require_license
+from ee.cloud.shared.deps import require_action_any_workspace
 
 from ee.instinct.correction import (
     Correction,
@@ -38,7 +47,7 @@ from ee.instinct.trace import FabricObjectSnapshot, ReasoningTrace
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Instinct"])
+router = APIRouter(tags=["Instinct"], dependencies=[Depends(require_license)])
 
 
 def _store():
@@ -132,7 +141,12 @@ class CorrectionsListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/instinct/actions", response_model=Action, status_code=201)
+@router.post(
+    "/instinct/actions",
+    response_model=Action,
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("instinct.propose"))],
+)
 async def propose_action(req: ProposeRequest):
     """Propose a new action for human approval.
 
@@ -154,13 +168,21 @@ async def propose_action(req: ProposeRequest):
     )
 
 
-@router.get("/instinct/actions/pending", response_model=list[Action])
+@router.get(
+    "/instinct/actions/pending",
+    response_model=list[Action],
+    dependencies=[Depends(require_action_any_workspace("instinct.read"))],
+)
 async def pending_actions(pocket_id: str | None = Query(None)):
     """List actions waiting for human approval."""
     return await _store().pending(pocket_id=pocket_id)
 
 
-@router.get("/instinct/actions", response_model=ActionsListResponse)
+@router.get(
+    "/instinct/actions",
+    response_model=ActionsListResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.read"))],
+)
 async def list_actions(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
     status: str | None = Query(
@@ -179,7 +201,11 @@ async def list_actions(
     return ActionsListResponse(actions=actions, total=len(actions))
 
 
-@router.post("/instinct/actions/{action_id}/approve", response_model=ApproveResponse)
+@router.post(
+    "/instinct/actions/{action_id}/approve",
+    response_model=ApproveResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
+)
 async def approve_action(action_id: str, req: ApproveRequest | None = None):
     """Approve a pending action, optionally with edits.
 
@@ -232,7 +258,11 @@ async def _forward_to_soul(correction: Correction, action: Action) -> None:
         logger.exception("Correction soul-bridge failed (non-fatal)")
 
 
-@router.post("/instinct/actions/{action_id}/reject", response_model=Action)
+@router.post(
+    "/instinct/actions/{action_id}/reject",
+    response_model=Action,
+    dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
+)
 async def reject_action(action_id: str, req: RejectRequest | None = None):
     """Reject a pending action with an optional reason."""
     reason = req.reason if req else ""
@@ -310,7 +340,11 @@ async def _persist_edits(store: Any, action: Action, edited: set[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/instinct/corrections", response_model=CorrectionsListResponse)
+@router.get(
+    "/instinct/corrections",
+    response_model=CorrectionsListResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.read"))],
+)
 async def list_corrections(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
     action_id: str | None = Query(None, description="Filter by action ID"),
@@ -332,7 +366,11 @@ async def list_corrections(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/instinct/audit", response_model=AuditListResponse)
+@router.get(
+    "/instinct/audit",
+    response_model=AuditListResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
+)
 async def query_audit(
     response: Response,
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
@@ -387,7 +425,10 @@ class HydratedAuditEntry(BaseModel):
 # /instinct/audit/{audit_id} below — FastAPI routes match in registration
 # order, and a literal-vs-parameter collision would otherwise route
 # /audit/export to the {audit_id} handler and 404.
-@router.get("/instinct/audit/export")
+@router.get(
+    "/instinct/audit/export",
+    dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
+)
 async def export_audit(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
 ):
@@ -400,7 +441,11 @@ async def export_audit(
     )
 
 
-@router.get("/instinct/audit/{audit_id}", response_model=HydratedAuditEntry)
+@router.get(
+    "/instinct/audit/{audit_id}",
+    response_model=HydratedAuditEntry,
+    dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
+)
 async def get_audit_entry(
     audit_id: str,
     hydrate: int = Query(0, description="Pass 1 to expand referenced IDs"),

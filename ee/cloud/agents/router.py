@@ -5,6 +5,12 @@ Updated 2026-04-19 (feat/cluster-d-agent-scope-picker): added
 ScopePicker UI. PATCH re-validates and re-normalises the payload server
 side — the frontend normaliseScope helper is treated as a UX nicety, not
 a security boundary.
+
+Updated 2026-05-07 (fix/rbac-guards-fabric-instinct-agent-knowledge): the
+five knowledge mutation endpoints (POST text/url/urls/upload, DELETE) now
+require ``require_agent_owner_or_admin`` — same guard as PATCH/DELETE agent
+CRUD. Previously they had no RBAC guard beyond ``require_license``, so any
+workspace member could inject content into any agent's knowledge base.
 """
 
 from __future__ import annotations
@@ -136,7 +142,10 @@ async def discover_agents(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/{agent_id}/knowledge/text")
+@router.post(
+    "/{agent_id}/knowledge/text",
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
 async def ingest_text(agent_id: str, body: dict):
     """Ingest plain text into agent's knowledge base."""
     import logging
@@ -154,7 +163,10 @@ async def ingest_text(agent_id: str, body: dict):
         return {"error": str(exc)}
 
 
-@router.post("/{agent_id}/knowledge/url")
+@router.post(
+    "/{agent_id}/knowledge/url",
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
 async def ingest_url(agent_id: str, body: dict):
     """Fetch and ingest a URL into agent's knowledge base."""
     from ee.cloud.agents.knowledge import KnowledgeService
@@ -165,7 +177,10 @@ async def ingest_url(agent_id: str, body: dict):
     return await KnowledgeService.ingest_url(agent_id, url)
 
 
-@router.post("/{agent_id}/knowledge/urls")
+@router.post(
+    "/{agent_id}/knowledge/urls",
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
 async def ingest_urls(agent_id: str, body: dict):
     """Batch ingest multiple URLs."""
     from ee.cloud.agents.knowledge import KnowledgeService
@@ -259,7 +274,10 @@ async def upload_profile_pic(
     return {"url": avatar_url}
 
 
-@router.post("/{agent_id}/knowledge/upload")
+@router.post(
+    "/{agent_id}/knowledge/upload",
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
 async def upload_and_ingest(
     agent_id: str,
     file: UploadFile = FastAPIFile(...),  # noqa: B008
@@ -298,7 +316,11 @@ async def upload_and_ingest(
         os.unlink(tmp_path)
 
 
-@router.delete("/{agent_id}/knowledge", status_code=204)
+@router.delete(
+    "/{agent_id}/knowledge",
+    status_code=204,
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
 async def clear_knowledge(agent_id: str):
     """Clear all knowledge for an agent."""
     from ee.cloud.agents.knowledge import KnowledgeService
