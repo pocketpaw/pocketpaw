@@ -484,8 +484,86 @@ Inside any string value the dispatcher resolves:
   {item} / {card} / {index}    — loop context
   {event}                — payload from on_change / on_submit
 
-This is enough to build any add/remove/edit/toggle flow without
-inventing new actions.
+Whitelisted method calls on resolved values (no callbacks; args are
+literals or expressions only):
+
+  string  — .toLowerCase() .toUpperCase() .trim()
+            .includes(s) .startsWith(s) .endsWith(s)
+  number  — .toFixed(n)
+  array   — .includes(v) .join(sep) .sum(field) .count()
+            .first() .last() .reverse() .limit(n)
+            .where(field, value)         — equality filter; pass-through
+                                           when value is null/undefined
+                                           or the literal 'All', so a
+                                           "no filter" select binds
+                                           directly with no ternary
+            .whereIn(field, values)      — pass-through on empty array
+            .sortBy(field, 'asc'|'desc') — non-mutating, numeric-aware
+
+Bracket indexing in paths (key may be literal or an expression):
+
+  {state.repos[0].name}
+  {state.byLang['Astro']}
+  {state.byLang[state.language]}
+
+### Deriving filtered / sorted views from state
+
+NEVER read a raw collection into a list/table when external controls
+exist to filter or sort it — the controls become dead UI. Compose
+`.where(...).sortBy(...).limit(...)` in the data binding so the view
+recomputes when bound state changes.
+
+  // state seed
+  "state": {
+    "language_filter": "All",
+    "sort_by": "stars",
+    "all_repos": [ ... ]
+  }
+
+  // controls
+  { "type": "select", "bind": "language_filter",
+    "props": { "options": [{"value":"All","label":"All"}, ...] } }
+  { "type": "segmented", "bind": "sort_by",
+    "props": { "options": [{"value":"stars","label":"Stars"}, ...] } }
+
+  // the table reads a derived view, not the raw array
+  { "type": "table",
+    "props": {
+      "columns": [...],
+      "rows": "{state.all_repos
+                 .where('language', state.language_filter)
+                 .sortBy(state.sort_by, 'desc')}"
+    } }
+
+  (Newlines shown above for readability — emit the expression on a single
+   line in the actual JSON.)
+
+`where` treats `'All'`/`null`/`undefined` as "no filter", so the
+default-selected option needs no special branch. Same composition
+works for `data` on charts, `items` on grids/feeds, etc.
+
+This is enough to build any add/remove/edit/toggle/filter/sort flow
+without inventing new actions.
+
+## Interactive elements must have handlers
+
+Every clickable / changeable widget in a pocket needs a wired handler.
+A button with `id` and `label` but no `on_click` (or, on `entity-detail`
+action items, no `actions` field) is dead UI — it renders, the user
+clicks, nothing happens.
+
+  // wrong — looks interactive, isn't
+  { "id": "view", "label": "View on GitHub", "icon": "external-link" }
+
+  // right — every action item declares what it does
+  { "id": "view", "label": "View on GitHub", "icon": "external-link",
+    "actions": [{ "action": "navigate",
+                  "url": "https://github.com/{state.handle}" }] }
+  { "id": "refresh", "label": "Refresh", "icon": "refresh-cw",
+    "actions": [{ "action": "emit", "target": "refresh.repos" }] }
+
+If you genuinely have nothing for a button to do, omit the button.
+Never ship a labeled control with no behavior behind it.
 
 ## Generic recipe — adding an item to a list (any widget)
 
@@ -624,7 +702,7 @@ clear this bar before you emit it:
 RIPPLE_DESIGN_RULES = "\n".join(
     [
         USE_THE_WIDGET_RULE,
-        FULL_PANE_RULE,
+        # FULL_PANE_RULE,
         WIDGET_CATALOG,
         NO_INVENTED_WIDGETS_RULE,
         WIDGET_SPEC_TOOL_RULE,

@@ -498,9 +498,7 @@ def test_normalizer_lifts_each_bind_to_items():
                 {
                     "type": "each",
                     "bind": "todos",  # ← wrong field name
-                    "children": [
-                        {"type": "text", "props": {"text": "{item.text}"}}
-                    ],
+                    "children": [{"type": "text", "props": {"text": "{item.text}"}}],
                 }
             ],
         },
@@ -638,6 +636,82 @@ def test_normalizer_lifts_aliased_ui_field():
         assert alias not in out, f"alias {alias!r} kept alongside ui"
 
 
+def test_normalizer_drops_entity_detail_actions_without_handlers():
+    """An ``entity-detail`` action item with ``id``/``label`` but no
+    ``actions`` handler renders a clickable button that does nothing —
+    a dead control. Normalizer should drop those, keeping only items
+    with a real handler wired."""
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
+
+    spec = {
+        "state": {},
+        "ui": {
+            "type": "entity-detail",
+            "props": {
+                "title": "Demo",
+                "actions": [
+                    {"id": "view", "label": "View"},  # ← dead, no handler
+                    {
+                        "id": "refresh",
+                        "label": "Refresh",
+                        "actions": [{"action": "emit", "target": "refresh"}],
+                    },
+                    {"id": "share", "label": "Share", "actions": []},  # ← empty list
+                ],
+            },
+        },
+    }
+    out = normalize_ripple_spec(spec)
+    assert out is not None
+    actions = out["ui"]["props"]["actions"]
+    assert len(actions) == 1, "only the wired action should survive"
+    assert actions[0]["id"] == "refresh"
+
+
+def test_normalizer_lifts_on_click_to_actions_on_entity_detail():
+    """Some agents emit ``on_click`` on entity-detail action items
+    (parallel to button widgets) instead of ``actions``. Lift it."""
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
+
+    spec = {
+        "ui": {
+            "type": "entity-detail",
+            "props": {
+                "title": "Demo",
+                "actions": [
+                    {
+                        "id": "view",
+                        "label": "View on GitHub",
+                        "on_click": [{"action": "navigate", "url": "https://github.com"}],
+                    },
+                ],
+            },
+        },
+    }
+    out = normalize_ripple_spec(spec)
+    assert out is not None
+    item = out["ui"]["props"]["actions"][0]
+    assert "on_click" not in item, "on_click should be lifted away"
+    assert isinstance(item.get("actions"), list)
+    assert item["actions"][0]["action"] == "navigate"
+
+
+def test_normalizer_preserves_entity_detail_with_no_actions_field():
+    """Sanity: an entity-detail with no ``actions`` prop at all should
+    pass through unchanged — the fix only fires when actions exist."""
+    from ee.cloud.ripple_normalizer import normalize_ripple_spec
+
+    spec = {
+        "ui": {
+            "type": "entity-detail",
+            "props": {"title": "Demo", "subtitle": "hi"},
+        },
+    }
+    out = normalize_ripple_spec(spec)
+    assert out is not None
+    assert out["ui"]["props"] == {"title": "Demo", "subtitle": "hi"}
+
+
 def test_normalizer_passes_through_already_wrapped_ui():
     """A spec that's already in the ``{ui: <node>}`` shape should not
     be double-wrapped."""
@@ -670,8 +744,6 @@ async def test_generate_session_title_skips_when_no_session_id():
         session_id=None,
     )
     # Should return without calling the titler at all.
-    with patch(
-        "pocketpaw.memory.titler.generate_title", AsyncMock()
-    ) as titler:
+    with patch("pocketpaw.memory.titler.generate_title", AsyncMock()) as titler:
         await _generate_session_title(ctx, "anything")
     titler.assert_not_called()

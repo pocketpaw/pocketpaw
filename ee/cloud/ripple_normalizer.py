@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def _short_id() -> str:
@@ -46,11 +49,68 @@ def _fix_control_flow_node(node: dict[str, Any]) -> dict[str, Any]:
     return node
 
 
+def _fix_entity_detail_actions(node: dict[str, Any]) -> dict[str, Any]:
+    """Strip dead `entity-detail` action items — those with `id`/`label`
+    but no `actions` (or `on_click`) handler.
+
+    EntityDetail's `props.actions[]` renders as primary CTAs in the hero.
+    An item with no wired handler renders a clickable button that does
+    nothing — visually identical to a working button. The renderer falls
+    back to a host `onaction` callback when a handler is missing, but
+    pocket specs don't have one, so the click silently no-ops.
+
+    We also lift `on_click` → `actions` for items that use the wrong
+    field name (parallel to `bind` → `items` on `each`).
+
+    Stripping is intentional over raising: a ValidationError on persist
+    would lock the agent in a retry loop. The prompt teaches the agent
+    the correct shape; this is the safety net.
+    """
+    if node.get("type") != "entity-detail":
+        return node
+    props = node.get("props")
+    if not isinstance(props, dict):
+        return node
+    actions = props.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return node
+
+    cleaned: list[Any] = []
+    changed = False
+    for item in actions:
+        if not isinstance(item, dict):
+            cleaned.append(item)
+            continue
+        # Lift `on_click` → `actions` when the agent uses the wrong field.
+        if "actions" not in item and "on_click" in item:
+            handler = item["on_click"]
+            item = {k: v for k, v in item.items() if k != "on_click"}
+            item["actions"] = handler
+            changed = True
+        handler = item.get("actions")
+        has_handler = (isinstance(handler, list) and len(handler) > 0) or (
+            isinstance(handler, dict) and handler
+        )
+        if has_handler:
+            cleaned.append(item)
+        else:
+            changed = True
+            log.warning(
+                "ripple_normalizer: dropped entity-detail action %r — no handler wired",
+                item.get("id") or item.get("label") or "<unnamed>",
+            )
+
+    if not changed:
+        return node
+    return {**node, "props": {**props, "actions": cleaned}}
+
+
 def _walk_and_fix(node: Any) -> Any:
     """Recursively walk a UISpec tree, applying node-level fixes.
     Returns a new structure; input is not mutated."""
     if isinstance(node, dict):
         fixed = _fix_control_flow_node(node)
+        fixed = _fix_entity_detail_actions(fixed)
         if "children" in fixed and isinstance(fixed["children"], list):
             fixed = {**fixed, "children": [_walk_and_fix(c) for c in fixed["children"]]}
         if "else_children" in fixed and isinstance(fixed["else_children"], list):
@@ -131,9 +191,7 @@ def normalize_ripple_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
     # ``widgets``, and the dashboard renderer falls back to the
     # "No widgets yet" empty state.
     spec_type = spec.get("type")
-    if isinstance(spec_type, str) and spec_type and (
-        "props" in spec or "children" in spec
-    ):
+    if isinstance(spec_type, str) and spec_type and ("props" in spec or "children" in spec):
         node_keys = ("type", "props", "children", "style", "show", "id")
         node = {k: v for k, v in spec.items() if k in node_keys}
         return {**envelope, "version": spec.get("version", "1.0"), "ui": _walk_and_fix(node)}
