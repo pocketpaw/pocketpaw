@@ -87,6 +87,36 @@ read source files, or explore the codebase to satisfy a pocket request.
 """
 
 
+POCKET_DELEGATION_RULE = """\
+<pocket-delegation>
+Pocket creation and editing are NOT done in this conversation. They
+are done by the `pocket_specialist` subagent.
+
+When the user asks to create, edit, add to, modify, or otherwise touch
+a pocket — including phrases like "make a pocket", "edit this canvas",
+"add a widget", "change the layout", "build a dashboard for X", or any
+follow-up that mutates pocket state — you MUST invoke the
+`delegate_to_pocket_specialist` tool. Do NOT call `cloud_create_pocket`,
+`cloud_update_pocket`, `cloud_add_widget`, or any other pocket
+mutation tool from this turn — those tools are not on your allowlist
+in chat mode.
+
+Pass to the tool:
+  user_message      — the user's verbatim request, no rephrasing
+  pocket_id         — the active pocket if known, else null
+  recent_turns      — the last 4 turns of conversation as
+                      [{role, content}], oldest first
+
+The specialist returns a brief status string. Relay it to the user in
+your own voice; do not paraphrase the specialist's internal reasoning.
+
+A request that is purely conversational (no canvas mutation) — "what
+pockets do I have?", "describe this pocket", "what does X mean" — is
+NOT pocket work. Answer those directly with `cloud_list_pockets` /
+`cloud_get_pocket` (read-only, on your allowlist).
+</pocket-delegation>
+"""
+
 _CANVAS_BLOCK = """\
 <rippleSpec-is-the-canvas>
 **rippleSpec.ui is the entire visible canvas. Nothing else renders.**
@@ -760,6 +790,7 @@ __all__ = [
     "POCKET_CREATION_PROMPT",
     "POCKET_CREATION_PROMPT_CLI",
     "POCKET_CREATION_PROMPT_MCP",
+    "POCKET_DELEGATION_RULE",
     "POCKET_ID_TOKEN",
     "POCKET_INTERACTION_PROMPT",
     "POCKET_INTERACTION_PROMPT_CLI",

@@ -178,3 +178,28 @@ def test_inline_widget_help_no_args_returns_full_catalog():
     assert widget_help() == RIPPLE_DESIGN_RULES
     assert widget_help([]) == RIPPLE_DESIGN_RULES
     assert widget_help([" ", ""]) == RIPPLE_DESIGN_RULES
+
+
+def test_main_chat_prompt_delegates_pocket_work_not_inlines_it():
+    """In plain chat, the system prompt teaches the agent to delegate
+    pocket work to the specialist. It must NOT carry the full
+    POCKET_CREATION_PROMPT_MCP — that lives on the specialist now."""
+    ctx = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+    )
+    block = build_context_block(ctx)
+    # Delegation rule present.
+    assert "<pocket-delegation>" in block
+    assert "delegate_to_pocket_specialist" in block
+    # Full pocket creation prompt is NOT inlined.
+    assert "<list-before-create>" not in block, (
+        "full pocket creation prompt leaked into main-chat system prompt — "
+        "should be on the specialist subagent only"
+    )

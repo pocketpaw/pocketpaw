@@ -25,6 +25,7 @@ from ee.ripple import (
     POCKET_ID_TOKEN,
     get_pocket_prompts,
 )
+from ee.ripple._pockets import POCKET_DELEGATION_RULE
 
 logger = logging.getLogger(__name__)
 
@@ -482,6 +483,7 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
         static_parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
     else:
         static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+        static_parts.append(POCKET_DELEGATION_RULE)
 
     # Dynamic portion LAST — per-turn variability lives here.
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
