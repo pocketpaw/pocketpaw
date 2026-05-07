@@ -14,7 +14,6 @@
 # rules) + the shared design language from ee.ripple._design (widget
 # catalog, canonical shapes, full-pane rule, theme, design-quality bar).
 
-from ee.ripple._design import RIPPLE_DESIGN_RULES
 
 _INLINE_PREAMBLE = """\
 <ripple>
@@ -133,6 +132,45 @@ Interaction rules:
 """
 
 
+_INLINE_CORE_CATALOG = """\
+---
+
+# WIDGET CATALOG — chat-inline allowlist
+
+Six core widgets cover ~90% of chat replies. Use these from memory:
+
+  text       — plain or rich text. Props: text, variant ('h1'..'h4',
+               'body','muted','small'), align.
+  heading    — same as text.h1..h4 with stronger visual default.
+  stat       — single big number. Props: label, value, delta, trend
+               ('up'|'down'|'flat'), sublabel.
+  button     — Props: label, icon, variant. Always carries on_click.
+  table      — Props: columns ([{accessorKey, header}, ...]), rows
+               (data array OR `{state.x}` expression), variant
+               ('default'|'compact'|'striped'|'minimal'), searchable,
+               sortable, pageSize.
+  flex       — layout. Props: direction ('row'|'column'), gap, align,
+               justify. Children = the laid-out nodes.
+
+Anything beyond these — chart, sparkline, kanban, calendar, gauge,
+heatmap, treemap, timeline, gantt, candlestick OHLC, comparison-table,
+pricing-table, source-card, news-card, link-preview, master-detail,
+entity-detail, dashboard, etc. — is supported but the prop schema is
+NOT in this prompt. Call the `get_inline_widget_help` MCP tool with
+the widget types you intend to use. Cheap (single round-trip) and
+returns the canonical shape for those widgets.
+
+Example: planning a candlestick + sparkline reply →
+  get_inline_widget_help(types=["chart", "sparkline"])
+  → returns the OHLC data shape for candlestick and the values/labels
+    shape for sparkline. Use the returned text verbatim as the prop
+    contract.
+
+Do NOT guess prop names for non-core widgets. Wrong props render as
+empty placeholders and waste a turn.
+"""
+
+
 _INLINE_RULES = """\
 # RULES
 
@@ -144,20 +182,23 @@ _INLINE_RULES = """\
 - Pocket canvases are a SEPARATE surface — do not call
   `cloud_update_pocket` from a chat reply. chat.send loops drive the
   conversation; they do NOT mutate pocket state.
+- Interactive elements MUST have on_click / on_change. A button with
+  a label and no handler is dead UI — render only buttons that lead
+  somewhere via chat.send (or omit them entirely).
 
 Final self-check before sending:
 ✔ ui-spec used when response has structure
 ✔ Interactive elements have on_click / on_change
 ✔ Actions emit chat.send to close the loop
 ✔ One focal widget — clean, minimal layout, no clutter
-✔ Typed widget chosen over flex+text rebuild (USE-THE-WIDGET RULE)
+✔ Core widget OR `get_inline_widget_help` was called for the type
 ✔ Leads to a clear next step
 ✔ No static lists for open-ended queries
 ✔ Valid JSON, concrete values, one fence
 </ripple>"""
 
 
-INLINE_RIPPLE_SYSTEM_PROMPT = _INLINE_PREAMBLE + RIPPLE_DESIGN_RULES + "\n---\n\n" + _INLINE_RULES
+INLINE_RIPPLE_SYSTEM_PROMPT = _INLINE_PREAMBLE + _INLINE_CORE_CATALOG + "\n" + _INLINE_RULES
 
 
 __all__ = ["INLINE_RIPPLE_SYSTEM_PROMPT"]
