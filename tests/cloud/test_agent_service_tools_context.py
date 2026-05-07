@@ -119,8 +119,6 @@ def test_build_context_block_has_stable_static_prefix():
     """Anthropic prompt caching keys off prefix. The static ripple/pocket
     portion of the system prompt must come BEFORE per-turn dynamic tags
     (<scope>, <participants>, KB context) so it caches across turns."""
-    from ee.cloud.chat.agent_service import ScopeContext, ScopeKind, build_context_block
-
     a = build_context_block(
         ScopeContext(
             kind=ScopeKind.GROUP,
@@ -145,7 +143,11 @@ def test_build_context_block_has_stable_static_prefix():
             agent_ids_in_scope=["a1"],
         )
     )
-    assert a[:1000] == b[:1000], (
+    # Must be at least as long as the longest plausible dynamic preamble
+    # (scope + participants tags are ~60 chars). 1000 is a conservative
+    # floor; the full static block is several thousand chars.
+    static_prefix_floor = 1000
+    assert a[:static_prefix_floor] == b[:static_prefix_floor], (
         "Static prefix differs across builds — prompt caching will miss. "
         f"a starts: {a[:200]!r}; b starts: {b[:200]!r}"
     )

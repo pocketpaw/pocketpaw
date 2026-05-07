@@ -478,6 +478,7 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
     if ctx.intent == "pocket_create":
         static_parts.append(creation_prompt)
     elif ctx.pocket_id:
+        # pocket-id baked in — prefix is per-pocket-instance, not globally cacheable.
         static_parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
     else:
         static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
