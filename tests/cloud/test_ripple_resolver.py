@@ -169,6 +169,68 @@ async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
     assert "w1" in str(query)
 
 
+async def test_workspace_pockets_source_strict_workspace_scoping(ctx: ResolveCtx) -> None:
+    """Stricter tenancy invariant — assert the find query has workspace=ctx.workspace_id
+    as an exact dict key, not just substring-present in str(query). Catches refactors
+    that loosen the scoping (e.g. dropping the workspace key, or moving it under $or)
+    even though the structural invariant 'every find call is workspace-scoped' must hold."""
+    import ee.cloud.ripple_sources  # noqa: F401
+
+    class _FakeFind:
+        def __init__(self, docs):
+            self._docs = docs
+
+        async def to_list(self):
+            return self._docs
+
+    with patch(
+        "ee.cloud.ripple_sources._PocketDoc.find",
+        return_value=_FakeFind([]),
+    ) as find_mock:
+        spec = {"state": {"all": {"$source": "workspace.pockets"}}}
+        await resolve_ripple_spec(spec, ctx)
+
+    args, kwargs = find_mock.call_args
+    query = args[0] if args else kwargs
+    # The top-level workspace key must be set to the ctx's workspace_id exactly.
+    assert isinstance(query, dict), f"expected dict query, got {type(query).__name__}"
+    assert query.get("workspace") == "w1", (
+        f"workspace key must equal ctx.workspace_id; got query={query!r}"
+    )
+
+
+async def test_workspace_pockets_source_other_workspace_ctx_scopes_to_other(ctx: ResolveCtx) -> None:
+    """Cross-workspace tenancy proof — when ctx.workspace_id changes from 'w1' to 'w2',
+    the find query's workspace key tracks. Demonstrates the source cannot leak across
+    workspace boundaries because the query is built from ctx, not from the spec."""
+    import ee.cloud.ripple_sources  # noqa: F401
+
+    other_ctx = ResolveCtx(workspace_id="w2", user_id="u1", pocket_id=None)
+
+    class _FakeFind:
+        def __init__(self, docs):
+            self._docs = docs
+
+        async def to_list(self):
+            return self._docs
+
+    with patch(
+        "ee.cloud.ripple_sources._PocketDoc.find",
+        return_value=_FakeFind([]),
+    ) as find_mock:
+        spec = {"state": {"all": {"$source": "workspace.pockets"}}}
+        await resolve_ripple_spec(spec, other_ctx)
+
+    args, kwargs = find_mock.call_args
+    query = args[0] if args else kwargs
+    assert query.get("workspace") == "w2", (
+        f"workspace key must equal other_ctx.workspace_id 'w2'; got query={query!r}"
+    )
+    # Crucially, "w1" never appears — proves the source ignores any spec-level
+    # workspace value and trusts only the ctx (which is server-built from auth).
+    assert "w1" not in str(query)
+
+
 async def test_workspace_members_source_returns_enriched_member_list(ctx):
     import ee.cloud.ripple_sources  # noqa: F401
 
