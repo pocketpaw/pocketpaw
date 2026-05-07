@@ -34,6 +34,73 @@ _DEFAULT_IDENTITY = (
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
 
+# Pocket mutation tools — write-side MCP tools the main chat agent is NOT
+# allowed to call. Pocket edits flow through the ``pocket_specialist``
+# subagent via the ``delegate_to_pocket_specialist`` tool. Read-side
+# tools (``get_pocket``, ``list_pockets``, ``get_widget_spec``,
+# ``get_inline_widget_help``) stay on the main allowlist so the agent
+# can answer conversational questions about existing pockets.
+_POCKET_MUTATION_TOOL_IDS: frozenset[str] = frozenset(
+    {
+        "mcp__pocketpaw_pocket__create_pocket",
+        "mcp__pocketpaw_pocket__update_pocket",
+        "mcp__pocketpaw_pocket__add_widget",
+        "mcp__pocketpaw_pocket__update_widget",
+        "mcp__pocketpaw_pocket__remove_widget",
+    }
+)
+
+
+def _pocket_specialist_system_prompt() -> str:
+    """Full pocket-mode system prompt the specialist subagent runs with.
+
+    The main chat agent ships only ``POCKET_DELEGATION_RULE``; this is
+    what the specialist sees when delegated to. Both creation and
+    interaction prompts ship together so the specialist can both create
+    and edit pockets within a single delegated session. The interaction
+    prompt's ``POCKET_ID_TOKEN`` is replaced per-call by the delegation
+    tool's invoker (added in Phase 3.4).
+    """
+    from ee.ripple._pockets import (
+        POCKET_CREATION_PROMPT_MCP,
+        POCKET_INTERACTION_PROMPT_MCP,
+    )
+
+    return POCKET_CREATION_PROMPT_MCP + "\n\n" + POCKET_INTERACTION_PROMPT_MCP
+
+
+def _build_pocket_specialist_agent_def() -> Any:
+    """Construct the ``AgentDefinition`` for the pocket specialist subagent.
+
+    Returns ``None`` if the SDK is unavailable. Importing ``AgentDefinition``
+    lazily keeps this module loadable in environments where
+    ``claude_agent_sdk`` is not installed.
+    """
+    try:
+        from claude_agent_sdk import AgentDefinition
+    except ImportError:
+        return None
+
+    return AgentDefinition(
+        description=(
+            "Builds and edits PocketPaw pockets (themed dashboards / canvases). "
+            "Owns the cloud_* pocket mutation tools. Invoke via "
+            "delegate_to_pocket_specialist whenever the user asks to create, "
+            "edit, add to, or modify a pocket."
+        ),
+        prompt=_pocket_specialist_system_prompt(),
+        tools=[
+            "mcp__pocketpaw_pocket__create_pocket",
+            "mcp__pocketpaw_pocket__update_pocket",
+            "mcp__pocketpaw_pocket__add_widget",
+            "mcp__pocketpaw_pocket__update_widget",
+            "mcp__pocketpaw_pocket__remove_widget",
+            "mcp__pocketpaw_pocket__get_pocket",
+            "mcp__pocketpaw_pocket__list_pockets",
+            "mcp__pocketpaw_pocket__get_widget_spec",
+        ],
+    )
+
 
 class ClaudeSDKBackend:
     """Claude Agent SDK backend — the recommended default.
@@ -805,6 +872,17 @@ class ClaudeSDKBackend:
 
             allowed_tools.extend(POCKET_TOOL_IDS)
 
+            # Filter pocket mutation tools out of the main agent's
+            # allowlist — pocket edits flow through the
+            # ``pocket_specialist`` subagent. The specialist's
+            # ``AgentDefinition.tools`` field holds the full mutation
+            # set. Read-only pocket tools (``get_pocket``,
+            # ``list_pockets``, ``get_widget_spec``,
+            # ``get_inline_widget_help``) remain on the main allowlist
+            # so the agent can answer conversational pocket queries
+            # without delegating.
+            allowed_tools = [t for t in allowed_tools if t not in _POCKET_MUTATION_TOOL_IDS]
+
             # Build hooks for security
             hooks = {
                 "PreToolUse": [
@@ -845,6 +923,19 @@ class ClaudeSDKBackend:
                 "cwd": str(self._cwd),
                 "max_turns": self.settings.claude_sdk_max_turns or None,
             }
+
+            # Register the pocket_specialist subagent — owns the full
+            # POCKET_CREATION_PROMPT_MCP + POCKET_INTERACTION_PROMPT_MCP
+            # text and the mutation tools. The main agent reaches it
+            # via the ``delegate_to_pocket_specialist`` MCP tool added
+            # in Phase 3.4. Built with a real ``AgentDefinition`` per
+            # the installed SDK's ClaudeAgentOptions.agents field
+            # (claude-agent-sdk 0.1.72).
+            pocket_specialist_def = _build_pocket_specialist_agent_def()
+            if pocket_specialist_def is not None:
+                options_kwargs["agents"] = {
+                    "pocket_specialist": pocket_specialist_def,
+                }
 
             # Configure LLM provider for the Claude CLI subprocess.
             # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
