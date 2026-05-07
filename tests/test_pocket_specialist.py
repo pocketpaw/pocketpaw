@@ -85,3 +85,15 @@ def test_main_agent_allowlist_excludes_pocket_mutation_tools():
     assert _POCKET_MUTATION_TOOL_IDS == expected, (
         "drift between mutation-tool filter and the canonical name set"
     )
+
+
+def test_agent_tool_is_in_policy_map():
+    """Agent must be explicitly in _TOOL_POLICY_MAP or it's blocked
+    for non-full tool profiles, silently preventing specialist
+    delegation. Without this test, removing the entry would only
+    surface in production for restricted-profile users."""
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    assert "Agent" in ClaudeSDKBackend._TOOL_POLICY_MAP, (
+        "Agent tool must have an explicit policy-map entry"
+    )

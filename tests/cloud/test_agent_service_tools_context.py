@@ -224,3 +224,59 @@ def test_pocket_delegation_rule_uses_agent_tool():
     ), "delegation rule must explicitly tell agent to pass subagent_type='pocket_specialist'"
     # Should NOT reference the abandoned custom MCP tool name.
     assert "delegate_to_pocket_specialist" not in POCKET_DELEGATION_RULE
+
+
+def test_pocket_create_branch_also_uses_delegation():
+    """Phase 3 regression guard: pocket_create intent must NOT receive
+    the full POCKET_CREATION_PROMPT_MCP — the specialist owns that. The
+    main agent gets the slim inline prompt + delegation rule, same as
+    plain chat. Otherwise the agent would be instructed to call
+    create_pocket directly, which is filtered off its allowlist."""
+    ctx = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        intent="pocket_create",
+    )
+    block = build_context_block(ctx)
+    # Slim core prompt and delegation rule are present.
+    assert "<ripple>" in block
+    assert "<pocket-delegation>" in block
+    # The full pocket creation prompt is NOT in the main agent's prompt.
+    assert "<list-before-create>" not in block, (
+        "POCKET_CREATION_PROMPT_MCP leaked into main agent prompt under "
+        "pocket_create intent — should be on the specialist only"
+    )
+
+
+def test_pocket_id_branch_also_uses_delegation():
+    """Same regression guard for the pocket_id (interaction) branch.
+    Heavy interaction prompt belongs on the specialist; main agent gets
+    delegation rule and a <current-pocket> tag for context."""
+    ctx = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="pocket-abc",
+    )
+    block = build_context_block(ctx)
+    assert "<ripple>" in block
+    assert "<pocket-delegation>" in block
+    # The heavy interaction prompt should NOT be inlined.
+    assert "<pocket-workflow>" not in block, (
+        "POCKET_INTERACTION_PROMPT_MCP leaked into main agent prompt — "
+        "should be on the specialist only"
+    )
+    # But the active pocket id tag IS present (so the agent knows which
+    # pocket to mention when delegating).
+    assert '<current-pocket id="pocket-abc"' in block

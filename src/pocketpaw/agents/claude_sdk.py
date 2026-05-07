@@ -886,22 +886,25 @@ class ClaudeSDKBackend:
             # In-process pocket-context tools — always allowed. Each tool
             # short-circuits without a valid ``pocket_id``, so the cost of
             # leaving them enabled for non-pocket sessions is negligible.
-            # Read (``get_pocket``) plus four writes (``update_pocket``,
-            # ``add_widget``, ``update_widget``, ``remove_widget``) — see
-            # ``agents/sdk_mcp_pocket.py``.
+            # Full set: ``get_pocket``, ``list_pockets``, ``create_pocket``,
+            # ``update_pocket``, ``add_widget``, ``update_widget``,
+            # ``remove_widget``, ``get_widget_spec``,
+            # ``get_inline_widget_help`` — see ``agents/sdk_mcp_pocket.py``.
+            # The mutation subset is filtered out immediately below.
             from pocketpaw.agents.sdk_mcp_pocket import POCKET_TOOL_IDS
 
             allowed_tools.extend(POCKET_TOOL_IDS)
 
-            # Filter pocket mutation tools out of the main agent's
-            # allowlist — pocket edits flow through the
-            # ``pocket_specialist`` subagent. The specialist's
-            # ``AgentDefinition.tools`` field holds the full mutation
-            # set. Read-only pocket tools (``get_pocket``,
-            # ``list_pockets``, ``get_widget_spec``,
-            # ``get_inline_widget_help``) remain on the main allowlist
-            # so the agent can answer conversational pocket queries
-            # without delegating.
+            # Filter pocket mutation tools off the main agent's allowlist.
+            # Mutation tools (``create_pocket``, ``update_pocket``,
+            # ``add_widget``, ``update_widget``, ``remove_widget``) flow
+            # to the ``pocket_specialist`` subagent — its
+            # ``AgentDefinition.tools`` field holds the full write set.
+            # Surviving on the main agent: read-only + catalog tools only
+            # (``get_pocket``, ``list_pockets``, ``get_widget_spec``,
+            # ``get_inline_widget_help``). The main agent receives
+            # POCKET_DELEGATION_RULE (not the heavy creation/interaction
+            # prompts), so it never tries to call the filtered-out tools.
             allowed_tools = [t for t in allowed_tools if t not in _POCKET_MUTATION_TOOL_IDS]
 
             # Build hooks for security

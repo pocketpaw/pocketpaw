@@ -396,10 +396,11 @@ async def test_generate_session_title_uses_message_when_haiku_fails():
 
 
 def test_build_context_block_pocket_mode_does_not_raise_on_format_braces():
-    """Regression: literal ``{type, props, children}`` braces in the cloud
-    preamble were being treated as ``str.format`` placeholders, blowing
-    up every pocket-mode chat with ``KeyError: 'type, props, children'``.
-    Doubled braces (``{{...}}``) keep them literal."""
+    """Regression: literal braces in the inline ripple prompt were being treated
+    as ``str.format`` placeholders, blowing up pocket-mode chat with KeyError.
+    After Phase 3, pocket_id scope ships INLINE_RIPPLE_SYSTEM_PROMPT +
+    POCKET_DELEGATION_RULE (not the full interaction prompt); the pocket id
+    is still present via the <current-pocket> tag."""
     from ee.cloud.chat.agent_service import (
         ScopeContext,
         ScopeKind,
@@ -415,14 +416,20 @@ def test_build_context_block_pocket_mode_does_not_raise_on_format_braces():
         target_agent_id="a1",
         pocket_id="p-mongo-id",
     )
+    # Must not raise — brace handling in the slim prompt is safe.
     block = build_context_block(ctx)
-    # The pocket-id substitution worked and the literal UISpec example
-    # text survived intact.
+    # The pocket id appears in the dynamic <current-pocket> tag.
     assert "p-mongo-id" in block
-    assert "{type, props, children}" in block
+    # Slim inline prompt and delegation rule are present.
+    assert "<ripple>" in block
+    assert "<pocket-delegation>" in block
 
 
-def test_build_context_block_pocket_create_intent_uses_creation_context():
+def test_build_context_block_pocket_create_intent_uses_delegation():
+    """Phase 3 regression: pocket_create intent must use the delegation branch,
+    NOT the full POCKET_CREATION_PROMPT_MCP — that text lives on the specialist
+    and references mutation tools that are filtered off the main agent's allowlist.
+    backend_name is accepted for API compatibility but no longer changes behavior."""
     from ee.cloud.chat.agent_service import (
         ScopeContext,
         ScopeKind,
@@ -438,21 +445,20 @@ def test_build_context_block_pocket_create_intent_uses_creation_context():
         target_agent_id="a1",
         intent="pocket_create",
     )
-    # Default (no backend hint) keeps the shell-CLI variant — codex_cli
-    # and other tool-using backends rely on the ``cloud_*`` CLI surface.
     block = build_context_block(ctx)
-    assert "<pocket-creation>" in block
-    assert "cloud_create_pocket" in block
+    # Slim inline prompt and delegation rule must be present.
+    assert "<ripple>" in block
+    assert "<pocket-delegation>" in block
+    # The full creation prompt content must NOT leak into the main agent.
+    assert "<pocket-creation>" not in block
+    assert "cloud_create_pocket" not in block
 
-    # claude_agent_sdk wires up the in-process pocket MCP server
-    # (``sdk_mcp_pocket``); its prompt steers the agent at the
-    # ``create_pocket`` MCP tool, which reads identity from per-stream
-    # ContextVars instead of subprocess env vars.
+    # backend_name is still accepted (caller in agent_router passes it)
+    # but no longer changes which prompt branch is selected.
     mcp_block = build_context_block(ctx, backend_name="claude_agent_sdk")
-    assert "<pocket-creation>" in mcp_block
-    assert "create_pocket(" in mcp_block
-    assert "cloud_create_pocket" not in mcp_block
-    assert "python -m pocketpaw.tools.cli" not in mcp_block
+    assert "<ripple>" in mcp_block
+    assert "<pocket-delegation>" in mcp_block
+    assert "<pocket-creation>" not in mcp_block
 
 
 def test_normalizer_lifts_raw_ui_node_under_ui_field():
