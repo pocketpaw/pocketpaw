@@ -9,6 +9,11 @@
 #   (POST /types, /objects, /links) require ``fabric.write`` (MEMBER). Previously
 #   the router had zero auth — any unauthenticated caller could read or modify the
 #   ontology store.
+# Updated: 2026-05-07 (feat/rbac-plan-feature-gate) — added router-level
+#   ``require_plan_feature("fabric")`` so the entire Fabric API is gated to
+#   business-tier (or higher) plans. Closes the plan-tier bypass where a
+#   team-plan member who passed the workspace RBAC check still hit Fabric for
+#   free.
 
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ee.cloud._core.deps import require_plan_feature
 from ee.cloud.license import require_license
 from ee.cloud.shared.deps import require_action_any_workspace
 from ee.fabric.models import (
@@ -33,7 +39,10 @@ from ee.fabric.store import FabricStore
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Fabric"], dependencies=[Depends(require_license)])
+router = APIRouter(
+    tags=["Fabric"],
+    dependencies=[Depends(require_license), Depends(require_plan_feature("fabric"))],
+)
 
 _DB_PATH = Path.home() / ".pocketpaw" / "fabric.db"
 

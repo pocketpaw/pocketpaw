@@ -17,6 +17,11 @@
 #   reject, and all audit endpoints require ``instinct.approve``/``instinct.audit``
 #   (ADMIN) — governance actions that trigger automations or record corrections.
 #   Previously the router had zero auth.
+# Updated: 2026-05-07 (feat/rbac-plan-feature-gate) — added router-level
+#   ``require_plan_feature("instinct")`` so the entire Instinct API is gated to
+#   business-tier (or higher) plans. Closes the plan-tier bypass where a
+#   team-plan member who passed the workspace RBAC check still hit Instinct for
+#   free.
 
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from ee.cloud._core.deps import require_plan_feature
 from ee.cloud.license import require_license
 from ee.cloud.shared.deps import require_action_any_workspace
 
@@ -47,7 +53,10 @@ from ee.instinct.trace import FabricObjectSnapshot, ReasoningTrace
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Instinct"], dependencies=[Depends(require_license)])
+router = APIRouter(
+    tags=["Instinct"],
+    dependencies=[Depends(require_license), Depends(require_plan_feature("instinct"))],
+)
 
 
 def _store():
