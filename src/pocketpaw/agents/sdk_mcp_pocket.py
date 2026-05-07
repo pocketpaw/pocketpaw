@@ -33,6 +33,7 @@ ADD_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__add_widget"
 UPDATE_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__update_widget"
 REMOVE_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__remove_widget"
 GET_WIDGET_SPEC_TOOL_ID = f"mcp__{SERVER_NAME}__get_widget_spec"
+GET_INLINE_WIDGET_HELP_TOOL_ID = f"mcp__{SERVER_NAME}__get_inline_widget_help"
 
 POCKET_TOOL_IDS = (
     GET_POCKET_TOOL_ID,
@@ -43,6 +44,7 @@ POCKET_TOOL_IDS = (
     UPDATE_WIDGET_TOOL_ID,
     REMOVE_WIDGET_TOOL_ID,
     GET_WIDGET_SPEC_TOOL_ID,
+    GET_INLINE_WIDGET_HELP_TOOL_ID,
 )
 
 
@@ -84,9 +86,7 @@ async def _list_pockets_handler(args: dict) -> dict:
         "content": [
             {
                 "type": "text",
-                "text": json.dumps(
-                    {"pockets": result.get("pockets", [])}, separators=(",", ":")
-                ),
+                "text": json.dumps({"pockets": result.get("pockets", [])}, separators=(",", ":")),
             }
         ]
     }
@@ -178,9 +178,7 @@ async def _get_widget_spec_handler(args: dict) -> dict:
     )
     if manifest is None:
         return {
-            "content": [
-                {"type": "text", "text": "Error: ripple manifest unavailable."}
-            ],
+            "content": [{"type": "text", "text": "Error: ripple manifest unavailable."}],
             "is_error": True,
         }
 
@@ -205,6 +203,23 @@ async def _get_widget_spec_handler(args: dict) -> dict:
         block += f"\n\n_Note: unknown types skipped: {', '.join(missing)}_"
 
     return {"content": [{"type": "text", "text": block}]}
+
+
+async def _get_inline_widget_help_handler(args: dict) -> dict:
+    """Handler for get_inline_widget_help — returns the slice of the
+    chat-inline widget catalog matching the requested types.
+
+    Args:
+      types: list of widget kinds the agent intends to use
+             (e.g. ["chart", "sparkline"]). Empty / missing → full
+             catalog (rare — agent generally knows what it wants).
+    """
+    from ee.ripple._inline_core import widget_help
+
+    types = args.get("types") or []
+    if not isinstance(types, list):
+        types = []
+    return {"content": [{"type": "text", "text": widget_help([str(t) for t in types])}]}
 
 
 def build_pocket_context_server() -> tuple[str, Any] | None:
@@ -346,6 +361,32 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
     async def get_widget_spec(args):  # type: ignore[no-untyped-def]
         return await _get_widget_spec_handler(args)
 
+    @tool(
+        "get_inline_widget_help",
+        "Return the chat-inline Ripple widget catalog. Call this BEFORE "
+        "emitting any non-core widget in a ui-spec fence (anything "
+        "beyond text/heading/stat/button/table/flex). Pass the widget "
+        "types you intend to use; you receive the canonical prop "
+        "schema for those widgets so the spec renders on the first "
+        "try. Cheap, in-process, single round-trip.",
+        {
+            "type": "object",
+            "properties": {
+                "types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Widget kinds you plan to use, e.g. "
+                        "['chart', 'sparkline']. Empty returns the "
+                        "full catalog."
+                    ),
+                }
+            },
+        },
+    )
+    async def get_inline_widget_help(args):  # type: ignore[no-untyped-def]
+        return await _get_inline_widget_help_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
@@ -358,6 +399,7 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
             update_widget,
             remove_widget,
             get_widget_spec,
+            get_inline_widget_help,
         ],
     )
     return SERVER_NAME, server
