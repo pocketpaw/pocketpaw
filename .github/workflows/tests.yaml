@@ -1,0 +1,36 @@
+# Tests — runs the pytest suite on every PR and on pushes to ee/main/dev.
+# Created: 2026-05-07 — Added pytest job to PR Quality Gate so broken tests
+# can no longer slip through CI on PRs targeting ee. Closes #1065.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [ee, main, dev]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set Python version
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run pytest
+        run: uv run pytest tests/ --ignore=tests/e2e --ignore=tests/test_frontend_syntax.py -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
