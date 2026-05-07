@@ -96,8 +96,8 @@ When the user asks to create, edit, add to, modify, or otherwise touch
 a pocket — including phrases like "make a pocket", "edit this canvas",
 "add a widget", "change the layout", "build a dashboard for X", or any
 follow-up that mutates pocket state — you MUST invoke the
-`delegate_to_pocket_specialist` tool. Do NOT call `cloud_create_pocket`,
-`cloud_update_pocket`, `cloud_add_widget`, or any other pocket
+`delegate_to_pocket_specialist` tool. Do NOT call `create_pocket`,
+`update_pocket`, `add_widget`, or any other pocket
 mutation tool from this turn — those tools are not on your allowlist
 in chat mode.
 
@@ -112,8 +112,8 @@ your own voice; do not paraphrase the specialist's internal reasoning.
 
 A request that is purely conversational (no canvas mutation) — "what
 pockets do I have?", "describe this pocket", "what does X mean" — is
-NOT pocket work. Answer those directly with `cloud_list_pockets` /
-`cloud_get_pocket` (read-only, on your allowlist).
+NOT pocket work. Answer those directly with `list_pockets` /
+`get_pocket` (read-only, on your allowlist).
 </pocket-delegation>
 """
 
