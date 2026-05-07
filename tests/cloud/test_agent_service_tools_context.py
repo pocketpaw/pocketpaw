@@ -66,9 +66,10 @@ def test_build_context_block_has_scope_and_members():
 
 
 def test_build_context_block_includes_ripple_hint():
-    """Agents need to know they can emit ui-spec blocks for inline UI,
-    including interactive buttons that drive the conversation loop via
-    `chat.send`."""
+    """Plain-chat scope must embed the slim inline ripple system prompt
+    (~6 core widgets + chat.send loop + UI-FIRST decision rule). The
+    full widget catalog now lives behind the get_inline_widget_help
+    MCP tool — see test_inline_widget_help_* for that surface."""
     ctx = ScopeContext(
         kind=ScopeKind.SESSION,
         scope_id="s1",
@@ -79,40 +80,31 @@ def test_build_context_block_includes_ripple_hint():
         agent_ids_in_scope=["a1"],
     )
     block = build_context_block(ctx)
+    # Slim core must be present.
     assert "<ripple>" in block
     assert "ui-spec" in block
-    # Sanity-check the canonical shape and the chat-inline node allowlist.
     assert '"version": "1.0"' in block
-    for node in ("flex", "grid", "heading", "text", "stat", "chart", "table"):
-        assert node in block, f"node type {node!r} missing from Ripple hint"
-    # Chart specifics — the agent needs to know all 10 chart kinds + the
-    # canonical Ripple shape (props.type), not the legacy chartType alias.
-    for kind in (
-        "bar",
-        "line",
-        "area",
-        "pie",
-        "donut",
-        "candlestick",
-        "sparkline",
-        "heatmap",
-        "gauge",
-        "radar",
-    ):
-        assert kind in block, f"chart kind {kind!r} missing from Ripple hint"
-    # Candlestick data points need the OHLC shape called out.
-    assert "open" in block and "close" in block and "high" in block and "low" in block
-    # Table specifics — data-of-objects is the preferred shape; columns
-    # remain mandatory; variant should be advertised.
-    assert "columns" in block
-    assert '"variant"' in block or "`variant`" in block
-    for v in ("default", "compact", "striped", "minimal"):
-        assert v in block, f"table variant {v!r} missing from Ripple hint"
-    # Driven-UI loop — chat.send round-trip must be documented; clicks
-    # round-trip as the user's next message.
-    assert "chat.send" in block, "chat.send target missing from Ripple hint"
-    assert "on_click" in block, "on_click handler missing from Ripple hint"
-    assert "emit" in block, "emit action missing from Ripple hint"
+    # Six core widgets named in the catalog.
+    for node in ("text", "heading", "stat", "button", "table", "flex"):
+        assert node in block, f"core widget {node!r} missing from slim prompt"
+    # chat.send loop is still in.
+    assert "chat.send" in block
+    # The slim prompt MUST point the agent at the tool for the long tail.
+    assert "get_inline_widget_help" in block, (
+        "slim prompt must teach the agent about the on-demand catalog tool"
+    )
+    # The full catalog content is GONE from the prompt — verify by
+    # checking for content that ONLY appeared in RIPPLE_DESIGN_RULES,
+    # not by checking for widget names (the slim prompt names some
+    # non-core widgets in the "call the tool for these" pointer).
+    from ee.ripple._design import RIPPLE_DESIGN_RULES
+
+    assert RIPPLE_DESIGN_RULES not in block, "full RIPPLE_DESIGN_RULES leaked back into the prompt"
+    # Slim prompt should be dramatically smaller than the full catalog.
+    assert len(block) < len(RIPPLE_DESIGN_RULES), (
+        f"slim prompt (chars={len(block)}) should be smaller than the "
+        f"full catalog (chars={len(RIPPLE_DESIGN_RULES)})"
+    )
 
 
 def test_build_context_block_has_stable_static_prefix():
