@@ -5,6 +5,7 @@ name: Tests
 
 on:
   pull_request:
+    branches: [ee, main, dev]
   push:
     branches: [ee, main, dev]
 
@@ -30,6 +31,7 @@ jobs:
         run: uv sync --dev
 
       - name: Run pytest
+        # No -x: this is a PR gate, surface ALL failures, not just the first.
         run: uv run pytest tests/ --ignore=tests/e2e --ignore=tests/test_frontend_syntax.py -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
