@@ -8,6 +8,7 @@ from ee.cloud.chat.agent_service import (
     assemble_toolset,
     build_context_block,
 )
+from ee.ripple._design import RIPPLE_DESIGN_RULES
 
 
 def _pocket_ctx(specs: list[dict]) -> ScopeContext:
@@ -97,9 +98,11 @@ def test_build_context_block_includes_ripple_hint():
     # checking for content that ONLY appeared in RIPPLE_DESIGN_RULES,
     # not by checking for widget names (the slim prompt names some
     # non-core widgets in the "call the tool for these" pointer).
-    from ee.ripple._design import RIPPLE_DESIGN_RULES
-
     assert RIPPLE_DESIGN_RULES not in block, "full RIPPLE_DESIGN_RULES leaked back into the prompt"
+    # Sentinel: a known catalog-only phrase that should NOT be in slim.
+    assert "# CANONICAL SHAPES" not in block, (
+        "catalog content sentinel found in slim prompt — full design rules may have leaked"
+    )
     # Slim prompt should be dramatically smaller than the full catalog.
     assert len(block) < len(RIPPLE_DESIGN_RULES), (
         f"slim prompt (chars={len(block)}) should be smaller than the "
@@ -147,7 +150,6 @@ def test_build_context_block_has_stable_static_prefix():
 
 
 def test_inline_widget_help_returns_catalog_for_known_types():
-    from ee.ripple._design import RIPPLE_DESIGN_RULES
     from ee.ripple._inline_core import widget_help
 
     out = widget_help(["chart"])
@@ -171,7 +173,6 @@ def test_inline_widget_help_returns_catalog_for_known_types():
 
 
 def test_inline_widget_help_no_args_returns_full_catalog():
-    from ee.ripple._design import RIPPLE_DESIGN_RULES
     from ee.ripple._inline_core import widget_help
 
     assert widget_help() == RIPPLE_DESIGN_RULES
