@@ -181,8 +181,8 @@ def test_inline_widget_help_no_args_returns_full_catalog():
 
 
 def test_main_chat_prompt_delegates_pocket_work_not_inlines_it():
-    """In plain chat, the system prompt teaches the agent to delegate
-    pocket work to the specialist. It must NOT carry the full
+    """In plain chat on claude_agent_sdk, the system prompt teaches the agent
+    to delegate pocket work to the specialist. It must NOT carry the full
     POCKET_CREATION_PROMPT_MCP — that lives on the specialist now."""
     ctx = ScopeContext(
         kind=ScopeKind.SESSION,
@@ -194,7 +194,7 @@ def test_main_chat_prompt_delegates_pocket_work_not_inlines_it():
         target_agent_id="a1",
         agent_ids_in_scope=["a1"],
     )
-    block = build_context_block(ctx)
+    block = build_context_block(ctx, backend_name="claude_agent_sdk")
     # Delegation rule present and uses the Agent tool pattern.
     assert "<pocket-delegation>" in block
     assert "Agent" in block
@@ -243,7 +243,7 @@ def test_pocket_create_branch_also_uses_delegation():
         agent_ids_in_scope=["a1"],
         intent="pocket_create",
     )
-    block = build_context_block(ctx)
+    block = build_context_block(ctx, backend_name="claude_agent_sdk")
     # Slim core prompt and delegation rule are present.
     assert "<ripple>" in block
     assert "<pocket-delegation>" in block
@@ -269,7 +269,7 @@ def test_pocket_id_branch_also_uses_delegation():
         agent_ids_in_scope=["a1"],
         pocket_id="pocket-abc",
     )
-    block = build_context_block(ctx)
+    block = build_context_block(ctx, backend_name="claude_agent_sdk")
     assert "<ripple>" in block
     assert "<pocket-delegation>" in block
     # The heavy interaction prompt should NOT be inlined.
@@ -280,3 +280,48 @@ def test_pocket_id_branch_also_uses_delegation():
     # But the active pocket id tag IS present (so the agent knows which
     # pocket to mention when delegating).
     assert '<current-pocket id="pocket-abc"' in block
+
+
+def test_non_subagent_backend_uses_inline_pocket_prompts():
+    """codex_cli, openai_agents, google_adk, etc. don't have a native
+    subagent integration. Verify they fall back to the pre-Phase-3
+    behavior: full POCKET_CREATION_PROMPT inline for pocket_create
+    intent, POCKET_INTERACTION_PROMPT inline for pocket_id mode."""
+    ctx_create = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        intent="pocket_create",
+    )
+    block = build_context_block(ctx_create, backend_name="codex_cli")
+    # Heavy creation guidance IS present (sentinel from creation prompt).
+    assert "<list-before-create>" in block
+    # Delegation rule is NOT (subagents aren't a concept on this backend).
+    assert "<pocket-delegation>" not in block
+
+
+def test_non_subagent_backend_pocket_id_inlines_interaction_prompt():
+    """Same gate for pocket_id mode on non-subagent backends."""
+    ctx_edit = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="pocket-abc",
+    )
+    block = build_context_block(ctx_edit, backend_name="codex_cli")
+    # The pocket id was substituted into the interaction prompt.
+    assert "pocket-abc" in block
+    # Heavy interaction guidance IS present.
+    assert "<pocket-workflow>" in block
+    # Delegation rule is NOT.
+    assert "<pocket-delegation>" not in block

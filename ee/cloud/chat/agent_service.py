@@ -23,7 +23,10 @@ from ee.cloud.shared.errors import CloudError, NotFound
 from ee.ripple import (
     INLINE_RIPPLE_SYSTEM_PROMPT,
     POCKET_DELEGATION_RULE,
+    POCKET_ID_TOKEN,
+    get_pocket_prompts,
 )
+from ee.ripple._pockets import _MCP_POCKET_BACKENDS
 
 logger = logging.getLogger(__name__)
 
@@ -462,31 +465,35 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
 
     ORDER MATTERS: the static ripple/pocket prompt content goes FIRST
     so Anthropic prompt caching can hit on it; per-turn dynamic tags
-    (scope, participants, KB context, current pocket id) go LAST.
+    (scope, participants, current pocket id) go LAST.
 
-    All three intent branches (plain chat, pocket_create, pocket_id)
-    ship the same static content: INLINE_RIPPLE_SYSTEM_PROMPT +
-    POCKET_DELEGATION_RULE. The heavy POCKET_CREATION_PROMPT_MCP and
-    POCKET_INTERACTION_PROMPT_MCP texts live ONLY on the
-    pocket_specialist subagent (see claude_sdk.py). Mutation tools are
-    filtered off the main agent's allowlist — shipping those prompts
-    here would instruct the agent to call tools it cannot call.
-
-    ``backend_name`` is retained for API compatibility (agent_router
-    passes it) but no longer affects which prompt is selected.
+    Backend gating: claude_agent_sdk supports the pocket_specialist
+    subagent, so the main chat agent ships only INLINE_RIPPLE_SYSTEM_PROMPT
+    + POCKET_DELEGATION_RULE — heavy POCKET_*_PROMPT_MCP text lives on
+    the specialist. Other backends (codex_cli, opencode, openai_agents,
+    google_adk, deep_agents, copilot_sdk) don't have a native subagent
+    integration today, so they fall back to the pre-Phase-3 path:
+    full pocket prompt inline. Universal Option-A (MCP-based specialist)
+    is the planned follow-up.
     """
-    # Static portion FIRST — prefix-cacheable.
-    # All three branches ship the slim main-agent prompt; the heavy
-    # POCKET_CREATION_PROMPT_MCP / POCKET_INTERACTION_PROMPT_MCP text
-    # lives on the pocket_specialist subagent. Mutation tools are
-    # filtered off the main allowlist in claude_sdk.py — without
-    # delegation guidance the agent would receive a prompt telling it
-    # to call tools it cannot call.
     static_parts: list[str] = []
-    static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
-    static_parts.append(POCKET_DELEGATION_RULE)
 
-    # Dynamic portion LAST — per-turn variability lives here.
+    if backend_name in _MCP_POCKET_BACKENDS:
+        # Subagent-capable backend → main agent is slim + delegates.
+        static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+        static_parts.append(POCKET_DELEGATION_RULE)
+    else:
+        # Pre-Phase-3 path: heavy pocket prompts ride in the main agent.
+        creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
+        if ctx.intent == "pocket_create":
+            static_parts.append(creation_prompt)
+        elif ctx.pocket_id:
+            # pocket-id baked in — prefix is per-pocket-instance, not
+            # globally cacheable.
+            static_parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
+        else:
+            static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
     dynamic_parts = [
         f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>",
