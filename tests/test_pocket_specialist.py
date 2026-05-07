@@ -9,26 +9,34 @@ full pocket prompts.
 
 
 def test_delegation_rule_lists_correct_subagent_name():
-    """The delegation rule must name the registered subagent exactly —
-    typos here would leave the agent unable to invoke the specialist."""
+    """Cross-file contract: the subagent name in POCKET_DELEGATION_RULE
+    must match the dict key used to register it in claude_sdk.py.
+    Typos here would leave the agent unable to invoke the specialist."""
     from ee.ripple._pockets import POCKET_DELEGATION_RULE
+    from pocketpaw.agents.claude_sdk import _POCKET_SPECIALIST_NAME
 
-    assert "pocket_specialist" in POCKET_DELEGATION_RULE
-    # And it must use the canonical Agent-tool kwarg shape.
-    assert (
-        'subagent_type="pocket_specialist"' in POCKET_DELEGATION_RULE
-        or "subagent_type='pocket_specialist'" in POCKET_DELEGATION_RULE
+    assert _POCKET_SPECIALIST_NAME in POCKET_DELEGATION_RULE, (
+        f"registered subagent name {_POCKET_SPECIALIST_NAME!r} not "
+        "in POCKET_DELEGATION_RULE — rule and registration drifted"
     )
+    assert (
+        f'subagent_type="{_POCKET_SPECIALIST_NAME}"' in POCKET_DELEGATION_RULE
+        or f"subagent_type='{_POCKET_SPECIALIST_NAME}'" in POCKET_DELEGATION_RULE
+    ), "rule must teach the canonical Agent-tool kwarg shape"
 
 
-def test_delegation_rule_lists_read_only_pocket_tools_as_ok():
-    """Read-only pocket tools must remain available to the main agent —
-    listing pockets and answering questions about them is conversational,
-    not delegation."""
-    from ee.ripple._pockets import POCKET_DELEGATION_RULE
+def test_main_agent_keeps_read_only_pocket_tools():
+    """The read-only pocket tool IDs must NOT appear in the mutation
+    filter — they stay on the main agent's allowlist so it can answer
+    conversational queries about pockets without delegating."""
+    from pocketpaw.agents.claude_sdk import _POCKET_MUTATION_TOOL_IDS
 
-    assert "list_pockets" in POCKET_DELEGATION_RULE
-    assert "get_pocket" in POCKET_DELEGATION_RULE
+    read_only_ids = {
+        "mcp__pocketpaw_pocket__list_pockets",
+        "mcp__pocketpaw_pocket__get_pocket",
+    }
+    leaked = read_only_ids & _POCKET_MUTATION_TOOL_IDS
+    assert not leaked, f"read-only tool IDs ended up in the mutation filter: {leaked}"
 
 
 def test_specialist_system_prompt_includes_full_pocket_prompts():

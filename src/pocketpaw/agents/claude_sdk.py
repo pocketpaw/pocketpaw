@@ -50,6 +50,11 @@ _POCKET_MUTATION_TOOL_IDS: frozenset[str] = frozenset(
     }
 )
 
+# Canonical subagent registration key — must match the name referenced in
+# POCKET_DELEGATION_RULE.  Extracted as a constant so the test can import it
+# and assert both sides of the contract refer to the same string.
+_POCKET_SPECIALIST_NAME = "pocket_specialist"
+
 
 def _pocket_specialist_system_prompt() -> str:
     """Full pocket-mode system prompt the specialist subagent runs with.
@@ -952,7 +957,7 @@ class ClaudeSDKBackend:
             pocket_specialist_def = _build_pocket_specialist_agent_def()
             if pocket_specialist_def is not None:
                 options_kwargs["agents"] = {
-                    "pocket_specialist": pocket_specialist_def,
+                    _POCKET_SPECIALIST_NAME: pocket_specialist_def,
                 }
 
             # Configure LLM provider for the Claude CLI subprocess.
