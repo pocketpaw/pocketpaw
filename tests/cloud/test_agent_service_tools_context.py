@@ -152,3 +152,25 @@ def test_build_context_block_has_stable_static_prefix():
         f"a starts: {a[:200]!r}; b starts: {b[:200]!r}"
     )
     assert "<scope>" in a and "<participants>" in a
+
+
+def test_inline_widget_help_returns_catalog_for_known_types():
+    from ee.ripple._inline_core import widget_help
+
+    out = widget_help(["chart"])
+    # Some chart specifics must appear when 'chart' is asked for.
+    assert "chart" in out.lower()
+    assert any(kind in out for kind in ("bar", "line", "pie")), (
+        "chart kinds must come back when caller asks for chart"
+    )
+    # Toolkit / expression section is always pulled in.
+    assert "{state." in out, "expression toolkit must always be included"
+
+
+def test_inline_widget_help_no_args_returns_full_catalog():
+    from ee.ripple._design import RIPPLE_DESIGN_RULES
+    from ee.ripple._inline_core import widget_help
+
+    assert widget_help() == RIPPLE_DESIGN_RULES
+    assert widget_help([]) == RIPPLE_DESIGN_RULES
+    assert widget_help([" ", ""]) == RIPPLE_DESIGN_RULES
