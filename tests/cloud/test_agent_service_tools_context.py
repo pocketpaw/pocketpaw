@@ -155,6 +155,7 @@ def test_build_context_block_has_stable_static_prefix():
 
 
 def test_inline_widget_help_returns_catalog_for_known_types():
+    from ee.ripple._design import RIPPLE_DESIGN_RULES
     from ee.ripple._inline_core import widget_help
 
     out = widget_help(["chart"])
@@ -163,8 +164,18 @@ def test_inline_widget_help_returns_catalog_for_known_types():
     assert any(kind in out for kind in ("bar", "line", "pie")), (
         "chart kinds must come back when caller asks for chart"
     )
+    # Canonical chart shape from the CANONICAL SHAPES section must be present
+    # (this is what the agent actually copies into its spec).
+    assert '"type": "chart"' in out or "type: chart" in out.lower(), (
+        "canonical chart schema must be included in chart-specific help"
+    )
     # Toolkit / expression section is always pulled in.
     assert "{state." in out, "expression toolkit must always be included"
+    # And it must be a subset, not the entire catalog (proving the splitter
+    # actually filtered something out).
+    assert len(out) < len(RIPPLE_DESIGN_RULES), (
+        "filtered help should be smaller than the full catalog"
+    )
 
 
 def test_inline_widget_help_no_args_returns_full_catalog():

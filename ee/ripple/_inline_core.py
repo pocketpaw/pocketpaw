@@ -30,28 +30,36 @@ def widget_help(types: list[str] | None = None) -> str:
     if not wanted:
         return RIPPLE_DESIGN_RULES
 
-    # Split RIPPLE_DESIGN_RULES into top-level sections at "## " and
-    # "# " headings, return any section whose heading or body mentions
-    # a wanted type. Always include the toolkit / expression-language
-    # section — the agent rarely uses widgets without bindings.
+    # Split RIPPLE_DESIGN_RULES into top-level sections at "# " headings,
+    # return any section whose body mentions a wanted type. Always include
+    # the section carrying the toolkit / expression-language vocabulary —
+    # the agent rarely uses widgets without bindings.
     sections = _split_sections(RIPPLE_DESIGN_RULES)
     keep: list[str] = []
     for sect in sections:
-        head = sect.split("\n", 1)[0].lower()
         body = sect.lower()
-        always_keep = "toolkit" in head or "expression" in head or "interactive elements" in head
+        # Always keep the section that carries the toolkit /
+        # expression-language vocabulary — agents need handler syntax
+        # and binding shape for any widget with on_click or {state.x}.
+        always_keep = "toolkit" in body or "expression language" in body
         if always_keep or any(t in body for t in wanted):
             keep.append(sect)
     return "\n\n".join(keep) if keep else RIPPLE_DESIGN_RULES
 
 
 def _split_sections(text: str) -> list[str]:
-    """Split on top-level (## ) headings, preserving the heading line."""
+    """Split on top-level ('# ') headings only. '## ' subheadings are
+    part of the section body and not split points — splitting on them
+    fragments coherent sections like INTERACTIVE_STATE_RULE (which
+    uses '##' subheadings for Toolkit, action vocabulary, etc.) into
+    disconnected pieces.
+    """
     lines = text.split("\n")
     sections: list[list[str]] = []
     current: list[str] = []
     for line in lines:
-        if line.startswith("## ") or line.startswith("# "):
+        # '# Foo' opens a new section; '## Foo' stays in the current.
+        if line.startswith("# ") and not line.startswith("## "):
             if current:
                 sections.append(current)
             current = [line]
