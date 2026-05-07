@@ -195,11 +195,32 @@ def test_main_chat_prompt_delegates_pocket_work_not_inlines_it():
         agent_ids_in_scope=["a1"],
     )
     block = build_context_block(ctx)
-    # Delegation rule present.
+    # Delegation rule present and uses the Agent tool pattern.
     assert "<pocket-delegation>" in block
-    assert "delegate_to_pocket_specialist" in block
+    assert "Agent" in block
+    assert (
+        'subagent_type="pocket_specialist"' in block or "subagent_type='pocket_specialist'" in block
+    )
     # Full pocket creation prompt is NOT inlined.
     assert "<list-before-create>" not in block, (
         "full pocket creation prompt leaked into main-chat system prompt — "
         "should be on the specialist subagent only"
     )
+
+
+def test_pocket_delegation_rule_uses_agent_tool():
+    """The delegation rule must teach the agent to call the built-in
+    Agent tool with subagent_type='pocket_specialist'. The custom
+    'delegate_to_pocket_specialist' MCP tool was deliberately not
+    added — registered subagents are auto-exposed via the Agent tool
+    by claude-agent-sdk 0.1.72+."""
+    from ee.ripple._pockets import POCKET_DELEGATION_RULE
+
+    assert "Agent" in POCKET_DELEGATION_RULE
+    assert (
+        'subagent_type="pocket_specialist"' in POCKET_DELEGATION_RULE
+        or "subagent_type='pocket_specialist'" in POCKET_DELEGATION_RULE
+        or 'subagent_type="pocket_specialist"' in POCKET_DELEGATION_RULE
+    ), "delegation rule must explicitly tell agent to pass subagent_type='pocket_specialist'"
+    # Should NOT reference the abandoned custom MCP tool name.
+    assert "delegate_to_pocket_specialist" not in POCKET_DELEGATION_RULE

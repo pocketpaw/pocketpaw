@@ -843,6 +843,7 @@ class ClaudeSDKBackend:
 
             # Build allowed tools list, filtered by tool policy
             all_sdk_tools = [
+                "Agent",
                 "Bash",
                 "Read",
                 "Write",
@@ -926,11 +927,13 @@ class ClaudeSDKBackend:
 
             # Register the pocket_specialist subagent — owns the full
             # POCKET_CREATION_PROMPT_MCP + POCKET_INTERACTION_PROMPT_MCP
-            # text and the mutation tools. The main agent reaches it
-            # via the ``delegate_to_pocket_specialist`` MCP tool added
-            # in Phase 3.4. Built with a real ``AgentDefinition`` per
-            # the installed SDK's ClaudeAgentOptions.agents field
-            # (claude-agent-sdk 0.1.72).
+            # text and the mutation tools. The main agent reaches it via
+            # the built-in ``Agent`` tool (Agent(subagent_type=
+            # "pocket_specialist", ...)) — claude-agent-sdk 0.1.72+
+            # auto-exposes registered subagents through that tool; no
+            # custom MCP wrapper is needed. Built with a real
+            # ``AgentDefinition`` per the SDK's ClaudeAgentOptions.agents
+            # field.
             pocket_specialist_def = _build_pocket_specialist_agent_def()
             if pocket_specialist_def is not None:
                 options_kwargs["agents"] = {
