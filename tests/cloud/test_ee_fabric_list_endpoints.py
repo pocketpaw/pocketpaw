@@ -4,29 +4,67 @@
 # alongside PocketDataPanel's Objects/Links sub-tab wire-up. Exercises the
 # store + router round-trip so the frontend contract holds without a live
 # SQLite db.
+# Updated: 2026-05-07 (fix/test-fixtures-auth-context) — seed auth context in
+#   the client fixture so route tests pass against the workspace RBAC guards
+#   added in #1059 and the require_plan_feature("fabric") gate added in #1060.
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import ee.fabric.router as fabric_router_module
+from ee.cloud._core.deps import current_workspace_id
+from ee.cloud.auth import current_active_user
+from ee.cloud.license import require_license
 from ee.fabric.store import FabricStore
+
+
+class _FakeMembership:
+    def __init__(self, workspace: str, role: str = "member") -> None:
+        self.workspace = workspace
+        self.role = role
+
+
+class _FakeUser:
+    """Member of the test workspace — fabric.read/write are MEMBER-tier."""
+
+    def __init__(self, workspace_id: str = "ws-test") -> None:
+        self.id = "user-test-1"
+        self.active_workspace = workspace_id
+        self.workspaces = [_FakeMembership(workspace=workspace_id, role="member")]
 
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch) -> TestClient:
-    """Build an isolated app with the fabric router pointed at a tmp db."""
+    """Build an isolated app with the fabric router and seeded auth context.
+
+    Overrides:
+      - require_license: no-op so license validation doesn't gate tests.
+      - current_active_user: returns a fake member of ws-test.
+      - current_workspace_id: returns 'ws-test'.
+      - workspace_service.get_workspace_plan: returns 'business' so the
+        require_plan_feature('fabric') gate added in #1060 passes (fabric
+        is a business+ feature in PLAN_FEATURES).
+    """
     # Point the module-level store at the tmp db. The router always calls
     # _store() lazily so setattr is enough.
     test_db = tmp_path / "fabric-test.db"
     monkeypatch.setattr(fabric_router_module, "_DB_PATH", test_db)
 
+    import ee.cloud.workspace.service as ws_svc
+    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="business"))
+
+    fake_user = _FakeUser()
     app = FastAPI()
     app.include_router(fabric_router_module.router, prefix="/api/v1")
+    app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_active_user] = lambda: fake_user
+    app.dependency_overrides[current_workspace_id] = lambda: fake_user.active_workspace
     return TestClient(app)
 
 

@@ -1,17 +1,24 @@
 # tests/test_ee_instinct.py — Comprehensive tests for ee/instinct (store + router).
 # Created: 2026-03-28 — Initial store tests.
 # Updated: 2026-03-30 — Full store unit tests + FastAPI router integration tests added.
+# Updated: 2026-05-07 (fix/test-fixtures-auth-context) — seed auth context in
+#   the test_app fixture so route tests pass against the workspace RBAC guards
+#   added in #1059 and the plan-feature gate added in #1060. Pattern mirrors
+#   tests/cloud/test_rbac_routes.py (the #1061 reference).
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ee.cloud._core.deps import current_workspace_id
+from ee.cloud.auth import current_active_user
+from ee.cloud.license import require_license
 from ee.instinct.models import (
     ActionCategory,
     ActionPriority,
@@ -21,6 +28,25 @@ from ee.instinct.models import (
 )
 from ee.instinct.router import router
 from ee.instinct.store import InstinctStore
+
+
+class _FakeMembership:
+    """Mimics ee.cloud.models.user.WorkspaceMembership — duck-typed."""
+
+    def __init__(self, workspace: str, role: str = "admin") -> None:
+        self.workspace = workspace
+        self.role = role
+
+
+class _FakeUser:
+    """Duck-typed stand-in for ee.cloud.models.user.User. Admin role so the
+    instinct.audit and instinct.approve actions (both ADMIN-tier) pass the
+    workspace-action guard. Read/propose pass at any role."""
+
+    def __init__(self, workspace_id: str = "ws-test") -> None:
+        self.id = "user-test-1"
+        self.active_workspace = workspace_id
+        self.workspaces = [_FakeMembership(workspace=workspace_id, role="admin")]
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -44,10 +70,32 @@ def store(tmp_path: Path) -> InstinctStore:
 
 
 @pytest.fixture
-def test_app(tmp_path: Path):
-    """FastAPI app with the instinct router and a patched store singleton."""
+def test_app(tmp_path: Path, monkeypatch):
+    """FastAPI app with the instinct router and seeded auth context.
+
+    Overrides:
+      - require_license: no-op so license validation doesn't gate tests.
+      - current_active_user: returns a fake admin (instinct.approve/audit
+        are ADMIN-tier; admin satisfies the workspace-action guard).
+      - current_workspace_id: returns the fake user's active workspace.
+      - workspace_service.get_workspace_plan: returns 'business' so the
+        require_plan_feature('instinct') gate added in #1060 passes.
+    """
+    fake_user = _FakeUser()
+
+    # instinct is an enterprise-tier feature in PLAN_FEATURES; team and
+    # business plans don't include it, so the require_plan_feature guard
+    # only passes at enterprise. Mirror the AsyncMock pattern from
+    # tests/cloud/test_plan_feature_gate.py so the patch reaches the same
+    # module attribute the guard reads from.
+    import ee.cloud.workspace.service as ws_svc
+    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))
+
     app = FastAPI()
     app.include_router(router)
+    app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_active_user] = lambda: fake_user
+    app.dependency_overrides[current_workspace_id] = lambda: fake_user.active_workspace
     return app
 
 
