@@ -1,6 +1,9 @@
 # Tests — runs the pytest suite on every PR and on pushes to ee/main/dev.
 # Created: 2026-05-07 — Added pytest job to PR Quality Gate so broken tests
 # can no longer slip through CI on PRs targeting ee. Closes #1065.
+# Updated: 2026-05-07 — install enterprise + soul extras so ee/cloud tests
+# can import beanie/motor/fastapi-users. `uv sync --dev` alone misses them
+# (they live under [project.optional-dependencies].enterprise).
 name: Tests
 
 on:
@@ -28,7 +31,11 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --dev
+        # ee/cloud tests import beanie + motor + fastapi-users which live in
+        # the `enterprise` extras group. Without --extra enterprise, the
+        # collection step errors with ModuleNotFoundError: No module named
+        # 'beanie'. --all-extras is the safest bet for full coverage.
+        run: uv sync --dev --all-extras
 
       - name: Run pytest
         # No -x: this is a PR gate, surface ALL failures, not just the first.
