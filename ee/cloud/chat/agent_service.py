@@ -52,9 +52,7 @@ _sse_event_sink: ContextVar[asyncio.Queue[tuple[str, dict[str, Any]]] | None] = 
 # stamp the ``Pocket.workspace`` / ``Pocket.owner`` fields. Set in
 # ``agent_router._run_agent_stream`` and propagated into spawned tasks
 # automatically via ``contextvars``.
-_active_workspace_id: ContextVar[str | None] = ContextVar(
-    "agent_workspace_id", default=None
-)
+_active_workspace_id: ContextVar[str | None] = ContextVar("agent_workspace_id", default=None)
 _active_user_id: ContextVar[str | None] = ContextVar("agent_user_id", default=None)
 _active_session_mongo_id: ContextVar[str | None] = ContextVar(
     "agent_session_mongo_id", default=None
@@ -463,34 +461,37 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
     """Compact string the agent prompt embeds so the model knows who is
     here and how to render rich UI back to the client.
 
+    ORDER MATTERS: the static ripple/pocket prompt content goes FIRST
+    so Anthropic prompt caching can hit on it; per-turn dynamic tags
+    (scope, participants, KB context, current pocket id) go LAST.
+
     Pocket prompts come from ee.ripple._pockets — the canonical source
     that backs every pocket surface (cloud chat agent, legacy local
     pocket router, codex CLI subprocesses). backend_name flips between
     the in-process MCP variant (claude_agent_sdk) and the shell-CLI
     variant (codex_cli, opencode, gemini_cli) via get_pocket_prompts.
-    Both variants already embed RIPPLE_DESIGN_RULES at the bottom, so
-    the chat-inline prompt is appended ONLY in plain-chat mode.
     """
     creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
 
+    # Static portion FIRST — prefix-cacheable.
+    static_parts: list[str] = []
+    if ctx.intent == "pocket_create":
+        static_parts.append(creation_prompt)
+    elif ctx.pocket_id:
+        static_parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
+    else:
+        static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+
+    # Dynamic portion LAST — per-turn variability lives here.
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
-    parts = [
+    dynamic_parts = [
         f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>",
         f"<participants>{member_list}</participants>",
     ]
-    if ctx.intent == "pocket_create":
-        # Creation prompt is self-contained — already includes the design
-        # rules block. The chat-inline prompt does NOT belong here; the
-        # agent is asked to BUILD a pocket, not to emit a chat-inline UI.
-        parts.append(creation_prompt)
-        return "\n".join(parts)
-    if ctx.pocket_id:
-        parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
-        parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
-        return "\n".join(parts)
-    # Plain chat — the inline ripple prompt already embeds RIPPLE_DESIGN_RULES.
-    parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
-    return "\n".join(parts)
+    if ctx.pocket_id and ctx.intent != "pocket_create":
+        dynamic_parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
+
+    return "\n".join(static_parts + dynamic_parts)
 
 
 # ---------------------------------------------------------------------------
