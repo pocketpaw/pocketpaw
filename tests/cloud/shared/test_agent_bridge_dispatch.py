@@ -162,7 +162,10 @@ async def test_dispatch_agent_responses_adds_final_collaboration_reply() -> None
 
 @pytest.mark.asyncio
 async def test_dispatch_agent_responses_continues_after_agent_failure() -> None:
-    """A failing agent should not block later agents in sequential mode."""
+    """A failing agent should not block later agents in sequential mode.
+
+    Three agents: A fails, B+C succeed. The synthesis pass runs because
+    2 agents responded — the >=2-survivor condition is met."""
     from ee.cloud.shared import agent_bridge
 
     group = SimpleNamespace(
@@ -170,10 +173,16 @@ async def test_dispatch_agent_responses_continues_after_agent_failure() -> None:
         agents=[
             SimpleNamespace(agent_id="agent-a", respond_mode="auto"),
             SimpleNamespace(agent_id="agent-b", respond_mode="auto"),
+            SimpleNamespace(agent_id="agent-c", respond_mode="auto"),
         ],
     )
     run_mock = AsyncMock(
-        side_effect=[RuntimeError("boom"), "draft from b", "final synthesis from b"]
+        side_effect=[
+            RuntimeError("boom"),
+            "draft from b",
+            "draft from c",
+            "final synthesis from c",
+        ]
     )
 
     with (
@@ -188,19 +197,72 @@ async def test_dispatch_agent_responses_continues_after_agent_failure() -> None:
             {
                 "group_id": "group-4",
                 "sender_id": "user-1",
-                "content": "@agent-a @agent-b",
+                "content": "@agent-a @agent-b @agent-c",
                 "mentions": [
                     {"type": "agent", "id": "agent-a"},
                     {"type": "agent", "id": "agent-b"},
+                    {"type": "agent", "id": "agent-c"},
                 ],
                 "workspace_id": "ws-4",
             }
         )
 
     dispatched_agent_ids = [call.kwargs["agent_id"] for call in run_mock.await_args_list]
-    assert dispatched_agent_ids == ["agent-a", "agent-b", "agent-b"]
+    assert dispatched_agent_ids == ["agent-a", "agent-b", "agent-c", "agent-c"]
     final_prompt = run_mock.await_args_list[-1].kwargs["user_message"]
     final_label = run_mock.await_args_list[-1].kwargs["response_label"]
     assert "Agents that could not produce a full response:" in final_prompt
     assert "agent-a" in final_prompt
     assert final_label == "Final response:"
+
+
+async def test_dispatch_agent_responses_skips_synthesis_when_only_one_agent_responds() -> None:
+    """When N=2 agents are dispatched and exactly one fails, the surviving
+    agent must NOT synthesize its own output. Otherwise the user sees a
+    redundant 'Final response:' duplicate of the lone agent's draft.
+
+    Regression test for the synthesis-guard bug: previously the guard was
+    `if len(agents_to_run) < 2 or not responses_by_agent` — passed when
+    one agent survived, triggering self-synthesis."""
+    from ee.cloud.shared import agent_bridge
+
+    group = SimpleNamespace(
+        members=["user-1"],
+        agents=[
+            SimpleNamespace(agent_id="agent-a", respond_mode="auto"),
+            SimpleNamespace(agent_id="agent-b", respond_mode="auto"),
+        ],
+    )
+    # A fails, B succeeds, no third call expected because synthesis must skip.
+    run_mock = AsyncMock(side_effect=[RuntimeError("boom"), "draft from b"])
+
+    with (
+        patch("ee.cloud.chat.group_service.get_for_dispatch", new=AsyncMock(return_value=group)),
+        patch(
+            "ee.cloud.shared.agent_bridge._should_agent_respond",
+            new=AsyncMock(return_value=True),
+        ),
+        patch("ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
+    ):
+        await agent_bridge._dispatch_agent_responses(
+            {
+                "group_id": "group-5",
+                "sender_id": "user-1",
+                "content": "@agent-a @agent-b",
+                "mentions": [
+                    {"type": "agent", "id": "agent-a"},
+                    {"type": "agent", "id": "agent-b"},
+                ],
+                "workspace_id": "ws-5",
+            }
+        )
+
+    # Only two calls: A (fails) and B (succeeds). No synthesis call from B.
+    assert run_mock.await_count == 2
+    dispatched_agent_ids = [call.kwargs["agent_id"] for call in run_mock.await_args_list]
+    assert dispatched_agent_ids == ["agent-a", "agent-b"]
+    # No "Final response:" label was emitted because synthesis was skipped.
+    final_labels = [
+        call.kwargs.get("response_label") for call in run_mock.await_args_list
+    ]
+    assert "Final response:" not in final_labels

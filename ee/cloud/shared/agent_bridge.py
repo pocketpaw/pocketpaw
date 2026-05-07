@@ -153,7 +153,11 @@ async def _dispatch_agent_responses(data: dict) -> None:
         if response_text:
             responses_by_agent.append((agent_id, response_text))
 
-    if len(agents_to_run) < 2 or not responses_by_agent:
+    # Skip the synthesis pass when fewer than 2 agents actually responded.
+    # If only one agent succeeded (others raised), having that survivor
+    # synthesize its own output produces a redundant "Final response:"
+    # duplicate visible to the user.
+    if len(agents_to_run) < 2 or len(responses_by_agent) < 2:
         return
 
     final_agent_id = responses_by_agent[-1][0]
