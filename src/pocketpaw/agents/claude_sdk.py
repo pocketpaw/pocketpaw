@@ -53,20 +53,25 @@ _POCKET_MUTATION_TOOL_IDS: frozenset[str] = frozenset(
 
 def _pocket_specialist_system_prompt() -> str:
     """Full pocket-mode system prompt the specialist subagent runs with.
+    The main chat agent ships only POCKET_DELEGATION_RULE; this is what
+    the specialist sees when delegated to.
 
-    The main chat agent ships only ``POCKET_DELEGATION_RULE``; this is
-    what the specialist sees when delegated to. Both creation and
-    interaction prompts ship together so the specialist can both create
-    and edit pockets within a single delegated session. The interaction
-    prompt's ``POCKET_ID_TOKEN`` is replaced per-call by the delegation
-    tool's invoker (added in Phase 3.4).
+    The interaction prompt's POCKET_ID_TOKEN placeholder is rewritten
+    to direct the specialist to the parent's Agent-tool invocation
+    prompt — the pocket_id is passed there per-call, not baked into
+    the system prompt at SDK init time.
     """
     from ee.ripple._pockets import (
         POCKET_CREATION_PROMPT_MCP,
+        POCKET_ID_TOKEN,
         POCKET_INTERACTION_PROMPT_MCP,
     )
 
-    return POCKET_CREATION_PROMPT_MCP + "\n\n" + POCKET_INTERACTION_PROMPT_MCP
+    interaction = POCKET_INTERACTION_PROMPT_MCP.replace(
+        POCKET_ID_TOKEN,
+        "<the pocket id, supplied in the invocation prompt>",
+    )
+    return POCKET_CREATION_PROMPT_MCP + "\n\n" + interaction
 
 
 def _build_pocket_specialist_agent_def() -> Any:
@@ -113,6 +118,16 @@ class ClaudeSDKBackend:
     """
 
     _TOOL_POLICY_MAP: dict[str, str] = {
+        # NOTE: is_tool_allowed() returns True for any key not explicitly
+        # denied when the profile is 'full' (empty _allowed_set). For
+        # restrictive profiles ('minimal', 'coding') it returns False for
+        # any key absent from the resolved allow set. 'Agent' therefore
+        # MUST have an explicit entry here; without it, the pocket_specialist
+        # subagent is silently blocked for every non-full profile.
+        # Mapped to 'shell' because invoking a subagent has comparable
+        # privilege scope to running a shell command — the gating is
+        # deliberately conservative.
+        "Agent": "shell",
         "Bash": "shell",
         "Read": "read_file",
         "Write": "write_file",

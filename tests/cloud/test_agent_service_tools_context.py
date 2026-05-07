@@ -217,10 +217,10 @@ def test_pocket_delegation_rule_uses_agent_tool():
     from ee.ripple._pockets import POCKET_DELEGATION_RULE
 
     assert "Agent" in POCKET_DELEGATION_RULE
+    # Match either single- or double-quoted form of the kwarg.
     assert (
         'subagent_type="pocket_specialist"' in POCKET_DELEGATION_RULE
         or "subagent_type='pocket_specialist'" in POCKET_DELEGATION_RULE
-        or 'subagent_type="pocket_specialist"' in POCKET_DELEGATION_RULE
     ), "delegation rule must explicitly tell agent to pass subagent_type='pocket_specialist'"
     # Should NOT reference the abandoned custom MCP tool name.
     assert "delegate_to_pocket_specialist" not in POCKET_DELEGATION_RULE
