@@ -133,7 +133,6 @@ Interaction rules:
 
 
 _INLINE_CORE_CATALOG = """\
----
 
 # WIDGET CATALOG — chat-inline allowlist
 
@@ -191,7 +190,7 @@ Final self-check before sending:
 ✔ Interactive elements have on_click / on_change
 ✔ Actions emit chat.send to close the loop
 ✔ One focal widget — clean, minimal layout, no clutter
-✔ Core widget OR `get_inline_widget_help` was called for the type
+✔ Used a core widget, or called `get_inline_widget_help` BEFORE emitting the type
 ✔ Leads to a clear next step
 ✔ No static lists for open-ended queries
 ✔ Valid JSON, concrete values, one fence
