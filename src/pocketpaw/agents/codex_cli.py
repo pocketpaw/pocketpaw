@@ -63,6 +63,41 @@ logger = logging.getLogger(__name__)
 _CURRENT_POCKET_ID_RE = re.compile(r'<current-pocket\s+id="([^"]+)"')
 
 
+# Codex CLI 0.125+ emits a leading deprecation warning that the SDK packages
+# into the first ``AgentMessageItem.text`` field. The warning has no separator
+# from the actual model reply, so users see it concatenated to their answer:
+#
+#   ``[features].web_search_request is deprecated because web search is
+#   enabled by default. (Set web_search to "live", "cached", or "disabled"
+#   at the top level (or under a profile) in config.toml if you want to
+#   override it.)Hello there, Test.``
+#
+# The expected response is just ``Hello there, Test.``. Strip the known
+# warning when it appears at the start of a message. If codex CLI fixes the
+# leak in a future release the regex simply won't match. Add new patterns
+# here as they surface — keep each one specific so we don't accidentally eat
+# real model output.
+_CODEX_STDERR_NOISE_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"^\s*\[features\]\.web_search_request is deprecated"
+        r".*?override it\.\)\s*",
+        re.DOTALL,
+    ),
+)
+
+
+def _strip_codex_stderr_noise(text: str) -> str:
+    """Remove leading codex CLI stderr noise that leaks into agent message text.
+
+    Defensive cleanup for the codex 0.125 deprecation-prefix bug. Returns
+    the text unchanged when no known noise pattern matches.
+    """
+    cleaned = text
+    for pattern in _CODEX_STDERR_NOISE_RES:
+        cleaned = pattern.sub("", cleaned, count=1)
+    return cleaned
+
+
 def _build_subprocess_env(system_prompt: str) -> dict[str, str]:
     """Compose the env passed to the Codex subprocess.
 
@@ -427,7 +462,9 @@ class CodexCLIBackend:
                     item = event.item
                     if isinstance(item, AgentMessageItem):
                         if item.text:
-                            yield AgentEvent(type="message", content=item.text)
+                            cleaned = _strip_codex_stderr_noise(item.text)
+                            if cleaned:
+                                yield AgentEvent(type="message", content=cleaned)
                     elif isinstance(item, CommandExecutionItem):
                         # ``aggregated_output`` is the canonical field on the
                         # typed item — no schema drift, no fallbacks needed.
