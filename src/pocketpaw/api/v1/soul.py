@@ -22,7 +22,7 @@ router = APIRouter(tags=["Soul"], dependencies=[Depends(require_scope("settings:
 @router.get("/soul/dashboard")
 async def get_soul_dashboard():
     """Full soul dashboard data — identity, OCEAN, state, memories, bonds, evolution."""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -189,7 +189,7 @@ async def get_soul_dashboard():
 @router.get("/soul/status")
 async def get_soul_status():
     """Return current soul state (mood, energy, personality, domains)."""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -239,7 +239,7 @@ async def get_soul_status():
 @router.get("/soul/core-memory")
 async def get_core_memory():
     """Return the soul's core memory (persona and human description)."""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -256,7 +256,7 @@ async def get_core_memory():
 @router.patch("/soul/core-memory")
 async def edit_core_memory(body: dict):
     """Edit core memory. Body: {"persona": "...", "human": "..."}"""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -276,7 +276,7 @@ async def edit_core_memory(body: dict):
 @router.post("/soul/remember")
 async def soul_remember(body: dict):
     """Store a memory. Body: {"content": "...", "importance": 5}"""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -296,7 +296,7 @@ async def soul_remember(body: dict):
 @router.post("/soul/recall")
 async def soul_recall(body: dict):
     """Search memories. Body: {"query": "...", "limit": 10}"""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -313,7 +313,7 @@ async def soul_recall(body: dict):
 @router.post("/soul/forget")
 async def soul_forget(body: dict):
     """Forget memories matching query. Body: {"query": "..."}"""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -409,7 +409,7 @@ async def list_soul_memories(tier: str = "episodic", limit: int = 20):
     if limit > 200:
         limit = 200
 
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -422,7 +422,7 @@ async def list_soul_memories(tier: str = "episodic", limit: int = 20):
 @router.post("/soul/export")
 async def export_soul():
     """Save the current soul to its .soul file."""
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -438,7 +438,7 @@ async def reload_soul():
 
     Useful when the file was modified by another client.
     """
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -457,7 +457,7 @@ async def evaluate_soul(body: dict):
     Body: {"user_input": "...", "agent_output": "..."}
     Returns heuristic scores for 7 criteria.
     """
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None or mgr.soul is None:
@@ -484,7 +484,7 @@ async def import_soul(file: UploadFile):
     Replaces the currently active soul with the imported one.
     Requires soul to be enabled in settings.
     """
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None:
@@ -526,7 +526,7 @@ async def import_soul_from_path(body: dict):
 
     Body: {"path": "/path/to/file.soul"} or {"path": "/path/to/config.yaml"}
     """
-    from pocketpaw.soul.manager import get_soul_manager
+    from pocketpaw.soul import get_soul_manager
 
     mgr = get_soul_manager()
     if mgr is None:

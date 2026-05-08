@@ -518,8 +518,11 @@ class AgentLoop:
         # Initialize Soul if enabled
         if settings.soul_enabled:
             try:
-                from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
-                from pocketpaw.soul.manager import SoulManager
+                from pocketpaw.soul import (
+                    PocketPawCognitiveEngine,
+                    SoulManager,
+                    set_soul_manager,
+                )
 
                 # Build a lazy engine: the backend_provider lambda captures `self`
                 # so it resolves the router (and therefore the backend) on every
@@ -540,10 +543,10 @@ class AgentLoop:
                     self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
                 self._soul_manager.start_auto_save()
 
-                # Register as global singleton so API endpoints can access it
-                import pocketpaw.soul.manager as _sm
-
-                _sm._manager = self._soul_manager
+                # Register as global singleton so API endpoints can access it.
+                # Belt-and-suspenders: initialize() already does this on success,
+                # but we re-register to keep behavior identical to pre-#1073.
+                set_soul_manager(self._soul_manager)
             except Exception:
                 logger.exception("Soul initialization failed, continuing without soul")
                 self._soul_manager = None
@@ -1479,7 +1482,7 @@ class AgentLoop:
         settings = Settings.load()
         if settings.soul_enabled and self._soul_manager is None:
             try:
-                from pocketpaw.soul.manager import SoulManager
+                from pocketpaw.soul import SoulManager
 
                 self._soul_manager = SoulManager(settings)
                 asyncio.create_task(self._initialize_soul_runtime())
@@ -1495,7 +1498,7 @@ class AgentLoop:
     def _build_cognitive_engine(self) -> Any:
         """Build a CognitiveEngine for soul, backed by the active agent backend."""
         try:
-            from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
+            from pocketpaw.soul import PocketPawCognitiveEngine
 
             return PocketPawCognitiveEngine(
                 backend_provider=lambda: (

@@ -51,7 +51,7 @@ async def get_paw_agent(project_root: Path | None = None) -> PawAgent:
 
     from soul_protocol import Soul
 
-    from pocketpaw.paw.soul_bridge import SoulBootstrapProvider, SoulBridge
+    from pocketpaw.soul import SoulBootstrapProvider, SoulBridge
     from pocketpaw.paw.tools import (
         SoulEditCoreTool,
         SoulRecallTool,

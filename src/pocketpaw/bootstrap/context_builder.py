@@ -201,7 +201,7 @@ class AgentContextBuilder:
         # memory (identity, personality, knowledge domains). Skip regular long-term
         # memory injection to avoid duplication — the agent should use soul_recall
         # for fact retrieval instead. Session history is still managed by regular memory.
-        from pocketpaw.paw.soul_bridge import SoulBootstrapProvider
+        from pocketpaw.soul import SoulBootstrapProvider
 
         soul_active = isinstance(self.bootstrap, SoulBootstrapProvider)
         if include_memory and memory_context and not soul_active:

@@ -111,7 +111,7 @@ class TestListSoulMemoriesEndpoint:
         class FakeMgr:
             soul = big
 
-        monkeypatch.setattr("pocketpaw.soul.manager.get_soul_manager", lambda: FakeMgr())
+        monkeypatch.setattr("pocketpaw.soul.get_soul_manager", lambda: FakeMgr())
 
         resp = await list_soul_memories(tier="episodic", limit=9999)
         assert resp["total"] == 200
@@ -126,14 +126,14 @@ class TestListSoulMemoriesEndpoint:
         class FakeMgr:
             soul = small
 
-        monkeypatch.setattr("pocketpaw.soul.manager.get_soul_manager", lambda: FakeMgr())
+        monkeypatch.setattr("pocketpaw.soul.get_soul_manager", lambda: FakeMgr())
 
         resp = await list_soul_memories(tier="episodic", limit=-1)
         assert resp["total"] == 1
 
     @pytest.mark.asyncio
     async def test_no_soul_returns_empty_not_error(self, monkeypatch):
-        monkeypatch.setattr("pocketpaw.soul.manager.get_soul_manager", lambda: None)
+        monkeypatch.setattr("pocketpaw.soul.get_soul_manager", lambda: None)
 
         resp = await list_soul_memories(tier="episodic", limit=20)
         assert resp == {"tier": "episodic", "memories": [], "total": 0}
@@ -150,7 +150,7 @@ class TestListSoulMemoriesEndpoint:
                 self.soul = soul
 
         monkeypatch.setattr(
-            "pocketpaw.soul.manager.get_soul_manager", lambda: FakeMgr(soul)
+            "pocketpaw.soul.get_soul_manager", lambda: FakeMgr(soul)
         )
 
         ep = await list_soul_memories(tier="episodic")

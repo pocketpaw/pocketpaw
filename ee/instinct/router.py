@@ -256,7 +256,7 @@ async def _forward_to_soul(correction: Correction, action: Action) -> None:
     """Hand off to the soul bridge — always best-effort, never breaks approval."""
     try:
         from ee.instinct.correction_soul_bridge import CorrectionSoulBridge
-        from pocketpaw.soul.manager import get_soul_manager
+        from pocketpaw.soul import get_soul_manager
 
         manager = get_soul_manager()
         if manager is None:
