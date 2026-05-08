@@ -30,7 +30,7 @@ def mock_audit():
 @pytest.fixture
 def guardian(mock_audit):
     with (
-        patch("pocketpaw.security.guardian.get_settings"),
+        patch("pocketpaw.config.get_settings"),
         patch("pocketpaw.security.guardian.get_audit_logger", return_value=mock_audit),
     ):
         agent = GuardianAgent()
@@ -42,7 +42,7 @@ def guardian(mock_audit):
 def guardian_no_client(mock_audit):
     """Guardian with no API client (simulates missing API key)."""
     with (
-        patch("pocketpaw.security.guardian.get_settings"),
+        patch("pocketpaw.config.get_settings"),
         patch("pocketpaw.security.guardian.get_audit_logger", return_value=mock_audit),
     ):
         agent = GuardianAgent()
@@ -282,7 +282,7 @@ class TestSingleton:
 
         mod._guardian = None
         with (
-            patch("pocketpaw.security.guardian.get_settings"),
+            patch("pocketpaw.config.get_settings"),
             patch("pocketpaw.security.guardian.get_audit_logger"),
         ):
             g1 = get_guardian()
