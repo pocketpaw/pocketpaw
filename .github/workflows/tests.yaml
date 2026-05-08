@@ -28,7 +28,10 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --dev
+        # --all-extras pulls every optional extra (enterprise, soul, vector, etc.)
+        # so ee/cloud tests can import beanie/motor/fastapi-users[beanie,oauth].
+        # uv's cache keeps subsequent runs fast; the extra install cost is small.
+        run: uv sync --dev --all-extras
 
       - name: Run pytest
         # No -x: this is a PR gate, surface ALL failures, not just the first.
