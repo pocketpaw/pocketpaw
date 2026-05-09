@@ -25,9 +25,14 @@ from ee.agent.pocket_specialist.tools import (
     make_persist_pocket_tool,
     make_validate_spec_tool,
 )
+from ee.cloud.pockets.service import agent_create as _agent_create_for_fallback
 from ee.ripple._pockets import POCKET_CREATION_PROMPT_MCP, POCKET_ID_TOKEN
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.config import Settings
+
+# _agent_create_for_fallback is imported (rather than referenced via the
+# ee.cloud.pockets.service path at call time) so tests can patch it on this
+# module. Mirrors the pattern in tools.py.
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +143,10 @@ async def run_specialist(
             user_id=user_id,
             input=input,
         )
+        captured_warnings.append(
+            "Specialist did not call persist_pocket; force-persisted a "
+            "minimal pocket. Ask the user to refine."
+        )
 
     duration_ms = int((time.monotonic() - started) * 1000)
     action: Literal["created", "extended"] = (
@@ -196,5 +205,40 @@ async def _force_persist_fallback(
     user_id: str,
     input: PocketSpecialistCreateInput,
 ) -> dict[str, Any]:
-    """Stub - Task 8 fills this in."""
-    raise NotImplementedError("force-persist fallback added in Task 8")
+    """Persist a minimal pocket when the LLM finished without calling
+    persist_pocket. Always ships output - never raises on LLM/spec content.
+    """
+    name = (input.hints and input.hints.name) or _derive_name_from_brief(input.brief)
+    description = (input.hints and input.hints.description) or input.brief[:200]
+    minimal_spec = {
+        "version": "1.0",
+        "state": {},
+        "ui": {
+            "type": "text",
+            "props": {
+                "value": (
+                    "This pocket was auto-created from a brief. "
+                    "Ask me to refine it and I'll fill it out."
+                )
+            },
+        },
+    }
+    pocket, _id, err = await _agent_create_for_fallback(
+        workspace_id=workspace_id,
+        owner_id=user_id,
+        name=name,
+        description=description,
+        icon=(input.hints and input.hints.icon) or "Sparkles",
+        color=(input.hints and input.hints.color) or "#a78bfa",
+        ripple_spec=minimal_spec,
+    )
+    if err or pocket is None:
+        raise RuntimeError(f"force-persist fallback failed: {err or 'no pocket returned'}")
+    return pocket
+
+
+def _derive_name_from_brief(brief: str) -> str:
+    """Best-effort short title from the brief - first 6 words, capped at 40 chars."""
+    words = brief.strip().split()[:6]
+    name = " ".join(words).rstrip(".,!?:;")[:40]
+    return name or "Untitled pocket"

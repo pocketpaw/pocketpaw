@@ -106,3 +106,45 @@ class TestRunSpecialistHappyPath:
 
         assert out.action == "extended"
         assert out.pocket["id"] == "p-1"
+
+
+class TestRunSpecialistSafetyNet:
+    @pytest.mark.asyncio
+    async def test_force_persists_when_llm_skips_persist(self):
+        # Backend yields events that never include persist_pocket - runtime
+        # must force-create a pocket anyway.
+        events = [
+            AgentEvent(type="message", content="I'm done."),
+            AgentEvent(type="done", content=""),
+        ]
+        fake_backend = MagicMock()
+        fake_backend.run = _stream(events)
+        fake_backend.attach_specialist_tools = MagicMock()
+        fake_backend.stop = AsyncMock()
+
+        force_persisted = {"id": "p-fallback", "name": "A vague brief here"}
+        with (
+            patch(
+                "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+                return_value=fake_backend,
+            ),
+            patch(
+                "ee.agent.pocket_specialist.runtime.emit_specialist_event",
+                new=AsyncMock(),
+            ),
+            patch(
+                "ee.agent.pocket_specialist.runtime._agent_create_for_fallback",
+                new=AsyncMock(return_value=(force_persisted, "p-fallback", None)),
+            ) as mock_create,
+        ):
+            out = await run_specialist(
+                PocketSpecialistCreateInput(brief="A vague brief here for testing"),
+                workspace_id="ws-1",
+                user_id="user-A",
+                settings=Settings(),
+            )
+
+        mock_create.assert_awaited_once()
+        assert out.ok is True
+        assert out.pocket["id"] == "p-fallback"
+        assert any("force" in w.lower() or "fallback" in w.lower() for w in out.warnings)
