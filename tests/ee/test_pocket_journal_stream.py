@@ -27,12 +27,11 @@ from soul_protocol.spec.journal import Actor, EventEntry
 
 from ee.cloud.license import require_license
 from ee.cloud.pockets.journal_stream_router import (
-    router,
     _entry_matches_pocket,
+    router,
 )
 from ee.cloud.shared.deps import require_pocket_edit
 from ee.journal_dep import get_journal, reset_journal_cache
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -82,9 +81,7 @@ def client(app: FastAPI) -> TestClient:
     return TestClient(app)
 
 
-def _append(
-    journal, *, action: str, pocket_id: str | None, scope: list[str] | None = None
-) -> int:
+def _append(journal, *, action: str, pocket_id: str | None, scope: list[str] | None = None) -> int:
     """Append one event to the test journal and return its seq.
 
     Takes a kwargs-only shape so tests read more like specs than scratch
@@ -125,9 +122,9 @@ def _read_sse_frames(response_text: str) -> list[dict]:
         data = None
         for line in block.splitlines():
             if line.startswith("event:"):
-                event = line[len("event:"):].strip()
+                event = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                data = line[len("data:"):].strip()
+                data = line[len("data:") :].strip()
         if event is not None and data is not None:
             frames.append({"event": event, "data": json.loads(data)})
     return frames
@@ -241,9 +238,7 @@ class TestStreamPocketJournal:
         for f in journal_frames:
             assert f["data"]["payload"]["pocket_id"] == "p-target"
 
-    def test_respects_since_seq_cursor(
-        self, client: TestClient, journal_path: Path
-    ) -> None:
+    def test_respects_since_seq_cursor(self, client: TestClient, journal_path: Path) -> None:
         """``since_seq`` skips events whose seq is ``<=`` the cursor so
         reconnects do not replay the whole backlog.
         """
@@ -313,9 +308,7 @@ class TestStreamPocketJournal:
         assert any(f["event"] == "connected" for f in frames)
         assert [f for f in frames if f["event"] == "journal"] == []
 
-    def test_stream_closes_on_max_idle_polls(
-        self, client: TestClient, journal_path: Path
-    ) -> None:
+    def test_stream_closes_on_max_idle_polls(self, client: TestClient, journal_path: Path) -> None:
         """The ``max_idle_polls`` debug knob short-circuits the long-poll
         loop so the stream terminates with a ``closed`` frame once the
         backlog has drained. Without it, the connection would stay open

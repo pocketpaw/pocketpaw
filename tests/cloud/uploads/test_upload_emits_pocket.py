@@ -109,9 +109,7 @@ async def test_upload_many_chat_and_pocket_both_present(monkeypatch):
 
     monkeypatch.setattr("ee.cloud.uploads.service.emit", fake_emit)
 
-    await svc.upload_many(
-        [], owner_id="u1", chat_id="g1", workspace="w1", pocket_id="PA"
-    )
+    await svc.upload_many([], owner_id="u1", chat_id="g1", workspace="w1", pocket_id="PA")
 
     file_events = [e for e in recorded if isinstance(e, FileReady)]
     assert len(file_events) == 1

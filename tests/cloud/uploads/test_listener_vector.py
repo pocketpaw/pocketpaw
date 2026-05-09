@@ -111,9 +111,7 @@ def _patch_pipeline(
 ):
     from ee.cloud.uploads import listeners
 
-    monkeypatch.setattr(
-        "ee.cloud.extraction.build_chain", lambda settings: chain
-    )
+    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: chain)
     monkeypatch.setattr(listeners, "_resolve_adapter", lambda: adapter)
 
     from ee.cloud.agents import knowledge as kn
@@ -134,6 +132,7 @@ def _patch_pipeline(
     )
 
     if subprocess_calls is not None:
+
         async def _fake_subprocess_exec(*args, **kwargs):
             subprocess_calls.append(list(args))
 
@@ -145,9 +144,7 @@ def _patch_pipeline(
 
             return _Proc()
 
-        monkeypatch.setattr(
-            "asyncio.create_subprocess_exec", _fake_subprocess_exec
-        )
+        monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_subprocess_exec)
 
 
 @pytest.mark.asyncio
@@ -190,9 +187,7 @@ async def test_vector_path_runs_when_enabled(monkeypatch, tmp_path):
     )
 
     # Text ingest happened first.
-    ingest.assert_awaited_once_with(
-        scope="workspace:w1", text="caption", source="diagram.png"
-    )
+    ingest.assert_awaited_once_with(scope="workspace:w1", text="caption", source="diagram.png")
     # Embedder ran on the same path the chain saw.
     assert embedder.calls == [(direct, "image/png")]
     # Cost was recorded.

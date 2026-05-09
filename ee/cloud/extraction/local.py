@@ -59,9 +59,7 @@ async def _extract_text(path: Path) -> str:
             doc = Document(file_path)
             return "\n".join(p.text for p in doc.paragraphs)
         except ImportError as exc:
-            raise RuntimeError(
-                "python-docx not installed — run: pip install python-docx"
-            ) from exc
+            raise RuntimeError("python-docx not installed — run: pip install python-docx") from exc
 
     if suffix in (".png", ".jpg", ".jpeg"):
         try:

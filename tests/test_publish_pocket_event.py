@@ -91,7 +91,7 @@ async def test_cloud_error_response_does_not_emit():
 async def test_unrelated_tool_output_skipped_cheaply():
     bus = _bus_mock()
     await _publish_pocket_event(bus, "Just some random text", session_key="s")
-    await _publish_pocket_event(bus, "{\"unrelated\": \"data\"}", session_key="s")
+    await _publish_pocket_event(bus, '{"unrelated": "data"}', session_key="s")
     bus.publish_system.assert_not_awaited()
 
 

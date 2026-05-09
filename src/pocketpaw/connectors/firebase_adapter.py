@@ -578,7 +578,8 @@ class FirebaseAdapter:
         """
         try:
             proc = await asyncio.create_subprocess_exec(
-                self._firebase_bin, "--version",
+                self._firebase_bin,
+                "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

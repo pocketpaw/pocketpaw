@@ -104,9 +104,7 @@ async def create(
     sid = body.session_id or f"websocket_{uuid.uuid4().hex[:12]}"
 
     if body.session_id:
-        existing_doc = await _SessionDoc.find_one(
-            _SessionDoc.sessionId == body.session_id
-        )
+        existing_doc = await _SessionDoc.find_one(_SessionDoc.sessionId == body.session_id)
         if existing_doc is not None:
             patched: dict = {}
             if body.pocket_id and body.pocket_id != existing_doc.pocket:
@@ -117,11 +115,7 @@ async def create(
                 if existing_doc.context_type == "session":
                     existing_doc.context_type = "pocket"
                 patched["pocket_id"] = body.pocket_id
-            if (
-                body.title
-                and body.title != "New Chat"
-                and body.title != existing_doc.title
-            ):
+            if body.title and body.title != "New Chat" and body.title != existing_doc.title:
                 existing_doc.title = body.title
                 patched["title"] = body.title
             if patched:
@@ -181,9 +175,7 @@ async def create(
     return session
 
 
-async def list_for_owner(
-    ctx: RequestContext, workspace_id: str
-) -> list[DomainSession]:
+async def list_for_owner(ctx: RequestContext, workspace_id: str) -> list[DomainSession]:
     docs = (
         await _SessionDoc.find(
             _SessionDoc.workspace == workspace_id,
@@ -212,9 +204,7 @@ async def list_by_agent(
     return [_to_domain(d) for d in docs]
 
 
-async def list_for_pocket(
-    ctx: RequestContext, pocket_id: str
-) -> list[DomainSession]:
+async def list_for_pocket(ctx: RequestContext, pocket_id: str) -> list[DomainSession]:
     docs = (
         await _SessionDoc.find(
             _SessionDoc.pocket == pocket_id,
@@ -292,9 +282,7 @@ async def delete(ctx: RequestContext, session_id: str) -> None:
     )
 
 
-async def link_pocket(
-    workspace_id: str, session_id_str: str, pocket_id: str
-) -> None:
+async def link_pocket(workspace_id: str, session_id_str: str, pocket_id: str) -> None:
     """Link a session (looked up by its sessionId string) to a pocket.
 
     Used by ``pockets/service.create_pocket`` when called with
@@ -387,9 +375,7 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
     # session_key shapes; preserved verbatim from the legacy implementation.
     pocket_candidate_keys = [session.sessionId]
     if session.pocket and session.agent:
-        pocket_candidate_keys.append(
-            f"cloud:pocket:{session.pocket}:{session.agent}"
-        )
+        pocket_candidate_keys.append(f"cloud:pocket:{session.pocket}:{session.agent}")
     or_clauses: list[dict[str, Any]] = [
         {"context_type": "pocket", "session_key": {"$in": pocket_candidate_keys}}
     ]
@@ -401,12 +387,7 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
             }
         )
 
-    messages = (
-        await Message.find({"$or": or_clauses})
-        .sort("createdAt")
-        .limit(limit)
-        .to_list()
-    )
+    messages = await Message.find({"$or": or_clauses}).sort("createdAt").limit(limit).to_list()
     return {
         "messages": [
             {
@@ -556,9 +537,7 @@ async def auto_create_pocket_session(
         title="Chat",
     )
     await doc.insert()
-    logger.info(
-        "auto-created pocket session: sessionId=%s owner=%s", session_key, user.id
-    )
+    logger.info("auto-created pocket session: sessionId=%s owner=%s", session_key, user.id)
     return doc
 
 

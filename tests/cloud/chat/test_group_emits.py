@@ -98,9 +98,7 @@ async def _make_group(
 
 @pytest.mark.asyncio
 async def test_create_group_emits_group_created(mongo_db, recording_bus, patched_lookups):
-    await group_service.create_group(
-        "w1", "u1", CreateGroupRequest(name="Test", member_ids=["u2"])
-    )
+    await group_service.create_group("w1", "u1", CreateGroupRequest(name="Test", member_ids=["u2"]))
 
     created = [e for e in recording_bus.events if isinstance(e, GroupCreated)]
     assert len(created) == 1
@@ -116,9 +114,7 @@ async def test_create_group_emits_group_created(mongo_db, recording_bus, patched
 async def test_update_group_emits_group_updated(mongo_db, recording_bus, patched_lookups):
     group = await _make_group(owner="u1", member_roles={"u1": "admin"})
 
-    await group_service.update_group(
-        str(group.id), "u1", UpdateGroupRequest(name="NewName")
-    )
+    await group_service.update_group(str(group.id), "u1", UpdateGroupRequest(name="NewName"))
 
     events = [e for e in recording_bus.events if isinstance(e, GroupUpdated)]
     assert len(events) == 1
@@ -166,9 +162,7 @@ async def test_join_group_emits_member_added_and_invalidates_cache(
 
 
 @pytest.mark.asyncio
-async def test_join_group_no_emit_when_already_member(
-    mongo_db, recording_bus, resolver_mock
-):
+async def test_join_group_no_emit_when_already_member(mongo_db, recording_bus, resolver_mock):
     group = await _make_group(owner="u1", type="public", members=["u1", "u2"])
 
     await group_service.join_group(str(group.id), "u2")
@@ -205,9 +199,7 @@ async def test_leave_group_emits_member_removed_and_invalidates_cache(
 async def test_add_members_emits_one_event_per_newly_added_user(
     mongo_db, recording_bus, patched_lookups, resolver_mock
 ):
-    group = await _make_group(
-        owner="u1", members=["u1"], member_roles={"u1": "admin"}
-    )
+    group = await _make_group(owner="u1", members=["u1"], member_roles={"u1": "admin"})
 
     added = await group_service.add_members(str(group.id), "u1", ["u2", "u3", "u4"])
 
@@ -229,9 +221,7 @@ async def test_add_members_emits_one_event_per_newly_added_user(
 async def test_add_members_skips_duplicates_and_does_not_invalidate_when_none_added(
     mongo_db, recording_bus, resolver_mock
 ):
-    group = await _make_group(
-        owner="u1", members=["u1", "u2"], member_roles={"u1": "admin"}
-    )
+    group = await _make_group(owner="u1", members=["u1", "u2"], member_roles={"u1": "admin"})
 
     added = await group_service.add_members(str(group.id), "u1", ["u2"])
 
@@ -249,9 +239,7 @@ async def test_add_members_skips_duplicates_and_does_not_invalidate_when_none_ad
 async def test_remove_member_emits_member_removed_and_invalidates_cache(
     mongo_db, recording_bus, resolver_mock
 ):
-    group = await _make_group(
-        owner="u1", members=["u1", "u2"], member_roles={"u1": "admin"}
-    )
+    group = await _make_group(owner="u1", members=["u1", "u2"], member_roles={"u1": "admin"})
 
     await group_service.remove_member(str(group.id), "u1", "u2")
 
@@ -270,9 +258,7 @@ async def test_remove_member_emits_member_removed_and_invalidates_cache(
 async def test_set_member_role_emits_member_role_no_invalidation(
     mongo_db, recording_bus, resolver_mock
 ):
-    group = await _make_group(
-        owner="u1", members=["u1", "u2"], member_roles={"u1": "admin"}
-    )
+    group = await _make_group(owner="u1", members=["u1", "u2"], member_roles={"u1": "admin"})
 
     await group_service.set_member_role(str(group.id), "u1", "u2", "admin")
 
@@ -348,9 +334,7 @@ async def test_remove_agent_emits_agent_removed(mongo_db, recording_bus):
 
 
 @pytest.mark.asyncio
-async def test_get_or_create_dm_emits_when_created(
-    mongo_db, recording_bus, patched_lookups
-):
+async def test_get_or_create_dm_emits_when_created(mongo_db, recording_bus, patched_lookups):
     await group_service.get_or_create_dm("w1", "u1", "u2")
 
     events = [e for e in recording_bus.events if isinstance(e, GroupCreated)]
@@ -359,9 +343,7 @@ async def test_get_or_create_dm_emits_when_created(
 
 
 @pytest.mark.asyncio
-async def test_get_or_create_dm_no_emit_when_existing(
-    mongo_db, recording_bus, patched_lookups
-):
+async def test_get_or_create_dm_no_emit_when_existing(mongo_db, recording_bus, patched_lookups):
     await _make_group(workspace="w1", type="dm", members=["u1", "u2"], slug="dm")
 
     await group_service.get_or_create_dm("w1", "u1", "u2")

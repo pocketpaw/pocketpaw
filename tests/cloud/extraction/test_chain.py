@@ -141,9 +141,7 @@ async def test_offline_skips_network_adapter(
 
 
 async def test_failing_adapter_falls_through(fallback: _StubAdapter) -> None:
-    flaky = _StubAdapter(
-        "flaky", {"image/png"}, raise_on_extract=RuntimeError("boom")
-    )
+    flaky = _StubAdapter("flaky", {"image/png"}, raise_on_extract=RuntimeError("boom"))
     chain = ExtractionChain(adapters=[flaky], offline_fallback=fallback)
 
     result = await chain.run(Path("/tmp/x.png"), "image/png")
@@ -153,9 +151,7 @@ async def test_failing_adapter_falls_through(fallback: _StubAdapter) -> None:
 
 
 async def test_fallback_failure_propagates() -> None:
-    bad_fallback = _StubAdapter(
-        "local", {"*"}, raise_on_extract=RuntimeError("fallback failed")
-    )
+    bad_fallback = _StubAdapter("local", {"*"}, raise_on_extract=RuntimeError("fallback failed"))
     chain = ExtractionChain(adapters=[], offline_fallback=bad_fallback)
 
     with pytest.raises(RuntimeError, match="fallback failed"):
@@ -207,13 +203,9 @@ def test_build_chain_includes_gemini_with_api_key(
     from ee.cloud.extraction import gemini_flash as gem_mod
 
     sentinel = _StubAdapter("gemini-flash", {"image/png"}, requires_network=True)
-    monkeypatch.setattr(
-        gem_mod, "GeminiFlashExtractor", lambda api_key, **kw: sentinel
-    )
+    monkeypatch.setattr(gem_mod, "GeminiFlashExtractor", lambda api_key, **kw: sentinel)
 
-    settings = _settings(
-        extraction_chain=["gemini-flash", "local"], gemini_api_key="fake-key"
-    )
+    settings = _settings(extraction_chain=["gemini-flash", "local"], gemini_api_key="fake-key")
     chain = build_chain(settings)
 
     names = [a.name for a in chain._adapters]

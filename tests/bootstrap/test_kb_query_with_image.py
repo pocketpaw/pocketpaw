@@ -65,9 +65,7 @@ class _TextOnlyEmbedder(_FakeEmbedder):
 async def test_image_query_uses_hybrid_with_query_vec(monkeypatch):
     """image_bytes provided → embed_query called → kb invoked --hybrid --query-vec."""
     embedder = _FakeEmbedder()
-    monkeypatch.setattr(
-        "ee.cloud.embeddings.build_embedder", lambda s: embedder
-    )
+    monkeypatch.setattr("ee.cloud.embeddings.build_embedder", lambda s: embedder)
     _stub_settings(
         monkeypatch,
         kb_vectors_enabled=True,
@@ -125,9 +123,7 @@ async def test_image_query_uses_hybrid_with_query_vec(monkeypatch):
 @pytest.mark.asyncio
 async def test_image_query_falls_back_to_bm25_when_embed_fails(monkeypatch):
     failing = _FakeEmbedder(fail=True)
-    monkeypatch.setattr(
-        "ee.cloud.embeddings.build_embedder", lambda s: failing
-    )
+    monkeypatch.setattr("ee.cloud.embeddings.build_embedder", lambda s: failing)
     _stub_settings(
         monkeypatch,
         kb_vectors_enabled=True,
@@ -152,9 +148,7 @@ async def test_image_query_falls_back_to_bm25_when_embed_fails(monkeypatch):
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_subprocess_exec)
 
-    out = await AgentContextBuilder._get_kb_context(
-        "find slide", image_bytes=b"\x89PNG"
-    )
+    out = await AgentContextBuilder._get_kb_context("find slide", image_bytes=b"\x89PNG")
 
     assert "plain BM25 hit" in out
     # Plain BM25 path: no --hybrid / --query-vec.
@@ -168,9 +162,7 @@ async def test_image_query_falls_back_to_bm25_when_embed_fails(monkeypatch):
 @pytest.mark.asyncio
 async def test_image_query_falls_back_when_embedder_lacks_image_modality(monkeypatch):
     text_only = _TextOnlyEmbedder()
-    monkeypatch.setattr(
-        "ee.cloud.embeddings.build_embedder", lambda s: text_only
-    )
+    monkeypatch.setattr("ee.cloud.embeddings.build_embedder", lambda s: text_only)
     _stub_settings(
         monkeypatch,
         kb_vectors_enabled=True,
@@ -195,9 +187,7 @@ async def test_image_query_falls_back_when_embedder_lacks_image_modality(monkeyp
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_subprocess_exec)
 
-    await AgentContextBuilder._get_kb_context(
-        "any query", image_bytes=b"\x89PNG"
-    )
+    await AgentContextBuilder._get_kb_context("any query", image_bytes=b"\x89PNG")
 
     # Embedder lacks "image" modality → BM25 path.
     assert text_only.queries == []
@@ -207,9 +197,7 @@ async def test_image_query_falls_back_when_embedder_lacks_image_modality(monkeyp
 @pytest.mark.asyncio
 async def test_image_query_skips_when_vectors_disabled(monkeypatch):
     embedder = _FakeEmbedder()
-    monkeypatch.setattr(
-        "ee.cloud.embeddings.build_embedder", lambda s: embedder
-    )
+    monkeypatch.setattr("ee.cloud.embeddings.build_embedder", lambda s: embedder)
     _stub_settings(
         monkeypatch,
         kb_vectors_enabled=False,
@@ -230,9 +218,7 @@ async def test_image_query_skips_when_vectors_disabled(monkeypatch):
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_subprocess_exec)
 
-    await AgentContextBuilder._get_kb_context(
-        "query", image_bytes=b"\x89PNG"
-    )
+    await AgentContextBuilder._get_kb_context("query", image_bytes=b"\x89PNG")
 
     assert embedder.queries == []  # never called
 

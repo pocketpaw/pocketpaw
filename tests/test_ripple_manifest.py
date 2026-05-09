@@ -437,9 +437,7 @@ def test_validate_walks_nested_children():
                         {
                             "type": "timeline",
                             "props": {
-                                "events": [
-                                    {"date": "Q1", "title": "T", "description": "Buried"}
-                                ]
+                                "events": [{"date": "Q1", "title": "T", "description": "Buried"}]
                             },
                         }
                     ],
@@ -461,9 +459,7 @@ def test_validate_accepts_bare_node_without_envelope():
 
     bare = {
         "type": "timeline",
-        "props": {
-            "events": [{"date": "Q1", "title": "T", "description": "no-envelope"}]
-        },
+        "props": {"events": [{"date": "Q1", "title": "T", "description": "no-envelope"}]},
     }
     issues = m.validate_against_manifest(bare, VALIDATE_MANIFEST, apply_aliases=True)
     assert len(issues) == 1
@@ -492,9 +488,7 @@ async def test_agent_context_validator_mutates_spec_in_place(monkeypatch):
     from ee.ripple import manifest as m
 
     async def fake_get(self, url, timeout):
-        return httpx.Response(
-            200, json=VALIDATE_MANIFEST, request=httpx.Request("GET", url)
-        )
+        return httpx.Response(200, json=VALIDATE_MANIFEST, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     m._cache.clear()
@@ -502,9 +496,7 @@ async def test_agent_context_validator_mutates_spec_in_place(monkeypatch):
     spec = {
         "ui": {
             "type": "timeline",
-            "props": {
-                "events": [{"date": "Q1", "title": "T", "description": "Drifted"}]
-            },
+            "props": {"events": [{"date": "Q1", "title": "T", "description": "Drifted"}]},
         }
     }
     await agent_context._validate_ripple_spec(spec)
@@ -527,9 +519,7 @@ async def test_agent_context_validator_skips_when_manifest_unavailable(monkeypat
     spec = {
         "ui": {
             "type": "timeline",
-            "props": {
-                "events": [{"date": "Q1", "title": "T", "description": "kept-as-is"}]
-            },
+            "props": {"events": [{"date": "Q1", "title": "T", "description": "kept-as-is"}]},
         }
     }
     await agent_context._validate_ripple_spec(spec)

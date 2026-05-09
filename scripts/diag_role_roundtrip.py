@@ -21,7 +21,6 @@ async def main() -> int:
     from ee.cloud.memory.documents import MemoryFactDoc
     from ee.cloud.models import ALL_DOCUMENTS
 
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
     await init_beanie(
         connection_string=uri,
         document_models=[*ALL_DOCUMENTS, MemoryFactDoc],
@@ -52,10 +51,7 @@ async def main() -> int:
 
     rows = await Message.find({"session_key": ui_key}).sort("createdAt").to_list()
     for m in rows:
-        print(
-            f"  id={m.id} role={m.role!r} sender_type={m.sender_type!r} "
-            f"content={m.content!r}"
-        )
+        print(f"  id={m.id} role={m.role!r} sender_type={m.sender_type!r} content={m.content!r}")
 
     print(f"\n{len(rows)} rows. Roles seen: {[m.role for m in rows]}")
 

@@ -1,6 +1,7 @@
 """Regression guard: the cloud chat-inline system prompt must live in one
 place — `ee/ripple/_inline.py`. If a future refactor reintroduces a
 `_RIPPLE_HINT` literal in `agent_service.py`, this test fires."""
+
 from __future__ import annotations
 
 from pathlib import Path

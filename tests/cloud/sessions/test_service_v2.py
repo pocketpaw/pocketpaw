@@ -50,12 +50,8 @@ def captured_legacy_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, d
 # ---------------------------------------------------------------------------
 
 
-async def test_create_emits_session_created(
-    recording_bus, captured_legacy_events
-) -> None:
-    s = await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="My chat")
-    )
+async def test_create_emits_session_created(recording_bus, captured_legacy_events) -> None:
+    s = await sessions_service.create(_ctx(), "w1", CreateSessionRequest(title="My chat"))
     assert s.context_type == "session"
     assert s.title == "My chat"
     assert any(isinstance(e, SessionCreated) for e in recording_bus.events)
@@ -63,9 +59,7 @@ async def test_create_emits_session_created(
 
 
 async def test_create_with_pocket_id_uses_pocket_context() -> None:
-    s = await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="t", pocket_id="p1")
-    )
+    s = await sessions_service.create(_ctx(), "w1", CreateSessionRequest(title="t", pocket_id="p1"))
     assert s.context_type == "pocket"
     assert s.pocket == "p1"
 
@@ -81,9 +75,7 @@ async def test_create_with_existing_session_id_returns_existing() -> None:
 
 
 async def test_create_with_existing_session_id_updates_pocket(recording_bus) -> None:
-    await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="t", session_id="known")
-    )
+    await sessions_service.create(_ctx(), "w1", CreateSessionRequest(title="t", session_id="known"))
     recording_bus.events.clear()
     s2 = await sessions_service.create(
         _ctx(),
@@ -105,9 +97,7 @@ async def test_list_for_owner_returns_owners_only() -> None:
 async def test_update_emits_session_updated(recording_bus) -> None:
     s = await sessions_service.create(_ctx(), "w1", CreateSessionRequest(title="orig"))
     recording_bus.events.clear()
-    updated = await sessions_service.update(
-        _ctx(), s.id, UpdateSessionRequest(title="new")
-    )
+    updated = await sessions_service.update(_ctx(), s.id, UpdateSessionRequest(title="new"))
     assert updated.title == "new"
     assert any(isinstance(e, SessionUpdated) for e in recording_bus.events)
 
@@ -128,12 +118,8 @@ async def test_get_rejects_other_owner() -> None:
 
 
 async def test_list_for_pocket_filters() -> None:
-    await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="a", pocket_id="p1")
-    )
-    await sessions_service.create(
-        _ctx(), "w1", CreateSessionRequest(title="b", pocket_id="p2")
-    )
+    await sessions_service.create(_ctx(), "w1", CreateSessionRequest(title="a", pocket_id="p1"))
+    await sessions_service.create(_ctx(), "w1", CreateSessionRequest(title="b", pocket_id="p2"))
     p1_sessions = await sessions_service.list_for_pocket(_ctx(), "p1")
     assert len(p1_sessions) == 1
     assert p1_sessions[0].pocket == "p1"

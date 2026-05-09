@@ -21,6 +21,7 @@ configured without touching this file.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -105,31 +106,27 @@ class KnowledgeService:
     """
 
     @staticmethod
-    async def ingest_text_to_scope(
-        scope: str, text: str, source: str = "manual"
-    ) -> dict:
+    async def ingest_text_to_scope(scope: str, text: str, source: str = "manual") -> dict:
         """Ingest ``text`` into an arbitrary kb-go scope.
 
         ``scope`` is the literal scope string the kb binary understands
         (e.g. ``"workspace:w1"``, ``"agent:a1"``, ``"pocket:p1"``). No
         validation here — kb-go rejects unknown scope shapes itself.
         """
-        return _kb("ingest", "--scope", scope, "--source", source, input_text=text)
+        return await asyncio.to_thread(
+            _kb, "ingest", "--scope", scope, "--source", source, input_text=text
+        )
 
     @staticmethod
     async def ingest_text(agent_id: str, text: str, source: str = "manual") -> dict:
-        return await KnowledgeService.ingest_text_to_scope(
-            f"agent:{agent_id}", text, source
-        )
+        return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, source)
 
     @staticmethod
     async def ingest_url(agent_id: str, url: str) -> dict:
         """Fetch URL with trafilatura (Python), pipe text to kb."""
         try:
             text = await _extract_url(url)
-            return await KnowledgeService.ingest_text_to_scope(
-                f"agent:{agent_id}", text, url
-            )
+            return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, url)
         except Exception as exc:
             return {"error": str(exc), "url": url}
 
@@ -144,27 +141,28 @@ class KnowledgeService:
         label = source or path.name
         if path.suffix.lower() in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"):
             text = await _extract_file(file_path)
-            return await KnowledgeService.ingest_text_to_scope(
-                f"agent:{agent_id}", text, label
-            )
+            return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, label)
         # Text/code files go directly to kb (without intermediate extraction)
-        return _kb("ingest", file_path, "--scope", f"agent:{agent_id}", "--source", label)
+        return await asyncio.to_thread(
+            _kb, "ingest", file_path, "--scope", f"agent:{agent_id}", "--source", label
+        )
 
     @staticmethod
     async def list_articles(agent_id: str) -> list[dict]:
         """List ingested articles for an agent."""
-        result = _kb("list", "--scope", f"agent:{agent_id}")
+        result = await asyncio.to_thread(_kb, "list", "--scope", f"agent:{agent_id}")
         return result if isinstance(result, list) else []
 
     @staticmethod
     async def get_article(agent_id: str, article_id: str) -> dict:
         """Fetch a single article's full body."""
-        result = _kb("show", article_id, "--scope", f"agent:{agent_id}")
+        result = await asyncio.to_thread(_kb, "show", article_id, "--scope", f"agent:{agent_id}")
         return result if isinstance(result, dict) else {"content": str(result)}
 
     @staticmethod
     async def search(agent_id: str, query: str, limit: int = 5) -> list[str]:
-        results = _kb(
+        results = await asyncio.to_thread(
+            _kb,
             "search",
             query,
             "--scope",
@@ -179,11 +177,25 @@ class KnowledgeService:
     @staticmethod
     async def search_context(agent_id: str, query: str, limit: int = 3) -> str:
         """Get formatted knowledge context for agent prompt injection."""
-        result = _kb(
+        return await KnowledgeService.search_context_for_scope(
+            scope=f"agent:{agent_id}",
+            query=query,
+            limit=limit,
+        )
+
+    @staticmethod
+    async def search_context_for_scope(scope: str, query: str, limit: int = 3) -> str:
+        """Get formatted knowledge context for any kb-go scope.
+
+        Runs ``_kb`` in a thread so the event loop isn't blocked by the
+        subprocess call. See S2 in the code review for context.
+        """
+        result = await asyncio.to_thread(
+            _kb,
             "search",
             query,
             "--scope",
-            f"agent:{agent_id}",
+            scope,
             "--limit",
             str(limit),
             "--context",
@@ -192,7 +204,8 @@ class KnowledgeService:
 
     @staticmethod
     async def clear(agent_id: str) -> dict:
-        return _kb("clear", "--scope", f"agent:{agent_id}")
+        result = await asyncio.to_thread(_kb, "clear", "--scope", f"agent:{agent_id}")
+        return result if isinstance(result, dict) else {}
 
     @staticmethod
     def stats(agent_id: str) -> dict:
@@ -200,7 +213,8 @@ class KnowledgeService:
 
     @staticmethod
     async def lint(agent_id: str) -> list[dict]:
-        return _kb("lint", "--scope", f"agent:{agent_id}")
+        result = await asyncio.to_thread(_kb, "lint", "--scope", f"agent:{agent_id}")
+        return result if isinstance(result, list) else []
 
 
 # --- Heavy extraction (stays in Python) ---

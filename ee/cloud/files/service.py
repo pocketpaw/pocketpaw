@@ -138,9 +138,7 @@ class UnifiedFilesService:
 
         if source in (None, "chat"):
             merged.extend(
-                await self.list_chat_uploads(
-                    workspace_id, limit=per_source, pocket_id=pocket_id
-                )
+                await self.list_chat_uploads(workspace_id, limit=per_source, pocket_id=pocket_id)
             )
 
         if source in (None, "drive"):

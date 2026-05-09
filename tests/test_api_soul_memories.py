@@ -104,14 +104,12 @@ class TestListSoulMemoriesEndpoint:
     async def test_limit_clamped_to_upper_bound(self, monkeypatch):
         # Force the soul manager to return a soul with a tonne of entries,
         # then verify the endpoint hands back at most 200.
-        big = _soul_with_memories(
-            episodic=[FakeMemoryEntry(content=str(i)) for i in range(300)]
-        )
+        big = _soul_with_memories(episodic=[FakeMemoryEntry(content=str(i)) for i in range(300)])
 
         class FakeMgr:
             soul = big
 
-        monkeypatch.setattr("pocketpaw.soul.manager.get_soul_manager", lambda: FakeMgr())
+        monkeypatch.setattr("pocketpaw.soul.get_soul_manager", lambda: FakeMgr())
 
         resp = await list_soul_memories(tier="episodic", limit=9999)
         assert resp["total"] == 200
@@ -119,21 +117,19 @@ class TestListSoulMemoriesEndpoint:
 
     @pytest.mark.asyncio
     async def test_limit_clamped_to_lower_bound(self, monkeypatch):
-        small = _soul_with_memories(
-            episodic=[FakeMemoryEntry(content="only")] * 5
-        )
+        small = _soul_with_memories(episodic=[FakeMemoryEntry(content="only")] * 5)
 
         class FakeMgr:
             soul = small
 
-        monkeypatch.setattr("pocketpaw.soul.manager.get_soul_manager", lambda: FakeMgr())
+        monkeypatch.setattr("pocketpaw.soul.get_soul_manager", lambda: FakeMgr())
 
         resp = await list_soul_memories(tier="episodic", limit=-1)
         assert resp["total"] == 1
 
     @pytest.mark.asyncio
     async def test_no_soul_returns_empty_not_error(self, monkeypatch):
-        monkeypatch.setattr("pocketpaw.soul.manager.get_soul_manager", lambda: None)
+        monkeypatch.setattr("pocketpaw.soul.get_soul_manager", lambda: None)
 
         resp = await list_soul_memories(tier="episodic", limit=20)
         assert resp == {"tier": "episodic", "memories": [], "total": 0}
@@ -149,9 +145,7 @@ class TestListSoulMemoriesEndpoint:
             def __init__(self, soul):
                 self.soul = soul
 
-        monkeypatch.setattr(
-            "pocketpaw.soul.manager.get_soul_manager", lambda: FakeMgr(soul)
-        )
+        monkeypatch.setattr("pocketpaw.soul.get_soul_manager", lambda: FakeMgr(soul))
 
         ep = await list_soul_memories(tier="episodic")
         sem = await list_soul_memories(tier="semantic")

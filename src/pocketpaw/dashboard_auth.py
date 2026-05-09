@@ -39,6 +39,7 @@ def _verify_upload_grant(request: Request, secret: str) -> bool:
         return False
     return verify_grant(m.group("id"), token, secret)
 
+
 logger = logging.getLogger(__name__)
 
 auth_router = APIRouter()

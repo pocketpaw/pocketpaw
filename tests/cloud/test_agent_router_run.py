@@ -1,4 +1,5 @@
 """Wires AgentPool + MessageService into the router; verifies soul routing."""
+
 from __future__ import annotations
 
 import json
@@ -16,11 +17,13 @@ class _FakePool:
 
     def __init__(self):
         self.observed: list[tuple[str, str, str]] = []
+        self.knowledge_context_seen: str = ""
 
     async def get(self, agent_id):
         return SimpleNamespace(agent_id=agent_id, agent_name="Agent " + agent_id)
 
     async def run(self, agent_id, message, session_key, history=None, knowledge_context=""):
+        self.knowledge_context_seen = knowledge_context
         yield SimpleNamespace(type="thinking", content="pondering", metadata={})
         yield SimpleNamespace(type="tool_use", content={"tool": "web_fetch"}, metadata={})
         yield SimpleNamespace(type="message", content="Here is your answer.", metadata={})
@@ -73,14 +76,21 @@ async def test_full_run_emits_chunks_ripple_and_routes_observe_to_target(
     async def fake_broadcast_typing(ctx, active):
         return None
 
-    with patch.object(mod, "resolve_scope_context", fake_resolver), \
-         patch.object(mod, "_persist_user_message", fake_persist), \
-         patch.object(mod, "_persist_assistant_message", fake_persist_assistant), \
-         patch.object(mod, "_broadcast_message_new", fake_broadcast_new), \
-         patch.object(mod, "_broadcast_agent_typing", fake_broadcast_typing), \
-         patch.object(mod, "get_agent_pool", lambda: fake_pool):
+    async def fake_build_knowledge_context(_ctx, *, user_message, attachments=None, mentions=None):
+        return "<scope>group g1</scope>\n\n<knowledge-base>ctx</knowledge-base>"
+
+    with (
+        patch.object(mod, "resolve_scope_context", fake_resolver),
+        patch.object(mod, "_persist_user_message", fake_persist),
+        patch.object(mod, "_persist_assistant_message", fake_persist_assistant),
+        patch.object(mod, "_broadcast_message_new", fake_broadcast_new),
+        patch.object(mod, "_broadcast_agent_typing", fake_broadcast_typing),
+        patch.object(mod, "build_knowledge_context", fake_build_knowledge_context),
+        patch.object(mod, "get_agent_pool", lambda: fake_pool),
+    ):
         async with cloud_app_client.stream(
-            "POST", "/cloud/chat/group/g1/agent",
+            "POST",
+            "/cloud/chat/group/g1/agent",
             json={"content": "hi"},
         ) as resp:
             assert resp.status_code == 200
@@ -113,3 +123,4 @@ async def test_full_run_emits_chunks_ripple_and_routes_observe_to_target(
 
     # Soul routed to the target agent, not the global PocketPaw soul.
     assert fake_pool.observed and fake_pool.observed[0][0] == "agent_X"
+    assert "<knowledge-base>ctx</knowledge-base>" in fake_pool.knowledge_context_seen

@@ -97,7 +97,5 @@ async def test_set_active_workspace_empty_raises_validation() -> None:
 
 async def test_set_avatar_path_persists() -> None:
     doc = await _seed_user()
-    out = await auth_service.set_avatar_path(
-        _ctx(str(doc.id)), "/api/v1/auth/avatar/u1.png"
-    )
+    out = await auth_service.set_avatar_path(_ctx(str(doc.id)), "/api/v1/auth/avatar/u1.png")
     assert out.avatar == "/api/v1/auth/avatar/u1.png"

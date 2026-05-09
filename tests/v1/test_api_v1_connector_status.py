@@ -140,9 +140,7 @@ class TestConnectorStatusRoute:
         )
         assert connect_resp.status_code == 200
 
-        status = client.get(
-            "/api/v1/connectors/google_drive/status?pocket_id=p1"
-        ).json()
+        status = client.get("/api/v1/connectors/google_drive/status?pocket_id=p1").json()
         assert status["connected"] is True
         assert status["cred_state"] == "valid"
         assert status["scope"] == "drive.readonly"
@@ -163,9 +161,7 @@ class TestConnectorStatusRoute:
             "/api/v1/connectors/disconnect",
             json={"connector_name": "google_drive", "pocket_id": "p1"},
         )
-        status = client.get(
-            "/api/v1/connectors/google_drive/status?pocket_id=p1"
-        ).json()
+        status = client.get("/api/v1/connectors/google_drive/status?pocket_id=p1").json()
         assert status["connected"] is False
         assert status["cred_state"] == "missing"
         assert status["scope"] == ""
@@ -181,12 +177,8 @@ class TestConnectorStatusRoute:
             },
         )
 
-        alpha = client.get(
-            "/api/v1/connectors/google_drive/status?pocket_id=alpha"
-        ).json()
-        beta = client.get(
-            "/api/v1/connectors/google_drive/status?pocket_id=beta"
-        ).json()
+        alpha = client.get("/api/v1/connectors/google_drive/status?pocket_id=alpha").json()
+        beta = client.get("/api/v1/connectors/google_drive/status?pocket_id=beta").json()
 
         assert alpha["connected"] is True
         assert beta["connected"] is False
@@ -201,9 +193,7 @@ class TestConnectorStatusRoute:
             connector_name="google_drive",
             cred_state="expired",
         )
-        status = client.get(
-            "/api/v1/connectors/google_drive/status?pocket_id=p1"
-        ).json()
+        status = client.get("/api/v1/connectors/google_drive/status?pocket_id=p1").json()
         # adapter isn't instantiated so connected stays false, but cred_state
         # reflects the OAuth refresh result.
         assert status["connected"] is False
@@ -227,9 +217,7 @@ class TestConnectorStatusRoute:
                 },
             },
         )
-        status = client.get(
-            "/api/v1/connectors/google_drive/status?pocket_id=p1"
-        ).json()
+        status = client.get("/api/v1/connectors/google_drive/status?pocket_id=p1").json()
         assert "client_secret" not in status
         assert "refresh_token" not in status
         # Payload is small and flat — the sensitive strings must not appear

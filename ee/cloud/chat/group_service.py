@@ -485,9 +485,7 @@ async def _update_group_fields(
     return _group_doc_to_domain(doc)
 
 
-async def _add_member_doc(
-    group_id: str, user_id: str, *, role: str | None = None
-) -> _GroupDomain:
+async def _add_member_doc(group_id: str, user_id: str, *, role: str | None = None) -> _GroupDomain:
     """Add user_id to the group's members list (idempotent).
     ``role`` optionally records the user's role in member_roles."""
     doc = await _GroupDoc.get(PydanticObjectId(group_id))
@@ -686,8 +684,7 @@ async def list_groups(workspace_id: str, user_id: str) -> list[dict]:
 
     users_by_id, agents_by_id = await _populate_lookups_for_domain_groups(groups)
     return [
-        group_to_wire_dict(g, users_by_id=users_by_id, agents_by_id=agents_by_id)
-        for g in groups
+        group_to_wire_dict(g, users_by_id=users_by_id, agents_by_id=agents_by_id) for g in groups
     ]
 
 
@@ -753,9 +750,7 @@ async def join_group(group_id: str, user_id: str) -> None:
         return
 
     updated = await _add_member_doc(group_id, user_id)
-    await emit(
-        GroupMemberAdded(data={"group_id": group_id, "user_id": user_id, "role": "edit"})
-    )
+    await emit(GroupMemberAdded(data={"group_id": group_id, "user_id": user_id, "role": "edit"}))
     users_by_id, agents_by_id = await _populate_lookups_for_domain_groups([updated])
     resp = group_to_wire_dict(updated, users_by_id=users_by_id, agents_by_id=agents_by_id)
     await emit(GroupJoined(data={**resp, "member_ids": [user_id]}))
@@ -797,9 +792,7 @@ async def add_members(
 
     for added_user_id in newly_added:
         await emit(
-            GroupMemberAdded(
-                data={"group_id": group_id, "user_id": added_user_id, "role": role}
-            )
+            GroupMemberAdded(data={"group_id": group_id, "user_id": added_user_id, "role": role})
         )
     if newly_added:
         users_by_id, agents_by_id = await _populate_lookups_for_domain_groups([updated])

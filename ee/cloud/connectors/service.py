@@ -305,7 +305,8 @@ async def list_widget_recipes(workspace_id: str) -> list[WidgetRecipeResponse]:
     zero recipes.
     """
     enabled_docs = await _WCDoc.find(
-        _WCDoc.workspace == workspace_id, _WCDoc.enabled == True  # noqa: E712 — Beanie expects ==
+        _WCDoc.workspace == workspace_id,
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
     ).to_list()
     if not enabled_docs:
         return []

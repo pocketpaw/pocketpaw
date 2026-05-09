@@ -72,9 +72,7 @@ async def list_unreads(user_id: str, workspace_id: str) -> list[dict]:
         else:
             unread = await _count_messages_after(str(group.id), state.last_read_message_id)
             mention_unread = state.mention_unread
-        out.append(
-            {"group_id": str(group.id), "unread": unread, "mention_unread": mention_unread}
-        )
+        out.append({"group_id": str(group.id), "unread": unread, "mention_unread": mention_unread})
     return out
 
 

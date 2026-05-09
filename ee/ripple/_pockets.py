@@ -791,6 +791,8 @@ Hard rules:
 
 # ---------------------------------------------------------------------------
 # Final assembly. Each variant ends with the shared design rules block.
+# Order: scope → canvas → list-gate → tools → workflow/creation →
+# interactive-default → state-sources → examples → research-protocol → design rules.
 # ---------------------------------------------------------------------------
 
 

@@ -90,9 +90,7 @@ async def test_patch_me_updates_full_name(app_client) -> None:
 
 async def test_set_active_workspace(app_client) -> None:
     client, user_doc = app_client
-    resp = await client.post(
-        "/api/v1/auth/set-active-workspace", json={"workspace_id": "w42"}
-    )
+    resp = await client.post("/api/v1/auth/set-active-workspace", json={"workspace_id": "w42"})
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "activeWorkspace": "w42"}
 
@@ -103,8 +101,6 @@ async def test_set_active_workspace(app_client) -> None:
 
 async def test_set_active_workspace_empty_returns_422(app_client) -> None:
     client, _ = app_client
-    resp = await client.post(
-        "/api/v1/auth/set-active-workspace", json={"workspace_id": ""}
-    )
+    resp = await client.post("/api/v1/auth/set-active-workspace", json={"workspace_id": ""})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "workspace_id.required"

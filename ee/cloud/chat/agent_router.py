@@ -27,6 +27,7 @@ from ee.cloud.chat.agent_service import (
     ScopeKind,
     attach_agent_identity,
     attach_sse_event_sink,
+    build_knowledge_context,
     detach_agent_identity,
     detach_sse_event_sink,
     load_history_for_scope,
@@ -313,48 +314,14 @@ async def _run_agent_stream(
         yield ("error", {"code": "agent.load_failed", "message": str(e)})
         return
 
-    # Inject the scope/participants block via knowledge_context — AgentPool.run
-    # prepends this to the system prompt, which is the least invasive way to
-    # give the agent scope awareness without changing pool.run's signature.
-    from ee.cloud.chat.agent_service import build_context_block
-
-    # Surface the backend name so the prompt picks the right pocket-tool
-    # path (MCP for claude_agent_sdk, shell CLI for codex_cli + others).
-    backend_name: str | None = None
-    try:
-        backend_name = instance.backend.info().name
-    except Exception:
-        logger.debug("backend.info() unavailable on agent %s", ctx.target_agent_id, exc_info=True)
-    scope_block = build_context_block(ctx, backend_name=backend_name)
-
-    # Stage 3.E: pull KB context with per-request scope priority
-    # (pocket > agent > workspace). The per-request resolver lives on
-    # ``AgentContextBuilder`` so the OSS / channel paths share the same
-    # logic, just with a static ``settings.kb_scopes`` fallback. We
-    # prepend the result to the scope block so the agent sees ``###
-    # From <scope>`` sections alongside the participants tag.
-    try:
-        from pocketpaw.bootstrap.context_builder import (
-            AgentContextBuilder,
-            KbContext,
-        )
-
-        kb_block = await AgentContextBuilder._get_kb_context(
-            body.content,
-            kb_ctx=KbContext(
-                pocket_id=ctx.pocket_id,
-                agent_id=ctx.target_agent_id,
-                workspace_id=ctx.workspace_id,
-            ),
-        )
-    except Exception:
-        # KB context is best-effort — a transient kb-go / Mongo blip never
-        # blocks the chat reply. Log at debug for the failure trail.
-        logger.debug("KB context fetch failed for cloud chat", exc_info=True)
-        kb_block = ""
-
-    if kb_block:
-        scope_block = f"{scope_block}\n\n{kb_block}"
+    # Inject scope metadata + KB context via knowledge_context — AgentPool.run
+    # prepends this to the system prompt without changing its run signature.
+    knowledge_context = await build_knowledge_context(
+        ctx,
+        user_message=body.content,
+        attachments=body.attachments,
+        mentions=body.mentions,
+    )
 
     await _broadcast_agent_typing(ctx, active=True)
 
@@ -416,7 +383,7 @@ async def _run_agent_stream(
             body.content,
             session_key,
             history=history,
-            knowledge_context=scope_block,
+            knowledge_context=knowledge_context,
         ):
             for ev in _drain_side_channel():
                 yield ev
@@ -599,9 +566,7 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
             api_key=settings.anthropic_api_key or None,
         )
     except Exception:
-        logger.warning(
-            "cloud Haiku title generation failed for %s", ctx.session_id, exc_info=True
-        )
+        logger.warning("cloud Haiku title generation failed for %s", ctx.session_id, exc_info=True)
         return
 
     if not title or title == placeholder:

@@ -102,9 +102,7 @@ def _resolve_root(spec: dict) -> dict | None:
     return None
 
 
-def patch_content_with_state(
-    content: str, spec_id: str, patch_state: dict[str, Any]
-) -> str | None:
+def patch_content_with_state(content: str, spec_id: str, patch_state: dict[str, Any]) -> str | None:
     """Return ``content`` with the ``spec_id``-th ``ui-spec`` block updated.
 
     ``spec_id`` is the position-based key the frontend uses (``spec_0``,

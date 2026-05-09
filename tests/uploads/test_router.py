@@ -126,9 +126,7 @@ def test_grant_missing_file_is_404(client: TestClient):
     assert r.status_code == 404
 
 
-def test_grant_returns_adapter_presigned_url_when_available(
-    client: TestClient, monkeypatch
-):
+def test_grant_returns_adapter_presigned_url_when_available(client: TestClient, monkeypatch):
     """When the storage adapter returns a presigned URL (S3/GCS), the grant
     endpoint proxies it verbatim — no HMAC fallback, no signature query param.
     """
@@ -144,9 +142,7 @@ def test_grant_returns_adapter_presigned_url_when_available(
         rec = self._meta.get(file_id)
         return rec, f"https://s3.example.com/bucket/{rec.storage_key}?X-Amz-Signature=abc"
 
-    monkeypatch.setattr(
-        type(uploads_module._SVC), "presigned_get", fake_presigned
-    )
+    monkeypatch.setattr(type(uploads_module._SVC), "presigned_get", fake_presigned)
 
     g = client.get(f"/api/v1/uploads/{fid}/grant")
     assert g.status_code == 200

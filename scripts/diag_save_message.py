@@ -11,7 +11,9 @@ import logging
 
 
 async def main() -> int:
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
 
     print("1. init_cloud_db ...")
     from ee.cloud.shared.db import init_cloud_db

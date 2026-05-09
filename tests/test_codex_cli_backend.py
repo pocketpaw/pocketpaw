@@ -88,9 +88,7 @@ def _patch_codex(events):
             return fake_thread
 
     return patch(
-        "pocketpaw.agents.codex_cli.Codex"
-        if False
-        else "openai_codex_sdk.Codex",
+        "pocketpaw.agents.codex_cli.Codex" if False else "openai_codex_sdk.Codex",
         _FakeCodex,
     ), fake_thread
 
@@ -158,9 +156,7 @@ class TestCodexCLIInit:
     async def test_run_without_cli(self):
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
-        with patch(
-            "pocketpaw.agents.codex_cli._resolve_codex_binary", return_value=None
-        ):
+        with patch("pocketpaw.agents.codex_cli._resolve_codex_binary", return_value=None):
             backend = CodexCLIBackend(Settings())
             events = []
             async for event in backend.run("test"):
@@ -226,9 +222,7 @@ class TestCodexCLIRun:
             [
                 (
                     "completed",
-                    AgentMessageItem(
-                        id="i1", type="agent_message", text="Hello from Codex!"
-                    ),
+                    AgentMessageItem(id="i1", type="agent_message", text="Hello from Codex!"),
                 ),
             ]
         )
@@ -241,6 +235,78 @@ class TestCodexCLIRun:
         messages = [e for e in out if e.type == "message"]
         assert len(messages) == 1
         assert messages[0].content == "Hello from Codex!"
+
+    @pytest.mark.asyncio
+    async def test_strips_codex_stderr_deprecation_prefix(self):
+        """Codex 0.125 leaks a [features].web_search_request deprecation
+        warning into the first AgentMessageItem.text. The user-visible
+        message must start with the real model reply, not the warning.
+        Closes pocketpaw#1070."""
+        from openai_codex_sdk import AgentMessageItem
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        polluted = (
+            "[features].web_search_request is deprecated because web search "
+            'is enabled by default. (Set web_search to "live", "cached", '
+            'or "disabled" at the top level (or under a profile) in '
+            "config.toml if you want to override it.)Hello there, Test."
+        )
+
+        backend = CodexCLIBackend(Settings())
+        events_in = _events_from(
+            [
+                (
+                    "completed",
+                    AgentMessageItem(id="i1", type="agent_message", text=polluted),
+                ),
+            ]
+        )
+        ctx, _ = _patch_codex(events_in)
+        with ctx:
+            out = []
+            async for event in backend.run("say hello"):
+                out.append(event)
+
+        messages = [e for e in out if e.type == "message"]
+        assert len(messages) == 1
+        assert messages[0].content == "Hello there, Test."
+        assert "deprecated" not in messages[0].content
+        assert "web_search_request" not in messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_clean_messages_pass_through_unchanged(self):
+        """Sanity guard: a message with no known stderr-noise pattern is
+        forwarded verbatim. If the noise-stripper ever over-matches and
+        eats real model output this test will fail loudly."""
+        from openai_codex_sdk import AgentMessageItem
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+        clean = (
+            "Here is a snippet: `[features].web_search_request` was the "
+            "old config key — your snippet about deprecation should not "
+            "trigger the stripper because it is not at the start of the "
+            "message and lacks the trailing override-clause."
+        )
+        events_in = _events_from(
+            [
+                (
+                    "completed",
+                    AgentMessageItem(id="i1", type="agent_message", text=clean),
+                ),
+            ]
+        )
+        ctx, _ = _patch_codex(events_in)
+        with ctx:
+            out = []
+            async for event in backend.run("explain web_search"):
+                out.append(event)
+
+        messages = [e for e in out if e.type == "message"]
+        assert len(messages) == 1
+        assert messages[0].content == clean
 
     @pytest.mark.asyncio
     async def test_parses_command_execution_started_and_completed(self):
@@ -597,9 +663,7 @@ class TestCodexCLIPromptDelivery:
         assert "Recent Conversation" in contents
         assert "From previous backend" in contents
 
-    def test_build_subprocess_env_extracts_pocket_id_and_mirrors_mongo(
-        self, monkeypatch
-    ):
+    def test_build_subprocess_env_extracts_pocket_id_and_mirrors_mongo(self, monkeypatch):
         """The Codex subprocess gets per-turn identity + a Mongo URI alias.
         ``cloud_*`` CLI commands invoked from the agent then have everything
         they need without an explicit MCP layer."""
@@ -609,11 +673,7 @@ class TestCodexCLIPromptDelivery:
         monkeypatch.delenv("POCKETPAW_MONGO_URI", raising=False)
         monkeypatch.delenv("POCKETPAW_POCKET_ID", raising=False)
 
-        prompt = (
-            "<scope>pocket abc123</scope>\n"
-            '<current-pocket id="abc123" />\n'
-            "..."
-        )
+        prompt = '<scope>pocket abc123</scope>\n<current-pocket id="abc123" />\n...'
         env = _build_subprocess_env(prompt)
 
         assert env["POCKETPAW_POCKET_ID"] == "abc123"
@@ -623,9 +683,7 @@ class TestCodexCLIPromptDelivery:
         # Parent env survives.
         assert env["CLOUD_MONGODB_URI"] == "mongodb://example/paw"
 
-    def test_build_subprocess_env_no_pocket_in_prompt_leaves_id_unset(
-        self, monkeypatch
-    ):
+    def test_build_subprocess_env_no_pocket_in_prompt_leaves_id_unset(self, monkeypatch):
         from pocketpaw.agents.codex_cli import _build_subprocess_env
 
         monkeypatch.delenv("POCKETPAW_POCKET_ID", raising=False)

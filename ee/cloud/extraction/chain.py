@@ -58,9 +58,7 @@ class ExtractionChain:
             adapter = self._by_name.get(override)
             if adapter is not None:
                 return await self._call(adapter, path, mime)
-            logger.warning(
-                "per-mime override %r unknown; falling through to chain", override
-            )
+            logger.warning("per-mime override %r unknown; falling through to chain", override)
 
         # 2. First chain adapter that supports the mime (wildcard or explicit).
         for adapter in self._adapters:
@@ -70,9 +68,7 @@ class ExtractionChain:
         # 3. No adapter claimed this mime — let the fallback take it.
         return await self._offline_fallback.extract(path, mime)
 
-    async def _call(
-        self, adapter: ExtractionAdapter, path: Path, mime: str
-    ) -> ExtractionResult:
+    async def _call(self, adapter: ExtractionAdapter, path: Path, mime: str) -> ExtractionResult:
         if adapter.requires_network and not _is_online():
             logger.info(
                 "adapter %s requires network but host is offline; using fallback",
@@ -109,9 +105,7 @@ def build_chain(settings) -> ExtractionChain:
             if api_key:
                 adapters.append(GeminiFlashExtractor(api_key))
             else:
-                logger.info(
-                    "gemini-flash adapter skipped: POCKETPAW_GEMINI_API_KEY not set"
-                )
+                logger.info("gemini-flash adapter skipped: POCKETPAW_GEMINI_API_KEY not set")
         else:
             raise ValueError(f"unknown extraction adapter: {name!r}")
 

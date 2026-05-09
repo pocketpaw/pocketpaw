@@ -84,17 +84,13 @@ def _patch_listener(
     # ``_resolve_adapter`` underpins both the local-path and the temp-file
     # branches; ``adapter`` lets tests pin both at once.
     if adapter is not None:
-        monkeypatch.setattr(
-            listeners, "_resolve_adapter", lambda: adapter
-        )
+        monkeypatch.setattr(listeners, "_resolve_adapter", lambda: adapter)
     elif storage_path is not None:
         # Back-compat shortcut: tests that only care about the local-path
         # branch can pass ``storage_path`` and we wire a fake adapter
         # under the hood.
         fake = _FakeAdapter(local_path_value=storage_path)
-        monkeypatch.setattr(
-            listeners, "_resolve_adapter", lambda: fake
-        )
+        monkeypatch.setattr(listeners, "_resolve_adapter", lambda: fake)
 
     if ingest is not None:
         from ee.cloud.agents import knowledge as kn
@@ -110,9 +106,7 @@ async def test_index_uploaded_file_calls_chain_then_kb(monkeypatch, tmp_path):
     fake_path = tmp_path / "doc.pdf"
     fake_path.write_bytes(b"unused; chain.run is mocked")
 
-    chain = _FakeChain(
-        ExtractionResult(text="hello world", backend="local")
-    )
+    chain = _FakeChain(ExtractionResult(text="hello world", backend="local"))
     ingest = AsyncMock(return_value={"id": "art-1"})
     _patch_listener(monkeypatch, chain=chain, storage_path=fake_path, ingest=ingest)
 
@@ -142,13 +136,9 @@ async def test_index_skips_when_workspace_id_missing(monkeypatch, tmp_path):
 
     chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
     ingest = AsyncMock()
-    _patch_listener(
-        monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest
-    )
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
 
-    await index_uploaded_file(
-        FileReady(data={"file_id": "f1", "storage_key": "k"})
-    )
+    await index_uploaded_file(FileReady(data={"file_id": "f1", "storage_key": "k"}))
 
     assert chain.calls == []
     ingest.assert_not_awaited()
@@ -160,13 +150,9 @@ async def test_index_skips_when_file_id_missing(monkeypatch, tmp_path):
 
     chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
     ingest = AsyncMock()
-    _patch_listener(
-        monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest
-    )
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
 
-    await index_uploaded_file(
-        FileReady(data={"workspace_id": "w1", "storage_key": "k"})
-    )
+    await index_uploaded_file(FileReady(data={"workspace_id": "w1", "storage_key": "k"}))
 
     assert chain.calls == []
     ingest.assert_not_awaited()
@@ -201,9 +187,7 @@ async def test_remote_adapter_streams_into_temp_then_extracts(monkeypatch):
     into a NamedTemporaryFile, runs extraction on it, deletes the file."""
     from ee.cloud.uploads.listeners import index_uploaded_file
 
-    chain = _FakeChain(
-        ExtractionResult(text="caption from gemini", backend="gemini-flash")
-    )
+    chain = _FakeChain(ExtractionResult(text="caption from gemini", backend="gemini-flash"))
     adapter = _FakeAdapter(
         local_path_value=None,
         open_chunks=[b"chunk-1 ", b"chunk-2"],
@@ -282,12 +266,8 @@ async def test_remote_adapter_temp_suffix_falls_back_to_mime(monkeypatch):
     case too."""
     from ee.cloud.uploads.listeners import index_uploaded_file
 
-    chain = _FakeChain(
-        ExtractionResult(text="extracted", backend="local")
-    )
-    adapter = _FakeAdapter(
-        local_path_value=None, open_chunks=[b"%PDF-1.4 ..."]
-    )
+    chain = _FakeChain(ExtractionResult(text="extracted", backend="local"))
+    adapter = _FakeAdapter(local_path_value=None, open_chunks=[b"%PDF-1.4 ..."])
     ingest = AsyncMock()
     _patch_listener(monkeypatch, chain=chain, adapter=adapter, ingest=ingest)
 
@@ -359,9 +339,7 @@ async def test_index_skips_when_adapter_unavailable(monkeypatch):
     chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
     ingest = AsyncMock()
     monkeypatch.setattr(listeners, "_resolve_adapter", lambda: None)
-    monkeypatch.setattr(
-        "ee.cloud.extraction.build_chain", lambda settings: chain
-    )
+    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: chain)
     from ee.cloud.agents import knowledge as kn
 
     monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)
@@ -388,9 +366,7 @@ async def test_index_skips_when_extraction_returns_empty(monkeypatch, tmp_path):
 
     chain = _FakeChain(ExtractionResult(text="   ", backend="local"))
     ingest = AsyncMock()
-    _patch_listener(
-        monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest
-    )
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
 
     await index_uploaded_file(
         FileReady(
@@ -416,9 +392,7 @@ async def test_extraction_failure_does_not_propagate(monkeypatch, tmp_path):
         async def run(self, *_args, **_kwargs):
             raise RuntimeError("kaboom")
 
-    monkeypatch.setattr(
-        "ee.cloud.extraction.build_chain", lambda settings: _ExplodingChain()
-    )
+    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: _ExplodingChain())
     ingest = AsyncMock()
     _patch_listener(monkeypatch, storage_path=tmp_path / "x", ingest=ingest)
 
@@ -447,9 +421,7 @@ async def test_kb_failure_does_not_propagate(monkeypatch, tmp_path):
 
     chain = _FakeChain(ExtractionResult(text="content", backend="local"))
     ingest = AsyncMock(side_effect=RuntimeError("kb missing"))
-    _patch_listener(
-        monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest
-    )
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
 
     await index_uploaded_file(
         FileReady(

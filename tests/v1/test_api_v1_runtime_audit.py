@@ -82,8 +82,7 @@ async def test_runtime_audit_full_text_search(client: TestClient, seed) -> None:
     body = resp.json()
     assert body["total"] == 1
     assert "pipeline" in (
-        body["entries"][0]["description"].lower()
-        + str(body["entries"][0]["context"]).lower()
+        body["entries"][0]["description"].lower() + str(body["entries"][0]["context"]).lower()
     )
 
 

@@ -113,6 +113,7 @@ def iter_per_agent_loops() -> list[AgentLoop]:
     """
     return [v for v in _agent_loops.values() if isinstance(v, AgentLoop)]
 
+
 # Retain active_connections for legacy broadcasts until fully migrated
 active_connections: list[WebSocket] = []
 

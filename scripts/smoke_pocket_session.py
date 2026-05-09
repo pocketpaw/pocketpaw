@@ -70,7 +70,6 @@ async def main() -> int:
     lic_mod._license_error = None
 
     _banner("0. init_beanie + mount_cloud")
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
     await init_beanie(
         connection_string=uri,
         document_models=[*ALL_DOCUMENTS, MemoryFactDoc],
@@ -193,9 +192,7 @@ async def main() -> int:
             assert r.status_code == 200, r.text
             hist = r.json()
             print(f"   {len(hist.get('messages', []))} messages in history")
-            assert any(
-                m["content"] == "hello pocket chat" for m in hist.get("messages", [])
-            )
+            assert any(m["content"] == "hello pocket chat" for m in hist.get("messages", []))
 
             print("\nSMOKE OK")
             return 0

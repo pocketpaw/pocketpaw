@@ -199,9 +199,7 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
 # ---------------------------------------------------------------------------
 
 
-async def create(
-    ctx: RequestContext, workspace_id: str, body: CreateAgentRequest
-) -> Agent:
+async def create(ctx: RequestContext, workspace_id: str, body: CreateAgentRequest) -> Agent:
     existing = await _AgentDoc.find_one(
         _AgentDoc.workspace == workspace_id,
         _AgentDoc.slug == body.slug,
@@ -253,9 +251,7 @@ async def get_by_slug(workspace_id: str, slug: str) -> Agent:
     return _to_domain(doc)
 
 
-async def list_agents(
-    workspace_id: str, *, query: str | None = None
-) -> list[Agent]:
+async def list_agents(workspace_id: str, *, query: str | None = None) -> list[Agent]:
     filters: dict[str, Any] = {"workspace": workspace_id}
     if query:
         filters["name"] = {"$regex": query, "$options": "i"}
@@ -263,9 +259,7 @@ async def list_agents(
     return [_to_domain(d) for d in docs]
 
 
-async def update(
-    ctx: RequestContext, agent_id: str, body: UpdateAgentRequest
-) -> Agent:
+async def update(ctx: RequestContext, agent_id: str, body: UpdateAgentRequest) -> Agent:
     try:
         doc = await _AgentDoc.get(PydanticObjectId(agent_id))
     except Exception:
@@ -360,9 +354,7 @@ async def _try_eager_soul(agent: Agent) -> None:
         logger.warning("Eager soul creation failed for agent %s", agent.id, exc_info=True)
 
 
-async def suggest_for_mentions(
-    workspace_id: str, q: str, *, limit: int = 8
-) -> list[dict]:
+async def suggest_for_mentions(workspace_id: str, q: str, *, limit: int = 8) -> list[dict]:
     """Return up to ``limit`` agents matching ``q`` against name / slug.
     Used by the chat ``/mentions/suggest`` endpoint."""
     aquery: dict = {"workspace": workspace_id}
@@ -497,9 +489,7 @@ async def ensure_default_agent_all_workspaces() -> int:
             if created:
                 seeded += 1
         except Exception as exc:
-            logger.warning(
-                "Failed to back-fill pocketpaw agent for ws=%s: %s", ws.id, exc
-            )
+            logger.warning("Failed to back-fill pocketpaw agent for ws=%s: %s", ws.id, exc)
     return seeded
 
 

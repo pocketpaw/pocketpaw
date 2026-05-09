@@ -94,7 +94,6 @@ async def main() -> int:
     lic_mod._license_error = None
 
     _banner("0. init_beanie + mount_cloud")
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
     await init_beanie(
         connection_string=uri,
         document_models=[*ALL_DOCUMENTS, MemoryFactDoc],
@@ -188,9 +187,7 @@ async def main() -> int:
             members_objs = [m for m in grp.get("members", []) if isinstance(m, dict)]
             print(f"   populated members: {len(members_objs)}/{len(grp['members'])}")
             for m in members_objs:
-                print(
-                    f"     - _id={m.get('_id')} name={m.get('name')!r} email={m.get('email')!r}"
-                )
+                print(f"     - _id={m.get('_id')} name={m.get('name')!r} email={m.get('email')!r}")
             # From Alice's perspective, the "other member" is Bob.
             other_for_alice = next(
                 (m for m in members_objs if m.get("_id") != alice["user_id"]), None
@@ -272,9 +269,7 @@ async def main() -> int:
                 headers=bob["headers"],
             )
             page = r.json()
-            assert any(
-                m["content"] == "kicking off the engineering thread" for m in page["items"]
-            )
+            assert any(m["content"] == "kicking off the engineering thread" for m in page["items"])
             print(f"   bob sees {len(page['items'])} group message(s)")
 
             _banner("9. Bob posts back")

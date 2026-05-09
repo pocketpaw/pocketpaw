@@ -44,9 +44,7 @@ async def _make_group(
     return doc
 
 
-async def _make_message(
-    *, group_id: str, sender: str, content: str = "hey"
-) -> _MessageDoc:
+async def _make_message(*, group_id: str, sender: str, content: str = "hey") -> _MessageDoc:
     doc = _MessageDoc(
         context_type="group",
         group=group_id,
@@ -64,18 +62,12 @@ async def _make_message(
 
 
 @pytest.mark.asyncio
-async def test_send_message_with_mention_creates_notification_for_target(
-    mongo_db, monkeypatch
-):
+async def test_send_message_with_mention_creates_notification_for_target(mongo_db, monkeypatch):
     group = await _make_group(workspace="w1", owner="u1", members=["u1", "u2"])
 
     spy = AsyncMock()
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.notifications_service.create", spy
-    )
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.unread_service.bump_mention", AsyncMock()
-    )
+    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", spy)
+    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", AsyncMock())
 
     response = await message_service.send_message(
         str(group.id),
@@ -102,12 +94,8 @@ async def test_send_message_self_mention_does_not_notify(mongo_db, monkeypatch):
     group = await _make_group(workspace="w1", owner="u1")
 
     spy = AsyncMock()
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.notifications_service.create", spy
-    )
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.unread_service.bump_mention", AsyncMock()
-    )
+    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", spy)
+    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", AsyncMock())
 
     await message_service.send_message(
         str(group.id),
@@ -133,9 +121,7 @@ async def test_toggle_reaction_adding_notifies_original_sender(mongo_db, monkeyp
     msg = await _make_message(group_id=str(group.id), sender="u1", content="hey")
 
     spy = AsyncMock()
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.notifications_service.create", spy
-    )
+    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", spy)
 
     await message_service.toggle_reaction(str(msg.id), "u2", "\U0001f44d")
 
@@ -157,9 +143,7 @@ async def test_toggle_reaction_self_reaction_does_not_notify(mongo_db, monkeypat
     msg = await _make_message(group_id=str(group.id), sender="u1", content="hey")
 
     spy = AsyncMock()
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.notifications_service.create", spy
-    )
+    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", spy)
 
     await message_service.toggle_reaction(str(msg.id), "u1", "\U0001f44d")
 
@@ -176,9 +160,7 @@ async def test_toggle_reaction_removing_does_not_notify(mongo_db, monkeypatch):
     await message_service.toggle_reaction(str(msg.id), "u2", "\U0001f44d")
 
     spy = AsyncMock()
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.notifications_service.create", spy
-    )
+    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", spy)
 
     await message_service.toggle_reaction(str(msg.id), "u2", "\U0001f44d")
 

@@ -49,9 +49,7 @@ def _build_s3() -> StorageAdapter:
 
     bucket = os.environ.get("S3_PRIVATE_BUCKET") or os.environ.get("S3_BUCKET")
     if not bucket:
-        raise RuntimeError(
-            "POCKETPAW_UPLOAD_ADAPTER=s3 requires S3_PRIVATE_BUCKET to be set"
-        )
+        raise RuntimeError("POCKETPAW_UPLOAD_ADAPTER=s3 requires S3_PRIVATE_BUCKET to be set")
     return S3StorageAdapter(
         bucket=bucket,
         region=os.environ.get("S3_REGION") or None,

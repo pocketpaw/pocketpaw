@@ -16,6 +16,11 @@ Public API:
 - ``list_member_ids(workspace_id)``, ``list_admin_ids(workspace_id)``,
   ``list_peer_ids(user_id)`` — used as function refs by the realtime
   audience resolver
+- ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
+  the plan-feature gate dependency; returns "team" on any failure so the
+  dep fails open on plan rather than crashing with a 500.
+
+Changes: added get_workspace_plan helper for plan-feature gate dep.
 """
 
 from __future__ import annotations
@@ -193,9 +198,7 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
         _WorkspaceDoc.deleted_at == None,  # noqa: E711
     )
     if existing is not None:
-        raise ConflictError(
-            "workspace.slug_taken", f"Slug '{body.slug}' is already in use"
-        )
+        raise ConflictError("workspace.slug_taken", f"Slug '{body.slug}' is already in use")
 
     doc = _WorkspaceDoc(name=body.name, slug=body.slug, owner=ctx.user_id)
     await doc.insert()
@@ -289,10 +292,7 @@ async def list_for_user(ctx: RequestContext) -> list[Workspace]:
     ).to_list()
 
     counts = await _count_members_bulk(ws_ids)
-    return [
-        _workspace_to_domain(doc, member_count=counts.get(str(doc.id), 0))
-        for doc in docs
-    ]
+    return [_workspace_to_domain(doc, member_count=counts.get(str(doc.id), 0)) for doc in docs]
 
 
 # ---------------------------------------------------------------------------
@@ -300,9 +300,7 @@ async def list_for_user(ctx: RequestContext) -> list[Workspace]:
 # ---------------------------------------------------------------------------
 
 
-async def list_members(
-    ctx: RequestContext, workspace_id: str
-) -> list[WorkspaceMember]:
+async def list_members(ctx: RequestContext, workspace_id: str) -> list[WorkspaceMember]:
     role = await _get_member_role(workspace_id, ctx.user_id)
     if role is None:
         raise NotFound("workspace", workspace_id)
@@ -310,9 +308,7 @@ async def list_members(
     members = await _UserDoc.find({"workspaces.workspace": workspace_id}).to_list()
     out: list[WorkspaceMember] = []
     for member in members:
-        membership = next(
-            (m for m in member.workspaces if m.workspace == workspace_id), None
-        )
+        membership = next((m for m in member.workspaces if m.workspace == workspace_id), None)
         if membership is None:
             continue
         out.append(
@@ -376,9 +372,7 @@ async def remove_member(
     if doc is None:
         raise NotFound("workspace", workspace_id)
     if doc.owner == target_user_id:
-        raise Forbidden(
-            "workspace.cannot_remove_owner", "Cannot remove the workspace owner"
-        )
+        raise Forbidden("workspace.cannot_remove_owner", "Cannot remove the workspace owner")
 
     user = await _UserDoc.get(PydanticObjectId(target_user_id))
     if user is None:
@@ -400,9 +394,7 @@ async def remove_member(
         },
     )
     await emit(
-        WorkspaceMemberRemoved(
-            data={"workspace_id": workspace_id, "user_id": target_user_id}
-        )
+        WorkspaceMemberRemoved(data={"workspace_id": workspace_id, "user_id": target_user_id})
     )
     get_resolver().invalidate_workspace(workspace_id)
 
@@ -500,9 +492,7 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
         raise NotFound("invite")
     invite = _invite_to_domain(invite_doc)
     if invite.accepted:
-        raise ConflictError(
-            "invite.already_accepted", "This invite has already been accepted"
-        )
+        raise ConflictError("invite.already_accepted", "This invite has already been accepted")
     if invite.revoked:
         raise Forbidden("invite.revoked", "This invite has been revoked")
     if invite.expired:
@@ -512,9 +502,7 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
     if ws_doc is None:
         raise NotFound("workspace", invite.workspace_id)
 
-    already_member = (
-        await _get_member_role(invite.workspace_id, ctx.user_id) is not None
-    )
+    already_member = await _get_member_role(invite.workspace_id, ctx.user_id) is not None
     if not already_member:
         member_count = await _count_members(invite.workspace_id)
         if member_count >= ws_doc.seats:
@@ -562,11 +550,7 @@ async def revoke_invite(workspace_id: str, invite_id: str) -> None:
         raise NotFound("invite", invite_id)
     invite_doc.revoked = True
     await invite_doc.save()
-    await emit(
-        WorkspaceInviteRevoked(
-            data={"workspace_id": workspace_id, "invite_id": invite_id}
-        )
-    )
+    await emit(WorkspaceInviteRevoked(data={"workspace_id": workspace_id, "invite_id": invite_id}))
 
 
 # ---------------------------------------------------------------------------
@@ -608,9 +592,7 @@ async def list_peer_ids(user_id: str) -> list[str]:
     return [str(u.id) for u in peers]
 
 
-async def seed_default_workspace(
-    admin_id: str, *, name: str, slug: str
-) -> _WorkspaceDoc | None:
+async def seed_default_workspace(admin_id: str, *, name: str, slug: str) -> _WorkspaceDoc | None:
     """Insert a default workspace with enterprise plan + 50 seats and
     register ``admin_id`` as the owner. Skips silently if any workspace
     already exists or if the admin already has a workspace.
@@ -647,13 +629,24 @@ async def seed_default_workspace(
         )
         await doc.insert()
         await _add_member(str(doc.id), admin_id, role="owner", set_active=True)
-        logger.info(
-            "Default workspace seeded: %s (slug: %s, id: %s)", name, slug, doc.id
-        )
+        logger.info("Default workspace seeded: %s (slug: %s, id: %s)", name, slug, doc.id)
         return doc
     except Exception:
         logger.warning("Failed to seed default workspace", exc_info=True)
         return None
+
+
+async def get_workspace_plan(workspace_id: str) -> str:
+    """Return the plan tier string for a workspace.
+
+    Used by the plan-feature gate dependency. Returns "team" (the most
+    restrictive plan) as a safe fallback when the workspace cannot be
+    loaded so the guard fails open on plan rather than raising a 500.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        return "team"
+    return doc.plan
 
 
 __all__ = [
@@ -662,6 +655,7 @@ __all__ = [
     "create_invite",
     "delete",
     "get",
+    "get_workspace_plan",
     "legacy_ctx",
     "list_admin_ids",
     "list_for_user",

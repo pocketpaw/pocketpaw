@@ -1,4 +1,5 @@
 """Cloud agent chat request and SSE event schema tests."""
+
 from __future__ import annotations
 
 import pytest

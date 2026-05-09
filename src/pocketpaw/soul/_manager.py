@@ -1,5 +1,8 @@
 """SoulManager -- lifecycle management for the Soul instance.
 
+Private implementation module. Callers should import from `pocketpaw.soul`,
+not from this file directly.
+
 Edge cases handled:
 - Corrupt/encrypted .soul files: backs up and births fresh soul
 - Concurrent observe(): serialized via asyncio.Lock
@@ -11,6 +14,9 @@ Edge cases handled:
 - CognitiveEngine wiring: passes PocketPawCognitiveEngine to Soul so the
   active agent backend powers fact extraction, significance scoring,
   and reflection instead of heuristic fallbacks (feat/pocketpaw-cognitive-engine)
+
+2026-05-08: Renamed from manager.py to _manager.py as part of #1073. Public
+surface now lives in soul/__init__.py; this module is private implementation.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pocketpaw.config import Settings
-    from pocketpaw.paw.soul_bridge import SoulBootstrapProvider, SoulBridge
+    from pocketpaw.soul._bridge import SoulBootstrapProvider, SoulBridge
     from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -37,6 +43,18 @@ _manager: SoulManager | None = None
 def get_soul_manager() -> SoulManager | None:
     """Return the global SoulManager, or None if not initialized."""
     return _manager
+
+
+def set_soul_manager(manager: SoulManager | None) -> None:
+    """Register (or clear) the global SoulManager singleton.
+
+    `SoulManager.initialize()` already registers itself on success — this
+    setter exists for callers (e.g. the agent loop) that want belt-and-
+    suspenders registration without reaching into the private `_manager`
+    module variable.
+    """
+    global _manager
+    _manager = manager
 
 
 def _reset_manager() -> None:
@@ -109,7 +127,7 @@ class SoulManager:
             logger.warning("soul-protocol not installed. Install with: pip install pocketpaw[soul]")
             return
 
-        from pocketpaw.paw.soul_bridge import SoulBootstrapProvider, SoulBridge
+        from pocketpaw.soul._bridge import SoulBootstrapProvider, SoulBridge
 
         self.soul_dir.mkdir(parents=True, exist_ok=True)
 
@@ -411,7 +429,7 @@ class SoulManager:
                 "soul-protocol not installed. Install with: pip install pocketpaw[soul]"
             ) from None
 
-        from pocketpaw.paw.soul_bridge import SoulBootstrapProvider, SoulBridge
+        from pocketpaw.soul._bridge import SoulBootstrapProvider, SoulBridge
 
         file_path = Path(file_path)
         if not file_path.exists():

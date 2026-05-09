@@ -10,7 +10,7 @@ from pocketpaw.security.guardian import GuardianAgent
 @pytest.fixture
 def guardian():
     with (
-        patch("pocketpaw.security.guardian.get_settings"),
+        patch("pocketpaw.config.get_settings"),
         patch("pocketpaw.security.guardian.get_audit_logger"),
     ):
         agent = GuardianAgent()

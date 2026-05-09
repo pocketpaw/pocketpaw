@@ -23,9 +23,7 @@ async def list_notifications(
     limit: int = Query(default=50, ge=1, le=200),
     ctx: RequestContext = Depends(request_context),
 ) -> list[NotificationOut]:
-    notes = await notifications_service.list_for_user(
-        ctx.user_id, unread=unread, limit=limit
-    )
+    notes = await notifications_service.list_for_user(ctx.user_id, unread=unread, limit=limit)
     return [notification_to_dto(n) for n in notes]
 
 

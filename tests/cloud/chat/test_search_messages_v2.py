@@ -30,9 +30,7 @@ async def _make_group(*, type: str = "public", owner: str = "u1") -> _GroupDoc:
     return doc
 
 
-async def _make_message(
-    *, group_id: str, content: str, sender: str = "u1"
-) -> _MessageDoc:
+async def _make_message(*, group_id: str, content: str, sender: str = "u1") -> _MessageDoc:
     doc = _MessageDoc(
         context_type="group",
         group=group_id,
@@ -41,9 +39,7 @@ async def _make_message(
         content=content,
         mentions=[_MentionDoc(type="user", id="u2", display_name="Bob")],
         attachments=[
-            _AttachmentDoc(
-                type="file", url="https://x/y.pdf", name="y.pdf", meta={"size": 1024}
-            )
+            _AttachmentDoc(type="file", url="https://x/y.pdf", name="y.pdf", meta={"size": 1024})
         ],
         reactions=[_ReactionDoc(emoji="👍", users=["u1", "u2"])],
     )

@@ -46,9 +46,7 @@ async def test_pocket_a_listing_returns_only_pocket_a_files(beanie_upload_db):
     await _seed("w1", name="b-secret.pdf", pocket_id="B")
 
     svc = UnifiedFilesService()
-    files, _warnings = await svc.list_unified(
-        "w1", source="chat", limit=50, pocket_id="A"
-    )
+    files, _warnings = await svc.list_unified("w1", source="chat", limit=50, pocket_id="A")
 
     assert [f.filename for f in files] == ["a-secret.pdf"]
 
@@ -59,9 +57,7 @@ async def test_pocket_b_listing_returns_only_pocket_b_files(beanie_upload_db):
     await _seed("w1", name="b-secret.pdf", pocket_id="B")
 
     svc = UnifiedFilesService()
-    files, _warnings = await svc.list_unified(
-        "w1", source="chat", limit=50, pocket_id="B"
-    )
+    files, _warnings = await svc.list_unified("w1", source="chat", limit=50, pocket_id="B")
 
     assert [f.filename for f in files] == ["b-secret.pdf"]
 
@@ -79,9 +75,7 @@ async def test_workspace_listing_excludes_all_pocket_files(beanie_upload_db):
     await _seed("w1", name="b-secret.pdf", pocket_id="B")
 
     svc = UnifiedFilesService()
-    files, _warnings = await svc.list_unified(
-        "w1", source="chat", limit=50, pocket_id=None
-    )
+    files, _warnings = await svc.list_unified("w1", source="chat", limit=50, pocket_id=None)
 
     assert [f.filename for f in files] == ["ws-doc.pdf"]
 
@@ -137,9 +131,7 @@ async def test_list_by_workspace_workspace_only_sentinel(beanie_upload_db):
     await _seed("w1", name="pa.pdf", pocket_id="A")
 
     store = MongoFileStore()
-    rows = await store.list_by_workspace(
-        "w1", limit=50, pocket_id=LIST_WORKSPACE_ONLY
-    )
+    rows = await store.list_by_workspace("w1", limit=50, pocket_id=LIST_WORKSPACE_ONLY)
     assert [r.filename for r in rows] == ["ws.pdf"]
 
 

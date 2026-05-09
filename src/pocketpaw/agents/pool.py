@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pocketpaw.agents.backend import AgentBackend
-    from pocketpaw.soul.manager import SoulManager
+    from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +264,7 @@ class AgentPool:
     async def _init_soul(self, agent_doc: Any, settings: Any) -> SoulManager:
         """Initialize a SoulManager for an agent."""
         from pocketpaw.config import get_config_dir
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         config = agent_doc.config
 

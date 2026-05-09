@@ -1,4 +1,5 @@
 """Cancellation behavior for the cloud agent endpoint."""
+
 from __future__ import annotations
 
 import asyncio
@@ -42,8 +43,10 @@ async def test_second_request_cancels_first(cloud_app_client: AsyncClient):
     first_done = asyncio.Event()
 
     async def slow_stream(ctx, user_msg_id, body, cancel_event, *, history=None):
-        yield ("stream_start", {"run_id": "r", "agent_id": "a1",
-                                 "scope": "group", "scope_id": "g1"})
+        yield (
+            "stream_start",
+            {"run_id": "r", "agent_id": "a1", "scope": "group", "scope_id": "g1"},
+        )
         try:
             await asyncio.wait_for(cancel_event.wait(), timeout=5.0)
         finally:
@@ -53,8 +56,10 @@ async def test_second_request_cancels_first(cloud_app_client: AsyncClient):
     async def fast_stream(ctx, user_msg_id, body, cancel_event, *, history=None):
         yield ("stream_end", {"assistant_message_id": "m", "usage": {}, "cancelled": False})
 
-    with patch.object(mod, "resolve_scope_context", fake_resolver), \
-         patch.object(mod, "_persist_user_message", fake_persist):
+    with (
+        patch.object(mod, "resolve_scope_context", fake_resolver),
+        patch.object(mod, "_persist_user_message", fake_persist),
+    ):
         with patch.object(mod, "_run_agent_stream", slow_stream):
             first_task = asyncio.create_task(
                 cloud_app_client.post("/cloud/chat/group/g1/agent", json={"content": "1"})

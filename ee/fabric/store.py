@@ -300,8 +300,7 @@ class FabricStore:
                 total = row["cnt"] if row else 0
 
             async with db.execute(
-                f"SELECT * FROM fabric_links {where}"
-                " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM fabric_links {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 [*params, limit, offset],
             ) as cur:
                 links = [self._row_to_link(row) async for row in cur]

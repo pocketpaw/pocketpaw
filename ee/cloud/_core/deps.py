@@ -11,6 +11,8 @@ delegates to ``pocketpaw.ee.guards`` (the platform-wide RBAC package) for
 the actual policy lookup. We translate platform ``GuardForbidden``
 exceptions to cloud-native ``Forbidden`` so the standard error envelope
 applies.
+
+Changes: added require_plan_feature dependency for plan-tier feature gating.
 """
 
 from __future__ import annotations
@@ -134,6 +136,54 @@ async def require_membership(
     raise Forbidden("workspace.not_member", "Not a member of this workspace")
 
 
+# ---------------------------------------------------------------------------
+# Plan-tier feature gate
+# ---------------------------------------------------------------------------
+
+_PLAN_ORDER = ("team", "business", "enterprise")
+
+
+def require_plan_feature(feature: str) -> Callable[..., Coroutine[Any, Any, None]]:
+    """FastAPI dependency gating access by workspace plan tier.
+
+    Loads the workspace's plan from the Workspace document and checks it
+    against PLAN_FEATURES. Raises cloud Forbidden with code
+    'plan.feature_denied' if the feature is not available on the plan.
+
+    Use on routes that require business+ or enterprise features::
+
+        @router.get(
+            "/fabric/types",
+            dependencies=[
+                Depends(require_plan_feature("fabric")),
+                Depends(require_action_any_workspace("fabric.read")),
+            ],
+        )
+    """
+    from pocketpaw.ee.guards.abac import PLAN_FEATURES
+
+    # Compute the minimum plan that unlocks this feature, for the error message.
+    needed_plan = "enterprise"
+    for plan in _PLAN_ORDER:
+        if feature in PLAN_FEATURES.get(plan, set()):
+            needed_plan = plan
+            break
+
+    async def _guard(workspace_id: str = Depends(current_workspace_id)) -> None:
+        from ee.cloud.workspace import service as workspace_service
+
+        plan = await workspace_service.get_workspace_plan(workspace_id)
+        allowed_features = PLAN_FEATURES.get(plan, set())
+        if feature not in allowed_features:
+            raise Forbidden(
+                "plan.feature_denied",
+                f"feature {feature!r} requires {needed_plan}",
+            )
+
+    _guard.__name__ = f"require_plan_feature_{feature.replace('.', '_')}"
+    return _guard
+
+
 __all__ = [
     "current_user",
     "current_user_id",
@@ -142,4 +192,5 @@ __all__ = [
     "require_action",
     "require_action_any_workspace",
     "require_membership",
+    "require_plan_feature",
 ]

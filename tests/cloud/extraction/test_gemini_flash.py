@@ -93,9 +93,7 @@ async def test_image_extract_calls_gemini_with_inline_bytes(
     assert getattr(part.inline_data, "data", None) == tmp_image.read_bytes()
 
 
-async def test_image_extract_uses_configured_model(
-    mock_genai_client, tmp_image: Path
-) -> None:
+async def test_image_extract_uses_configured_model(mock_genai_client, tmp_image: Path) -> None:
     from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     fake_client, _ = mock_genai_client
@@ -106,9 +104,7 @@ async def test_image_extract_uses_configured_model(
     assert call_kwargs["model"] == "custom-model"
 
 
-async def test_image_extract_handles_empty_response(
-    mock_genai_client, tmp_image: Path
-) -> None:
+async def test_image_extract_handles_empty_response(mock_genai_client, tmp_image: Path) -> None:
     from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     _, fake_response = mock_genai_client
@@ -121,9 +117,7 @@ async def test_image_extract_handles_empty_response(
     assert result.captions == [""]
 
 
-async def test_pdf_extract_blank_page_marked_sparse(
-    mock_genai_client, tmp_blank_pdf: Path
-) -> None:
+async def test_pdf_extract_blank_page_marked_sparse(mock_genai_client, tmp_blank_pdf: Path) -> None:
     from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     fake_client, _ = mock_genai_client

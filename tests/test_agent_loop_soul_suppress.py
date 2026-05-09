@@ -5,6 +5,7 @@ evolve from interactions that were actually directed at a specific
 workspace agent. OSS paths never set the flag, so default behavior is
 unchanged -- verified by the second test.
 """
+
 from __future__ import annotations
 
 import asyncio

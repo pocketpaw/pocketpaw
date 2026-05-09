@@ -146,7 +146,8 @@ async def test_execute_cloud_mode_runs_in_process(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_execute_local_mode_returns_503_and_emits_bus_event(
-    client: AsyncClient, recording_bus,
+    client: AsyncClient,
+    recording_bus,
 ):
     """Local-mode actions don't run in cloud — they emit on the bus and 503.
 

@@ -505,6 +505,133 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
     return "\n".join(static_parts + dynamic_parts)
 
 
+_FILE_MENTION_TYPES = {"file", "upload", "attachment", "document", "image"}
+
+
+def _file_reference_terms(
+    *,
+    attachments: list[dict[str, Any]] | None,
+    mentions: list[dict[str, Any]] | None,
+) -> list[str]:
+    """Collect filename-like terms to steer KB retrieval for upload mentions."""
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        text = value.strip()
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        terms.append(text)
+
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        _add(att.get("name"))
+        _add(att.get("filename"))
+        _add(att.get("url"))
+        meta = att.get("meta")
+        if isinstance(meta, dict):
+            _add(meta.get("file_id"))
+            _add(meta.get("upload_id"))
+
+    for mention in mentions or []:
+        if not isinstance(mention, dict):
+            continue
+        mtype = str(mention.get("type") or "").strip().lower()
+        if mtype and mtype not in _FILE_MENTION_TYPES:
+            continue
+        _add(mention.get("display_name"))
+        _add(mention.get("name"))
+        _add(mention.get("id"))
+        _add(mention.get("url"))
+
+    return terms
+
+
+def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
+    """Return KB scopes to search for cloud-agent prompt context.
+
+    Ordered most-specific-first (pocket > agent > workspace) so that
+    the limited KB budget is allocated to the most relevant scope first.
+    """
+    scopes: list[str] = []
+    seen: set[str] = set()
+    for candidate in (
+        f"pocket:{ctx.pocket_id}" if ctx.pocket_id else None,
+        f"agent:{ctx.target_agent_id}" if ctx.target_agent_id else None,
+        f"workspace:{ctx.workspace_id}" if ctx.workspace_id else None,
+    ):
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        scopes.append(candidate)
+    return scopes
+
+
+async def build_knowledge_context(
+    ctx: ScopeContext,
+    *,
+    user_message: str,
+    attachments: list[dict[str, Any]] | None = None,
+    mentions: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build the prompt context block with KB hits relevant to this turn."""
+    scope_block = build_context_block(ctx)
+    query = (user_message or "").strip()
+    refs = _file_reference_terms(attachments=attachments, mentions=mentions)
+    if refs:
+        if len(refs) > 12:
+            logger.warning(
+                "_file_reference_terms returned %d terms; truncating to first 12",
+                len(refs),
+            )
+        ref_line = ", ".join(refs[:12])
+        query = f"{query}\nReferenced uploads: {ref_line}" if query else ref_line
+    if not query:
+        return scope_block
+
+    scopes = _kb_scopes_for_context(ctx)
+    if not scopes:
+        return scope_block
+
+    try:
+        from ee.cloud.agents.knowledge import KnowledgeService
+    except Exception:
+        logger.debug("KnowledgeService unavailable; using scope block only", exc_info=True)
+        return scope_block
+
+    snippets: list[tuple[str, str]] = []
+    for scope in scopes:
+        try:
+            text = await KnowledgeService.search_context_for_scope(scope, query, limit=3)
+        except Exception:
+            logger.warning("knowledge search failed for scope %s", scope, exc_info=True)
+            continue
+        cleaned = text.strip()
+        if cleaned:
+            snippets.append((scope, cleaned))
+
+    if not snippets:
+        return scope_block
+
+    kb_lines = [
+        "<knowledge-base>",
+        "Use relevant snippets below before reaching for extra tools.",
+    ]
+    for scope, text in snippets:
+        kb_lines.append(f"### {scope}\n{text}")
+    kb_lines.append("</knowledge-base>")
+    return f"{scope_block}\n\n" + "\n\n".join(kb_lines)
+
+
 # ---------------------------------------------------------------------------
 # History rehydration
 # ---------------------------------------------------------------------------

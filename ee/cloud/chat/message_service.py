@@ -172,9 +172,7 @@ async def _list_replies(parent_message_id: str) -> list[_MessageDomain]:
     return [_message_doc_to_domain(d) async for d in cursor]
 
 
-async def _search_in_group(
-    group_id: str, query: str, *, limit: int = 100
-) -> list[_MessageDomain]:
+async def _search_in_group(group_id: str, query: str, *, limit: int = 100) -> list[_MessageDomain]:
     pattern = re.escape(query)
     docs = (
         await _MessageDoc.find(
@@ -449,9 +447,7 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
             workspace_id=str(group.workspace),
             recipient=target,
             kind="mention",
-            title=(
-                f"You were mentioned in #{group_name}" if group_name else "You were mentioned"
-            ),
+            title=(f"You were mentioned in #{group_name}" if group_name else "You were mentioned"),
             body=body.content[:200],
             source=NotificationSource(
                 type="message",
@@ -852,9 +848,7 @@ async def persist_pocket_memory_message(
     Returns the new message id (as str). Used by ``MongoMemoryStore.save``
     so the memory adapter doesn't import the Message Beanie class.
     """
-    attachment_docs = (
-        [_AttachmentDoc(**a) for a in attachments] if attachments else []
-    )
+    attachment_docs = [_AttachmentDoc(**a) for a in attachments] if attachments else []
     msg = _MessageDoc(
         context_type="pocket",
         session_key=session_key,
@@ -911,9 +905,7 @@ async def delete_message_doc_by_id(message_id: str) -> bool:
     return True
 
 
-async def list_recent_for_group(
-    group_id: str, *, limit: int = 20
-) -> list[_MessageDomain]:
+async def list_recent_for_group(group_id: str, *, limit: int = 20) -> list[_MessageDomain]:
     """Return up to ``limit`` most-recent non-deleted group messages,
     oldest-first. Used by the agent bridge to rehydrate prior turns
     before a ``pool.run`` call."""
@@ -999,9 +991,7 @@ async def persist_assistant_message_for_scope(
 ) -> _MessageDoc:
     """Persist an agent's reply in an agent-stream context. Returns the
     Beanie doc so callers can read ``msg.id`` / ``msg.createdAt``."""
-    att_models = [
-        _AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])
-    ]
+    att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
     if kind in ("pocket", "session"):
         msg = _MessageDoc(
             context_type=kind,  # type: ignore[arg-type]

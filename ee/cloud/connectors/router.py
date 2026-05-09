@@ -4,6 +4,11 @@
 # legacy src/pocketpaw/api/v1/connectors.py so the frontend's
 # ``getConnectors()`` works unchanged when this handler shadows the
 # runtime one in cloud deployments.
+#
+# Updated: 2026-05-06 (fix/rbac-connector-upload-guards) — added RBAC guards
+# to all mutation endpoints. execute → connector.execute (MEMBER); enable /
+# disable / config → connector.manage (ADMIN). Read-only routes (GET list,
+# GET detail, GET widget-recipes) retain require_license only.
 
 from __future__ import annotations
 
@@ -20,7 +25,11 @@ from ee.cloud.connectors.dto import (
     WidgetRecipeResponse,
 )
 from ee.cloud.license import require_license
-from ee.cloud.shared.deps import current_user_id, current_workspace_id
+from ee.cloud.shared.deps import (
+    current_user_id,
+    current_workspace_id,
+    require_action_any_workspace,
+)
 
 # Mounted under /api/v1/cloud/connectors (not /api/v1/connectors) so it
 # does NOT shadow the legacy pocket-scoped routes in
@@ -62,7 +71,11 @@ async def list_widget_recipes(
     return await connectors_service.list_widget_recipes(workspace_id)
 
 
-@router.post("/{name}/execute", response_model=ExecuteActionResponse)
+@router.post(
+    "/{name}/execute",
+    response_model=ExecuteActionResponse,
+    dependencies=[Depends(require_action_any_workspace("connector.execute"))],
+)
 async def execute_action(
     name: str,
     body: ExecuteActionRequest,
@@ -89,7 +102,11 @@ async def get_connector(
     return await connectors_service.get_connector(workspace_id, name)
 
 
-@router.post("/{name}/enable", response_model=ConnectorResponse)
+@router.post(
+    "/{name}/enable",
+    response_model=ConnectorResponse,
+    dependencies=[Depends(require_action_any_workspace("connector.manage"))],
+)
 async def enable_connector(
     name: str,
     body: EnableConnectorRequest | None = None,
@@ -106,7 +123,11 @@ async def enable_connector(
     return await connectors_service.enable_connector(workspace_id, name, payload)
 
 
-@router.post("/{name}/disable", response_model=ConnectorResponse)
+@router.post(
+    "/{name}/disable",
+    response_model=ConnectorResponse,
+    dependencies=[Depends(require_action_any_workspace("connector.manage"))],
+)
 async def disable_connector(
     name: str,
     workspace_id: str = Depends(current_workspace_id),
@@ -115,7 +136,11 @@ async def disable_connector(
     return await connectors_service.disable_connector(workspace_id, name)
 
 
-@router.patch("/{name}/config", response_model=ConnectorResponse)
+@router.patch(
+    "/{name}/config",
+    response_model=ConnectorResponse,
+    dependencies=[Depends(require_action_any_workspace("connector.manage"))],
+)
 async def update_config(
     name: str,
     body: UpdateConnectorConfigRequest,

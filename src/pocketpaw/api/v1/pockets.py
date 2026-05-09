@@ -28,6 +28,7 @@ _WS_PREFIX = "websocket_"
 # Match the JSON arg passed to create_pocket in a Bash command (legacy fallback)
 _CREATE_POCKET_RE = re.compile(r"create_pocket\s+'(.*?)'", re.DOTALL)
 
+
 def _extract_chat_id(session_id: str | None) -> str:
     """Extract raw chat_id from a client-supplied session_id.
 

@@ -116,9 +116,7 @@ async def update_member_role(
     body: UpdateMemberRoleRequest,
     user: User = Depends(require_action("workspace.member.role_change")),
 ) -> dict:
-    await workspace_service.update_member_role(
-        workspace_id, user_id, body.role, str(user.id)
-    )
+    await workspace_service.update_member_role(workspace_id, user_id, body.role, str(user.id))
     return {"ok": True}
 
 

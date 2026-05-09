@@ -2,7 +2,8 @@
 
 Usage:
     uv run python scripts/diag_mongo_state.py
-    POCKETPAW_CLOUD_MONGO_URI=mongodb://localhost:27017/paw-cloud uv run python scripts/diag_mongo_state.py
+    POCKETPAW_CLOUD_MONGO_URI=mongodb://localhost:27017/paw-cloud \\
+        uv run python scripts/diag_mongo_state.py
 """
 
 from __future__ import annotations
@@ -12,9 +13,7 @@ import os
 
 
 async def main() -> int:
-    uri = os.environ.get(
-        "POCKETPAW_CLOUD_MONGO_URI", "mongodb://localhost:27017/paw-cloud"
-    )
+    uri = os.environ.get("POCKETPAW_CLOUD_MONGO_URI", "mongodb://localhost:27017/paw-cloud")
     db_name = uri.rsplit("/", 1)[-1].split("?")[0] or "paw-cloud"
     print(f"Connecting to: {uri}")
     print(f"DB name: {db_name}")

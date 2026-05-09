@@ -76,7 +76,6 @@ async def main() -> int:
     lic_mod._license_error = None
 
     _banner("0. init_beanie + mount_cloud")
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
     await init_beanie(
         connection_string=uri,
         document_models=[*ALL_DOCUMENTS, MemoryFactDoc],
@@ -142,7 +141,7 @@ async def main() -> int:
             session = r.json()
             session_id = session["sessionId"]
             print(f"   sessionId={session_id}")
-            print(f"   context_type in DB should be 'pocket' (no pocket/group/agent)")
+            print("   context_type in DB should be 'pocket' (no pocket/group/agent)")
 
             # --- 3. Send a chat message tagged with that session_id -------
             _banner("3. simulate chat with save_user_message(session_id, ...)")
@@ -185,8 +184,7 @@ async def main() -> int:
             hist = r.json()
             print(f"   history: {hist}")
             assert any(
-                m["content"] == "hello from smoke — user msg"
-                for m in hist.get("messages", [])
+                m["content"] == "hello from smoke — user msg" for m in hist.get("messages", [])
             ), "history did not include the message we just sent"
 
             print("\nSMOKE OK")

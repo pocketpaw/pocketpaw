@@ -78,9 +78,7 @@ async def list_files(
         from ee.cloud.pockets import service as pockets_service
 
         try:
-            allowed = await pockets_service.is_member(
-                pocket_id=pocket_id, user_id=user_id
-            )
+            allowed = await pockets_service.is_member(pocket_id=pocket_id, user_id=user_id)
         except Exception:
             allowed = False
         if not allowed:

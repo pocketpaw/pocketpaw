@@ -100,9 +100,7 @@ class S3StorageAdapter(StorageAdapter):
 
     async def open(self, key: str) -> AsyncIterator[bytes]:
         try:
-            obj = await asyncio.to_thread(
-                self._client.get_object, Bucket=self._bucket, Key=key
-            )
+            obj = await asyncio.to_thread(self._client.get_object, Bucket=self._bucket, Key=key)
         except Exception as exc:
             if _is_missing_key(exc):
                 raise NotFound(f"missing: {key}") from exc
@@ -120,9 +118,7 @@ class S3StorageAdapter(StorageAdapter):
 
     async def delete(self, key: str) -> None:
         try:
-            await asyncio.to_thread(
-                self._client.delete_object, Bucket=self._bucket, Key=key
-            )
+            await asyncio.to_thread(self._client.delete_object, Bucket=self._bucket, Key=key)
         except Exception as exc:
             if _is_missing_key(exc):
                 return
@@ -130,9 +126,7 @@ class S3StorageAdapter(StorageAdapter):
 
     async def exists(self, key: str) -> bool:
         try:
-            await asyncio.to_thread(
-                self._client.head_object, Bucket=self._bucket, Key=key
-            )
+            await asyncio.to_thread(self._client.head_object, Bucket=self._bucket, Key=key)
             return True
         except Exception:
             return False

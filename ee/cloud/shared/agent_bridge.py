@@ -72,7 +72,7 @@ async def on_message_for_agents(data: dict) -> None:
 
 async def _dispatch_agent_responses(data: dict) -> None:
     """Background worker for ``on_message_for_agents`` — does the actual
-    respond-mode evaluation and per-agent response spawning. Runs
+    respond-mode evaluation and per-agent response execution. Runs
     detached from the emitter's await chain."""
     group_id = data.get("group_id")
     sender_id = data.get("sender_id")
@@ -105,6 +105,7 @@ async def _dispatch_agent_responses(data: dict) -> None:
         [(a.agent_id, a.respond_mode) for a in group.agents],
     )
 
+    agents_to_run: list[str] = []
     for group_agent in group.agents:
         should = await _should_agent_respond(
             group_agent,
@@ -121,16 +122,130 @@ async def _dispatch_agent_responses(data: dict) -> None:
             should,
         )
         if should:
-            asyncio.create_task(
-                _run_agent_response(
-                    agent_id=group_agent.agent_id,
-                    group_id=group_id,
-                    workspace_id=workspace_id,
-                    user_message=content,
-                    group_members=group.members,
-                    attachments=attachments,
-                )
+            agents_to_run.append(group_agent.agent_id)
+
+    agents_to_run = _reorder_agent_ids_for_mentions(agents_to_run, mentions)
+    responses_by_agent: list[tuple[str, str]] = []
+    for idx, agent_id in enumerate(agents_to_run, start=1):
+        logger.info(
+            "Agent bridge: dispatching agent %s (%d/%d) sequentially",
+            agent_id,
+            idx,
+            len(agents_to_run),
+        )
+        try:
+            response_text = await _run_agent_response(
+                agent_id=agent_id,
+                group_id=group_id,
+                workspace_id=workspace_id,
+                user_message=content,
+                group_members=group.members,
+                attachments=attachments,
+                response_label=None,
             )
+        except Exception:
+            logger.exception(
+                "Agent bridge: agent %s failed during sequential dispatch in group %s",
+                agent_id,
+                group_id,
+            )
+            continue
+        if response_text:
+            responses_by_agent.append((agent_id, response_text))
+
+    # Skip the synthesis pass when fewer than 2 agents actually responded.
+    # If only one agent succeeded (others raised), having that survivor
+    # synthesize its own output produces a redundant "Final response:"
+    # duplicate visible to the user.
+    if len(agents_to_run) < 2 or len(responses_by_agent) < 2:
+        return
+
+    final_agent_id = responses_by_agent[-1][0]
+    responded_agent_ids = {agent_id for agent_id, _ in responses_by_agent}
+    failed_agent_ids = [
+        agent_id for agent_id in agents_to_run if agent_id not in responded_agent_ids
+    ]
+    logger.info(
+        (
+            "Agent bridge: generating final collaborative response "
+            "with agent %s after %d agent replies"
+        ),
+        final_agent_id,
+        len(responses_by_agent),
+    )
+    try:
+        await _run_agent_response(
+            agent_id=final_agent_id,
+            group_id=group_id,
+            workspace_id=workspace_id,
+            user_message=_build_collaboration_final_prompt(
+                content, responses_by_agent, failed_agent_ids
+            ),
+            group_members=group.members,
+            attachments=None,
+            response_label="Final response:",
+        )
+    except Exception:
+        logger.exception(
+            "Agent bridge: final collaborative response failed in group %s (agent %s)",
+            group_id,
+            final_agent_id,
+        )
+
+
+def _reorder_agent_ids_for_mentions(agent_ids: list[str], mentions: list[dict]) -> list[str]:
+    """Dispatch mentioned agents first, preserving mention order from the message."""
+    seen: set[str] = set()
+    mentioned_order: list[str] = []
+    for mention in mentions:
+        if not isinstance(mention, dict) or mention.get("type") != "agent":
+            continue
+        agent_id = mention.get("id")
+        if isinstance(agent_id, str) and agent_id and agent_id not in seen:
+            seen.add(agent_id)
+            mentioned_order.append(agent_id)
+
+    prioritized = [agent_id for agent_id in mentioned_order if agent_id in agent_ids]
+    prioritized_set = set(prioritized)
+    return prioritized + [agent_id for agent_id in agent_ids if agent_id not in prioritized_set]
+
+
+def _build_collaboration_final_prompt(
+    user_message: str,
+    responses_by_agent: list[tuple[str, str]],
+    failed_agent_ids: list[str] | None = None,
+) -> str:
+    """Build a synthesis prompt so one agent can produce the final collaborative answer."""
+    lines = [
+        "You are generating the final collaborative answer for a group chat.",
+        "Original user message:",
+        user_message.strip(),
+        "",
+        "Other agent responses:",
+    ]
+    for idx, (agent_id, response) in enumerate(responses_by_agent, start=1):
+        clipped = response.strip()[:4000]
+        lines.extend([f"{idx}. Agent {agent_id}:", clipped, ""])
+
+    if failed_agent_ids:
+        lines.extend(
+            [
+                "Agents that could not produce a full response:",
+                ", ".join(failed_agent_ids),
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            (
+                "Now provide one final answer for the user that reconciles the agents, resolves "
+                "disagreements, and is directly actionable."
+            ),
+            "Do not repeat raw internal notes; provide only the final user-facing answer.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 async def _should_agent_respond(
@@ -281,7 +396,8 @@ async def _run_agent_response(
     user_message: str,
     group_members: list[str],
     attachments: list[dict] | None = None,
-) -> None:
+    response_label: str | None = None,
+) -> str | None:
     """Run an agent's response and stream it to the group.
 
     ``attachments`` carries the triggering user message's files (shape matches
@@ -306,7 +422,7 @@ async def _run_agent_response(
         instance = await pool.get(agent_id)
     except Exception:
         logger.error("Failed to get agent instance %s", agent_id, exc_info=True)
-        return
+        return None
 
     # Fetch recent conversation history from cloud Messages.
     recent_msgs = await message_service.list_recent_for_group(group_id, limit=20)
@@ -350,13 +466,15 @@ async def _run_agent_response(
     # O(n²) with response length. stream_end delivers the authoritative final
     # text, so a coalesced chunk is a lossless UX compromise.
     full_text = ""
+    saw_error_event = False
+    error_summary = ""
     last_emit_ts = 0.0
     STREAM_CHUNK_THROTTLE_S = 0.2
     try:
         async for event in pool.run(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
         ):
-            if event.type == "message":
+            if event.type in {"message", "text"}:
                 full_text += event.content
                 now = asyncio.get_event_loop().time()
                 if now - last_emit_ts >= STREAM_CHUNK_THROTTLE_S:
@@ -399,14 +517,22 @@ async def _run_agent_response(
                         },
                     )
                 )
+            elif event.type == "error":
+                saw_error_event = True
+                if isinstance(event.content, str):
+                    error_summary = event.content.strip()[:300]
             elif event.type == "done":
                 break
     except Exception:
         logger.exception("Agent %s response failed in group %s", agent_id, group_id)
         full_text = full_text or "[Agent response failed]"
 
+    if saw_error_event and not full_text.strip():
+        details = f": {error_summary}" if error_summary else ""
+        full_text = f"[Agent encountered an error and could not produce a full response{details}]"
+
     if not full_text.strip():
-        return
+        return None
 
     # Check for ripple spec in response
     attachment_dicts: list[dict] = []
@@ -439,10 +565,14 @@ async def _run_agent_response(
 
     # Persist agent message via the chat service so this file stays out
     # of ``ee.cloud.models.message``.
+    final_text = full_text
+    if response_label:
+        final_text = f"{response_label}\n\n{full_text}"
+
     msg = await message_service.create_agent_message(
         group_id=group_id,
         agent_id=agent_id,
-        content=full_text,
+        content=final_text,
         attachments=attachment_dicts or None,
     )
 
@@ -458,7 +588,7 @@ async def _run_agent_response(
                 "agent_id": agent_id,
                 "message_id": str(msg.id),
                 "temp_message_id": temp_msg_id,
-                "content": full_text,
+                "content": final_text,
                 "ripple_spec": ripple_spec,
                 "pocket_id": pocket_id,
                 "agent_name": instance.agent_name,
@@ -467,14 +597,15 @@ async def _run_agent_response(
     )
 
     # Observe with soul
-    await pool.observe(agent_id, user_message, full_text)
+    await pool.observe(agent_id, user_message, final_text)
 
     logger.info(
         "Agent %s responded in group %s (%d chars)",
         instance.agent_name,
         group_id,
-        len(full_text),
+        len(final_text),
     )
+    return final_text
 
 
 def register_agent_bridge() -> None:

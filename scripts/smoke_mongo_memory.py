@@ -31,9 +31,7 @@ def _banner(title: str) -> None:
 async def main() -> int:
     # Pick a throwaway database so we can safely drop it at the end.
     db_name = f"smoke_mongo_memory_{uuid.uuid4().hex[:8]}"
-    mongo_uri = os.environ.get(
-        "POCKETPAW_SMOKE_MONGO_URI", f"mongodb://localhost:27017/{db_name}"
-    )
+    mongo_uri = os.environ.get("POCKETPAW_SMOKE_MONGO_URI", f"mongodb://localhost:27017/{db_name}")
     # Make sure no prior env selection overrides the ee default.
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
 

@@ -60,8 +60,18 @@ def _fts_escape(term: str) -> str:
 
 def _entries_to_csv_bytes(entries: list[AuditEntry]) -> bytes:
     fieldnames = [
-        "id", "timestamp", "pocket_id", "actor", "action", "category",
-        "description", "context", "ai_recommendation", "outcome", "status", "metadata",
+        "id",
+        "timestamp",
+        "pocket_id",
+        "actor",
+        "action",
+        "category",
+        "description",
+        "context",
+        "ai_recommendation",
+        "outcome",
+        "status",
+        "metadata",
     ]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
@@ -194,9 +204,7 @@ class AuditStore:
         if workspace_id is not None:
             # JSON comparison using SQLite's json_extract. Parameter
             # binding handles the value; the column name is a literal.
-            conditions.append(
-                "COALESCE(json_extract(context, '$.workspace_id'), '') = ?"
-            )
+            conditions.append("COALESCE(json_extract(context, '$.workspace_id'), '') = ?")
             params.append(workspace_id)
         if q is not None and q.strip():
             needle = _fts_escape(q.strip())

@@ -163,9 +163,7 @@ class MongoMemoryStore:
                     if isinstance(a, dict):
                         attachment_dicts.append(a)
                     else:
-                        logger.warning(
-                            "skipping malformed attachment on pocket message: %r", a
-                        )
+                        logger.warning("skipping malformed attachment on pocket message: %r", a)
 
             session, workspace_id = await _resolve_or_create_session(normalized_key, entry)
             msg_id = await message_service.persist_pocket_memory_message(
@@ -435,9 +433,7 @@ async def _resolve_or_create_session(
     if session is not None:
         return session, md_ws or session.workspace
 
-    session = await sessions_service.auto_create_pocket_session(
-        session_key, workspace_id=md_ws
-    )
+    session = await sessions_service.auto_create_pocket_session(session_key, workspace_id=md_ws)
     if session is None:
         return None, md_ws
 

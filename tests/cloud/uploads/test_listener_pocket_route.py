@@ -29,9 +29,7 @@ class _FakeChain:
 def _patch(monkeypatch, *, chain, storage_path: Path, ingest):
     from ee.cloud.uploads import listeners
 
-    monkeypatch.setattr(
-        "ee.cloud.extraction.build_chain", lambda settings: chain
-    )
+    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: chain)
 
     class _Adapter:
         def local_path(self, _key: str) -> Path:

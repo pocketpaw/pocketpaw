@@ -187,7 +187,8 @@ class GCPAdapter:
         """Check whether the gcloud CLI is reachable."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                self._gcloud or "gcloud", "--version",
+                self._gcloud or "gcloud",
+                "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

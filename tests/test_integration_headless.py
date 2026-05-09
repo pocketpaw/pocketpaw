@@ -198,7 +198,7 @@ class TestToolBridgeCompleteness:
         this reset the memory-tool assertions below fail non-deterministically
         depending on test order. Mirrors the pattern in test_soul_v024_smoke.py.
         """
-        from pocketpaw.soul.manager import _reset_manager
+        from pocketpaw.soul._manager import _reset_manager
 
         _reset_manager()
         yield

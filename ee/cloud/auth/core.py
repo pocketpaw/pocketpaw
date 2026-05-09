@@ -198,9 +198,7 @@ async def seed_workspace(admin: User | None = None) -> Any | None:
     ws_name = os.environ.get("DEFAULT_WORKSPACE_NAME", "PocketPaw")
     ws_slug = os.environ.get("DEFAULT_WORKSPACE_SLUG", "pocketpaw")
 
-    ws = await workspace_service.seed_default_workspace(
-        str(admin.id), name=ws_name, slug=ws_slug
-    )
+    ws = await workspace_service.seed_default_workspace(str(admin.id), name=ws_name, slug=ws_slug)
     if ws is None:
         # Skipped or failed — service logged the reason.
         return None

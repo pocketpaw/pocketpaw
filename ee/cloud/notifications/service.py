@@ -124,9 +124,7 @@ async def list_for_user(
     return [_to_domain(doc) async for doc in cursor]
 
 
-async def list_for_user_dicts(
-    user_id: str, *, unread: bool = False, limit: int = 50
-) -> list[dict]:
+async def list_for_user_dicts(user_id: str, *, unread: bool = False, limit: int = 50) -> list[dict]:
     """Wire-shape variant: returns ``list[dict]`` for legacy callers
     that haven't yet adopted the DTO."""
     notes = await list_for_user(user_id, unread=unread, limit=limit)
@@ -146,9 +144,9 @@ async def mark_read(notification_id: str, user_id: str) -> bool:
 
 
 async def clear_all(user_id: str) -> int:
-    result = await _NotificationDoc.find(
-        {"recipient": user_id, "read": False}
-    ).update_many({"$set": {"read": True}})
+    result = await _NotificationDoc.find({"recipient": user_id, "read": False}).update_many(
+        {"$set": {"read": True}}
+    )
     count = getattr(result, "modified_count", 0)
     await emit(NotificationCleared(data={"user_id": user_id}))
     return count

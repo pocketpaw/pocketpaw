@@ -302,9 +302,7 @@ async def patch_message_ui_state(
     inputs, etc.) so client-side state survives reload. See
     ``message_service.patch_ui_state`` for authz semantics.
     """
-    return await message_service.patch_ui_state(
-        message_id, user_id, body.spec_id, body.state
-    )
+    return await message_service.patch_ui_state(message_id, user_id, body.spec_id, body.state)
 
 
 # ---------------------------------------------------------------------------
@@ -419,14 +417,10 @@ async def suggest_mentions(
     results: list[dict] = []
 
     if "user" in kinds:
-        results.extend(
-            await auth_service.suggest_workspace_members(workspace_id, q)
-        )
+        results.extend(await auth_service.suggest_workspace_members(workspace_id, q))
 
     if "agent" in kinds:
-        results.extend(
-            await agents_service.suggest_for_mentions(workspace_id, q)
-        )
+        results.extend(await agents_service.suggest_for_mentions(workspace_id, q))
 
     if "channel" in kinds:
         results.extend(await group_service.suggest_channels(workspace_id, q))

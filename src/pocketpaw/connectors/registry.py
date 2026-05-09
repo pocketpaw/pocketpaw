@@ -44,7 +44,12 @@ _SQL_CONNECTORS: set[str] = {"postgresql", "mysql", "mssql", "sqlite"}
 _NOSQL_CONNECTORS: set[str] = {"mongodb"}
 _CLI_CONNECTORS: set[str] = {"firebase", "gcp"}
 _NATIVE_COMM_CONNECTORS: set[str] = {
-    "gmail", "gcalendar", "gdocs", "drive", "reddit", "spotify",
+    "gmail",
+    "gcalendar",
+    "gdocs",
+    "drive",
+    "reddit",
+    "spotify",
 }  # PR-3..7
 
 

@@ -70,9 +70,7 @@ async def _make_message(
 async def test_send_message_emits_new_and_sent(mongo_db, recording_bus):
     group = await _make_group(owner="u1", members=["u1"])
 
-    await message_service.send_message(
-        str(group.id), "u1", SendMessageRequest(content="hi")
-    )
+    await message_service.send_message(str(group.id), "u1", SendMessageRequest(content="hi"))
 
     new_evs = [e for e in recording_bus.events if isinstance(e, MessageNew)]
     sent_evs = [e for e in recording_bus.events if isinstance(e, MessageSent)]
@@ -90,9 +88,7 @@ async def test_edit_message_emits_edited(mongo_db, recording_bus):
     group = await _make_group(owner="u1", members=["u1"])
     msg = await _make_message(group_id=str(group.id), sender="u1", content="orig")
 
-    await message_service.edit_message(
-        str(msg.id), "u1", EditMessageRequest(content="new")
-    )
+    await message_service.edit_message(str(msg.id), "u1", EditMessageRequest(content="new"))
 
     edits = [e for e in recording_bus.events if isinstance(e, MessageEdited)]
     assert len(edits) == 1
@@ -170,12 +166,8 @@ async def test_send_message_fans_out_everyone_mention_to_all_members(
     async def fake_bump(user_id, group_id):
         bumped.append((user_id, group_id))
 
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.notifications_service.create", fake_notif
-    )
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
-    )
+    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", fake_notif)
+    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump)
 
     body = SendMessageRequest(
         content="hello team",
@@ -203,12 +195,8 @@ async def test_send_message_user_and_broadcast_mention_dedupes(
     async def fake_bump(user_id, group_id):
         pass
 
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.notifications_service.create", fake_notif
-    )
-    monkeypatch.setattr(
-        "ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
-    )
+    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", fake_notif)
+    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump)
 
     body = SendMessageRequest(
         content="hi u2",
@@ -228,9 +216,7 @@ async def test_send_message_emits_unread_update_for_non_senders(mongo_db, record
     """Every non-sender member should receive an unread.update event."""
     group = await _make_group(owner="sender", members=["sender", "u2", "u3"])
 
-    await message_service.send_message(
-        str(group.id), "sender", SendMessageRequest(content="hi")
-    )
+    await message_service.send_message(str(group.id), "sender", SendMessageRequest(content="hi"))
 
     updates = [e for e in recording_bus.events if isinstance(e, UnreadUpdate)]
     recipients = {e.data["user_id"] for e in updates}

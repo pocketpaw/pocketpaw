@@ -238,14 +238,13 @@ def format_for_prompt(manifest: dict[str, Any]) -> str:
             lines.append(description)
             lines.append("")
         lines.append(
-            f"Top-level shape: `{{ \"version\": \"{envelope_version}\", "
-            f"\"{state_field}\": {{...}}, \"{ui_field}\": {{...}} }}`."
+            f'Top-level shape: `{{ "version": "{envelope_version}", '
+            f'"{state_field}": {{...}}, "{ui_field}": {{...}} }}`.'
         )
         if aliases:
             alias_list = ", ".join(f"`{a}`" for a in aliases)
             lines.append(
-                f"Do NOT name the renderable tree {alias_list}. "
-                f"The field is `{ui_field}` exactly."
+                f"Do NOT name the renderable tree {alias_list}. The field is `{ui_field}` exactly."
             )
         if example:
             lines.append("")

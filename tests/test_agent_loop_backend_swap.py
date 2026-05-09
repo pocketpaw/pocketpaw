@@ -27,9 +27,7 @@ def _make_loop(agent_id: str | None = None) -> AgentLoop:
     with (
         patch("pocketpaw.agents.loop.get_settings", return_value=settings),
         patch("pocketpaw.agents.loop.get_message_bus", return_value=MagicMock()),
-        patch(
-            "pocketpaw.agents.loop.get_memory_manager", return_value=MagicMock()
-        ),
+        patch("pocketpaw.agents.loop.get_memory_manager", return_value=MagicMock()),
         patch("pocketpaw.agents.loop.AgentContextBuilder", return_value=MagicMock()),
     ):
         return AgentLoop(agent_id=agent_id)
@@ -51,9 +49,7 @@ def test_default_loop_rebuilds_router_when_backend_changes():
     fresh_settings = MagicMock(agent_backend="codex_cli", fallback_backends=[])
 
     with (
-        patch(
-            "pocketpaw.agents.loop.Settings.load", return_value=fresh_settings
-        ),
+        patch("pocketpaw.agents.loop.Settings.load", return_value=fresh_settings),
         patch(
             "pocketpaw.agents.loop.AgentRouter",
             return_value=_stub_router("codex_cli"),
@@ -115,9 +111,7 @@ def test_first_call_for_default_loop_loads_fresh_settings():
     fresh_settings = MagicMock(agent_backend="codex_cli", fallback_backends=[])
 
     with (
-        patch(
-            "pocketpaw.agents.loop.Settings.load", return_value=fresh_settings
-        ),
+        patch("pocketpaw.agents.loop.Settings.load", return_value=fresh_settings),
         patch(
             "pocketpaw.agents.loop.AgentRouter",
             return_value=_stub_router("codex_cli"),

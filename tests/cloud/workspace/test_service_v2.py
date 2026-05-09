@@ -118,9 +118,7 @@ async def test_create_emits_member_added_and_invalidates_cache(
 
 
 async def test_create_rejects_duplicate_slug(owner) -> None:
-    await workspace_service.create(
-        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
-    )
+    await workspace_service.create(_ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a"))
     with pytest.raises(ConflictError):
         await workspace_service.create(
             _ctx(str(owner.id)), CreateWorkspaceRequest(name="A2", slug="a")
@@ -132,9 +130,7 @@ async def test_update_emits_workspace_updated(owner, recording_bus) -> None:
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
     recording_bus.events.clear()
-    await workspace_service.update(
-        _ctx(str(owner.id)), ws.id, UpdateWorkspaceRequest(name="B")
-    )
+    await workspace_service.update(_ctx(str(owner.id)), ws.id, UpdateWorkspaceRequest(name="B"))
     assert any(isinstance(e, WorkspaceUpdated) for e in recording_bus.events)
 
 
@@ -167,15 +163,11 @@ async def test_update_member_role_blocks_demoting_owner(owner) -> None:
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
     with pytest.raises(Forbidden) as exc:
-        await workspace_service.update_member_role(
-            ws.id, str(owner.id), "member", str(owner.id)
-        )
+        await workspace_service.update_member_role(ws.id, str(owner.id), "member", str(owner.id))
     assert exc.value.code == "workspace.cannot_demote_owner"
 
 
-async def test_update_member_role_emits_role_event(
-    owner, recording_bus, resolver_mock
-) -> None:
+async def test_update_member_role_emits_role_event(owner, recording_bus, resolver_mock) -> None:
     other = await _seed_user(email="other@x.c")
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
@@ -184,9 +176,7 @@ async def test_update_member_role_emits_role_event(
 
     recording_bus.events.clear()
     resolver_mock.invalidate_workspace.reset_mock()
-    await workspace_service.update_member_role(
-        ws.id, str(other.id), "admin", str(owner.id)
-    )
+    await workspace_service.update_member_role(ws.id, str(other.id), "admin", str(owner.id))
     assert any(isinstance(e, WorkspaceMemberRole) for e in recording_bus.events)
     resolver_mock.invalidate_workspace.assert_called_with(ws.id)
 
@@ -225,9 +215,7 @@ async def test_remove_member_emits_both_paths(
 
 
 async def test_create_invite_seat_limit(owner, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", _async_noop
-    )
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -243,9 +231,7 @@ async def test_create_invite_seat_limit(owner, monkeypatch) -> None:
 
 
 async def test_create_invite_rejects_duplicate_pending(owner, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", _async_noop
-    )
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -259,12 +245,8 @@ async def test_create_invite_rejects_duplicate_pending(owner, monkeypatch) -> No
     assert exc.value.code == "invite.already_pending"
 
 
-async def test_create_invite_emits_invite_created(
-    owner, recording_bus, monkeypatch
-) -> None:
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", _async_noop
-    )
+async def test_create_invite_emits_invite_created(owner, recording_bus, monkeypatch) -> None:
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -283,9 +265,7 @@ async def test_create_invite_to_existing_user_includes_user_id_and_notifies(
     async def fake_notify(**kwargs):
         notifications.append(kwargs)
 
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", fake_notify
-    )
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", fake_notify)
     invitee = await _seed_user(email="invitee@x.c")
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
@@ -295,9 +275,7 @@ async def test_create_invite_to_existing_user_includes_user_id_and_notifies(
         _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="invitee@x.c")
     )
 
-    created = next(
-        e for e in recording_bus.events if isinstance(e, WorkspaceInviteCreated)
-    )
+    created = next(e for e in recording_bus.events if isinstance(e, WorkspaceInviteCreated))
     assert created.data.get("user_id") == str(invitee.id)
     assert len(notifications) == 1
     assert notifications[0]["recipient"] == str(invitee.id)
@@ -306,9 +284,7 @@ async def test_create_invite_to_existing_user_includes_user_id_and_notifies(
 async def test_accept_invite_adds_member_and_emits(
     owner, recording_bus, resolver_mock, monkeypatch
 ) -> None:
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", _async_noop
-    )
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
     invitee = await _seed_user(email="invitee@x.c")
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
@@ -330,9 +306,7 @@ async def test_accept_invite_adds_member_and_emits(
 
 
 async def test_accept_invite_rejects_revoked(owner, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", _async_noop
-    )
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -352,12 +326,8 @@ async def test_accept_invite_rejects_revoked(owner, monkeypatch) -> None:
     assert exc.value.code == "invite.revoked"
 
 
-async def test_revoke_invite_emits_invite_revoked(
-    owner, recording_bus, monkeypatch
-) -> None:
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", _async_noop
-    )
+async def test_revoke_invite_emits_invite_revoked(owner, recording_bus, monkeypatch) -> None:
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -370,9 +340,7 @@ async def test_revoke_invite_emits_invite_revoked(
 
 
 async def test_validate_invite_returns_workspace_name(owner, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ee.cloud.workspace.service.notifications_service.create", _async_noop
-    )
+    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="Acme", slug="acme")
     )
