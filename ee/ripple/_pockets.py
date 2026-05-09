@@ -493,62 +493,57 @@ Step 3 — hard rules:
 
 _CREATION_OVERVIEW_MCP = """\
 <pocket-creation>
-The user wants to create a NEW pocket — a workspace canvas.
+## STEP 0 — DELEGATE TO SPECIALIST
 
-**The canvas renders only from `rippleSpec.ui`.** A pocket without a
-`ripple_spec` is an empty canvas. Build the full UISpec node tree up
-front and pass it as `ripple_spec`. Do NOT pass a separate `widgets`
-array — that field exists for legacy reasons and the client doesn't
-render from it.
+When the user wants a pocket and you have the brief, IMMEDIATELY call:
 
-Each node: {type, props, children?, style?}. Nest with `children`
-arrays in `flex`/`grid`.
+    pocket_specialist__create({
+        "brief": "<natural-language description of what the user wants>",
+        "hints": {  // optional, only when user named these explicitly
+            "name": "<user-said-name>",
+            "color": "<user-said-color-hex>",
+            "icon": "<user-said-icon>"
+        }
+    })
 
-Hard rules:
-- Run `list_pockets` FIRST (see <list-before-create>). Default to
-  extending an existing pocket if one fits.
-- Apply the <interactive-by-default> pattern. Most pockets get a
-  `state` seed + a controls row + a bound focal widget.
-- All values must be concrete — no "TBD", "...", null. If estimating,
-  prefix with "~".
-- NEVER read source files or grep the repo to figure out the schema —
-  the canonical shapes in the design block below are the contract.
-- NEVER pass a `widgets` array. Put everything inside `ripple_spec`.
+The specialist will list existing pockets, decide extend-vs-create,
+draft, validate, and persist. You receive:
 
-The tool returns {"ok": true, "pocket": {...}, "pocket_id": "..."}.
-The new pocket mounts in the user's sidebar automatically; do not
-follow up with `get_pocket`.
+    {ok, action: "created"|"extended", pocket, warnings, duration_ms, backend_used}
+
+Do NOT call list_pockets, create_pocket, or update_pocket directly.
+The specialist owns the whole flow in one tool call.
+
+After the specialist returns, surface any warnings to the user as
+"I shipped it; want me to clean up X?" — do NOT block on warnings.
+The pocket already exists.
 </pocket-creation>
 """
 
 
 _CREATION_OVERVIEW_CLI = """\
 <pocket-creation>
-The user wants to create a NEW pocket — a workspace canvas.
+## STEP 0 — DELEGATE TO SPECIALIST
 
-**The canvas renders only from `rippleSpec.ui`.** A pocket without a
-`ripple_spec` is an empty canvas. Build the full UISpec node tree up
-front and pass it as `ripple_spec`. Do NOT pass a separate `widgets`
-array — that field exists for legacy reasons and the client doesn't
-render from it.
+When the user wants a pocket and you have the brief, IMMEDIATELY run:
 
-Each node: {type, props, children?, style?}. Nest with `children`
-arrays in `flex`/`grid`.
+    cloud_pocket_specialist_create '{"brief": "<brief>", "hints": {...}}'
 
-Hard rules:
-- Run `cloud_list_pockets` FIRST (see <list-before-create>). Default
-  to extending an existing pocket if one fits.
-- Apply the <interactive-by-default> pattern. Most pockets get a
-  `state` seed + a controls row + a bound focal widget.
-- All values must be concrete — no "TBD", "...", null. If estimating,
-  prefix with "~".
-- NEVER read source files or grep the repo to figure out the schema —
-  the canonical shapes in the design block below are the contract.
-- NEVER pass a `widgets` array. Put everything inside `ripple_spec`.
+(The hints object is optional. Pass keys like
+{"name": "PR Tracker", "color": "#0ea5e9"} only when the user named
+those fields explicitly.)
 
-The command returns {"ok": true, "pocket": {...}, "pocket_id": "..."}.
-The new pocket mounts in the user's sidebar automatically; do not follow
-up with `cloud_get_pocket`.
+The specialist will list existing pockets, decide extend-vs-create,
+draft, validate, and persist. The command prints a JSON object:
+
+    {ok, action: "created"|"extended", pocket, warnings, duration_ms, backend_used}
+
+Do NOT run any other cloud_* pocket command directly — the
+specialist owns the whole flow (listing, creating, updating).
+
+After the specialist returns, surface any warnings to the user as
+"I shipped it; want me to clean up X?" — do NOT block on warnings.
+The pocket already exists.
 </pocket-creation>
 """
 
@@ -729,22 +724,125 @@ research FIRST using a MULTI-AGENT approach:
 
 
 # ---------------------------------------------------------------------------
+# Specialist tool surface — what the pocket specialist runtime sees.
+# These are the three internal tools the runtime attaches via
+# ``backend.attach_specialist_tools`` (see ``ee.agent.pocket_specialist``).
+# ---------------------------------------------------------------------------
+
+
+_SPECIALIST_TOOLS = """\
+<specialist-tools>
+You have three internal tools (no MCP/cloud_ prefix — the runtime
+attaches them directly):
+
+  list_pockets()
+    → {"ok": true, "pockets": [{id, name, description, type, icon, color}, ...]}
+    Lists every pocket in the user's workspace. Cheap; metadata only.
+    Call FIRST so you can decide extend-vs-create.
+
+  validate_spec(spec={...full rippleSpec envelope...})
+    → {"ok": true, "warnings": ["...", ...], "spec": {...possibly normalized...}}
+    Validates the draft against the renderer's grammar. If warnings
+    come back: revise and re-validate, up to 3 attempts. After 3
+    attempts, persist anyway with the remaining warnings — never
+    block.
+
+  persist_pocket(
+    name="<short title>",                                       # required
+    description="<one-line summary>",
+    type="research|business|data|mission|deep-work|custom|hospitality",
+    icon="<icon name>",
+    color="#0A84FF",
+    ripple_spec={...validated UISpec envelope...},              # required
+    target_pocket_id="..."                                      # only when extending
+  )
+    → {"ok": true, "pocket": {...}, "pocket_id": "..."}
+    Writes the pocket to the workspace. The new pocket auto-mounts on
+    the sidebar. Call EXACTLY ONCE. If you finish without calling
+    persist_pocket, the runtime force-persists a placeholder — that's
+    a bug; always call persist_pocket explicitly.
+</specialist-tools>
+"""
+
+
+_SPECIALIST_WORKFLOW = """\
+<specialist-workflow>
+You are the pocket specialist. The calling agent has handed you a
+brief describing what a user wants. Run this workflow:
+
+1. Call ``list_pockets`` to see what already exists in the workspace.
+
+2. Decide whether to extend an existing pocket or create a new one:
+   - If the brief is a near-exact match for an existing pocket
+     (same scope, same intent), extend it: pass that pocket's id as
+     ``target_pocket_id`` to ``persist_pocket``.
+   - If the brief is merely "related" (user has a Kanban; brief asks
+     for a Todo list), CREATE a new pocket. Different intent =
+     different pocket.
+   - Default to creating a new pocket. When in doubt, create.
+
+3. Draft a rippleSpec from the brief, the caller's hints (if any),
+   and — when extending — the existing pocket's spec. Apply the
+   <interactive-by-default> pattern unless the brief asks for a
+   read-only display.
+
+4. Call ``validate_spec`` on the draft. If warnings come back, revise
+   the draft and re-validate. Cap at 3 attempts; on the third pass,
+   persist with the remaining warnings instead of looping forever.
+
+5. Call ``persist_pocket`` exactly once with the final spec. You MUST
+   call this before returning — that is your contract. The pocket
+   doesn't exist until persist_pocket runs.
+
+Hard rules:
+- NEVER read source files or grep the repo to figure out the schema.
+  The canonical shapes in the design block below are the contract.
+- All values must be concrete — no "TBD", "...", null. If estimating,
+  prefix with "~" (e.g. "~$5B").
+- NEVER pass a ``widgets`` array. Put everything inside ``ripple_spec``.
+</specialist-workflow>
+"""
+
+
+# ---------------------------------------------------------------------------
 # Final assembly. Each variant ends with the shared design rules block.
-# Order: scope → canvas → list-gate → tools → workflow/creation →
-# interactive-default → state-sources → examples → research-protocol → design rules.
 # ---------------------------------------------------------------------------
 
 
 def _assemble_creation(*, mcp: bool) -> str:
+    """Calling-agent prompt: scope/canvas + STEP 0 delegation block.
+
+    The full creation workflow lives on the specialist (see
+    ``POCKET_SPECIALIST_PROMPT``). The calling agent's only job is to
+    delegate via ``pocket_specialist__create`` (MCP) or
+    ``cloud_pocket_specialist_create`` (CLI).
+    """
     parts = [
         _SCOPE_BLOCK,
         _CANVAS_BLOCK,
-        _LIST_BEFORE_CREATE_MCP if mcp else _LIST_BEFORE_CREATE_CLI,
-        _TOOLS_MCP if mcp else _TOOLS_CLI,
         _CREATION_OVERVIEW_MCP if mcp else _CREATION_OVERVIEW_CLI,
+    ]
+    return "\n".join(parts) + "\n"
+
+
+def _assemble_specialist() -> str:
+    """Specialist runtime prompt: scope/canvas + tools + workflow +
+    interactive-by-default + state-sources + examples + research +
+    design rules. The specialist owns the heavy creation lift.
+
+    The example blocks still show the legacy ``create_pocket`` envelope —
+    they document the rippleSpec shape, not the tool surface; the
+    specialist calls ``persist_pocket`` instead but the spec body is
+    identical.
+    """
+    parts = [
+        _SCOPE_BLOCK,
+        _CANVAS_BLOCK,
+        _SPECIALIST_TOOLS,
+        _SPECIALIST_WORKFLOW,
         _INTERACTIVE_DEFAULT_BLOCK,
-        _STATE_SOURCES_BLOCK,  # <-- new line, here
-        _CREATION_EXAMPLES_MCP if mcp else _CREATION_EXAMPLES_CLI,
+        _STATE_SOURCES_BLOCK,
+        _CREATION_EXAMPLES_MCP,
         _RESEARCH_PROTOCOL,
         RIPPLE_DESIGN_RULES,
     ]
@@ -768,6 +866,7 @@ POCKET_CREATION_PROMPT_MCP = _assemble_creation(mcp=True)
 POCKET_CREATION_PROMPT_CLI = _assemble_creation(mcp=False)
 POCKET_INTERACTION_PROMPT_MCP = _assemble_interaction(mcp=True)
 POCKET_INTERACTION_PROMPT_CLI = _assemble_interaction(mcp=False)
+POCKET_SPECIALIST_PROMPT = _assemble_specialist()
 
 # Backward-compat aliases — older callers still import these names.
 # The MCP variant is the safer default since it mentions the in-process
@@ -798,5 +897,6 @@ __all__ = [
     "POCKET_INTERACTION_PROMPT",
     "POCKET_INTERACTION_PROMPT_CLI",
     "POCKET_INTERACTION_PROMPT_MCP",
+    "POCKET_SPECIALIST_PROMPT",
     "get_pocket_prompts",
 ]

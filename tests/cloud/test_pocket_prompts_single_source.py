@@ -17,11 +17,7 @@ from pathlib import Path
 import pytest
 
 AGENT_SERVICE = (
-    Path(__file__).resolve().parent.parent.parent
-    / "ee"
-    / "cloud"
-    / "chat"
-    / "agent_service.py"
+    Path(__file__).resolve().parent.parent.parent / "ee" / "cloud" / "chat" / "agent_service.py"
 )
 
 
@@ -40,9 +36,9 @@ def test_no_cloud_pocket_prompt_constants(agent_service_source: str) -> None:
         "_MCP_POCKET_BACKENDS",
     )
     for name in forbidden:
-        assert (
-            name not in agent_service_source
-        ), f"{name!r} reintroduced in agent_service.py — pocket prompts live in ee.ripple"
+        assert name not in agent_service_source, (
+            f"{name!r} reintroduced in agent_service.py — pocket prompts live in ee.ripple"
+        )
 
 
 def test_agent_service_imports_canonical_prompts(agent_service_source: str) -> None:
@@ -53,32 +49,42 @@ def test_agent_service_imports_canonical_prompts(agent_service_source: str) -> N
 
 
 def test_canonical_prompts_carry_required_features() -> None:
-    """The interactive-by-default rule and list-before-create gate must
-    appear in every pocket creation prompt — they are the user-visible
-    behavior changes the prompts exist to enforce."""
+    """The creation prompts now delegate to the specialist (STEP 0 block);
+    the heavy workflow lives on POCKET_SPECIALIST_PROMPT. The interaction
+    prompts still carry the interactive-by-default rule and the
+    pocket-workflow block."""
     from ee.ripple import (
         POCKET_CREATION_PROMPT_CLI,
         POCKET_CREATION_PROMPT_MCP,
         POCKET_INTERACTION_PROMPT_CLI,
         POCKET_INTERACTION_PROMPT_MCP,
+        POCKET_SPECIALIST_PROMPT,
     )
 
+    # Calling-agent creation prompts: scope/canvas + STEP 0 delegate.
     for prompt in (POCKET_CREATION_PROMPT_MCP, POCKET_CREATION_PROMPT_CLI):
-        assert "<list-before-create>" in prompt
-        assert "<interactive-by-default>" in prompt
         assert "<pocket-creation>" in prompt
+        assert "DELEGATE TO SPECIALIST" in prompt
 
+    # Interaction prompts unchanged.
     for prompt in (POCKET_INTERACTION_PROMPT_MCP, POCKET_INTERACTION_PROMPT_CLI):
         assert "<interactive-by-default>" in prompt
         assert "<pocket-workflow>" in prompt
 
-    # Tool-surface separation: MCP variant points at the in-process tools,
-    # CLI variant at the shell bridge. Crossover means a backend got the
-    # wrong instructions.
-    assert "list_pockets()" in POCKET_CREATION_PROMPT_MCP
+    # Specialist prompt carries the heavy creation lift.
+    assert "<interactive-by-default>" in POCKET_SPECIALIST_PROMPT
+    assert "<specialist-workflow>" in POCKET_SPECIALIST_PROMPT
+    assert "list_pockets" in POCKET_SPECIALIST_PROMPT
+    assert "validate_spec" in POCKET_SPECIALIST_PROMPT
+    assert "persist_pocket" in POCKET_SPECIALIST_PROMPT
+
+    # Tool-surface separation in the calling-agent delegation blocks: MCP
+    # variant invokes the MCP specialist tool, CLI variant the shell command.
+    assert "pocket_specialist__create" in POCKET_CREATION_PROMPT_MCP
+    assert "cloud_pocket_specialist_create" in POCKET_CREATION_PROMPT_CLI
+    # And neither calling-agent prompt teaches direct create_pocket calls.
     assert "cloud_create_pocket" not in POCKET_CREATION_PROMPT_MCP
-    assert "cloud_list_pockets" in POCKET_CREATION_PROMPT_CLI
-    assert "cloud_create_pocket" in POCKET_CREATION_PROMPT_CLI
+    assert "cloud_create_pocket" not in POCKET_CREATION_PROMPT_CLI
 
 
 def test_get_pocket_prompts_selects_by_backend() -> None:
@@ -112,3 +118,33 @@ def test_pocket_id_token_substitution() -> None:
     swapped = POCKET_INTERACTION_PROMPT_MCP.replace(POCKET_ID_TOKEN, "abc123")
     assert "abc123" in swapped
     assert POCKET_ID_TOKEN not in swapped
+
+
+class TestSpecialistDelegationBlock:
+    """The new STEP 0 delegation block must replace the legacy STEP 1..N
+    inline-creation block in BOTH MCP and CLI prompt variants."""
+
+    def test_mcp_prompt_has_delegation_block(self):
+        from ee.ripple._pockets import POCKET_CREATION_PROMPT_MCP
+
+        assert "pocket_specialist__create" in POCKET_CREATION_PROMPT_MCP
+        assert "DELEGATE TO SPECIALIST" in POCKET_CREATION_PROMPT_MCP
+
+    def test_cli_prompt_has_delegation_block(self):
+        from ee.ripple._pockets import POCKET_CREATION_PROMPT_CLI
+
+        assert "cloud_pocket_specialist_create" in POCKET_CREATION_PROMPT_CLI
+        assert "DELEGATE TO SPECIALIST" in POCKET_CREATION_PROMPT_CLI
+
+    def test_legacy_inline_steps_removed_mcp(self):
+        from ee.ripple._pockets import POCKET_CREATION_PROMPT_MCP
+
+        # Calling agent must NEVER call create_pocket / update_pocket directly.
+        assert "mcp__pocketpaw_pocket__create_pocket" not in POCKET_CREATION_PROMPT_MCP
+        assert "mcp__pocketpaw_pocket__update_pocket" not in POCKET_CREATION_PROMPT_MCP
+
+    def test_legacy_inline_steps_removed_cli(self):
+        from ee.ripple._pockets import POCKET_CREATION_PROMPT_CLI
+
+        assert "cloud_create_pocket" not in POCKET_CREATION_PROMPT_CLI
+        assert "cloud_update_pocket" not in POCKET_CREATION_PROMPT_CLI

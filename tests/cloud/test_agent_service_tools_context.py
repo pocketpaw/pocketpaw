@@ -284,9 +284,10 @@ def test_pocket_id_branch_also_uses_delegation():
 
 def test_non_subagent_backend_uses_inline_pocket_prompts():
     """codex_cli, openai_agents, google_adk, etc. don't have a native
-    subagent integration. Verify they fall back to the pre-Phase-3
-    behavior: full POCKET_CREATION_PROMPT inline for pocket_create
-    intent, POCKET_INTERACTION_PROMPT inline for pocket_id mode."""
+    subagent integration. They still get the calling-agent creation
+    prompt — which post-Task-11 is the STEP 0 delegate-to-specialist
+    block (the CLI specialist tool from Task 10 is universal).
+    POCKET_INTERACTION_PROMPT remains inline for pocket_id mode."""
     ctx_create = ScopeContext(
         kind=ScopeKind.SESSION,
         scope_id="s1",
@@ -299,9 +300,12 @@ def test_non_subagent_backend_uses_inline_pocket_prompts():
         intent="pocket_create",
     )
     block = build_context_block(ctx_create, backend_name="codex_cli")
-    # Heavy creation guidance IS present (sentinel from creation prompt).
-    assert "<list-before-create>" in block
-    # Delegation rule is NOT (subagents aren't a concept on this backend).
+    # STEP 0 delegate-to-specialist block IS present (sentinel from
+    # the CLI creation prompt).
+    assert "DELEGATE TO SPECIALIST" in block
+    assert "cloud_pocket_specialist_create" in block
+    # Subagent-style delegation rule is NOT (subagents aren't a
+    # concept on this backend).
     assert "<pocket-delegation>" not in block
 
 

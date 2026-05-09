@@ -34,6 +34,7 @@ from ee.ripple._pockets import (
     POCKET_INTERACTION_PROMPT,
     POCKET_INTERACTION_PROMPT_CLI,
     POCKET_INTERACTION_PROMPT_MCP,
+    POCKET_SPECIALIST_PROMPT,
     get_pocket_prompts,
 )
 
@@ -47,6 +48,7 @@ __all__ = [
     "POCKET_INTERACTION_PROMPT",
     "POCKET_INTERACTION_PROMPT_CLI",
     "POCKET_INTERACTION_PROMPT_MCP",
+    "POCKET_SPECIALIST_PROMPT",
     "RIPPLE_DESIGN_RULES",
     "get_pocket_prompts",
 ]

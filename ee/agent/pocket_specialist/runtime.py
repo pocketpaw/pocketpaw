@@ -26,7 +26,7 @@ from ee.agent.pocket_specialist.tools import (
     make_validate_spec_tool,
 )
 from ee.cloud.pockets.service import agent_create as _agent_create_for_fallback
-from ee.ripple._pockets import POCKET_CREATION_PROMPT_MCP, POCKET_ID_TOKEN
+from ee.ripple._pockets import POCKET_ID_TOKEN, POCKET_SPECIALIST_PROMPT
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.config import Settings
 
@@ -182,7 +182,7 @@ async def run_specialist(
 def _build_system_prompt(hints: PocketSpecialistHints | None) -> str:
     """Compose the specialist system prompt from the canonical creation
     prompt + any hints from the caller."""
-    base = POCKET_CREATION_PROMPT_MCP.replace(POCKET_ID_TOKEN, "")
+    base = POCKET_SPECIALIST_PROMPT.replace(POCKET_ID_TOKEN, "")
     if not hints:
         return base
     hint_block = ["", "CALLER HINTS (respect when set, otherwise decide yourself):"]

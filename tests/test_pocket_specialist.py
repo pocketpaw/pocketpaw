@@ -42,18 +42,22 @@ def test_main_agent_keeps_read_only_pocket_tools():
 def test_specialist_system_prompt_includes_full_pocket_prompts():
     """The specialist's system prompt is the full pocket-mode text —
     anything less defeats the architecture (specialist is SUPPOSED to
-    carry the heavy prompt so the main agent doesn't)."""
-    from ee.ripple._pockets import POCKET_CREATION_PROMPT_MCP
+    carry the heavy prompt so the main agent doesn't).
+
+    Post-Task-11: the specialist runs the dedicated POCKET_SPECIALIST_PROMPT
+    (list_pockets / validate_spec / persist_pocket workflow), not the
+    calling-agent delegation block."""
+    from ee.ripple._pockets import POCKET_SPECIALIST_PROMPT
     from pocketpaw.agents.claude_sdk import _pocket_specialist_system_prompt
 
     sp = _pocket_specialist_system_prompt()
-    # Spot-check canonical chunks from the creation prompt.
+    # Spot-check canonical chunks from the specialist prompt.
     assert "<rippleSpec-is-the-canvas>" in sp
     # Toolkit / expression-language section must be present in the
     # specialist (it's part of RIPPLE_DESIGN_RULES).
     assert "Toolkit" in sp or "expression language" in sp
-    # And the full creation prompt is fully embedded.
-    assert POCKET_CREATION_PROMPT_MCP in sp
+    # And the full specialist prompt is fully embedded.
+    assert POCKET_SPECIALIST_PROMPT in sp
 
 
 def test_specialist_prompt_resolves_pocket_id_token():

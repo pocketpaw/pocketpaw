@@ -67,16 +67,16 @@ def _pocket_specialist_system_prompt() -> str:
     the system prompt at SDK init time.
     """
     from ee.ripple._pockets import (
-        POCKET_CREATION_PROMPT_MCP,
         POCKET_ID_TOKEN,
         POCKET_INTERACTION_PROMPT_MCP,
+        POCKET_SPECIALIST_PROMPT,
     )
 
     interaction = POCKET_INTERACTION_PROMPT_MCP.replace(
         POCKET_ID_TOKEN,
         "<the pocket id, supplied in the invocation prompt>",
     )
-    return POCKET_CREATION_PROMPT_MCP + "\n\n" + interaction
+    return POCKET_SPECIALIST_PROMPT + "\n\n" + interaction
 
 
 def _build_pocket_specialist_agent_def() -> Any:
