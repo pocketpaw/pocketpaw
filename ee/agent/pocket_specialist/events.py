@@ -37,4 +37,4 @@ async def emit_specialist_event(
     try:
         await event_bus.emit(event.value, data)
     except Exception as exc:  # noqa: BLE001
-        log.warning("Specialist event emit failed (non-fatal): %s", exc)
+        log.debug("Specialist event emit failed (non-fatal): %s", exc)

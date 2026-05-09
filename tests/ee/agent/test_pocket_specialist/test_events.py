@@ -48,9 +48,14 @@ class TestEmitSpecialistEvent:
 
     @pytest.mark.asyncio
     async def test_emit_swallows_bus_failure(self, caplog):
-        with patch(
-            "ee.agent.pocket_specialist.events.event_bus",
-        ) as mock_bus:
-            mock_bus.emit = AsyncMock(side_effect=RuntimeError("bus down"))
-            await emit_specialist_event(SpecialistEvent.START, {"brief": "x"})
-            assert "specialist event emit failed" in caplog.text.lower()
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="ee.agent.pocket_specialist.events"):
+            with patch(
+                "ee.agent.pocket_specialist.events.event_bus",
+            ) as mock_bus:
+                mock_bus.emit = AsyncMock(side_effect=RuntimeError("bus down"))
+                result = await emit_specialist_event(SpecialistEvent.START, {"brief": "x"})
+                # Helper must return None and NOT propagate the exception.
+                assert result is None
+                assert "specialist event emit failed" in caplog.text.lower()
