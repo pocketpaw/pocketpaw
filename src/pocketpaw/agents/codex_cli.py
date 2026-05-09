@@ -53,7 +53,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 
@@ -155,9 +160,9 @@ def _resolve_codex_binary() -> str | None:
             shim = Path(npm_shim)
             search_root = shim.parent / "node_modules" / "@openai" / "codex"
             if search_root.is_dir():
-                hits = list(search_root.glob(
-                    "node_modules/@openai/codex-*/vendor/*/codex/codex.exe"
-                ))
+                hits = list(
+                    search_root.glob("node_modules/@openai/codex-*/vendor/*/codex/codex.exe")
+                )
                 if hits:
                     return str(hits[0])
     else:
@@ -171,7 +176,7 @@ def _resolve_codex_binary() -> str | None:
     return None
 
 
-class CodexCLIBackend:
+class CodexCLIBackend(BaseAgentBackend):
     """Codex CLI backend — SDK-driven, typed events, abort-signal stop."""
 
     @staticmethod
@@ -240,8 +245,7 @@ class CodexCLIBackend:
             yield AgentEvent(
                 type="error",
                 content=(
-                    "Codex CLI binary not found.\n\n"
-                    "Install with: npm install -g @openai/codex"
+                    "Codex CLI binary not found.\n\nInstall with: npm install -g @openai/codex"
                 ),
             )
             return
@@ -302,9 +306,7 @@ class CodexCLIBackend:
 
         work_dir = Path(tempfile.mkdtemp(prefix="paw_codex_"))
         try:
-            (work_dir / "AGENTS.md").write_text(
-                instructions_with_history, encoding="utf-8"
-            )
+            (work_dir / "AGENTS.md").write_text(instructions_with_history, encoding="utf-8")
 
             subprocess_env = _build_subprocess_env(instructions)
             # Per-backend API key + base URL overrides — let the user
@@ -397,8 +399,7 @@ class CodexCLIBackend:
                                 "input": {
                                     "path": path,
                                     "changes": [
-                                        {"path": c.path, "kind": c.kind}
-                                        for c in item.changes
+                                        {"path": c.path, "kind": c.kind} for c in item.changes
                                     ],
                                 },
                             },
@@ -446,9 +447,7 @@ class CodexCLIBackend:
                         )
                     elif isinstance(item, FileChangeItem):
                         if item.changes:
-                            summary = ", ".join(
-                                f"{c.kind} {c.path}" for c in item.changes
-                            )
+                            summary = ", ".join(f"{c.kind} {c.path}" for c in item.changes)
                         else:
                             summary = "updated"
                         yield AgentEvent(
@@ -505,9 +504,7 @@ class CodexCLIBackend:
                         metadata={
                             "input_tokens": getattr(usage, "input_tokens", 0),
                             "output_tokens": getattr(usage, "output_tokens", 0),
-                            "cached_input_tokens": getattr(
-                                usage, "cached_input_tokens", 0
-                            ),
+                            "cached_input_tokens": getattr(usage, "cached_input_tokens", 0),
                             "model": model or "(codex-config)",
                             "backend": "codex_cli",
                         },
@@ -530,15 +527,14 @@ class CodexCLIBackend:
             # culprit (model not authorised on this account / plan, or the
             # 0.124.0+ TTY-detached regression — openai/codex#19945).
             if (
-                "failed to record rollout items" in msg
-                or "Reading prompt from stdin" in msg
+                "failed to record rollout items" in msg or "Reading prompt from stdin" in msg
             ) and "invalid" not in msg.lower():
                 msg += (
                     "\n\nHint: this stderr usually means codex bailed before "
                     "running the prompt. Two likely causes:\n"
                     f"  1. Model ({model or 'config-default'}) not authorised "
                     "on your account — check ``~/.codex/config.toml`` "
-                    "(``model = \"...\"``).\n"
+                    '(``model = "..."``).\n'
                     "  2. codex-cli 0.124.0/0.125.0 regression (openai/codex"
                     "#19945) — long prompts crash on Windows with stdio "
                     "piped. Workaround: ``npm install -g "
@@ -554,8 +550,7 @@ class CodexCLIBackend:
             exc_class = type(exc).__name__
             exc_msg = str(exc)
             if exc_class == "EventParseError" or (
-                "Failed to parse JSONL" in exc_msg
-                and "SUCCESS: The process with PID" in exc_msg
+                "Failed to parse JSONL" in exc_msg and "SUCCESS: The process with PID" in exc_msg
             ):
                 logger.error("Codex stdout-leak detected: %s", exc_msg)
                 yield AgentEvent(
@@ -569,7 +564,7 @@ class CodexCLIBackend:
                         "leaking ``taskkill`` output during shutdown. "
                         "Workaround: edit ``~/.codex/config.toml`` and set\n"
                         "    [windows]\n"
-                        "    sandbox = \"none\"\n"
+                        '    sandbox = "none"\n'
                         "(or downgrade codex-cli to 0.123.0). The codex-CLI "
                         "sandbox we pass via ``--sandbox workspace-write`` "
                         "is independent of this OS-level setting."

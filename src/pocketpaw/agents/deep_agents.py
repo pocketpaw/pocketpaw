@@ -348,6 +348,10 @@ class DeepAgentsBackend:
 
         Invalidates the compiled-graph cache so the next ``run()`` rebuilds
         the agent with the new tool surface.
+
+        Each call extends the list; tools are not deduplicated. Use an isolated
+        backend instance (AgentRouter.create_isolated_backend) to avoid
+        accumulation across specialist runs.
         """
         if self._custom_tools is None:
             self._custom_tools = []

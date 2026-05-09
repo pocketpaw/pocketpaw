@@ -398,6 +398,7 @@ class TestDeepAgentsAttachSpecialistTools:
 
         assert backend._custom_tools[-1] is new_tool
         assert backend._cached_agent is None  # cache invalidated
+        assert backend._cached_model_key is None  # both halves of the cache cleared
 
 
 class TestDeepAgentsRegistry:

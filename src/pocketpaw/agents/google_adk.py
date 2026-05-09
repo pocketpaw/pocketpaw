@@ -15,7 +15,12 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
@@ -26,7 +31,7 @@ logger = logging.getLogger(__name__)
 _APP_NAME = "pocketpaw"
 
 
-class GoogleADKBackend:
+class GoogleADKBackend(BaseAgentBackend):
     """Google ADK backend — native Python SDK for Gemini-powered agents."""
 
     @staticmethod

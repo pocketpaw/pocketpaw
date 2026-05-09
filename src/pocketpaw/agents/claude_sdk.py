@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import BackendInfo, BaseAgentBackend, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.security.rails import is_substring_blocked
@@ -112,7 +112,7 @@ def _build_pocket_specialist_agent_def() -> Any:
     )
 
 
-class ClaudeSDKBackend:
+class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
 
     Provides all built-in tools (Bash, Read, Write, Edit, Glob, Grep,

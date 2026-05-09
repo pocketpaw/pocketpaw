@@ -83,3 +83,20 @@ class AgentBackend(Protocol):
         ``pocket_specialist_backend`` set.
         """
         ...
+
+
+class BaseAgentBackend:
+    """Default no-op implementations of optional ``AgentBackend`` methods.
+
+    Backends that don't support a particular optional capability inherit
+    from this mixin to get an informative ``NotImplementedError`` instead
+    of an unhelpful ``AttributeError`` when callers try to use that
+    capability.
+    """
+
+    def attach_specialist_tools(self, tools: list[Any]) -> None:  # noqa: ARG002
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support dynamic tool attachment. "
+            "Set POCKETPAW_POCKET_SPECIALIST_BACKEND=deep_agents (the default) "
+            "to use a backend that supports specialist tool injection."
+        )
