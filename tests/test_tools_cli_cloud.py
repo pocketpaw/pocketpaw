@@ -18,9 +18,7 @@ import pytest
 def _stub_db_init():
     """Pretend Beanie is already initialized — the CLI's lazy boot path
     is exercised separately in ``test_ensures_db_when_missing``."""
-    with patch(
-        "pocketpaw.tools.cli._ensure_cloud_db_initialized", new=AsyncMock()
-    ):
+    with patch("pocketpaw.tools.cli._ensure_cloud_db_initialized", new=AsyncMock()):
         yield
 
 
@@ -76,9 +74,7 @@ async def test_cloud_update_widget_passes_fields():
         "ee.cloud.pockets.agent_context.update_widget_for_agent",
         new=AsyncMock(return_value={"ok": True}),
     ) as mock_upd:
-        await _cloud_update_widget(
-            {"pocket_id": "p1", "widget_id": "w1", "fields": {"name": "X"}}
-        )
+        await _cloud_update_widget({"pocket_id": "p1", "widget_id": "w1", "fields": {"name": "X"}})
 
     mock_upd.assert_awaited_once_with("p1", "w1", {"name": "X"})
 
@@ -96,58 +92,27 @@ async def test_cloud_remove_widget_targets_id():
     mock_rm.assert_awaited_once_with("p1", "w1")
 
 
-@pytest.mark.asyncio
-async def test_cloud_update_pocket_only_sends_provided_fields():
-    """``update_pocket_for_agent`` accepts ``None`` for fields the caller
-    didn't pass — make sure we don't backfill missing ones."""
-    from pocketpaw.tools.cli import _cloud_update_pocket
+def test_legacy_pocket_mutation_handlers_are_dropped():
+    """``cloud_create_pocket`` / ``cloud_update_pocket`` were the
+    calling-agent equivalents of the specialist tool. They are now
+    filtered out of the CLI dispatcher so subprocess agents (codex_cli,
+    opencode, gemini_cli, copilot_sdk) can't bypass the specialist —
+    matching the ``_POCKET_MUTATION_TOOL_IDS`` filter in claude_agent_sdk."""
+    from pocketpaw.tools import cli as cli_module
 
-    with patch(
-        "ee.cloud.pockets.agent_context.update_pocket_for_agent",
-        new=AsyncMock(return_value={"ok": True}),
-    ) as mock_upd:
-        await _cloud_update_pocket({"pocket_id": "p1", "name": "Renamed"})
-
-    mock_upd.assert_awaited_once_with(
-        "p1",
-        name="Renamed",
-        description=None,
-        icon=None,
-        color=None,
-        ripple_spec=None,
-    )
-
-
-@pytest.mark.asyncio
-async def test_cloud_create_pocket_uses_env_identity(monkeypatch):
-    from pocketpaw.tools.cli import _cloud_create_pocket
-
-    monkeypatch.setenv("POCKETPAW_WORKSPACE_ID", "ws-1")
-    monkeypatch.setenv("POCKETPAW_USER_ID", "u-1")
-    fake_view = {"_id": "p-new"}
-    with patch(
-        "ee.cloud.pockets.service.agent_create",
-        new=AsyncMock(return_value=(fake_view, "p-new", None)),
-    ) as mock_create:
-        result = await _cloud_create_pocket({"name": "My Pocket"})
-
-    assert result == {"ok": True, "pocket": fake_view, "pocket_id": "p-new"}
-    mock_create.assert_awaited_once()
-    kwargs = mock_create.await_args.kwargs
-    assert kwargs["workspace_id"] == "ws-1"
-    assert kwargs["owner_id"] == "u-1"
-    assert kwargs["name"] == "My Pocket"
-
-
-@pytest.mark.asyncio
-async def test_cloud_create_pocket_errors_when_identity_missing(monkeypatch):
-    from pocketpaw.tools.cli import _cloud_create_pocket
-
-    monkeypatch.delenv("POCKETPAW_WORKSPACE_ID", raising=False)
-    monkeypatch.delenv("POCKETPAW_USER_ID", raising=False)
-    result = await _cloud_create_pocket({"name": "x"})
-    assert result["ok"] is False
-    assert "POCKETPAW_WORKSPACE_ID" in result["error"]
+    assert "cloud_create_pocket" not in cli_module._CLOUD_HANDLERS
+    assert "cloud_update_pocket" not in cli_module._CLOUD_HANDLERS
+    # The specialist tool itself must remain available.
+    assert "cloud_pocket_specialist_create" in cli_module._CLOUD_HANDLERS
+    # Read-only + live-widget editing flows are kept.
+    assert "cloud_list_pockets" in cli_module._CLOUD_HANDLERS
+    assert "cloud_get_pocket" in cli_module._CLOUD_HANDLERS
+    assert "cloud_add_widget" in cli_module._CLOUD_HANDLERS
+    assert "cloud_update_widget" in cli_module._CLOUD_HANDLERS
+    assert "cloud_remove_widget" in cli_module._CLOUD_HANDLERS
+    # The Python-level helpers are gone too.
+    assert not hasattr(cli_module, "_cloud_create_pocket")
+    assert not hasattr(cli_module, "_cloud_update_pocket")
 
 
 @pytest.mark.asyncio
