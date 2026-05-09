@@ -42,3 +42,14 @@ class TestResolveSpecialistModel:
         # if a backend has none, resolver returns "" — caller must handle.
         s = Settings(pocket_specialist_backend="not_a_real_backend")
         assert resolve_specialist_model(s) == ""
+
+    def test_falls_back_to_claude_sdk_model_for_claude_agent_sdk_backend(self):
+        # claude_agent_sdk's Settings field is claude_sdk_model (not
+        # claude_agent_sdk_model). The resolver must remap so users who
+        # leave pocket_specialist_model="" still inherit the configured
+        # claude_sdk_model value.
+        s = Settings(
+            pocket_specialist_backend="claude_agent_sdk",
+            claude_sdk_model="anthropic:claude-sonnet-4-6",
+        )
+        assert resolve_specialist_model(s) == "anthropic:claude-sonnet-4-6"
