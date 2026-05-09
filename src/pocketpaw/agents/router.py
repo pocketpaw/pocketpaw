@@ -87,6 +87,33 @@ class AgentRouter:
             )
             return None
 
+    @classmethod
+    def create_isolated_backend(
+        cls,
+        backend_name: str,
+        settings: Settings,
+        *,
+        settings_override: dict[str, Any] | None = None,
+    ) -> Any:
+        """Build a fresh, non-cached AgentBackend with optional settings overrides.
+
+        Used for short-lived specialist runs that should not share state with
+        the main chat backend. Each call returns a new instance; nothing is
+        cached on the router.
+        """
+        backend_cls = get_backend_class(backend_name)
+        if backend_cls is None:
+            raise ValueError(
+                f"Backend '{backend_name}' is not registered or its dependencies are not installed."
+            )
+
+        if settings_override:
+            effective = settings.model_copy(update=settings_override)
+        else:
+            effective = settings
+
+        return backend_cls(effective)
+
     async def run(
         self,
         message: str,
