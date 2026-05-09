@@ -400,6 +400,22 @@ class TestDeepAgentsAttachSpecialistTools:
         assert backend._cached_agent is None  # cache invalidated
         assert backend._cached_model_key is None  # both halves of the cache cleared
 
+    def test_skips_mcp_loading(self):
+        from langchain_core.tools import StructuredTool
+
+        from pocketpaw.agents.deep_agents import DeepAgentsBackend
+
+        backend = DeepAgentsBackend(Settings())
+        backend._mcp_tools = None  # default state where _build_mcp_tools would load
+        backend._custom_tools = None
+
+        tool = StructuredTool.from_function(func=lambda: "x", name="t", description="x")
+        backend.attach_specialist_tools([tool])
+
+        # _mcp_tools is now [] — _build_mcp_tools() short-circuits and never
+        # connects to user MCP servers.
+        assert backend._mcp_tools == []
+
 
 class TestDeepAgentsRegistry:
     """Tests for registry integration."""

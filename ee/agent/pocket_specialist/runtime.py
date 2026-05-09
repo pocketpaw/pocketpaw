@@ -121,8 +121,21 @@ async def run_specialist(
 
     persist_called = False
 
+    log.info(
+        "[pocket-specialist] dispatching to backend.run (model=%s, system_prompt_len=%d)",
+        model_id or "<inherited>",
+        len(system_prompt),
+    )
+
+    first_event_seen = False
     try:
         async for event in backend.run(user_message, system_prompt=system_prompt):
+            if not first_event_seen:
+                log.info(
+                    "[pocket-specialist] backend stream started (first event: %s)",
+                    event.type,
+                )
+                first_event_seen = True
             if event.type == "tool_use":
                 tool_name = (event.metadata or {}).get("name", "")
                 if tool_name == "list_pockets":

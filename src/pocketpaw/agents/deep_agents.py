@@ -344,10 +344,12 @@ class DeepAgentsBackend:
         return agent
 
     def attach_specialist_tools(self, tools: list[Any]) -> None:
-        """Merge specialist tools into the custom-tool cache.
+        """Merge specialist tools into the custom-tool cache for an isolated run.
 
-        Invalidates the compiled-graph cache so the next ``run()`` rebuilds
-        the agent with the new tool surface.
+        Also short-circuits MCP-server loading by pre-setting ``_mcp_tools = []``.
+        Specialist runs are short-lived and only need the tools passed here;
+        loading the user's full MCP server set (which can include slow stdio
+        servers) wastes startup time and risks hanging the run.
 
         Each call extends the list; tools are not deduplicated. Use an isolated
         backend instance (AgentRouter.create_isolated_backend) to avoid
@@ -356,6 +358,10 @@ class DeepAgentsBackend:
         if self._custom_tools is None:
             self._custom_tools = []
         self._custom_tools.extend(tools)
+        # Skip MCP loading — specialist's tool surface comes entirely from
+        # `tools` above. _build_mcp_tools() short-circuits when _mcp_tools is
+        # not None.
+        self._mcp_tools = []
         self._cached_agent = None  # force recompile next run
         self._cached_model_key = None
 
