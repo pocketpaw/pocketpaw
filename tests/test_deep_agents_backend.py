@@ -257,6 +257,128 @@ class TestDeepAgentsBackendRun:
         assert status["resolved_model"] == "codellama"
 
 
+class TestDeepAgentsResponsesApiKwarg:
+    """init_chat_model must receive use_responses_api=False for OpenAI-compat
+    endpoints that don't speak the OpenAI Responses API (DeepSeek, OpenRouter,
+    LiteLLM, vLLM). With deepagents 0.5.x defaulting to Responses, omitting
+    this kwarg sends every call to a 404."""
+
+    def _capture_init_chat_model(self, settings: Settings) -> tuple[str, dict]:
+        from pocketpaw.agents.deep_agents import DeepAgentsBackend
+
+        backend = DeepAgentsBackend(settings)
+        captured: dict[str, object] = {}
+
+        def fake_init(model_id: str, **kwargs):
+            captured["model_id"] = model_id
+            captured["kwargs"] = kwargs
+            return MagicMock()
+
+        with patch("langchain.chat_models.init_chat_model", side_effect=fake_init):
+            backend._build_model()
+        return str(captured["model_id"]), dict(captured["kwargs"])  # type: ignore[arg-type]
+
+    def test_openai_compatible_forces_chat_completions(self):
+        settings = Settings(
+            deep_agents_model="openai_compatible:deepseek-v4-pro",
+            openai_compatible_base_url="https://api.deepseek.com/v1",
+            openai_compatible_api_key="sk-test",
+        )
+        model_id, kwargs = self._capture_init_chat_model(settings)
+        assert kwargs.get("use_responses_api") is False
+        assert kwargs.get("base_url") == "https://api.deepseek.com/v1"
+        assert model_id == "openai:deepseek-v4-pro"
+
+    def test_openrouter_forces_chat_completions(self):
+        settings = Settings(
+            deep_agents_model="openrouter:deepseek/deepseek-v4-pro",
+            openrouter_api_key="sk-or-test",
+        )
+        _model_id, kwargs = self._capture_init_chat_model(settings)
+        assert kwargs.get("use_responses_api") is False
+
+    def test_litellm_forces_chat_completions(self):
+        settings = Settings(
+            deep_agents_model="litellm:claude-sonnet-4-6",
+            litellm_api_base="http://proxy:4000",
+        )
+        _model_id, kwargs = self._capture_init_chat_model(settings)
+        assert kwargs.get("use_responses_api") is False
+
+    def test_plain_openai_keeps_responses_api_default(self):
+        # No custom base_url — talking to api.openai.com directly. We must
+        # NOT force chat-completions or we lose Responses-API features.
+        settings = Settings(
+            deep_agents_model="openai:gpt-4o",
+            openai_api_key="sk-test",
+        )
+        _model_id, kwargs = self._capture_init_chat_model(settings)
+        assert "use_responses_api" not in kwargs
+
+    def test_anthropic_unaffected(self):
+        settings = Settings(
+            deep_agents_model="anthropic:claude-sonnet-4-6",
+            anthropic_api_key="sk-ant-test",
+        )
+        _model_id, kwargs = self._capture_init_chat_model(settings)
+        assert "use_responses_api" not in kwargs
+
+
+class TestDeepAgentsSkillsMemoryPlumbing:
+    """skills= / memory= settings must reach create_deep_agent() only when
+    populated, and must invalidate the compiled-graph cache when changed."""
+
+    def _capture_create_deep_agent(self, settings: Settings):
+        from pocketpaw.agents.deep_agents import DeepAgentsBackend
+
+        backend = DeepAgentsBackend(settings)
+        backend._custom_tools = []
+        captured: dict[str, object] = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="compiled_agent")
+
+        with patch("deepagents.create_deep_agent", side_effect=fake_create):
+            backend._get_or_create_agent(MagicMock(), "system")
+        return captured
+
+    def test_skills_forwarded_when_populated(self):
+        settings = Settings(deep_agents_skills=["/skills/ripple", "/skills/pockets"])
+        captured = self._capture_create_deep_agent(settings)
+        assert captured.get("skills") == ["/skills/ripple", "/skills/pockets"]
+
+    def test_memory_forwarded_when_populated(self):
+        settings = Settings(deep_agents_memory=["/mem/AGENTS.md"])
+        captured = self._capture_create_deep_agent(settings)
+        assert captured.get("memory") == ["/mem/AGENTS.md"]
+
+    def test_skills_omitted_when_empty(self):
+        # Passing an empty list still wires SkillsMiddleware with nothing to
+        # load — wasted middleware. Better to not forward at all.
+        captured = self._capture_create_deep_agent(Settings())
+        assert "skills" not in captured
+        assert "memory" not in captured
+
+    def test_cache_key_includes_skills(self):
+        from pocketpaw.agents.deep_agents import DeepAgentsBackend
+
+        backend = DeepAgentsBackend(Settings(deep_agents_skills=["/a"]))
+        backend._custom_tools = []
+        first = MagicMock(name="first")
+        second = MagicMock(name="second")
+
+        with patch("deepagents.create_deep_agent", side_effect=[first, second]):
+            agent1 = backend._get_or_create_agent(MagicMock(), "sys")
+            # Same settings → cached
+            agent_again = backend._get_or_create_agent(MagicMock(), "sys")
+            assert agent1 is agent_again
+            # Mutate skills → cache invalidates, second instance compiled
+            backend.settings = Settings(deep_agents_skills=["/a", "/b"])
+            agent2 = backend._get_or_create_agent(MagicMock(), "sys")
+            assert agent2 is not agent1
+
+
 class TestDeepAgentsRegistry:
     """Tests for registry integration."""
 

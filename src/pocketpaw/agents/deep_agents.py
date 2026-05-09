@@ -108,7 +108,7 @@ class DeepAgentsBackend:
         self._mcp_tools: list | None = None
         self._mcp_client: Any = None
         self._cached_agent: Any = None
-        self._cached_model_key: str = ""
+        self._cached_model_key: Any = None
         self._initialize()
 
     def _initialize(self) -> None:
@@ -235,6 +235,12 @@ class DeepAgentsBackend:
 
         provider, model = self._parse_provider_model()
         kwargs: dict[str, Any] = {}
+        # OpenAI-compat endpoints that speak chat-completions but NOT the
+        # OpenAI Responses API (DeepSeek, OpenRouter, LiteLLM proxy, vLLM,
+        # etc.). When provider is mapped to "openai" with a custom base_url,
+        # we must force chat-completions or init_chat_model defaults to the
+        # Responses API in deepagents 0.5.x and the call fails with 404.
+        is_openai_compat_endpoint = False
 
         if provider == "anthropic":
             if self.settings.anthropic_api_key:
@@ -264,6 +270,7 @@ class DeepAgentsBackend:
                 model = self.settings.openrouter_model or ""
             # OpenRouter uses OpenAI-compatible API
             provider = "openai"
+            is_openai_compat_endpoint = True
 
         elif provider == "openai_compatible":
             if self.settings.openai_compatible_base_url:
@@ -274,6 +281,7 @@ class DeepAgentsBackend:
             if not model:
                 model = self.settings.openai_compatible_model or ""
             provider = "openai"
+            is_openai_compat_endpoint = True
 
         elif provider == "litellm":
             # Route through LiteLLM proxy as OpenAI-compatible endpoint.
@@ -285,6 +293,12 @@ class DeepAgentsBackend:
             if not model:
                 model = self.settings.litellm_model or ""
             provider = "openai"
+            is_openai_compat_endpoint = True
+
+        # Force chat-completions for non-OpenAI endpoints. The default
+        # Responses API in deepagents 0.5.x is OpenAI-only.
+        if is_openai_compat_endpoint:
+            kwargs["use_responses_api"] = False
 
         # Map to LangChain's expected provider name
         lc_provider = _LANGCHAIN_PROVIDER_MAP.get(provider, provider)
@@ -299,17 +313,32 @@ class DeepAgentsBackend:
         """Cache the compiled LangGraph agent to avoid recompilation on every call."""
         from deepagents import create_deep_agent
 
-        # Invalidate cache if model setting changed
-        model_key = self.settings.deep_agents_model
+        skills = list(self.settings.deep_agents_skills or [])
+        memory = list(self.settings.deep_agents_memory or [])
+
+        # Invalidate cache if any input that shapes the compiled graph changed
+        model_key = (
+            self.settings.deep_agents_model,
+            tuple(skills),
+            tuple(memory),
+        )
         if self._cached_agent is not None and self._cached_model_key == model_key:
             return self._cached_agent
 
         all_tools = self._build_custom_tools() + (mcp_tools or [])
-        agent = create_deep_agent(
-            model=model,
-            tools=all_tools if all_tools else [],
-            system_prompt=instructions,
-        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "tools": all_tools if all_tools else [],
+            "system_prompt": instructions,
+        }
+        # Only forward skills/memory when populated — passing empty lists
+        # still wires SkillsMiddleware/MemoryMiddleware with nothing to load.
+        if skills:
+            kwargs["skills"] = skills
+        if memory:
+            kwargs["memory"] = memory
+
+        agent = create_deep_agent(**kwargs)
         self._cached_agent = agent
         self._cached_model_key = model_key
         return agent

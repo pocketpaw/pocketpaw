@@ -283,6 +283,20 @@ class Settings(BaseSettings):
         default=100,
         description="Max turns per query in Deep Agents backend (0 = unlimited)",
     )
+    deep_agents_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths passed to deepagents `skills=` — directories or files loaded "
+            "progressively by SkillsMiddleware (AGENTS.md-style). Empty disables."
+        ),
+    )
+    deep_agents_memory: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths passed to deepagents `memory=` — files loaded by "
+            "MemoryMiddleware for cross-thread recall. Empty disables."
+        ),
+    )
 
     # OpenCode Settings
     opencode_base_url: ExternalUrl = Field(
