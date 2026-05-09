@@ -82,3 +82,25 @@ class TestCreateHandler:
 
         assert payload.get("is_error") is True
         assert "workspace" in payload["content"][0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_handler_returns_error_when_run_specialist_raises(self):
+        from ee.agent.pocket_specialist.mcp_tool import _create_handler
+
+        with (
+            patch(
+                "ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                new=AsyncMock(side_effect=RuntimeError("backend exploded")),
+            ),
+        ):
+            payload = await _create_handler({"brief": "Test brief here"})
+        assert payload.get("is_error") is True
+        assert "backend exploded" in payload["content"][0]["text"].lower()
