@@ -40,6 +40,7 @@ from ee.cloud.pockets.dto import (
     pocket_to_wire_dict,
 )
 from ee.cloud.ripple_normalizer import normalize_ripple_spec
+from ee.cloud.ripple_validator import validate_ripple_spec_logged
 from ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
 from ee.cloud.shared.events import event_bus
 
@@ -254,6 +255,8 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     from ee.cloud.sessions import service as sessions_service
 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
+    if normalized_spec:
+        validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
     widget_docs = [_build_widget_doc(w) for w in (body.widgets or [])]
 
     doc = _PocketDoc(
@@ -328,6 +331,10 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
         _check_domain_owner(pocket, user_id)
 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
+    if normalized_spec:
+        validate_ripple_spec_logged(
+            normalized_spec, pocket_id=str(doc.id), workspace_id=doc.workspace
+        )
 
     if body.name is not None:
         doc.name = body.name
@@ -390,6 +397,7 @@ async def create_from_ripple_spec(
         normalized = normalize_ripple_spec(ripple_spec)
         if not normalized:
             return None
+        validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
 
         name = (
             normalized.get("lifecycle", {}).get("name")
@@ -837,6 +845,10 @@ async def agent_update(
         doc.color = color
     if ripple_spec is not None:
         doc.rippleSpec = normalize_ripple_spec(ripple_spec)
+        if doc.rippleSpec:
+            validate_ripple_spec_logged(
+                doc.rippleSpec, pocket_id=str(doc.id), workspace_id=doc.workspace
+            )
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
@@ -929,6 +941,8 @@ async def agent_create(
     if not name:
         return None, None, "name is required"
     normalized = normalize_ripple_spec(ripple_spec) if ripple_spec else None
+    if normalized:
+        validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,

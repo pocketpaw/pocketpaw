@@ -161,6 +161,36 @@ async def _push_replace(pocket_view: dict[str, Any]) -> None:
         logger.debug("push_pocket_mutation failed (non-fatal)", exc_info=True)
 
 
+def _spec_grammar_warnings(ripple_spec: dict[str, Any] | None) -> str | None:
+    """Return an agent-readable warnings summary for the given spec, or
+    ``None`` when the spec is fully grammar-clean.
+
+    Run AFTER persistence — the warnings tell the LLM what to fix on the
+    next turn, but we don't want to block writes the user can still
+    interact with via the defensive widgets in the renderer.
+    """
+    if not isinstance(ripple_spec, dict):
+        return None
+    try:
+        from ee.cloud.ripple_normalizer import normalize_ripple_spec
+        from ee.cloud.ripple_validator import (
+            format_warnings_for_agent,
+            validate_ripple_spec,
+        )
+
+        # Validate against the normalized shape the renderer will see —
+        # not the raw agent-provided one. Otherwise the warnings would
+        # reference paths that don't exist post-lift.
+        normalized = normalize_ripple_spec(ripple_spec) or ripple_spec
+        warnings = validate_ripple_spec(normalized)
+        if not warnings:
+            return None
+        return format_warnings_for_agent(warnings)
+    except Exception:
+        logger.debug("spec grammar validation skipped (non-fatal)", exc_info=True)
+        return None
+
+
 async def update_pocket_for_agent(
     pocket_id: str,
     *,
@@ -187,7 +217,11 @@ async def update_pocket_for_agent(
     if err is not None:
         return {"ok": False, "error": err}
     await _push_replace(view)
-    return {"ok": True, "pocket": view}
+    result: dict[str, Any] = {"ok": True, "pocket": view}
+    grammar_msg = _spec_grammar_warnings(ripple_spec)
+    if grammar_msg:
+        result["warnings"] = grammar_msg
+    return result
 
 
 async def add_widget_for_agent(pocket_id: str, widget: dict[str, Any]) -> dict[str, Any]:
@@ -314,7 +348,11 @@ async def create_pocket_for_agent(
     except Exception:
         logger.debug("push_sse_event(pocket_created) failed", exc_info=True)
 
-    return {"ok": True, "pocket": view}
+    result: dict[str, Any] = {"ok": True, "pocket": view}
+    grammar_msg = _spec_grammar_warnings(ripple_spec)
+    if grammar_msg:
+        result["warnings"] = grammar_msg
+    return result
 
 
 __all__ = [
