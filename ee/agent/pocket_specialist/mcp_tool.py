@@ -42,7 +42,7 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
     builds the typed input model, and delegates to ``run_specialist``.
     Returns the MCP ``{content: [...], is_error?: bool}`` shape.
     """
-    from pocketpaw.config import Settings
+    from pocketpaw.config import get_settings
 
     workspace_id = current_workspace_id()
     user_id = current_user_id()
@@ -69,7 +69,7 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
             payload,
             workspace_id=workspace_id,
             user_id=user_id,
-            settings=Settings(),
+            settings=get_settings(),
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("pocket specialist run failed")
@@ -102,21 +102,35 @@ def build_pocket_specialist_server() -> Any:
             "Always produces a pocket — never noop."
         ),
         {
-            "brief": {
-                "type": "string",
-                "description": (
-                    "Natural-language description of what the user wants. "
-                    "Include any research/context already gathered."
-                ),
+            "type": "object",
+            "properties": {
+                "brief": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 4000,
+                    "description": (
+                        "Natural-language description of what the user wants. "
+                        "Include any research/context already gathered."
+                    ),
+                },
+                "hints": {
+                    "type": "object",
+                    "description": (
+                        "Optional caller-supplied overrides for fields the user "
+                        "named explicitly. Unknown keys are rejected."
+                    ),
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "color": {"type": "string"},
+                        "icon": {"type": "string"},
+                        "target_pocket_id": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
             },
-            "hints": {
-                "type": "object",
-                "description": (
-                    "Optional caller-supplied overrides "
-                    "{name?, description?, color?, icon?, target_pocket_id?}."
-                ),
-                "additionalProperties": True,
-            },
+            "required": ["brief"],
+            "additionalProperties": False,
         },
     )
     async def create_pocket_specialist(args: dict[str, Any]) -> dict[str, Any]:

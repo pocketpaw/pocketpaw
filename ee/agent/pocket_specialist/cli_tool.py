@@ -37,7 +37,7 @@ from ee.cloud.chat.agent_service import (
     current_user_id,
     current_workspace_id,
 )
-from pocketpaw.config import Settings
+from pocketpaw.config import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ async def _cloud_pocket_specialist_create(args: dict[str, Any]) -> dict[str, Any
             payload,
             workspace_id=workspace_id,
             user_id=user_id,
-            settings=Settings(),
+            settings=get_settings(),
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("pocket specialist run failed")
