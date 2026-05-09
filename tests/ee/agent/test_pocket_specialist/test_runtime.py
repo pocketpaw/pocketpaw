@@ -1,5 +1,6 @@
 """run_specialist end-to-end with a mocked backend."""
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,19 +24,51 @@ def _stream(events: list[AgentEvent]):
     return gen
 
 
+def _persist_factory_stub(pocket: dict[str, Any]):
+    """Build a side_effect for ``make_persist_pocket_tool`` that simulates
+    the tool running successfully: when the runtime constructs the tool,
+    the stub immediately writes ``pocket`` into the supplied capture dict.
+
+    The returned MagicMock stands in for the StructuredTool — the mocked
+    backend never invokes it, so its surface is irrelevant.
+    """
+
+    def _stub(*, workspace_id: str, user_id: str, capture: dict[str, Any] | None = None):
+        if capture is not None:
+            capture["pocket"] = pocket
+        return MagicMock()
+
+    return _stub
+
+
+def _validate_factory_stub(warnings: list[str] | None = None):
+    """Build a side_effect for ``make_validate_spec_tool`` that simulates
+    the validator producing the given warnings (default: none)."""
+
+    def _stub(*, capture: dict[str, Any] | None = None):
+        if capture is not None:
+            capture["last_validation"] = {
+                "ok": not warnings,
+                "warnings": list(warnings or []),
+            }
+        return MagicMock()
+
+    return _stub
+
+
 class TestRunSpecialistHappyPath:
     @pytest.mark.asyncio
     async def test_returns_persisted_pocket_via_tool_capture(self):
         captured_pocket = {"id": "p-new", "name": "Repos", "color": "#0ea5e9"}
+        # Real backends only emit {"name": tool_name} in tool_result metadata
+        # - they never include the tool's return dict. The runtime now relies
+        # on a side-channel capture dict that the persist tool factory mutates
+        # when its tool runs. We simulate that mutation via a factory stub.
         events = [
             AgentEvent(type="tool_use", content="", metadata={"name": "list_pockets"}),
             AgentEvent(type="tool_result", content="[]", metadata={"name": "list_pockets"}),
             AgentEvent(type="tool_use", content="", metadata={"name": "persist_pocket"}),
-            AgentEvent(
-                type="tool_result",
-                content=str(captured_pocket),
-                metadata={"name": "persist_pocket", "result": captured_pocket},
-            ),
+            AgentEvent(type="tool_result", content="", metadata={"name": "persist_pocket"}),
             AgentEvent(type="done", content=""),
         ]
         fake_backend = MagicMock()
@@ -52,6 +85,14 @@ class TestRunSpecialistHappyPath:
                 "ee.agent.pocket_specialist.runtime.emit_specialist_event",
                 new=AsyncMock(),
             ) as mock_emit,
+            patch(
+                "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
+                side_effect=_persist_factory_stub(captured_pocket),
+            ),
+            patch(
+                "ee.agent.pocket_specialist.runtime.make_validate_spec_tool",
+                side_effect=_validate_factory_stub(),
+            ),
         ):
             out = await run_specialist(
                 PocketSpecialistCreateInput(brief="Track my repos across repos foo, bar, baz"),
@@ -72,11 +113,7 @@ class TestRunSpecialistHappyPath:
         captured_pocket = {"id": "p-1", "name": "Updated"}
         events = [
             AgentEvent(type="tool_use", content="", metadata={"name": "persist_pocket"}),
-            AgentEvent(
-                type="tool_result",
-                content="",
-                metadata={"name": "persist_pocket", "result": captured_pocket},
-            ),
+            AgentEvent(type="tool_result", content="", metadata={"name": "persist_pocket"}),
             AgentEvent(type="done", content=""),
         ]
         fake_backend = MagicMock()
@@ -92,6 +129,14 @@ class TestRunSpecialistHappyPath:
             patch(
                 "ee.agent.pocket_specialist.runtime.emit_specialist_event",
                 new=AsyncMock(),
+            ),
+            patch(
+                "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
+                side_effect=_persist_factory_stub(captured_pocket),
+            ),
+            patch(
+                "ee.agent.pocket_specialist.runtime.make_validate_spec_tool",
+                side_effect=_validate_factory_stub(),
             ),
         ):
             out = await run_specialist(

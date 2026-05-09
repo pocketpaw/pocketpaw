@@ -79,13 +79,18 @@ def _format_issue(issue: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def make_validate_spec_tool() -> StructuredTool:
+def make_validate_spec_tool(*, capture: dict[str, Any] | None = None) -> StructuredTool:
     """Build a ``validate_spec`` tool that checks a draft rippleSpec
     against the live widget manifest.
 
     Returns ``{"ok": bool, "warnings": [str, ...]}``. If the manifest is
     unavailable (offline, fetch error), the tool returns ``ok=True`` with
     an empty warnings list — best-effort, never block the user.
+
+    If ``capture`` is provided, ``capture["last_validation"]`` is set to
+    the most recent result dict. This is the runtime's side-channel for
+    reading validator output without parsing truncated tool_result content
+    (most agent backends don't surface tool return values verbatim).
     """
 
     # Lazy-import settings inside the thunk to avoid pulling pocketpaw
@@ -99,10 +104,14 @@ def make_validate_spec_tool() -> StructuredTool:
             ttl_seconds=settings.ripple_manifest_ttl_seconds,
         )
         if manifest is None:
-            return {"ok": True, "warnings": []}
-        issues = validate_against_manifest(spec, manifest, apply_aliases=True)
-        warnings = [_format_issue(issue) for issue in issues]
-        return {"ok": len(warnings) == 0, "warnings": warnings}
+            result: dict[str, Any] = {"ok": True, "warnings": []}
+        else:
+            issues = validate_against_manifest(spec, manifest, apply_aliases=True)
+            warnings = [_format_issue(issue) for issue in issues]
+            result = {"ok": len(warnings) == 0, "warnings": warnings}
+        if capture is not None:
+            capture["last_validation"] = result
+        return result
 
     return StructuredTool.from_function(
         coroutine=_run,
@@ -132,13 +141,24 @@ class _PersistPocketArgs(BaseModel):
     )
 
 
-def make_persist_pocket_tool(*, workspace_id: str, user_id: str) -> StructuredTool:
+def make_persist_pocket_tool(
+    *,
+    workspace_id: str,
+    user_id: str,
+    capture: dict[str, Any] | None = None,
+) -> StructuredTool:
     """Build a ``persist_pocket`` tool bound to the given workspace/user.
 
     Creates a new pocket when ``target_pocket_id`` is None; updates an
     existing pocket otherwise. Returns the pocket view dict on success.
     Raises ``RuntimeError`` on persist failure (the runtime catches and
     surfaces the error to the agent).
+
+    If ``capture`` is provided, ``capture["pocket"]`` is set to the
+    persisted pocket view when the tool runs successfully. This is the
+    runtime's side-channel for getting the actual return value out of the
+    LangGraph/MCP boundary, since most agent backends don't surface tool
+    return values verbatim in tool_result events.
     """
 
     async def _run(
@@ -160,6 +180,8 @@ def make_persist_pocket_tool(*, workspace_id: str, user_id: str) -> StructuredTo
             )
             if err is not None or view is None:
                 raise RuntimeError(f"persist failed: {err or 'update returned no view'}")
+            if capture is not None:
+                capture["pocket"] = view
             return view
         view, _pocket_id, err = await _agent_create(
             workspace_id=workspace_id,
@@ -172,6 +194,8 @@ def make_persist_pocket_tool(*, workspace_id: str, user_id: str) -> StructuredTo
         )
         if err is not None or view is None:
             raise RuntimeError(f"persist failed: {err or 'create returned no view'}")
+        if capture is not None:
+            capture["pocket"] = view
         return view
 
     return StructuredTool.from_function(

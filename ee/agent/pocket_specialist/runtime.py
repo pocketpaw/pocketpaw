@@ -97,19 +97,28 @@ async def run_specialist(
         settings,
         settings_override=override or None,
     )
+    # Side-channel capture dicts: real agent backends only surface
+    # {"name": tool_name} in tool_result metadata - they never put the
+    # tool's return dict in metadata["result"]. The factories mutate these
+    # dicts when their tools run, giving the runtime access to the actual
+    # return values without parsing truncated stringified content.
+    persist_capture: dict[str, Any] = {}
+    validate_capture: dict[str, Any] = {}
     backend.attach_specialist_tools(
         [
             make_list_pockets_tool(workspace_id=workspace_id, user_id=user_id),
-            make_validate_spec_tool(),
-            make_persist_pocket_tool(workspace_id=workspace_id, user_id=user_id),
+            make_validate_spec_tool(capture=validate_capture),
+            make_persist_pocket_tool(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                capture=persist_capture,
+            ),
         ]
     )
 
     system_prompt = _build_system_prompt(input.hints)
     user_message = _build_user_message(input)
 
-    captured_pocket: dict[str, Any] | None = None
-    captured_warnings: list[str] = []
     persist_called = False
 
     try:
@@ -126,15 +135,12 @@ async def run_specialist(
                 meta = event.metadata or {}
                 if meta.get("name") == "persist_pocket":
                     persist_called = True
-                    result = meta.get("result")
-                    if isinstance(result, dict):
-                        captured_pocket = result
-                elif meta.get("name") == "validate_spec":
-                    result = meta.get("result")
-                    if isinstance(result, dict):
-                        captured_warnings = result.get("warnings", [])
     finally:
         await backend.stop()
+
+    captured_pocket: dict[str, Any] | None = persist_capture.get("pocket")
+    last_validation = validate_capture.get("last_validation") or {}
+    captured_warnings: list[str] = list(last_validation.get("warnings", []))
 
     if not persist_called or captured_pocket is None:
         log.warning("specialist run finished without persist_pocket; using fallback")
