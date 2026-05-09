@@ -343,6 +343,18 @@ class DeepAgentsBackend:
         self._cached_model_key = model_key
         return agent
 
+    def attach_specialist_tools(self, tools: list[Any]) -> None:
+        """Merge specialist tools into the custom-tool cache.
+
+        Invalidates the compiled-graph cache so the next ``run()`` rebuilds
+        the agent with the new tool surface.
+        """
+        if self._custom_tools is None:
+            self._custom_tools = []
+        self._custom_tools.extend(tools)
+        self._cached_agent = None  # force recompile next run
+        self._cached_model_key = None
+
     async def run(
         self,
         message: str,

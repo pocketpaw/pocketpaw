@@ -70,3 +70,16 @@ class AgentBackend(Protocol):
     async def stop(self) -> None: ...
 
     async def get_status(self) -> dict[str, Any]: ...
+
+    def attach_specialist_tools(self, tools: list[Any]) -> None:
+        """Attach pocket-specialist-internal tools to this backend instance.
+
+        Called by the specialist runtime to wire list_pockets / validate_spec /
+        persist_pocket into the LLM's tool surface for the duration of an
+        isolated specialist run.
+
+        Backends that cannot accept dynamic tools at runtime should raise
+        NotImplementedError and will be excluded from the valid
+        ``pocket_specialist_backend`` set.
+        """
+        ...

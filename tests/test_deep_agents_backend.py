@@ -379,6 +379,27 @@ class TestDeepAgentsSkillsMemoryPlumbing:
             assert agent2 is not agent1
 
 
+class TestDeepAgentsAttachSpecialistTools:
+    """attach_specialist_tools() merges into _custom_tools and invalidates the
+    compiled-graph cache so the next run picks up the new tool surface."""
+
+    def test_appends_tools_and_invalidates_cache(self):
+        from langchain_core.tools import StructuredTool
+
+        from pocketpaw.agents.deep_agents import DeepAgentsBackend
+
+        backend = DeepAgentsBackend(Settings())
+        backend._custom_tools = [MagicMock(name="existing")]
+        backend._cached_agent = MagicMock(name="prev")
+        backend._cached_model_key = ("anthropic:x", (), ())
+
+        new_tool = StructuredTool.from_function(func=lambda: "hi", name="extra", description="x")
+        backend.attach_specialist_tools([new_tool])
+
+        assert backend._custom_tools[-1] is new_tool
+        assert backend._cached_agent is None  # cache invalidated
+
+
 class TestDeepAgentsRegistry:
     """Tests for registry integration."""
 
