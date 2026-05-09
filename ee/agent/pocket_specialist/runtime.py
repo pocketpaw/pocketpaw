@@ -21,9 +21,7 @@ from ee.agent.pocket_specialist.settings import (
     resolve_specialist_model,
 )
 from ee.agent.pocket_specialist.tools import (
-    make_list_pockets_tool,
     make_persist_pocket_tool,
-    make_validate_spec_tool,
 )
 from ee.cloud.pockets.service import agent_create as _agent_create_for_fallback
 from ee.ripple._pockets import POCKET_ID_TOKEN, POCKET_SPECIALIST_PROMPT
@@ -103,11 +101,8 @@ async def run_specialist(
     # dicts when their tools run, giving the runtime access to the actual
     # return values without parsing truncated stringified content.
     persist_capture: dict[str, Any] = {}
-    validate_capture: dict[str, Any] = {}
     backend.attach_specialist_tools(
         [
-            make_list_pockets_tool(workspace_id=workspace_id, user_id=user_id),
-            make_validate_spec_tool(capture=validate_capture),
             make_persist_pocket_tool(
                 workspace_id=workspace_id,
                 user_id=user_id,
@@ -138,11 +133,7 @@ async def run_specialist(
                 first_event_seen = True
             if event.type == "tool_use":
                 tool_name = (event.metadata or {}).get("name", "")
-                if tool_name == "list_pockets":
-                    await emit_specialist_event(SpecialistEvent.LISTING, {})
-                elif tool_name == "validate_spec":
-                    await emit_specialist_event(SpecialistEvent.VALIDATING, {})
-                elif tool_name == "persist_pocket":
+                if tool_name == "persist_pocket":
                     await emit_specialist_event(SpecialistEvent.PERSISTING, {})
             elif event.type == "tool_result":
                 meta = event.metadata or {}
@@ -152,8 +143,7 @@ async def run_specialist(
         await backend.stop()
 
     captured_pocket: dict[str, Any] | None = persist_capture.get("pocket")
-    last_validation = validate_capture.get("last_validation") or {}
-    captured_warnings: list[str] = list(last_validation.get("warnings", []))
+    captured_warnings: list[str] = list(persist_capture.get("warnings", []))
 
     if not persist_called or captured_pocket is None:
         log.warning("specialist run finished without persist_pocket; using fallback")
@@ -222,10 +212,9 @@ def _build_system_prompt(hints: PocketSpecialistHints | None) -> str:
 
 def _build_user_message(input: PocketSpecialistCreateInput) -> str:
     return (
-        "Create a pocket per the brief below. Follow the workflow in your "
-        "system prompt: list existing pockets, decide extend-vs-create, "
-        "draft, validate, persist. You MUST end by calling persist_pocket "
-        "exactly once.\n\nBRIEF:\n" + input.brief
+        "Create a pocket per the brief below. Draft the rippleSpec in one "
+        "pass and call persist_pocket exactly once. Do NOT call any other "
+        "tools.\n\nBRIEF:\n" + input.brief
     )
 
 

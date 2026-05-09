@@ -29,6 +29,69 @@ _LANGCHAIN_PROVIDER_MAP: dict[str, str] = {
 }
 
 
+_LITELLM_PATCHED = False
+
+
+def _patch_litellm_message_serializer() -> None:
+    """Make langchain_litellm round-trip DeepSeek `reasoning_content` properly.
+
+    langchain_litellm wraps DeepSeek's `reasoning_content` as an Anthropic-style
+    `{"type": "thinking", "thinking": "..."}` content block on the AIMessage,
+    but its outbound `_convert_message_to_dict` passes that block through
+    untouched and never re-emits a top-level `reasoning_content` field. DeepSeek
+    rejects both shapes: the block is an unknown variant, and stripping it
+    makes DeepSeek complain that reasoning_content is missing in thinking mode.
+
+    Patch the serializer to:
+      - filter `thinking` / `redacted_thinking` blocks out of `content`
+      - hoist their text back into a top-level `reasoning_content` field
+    """
+    global _LITELLM_PATCHED
+    if _LITELLM_PATCHED:
+        return
+
+    try:
+        from langchain_litellm.chat_models import litellm as _ll
+    except ImportError:
+        return
+
+    original = _ll._convert_message_to_dict
+
+    def patched(message):  # type: ignore[no-untyped-def]
+        msg_dict = original(message)
+        content = msg_dict.get("content")
+        if isinstance(content, list):
+            thinking_parts: list[str] = []
+            kept: list[Any] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in (
+                    "thinking",
+                    "redacted_thinking",
+                ):
+                    text = block.get("thinking") or block.get("data") or ""
+                    if text:
+                        thinking_parts.append(text)
+                    continue
+                kept.append(block)
+            if thinking_parts:
+                if not msg_dict.get("reasoning_content"):
+                    msg_dict["reasoning_content"] = "\n".join(thinking_parts)
+                msg_dict["content"] = kept or ""
+        # Also surface reasoning_content stashed in additional_kwargs by the
+        # response parser, in case content was already a plain string.
+        if not msg_dict.get("reasoning_content"):
+            rc = getattr(message, "additional_kwargs", {}).get("reasoning_content")
+            if rc:
+                msg_dict["reasoning_content"] = rc
+        return msg_dict
+
+    _ll._convert_message_to_dict = patched
+    _LITELLM_PATCHED = True
+    logger.info(
+        "Patched langchain_litellm._convert_message_to_dict for reasoning_content round-trip"
+    )
+
+
 def _unwrap(value: Any) -> Any:
     """Unwrap LangGraph Overwrite/Send wrapper objects to their inner value.
 
@@ -342,6 +405,14 @@ class DeepAgentsBackend:
             kwargs["skills"] = skills
         if memory:
             kwargs["memory"] = memory
+
+        # langchain_litellm wraps DeepSeek's reasoning_content as an Anthropic
+        # `thinking` content block on AIMessages, but the outbound serializer
+        # never restores it as a top-level `reasoning_content` field. Patch
+        # _convert_message_to_dict so DeepSeek-thinking conversations round-trip.
+        provider, _ = self._parse_provider_model()
+        if provider == "litellm":
+            _patch_litellm_message_serializer()
 
         agent = create_deep_agent(**kwargs)
         self._cached_agent = agent

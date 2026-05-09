@@ -169,6 +169,23 @@ def make_persist_pocket_tool(
         color: str | None = None,
         target_pocket_id: str | None = None,
     ) -> dict[str, Any]:
+        # Inline manifest validation — replaces the separate validate_spec
+        # tool round-trip. apply_aliases=True normalizes known prop aliases
+        # in-place; remaining warnings are surfaced in the run output.
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        manifest = await _get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        warnings: list[str] = []
+        if manifest is not None:
+            issues = validate_against_manifest(ripple_spec, manifest, apply_aliases=True)
+            warnings = [_format_issue(issue) for issue in issues]
+        if capture is not None:
+            capture["warnings"] = warnings
+
         if target_pocket_id is not None:
             view, err = await _agent_update(
                 pocket_id=target_pocket_id,

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import warnings
 from functools import lru_cache
@@ -1205,6 +1206,14 @@ class Settings(BaseSettings):
             if field in secrets and secrets[field]:
                 data[field] = secrets[field]
             # data[field] may already be set from config.json — keep it as fallback
+
+        # Env vars must beat config.json. Passing a key as a kwarg to
+        # BaseSettings(**data) overrides env, so drop any field that has a
+        # POCKETPAW_<FIELD> env set — BaseSettings will pull it from env itself.
+        env_prefix = cls.model_config.get("env_prefix", "")
+        for field in list(data.keys()):
+            if os.environ.get(f"{env_prefix}{field.upper()}") is not None:
+                data.pop(field, None)
 
         if data:
             try:
