@@ -283,6 +283,31 @@ class Settings(BaseSettings):
         default=100,
         description="Max turns per query in Deep Agents backend (0 = unlimited)",
     )
+    # Pocket Specialist Settings — see docs/superpowers/specs/2026-05-09-pocket-specialist-design.md
+    pocket_specialist_backend: str = Field(
+        default="deep_agents",
+        description=(
+            "Which agent backend runs the pocket specialist's LLM work. Must be a "
+            "registered backend name (deep_agents, claude_agent_sdk, openai_agents, "
+            "google_adk, codex_cli, opencode, copilot_sdk). Default deep_agents "
+            "avoids subprocess cold-start."
+        ),
+    )
+    pocket_specialist_model: str = Field(
+        default="",
+        description=(
+            "Model override for the specialist run (empty = use the chosen backend's "
+            "default *_model setting). provider:model format, e.g. "
+            "'openai_compatible:deepseek-v4-pro' for cheap fast specs."
+        ),
+    )
+    pocket_specialist_max_validation_retries: int = Field(
+        default=3,
+        description=(
+            "Max draft -> validate -> revise iterations before persisting with "
+            "remaining warnings. Specialist always persists; this only bounds revision."
+        ),
+    )
     deep_agents_skills: list[str] = Field(
         default_factory=list,
         description=(
