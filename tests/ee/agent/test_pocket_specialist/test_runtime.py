@@ -1,5 +1,7 @@
 """run_specialist end-to-end with a mocked backend."""
 
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -193,3 +195,64 @@ class TestRunSpecialistSafetyNet:
         assert out.ok is True
         assert out.pocket["id"] == "p-fallback"
         assert any("force" in w.lower() or "fallback" in w.lower() for w in out.warnings)
+
+    @pytest.mark.asyncio
+    async def test_force_persist_raises_on_create_error(self):
+        # When the safety net's agent_create itself fails (Mongo down,
+        # validation error, etc.), we currently propagate as RuntimeError.
+        # The MCP/CLI handler at the call boundary converts it to is_error.
+        events = [
+            AgentEvent(type="message", content="done"),
+            AgentEvent(type="done", content=""),
+        ]
+        fake_backend = MagicMock()
+        fake_backend.run = _stream(events)
+        fake_backend.attach_specialist_tools = MagicMock()
+        fake_backend.stop = AsyncMock()
+
+        with (
+            patch(
+                "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+                return_value=fake_backend,
+            ),
+            patch(
+                "ee.agent.pocket_specialist.runtime.emit_specialist_event",
+                new=AsyncMock(),
+            ),
+            patch(
+                "ee.agent.pocket_specialist.runtime._agent_create_for_fallback",
+                new=AsyncMock(return_value=(None, None, "mongo timeout")),
+            ),
+            pytest.raises(RuntimeError, match="mongo timeout"),
+        ):
+            await run_specialist(
+                PocketSpecialistCreateInput(brief="A vague brief here for testing"),
+                workspace_id="ws-1",
+                user_id="user-A",
+                settings=Settings(),
+            )
+
+
+class TestForcePersistMinimalSpec:
+    """The hardcoded minimal spec must validate against the live manifest.
+    If the renderer's manifest changes prop names, this test fails before
+    we ship a blank pocket to a real user."""
+
+    @pytest.mark.asyncio
+    async def test_minimal_spec_passes_manifest_validation(self):
+        from ee.agent.pocket_specialist.runtime import (
+            _MINIMAL_SPEC_FOR_FALLBACK,
+        )
+        from ee.ripple.manifest import validate_against_manifest
+
+        # Load the manifest directly from the ripple project's static
+        # asset. The configured URL defaults to a local dev server which
+        # is not running in CI; loading from disk is deterministic and
+        # mirrors what the renderer ships.
+        manifest_path = Path(__file__).resolve().parents[5] / "ripple" / "static" / "manifest.json"
+        if not manifest_path.exists():
+            pytest.skip(f"manifest not found at {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        issues = validate_against_manifest(_MINIMAL_SPEC_FOR_FALLBACK, manifest)
+        assert issues == [], f"Minimal spec drifted from manifest: {issues}"

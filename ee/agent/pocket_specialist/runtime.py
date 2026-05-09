@@ -205,6 +205,25 @@ def _build_user_message(input: PocketSpecialistCreateInput) -> str:
     )
 
 
+# Module-level - exposed for tests to validate against the live manifest.
+# If the renderer's manifest changes prop names, the regression test in
+# tests/ee/agent/test_pocket_specialist/test_runtime.py fails before we
+# ship a blank pocket to a real user.
+_MINIMAL_SPEC_FOR_FALLBACK: dict[str, Any] = {
+    "version": "1.0",
+    "state": {},
+    "ui": {
+        "type": "text",
+        "props": {
+            "text": (
+                "This pocket was auto-created from a brief. "
+                "Ask me to refine it and I'll fill it out."
+            )
+        },
+    },
+}
+
+
 async def _force_persist_fallback(
     *,
     workspace_id: str,
@@ -216,19 +235,6 @@ async def _force_persist_fallback(
     """
     name = (input.hints and input.hints.name) or _derive_name_from_brief(input.brief)
     description = (input.hints and input.hints.description) or input.brief[:200]
-    minimal_spec = {
-        "version": "1.0",
-        "state": {},
-        "ui": {
-            "type": "text",
-            "props": {
-                "value": (
-                    "This pocket was auto-created from a brief. "
-                    "Ask me to refine it and I'll fill it out."
-                )
-            },
-        },
-    }
     pocket, _id, err = await _agent_create_for_fallback(
         workspace_id=workspace_id,
         owner_id=user_id,
@@ -236,7 +242,7 @@ async def _force_persist_fallback(
         description=description,
         icon=(input.hints and input.hints.icon) or "Sparkles",
         color=(input.hints and input.hints.color) or "#a78bfa",
-        ripple_spec=minimal_spec,
+        ripple_spec=_MINIMAL_SPEC_FOR_FALLBACK,
     )
     if err or pocket is None:
         raise RuntimeError(f"force-persist fallback failed: {err or 'no pocket returned'}")
