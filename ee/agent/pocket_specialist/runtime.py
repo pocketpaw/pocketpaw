@@ -169,6 +169,17 @@ async def run_specialist(
         },
     )
 
+    # Single-line operator-grep summary: emit OUTSIDE the per-event helper
+    # so it shows up once per run regardless of bus state.
+    log.info(
+        "[pocket-specialist] complete: pocket_id=%s action=%s backend=%s duration=%dms warnings=%d",
+        captured_pocket.get("id", ""),
+        action,
+        backend_name,
+        duration_ms,
+        len(captured_warnings),
+    )
+
     return PocketSpecialistCreateOutput(
         ok=True,
         action=action,
