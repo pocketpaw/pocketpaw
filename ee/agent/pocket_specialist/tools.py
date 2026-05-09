@@ -46,7 +46,7 @@ def make_list_pockets_tool(*, workspace_id: str, user_id: str) -> StructuredTool
             "List existing pockets in the current workspace. Call this BEFORE "
             "drafting a new spec to decide whether to extend an existing pocket "
             "or create a new one. Returns a compact list of "
-            "{id, name, description, type, icon, color}."
+            "{id, name, description, type, icon, color, owner}."
         ),
         args_schema=_ListPocketsArgs,
     )
@@ -74,7 +74,9 @@ def _format_issue(issue: dict[str, Any]) -> str:
             f"{item.get('path', path)}: '{item.get('from')}' -> '{item.get('to')}'"
             + (" (auto-fixed)" if item.get("applied") else "")
         )
-    return "; ".join(parts) if parts else f"{path} ({type_}): drift"
+    # validate_against_manifest only emits issues when unknown_props or
+    # item_issues is non-empty, so parts is guaranteed non-empty here.
+    return "; ".join(parts)
 
 
 def make_validate_spec_tool() -> StructuredTool:
@@ -147,9 +149,9 @@ def make_persist_pocket_tool(*, workspace_id: str, user_id: str) -> StructuredTo
         color: str | None = None,
         target_pocket_id: str | None = None,
     ) -> dict[str, Any]:
-        if target_pocket_id:
+        if target_pocket_id is not None:
             view, err = await _agent_update(
-                target_pocket_id,
+                pocket_id=target_pocket_id,
                 name=name,
                 description=description,
                 icon=icon,

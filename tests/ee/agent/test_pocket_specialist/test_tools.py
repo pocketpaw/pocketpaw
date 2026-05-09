@@ -112,6 +112,6 @@ class TestPersistPocketTool:
                 }
             )
             mocked.assert_awaited_once()
-            args, kwargs = mocked.await_args
-            assert args[0] == "p1" or kwargs.get("pocket_id") == "p1"
+            call = mocked.await_args
+            assert call.kwargs.get("pocket_id") == "p1"
             assert result["id"] == "p1"
