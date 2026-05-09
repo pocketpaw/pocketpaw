@@ -594,6 +594,24 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocket_context MCP server not registered: %s", exc)
 
+        # In-process MCP server: exposes ``pocket_specialist__create`` so the
+        # main agent can hand a brief to the specialist subagent without
+        # re-implementing the listing/validation/persist workflow.
+        try:
+            from ee.agent.pocket_specialist.mcp_tool import (
+                SERVER_NAME as _PS_SERVER_NAME,
+            )
+            from ee.agent.pocket_specialist.mcp_tool import (
+                build_pocket_specialist_server,
+            )
+
+            if self._policy.is_mcp_server_allowed(_PS_SERVER_NAME):
+                servers[_PS_SERVER_NAME] = build_pocket_specialist_server()
+            else:
+                logger.info("pocket_specialist MCP server blocked by tool policy")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocket_specialist MCP server not registered: %s", exc)
+
         return servers
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
@@ -894,6 +912,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
             from pocketpaw.agents.sdk_mcp_pocket import POCKET_TOOL_IDS
 
             allowed_tools.extend(POCKET_TOOL_IDS)
+
+            # Pocket specialist — single ``create`` tool that runs the full
+            # listing → validate → persist workflow as an isolated subagent.
+            try:
+                from ee.agent.pocket_specialist.mcp_tool import (
+                    POCKET_SPECIALIST_TOOL_IDS,
+                )
+
+                allowed_tools.extend(POCKET_SPECIALIST_TOOL_IDS)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "pocket_specialist tool ids not added to allowlist: %s",
+                    exc,
+                )
 
             # Filter pocket mutation tools off the main agent's allowlist.
             # Mutation tools (``create_pocket``, ``update_pocket``,
