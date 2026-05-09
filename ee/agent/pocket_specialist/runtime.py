@@ -1,0 +1,200 @@
+"""Pocket-specialist runtime - the only public entry point for the tool surfaces.
+
+Orchestrates backend selection, tool wiring, event emission, and result
+assembly. Always persists a pocket - see feedback_pocket_always_ships.md.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+from ee.agent.pocket_specialist.events import (
+    SpecialistEvent,
+    emit_specialist_event,
+)
+from ee.agent.pocket_specialist.settings import (
+    _BACKEND_MODEL_FIELD,
+    resolve_specialist_model,
+)
+from ee.agent.pocket_specialist.tools import (
+    make_list_pockets_tool,
+    make_persist_pocket_tool,
+    make_validate_spec_tool,
+)
+from ee.ripple._pockets import POCKET_CREATION_PROMPT_MCP, POCKET_ID_TOKEN
+from pocketpaw.agents.router import AgentRouter
+from pocketpaw.config import Settings
+
+log = logging.getLogger(__name__)
+
+
+class PocketSpecialistHints(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    color: str | None = None
+    icon: str | None = None
+    target_pocket_id: str | None = None
+
+
+class PocketSpecialistCreateInput(BaseModel):
+    brief: str = Field(..., min_length=10, max_length=4000)
+    hints: PocketSpecialistHints | None = None
+
+
+class PocketSpecialistCreateOutput(BaseModel):
+    ok: bool
+    action: Literal["created", "extended"]
+    pocket: dict[str, Any]
+    warnings: list[str] = Field(default_factory=list)
+    duration_ms: int
+    backend_used: str
+
+
+async def run_specialist(
+    input: PocketSpecialistCreateInput,
+    *,
+    workspace_id: str,
+    user_id: str,
+    settings: Settings,
+) -> PocketSpecialistCreateOutput:
+    """Run the pocket specialist end-to-end.
+
+    Builds an isolated backend, attaches the three internal tools, runs the
+    agent loop, captures the persist_pocket result, and emits status events
+    along the way. Always returns a persisted pocket - the safety-net
+    fallback (Task 8) covers the rare case where the LLM finishes without
+    calling persist_pocket.
+    """
+    started = time.monotonic()
+    backend_name = settings.pocket_specialist_backend
+    model_id = resolve_specialist_model(settings)
+
+    await emit_specialist_event(
+        SpecialistEvent.START,
+        {
+            "brief": input.brief[:200],
+            "hints": input.hints.model_dump() if input.hints else None,
+            "backend": backend_name,
+        },
+    )
+
+    override: dict[str, Any] = {}
+    if model_id:
+        field_name = _BACKEND_MODEL_FIELD.get(backend_name, f"{backend_name}_model")
+        override[field_name] = model_id
+
+    backend = AgentRouter.create_isolated_backend(
+        backend_name,
+        settings,
+        settings_override=override or None,
+    )
+    backend.attach_specialist_tools(
+        [
+            make_list_pockets_tool(workspace_id=workspace_id, user_id=user_id),
+            make_validate_spec_tool(),
+            make_persist_pocket_tool(workspace_id=workspace_id, user_id=user_id),
+        ]
+    )
+
+    system_prompt = _build_system_prompt(input.hints)
+    user_message = _build_user_message(input)
+
+    captured_pocket: dict[str, Any] | None = None
+    captured_warnings: list[str] = []
+    persist_called = False
+
+    try:
+        async for event in backend.run(user_message, system_prompt=system_prompt):
+            if event.type == "tool_use":
+                tool_name = (event.metadata or {}).get("name", "")
+                if tool_name == "list_pockets":
+                    await emit_specialist_event(SpecialistEvent.LISTING, {})
+                elif tool_name == "validate_spec":
+                    await emit_specialist_event(SpecialistEvent.VALIDATING, {})
+                elif tool_name == "persist_pocket":
+                    await emit_specialist_event(SpecialistEvent.PERSISTING, {})
+            elif event.type == "tool_result":
+                meta = event.metadata or {}
+                if meta.get("name") == "persist_pocket":
+                    persist_called = True
+                    result = meta.get("result")
+                    if isinstance(result, dict):
+                        captured_pocket = result
+                elif meta.get("name") == "validate_spec":
+                    result = meta.get("result")
+                    if isinstance(result, dict):
+                        captured_warnings = result.get("warnings", [])
+    finally:
+        await backend.stop()
+
+    if not persist_called or captured_pocket is None:
+        log.warning("specialist run finished without persist_pocket; using fallback")
+        captured_pocket = await _force_persist_fallback(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            input=input,
+        )
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    action: Literal["created", "extended"] = (
+        "extended" if (input.hints and input.hints.target_pocket_id) else "created"
+    )
+
+    await emit_specialist_event(
+        SpecialistEvent.DONE,
+        {
+            "pocket_id": captured_pocket.get("id", ""),
+            "action": action,
+            "duration_ms": duration_ms,
+            "warning_count": len(captured_warnings),
+        },
+    )
+
+    return PocketSpecialistCreateOutput(
+        ok=True,
+        action=action,
+        pocket=captured_pocket,
+        warnings=captured_warnings,
+        duration_ms=duration_ms,
+        backend_used=backend_name,
+    )
+
+
+def _build_system_prompt(hints: PocketSpecialistHints | None) -> str:
+    """Compose the specialist system prompt from the canonical creation
+    prompt + any hints from the caller."""
+    base = POCKET_CREATION_PROMPT_MCP.replace(POCKET_ID_TOKEN, "")
+    if not hints:
+        return base
+    hint_block = ["", "CALLER HINTS (respect when set, otherwise decide yourself):"]
+    for field in ("name", "description", "color", "icon", "target_pocket_id"):
+        v = getattr(hints, field)
+        if v:
+            hint_block.append(f"  {field}: {v}")
+    if len(hint_block) == 2:
+        # No hints set on the model - skip the block entirely.
+        return base
+    return base + "\n".join(hint_block)
+
+
+def _build_user_message(input: PocketSpecialistCreateInput) -> str:
+    return (
+        "Create a pocket per the brief below. Follow the workflow in your "
+        "system prompt: list existing pockets, decide extend-vs-create, "
+        "draft, validate, persist. You MUST end by calling persist_pocket "
+        "exactly once.\n\nBRIEF:\n" + input.brief
+    )
+
+
+async def _force_persist_fallback(
+    *,
+    workspace_id: str,
+    user_id: str,
+    input: PocketSpecialistCreateInput,
+) -> dict[str, Any]:
+    """Stub - Task 8 fills this in."""
+    raise NotImplementedError("force-persist fallback added in Task 8")
