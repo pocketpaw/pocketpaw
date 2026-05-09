@@ -182,8 +182,9 @@ def test_inline_widget_help_no_args_returns_full_catalog():
 
 def test_main_chat_prompt_delegates_pocket_work_not_inlines_it():
     """In plain chat on claude_agent_sdk, the system prompt teaches the agent
-    to delegate pocket work to the specialist. It must NOT carry the full
-    POCKET_CREATION_PROMPT_MCP — that lives on the specialist now."""
+    to delegate pocket work to the ``pocket_specialist__create`` MCP tool.
+    It must NOT carry the full POCKET_CREATION_PROMPT_MCP — that lives in
+    the specialist tool now."""
     ctx = ScopeContext(
         kind=ScopeKind.SESSION,
         scope_id="s1",
@@ -195,34 +196,27 @@ def test_main_chat_prompt_delegates_pocket_work_not_inlines_it():
         agent_ids_in_scope=["a1"],
     )
     block = build_context_block(ctx, backend_name="claude_agent_sdk")
-    # Delegation rule present and uses the Agent tool pattern.
+    # Delegation rule present and points at the specialist MCP tool.
     assert "<pocket-delegation>" in block
-    assert "Agent" in block
-    assert (
-        'subagent_type="pocket_specialist"' in block or "subagent_type='pocket_specialist'" in block
-    )
+    assert "pocket_specialist__create" in block
     # Full pocket creation prompt is NOT inlined.
     assert "<list-before-create>" not in block, (
         "full pocket creation prompt leaked into main-chat system prompt — "
-        "should be on the specialist subagent only"
+        "should be in the pocket_specialist__create MCP tool only"
     )
 
 
-def test_pocket_delegation_rule_uses_agent_tool():
-    """The delegation rule must teach the agent to call the built-in
-    Agent tool with subagent_type='pocket_specialist'. The custom
-    'delegate_to_pocket_specialist' MCP tool was deliberately not
-    added — registered subagents are auto-exposed via the Agent tool
-    by claude-agent-sdk 0.1.72+."""
+def test_pocket_delegation_rule_points_at_specialist_mcp_tool():
+    """The delegation rule must teach the agent to call the
+    ``pocket_specialist__create`` MCP tool. The legacy native-subagent
+    Agent-tool path has been removed."""
     from ee.ripple._pockets import POCKET_DELEGATION_RULE
 
-    assert "Agent" in POCKET_DELEGATION_RULE
-    # Match either single- or double-quoted form of the kwarg.
-    assert (
-        'subagent_type="pocket_specialist"' in POCKET_DELEGATION_RULE
-        or "subagent_type='pocket_specialist'" in POCKET_DELEGATION_RULE
-    ), "delegation rule must explicitly tell agent to pass subagent_type='pocket_specialist'"
-    # Should NOT reference the abandoned custom MCP tool name.
+    assert "pocket_specialist__create" in POCKET_DELEGATION_RULE
+    # Legacy native-subagent kwarg shape must be gone.
+    assert 'subagent_type="pocket_specialist"' not in POCKET_DELEGATION_RULE
+    assert "subagent_type='pocket_specialist'" not in POCKET_DELEGATION_RULE
+    # Should NOT reference the abandoned custom MCP tool name either.
     assert "delegate_to_pocket_specialist" not in POCKET_DELEGATION_RULE
 
 

@@ -89,29 +89,29 @@ read source files, or explore the codebase to satisfy a pocket request.
 
 POCKET_DELEGATION_RULE = """\
 <pocket-delegation>
-Pocket creation and editing are NOT done in this conversation. They
-are done by the `pocket_specialist` subagent.
+Pocket creation and editing are done by a single specialist tool, not
+inline in this conversation.
 
 When the user asks to create, edit, add to, modify, or otherwise touch
 a pocket — including phrases like "make a pocket", "edit this canvas",
 "add a widget", "change the layout", "build a dashboard for X", or any
-follow-up that mutates pocket state — you MUST invoke the built-in
-`Agent` tool with `subagent_type="pocket_specialist"`. Do NOT call
-`create_pocket`, `update_pocket`, `add_widget`, or any other pocket
-mutation tool from this turn — those tools are not on your allowlist
-in chat mode.
+follow-up that mutates pocket state — you MUST call the
+`pocket_specialist__create` tool. Do NOT call `create_pocket`,
+`update_pocket`, `add_widget`, or any other pocket mutation tool — they
+are not on your allowlist in chat mode.
 
-Pass to the Agent tool:
-  subagent_type     — the literal string "pocket_specialist"
-  description       — a short label (3-5 words) of the work
-  prompt            — the user's verbatim request, prefixed with the
-                      active pocket id if known (e.g. "On pocket
-                      <id>: <verbatim request>") AND the last 4 turns
-                      of conversation as context
+Pass to `pocket_specialist__create`:
+  brief  — a natural-language description of what the user wants. Include
+           the active pocket id (if known) and the last 2-4 turns of
+           conversation context. The specialist will list existing
+           pockets and decide whether to create new or extend.
+  hints  — optional. Only set fields the user named explicitly:
+           {name?, description?, color?, icon?, target_pocket_id?}
 
-The specialist returns a brief status string when done. Relay it to
-the user in your own voice; do not paraphrase the specialist's
-internal reasoning.
+The tool returns {ok, action, pocket, warnings, duration_ms,
+backend_used}. Relay the result to the user in your own voice; surface
+warnings (if any) as "I shipped it; want me to clean up X?" and never
+block on warnings — the pocket already exists.
 
 A request that is purely conversational (no canvas mutation) — "what
 pockets do I have?", "describe this pocket", "what does X mean" — is

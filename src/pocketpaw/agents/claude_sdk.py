@@ -35,8 +35,9 @@ _DEFAULT_IDENTITY = (
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
 
 # Pocket mutation tools — write-side MCP tools the main chat agent is NOT
-# allowed to call. Pocket edits flow through the ``pocket_specialist``
-# subagent via the ``delegate_to_pocket_specialist`` tool. Read-side
+# allowed to call. Pocket mutations go through the
+# ``pocket_specialist__create`` MCP tool, which runs the full
+# list/validate/persist workflow as an isolated specialist run. Read-side
 # tools (``get_pocket``, ``list_pockets``, ``get_widget_spec``,
 # ``get_inline_widget_help``) stay on the main allowlist so the agent
 # can answer conversational questions about existing pockets.
@@ -49,67 +50,6 @@ _POCKET_MUTATION_TOOL_IDS: frozenset[str] = frozenset(
         "mcp__pocketpaw_pocket__remove_widget",
     }
 )
-
-# Canonical subagent registration key — must match the name referenced in
-# POCKET_DELEGATION_RULE.  Extracted as a constant so the test can import it
-# and assert both sides of the contract refer to the same string.
-_POCKET_SPECIALIST_NAME = "pocket_specialist"
-
-
-def _pocket_specialist_system_prompt() -> str:
-    """Full pocket-mode system prompt the specialist subagent runs with.
-    The main chat agent ships only POCKET_DELEGATION_RULE; this is what
-    the specialist sees when delegated to.
-
-    The interaction prompt's POCKET_ID_TOKEN placeholder is rewritten
-    to direct the specialist to the parent's Agent-tool invocation
-    prompt — the pocket_id is passed there per-call, not baked into
-    the system prompt at SDK init time.
-    """
-    from ee.ripple._pockets import (
-        POCKET_ID_TOKEN,
-        POCKET_INTERACTION_PROMPT_MCP,
-        POCKET_SPECIALIST_PROMPT,
-    )
-
-    interaction = POCKET_INTERACTION_PROMPT_MCP.replace(
-        POCKET_ID_TOKEN,
-        "<the pocket id, supplied in the invocation prompt>",
-    )
-    return POCKET_SPECIALIST_PROMPT + "\n\n" + interaction
-
-
-def _build_pocket_specialist_agent_def() -> Any:
-    """Construct the ``AgentDefinition`` for the pocket specialist subagent.
-
-    Returns ``None`` if the SDK is unavailable. Importing ``AgentDefinition``
-    lazily keeps this module loadable in environments where
-    ``claude_agent_sdk`` is not installed.
-    """
-    try:
-        from claude_agent_sdk import AgentDefinition
-    except ImportError:
-        return None
-
-    return AgentDefinition(
-        description=(
-            "Builds and edits PocketPaw pockets (themed dashboards / canvases). "
-            "Owns the cloud_* pocket mutation tools. Invoke via "
-            "delegate_to_pocket_specialist whenever the user asks to create, "
-            "edit, add to, or modify a pocket."
-        ),
-        prompt=_pocket_specialist_system_prompt(),
-        tools=[
-            "mcp__pocketpaw_pocket__create_pocket",
-            "mcp__pocketpaw_pocket__update_pocket",
-            "mcp__pocketpaw_pocket__add_widget",
-            "mcp__pocketpaw_pocket__update_widget",
-            "mcp__pocketpaw_pocket__remove_widget",
-            "mcp__pocketpaw_pocket__get_pocket",
-            "mcp__pocketpaw_pocket__list_pockets",
-            "mcp__pocketpaw_pocket__get_widget_spec",
-        ],
-    )
 
 
 class ClaudeSDKBackend(BaseAgentBackend):
@@ -127,11 +67,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # denied when the profile is 'full' (empty _allowed_set). For
         # restrictive profiles ('minimal', 'coding') it returns False for
         # any key absent from the resolved allow set. 'Agent' therefore
-        # MUST have an explicit entry here; without it, the pocket_specialist
-        # subagent is silently blocked for every non-full profile.
-        # Mapped to 'shell' because invoking a subagent has comparable
-        # privilege scope to running a shell command — the gating is
-        # deliberately conservative.
+        # MUST have an explicit entry here; without it, any registered
+        # subagent (general-purpose claude_agent_sdk capability) would
+        # be silently blocked for every non-full profile. Mapped to
+        # 'shell' because invoking a subagent has comparable privilege
+        # scope to running a shell command — the gating is deliberately
+        # conservative.
         "Agent": "shell",
         "Bash": "shell",
         "Read": "read_file",
@@ -595,8 +536,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
             logger.debug("pocket_context MCP server not registered: %s", exc)
 
         # In-process MCP server: exposes ``pocket_specialist__create`` so the
-        # main agent can hand a brief to the specialist subagent without
-        # re-implementing the listing/validation/persist workflow.
+        # main agent can hand a brief to the specialist tool, which runs
+        # the full list/validate/persist workflow as an isolated specialist
+        # run without re-implementing it inline.
         try:
             from ee.agent.pocket_specialist.mcp_tool import (
                 SERVER_NAME as _PS_SERVER_NAME,
@@ -929,14 +871,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
             # Filter pocket mutation tools off the main agent's allowlist.
             # Mutation tools (``create_pocket``, ``update_pocket``,
-            # ``add_widget``, ``update_widget``, ``remove_widget``) flow
-            # to the ``pocket_specialist`` subagent — its
-            # ``AgentDefinition.tools`` field holds the full write set.
-            # Surviving on the main agent: read-only + catalog tools only
-            # (``get_pocket``, ``list_pockets``, ``get_widget_spec``,
-            # ``get_inline_widget_help``). The main agent receives
-            # POCKET_DELEGATION_RULE (not the heavy creation/interaction
-            # prompts), so it never tries to call the filtered-out tools.
+            # ``add_widget``, ``update_widget``, ``remove_widget``) are
+            # owned by the ``pocket_specialist__create`` MCP tool, which
+            # runs the full list/validate/persist workflow as an isolated
+            # specialist run. Surviving on the main agent: read-only +
+            # catalog tools only (``get_pocket``, ``list_pockets``,
+            # ``get_widget_spec``, ``get_inline_widget_help``). The main
+            # agent receives POCKET_DELEGATION_RULE (not the heavy
+            # creation/interaction prompts), so it never tries to call
+            # the filtered-out tools.
             allowed_tools = [t for t in allowed_tools if t not in _POCKET_MUTATION_TOOL_IDS]
 
             # Build hooks for security
@@ -979,21 +922,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 "cwd": str(self._cwd),
                 "max_turns": self.settings.claude_sdk_max_turns or None,
             }
-
-            # Register the pocket_specialist subagent — owns the full
-            # POCKET_CREATION_PROMPT_MCP + POCKET_INTERACTION_PROMPT_MCP
-            # text and the mutation tools. The main agent reaches it via
-            # the built-in ``Agent`` tool (Agent(subagent_type=
-            # "pocket_specialist", ...)) — claude-agent-sdk 0.1.72+
-            # auto-exposes registered subagents through that tool; no
-            # custom MCP wrapper is needed. Built with a real
-            # ``AgentDefinition`` per the SDK's ClaudeAgentOptions.agents
-            # field.
-            pocket_specialist_def = _build_pocket_specialist_agent_def()
-            if pocket_specialist_def is not None:
-                options_kwargs["agents"] = {
-                    _POCKET_SPECIALIST_NAME: pocket_specialist_def,
-                }
 
             # Configure LLM provider for the Claude CLI subprocess.
             # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
