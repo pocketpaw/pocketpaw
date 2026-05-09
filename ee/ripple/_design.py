@@ -475,14 +475,28 @@ of actions run in order.
 
 ## Toolkit — the expression language
 
+This is the EXACT grammar the renderer's expression resolver supports.
+Anything outside it returns `undefined` at runtime and triggers a
+write-time warning. There is no `eval`, no arbitrary JS — keep
+expressions simple and use state seed values for anything richer.
+
 Inside any string value the dispatcher resolves:
 
   {state.x}              — read state
-  {state.x + 1}          — arithmetic (+ - * /)
+  {state.x + 1}          — arithmetic (+ - * / %)
   {state.x.length}       — property access
-  {state.x > 0 ? a : b}  — ternary, comparisons, &&, ||, !
+  {state.x > 0 ? a : b}  — ternary, comparisons (== === != !== > < >= <=)
+  {a && b} / {a || b} / {!flag} / {a ?? b}
   {item} / {card} / {index}    — loop context
   {event}                — payload from on_change / on_submit
+
+Inline literals (each item / value is itself an expression):
+
+  Array literal   — [1, 2, 'three']  /  [{value: 'a', label: 'A'}]
+  Object literal  — {n: state.x, label: 'Hello'}
+  String literal  — 'foo' or "foo"
+  Number literal  — 42, -1.5
+  Boolean / null  — true, false, null, undefined
 
 Whitelisted method calls on resolved values (no callbacks; args are
 literals or expressions only):
@@ -499,6 +513,30 @@ literals or expressions only):
                                            directly with no ternary
             .whereIn(field, values)      — pass-through on empty array
             .sortBy(field, 'asc'|'desc') — non-mutating, numeric-aware
+
+NEVER use these — they will silently break the widget:
+
+  ✗ arrow functions       i => i.name
+  ✗ .map / .filter / .find / .reduce / .flatMap   (use .where / .sortBy /
+                                                   .limit instead, or
+                                                   precompute in `state`)
+  ✗ function / class / new / typeof / instanceof / await
+  ✗ for / while loops, template literals (backticks), spread (...x)
+  ✗ ANY method not in the whitelist above
+
+When a control's "no value" option needs a placeholder list, put the
+placeholder in `state` and bind directly — don't put a literal array of
+placeholder objects inside a ternary expression on the prop.
+
+  ✗ wrong:
+    "options": "{state.team.length > 0 ? state.team
+                : [{value: 'placeholder', label: 'No teammates'}]}"
+
+  ✓ right:
+    "state": { "team": [], "team_options": [
+        {"value": "placeholder", "label": "No teammates"}
+      ] }
+    "options": "{state.team.length > 0 ? state.team : state.team_options}"
 
 Bracket indexing in paths (key may be literal or an expression):
 
