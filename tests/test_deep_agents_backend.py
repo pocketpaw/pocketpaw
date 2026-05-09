@@ -297,13 +297,23 @@ class TestDeepAgentsResponsesApiKwarg:
         _model_id, kwargs = self._capture_init_chat_model(settings)
         assert kwargs.get("use_responses_api") is False
 
-    def test_litellm_forces_chat_completions(self):
+    def test_litellm_uses_native_chatlitellm(self):
+        # The litellm branch now routes through the native ChatLiteLLM
+        # integration (langchain-litellm) so the LiteLLM SDK can handle
+        # provider-specific quirks (DeepSeek reasoning_content, Anthropic
+        # thinking blocks, etc.). ChatLiteLLM uses ``api_base`` (not
+        # ``base_url``) and does NOT accept ``use_responses_api``.
         settings = Settings(
             deep_agents_model="litellm:claude-sonnet-4-6",
             litellm_api_base="http://proxy:4000",
+            litellm_api_key="sk-test",
         )
-        _model_id, kwargs = self._capture_init_chat_model(settings)
-        assert kwargs.get("use_responses_api") is False
+        model_id, kwargs = self._capture_init_chat_model(settings)
+        assert model_id == "litellm:claude-sonnet-4-6"
+        assert kwargs.get("api_base") == "http://proxy:4000"
+        assert kwargs.get("api_key") == "sk-test"
+        assert "use_responses_api" not in kwargs
+        assert "base_url" not in kwargs
 
     def test_plain_openai_keeps_responses_api_default(self):
         # No custom base_url — talking to api.openai.com directly. We must

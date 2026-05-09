@@ -121,6 +121,13 @@ deep-agents = [
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
     "langchain-openai>=1.2.0,<2.0.0",
+    # Native LiteLLM integration — handles provider-specific quirks
+    # (DeepSeek reasoning_content, Anthropic thinking blocks, etc.) that the
+    # generic ChatOpenAI masquerade silently dropped on the floor.
+    # Pinned to 0.6.4 (excluding 0.6.5+) because 0.6.5 requires
+    # litellm>=1.83.14 which pins openai==2.24.0 and conflicts with
+    # langchain-openai>=1.2.0 (which needs openai>=2.26.0).
+    "langchain-litellm>=0.6.4,<0.6.5",
 ]
 litellm = [
     "litellm>=1.40.0",
@@ -313,6 +320,7 @@ all = [
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
     "langchain-openai>=1.2.0,<2.0.0",
+    "langchain-litellm>=0.6.4,<0.6.5",
 ]
 dev = [
     # all deps (flattened from [all])
@@ -345,6 +353,7 @@ dev = [
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
     "langchain-openai>=1.2.0,<2.0.0",
+    "langchain-litellm>=0.6.4,<0.6.5",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
@@ -417,6 +426,7 @@ dev = [
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
     "langchain-openai>=1.2.0,<2.0.0",
+    "langchain-litellm>=0.6.4,<0.6.5",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated

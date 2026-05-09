@@ -284,16 +284,21 @@ class DeepAgentsBackend:
             is_openai_compat_endpoint = True
 
         elif provider == "litellm":
-            # Route through LiteLLM proxy as OpenAI-compatible endpoint.
-            # The proxy exposes an OpenAI API, so we use the openai provider
-            # pointed at the proxy URL. This avoids needing langchain-litellm.
+            # Route through LiteLLM via the native ChatLiteLLM integration. The
+            # LiteLLM SDK handles provider-specific quirks (DeepSeek
+            # reasoning_content threading, Anthropic thinking blocks,
+            # model-name routing) that our earlier ChatOpenAI-masquerade
+            # dropped on the floor. ChatLiteLLM uses ``api_base`` (not
+            # ``base_url``) and the LiteLLM SDK appends the path itself, so we
+            # must NOT add ``/v1``. We also keep provider="litellm" so
+            # init_chat_model returns ChatLiteLLM, and we leave
+            # ``is_openai_compat_endpoint`` False — ChatLiteLLM does not
+            # accept ``use_responses_api``.
             base = (self.settings.litellm_api_base or "http://localhost:4000").rstrip("/")
-            kwargs["base_url"] = f"{base}/v1"
+            kwargs["api_base"] = base
             kwargs["api_key"] = self.settings.litellm_api_key or "not-needed"
             if not model:
                 model = self.settings.litellm_model or ""
-            provider = "openai"
-            is_openai_compat_endpoint = True
 
         # Force chat-completions for non-OpenAI endpoints. The default
         # Responses API in deepagents 0.5.x is OpenAI-only.
