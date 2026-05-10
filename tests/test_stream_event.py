@@ -1,5 +1,6 @@
 # Tests for StreamEvent token-by-token streaming integration
 # Created: 2026-02-06
+from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
