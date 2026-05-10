@@ -40,7 +40,6 @@ def _make_slow_router(delay: float = 0.1):
 # ---------------------------------------------------------------------------
 
 
-@patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
 @patch("pocketpaw.agents.loop.AgentContextBuilder")
@@ -50,56 +49,33 @@ async def test_session_lock_serialises_same_session(
     mock_ctx_cls,
     mock_get_mem,
     mock_get_bus,
-    mock_get_scanner,
 ):
     """Two messages with the same session_key must not overlap."""
     settings = MagicMock()
-    settings.injection_scan_enabled = False
-    settings.memory_backend = "file"
-    settings.file_auto_learn = False
-    settings.mem0_auto_learn = False
-    settings.compaction_recent_window = 10
-    settings.compaction_char_budget = 8000
-    settings.compaction_summary_chars = 150
-    settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 5
     mock_get_settings.return_value = settings
 
-    bus = MagicMock()
-    bus.publish_outbound = AsyncMock()
-    bus.publish_system = AsyncMock()
-    mock_get_bus.return_value = bus
+    mock_get_bus.return_value = MagicMock()
+    mock_ctx_cls.return_value = MagicMock()
 
     mem = MagicMock()
-    mem.add_to_session = AsyncMock()
-    mem.get_compacted_history = AsyncMock(return_value=[])
     mem.resolve_session_key = AsyncMock(side_effect=lambda k: k)
     mock_get_mem.return_value = mem
-
-    ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
-    mock_ctx_cls.return_value = ctx
-
-    scanner = MagicMock()
-    mock_get_scanner.return_value = scanner
 
     from pocketpaw.agents.loop import AgentLoop
 
     loop = AgentLoop()
 
     order = []
-    delay = 0.05
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
-        order.append(f"start:{message}")
-        await asyncio.sleep(delay)
-        order.append(f"end:{message}")
-        yield {"type": "message", "content": "ok", "metadata": {}}
-        yield {"type": "done", "content": ""}
+    async def slow_inner(message, session_key):
+        order.append(f"start:{message.content}")
+        # Yield once — the session lock keeps the second message out until we finish.
+        await asyncio.sleep(0)
+        order.append(f"end:{message.content}")
 
-    router = MagicMock()
-    router.run = slow_run
-    loop._router = router
+    # Bypass _process_message_inner; test only the concurrency primitives.
+    loop._process_message_inner = slow_inner
 
     msg1 = _make_inbound("user1", "first")
     msg2 = _make_inbound("user1", "second")
@@ -111,7 +87,7 @@ async def test_session_lock_serialises_same_session(
     )
 
     # With the session lock the second must not start until the first finishes.
-    # "start:first" < "end:first" < "start:second" < "end:second"
+    # Expected order: start:first → end:first → start:second → end:second
     assert order.index("end:first") < order.index("start:second")
 
 
@@ -120,7 +96,6 @@ async def test_session_lock_serialises_same_session(
 # ---------------------------------------------------------------------------
 
 
-@patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
 @patch("pocketpaw.agents.loop.AgentContextBuilder")
@@ -130,55 +105,36 @@ async def test_cross_session_runs_in_parallel(
     mock_ctx_cls,
     mock_get_mem,
     mock_get_bus,
-    mock_get_scanner,
 ):
     """Messages for different sessions should overlap in time."""
     settings = MagicMock()
-    settings.injection_scan_enabled = False
-    settings.memory_backend = "file"
-    settings.file_auto_learn = False
-    settings.mem0_auto_learn = False
-    settings.compaction_recent_window = 10
-    settings.compaction_char_budget = 8000
-    settings.compaction_summary_chars = 150
-    settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 5
     mock_get_settings.return_value = settings
 
-    bus = MagicMock()
-    bus.publish_outbound = AsyncMock()
-    bus.publish_system = AsyncMock()
-    mock_get_bus.return_value = bus
+    mock_get_bus.return_value = MagicMock()
+    mock_ctx_cls.return_value = MagicMock()
 
     mem = MagicMock()
-    mem.add_to_session = AsyncMock()
-    mem.get_compacted_history = AsyncMock(return_value=[])
     mem.resolve_session_key = AsyncMock(side_effect=lambda k: k)
     mock_get_mem.return_value = mem
-
-    ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
-    mock_ctx_cls.return_value = ctx
-
-    scanner = MagicMock()
-    mock_get_scanner.return_value = scanner
 
     from pocketpaw.agents.loop import AgentLoop
 
     loop = AgentLoop()
 
     order = []
+    # Both tasks must check in at this barrier before either can continue.
+    # If they run serially the first task hangs at barrier.wait() because
+    # the second never arrives — asyncio.Barrier requires all parties.
+    barrier = asyncio.Barrier(2)
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
-        order.append(f"start:{message}")
-        await asyncio.sleep(0.05)
-        order.append(f"end:{message}")
-        yield {"type": "message", "content": "ok", "metadata": {}}
-        yield {"type": "done", "content": ""}
+    async def slow_inner(message, session_key):
+        order.append(f"start:{message.content}")
+        await barrier.wait()  # proves both have started before either ends
+        order.append(f"end:{message.content}")
 
-    router = MagicMock()
-    router.run = slow_run
-    loop._router = router
+    # Bypass _process_message_inner; test only the concurrency primitives.
+    loop._process_message_inner = slow_inner
 
     # Different session keys → should run in parallel
     msg_a = _make_inbound("userA", "alpha")
@@ -189,10 +145,9 @@ async def test_cross_session_runs_in_parallel(
         loop._process_message(msg_b),
     )
 
-    # Both should start before either ends (parallel)
+    # Both started before either ended — confirmed by barrier rendezvous above.
     assert order.index("start:alpha") < order.index("end:alpha")
     assert order.index("start:beta") < order.index("end:beta")
-    # At least one starts before the other ends
     starts = [i for i, v in enumerate(order) if v.startswith("start:")]
     ends = [i for i, v in enumerate(order) if v.startswith("end:")]
     assert starts[1] < ends[0], "Expected parallel execution but got serial"
@@ -203,7 +158,6 @@ async def test_cross_session_runs_in_parallel(
 # ---------------------------------------------------------------------------
 
 
-@patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
 @patch("pocketpaw.agents.loop.AgentContextBuilder")
@@ -213,38 +167,18 @@ async def test_global_semaphore_caps_concurrency(
     mock_ctx_cls,
     mock_get_mem,
     mock_get_bus,
-    mock_get_scanner,
 ):
     """With max_concurrent_conversations=1, even cross-session must serialise."""
     settings = MagicMock()
-    settings.injection_scan_enabled = False
-    settings.memory_backend = "file"
-    settings.file_auto_learn = False
-    settings.mem0_auto_learn = False
-    settings.compaction_recent_window = 10
-    settings.compaction_char_budget = 8000
-    settings.compaction_summary_chars = 150
-    settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 1  # Force serial
     mock_get_settings.return_value = settings
 
-    bus = MagicMock()
-    bus.publish_outbound = AsyncMock()
-    bus.publish_system = AsyncMock()
-    mock_get_bus.return_value = bus
+    mock_get_bus.return_value = MagicMock()
+    mock_ctx_cls.return_value = MagicMock()
 
     mem = MagicMock()
-    mem.add_to_session = AsyncMock()
-    mem.get_compacted_history = AsyncMock(return_value=[])
     mem.resolve_session_key = AsyncMock(side_effect=lambda k: k)
     mock_get_mem.return_value = mem
-
-    ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
-    mock_ctx_cls.return_value = ctx
-
-    scanner = MagicMock()
-    mock_get_scanner.return_value = scanner
 
     from pocketpaw.agents.loop import AgentLoop
 
@@ -252,16 +186,14 @@ async def test_global_semaphore_caps_concurrency(
 
     order = []
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
-        order.append(f"start:{message}")
-        await asyncio.sleep(0.05)
-        order.append(f"end:{message}")
-        yield {"type": "message", "content": "ok", "metadata": {}}
-        yield {"type": "done", "content": ""}
+    async def slow_inner(message, session_key):
+        order.append(f"start:{message.content}")
+        # Yield once — the semaphore(1) keeps the second message out until we finish.
+        await asyncio.sleep(0)
+        order.append(f"end:{message.content}")
 
-    router = MagicMock()
-    router.run = slow_run
-    loop._router = router
+    # Bypass _process_message_inner; test only the concurrency primitives.
+    loop._process_message_inner = slow_inner
 
     msg_a = _make_inbound("userA", "alpha")
     msg_b = _make_inbound("userB", "beta")
@@ -271,7 +203,8 @@ async def test_global_semaphore_caps_concurrency(
         loop._process_message(msg_b),
     )
 
-    # With semaphore(1), first must fully finish before second starts
+    # With semaphore(1), the first task must fully finish before the second starts.
+    # Expected order: start:X → end:X → start:Y → end:Y  (X whichever runs first)
     first_end = min(order.index("end:alpha"), order.index("end:beta"))
     second_start = max(order.index("start:alpha"), order.index("start:beta"))
     assert first_end < second_start, "Semaphore(1) should serialise cross-session"
