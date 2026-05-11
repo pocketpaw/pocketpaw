@@ -9,11 +9,16 @@ from __future__ import annotations
 from pocketpaw.config import Settings
 
 # Some backends' Settings fields don't follow the strict
-# ``<backend_name>_model`` convention (e.g. agent_backend "claude_agent_sdk"
-# is configured via ``claude_sdk_model``, not ``claude_agent_sdk_model``).
-# When you change the registry, update this map too.
+# ``<backend_name>_model`` convention. When you add a backend to the
+# registry that reuses another backend's settings, map it here.
 _BACKEND_MODEL_FIELD: dict[str, str] = {
     "claude_agent_sdk": "claude_sdk_model",
+    # langchain_react subclasses DeepAgentsBackend and reads the same
+    # `deep_agents_model` field. Without this entry the specialist would
+    # try to write to the non-existent `langchain_react_model` field, the
+    # override would be dropped, and `_build_model` would fall back to
+    # `deep_agents_model`'s default (anthropic:claude-sonnet-4-6).
+    "langchain_react": "deep_agents_model",
 }
 
 

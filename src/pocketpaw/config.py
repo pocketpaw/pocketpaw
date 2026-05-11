@@ -178,8 +178,9 @@ class Settings(BaseSettings):
         default="claude_agent_sdk",
         description=(
             "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', "
-            "'codex_cli', 'opencode', 'copilot_sdk', or 'deep_agents'. "
-            "All backends support 'litellm' as a provider for open-source model access."
+            "'codex_cli', 'opencode', 'copilot_sdk', 'deep_agents', or "
+            "'langchain_react'. All backends support 'litellm' as a provider "
+            "for open-source model access."
         ),
     )
     # backend fallback chain
@@ -260,6 +261,30 @@ class Settings(BaseSettings):
             "the global OpenAI base URL."
         ),
     )
+    codex_cli_sandbox_mode: str = Field(
+        default="danger-full-access",
+        description=(
+            "Codex CLI sandbox_mode. Values: read-only, workspace-write, "
+            "danger-full-access. Default danger-full-access because Codex's "
+            "tighter sandboxes (workspace-write, read-only) rely on Linux "
+            "seccomp/landlock — on Windows the sandbox can't be created, so "
+            "every exec call is auto-declined with status='declined'. "
+            "PocketPaw runs Codex in an ephemeral temp dir as a trusted "
+            "agent that the operator already authorized; the tighter modes "
+            "are only useful on Linux operator deployments that want to "
+            "constrain a less-trusted agent."
+        ),
+    )
+    codex_cli_approval_policy: str = Field(
+        default="never",
+        description=(
+            "Codex CLI approval_policy. Values: never, on-request, "
+            "on-failure, untrusted. 'never' is required for headless cloud "
+            "use (no human to approve). Pair with codex_cli_sandbox_mode="
+            "'danger-full-access' on Windows or anywhere the agent can't "
+            "be interactively supervised."
+        ),
+    )
 
     # Copilot SDK Settings
     copilot_sdk_provider: str = Field(
@@ -278,20 +303,28 @@ class Settings(BaseSettings):
     # Deep Agents (LangChain/LangGraph) Settings
     deep_agents_model: str = Field(
         default="anthropic:claude-sonnet-4-6",
-        description="Model for Deep Agents backend (provider:model format, e.g. 'openai:gpt-4o')",
+        description="Model for Deep Agents backend in ``provider:model`` format.",
     )
     deep_agents_max_turns: int = Field(
         default=100,
         description="Max turns per query in Deep Agents backend (0 = unlimited)",
+    )
+    deep_agents_disable_thinking: bool = Field(
+        default=False,
+        description=(
+            "Ask the Deep Agents backend's chat model to skip extended "
+            "thinking. Sent as a provider-shaped kwarg; providers that "
+            "don't recognize the shape ignore it."
+        ),
     )
     # Pocket Specialist Settings — see docs/superpowers/specs/2026-05-09-pocket-specialist-design.md
     pocket_specialist_backend: str = Field(
         default="deep_agents",
         description=(
             "Which agent backend runs the pocket specialist's LLM work. Must be a "
-            "registered backend name (deep_agents, claude_agent_sdk, openai_agents, "
-            "google_adk, codex_cli, opencode, copilot_sdk). Default deep_agents "
-            "avoids subprocess cold-start."
+            "registered backend name (deep_agents, langchain_react, claude_agent_sdk, "
+            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk). Default "
+            "deep_agents avoids subprocess cold-start."
         ),
     )
     pocket_specialist_model: str = Field(
@@ -1185,31 +1218,38 @@ class Settings(BaseSettings):
 
     @classmethod
     def load(cls) -> Settings:
-        """Load settings from config file + encrypted credential store."""
+        """Load settings from config file + encrypted credential store.
+
+        Set ``POCKETPAW_IGNORE_CONFIG_JSON=true`` to skip config.json
+        entirely. Useful when ``.env`` is the source of truth and you
+        don't want unset fields to silently inherit stale dashboard
+        values. Secrets from the encrypted credential store still load.
+        """
         from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 
-        # Run one-time migration from plaintext config
         _migrate_plaintext_keys()
+
+        ignore_json = os.environ.get("POCKETPAW_IGNORE_CONFIG_JSON", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
         config_path = get_config_path()
         data: dict = {}
-        if config_path.exists():
+        if config_path.exists() and not ignore_json:
             try:
                 data = json.loads(config_path.read_text())
             except (json.JSONDecodeError, Exception):
                 pass
 
-        # Overlay secrets from encrypted store (falls back to config.json values)
         store = get_credential_store()
         secrets = store.get_all()
         for field in SECRET_FIELDS:
             if field in secrets and secrets[field]:
                 data[field] = secrets[field]
-            # data[field] may already be set from config.json — keep it as fallback
 
-        # Env vars must beat config.json. Passing a key as a kwarg to
-        # BaseSettings(**data) overrides env, so drop any field that has a
-        # POCKETPAW_<FIELD> env set — BaseSettings will pull it from env itself.
         env_prefix = cls.model_config.get("env_prefix", "")
         for field in list(data.keys()):
             if os.environ.get(f"{env_prefix}{field.upper()}") is not None:

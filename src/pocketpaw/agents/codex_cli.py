@@ -103,6 +103,64 @@ def _strip_codex_stderr_noise(text: str) -> str:
     return cleaned
 
 
+_CODEX_PARSER_PATCHED = False
+
+
+def _patch_codex_parser() -> None:
+    """One-shot monkey-patch: tolerate unknown literal values in known item types.
+
+    ``openai_codex_sdk.parsing.parse_thread_item`` has an ``UnknownThreadItem``
+    fallback for unknown item ``type`` values, but no fallback when a known
+    type fails ``model_validate`` on a NEW literal value the SDK's enum hasn't
+    been updated for yet. Concrete instance: ``CommandExecutionItem.status``
+    is typed ``Literal['in_progress', 'completed', 'failed']`` but Codex emits
+    ``'declined'`` when the user denies a command, which crashes the entire
+    stream.
+
+    Patch ``parse_thread_item`` to fall back to ``UnknownThreadItem`` on
+    ``ValidationError`` instead of propagating, matching the SDK's own
+    unknown-type fallback semantics.
+    """
+    global _CODEX_PARSER_PATCHED
+    if _CODEX_PARSER_PATCHED:
+        return
+    try:
+        from openai_codex_sdk import parsing as _codex_parsing
+        from pydantic import ValidationError
+    except ImportError:
+        return
+
+    original_parse_item = _codex_parsing.parse_thread_item
+
+    def patched(data: Any) -> Any:
+        try:
+            return original_parse_item(data)
+        except ValidationError as exc:
+            # Pull the command + status out of the raw dict so the operator
+            # can see exactly what Codex auto-declined. Common cause:
+            # sandbox_mode="workspace-write" rejecting a network call or
+            # an out-of-workspace path. ``status='declined'`` is Codex's
+            # own decision, NOT a user denial.
+            cmd = None
+            status = None
+            if isinstance(data, dict):
+                cmd = data.get("command") or data.get("changes") or data.get("tool")
+                status = data.get("status")
+            logger.warning(
+                "codex SDK rejected known item type "
+                "(type=%s status=%r command=%r): falling back to UnknownThreadItem; errors=%s",
+                (data.get("type") if isinstance(data, dict) else type(data).__name__),
+                status,
+                cmd,
+                exc.errors()[:2],
+            )
+            return _codex_parsing.UnknownThreadItem.model_validate(data)
+
+    _codex_parsing.parse_thread_item = patched
+    _CODEX_PARSER_PATCHED = True
+    logger.info("Patched openai_codex_sdk.parsing.parse_thread_item for forward-compat literals")
+
+
 def _build_subprocess_env(system_prompt: str) -> dict[str, str]:
     """Compose the env passed to the Codex subprocess.
 
@@ -248,6 +306,10 @@ class CodexCLIBackend(BaseAgentBackend):
         self._cli_available = self._codex_path is not None
         # Active abort controller (one per ``run`` invocation). Stop hits this.
         self._abort_controller: Any | None = None
+        # Tolerate unknown literal values in the codex SDK's pydantic models
+        # (e.g. CommandExecutionItem.status='declined' which the SDK schema
+        # doesn't list). One-shot patch; safe to call repeatedly.
+        _patch_codex_parser()
         if self._cli_available:
             logger.info("Codex CLI binary: %s", self._codex_path)
         else:
@@ -391,13 +453,15 @@ class CodexCLIBackend(BaseAgentBackend):
 
                 _exec.run = _filtered_run
 
+            sandbox_mode = getattr(self.settings, "codex_cli_sandbox_mode", "danger-full-access")
+            approval_policy = getattr(self.settings, "codex_cli_approval_policy", "never")
             thread = codex.start_thread(
                 ThreadOptions(
                     model=model,
                     working_directory=str(work_dir),
-                    sandbox_mode="workspace-write",
+                    sandbox_mode=sandbox_mode,
                     skip_git_repo_check=True,
-                    approval_policy="never",
+                    approval_policy=approval_policy,
                     web_search_enabled=True,
                 )
             )
@@ -415,6 +479,14 @@ class CodexCLIBackend(BaseAgentBackend):
                 if isinstance(event, ItemStartedEvent):
                     item = event.item
                     if isinstance(item, CommandExecutionItem):
+                        # Surface every shell invocation in the parent log so
+                        # operators can see what Codex is doing — especially
+                        # subprocess calls like ``python -m pocketpaw.tools.cli
+                        # cloud_pocket_specialist_create -`` whose own logs
+                        # are trapped inside the subprocess and never reach
+                        # the main terminal.
+                        cmd_str = (item.command or "")[:500]
+                        logger.info("codex shell: %s", cmd_str)
                         yield AgentEvent(
                             type="tool_use",
                             content=f"Running: {item.command}",
@@ -477,6 +549,16 @@ class CodexCLIBackend(BaseAgentBackend):
                         out = item.aggregated_output
                         if item.exit_code not in (None, 0):
                             out = f"[exit {item.exit_code}] {out}"
+                        # Mirror the result into the parent log (truncated)
+                        # so operators can confirm subprocess completion and
+                        # see the response body — particularly the
+                        # specialist's ``{ok, action, pocket, ...}`` JSON.
+                        preview = str(out)[:1000].replace("\n", " ")
+                        logger.info(
+                            "codex shell result (exit=%s): %s",
+                            item.exit_code,
+                            preview,
+                        )
                         yield AgentEvent(
                             type="tool_result",
                             content=str(out)[:65536],

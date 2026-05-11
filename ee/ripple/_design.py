@@ -83,6 +83,13 @@ of text rows" rebuild looks worse than the real widget.
   record / profile / entity detail page → entity-detail
   geographic map / locations / route  → map
   pick a place / address picker       → location-picker
+  multi-section view of one entity    → tabs
+                                        (Overview / Activity / Settings)
+  sort a table by column              → `sortable:true` on the table
+                                        — NOT tabs
+  filter a list by status/category    → `select` or `filter-bar`
+                                        bound to `state.filter`
+                                        — NOT tabs
 """
 
 
@@ -264,7 +271,8 @@ by WIDGET CATALOG and CANONICAL SHAPES below:
   layout / structure:   flex, grid, card, container, section,
                         separator, page-header, hero, tabs
   text primitives:      text, heading, badge, chip
-  inlined-shape data:   chart, table, kanban
+  inlined-shape data:   chart, table, data-grid, kanban,
+                        audit-log, timeline
 
 EVERYTHING ELSE in the catalog requires a `get_widget_spec` call
 BEFORE the first node of that type lands in your spec. Batch types
@@ -286,25 +294,141 @@ heatmap, pricing-table, comparison-table, kv-table, source-card,
 sources-bar, gauge, funnel, sankey, treemap, sparkline, etc. — call
 `get_widget_spec` per the WIDGET SPEC TOOL RULE above. Don't guess.
 
-`chart` — the prop is `type`, NOT `chartType`. The donut variant is
-spelled `donut`, NOT `doughnut`:
+`chart` — Ripple's chart has a SMALL fixed prop set. **Allowed props:**
+`type`, `data`, `title`, `height`, `colors`, `tooltip`. THAT IS THE
+WHOLE LIST. Anything else is invented and the renderer ignores it.
+
+⛔ HALLUCINATED PROPS — DO NOT EMIT (they all silently render undefined):
+  - `series: [{key, label, color}, ...]`    ← Recharts API, not Ripple
+  - `xAxis: {key: "..."}` / `yAxis: {...}`  ← Recharts API, not Ripple
+  - `dataKey`, `accessorKey`, `categoryKey` ← Recharts API, not Ripple
+  - `legend`, `axes`, `margin`, `stack`     ← invented
+
+The chart reads `label` + `value` directly off each data point. If your
+state row is `{month, revenue, target}` you MUST reshape it to
+`{label, value, series}` — there is no prop to "map columns onto the
+chart".
+
+Single-series (90% of charts) — bar/line/area/pie/donut:
   { "type": "chart", "props": {
       "type": "line",
       "data": [ { "label": "Jan", "value": 12000 },
-                { "label": "Feb", "value": 15400 } ]
+                { "label": "Feb", "value": 15400 } ],
+      "height": 280
   }}
+
+Multi-series (e.g. revenue vs target, two lines on one chart) — use the
+`series` FIELD ON EACH DATA POINT, not a top-level series prop:
+  { "type": "chart", "props": {
+      "type": "line",
+      "data": [
+        { "label": "Jan", "series": {"revenue": 1850000, "target": 1800000} },
+        { "label": "Feb", "series": {"revenue": 1920000, "target": 1850000} }
+      ],
+      "height": 280
+  }}
+
+Donut / pie — same `{label, value}` shape (one slice per point):
+  { "type": "chart", "props": {
+      "type": "donut",
+      "data": [ { "label": "North America", "value": 12300000 },
+                { "label": "EMEA",          "value":  7560000 },
+                { "label": "APAC",          "value":  5420000 } ],
+      "height": 260
+  }}
+
+Candlestick — `{label, open, high, low, close}`.
+
   - type: bar | line | area | pie | donut | candlestick | sparkline | heatmap | gauge | radar
-  - data: [{label, value}] for most. candlestick: {label, open, high, low, close}.
+  - data shape is by `label`+`value` per point. Reshape your state to
+    this shape; do NOT try to wire arbitrary state rows via series/dataKey.
+
+If you have state like `[{month: "Jan", revenue: 1.8M, target: 1.8M}]`
+and want a chart, you have two options:
+  (a) bind to a reshaped version of the array (preferred if you control
+      the state — emit `chartData` alongside the source array), or
+  (b) emit the chart-shaped array directly as `chartData` in state and
+      keep the source array for the table.
 
 `table` — `columns` are OBJECTS with `accessorKey`; `rows` is an array
 of OBJECTS keyed by accessorKey. NEVER pass `columns: [str]` +
-`rows: [[]]` — the cells silently render empty:
+`rows: [[]]` — the cells silently render empty.
+
+**ALWAYS emit `sortable: true` on every `table`** unless the user
+explicitly asked for a frozen order (rank list with fixed positions,
+ordered timeline-like rows). Sort is the #1 thing users want from a
+table; the renderer supports it natively with click-to-sort headers,
+asc → desc → off cycle. There is no reason to ship a non-sortable
+table.
+
   { "type": "table", "props": {
-      "columns": [ { "accessorKey": "page",  "header": "Page" },
-                   { "accessorKey": "views", "header": "Views" } ],
-      "rows": [ { "page": "/home", "views": "8,421" },
-                { "page": "/pricing", "views": "5,312" } ]
+      "columns": [ { "accessorKey": "page",  "header": "Page",
+                     "sortable": true },
+                   { "accessorKey": "views", "header": "Views",
+                     "sortable": true } ],
+      "rows": [ { "page": "/home", "views": 8421 },
+                { "page": "/pricing", "views": 5312 } ],
+      "sortable": true,
+      "searchable": true
   }}
+
+  Two ways to enable sort:
+    - Top-level `"sortable": true` — every column becomes click-sortable.
+      Use this as the DEFAULT.
+    - Per-column `{accessorKey, header, "sortable": true}` — turn sort
+      on only for specific columns (e.g. enable on `views`, disable on
+      a free-text `notes` column where alphabetic sort is meaningless).
+
+  Also default-on for ≥10 rows: `"searchable": true`. Free filter input
+  above the table — costs nothing, users always want it.
+
+  For numeric sort to work correctly, pass NUMBERS not formatted strings:
+    ✅ "views": 8421
+    ❌ "views": "8,421"   (sorts lexically: "10,000" < "9,000")
+  Format at display time via the renderer's column formatter, not at
+  emit time. If you must emit pre-formatted strings, do not enable
+  sort on that column.
+
+`data-grid` — HIGH DENSITY tabular: sticky headers, resizable columns,
+search, per-column sort, dense cells. Use when row count ≥ 50 or the
+user wants a "power user" feel (operational dashboards, log viewers,
+ranked datasets, monitoring lists).
+
+  *** PROPS DIFFER FROM `table`! ***  `data-grid` uses `key`/`label`
+  per column; `table` uses `accessorKey`/`header`. Don't mix them up
+  — wrong keys silently render empty cells.
+
+  ALWAYS turn on sort on numeric / temporal columns and the primary
+  label column. Sort is the main reason to reach for data-grid over a
+  flat list. Use `defaultSort` to set the most useful initial order
+  (newest first for logs, biggest first for ranked data).
+
+  { "type": "data-grid", "props": {
+      "columns": [
+        { "key": "ts",    "label": "Time",    "sortable": true,
+          "align": "left",  "width": "160px" },
+        { "key": "level", "label": "Level",   "sortable": true,
+          "align": "left",  "width": "80px" },
+        { "key": "msg",   "label": "Message", "align": "left" },
+        { "key": "ms",    "label": "Latency", "sortable": true,
+          "align": "right" }
+      ],
+      "rows": "{state.events}",
+      "pageSize": 50,
+      "searchable": true,
+      "defaultSort": "ts:desc",
+      "dense": true
+  }}
+
+  - `columns[i].key` is the row-object key (NOT `accessorKey`).
+  - `columns[i].label` is the header text (NOT `header`).
+  - `sortable` is PER-COLUMN, not a top-level prop.
+  - `defaultSort`: "key" or "key:desc" — set the initial order.
+    Logs → "ts:desc". Ranked → "<metric>:desc". Names → "name".
+  - `dense: true` for log/monitoring feel; omit for normal spacing.
+  - For 1000+ rows prefer `virtual-list` (call get_widget_spec).
+  - Same numeric-sort gotcha as `table`: emit numbers, not formatted
+    strings, on any column where sort is enabled.
 
 `kanban` — columns are headers ONLY; cards live in a flat list in
 `state`, reach the widget via `bind`, and `columnKey` says which card
@@ -320,6 +444,47 @@ field maps to which column. Without `bind`, drag-to-move snaps back:
       "columnKey": "status"
   }}
 
+`audit-log` — THE widget for "Recent Activity", event streams, audit
+trails, history logs. Each entry has actor + action + target. Far
+better than a `table` for this shape: dense per-row layout, icon per
+event type, color per severity, optional day/week grouping. NEVER
+rebuild this with a table — every "table of {type, actor, action,
+timestamp}" rows is an audit-log emitted as the wrong widget.
+
+  { "type": "audit-log", "props": {
+      "entries": "{state.activity}",
+      "groupBy": "day",
+      "showFilters": true
+  }}
+
+  Each entry shape:
+    { id, actor, action, target?, timestamp?, type?,
+      severity?: "info" | "warning" | "destructive" | "success",
+      actorIcon?, details? }
+
+  Use `groupBy: "day"` or `"week"` for chronological feeds; omit
+  (`"none"`) for tight chronological streams. `showFilters: true`
+  surfaces a filter-by-type chip row.
+
+`timeline` — milestones / dated events with optional rich detail.
+Vertical timeline rendering. Use for project history, release notes,
+contribution graphs, lifecycle events.
+
+  { "type": "timeline", "props": {
+      "events": "{state.milestones}",
+      "density": "compact"
+  }}
+
+  Each event shape:
+    { date, title, detail?,
+      type?: "default" | "success" | "warning" | "destructive" | "info" }
+
+  `density: "compact"` for >10 events; default for <=10.
+
+  When in doubt between `audit-log` and `timeline`:
+    audit-log → who did what (actor-driven)
+    timeline  → what happened when (event-driven, often single actor)
+
 `tabs` — labels in `props.tabs`; CONTENT in the node's `children` array,
 one child per tab by index. Do NOT use `props.tabs[i].content` — ignored:
   { "type": "tabs",
@@ -332,6 +497,37 @@ one child per tab by index. Do NOT use `props.tabs[i].content` — ignored:
     ]
   }
 
+  USE tabs ONLY to separate DIFFERENT KINDS of content for one entity —
+  each tab shows a structurally different view:
+    ✅ Overview · Activity · Settings · Files            (record detail)
+    ✅ Specs · Reviews · Q&A · Related items             (product page)
+    ✅ Tasks · Files · People · Discussions              (project page)
+    ✅ Daily · Weekly · Monthly                          (time grain)
+
+  DO NOT use tabs to FILTER or SORT a single dataset. Those belong on
+  the table itself or on a separate control. Common mistakes:
+
+    ❌ Tabs "All / Todo / Done" over the SAME task list.
+       Fix: ONE table, `searchable:true`, plus a `select` or
+       `filter-bar` bound to `state.filter`. Each table row checks
+       `show: "{state.filter === 'all' || row.status === state.filter}"`.
+
+    ❌ Tabs "Sort by date / Sort by name / Sort by priority".
+       Fix: ONE table with `sortable:true` per column. The user clicks
+       the column header to sort. Don't rebuild click-to-sort as tabs.
+
+    ❌ Tabs "Active / Archived / All" over the SAME records.
+       Fix: a `segmented` control or a `select` bound to
+       `state.scope`; table filters on the binding.
+
+    ❌ Tabs over rows of the same shape just because there are a lot.
+       Fix: pagination on `table` (`pageSize: 50`) or `data-grid` —
+       same shape, more rows is not "different sections".
+
+  Rule of thumb: if removing the tabs and putting all tabs' content on
+  one screen would feel CROWDED with structurally different things,
+  tabs are correct. If it would feel REPETITIVE (same widget, same
+  rows, just filtered differently), use a filter — not tabs.
 """
 
 
@@ -737,6 +933,190 @@ clear this bar before you emit it:
 # rule can refer to "the catalog above"; the spec-tool rule comes after
 # both so the agent has already learned what's allowed before being
 # told to call the tool for non-free-list types.
+ACTIVITY_PICKER_RULE = """\
+# ACTIVITY PICKER — events / logs / history are NOT tables
+
+If your data is a stream of EVENTS (something happened at a time,
+optionally by someone, optionally of a type), you have ONE correct
+widget — `audit-log` or `timeline`. NEVER a `table`.
+
+  events about who did what to a system     → audit-log
+    (recent activity, commit feed, audit trail, security log,
+     ops timeline, customer-action stream)
+  dated events / project milestones         → timeline
+    (release history, contributions, milestone tracker,
+     onboarding sequence, lifecycle events)
+
+ANTI-PATTERN: a `table` with columns like
+  [type, repo, message, timestamp]
+or
+  [actor, action, target, when]
+or
+  [event_type, source, payload, time]
+
+is rebuilding `audit-log` out of table primitives. It looks like a
+spreadsheet, scrolls awkwardly, and loses the per-event icons +
+severity coloring + day grouping that audit-log gives for free.
+
+USE THE TYPED WIDGET:
+
+  ❌ table of [type, repo, message, timestamp]
+     → ✅ audit-log with entries: [{actor, action, target, type,
+                                    timestamp}]
+
+  ❌ table of [date, milestone, status]
+     → ✅ timeline with events: [{date, title, type, detail}]
+
+  ❌ table of [date, commits] for a contribution graph
+     → ✅ chart (bar) — already a chart shape
+
+Even if some rows have richer text or links, audit-log handles it.
+Don't reach for `table` just because you know its prop shape — both
+`audit-log` and `timeline` are now in the FREE LIST (see
+CANONICAL SHAPES above) and cost nothing extra to emit.
+"""
+
+
+TABULAR_PICKER_RULE = """\
+# TABULAR PICKER — pick the right table-shaped widget
+
+`table` is NOT the answer for every list of rows. The catalog has five
+different tabular widgets, each optimal for a different shape. Pick by
+the data, not by habit.
+
+  ≤ 50 rows, flat schema, casual reading       → table
+                                                 (sortable, paginated, light)
+  50–500 rows, dense fields, power-user feel   → data-grid
+                                                 (sticky headers, resizable
+                                                  columns, denser cells)
+  hierarchy: tree of rows with expand/collapse → tree-table
+                                                 (project breakdown, BOM,
+                                                  org structure with metrics)
+  1000+ rows, homogeneous, scrollable          → virtual-list
+                                                 (only renders visible rows;
+                                                  table chokes past ~500)
+  rows grouped by status / stage / category    → kanban
+                                                 (drag-to-move; columnKey
+                                                  selects the grouping field)
+  one entity's properties / facts              → kv-table
+                                                 (term : value pairs, not a
+                                                  multi-row table)
+  features of N options side-by-side           → comparison-table
+                                                 (cells render check/cross)
+  pricing tiers                                → pricing-table
+                                                 (tiers + features + CTAs)
+
+Anti-patterns:
+
+  ❌ `table` with 10 000 rows. Use virtual-list — table will lag.
+  ❌ `table` to show "settings" or "metadata about one record". Use
+     kv-table — a 2-column table for terms+values is rebuilding kv-table
+     out of table primitives.
+  ❌ `table` with a status column when the user thinks in columns of
+     status. Use kanban — the user wants the drag interaction.
+  ❌ `data-grid` for 8 rows of light data. Use table — data-grid's
+     density looks heavy on small datasets.
+  ❌ Building a tree-table out of `table` + indented strings. Use
+     tree-table — expand/collapse only works in the real widget.
+
+When in doubt between `table` and `data-grid`: count the rows. Under 50
+or "informal feel" → table. Over 50 or "I'll be looking at this a lot"
+→ data-grid.
+"""
+
+
+VISUAL_VARIATION_RULE = """\
+# VISUAL VARIATION — every pocket should look like its own thing
+
+Examples in this prompt show PROP SHAPES, not page templates. The
+correct shape of a `stat` widget is shown via an example; the correct
+shape of a PAGE is something you design for each pocket, not a layout
+to copy from the example.
+
+If every pocket you build is `flex column → page-header → grid of 3
+stats → chart → table`, you have built the same pocket three times
+with different field values. That is the failure mode this section
+exists to prevent.
+
+Vary the SHAPE of the page across pockets. Pick from this menu (mix
+freely; combine across panes):
+
+  A. Hero + grid                — big page-header / hero, then KPI grid.
+                                  Default for "report" / "summary" feel.
+  B. Single full-pane widget    — calendar, kanban, gantt, treemap, or
+                                  data-grid fills the canvas. Thin stat
+                                  strip above OK. Default for "app" feel.
+  C. Split (sidebar + main)     — `split` layout: nav / filter list on
+                                  the left, focal widget on the right.
+                                  Default for "tool" feel.
+  D. Tabs                       — `tabs` widget, one logical view per
+                                  tab. Default for "multi-aspect record"
+                                  (Overview / Activity / Settings).
+                                  Each tab must be STRUCTURALLY DIFFERENT
+                                  content. Tabs are NOT a filter — same
+                                  rows under different labels = use
+                                  `select` or `filter-bar` instead. Tabs
+                                  are NOT a sort — use `sortable:true`
+                                  on table columns instead.
+  E. Master–detail              — `master-detail` widget: list on the
+                                  left, detail of selection on the right.
+                                  Default for "browse + inspect" flows.
+  F. Stacked recipe blocks      — page-header + sources-bar + text +
+                                  focal widget + callout + follow-up.
+                                  Default for "research / write-up" feel.
+  G. Wizard / steps             — `wizard-layout`. Default for "setup /
+                                  onboarding / multi-step form" feel.
+
+Vary the FOCAL WIDGET. The agent's standard combo (`stat` + `chart` +
+`table`) is correct for ~30% of pockets and lazy for the other 70%.
+For each pocket, ask "what's the ONE widget that IS this pocket?":
+
+  schedule           → calendar (NOT table of dates)
+  workflow / sprint  → kanban (NOT table with status badges)
+  hierarchy          → tree-table or org-chart (NOT indented table)
+  conversion / flow  → funnel or sankey (NOT bar chart of stages)
+  density / cohort   → heatmap (NOT colored grid of stat tiles)
+  composition        → treemap or pie chart (NOT row of stats)
+  long history       → timeline or audit-log (NOT reverse-sorted table)
+  comparison         → comparison-layout or comparison-table
+  facts about ONE    → entity-detail or kv-table (NOT grid of stats)
+
+Vary DENSITY:
+
+  - Cards with generous padding for "marketing / showcase" feel
+  - Tight rows (table / data-grid / virtual-list) for "operational" feel
+  - Single hero stat + supporting context for "headline number" feel
+
+Color emphasis: pick ONE accent per pocket (Tailwind token), use it for
+the primary CTA + badges that matter. Do not paint every block with
+inline backgrounds — the THEME RULE controls that.
+
+The bar: two pockets you create back-to-back should not be mistakable
+for each other at a glance. If they would be, change the layout shape
+(A–G above) or the focal widget — not just the labels.
+
+## NO TABLE-STAMPEDES
+
+CAP: at most **2 `table` (or `data-grid`) widgets per pocket**. If
+you find yourself emitting 3 or 4 tables, you have NOT made widget
+choices — you have repeated yourself. Each table after the second is
+almost certainly the wrong widget. Recheck:
+
+  • Looks like a log / activity feed?    → audit-log
+  • Looks like dated milestones?          → timeline
+  • Looks like workflow / status columns? → kanban
+  • Looks like hierarchy / parent-child?  → tree-table
+  • Looks like a single record's facts?   → kv-table or entity-detail
+  • Looks like a numeric trend?           → chart (sparkline/line/bar)
+  • Looks like proportions?               → pie / donut / treemap
+
+A pocket with one well-chosen focal widget + one sortable table +
+two more typed widgets reads as a designed page. Four tables reads
+as "the agent didn't pick anything; it just dumped each list of data
+into the same widget."
+"""
+
+
 RIPPLE_DESIGN_RULES = "\n".join(
     [
         USE_THE_WIDGET_RULE,
@@ -745,8 +1125,11 @@ RIPPLE_DESIGN_RULES = "\n".join(
         NO_INVENTED_WIDGETS_RULE,
         WIDGET_SPEC_TOOL_RULE,
         CANONICAL_SHAPES,
+        TABULAR_PICKER_RULE,
+        ACTIVITY_PICKER_RULE,
         INTERACTIVE_STATE_RULE,
         COMPOSITION_COOKBOOK,
+        VISUAL_VARIATION_RULE,
         THEME_RULE,
         LOGO_RULE,
         DESIGN_QUALITY,
@@ -762,6 +1145,9 @@ __all__ = [
     "WIDGET_SPEC_TOOL_RULE",
     "COMPOSITION_COOKBOOK",
     "CANONICAL_SHAPES",
+    "TABULAR_PICKER_RULE",
+    "ACTIVITY_PICKER_RULE",
+    "VISUAL_VARIATION_RULE",
     "INTERACTIVE_STATE_RULE",
     "THEME_RULE",
     "LOGO_RULE",

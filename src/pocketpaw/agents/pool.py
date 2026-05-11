@@ -32,6 +32,15 @@ class AgentInstance:
     memory_namespace: str
     last_active: datetime = field(default_factory=lambda: datetime.now(UTC))
     created_from_updated_at: datetime | None = None
+    # Number of in-flight ``run()`` iterations against this instance.
+    # The GC must NEVER evict an instance with ``active_runs > 0`` —
+    # ``last_active`` is only refreshed on yielded events, so a multi-minute
+    # gap between events (e.g. while DeepSeek is in thinking mode or a slow
+    # codex shell call is in progress) would otherwise look idle and the
+    # GC's teardown would abort the run mid-flight. The counter is the
+    # authoritative "this instance is busy" signal; ``last_active`` is just
+    # for ranking idle eviction candidates.
+    active_runs: int = 0
 
 
 class AgentPool:
@@ -84,6 +93,17 @@ class AgentPool:
                     and inst.created_from_updated_at
                     and agent_doc.updatedAt > inst.created_from_updated_at
                 ):
+                    # Don't rebuild while the instance has an in-flight stream
+                    # — teardown would abort it. The stale config will be picked
+                    # up on the next request once the current run finishes.
+                    if inst.active_runs > 0:
+                        logger.info(
+                            "Agent %s config changed but instance is busy "
+                            "(active_runs=%d); deferring rebuild",
+                            agent_id,
+                            inst.active_runs,
+                        )
+                        return inst
                     logger.info("Agent %s config changed, rebuilding", agent_id)
                     await self._teardown(inst)
                     del self._instances[agent_id]
@@ -119,8 +139,20 @@ class AgentPool:
         session_key: str,
         history: list[dict] | None = None,
         knowledge_context: str = "",
+        instructions: str = "",
     ) -> AsyncIterator[Any]:
-        """Run an agent on a message. Yields AgentEvent stream."""
+        """Run an agent on a message. Yields AgentEvent stream.
+
+        ``instructions`` is for AUTHORITATIVE behavioral rules — surface
+        conventions, delegation routing, mandatory pre-tool narration,
+        etc. — and is injected directly after persona/extra without the
+        "Your Knowledge Base" wrapper. Use it for anything the model
+        MUST do; the wrapper around ``knowledge_context`` framed
+        instructions as reference data, which models were ignoring.
+
+        ``knowledge_context`` remains reference material (KB snippets +
+        per-turn scope/participants tags). Kept under the wrapper.
+        """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
 
@@ -139,6 +171,11 @@ class AgentPool:
             extra = instance.config.get("system_prompt", "")
             system_prompt = f"{persona}\n\n{extra}".strip() if persona or extra else ""
 
+        # Authoritative behavior rules — injected BEFORE the knowledge
+        # wrapper so the model reads them as instructions, not reference.
+        if instructions:
+            system_prompt = f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
+
         # Inject knowledge context directly into system prompt
         if knowledge_context:
             system_prompt = (
@@ -150,13 +187,27 @@ class AgentPool:
                 f"{knowledge_context}"
             )
 
-        async for event in instance.backend.run(
-            message,
-            system_prompt=system_prompt,
-            history=history,
-            session_key=session_key,
-        ):
-            yield event
+        # Mark this instance as actively running for the duration of the
+        # stream. ``last_active`` alone isn't enough because the LLM can have
+        # multi-minute gaps between yielded events (DeepSeek thinking, slow
+        # codex shell calls, etc.) — during those gaps ``last_active`` looks
+        # stale and the GC would otherwise tear the instance down mid-flight,
+        # which surfaces as ``AbortError`` in Codex / disconnect in others.
+        # ``active_runs > 0`` is the authoritative "busy" flag the GC and
+        # LRU evictor honor.
+        instance.active_runs += 1
+        try:
+            async for event in instance.backend.run(
+                message,
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+            ):
+                instance.last_active = datetime.now(UTC)
+                yield event
+        finally:
+            instance.active_runs -= 1
+            instance.last_active = datetime.now(UTC)
 
     async def observe(self, agent_id: str, user_input: str, agent_output: str) -> None:
         """Observe an interaction for soul learning."""
@@ -299,23 +350,38 @@ class AgentPool:
         logger.info("AgentPool: teardown %s", instance.agent_name)
 
     async def _evict_oldest(self) -> None:
-        """Evict the least recently used instance."""
-        if not self._instances:
+        """Evict the least recently used IDLE instance.
+
+        Skips instances with ``active_runs > 0`` — evicting a busy instance
+        would call ``backend.stop()`` and abort its in-flight stream.
+        """
+        idle = [(aid, inst) for aid, inst in self._instances.items() if inst.active_runs == 0]
+        if not idle:
+            logger.warning(
+                "AgentPool at capacity but every instance is busy — "
+                "skipping LRU eviction this cycle"
+            )
             return
-        oldest_id = min(self._instances, key=lambda k: self._instances[k].last_active)
+        oldest_id, _ = min(idle, key=lambda kv: kv[1].last_active)
         inst = self._instances.pop(oldest_id)
         await self._teardown(inst)
         logger.info("AgentPool: evicted LRU agent %s", inst.agent_name)
 
     async def _gc_loop(self) -> None:
-        """Periodically evict idle instances."""
+        """Periodically evict idle instances.
+
+        Instances with ``active_runs > 0`` are NEVER expired even if their
+        ``last_active`` looks stale — the LLM may be thinking with no events
+        flowing back. Tearing one down mid-stream surfaces as ``AbortError``.
+        """
         while True:
             await asyncio.sleep(60)
             now = datetime.now(UTC)
             expired = [
                 aid
                 for aid, inst in self._instances.items()
-                if (now - inst.last_active).total_seconds() > self._max_idle
+                if inst.active_runs == 0
+                and (now - inst.last_active).total_seconds() > self._max_idle
             ]
             for aid in expired:
                 inst = self._instances.pop(aid, None)

@@ -30,6 +30,86 @@ _LANGCHAIN_PROVIDER_MAP: dict[str, str] = {
 
 
 _LITELLM_PATCHED = False
+_OPENAI_PATCHED = False
+
+
+def _patch_openai_message_serializer() -> None:
+    """Make langchain_openai round-trip DeepSeek `reasoning_content` when
+    the direct-DeepSeek (openai-compat) route is in use.
+
+    DeepSeek thinking mode requires ``reasoning_content`` from each prior
+    assistant turn to be echoed back on subsequent multi-turn requests
+    (per https://api-docs.deepseek.com/guides/thinking_mode). Vanilla
+    ``langchain_openai`` ignores the field on the way in AND drops
+    ``additional_kwargs`` on the way out, so every tool-using agent
+    400s on its second API call ("``reasoning_content`` in thinking
+    mode must be passed back to the API").
+
+    Three patches on ``langchain_openai.chat_models.base``:
+      1. ``_convert_dict_to_message`` — non-streaming response: capture
+         ``reasoning_content`` into ``AIMessage.additional_kwargs``.
+      2. ``_convert_delta_to_message_chunk`` — streaming delta: same on
+         ``AIMessageChunk``, accumulating across chunks.
+      3. ``_convert_message_to_dict`` — outbound: re-emit
+         ``reasoning_content`` as a top-level field when an assistant
+         message carries it in ``additional_kwargs``.
+
+    All three are idempotent and a no-op for non-DeepSeek openai-compat
+    endpoints (they only act when the field is actually present), so
+    applying unconditionally is safe.
+    """
+    global _OPENAI_PATCHED
+    if _OPENAI_PATCHED:
+        return
+
+    try:
+        from langchain_openai.chat_models import base as _oa
+    except ImportError:
+        return
+
+    # --- 1. inbound: non-streaming response → AIMessage ---
+    original_dict_to_message = _oa._convert_dict_to_message
+
+    def patched_dict_to_message(_dict):  # type: ignore[no-untyped-def]
+        msg = original_dict_to_message(_dict)
+        if msg.type == "ai":
+            rc = _dict.get("reasoning_content")
+            if rc:
+                msg.additional_kwargs["reasoning_content"] = rc
+        return msg
+
+    _oa._convert_dict_to_message = patched_dict_to_message
+
+    # --- 2. inbound: streaming delta → AIMessageChunk ---
+    original_delta_to_chunk = _oa._convert_delta_to_message_chunk
+
+    def patched_delta_to_chunk(_dict, default_class):  # type: ignore[no-untyped-def]
+        chunk = original_delta_to_chunk(_dict, default_class)
+        rc = _dict.get("reasoning_content")
+        if rc and hasattr(chunk, "additional_kwargs"):
+            existing = chunk.additional_kwargs.get("reasoning_content") or ""
+            chunk.additional_kwargs["reasoning_content"] = existing + rc
+        return chunk
+
+    _oa._convert_delta_to_message_chunk = patched_delta_to_chunk
+
+    # --- 3. outbound: AIMessage → request dict ---
+    original_message_to_dict = _oa._convert_message_to_dict
+
+    def patched_message_to_dict(message, api="chat/completions"):  # type: ignore[no-untyped-def]
+        msg_dict = original_message_to_dict(message, api=api)
+        if msg_dict.get("role") == "assistant":
+            rc = getattr(message, "additional_kwargs", {}).get("reasoning_content")
+            if rc and not msg_dict.get("reasoning_content"):
+                msg_dict["reasoning_content"] = rc
+        return msg_dict
+
+    _oa._convert_message_to_dict = patched_message_to_dict
+
+    _OPENAI_PATCHED = True
+    logger.info(
+        "Patched langchain_openai message serializers for DeepSeek reasoning_content round-trip"
+    )
 
 
 def _patch_litellm_message_serializer() -> None:
@@ -123,6 +203,32 @@ def _extract_content_text(content: Any) -> str:
     return ""
 
 
+def _split_content_text_and_thinking(content: Any) -> tuple[str, str]:
+    """Return ``(text, thinking)`` extracted from an AIMessageChunk
+    content payload. Anthropic emits ``{"type":"thinking","thinking":...}``
+    blocks; ``langchain_litellm`` wraps DeepSeek reasoning_content the
+    same way. Both feed the SSE ``thinking`` event so the UI shows
+    activity instead of silent dead time."""
+    if isinstance(content, str):
+        return content, ""
+    if not isinstance(content, list):
+        return "", ""
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype in ("thinking", "redacted_thinking"):
+            thinking_parts.append(block.get("thinking") or block.get("data") or "")
+    return "".join(text_parts), "".join(thinking_parts)
+
+
 class DeepAgentsBackend:
     """Deep Agents backend -- LangChain/LangGraph agent framework."""
 
@@ -184,7 +290,16 @@ class DeepAgentsBackend:
             logger.warning("Deep Agents SDK not installed -- pip install 'pocketpaw[deep-agents]'")
 
     def _build_custom_tools(self) -> list:
-        """Lazily build and cache PocketPaw tools as LangChain StructuredTool wrappers."""
+        """Lazily build and cache PocketPaw tools as LangChain StructuredTool wrappers.
+
+        Note: when this backend is used in an isolated specialist run, the
+        runtime calls ``attach_specialist_tools`` first, which pre-populates
+        ``_custom_tools`` with only the specialist's internal tools. This
+        method then early-returns the cached list, so the
+        ``pocket_specialist__create`` tool (auto-injected by the bridge for
+        every main-agent run) is NOT pulled into the specialist's own
+        backend, which would be a recursion footgun.
+        """
         if self._custom_tools is not None:
             return self._custom_tools
         try:
@@ -368,11 +483,69 @@ class DeepAgentsBackend:
         if is_openai_compat_endpoint:
             kwargs["use_responses_api"] = False
 
+        # Providers diverge on where the disable-thinking flag goes:
+        #
+        # - litellm           — ChatLiteLLM drops unknown top-level
+        #                       kwargs silently. extra_body MUST go
+        #                       through model_kwargs.
+        #                       NOTE: LiteLLM's DeepSeekChatConfig
+        #                       strips thinking={"type":"disabled"}
+        #                       before sending. Disable only actually
+        #                       works if the proxy is in raw passthrough
+        #                       mode or runs a patched LiteLLM. See
+        #                       https://github.com/BerriAI/litellm/issues/27439
+        # - openai / openai_compatible — ChatOpenAI has extra_body as a
+        #                       native top-level field; OpenAI SDK
+        #                       forwards it verbatim in the request body.
+        #                       Hitting DeepSeek's API directly via this
+        #                       path BYPASSES both LiteLLM transformers
+        #                       (ours + any proxy) — the recommended
+        #                       path for reliable disable.
+        # - anthropic         — `thinking={"type":"disabled"}` is a
+        #                       top-level kwarg the SDK honors directly.
+        #
+        # `reasoning_effort` is deliberately NOT passed. It's a thinking-
+        # mode parameter; setting it alongside disable is contradictory.
+        if getattr(self.settings, "deep_agents_disable_thinking", False):
+            if provider == "litellm":
+                model_kwargs = dict(kwargs.get("model_kwargs") or {})
+                extra_body = dict(model_kwargs.get("extra_body") or {})
+                extra_body["thinking"] = {"type": "disabled"}
+                model_kwargs["extra_body"] = extra_body
+                kwargs["model_kwargs"] = model_kwargs
+            elif provider == "openai":
+                # ChatOpenAI accepts extra_body as a native field — set
+                # it top-level. Covers both `openai` and the
+                # `openai_compatible` path which we remap to `openai`
+                # above with a custom base_url.
+                existing = kwargs.get("extra_body") or {}
+                kwargs["extra_body"] = {
+                    **existing,
+                    "thinking": {"type": "disabled"},
+                }
+            else:
+                kwargs["thinking"] = {"type": "disabled"}
+
         # Map to LangChain's expected provider name
         lc_provider = _LANGCHAIN_PROVIDER_MAP.get(provider, provider)
         model_id = f"{lc_provider}:{model}" if model else lc_provider
 
-        logger.info("Deep Agents: init_chat_model(%r) with %d kwargs", model_id, len(kwargs))
+        # Surface the thinking-disable status loudly. Past bug: extra_body
+        # was set at the wrong nesting level and silently dropped. This
+        # log makes any future regression visible on first inspection.
+        mk = kwargs.get("model_kwargs") or {}
+        if isinstance(mk, dict) and "extra_body" in mk:
+            logger.info(
+                "Deep Agents: init_chat_model(%r) with model_kwargs.extra_body=%s",
+                model_id,
+                mk["extra_body"],
+            )
+        else:
+            logger.info(
+                "Deep Agents: init_chat_model(%r) with %d kwargs",
+                model_id,
+                len(kwargs),
+            )
         return init_chat_model(model_id, **kwargs)
 
     def _get_or_create_agent(
@@ -384,16 +557,42 @@ class DeepAgentsBackend:
         skills = list(self.settings.deep_agents_skills or [])
         memory = list(self.settings.deep_agents_memory or [])
 
-        # Invalidate cache if any input that shapes the compiled graph changed
+        # Pocket sessions don't need shell or filesystem access. Same gate
+        # as claude_sdk: <pocket-scope> appears in every pocket prompt.
+        is_pocket_session = "<pocket-scope>" in (instructions or "")
+
+        # Invalidate cache if any input that shapes the compiled graph changed.
+        # is_pocket_session is part of the key so flipping between pocket and
+        # non-pocket sessions in the same backend recompiles the agent.
         model_key = (
             self.settings.deep_agents_model,
             tuple(skills),
             tuple(memory),
+            is_pocket_session,
         )
         if self._cached_agent is not None and self._cached_model_key == model_key:
             return self._cached_agent
 
         all_tools = self._build_custom_tools() + (mcp_tools or [])
+        if is_pocket_session:
+            # Drop shell + filesystem tools — pocket flow has MCP tools
+            # for everything it needs. Without this filter the agent has
+            # been observed running `env | grep pocket; curl localhost`
+            # to introspect state.
+            _blocked = {
+                "shell",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "list_dir",
+            }
+            before = len(all_tools)
+            all_tools = [t for t in all_tools if getattr(t, "name", "") not in _blocked]
+            if before != len(all_tools):
+                logger.info(
+                    "Pocket session — stripped %d shell/fs tools from agent",
+                    before - len(all_tools),
+                )
         kwargs: dict[str, Any] = {
             "model": model,
             "tools": all_tools if all_tools else [],
@@ -406,13 +605,26 @@ class DeepAgentsBackend:
         if memory:
             kwargs["memory"] = memory
 
-        # langchain_litellm wraps DeepSeek's reasoning_content as an Anthropic
-        # `thinking` content block on AIMessages, but the outbound serializer
-        # never restores it as a top-level `reasoning_content` field. Patch
-        # _convert_message_to_dict so DeepSeek-thinking conversations round-trip.
+        # Patch the active provider's message serializer so DeepSeek-thinking
+        # `reasoning_content` round-trips correctly across multi-turn / tool-
+        # using conversations. Both patches are idempotent and no-op when the
+        # field is absent (non-DeepSeek endpoints), so apply unconditionally
+        # for the provider that's actually in play.
+        #
+        # We KEEP the patch on regardless of `deep_agents_disable_thinking`.
+        # That flag only suppresses Anthropic thinking — DeepSeek ignores it
+        # and keeps emitting reasoning_content. If we skipped the patch when
+        # the flag is set, DeepSeek-routed conversations would 400 on every
+        # multi-turn ("reasoning_content in thinking mode must be passed
+        # back to the API").
         provider, _ = self._parse_provider_model()
         if provider == "litellm":
             _patch_litellm_message_serializer()
+        elif provider in ("openai", "openai_compatible", "openrouter"):
+            # The openai_compatible / openrouter / direct-DeepSeek route uses
+            # ChatOpenAI under the hood. Patch the langchain_openai
+            # serializers — see _patch_openai_message_serializer docstring.
+            _patch_openai_message_serializer()
 
         agent = create_deep_agent(**kwargs)
         self._cached_agent = agent
@@ -487,6 +699,12 @@ class DeepAgentsBackend:
                 # Each tool round-trip is ~2-3 steps, so multiply for headroom.
                 config["recursion_limit"] = max_turns * 3
 
+            # Track tool_use emissions so we don't double-announce: the
+            # "messages" path emits as soon as a tool NAME appears in a
+            # tool_call_chunk (early signal for the UI); the "updates"
+            # path emits the final args. Same tool_call_id → emit once.
+            announced_tool_ids: set[str] = set()
+
             # Stream using LangGraph's async streaming
             async for chunk in agent.astream(
                 {"messages": messages},
@@ -507,9 +725,37 @@ class DeepAgentsBackend:
                         continue
                     # v2 format: data is (AIMessageChunk, metadata_dict) tuple
                     msg_chunk = data[0] if isinstance(data, tuple | list) else data
-                    content = _extract_content_text(getattr(msg_chunk, "content", ""))
-                    if content:
-                        yield AgentEvent(type="message", content=content)
+                    text, thinking = _split_content_text_and_thinking(
+                        getattr(msg_chunk, "content", "")
+                    )
+                    if thinking:
+                        yield AgentEvent(type="thinking", content=thinking)
+                    if text:
+                        yield AgentEvent(type="message", content=text)
+
+                    # Early tool_use signal — fire as soon as the first
+                    # tool_call_chunk carries a name. The UI flips from
+                    # "Thinking..." to "Using <tool>..." 1-2s sooner than
+                    # waiting for the full tool_call in the updates path.
+                    tool_call_chunks = getattr(msg_chunk, "tool_call_chunks", None) or []
+                    for tcc in tool_call_chunks:
+                        # ToolCallChunk may be a dict or a Pydantic model.
+                        tcc_name = (
+                            tcc.get("name") if isinstance(tcc, dict) else getattr(tcc, "name", None)
+                        )
+                        tcc_id = (
+                            tcc.get("id") if isinstance(tcc, dict) else getattr(tcc, "id", None)
+                        )
+                        if not tcc_name or not tcc_id:
+                            continue
+                        if tcc_id in announced_tool_ids:
+                            continue
+                        announced_tool_ids.add(tcc_id)
+                        yield AgentEvent(
+                            type="tool_use",
+                            content=f"Using {tcc_name}...",
+                            metadata={"name": tcc_name, "input": {}},
+                        )
 
                 elif chunk_type == "updates":
                     data = _unwrap(chunk.get("data", {}))
@@ -528,6 +774,16 @@ class DeepAgentsBackend:
                             if tool_calls:
                                 for tc in tool_calls:
                                     name = tc.get("name", "Tool")
+                                    tc_id = tc.get("id")
+                                    # Skip if the messages-path already
+                                    # announced this tool. Still emit
+                                    # when id is missing (some providers
+                                    # omit it) so behavior degrades to
+                                    # the old single-emit path.
+                                    if tc_id and tc_id in announced_tool_ids:
+                                        continue
+                                    if tc_id:
+                                        announced_tool_ids.add(tc_id)
                                     yield AgentEvent(
                                         type="tool_use",
                                         content=f"Using {name}...",

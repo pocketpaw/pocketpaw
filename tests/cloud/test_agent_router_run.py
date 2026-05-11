@@ -20,10 +20,23 @@ class _FakePool:
         self.knowledge_context_seen: str = ""
 
     async def get(self, agent_id):
-        return SimpleNamespace(agent_id=agent_id, agent_name="Agent " + agent_id)
+        return SimpleNamespace(
+            agent_id=agent_id,
+            agent_name="Agent " + agent_id,
+            config={"backend": "claude_agent_sdk"},
+        )
 
-    async def run(self, agent_id, message, session_key, history=None, knowledge_context=""):
+    async def run(
+        self,
+        agent_id,
+        message,
+        session_key,
+        history=None,
+        knowledge_context="",
+        instructions="",
+    ):
         self.knowledge_context_seen = knowledge_context
+        self.instructions_seen = instructions
         yield SimpleNamespace(type="thinking", content="pondering", metadata={})
         yield SimpleNamespace(type="tool_use", content={"tool": "web_fetch"}, metadata={})
         yield SimpleNamespace(type="message", content="Here is your answer.", metadata={})

@@ -48,6 +48,20 @@ _POCKET_MUTATION_TOOL_IDS: frozenset[str] = frozenset(
         "mcp__pocketpaw_pocket__add_widget",
         "mcp__pocketpaw_pocket__update_widget",
         "mcp__pocketpaw_pocket__remove_widget",
+        # Granular rippleSpec.ui ops — same structural-enforcement rule:
+        # only the pocket_specialist subagent may invoke these.
+        "mcp__pocketpaw_pocket__add_node",
+        "mcp__pocketpaw_pocket__replace_node",
+        "mcp__pocketpaw_pocket__set_node_prop",
+        "mcp__pocketpaw_pocket__move_node",
+        "mcp__pocketpaw_pocket__remove_node",
+        # Granular rippleSpec.state ops — same rule: data writes flow
+        # through the specialist so list-before-create + validation
+        # still apply.
+        "mcp__pocketpaw_pocket__set_state",
+        "mcp__pocketpaw_pocket__append_state",
+        "mcp__pocketpaw_pocket__remove_state",
+        "mcp__pocketpaw_pocket__patch_state",
     }
 )
 
@@ -821,19 +835,38 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     lines.append(f"**{role}**: {content}")
                 final_prompt += "\n\n" + "\n".join(lines)
 
-            # Build allowed tools list, filtered by tool policy
-            all_sdk_tools = [
-                "Agent",
-                "Bash",
-                "Read",
-                "Write",
-                "Edit",
-                "Glob",
-                "Grep",
-                "WebSearch",
-                "WebFetch",
-                "Skill",
-            ]
+            # Pocket sessions don't need shell or filesystem access — the
+            # MCP pocket tools (get_pocket / list_pockets / set_state /
+            # set_node_prop / add_node / etc.) are the complete interface.
+            # Detect via the <pocket-scope> marker every pocket prompt
+            # carries; lock tools down to delegation + web + pocket MCP.
+            #
+            # Without this gate, the agent has been observed reaching for
+            # shell introspection (e.g. `env | grep pocket; curl localhost`)
+            # to "figure out" pocket state, which trips the security rails
+            # AND is the wrong path — the MCP tools already expose
+            # everything the agent needs.
+            is_pocket_session = "<pocket-scope>" in (final_prompt or "")
+
+            if is_pocket_session:
+                all_sdk_tools = ["Agent", "WebSearch", "WebFetch"]
+                logger.info(
+                    "Pocket session detected — tool surface locked to %s",
+                    all_sdk_tools,
+                )
+            else:
+                all_sdk_tools = [
+                    "Agent",
+                    "Bash",
+                    "Read",
+                    "Write",
+                    "Edit",
+                    "Glob",
+                    "Grep",
+                    "WebSearch",
+                    "WebFetch",
+                    "Skill",
+                ]
             allowed_tools = [
                 t
                 for t in all_sdk_tools

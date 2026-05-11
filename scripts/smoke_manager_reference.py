@@ -45,7 +45,7 @@ async def main() -> int:
     print(f"   agent_cached_memory is manager: {agent_cached_memory is manager}")
 
     _banner("2. init_beanie + register_default_backend (simulates startup)")
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
+    AsyncIOMotorClient("mongodb://localhost:27017")
     await init_beanie(
         connection_string=uri,
         document_models=[*ALL_DOCUMENTS, MemoryFactDoc],

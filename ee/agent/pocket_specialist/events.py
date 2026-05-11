@@ -8,7 +8,7 @@ is subscribed.
 from __future__ import annotations
 
 import logging
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from ee.cloud.shared.events import event_bus
@@ -16,7 +16,7 @@ from ee.cloud.shared.events import event_bus
 log = logging.getLogger(__name__)
 
 
-class SpecialistEvent(str, Enum):
+class SpecialistEvent(StrEnum):
     """Status event names. Frontend consumes these as progress indicators."""
 
     START = "specialist:start"

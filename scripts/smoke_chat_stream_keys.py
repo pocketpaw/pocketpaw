@@ -67,7 +67,7 @@ async def main() -> int:
     lic_mod._license_error = None
 
     _banner("0. init_beanie + mount_cloud")
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
+    AsyncIOMotorClient("mongodb://localhost:27017")
     await init_beanie(
         connection_string=uri,
         document_models=[*ALL_DOCUMENTS, MemoryFactDoc],

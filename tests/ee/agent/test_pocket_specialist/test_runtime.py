@@ -1,7 +1,5 @@
 """run_specialist end-to-end with a mocked backend."""
 
-import json
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,7 +33,13 @@ def _persist_factory_stub(pocket: dict[str, Any]):
     backend never invokes it, so its surface is irrelevant.
     """
 
-    def _stub(*, workspace_id: str, user_id: str, capture: dict[str, Any] | None = None):
+    def _stub(
+        *,
+        workspace_id: str,
+        user_id: str,
+        capture: dict[str, Any] | None = None,
+        max_validation_retries: int = 3,
+    ):
         if capture is not None:
             capture["pocket"] = pocket
         return MagicMock()
@@ -91,10 +95,6 @@ class TestRunSpecialistHappyPath:
                 "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
                 side_effect=_persist_factory_stub(captured_pocket),
             ),
-            patch(
-                "ee.agent.pocket_specialist.runtime.make_validate_spec_tool",
-                side_effect=_validate_factory_stub(),
-            ),
         ):
             out = await run_specialist(
                 PocketSpecialistCreateInput(brief="Track my repos across repos foo, bar, baz"),
@@ -136,10 +136,6 @@ class TestRunSpecialistHappyPath:
                 "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
                 side_effect=_persist_factory_stub(captured_pocket),
             ),
-            patch(
-                "ee.agent.pocket_specialist.runtime.make_validate_spec_tool",
-                side_effect=_validate_factory_stub(),
-            ),
         ):
             out = await run_specialist(
                 PocketSpecialistCreateInput(
@@ -155,11 +151,15 @@ class TestRunSpecialistHappyPath:
         assert out.pocket["id"] == "p-1"
 
 
-class TestRunSpecialistSafetyNet:
+class TestRunSpecialistFailureMode:
+    """When the LLM run never produces a persisted pocket (errored mid-
+    run, exhausted validation retries, transport 400, etc.), the
+    specialist must return ok=false with an error and NOT ship a
+    placeholder. User-facing rule: empty canvases captioned "auto-created
+    from a brief" are worse than "I couldn't build that, try again"."""
+
     @pytest.mark.asyncio
-    async def test_force_persists_when_llm_skips_persist(self):
-        # Backend yields events that never include persist_pocket - runtime
-        # must force-create a pocket anyway.
+    async def test_no_pocket_returns_failure_result(self):
         events = [
             AgentEvent(type="message", content="I'm done."),
             AgentEvent(type="done", content=""),
@@ -169,7 +169,6 @@ class TestRunSpecialistSafetyNet:
         fake_backend.attach_specialist_tools = MagicMock()
         fake_backend.stop = AsyncMock()
 
-        force_persisted = {"id": "p-fallback", "name": "A vague brief here"}
         with (
             patch(
                 "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
@@ -179,10 +178,6 @@ class TestRunSpecialistSafetyNet:
                 "ee.agent.pocket_specialist.runtime.emit_specialist_event",
                 new=AsyncMock(),
             ),
-            patch(
-                "ee.agent.pocket_specialist.runtime._agent_create_for_fallback",
-                new=AsyncMock(return_value=(force_persisted, "p-fallback", None)),
-            ) as mock_create,
         ):
             out = await run_specialist(
                 PocketSpecialistCreateInput(brief="A vague brief here for testing"),
@@ -191,68 +186,8 @@ class TestRunSpecialistSafetyNet:
                 settings=Settings(),
             )
 
-        mock_create.assert_awaited_once()
-        assert out.ok is True
-        assert out.pocket["id"] == "p-fallback"
-        assert any("force" in w.lower() or "fallback" in w.lower() for w in out.warnings)
-
-    @pytest.mark.asyncio
-    async def test_force_persist_raises_on_create_error(self):
-        # When the safety net's agent_create itself fails (Mongo down,
-        # validation error, etc.), we currently propagate as RuntimeError.
-        # The MCP/CLI handler at the call boundary converts it to is_error.
-        events = [
-            AgentEvent(type="message", content="done"),
-            AgentEvent(type="done", content=""),
-        ]
-        fake_backend = MagicMock()
-        fake_backend.run = _stream(events)
-        fake_backend.attach_specialist_tools = MagicMock()
-        fake_backend.stop = AsyncMock()
-
-        with (
-            patch(
-                "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
-                return_value=fake_backend,
-            ),
-            patch(
-                "ee.agent.pocket_specialist.runtime.emit_specialist_event",
-                new=AsyncMock(),
-            ),
-            patch(
-                "ee.agent.pocket_specialist.runtime._agent_create_for_fallback",
-                new=AsyncMock(return_value=(None, None, "mongo timeout")),
-            ),
-            pytest.raises(RuntimeError, match="mongo timeout"),
-        ):
-            await run_specialist(
-                PocketSpecialistCreateInput(brief="A vague brief here for testing"),
-                workspace_id="ws-1",
-                user_id="user-A",
-                settings=Settings(),
-            )
-
-
-class TestForcePersistMinimalSpec:
-    """The hardcoded minimal spec must validate against the live manifest.
-    If the renderer's manifest changes prop names, this test fails before
-    we ship a blank pocket to a real user."""
-
-    @pytest.mark.asyncio
-    async def test_minimal_spec_passes_manifest_validation(self):
-        from ee.agent.pocket_specialist.runtime import (
-            _MINIMAL_SPEC_FOR_FALLBACK,
-        )
-        from ee.ripple.manifest import validate_against_manifest
-
-        # Load the manifest directly from the ripple project's static
-        # asset. The configured URL defaults to a local dev server which
-        # is not running in CI; loading from disk is deterministic and
-        # mirrors what the renderer ships.
-        manifest_path = Path(__file__).resolve().parents[5] / "ripple" / "static" / "manifest.json"
-        if not manifest_path.exists():
-            pytest.skip(f"manifest not found at {manifest_path}")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-        issues = validate_against_manifest(_MINIMAL_SPEC_FOR_FALLBACK, manifest)
-        assert issues == [], f"Minimal spec drifted from manifest: {issues}"
+        assert out.ok is False
+        assert out.action == "failed"
+        assert out.pocket is None
+        assert out.error is not None
+        assert "Specialist did not produce" in out.error or "retries" in out.error

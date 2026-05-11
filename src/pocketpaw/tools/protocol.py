@@ -101,6 +101,20 @@ class BaseTool(ABC):
         return {"type": "object", "properties": {}, "required": []}
 
     @property
+    def args_schema(self) -> type | None:
+        """Optional Pydantic model for richer arg schemas.
+
+        Wrappers that introspect Python type annotations (LangChain
+        ``StructuredTool``, ADK ``FunctionTool``) lose fidelity for tools
+        with nested object params because they default to flat str-typed
+        signatures. Override this with a Pydantic ``BaseModel`` subclass
+        to preserve nested structure end-to-end. Wrappers that read
+        ``defn.parameters`` directly (OpenAI Agents) ignore this and use
+        the JSON Schema instead.
+        """
+        return None
+
+    @property
     def definition(self) -> ToolDefinition:
         """Get the tool definition."""
         return ToolDefinition(

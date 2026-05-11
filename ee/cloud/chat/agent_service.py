@@ -459,6 +459,52 @@ def assemble_toolset(ctx: ScopeContext, *, base: list[dict[str, Any]]) -> list[d
 # ---------------------------------------------------------------------------
 
 
+def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None = None) -> str:
+    """Return the STATIC behavioral rules for this scope/backend.
+
+    These are direct authoritative instructions the model must follow —
+    ripple UI conventions, pocket delegation rule, etc. They are
+    intentionally separated from ``build_dynamic_context`` so the caller
+    can inject them as top-level ``instructions`` to the agent backend
+    (where they read as rules) rather than burying them inside the
+    ``knowledge_context`` wrapper (where they read as reference data and
+    the model often ignores them).
+
+    Backend gating mirrors ``build_context_block``: MCP-capable backends
+    get ``INLINE_RIPPLE_SYSTEM_PROMPT + POCKET_DELEGATION_RULE``;
+    others get the heavy inline pocket prompt.
+    """
+    parts: list[str] = []
+    if backend_name in _MCP_POCKET_BACKENDS:
+        parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+        parts.append(POCKET_DELEGATION_RULE)
+    else:
+        creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
+        if ctx.intent == "pocket_create":
+            parts.append(creation_prompt)
+        elif ctx.pocket_id:
+            parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
+        else:
+            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+    return "\n".join(parts)
+
+
+def build_dynamic_context(ctx: ScopeContext) -> str:
+    """Return only the per-turn dynamic context tags — scope,
+    participants, current-pocket-id. Pairs with
+    ``build_behavior_instructions``: the dynamic context is reference
+    data and lives inside the ``knowledge_context`` wrapper; the
+    behavioral instructions live at the top level."""
+    member_list = ", ".join(ctx.members) if ctx.members else "(none)"
+    parts = [
+        f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>",
+        f"<participants>{member_list}</participants>",
+    ]
+    if ctx.pocket_id and ctx.intent != "pocket_create":
+        parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
+    return "\n".join(parts)
+
+
 def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -> str:
     """Compact string the agent prompt embeds so the model knows who is
     here and how to render rich UI back to the client.
@@ -466,6 +512,12 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
     ORDER MATTERS: the static ripple/pocket prompt content goes FIRST
     so Anthropic prompt caching can hit on it; per-turn dynamic tags
     (scope, participants, current pocket id) go LAST.
+
+    Combined ``build_behavior_instructions`` + ``build_dynamic_context``.
+    Kept for callers that want the full assembled block (tests, legacy
+    pre-Phase-3 fallback paths). The cloud chat router now uses the two
+    helpers separately so behavioral rules can be hoisted out of the
+    ``knowledge_context`` framing — see comments on the helpers.
 
     Backend gating: claude_agent_sdk supports the pocket_specialist
     subagent, so the main chat agent ships only INLINE_RIPPLE_SYSTEM_PROMPT
@@ -476,33 +528,9 @@ def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -
     full pocket prompt inline. Universal Option-A (MCP-based specialist)
     is the planned follow-up.
     """
-    static_parts: list[str] = []
-
-    if backend_name in _MCP_POCKET_BACKENDS:
-        # Subagent-capable backend → main agent is slim + delegates.
-        static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
-        static_parts.append(POCKET_DELEGATION_RULE)
-    else:
-        # Pre-Phase-3 path: heavy pocket prompts ride in the main agent.
-        creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
-        if ctx.intent == "pocket_create":
-            static_parts.append(creation_prompt)
-        elif ctx.pocket_id:
-            # pocket-id baked in — prefix is per-pocket-instance, not
-            # globally cacheable.
-            static_parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
-        else:
-            static_parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
-
-    member_list = ", ".join(ctx.members) if ctx.members else "(none)"
-    dynamic_parts = [
-        f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>",
-        f"<participants>{member_list}</participants>",
-    ]
-    if ctx.pocket_id and ctx.intent != "pocket_create":
-        dynamic_parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
-
-    return "\n".join(static_parts + dynamic_parts)
+    behavior = build_behavior_instructions(ctx, backend_name=backend_name)
+    dynamic = build_dynamic_context(ctx)
+    return f"{behavior}\n{dynamic}" if behavior else dynamic
 
 
 _FILE_MENTION_TYPES = {"file", "upload", "attachment", "document", "image"}
@@ -583,8 +611,12 @@ async def build_knowledge_context(
     attachments: list[dict[str, Any]] | None = None,
     mentions: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build the prompt context block with KB hits relevant to this turn."""
-    scope_block = build_context_block(ctx)
+    """Build the per-turn knowledge context — dynamic scope/participants
+    tags + KB hits. Static behavioral rules are NOT included here; the
+    caller must inject them via ``pool.run(instructions=...)`` so they
+    land outside the "Your Knowledge Base" framing that makes the model
+    treat them as reference data instead of rules."""
+    scope_block = build_dynamic_context(ctx)
     query = (user_message or "").strip()
     refs = _file_reference_terms(attachments=attachments, mentions=mentions)
     if refs:

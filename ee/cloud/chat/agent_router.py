@@ -27,6 +27,7 @@ from ee.cloud.chat.agent_service import (
     ScopeKind,
     attach_agent_identity,
     attach_sse_event_sink,
+    build_behavior_instructions,
     build_knowledge_context,
     detach_agent_identity,
     detach_sse_event_sink,
@@ -294,6 +295,147 @@ async def _broadcast_agent_typing(ctx: ScopeContext, active: bool) -> None:
     )
 
 
+def _extract_specialist_payload(output: Any) -> dict[str, Any] | None:
+    """Return the specialist's ``{ok, action, pocket, ...}`` dict if ``output``
+    looks like a pocket-specialist response, else ``None``.
+
+    The same payload surfaces in three shapes depending on the agent backend:
+      * raw dict — in-process function tool returning the dict directly
+      * JSON string — most common (BaseTool, codex shell stdout, MCP text)
+      * list of MCP content blocks — claude_agent_sdk's in-process MCP server
+        wraps the JSON in ``[{"type": "text", "text": "<json>"}]``
+    """
+    if output is None:
+        return None
+
+    def _coerce(data: Any) -> dict[str, Any] | None:
+        if (
+            isinstance(data, dict)
+            and "ok" in data
+            and "action" in data
+            and isinstance(data.get("pocket"), dict)
+        ):
+            return data
+        return None
+
+    if isinstance(output, dict):
+        # The persist_tool / function-tool may return the dict directly,
+        # OR the dict may wrap an MCP-style ``content`` array.
+        direct = _coerce(output)
+        if direct is not None:
+            return direct
+        content = output.get("content")
+        if isinstance(content, list):
+            return _extract_specialist_payload(content)
+        return None
+
+    if isinstance(output, str):
+        text = output.strip()
+        if not text or not text.startswith("{"):
+            return None
+        try:
+            return _coerce(json.loads(text))
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    if isinstance(output, list):
+        # MCP content array: scan text blocks until one parses as a payload.
+        for block in output:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                parsed = _extract_specialist_payload(block.get("text", ""))
+                if parsed is not None:
+                    return parsed
+        return None
+
+    return None
+
+
+async def _maybe_handle_specialist_response(
+    *,
+    ctx: ScopeContext,
+    session_mongo_id: str | None,
+    output: Any,
+    handled_pocket_ids: set[str],
+) -> None:
+    """Bind session → pocket and push ``pocket_created`` SSE on detection.
+
+    Idempotent per ``pocket_id``. Failure to bind or to push the SSE frame
+    is logged and swallowed — neither is allowed to break the agent stream.
+    """
+    payload = _extract_specialist_payload(output)
+    if payload is None:
+        return
+    if not payload.get("ok"):
+        return
+    pocket = payload.get("pocket") or {}
+    pocket_id = pocket.get("id") or pocket.get("_id")
+    if not pocket_id or pocket_id in handled_pocket_ids:
+        return
+    handled_pocket_ids.add(pocket_id)
+
+    if session_mongo_id:
+        try:
+            from ee.cloud.sessions import service as sessions_service
+
+            await sessions_service.attach_pocket_to_session_doc(
+                session_mongo_id, ctx.user_id, pocket_id
+            )
+        except Exception:
+            logger.warning(
+                "attach_pocket_to_session_doc failed after specialist run",
+                exc_info=True,
+            )
+
+    try:
+        push_sse_event(
+            "pocket_created",
+            {
+                "pocket_id": pocket_id,
+                "pocket": pocket,
+                "action": payload.get("action"),
+                "session_id": ctx.session_id,
+            },
+        )
+    except Exception:
+        logger.debug("push_sse_event(pocket_created) failed", exc_info=True)
+
+    # Re-emit the realtime ``pocket.created`` / ``pocket.updated`` event from
+    # the parent process so every connected client (sidebar, pockets list,
+    # other open windows) sees the new pocket without a manual refresh.
+    #
+    # Why this is needed: for subprocess backends (codex_cli, opencode,
+    # copilot_sdk) the specialist's ``persist_pocket`` runs in a
+    # ``python -m pocketpaw.tools.cli`` subprocess. That subprocess does call
+    # ``pockets.service.agent_create()`` which calls ``emit(PocketCreated)``,
+    # but the bus lives inside the subprocess's own process — the parent
+    # holds the WebSocket ConnectionManager and never receives the event.
+    # Re-emitting from the parent fills the gap. For in-process backends
+    # this double-emits, but the frontend handler is idempotent (finds by id,
+    # replaces in place — see paw-enterprise/.../handlers/pocket.ts) so the
+    # duplicate is a no-op visually.
+    try:
+        from beanie import PydanticObjectId
+
+        from ee.cloud._core.realtime.emit import emit
+        from ee.cloud._core.realtime.events import PocketCreated, PocketUpdated
+        from ee.cloud.models.pocket import Pocket as _PocketDoc
+        from ee.cloud.pockets.service import _pocket_event_payload
+
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+        if doc is not None:
+            event_payload = await _pocket_event_payload(doc)
+            event_cls = PocketUpdated if payload.get("action") == "extended" else PocketCreated
+            await emit(event_cls(data=event_payload))
+    except Exception:
+        logger.debug(
+            "realtime re-emit of pocket %s after specialist run failed",
+            pocket_id,
+            exc_info=True,
+        )
+
+
 async def _run_agent_stream(
     ctx: ScopeContext,
     user_message_id: str,
@@ -322,6 +464,15 @@ async def _run_agent_stream(
         attachments=body.attachments,
         mentions=body.mentions,
     )
+    # Behavioral rules (ripple conventions, pocket delegation, pre-tool
+    # narration) MUST land as authoritative instructions, not reference
+    # data. AgentPool.run injects ``instructions`` BEFORE the
+    # ``## Your Knowledge Base`` wrapper so the model reads them as
+    # rules to follow rather than reference text to look up.
+    backend_name = (
+        instance.config.get("backend", "claude_agent_sdk") if hasattr(instance, "config") else None
+    )
+    behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
 
     await _broadcast_agent_typing(ctx, active=True)
 
@@ -377,19 +528,61 @@ async def _run_agent_stream(
 
     full_text = ""
     cancelled = False
+    # Tracks pocket ids we've already bound + announced this run. The
+    # specialist's response can surface in tool_result events more than
+    # once (e.g. the agent calls the tool, the result is forwarded both
+    # as the in-process MCP/function-tool return value AND as a stdout
+    # echo from the codex subprocess wrapper). Dedup keeps us from
+    # binding twice or firing duplicate ``pocket_created`` SSE frames.
+    handled_pocket_ids: set[str] = set()
     try:
-        async for event in pool.run(
+        # Race the next agent event against new side-channel items so
+        # any push_sse_event() call made from inside an in-process tool
+        # (e.g. the pocket specialist's status pushes during its multi-
+        # second run) flushes to the SSE consumer in real time. Without
+        # this, the agent's loop blocks on its tool call, no events
+        # iterate, and queued side-channel items only drain after the
+        # tool returns — making them appear to the user all at once at
+        # the end.
+        agent_iter = pool.run(
             ctx.target_agent_id,
             body.content,
             session_key,
             history=history,
             knowledge_context=knowledge_context,
-        ):
-            for ev in _drain_side_channel():
-                yield ev
+            instructions=behavior_instructions,
+        ).__aiter__()
+        next_event_task: asyncio.Task[Any] | None = asyncio.create_task(agent_iter.__anext__())
+        next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] = asyncio.create_task(
+            side_channel_queue.get()
+        )
+        while True:
             if cancel_event.is_set():
                 cancelled = True
                 break
+            wait_set: set[asyncio.Task[Any]] = {next_queue_task}
+            if next_event_task is not None:
+                wait_set.add(next_event_task)
+            done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            # Drain ALL side-channel items that fired this round so the
+            # user sees them in order regardless of how many landed
+            # while we were waiting.
+            if next_queue_task in done:
+                yield next_queue_task.result()
+                for ev in _drain_side_channel():
+                    yield ev
+                next_queue_task = asyncio.create_task(side_channel_queue.get())
+            if next_event_task is None or next_event_task not in done:
+                continue
+            try:
+                event = next_event_task.result()
+            except StopAsyncIteration:
+                next_event_task = None
+                # Cancel the still-pending queue waiter; we'll do a
+                # final drain in the finally-block below.
+                next_queue_task.cancel()
+                break
+            next_event_task = asyncio.create_task(agent_iter.__anext__())
             etype = getattr(event, "type", None)
             econtent = getattr(event, "content", "")
             if etype == "message":
@@ -398,21 +591,51 @@ async def _run_agent_stream(
             elif etype == "thinking":
                 yield ("thinking", {"content": econtent if isinstance(econtent, str) else ""})
             elif etype == "tool_use":
+                # Prefer metadata (the canonical source: deep_agents and
+                # claude_sdk both populate event.metadata.name + .input).
+                # Falls back to content parsing for legacy backends that
+                # only set content.
+                meta = getattr(event, "metadata", None) or {}
                 name = ""
-                if isinstance(econtent, dict):
-                    name = econtent.get("tool") or econtent.get("name") or ""
-                elif isinstance(econtent, str):
-                    name = econtent
+                tool_input: Any = {}
+                if isinstance(meta, dict):
+                    name = meta.get("name") or meta.get("tool") or ""
+                    tool_input = meta.get("input") or {}
+                if not name:
+                    if isinstance(econtent, dict):
+                        name = econtent.get("tool") or econtent.get("name") or ""
+                        tool_input = econtent
+                    elif isinstance(econtent, str):
+                        name = econtent
                 yield (
                     "tool_start",
-                    {"tool": name, "input": econtent if isinstance(econtent, dict) else {}},
+                    {"tool": name, "input": tool_input},
                 )
             elif etype == "tool_result":
+                meta = getattr(event, "metadata", None) or {}
                 name = ""
                 output: Any = econtent
-                if isinstance(econtent, dict):
+                if isinstance(meta, dict):
+                    name = meta.get("name") or meta.get("tool") or ""
+                if not name and isinstance(econtent, dict):
                     name = econtent.get("tool") or econtent.get("name") or ""
+                if isinstance(econtent, dict):
                     output = econtent.get("result", econtent)
+                # Side-effect: if this tool result is a pocket-specialist
+                # response, bind the session to the new pocket and push a
+                # ``pocket_created`` SSE so the frontend opens it. Covers
+                # every backend uniformly — in-process MCP / function tool
+                # (claude_agent_sdk, deep_agents, google_adk, openai_agents)
+                # surfaces the JSON here, and codex_cli/opencode/copilot_sdk
+                # subprocess paths surface the same JSON via stdout. Dedup
+                # via ``handled_pocket_ids`` prevents double-binding when
+                # the same payload is echoed twice in one turn.
+                await _maybe_handle_specialist_response(
+                    ctx=ctx,
+                    session_mongo_id=session_mongo_id,
+                    output=output,
+                    handled_pocket_ids=handled_pocket_ids,
+                )
                 yield ("tool_result", {"tool": name, "output": output})
             elif etype == "done":
                 break

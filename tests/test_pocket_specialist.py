@@ -38,9 +38,18 @@ def test_main_agent_keeps_read_only_pocket_tools():
 
 def test_main_agent_allowlist_excludes_pocket_mutation_tools():
     """The pocket mutation tool IDs must NOT appear in the main agent's
-    allowed tool surface — they're owned by the
-    ``pocket_specialist__create`` MCP tool. Without this filter, the
-    main agent could call them directly and bypass the delegation rule."""
+    allowed tool surface — they're owned by the pocket specialist.
+    Without this filter, the main agent could call them directly and
+    bypass the delegation rule.
+
+    The set covers BOTH the original pocket-level mutators
+    (``create_pocket``, ``update_pocket``, legacy widget ops) AND the
+    granular ``rippleSpec.ui`` node ops (``add_node`` / ``replace_node`` /
+    ``set_node_prop`` / ``move_node`` / ``remove_node``). The node ops
+    operate directly on rendered UI; allowing them on the main agent
+    would let it skip the specialist's list-before-create + validation
+    workflow entirely.
+    """
     from pocketpaw.agents.claude_sdk import _POCKET_MUTATION_TOOL_IDS
 
     expected = {
@@ -49,6 +58,15 @@ def test_main_agent_allowlist_excludes_pocket_mutation_tools():
         "mcp__pocketpaw_pocket__add_widget",
         "mcp__pocketpaw_pocket__update_widget",
         "mcp__pocketpaw_pocket__remove_widget",
+        "mcp__pocketpaw_pocket__add_node",
+        "mcp__pocketpaw_pocket__replace_node",
+        "mcp__pocketpaw_pocket__set_node_prop",
+        "mcp__pocketpaw_pocket__move_node",
+        "mcp__pocketpaw_pocket__remove_node",
+        "mcp__pocketpaw_pocket__set_state",
+        "mcp__pocketpaw_pocket__append_state",
+        "mcp__pocketpaw_pocket__remove_state",
+        "mcp__pocketpaw_pocket__patch_state",
     }
     assert _POCKET_MUTATION_TOOL_IDS == expected, (
         "drift between mutation-tool filter and the canonical name set"

@@ -13,12 +13,20 @@ Public API (returns wire dicts for legacy router compatibility):
 - ``add_collaborator``, ``remove_collaborator``
 - ``add_team_member``, ``remove_team_member``
 - ``add_agent``, ``remove_agent``
+
+Agent-facing granular ``rippleSpec.ui`` mutations (called from the
+``pocket_specialist`` subagent via the in-process MCP server):
+- ``agent_add_node``, ``agent_replace_node``, ``agent_set_node_prop``,
+  ``agent_move_node``, ``agent_remove_node``
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
+from collections import OrderedDict
+from typing import Any
 
 from beanie import PydanticObjectId
 
@@ -30,6 +38,7 @@ from ee.cloud._core.realtime.events import (
 )
 from ee.cloud.models.pocket import Pocket as _PocketDoc
 from ee.cloud.models.pocket import Widget as _WidgetDoc
+from ee.cloud.pockets import spec_ops, state_ops
 from ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
 from ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
@@ -920,6 +929,459 @@ async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | No
     return _agent_view_dict(doc), None
 
 
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.ui mutations — agent-facing
+# ---------------------------------------------------------------------------
+
+# Per-pocket asyncio.Lock cache. Granular ops on the same pocket
+# serialize so a flurry of specialist calls can't race on doc.save().
+# Bounded LRU so the cache doesn't grow unboundedly with pocket churn.
+_POCKET_LOCK_CACHE_MAX = 256
+_pocket_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+
+
+def _pocket_lock(pocket_id: str) -> asyncio.Lock:
+    """Return (creating if needed) the per-pocket lock. LRU-evicted."""
+    lock = _pocket_locks.get(pocket_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _pocket_locks[pocket_id] = lock
+        if len(_pocket_locks) > _POCKET_LOCK_CACHE_MAX:
+            _pocket_locks.popitem(last=False)
+    else:
+        _pocket_locks.move_to_end(pocket_id)
+    return lock
+
+
+def _spec_root(doc: _PocketDoc) -> tuple[dict[str, Any] | None, str | None]:
+    """Return the mutable ``rippleSpec.ui`` root for a doc, or
+    ``(None, error)`` if the pocket has no spec or no root node.
+
+    Mutating the returned dict mutates ``doc.rippleSpec['ui']`` in place
+    — the caller follows up with ``doc.save()`` to persist.
+    """
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        return None, "pocket has no rippleSpec to mutate"
+    ui = spec.get("ui")
+    if not isinstance(ui, dict):
+        return None, "pocket rippleSpec has no 'ui' root"
+    return ui, None
+
+
+async def _load_and_ensure_ids(
+    pocket_id: str,
+) -> tuple[_PocketDoc | None, dict[str, Any] | None, str | None]:
+    """Load the pocket doc, get its UI root, and ensure every node has
+    an id (persisting if newly assigned). Returns
+    ``(doc, ui_root, None)`` on success.
+    """
+    doc, err = await _agent_load_doc(pocket_id)
+    if err or doc is None:
+        return None, None, err
+    ui, err = _spec_root(doc)
+    if err or ui is None:
+        return None, None, err
+    if spec_ops.ensure_ids(ui):
+        # Persist newly-assigned ids so subsequent ops can target them.
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, None, f"id-assignment save failed: {exc}"
+    return doc, ui, None
+
+
+async def agent_add_node(
+    pocket_id: str,
+    *,
+    parent_id: str,
+    spec: dict[str, Any],
+    after_id: str | None = None,
+) -> tuple[dict | None, str | None]:
+    """Insert ``spec`` as a child of ``parent_id`` (after ``after_id`` or
+    appended). The new node's id is assigned if absent.
+
+    Returns ``({"subtree": <new-node>, "pocket": <view>}, None)`` on
+    success.
+    """
+    if not isinstance(spec, dict):
+        return None, "spec must be a JSON object"
+    if not parent_id:
+        return None, "parent_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        parent = spec_ops.find_by_id(ui, parent_id)
+        if parent is None:
+            return None, f"no node with id {parent_id!r}"
+        new_node = dict(spec)
+        if not spec_ops.is_valid_id(new_node.get("id")):
+            new_node["id"] = spec_ops.new_node_id()
+        # Make sure any nested children also have ids.
+        spec_ops.ensure_ids(new_node)
+        try:
+            spec_ops.insert_child(parent, new_node, after_id=after_id)
+        except ValueError as exc:
+            return None, str(exc)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"subtree": new_node, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+async def agent_replace_node(
+    pocket_id: str,
+    *,
+    node_id: str,
+    spec: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Replace the subtree rooted at ``node_id`` with ``spec``. The
+    target's id is preserved if ``spec['id']`` is absent.
+
+    Returns ``({"subtree": <new>, "old": <prev>, "pocket": <view>}, None)``.
+    """
+    if not isinstance(spec, dict):
+        return None, "spec must be a JSON object"
+    if not node_id:
+        return None, "node_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        new_node = dict(spec)
+        try:
+            old = spec_ops.replace_node(ui, node_id, new_node)
+        except ValueError as exc:
+            return None, str(exc)
+        spec_ops.ensure_ids(new_node)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"subtree": new_node, "old": old, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+async def agent_set_node_prop(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    value: Any,
+) -> tuple[dict | None, str | None]:
+    """Set a single prop on ``node_id``. ``prop`` writes into ``props``
+    by default; top-level node keys (``show``, ``bind``, ``on_click``,
+    etc.) are addressable by their bare name. Dotted paths
+    (``data.rows``) walk inside ``props``.
+
+    Returns ``({"subtree": <node>, "old_value": <prev>, "pocket": <view>},
+    None)``.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+        try:
+            old = spec_ops.set_prop(node, prop, value)
+        except ValueError as exc:
+            return None, str(exc)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "subtree": node,
+                "old_value": old,
+                "prop": prop,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_move_node(
+    pocket_id: str,
+    *,
+    node_id: str,
+    new_parent_id: str,
+    after_id: str | None = None,
+) -> tuple[dict | None, str | None]:
+    """Move ``node_id`` under ``new_parent_id`` (after ``after_id`` or
+    appended). Refuses to move the root or to move into a descendant.
+
+    Returns ``({"subtree": <moved>, "old_parent_id": ..., "old_index": ...,
+    "pocket": <view>}, None)``.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not new_parent_id:
+        return None, "new_parent_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        try:
+            old_parent_id, old_idx = spec_ops.move_node(
+                ui, node_id, new_parent_id, after_id=after_id
+            )
+        except ValueError as exc:
+            return None, str(exc)
+        moved = spec_ops.find_by_id(ui, node_id) or {}
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "subtree": moved,
+                "old_parent_id": old_parent_id,
+                "old_index": old_idx,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_node(
+    pocket_id: str,
+    *,
+    node_id: str,
+) -> tuple[dict | None, str | None]:
+    """Remove the subtree at ``node_id``. Returns the removed subtree
+    plus enough position info to rebuild the inverse.
+
+    Returns ``({"removed_id": ..., "removed": <subtree>, "parent_id": ...,
+    "index": ..., "pocket": <view>}, None)``.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        try:
+            parent, _key, idx, removed = spec_ops.remove_node(ui, node_id)
+        except ValueError as exc:
+            return None, str(exc)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "removed_id": node_id,
+                "removed": removed,
+                "parent_id": str(parent.get("id", "")),
+                "index": idx,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.state mutations — agent-facing
+# ---------------------------------------------------------------------------
+#
+# The "data" half of the 3-layer mutation rule:
+# - data the user sees   → set_state / append_state / remove_state / patch_state
+# - widget appearance    → set_node_prop
+# - widget structure     → add_node / move_node / remove_node
+#
+# Reuses the per-pocket asyncio.Lock cache from the node ops above so
+# concurrent state + node mutations on the same pocket serialize.
+
+
+def _state_root(doc: _PocketDoc) -> tuple[dict[str, Any], str | None]:
+    """Return the mutable ``rippleSpec.state`` dict for a doc, creating
+    it (and the parent ``rippleSpec``) if absent.
+
+    Unlike ``_spec_root`` (which requires a ``ui`` root), state is
+    legitimately empty for new pockets, so we materialise it on demand.
+    """
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        spec = {}
+        doc.rippleSpec = spec
+    state = spec.get("state")
+    if not isinstance(state, dict):
+        state = {}
+        spec["state"] = state
+    return state, None
+
+
+async def agent_set_state(
+    pocket_id: str,
+    *,
+    path: str,
+    value: Any,
+) -> tuple[dict | None, str | None]:
+    """Write ``value`` at ``path`` in the pocket's state. Returns
+    ``({"path": ..., "value": ..., "old_value": ..., "pocket": <view>},
+    None)`` on success.
+
+    See ``state_ops`` for path syntax (dotted with bracket indexing).
+    """
+    if not path:
+        return None, "path is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            old = state_ops.set_path(state, path, value)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "path": path,
+                "value": value,
+                "old_value": old,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_append_state(
+    pocket_id: str,
+    *,
+    path: str,
+    item: Any,
+) -> tuple[dict | None, str | None]:
+    """Append ``item`` to the array at ``path``. Creates an empty list
+    if the path is absent. Returns the new length plus the appended item.
+    """
+    if not path:
+        return None, "path is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            new_len = state_ops.append_path(state, path, item)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "path": path,
+                "item": item,
+                "new_length": new_len,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_state(
+    pocket_id: str,
+    *,
+    path: str,
+) -> tuple[dict | None, str | None]:
+    """Remove the value at ``path``. Returns the removed value (used as
+    the inverse for undo)."""
+    if not path:
+        return None, "path is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            removed = state_ops.remove_path(state, path)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"path": path, "removed": removed, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+async def agent_patch_state(
+    pocket_id: str,
+    *,
+    partial: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Shallow-merge ``partial`` into state at the top level. For
+    batched independent-key writes. Returns the previous values of
+    overwritten keys."""
+    if not isinstance(partial, dict):
+        return None, "partial must be a dict"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            prev = state_ops.patch(state, partial)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"partial": partial, "previous": prev, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
 async def agent_create(
     *,
     workspace_id: str,
@@ -968,10 +1430,19 @@ __all__ = [
     "add_collaborator",
     "add_team_member",
     "add_widget",
+    "agent_add_node",
     "agent_add_widget",
+    "agent_append_state",
     "agent_create",
     "agent_list",
+    "agent_move_node",
+    "agent_patch_state",
+    "agent_remove_node",
+    "agent_remove_state",
     "agent_remove_widget",
+    "agent_replace_node",
+    "agent_set_node_prop",
+    "agent_set_state",
     "agent_update",
     "agent_update_widget",
     "agent_view",

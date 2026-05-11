@@ -42,6 +42,18 @@ _CLAUDE_SDK_EXCLUDED = frozenset(
     }
 )
 
+# Backends that receive ``PocketSpecialistTool`` via this bridge as a native
+# function tool. Must stay in sync with ``ee.ripple._pockets._MCP_POCKET_BACKENDS``
+# minus ``claude_agent_sdk`` (which goes through its own in-process MCP server,
+# not the function-tool bridge).
+_SPECIALIST_FUNCTION_TOOL_BACKENDS: frozenset[str] = frozenset(
+    {
+        "deep_agents",
+        "google_adk",
+        "openai_agents",
+    }
+)
+
 
 def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
     """Discover and instantiate all builtin tools, filtered by backend.
@@ -84,6 +96,27 @@ def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
             tools.extend(soul_mgr.get_tools())
     except Exception:
         pass  # Soul not available
+
+    # Inject the ee/cloud pocket specialist tool for MCP-capable function-tool
+    # backends only (deep_agents, google_adk, openai_agents). Same opt-in
+    # try-import pattern as soul above.
+    #
+    # Shell-CLI bridge backends (codex_cli, opencode, copilot_sdk, gemini_cli)
+    # are excluded: their POCKET_CREATION_PROMPT_CLI tells the agent to use
+    # ``cloud_pocket_specialist_create`` (registered in _CLOUD_HANDLERS), so
+    # surfacing ``pocket_specialist__create`` in their compact tool list
+    # would advertise a name the CLI dispatcher can't resolve.
+    #
+    # claude_agent_sdk is also excluded because that backend uses its own
+    # in-process SDK MCP server (``mcp_tool.build_pocket_specialist_server``)
+    # and never consumes PocketPaw BaseTools through this bridge.
+    if backend in _SPECIALIST_FUNCTION_TOOL_BACKENDS:
+        try:
+            from ee.agent.pocket_specialist.tool import PocketSpecialistTool
+
+            tools.append(PocketSpecialistTool())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("PocketSpecialistTool not available: %s", exc)
 
     return tools
 
@@ -319,16 +352,20 @@ def build_deep_agents_tools(settings: Any, backend: str = "deep_agents") -> list
 
 
 def _make_langchain_wrapper(tool: Any):
-    """Create a LangChain StructuredTool wrapper for a PocketPaw tool."""
+    """Create a LangChain StructuredTool wrapper for a PocketPaw tool.
+
+    When the tool exposes ``args_schema`` (a Pydantic model), pass it through
+    to ``StructuredTool.from_function`` so nested object params (e.g. the
+    pocket specialist's ``hints``) round-trip with their real types instead
+    of getting flattened to str-typed signature params.
+    """
     import inspect
 
     from langchain_core.tools import StructuredTool
 
     defn = tool.definition
-    props = (defn.parameters or {}).get("properties", {})
-    param_names = list(props.keys())
 
-    async def _run(**kwargs: str) -> str:
+    async def _run(**kwargs: Any) -> str:
         try:
             result = await tool.execute(**kwargs)
             return _scan_tool_output(result, tool.name)
@@ -336,12 +373,24 @@ def _make_langchain_wrapper(tool: Any):
             logger.error("LangChain tool %s execution error: %s", tool.name, exc)
             return f"Error executing {tool.name}: {exc}"
 
-    # Set function metadata so LangChain can introspect it
     _run.__name__ = defn.name
     _run.__qualname__ = defn.name
     _run.__doc__ = defn.description
 
-    # Build proper signature with string-typed parameters
+    schema_cls = getattr(tool, "args_schema", None)
+    if schema_cls is not None:
+        # Rich-schema path: let LangChain derive the signature from the
+        # Pydantic model. Signature/annotations stay generic on _run.
+        return StructuredTool.from_function(
+            coroutine=_run,
+            name=defn.name,
+            description=defn.description,
+            args_schema=schema_cls,
+        )
+
+    # Default str-only path (covers the 50+ existing builtin tools).
+    props = (defn.parameters or {}).get("properties", {})
+    param_names = list(props.keys())
     sig_params = [
         inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=str)
         for name in param_names
