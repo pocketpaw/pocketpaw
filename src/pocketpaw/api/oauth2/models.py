@@ -30,7 +30,7 @@ class OAuthClient:
         parsed = urlparse(uri)
         if parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1"):
             path = parsed.path or "/"
-            
+
             for registered in self.redirect_uris:
                 rp = urlparse(registered)
                 if rp.scheme == "http" and rp.hostname in ("localhost", "127.0.0.1"):

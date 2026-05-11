@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from pocketpaw.config import get_settings
 from pocketpaw.mcp.config import MCPServerConfig, load_mcp_config, save_mcp_config
 
 logger = logging.getLogger(__name__)
@@ -59,8 +60,21 @@ def _b64url_decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + ("=" * (-len(data) % 4)))
 
 
+# def _state_signing_key() -> bytes:
+#     return (os.getenv("POCKETPAW_OAUTH_STATE_SECRET") or "dev-oauth-state-secret").encode()
+
+
 def _state_signing_key() -> bytes:
-    return (os.getenv("POCKETPAW_OAUTH_STATE_SECRET") or "dev-oauth-state-secret").encode()
+    return get_settings().oauth_state_secret.encode()
+
+
+async def _cleanup_expired_oauth_flows() -> None:
+    now = time.time()
+    stale = [
+        k for k, v in _oauth_pending.items() if (now - v.created_at) > _OAUTH_STATE_TTL_SECONDS
+    ]
+    for k in stale:
+        _oauth_pending.pop(k, None)
 
 
 def _create_state_token(*, user_id: str, provider: str, upstream_state: str) -> tuple[str, str]:
@@ -90,7 +104,7 @@ def _verify_state_token(state_token: str) -> dict[str, Any] | None:
         if int(time.time()) > int(payload["exp"]):
             return None
         return payload
-    except Exception:
+    except (ValueError, KeyError, UnicodeDecodeError):
         return None
 
 
@@ -135,7 +149,7 @@ def set_oauth_callback_result(state: str, code: str) -> bool:
         return True
     logger.warning("No pending OAuth flow for state=%s", state[:16])
     return False
-    
+
 
 @dataclass
 class MCPToolInfo:
@@ -317,6 +331,7 @@ class MCPManager:
 
         async def redirect_handler(auth_url: str) -> None:
             """Called by SDK with the authorization URL — broadcast to frontend."""
+            await _cleanup_expired_oauth_flows()
             parsed = urlparse(auth_url)
             params = parse_qs(parsed.query)
             state_values = params.get("state", [])
@@ -358,6 +373,8 @@ class MCPManager:
             state = _flow_state.get("state")
             if not state or state not in _oauth_pending:
                 raise RuntimeError(f"No pending OAuth flow for server '{config.name}'")
+            # Ensure the returning OAuth state matches the server configuration that initiated it.
+            # This prevents cross-server state reuse.
             pending = _oauth_pending[state]
             if pending.server_name != config.name:
                 _oauth_pending.pop(state, None)
