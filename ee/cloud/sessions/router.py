@@ -9,6 +9,7 @@ from ee.cloud.license import require_license
 from ee.cloud.sessions import service as sessions_service
 from ee.cloud.sessions.dto import (
     CreateSessionRequest,
+    Surface,
     UpdateSessionRequest,
     session_to_wire_dict,
 )
@@ -39,7 +40,7 @@ async def create_session(
 @router.get("", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
 async def list_sessions(
     agent_id: str | None = None,
-    surface: str | None = None,
+    surface: Surface | None = None,
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> list[dict]:

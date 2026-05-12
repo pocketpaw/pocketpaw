@@ -24,6 +24,7 @@ Public API:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -347,8 +348,6 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
         # None when the backfill save fails). Matching the literal stored
         # ``session.agent`` would miss those rows entirely — symptom: user
         # sees their optimistic message with no agent reply.
-        import re
-
         prefix = f"cloud:session:{session.id}:"
         messages = (
             await Message.find(
