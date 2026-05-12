@@ -564,3 +564,122 @@ async def test_no_active_stream_rejected(fake_doc):
     assert result["ok"] is False
     assert "no active workspace/user" in result["error"]
     assert push_calls == []
+
+
+# ---------------------------------------------------------------------------
+# set_prop_array_item — surgical edit of one item inside a node prop-array.
+# ---------------------------------------------------------------------------
+
+
+class TestSetPropArrayItem:
+    """Surgical edit of one item inside a node's prop-array."""
+
+    @pytest.mark.asyncio
+    async def test_updates_matched_item_by_field(self, fake_doc):
+        # Seed a chart with a 4-slice donut.
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "type": "donut",
+                "data": [
+                    {"label": "Online Store", "value": 62},
+                    {"label": "POS", "value": 18},
+                    {"label": "Social", "value": 12},
+                    {"label": "Other", "value": 8},
+                ],
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+                partial={"value": 5},
+            )
+
+        assert err is None
+        assert result["item_index"] == 3
+        assert result["item"] == {"label": "Other", "value": 5}
+        assert chart["props"]["data"][3]["value"] == 5
+        # Unchanged siblings preserved.
+        assert chart["props"]["data"][0]["value"] == 62
+        assert fake_doc.saves == 1
+
+    @pytest.mark.asyncio
+    async def test_unsupported_prop_array_rejected(self, fake_doc):
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_header00",  # heading, not chart/table/etc.
+                prop="text",
+                match={"index": 0},
+                partial={"text": "Hi"},
+            )
+        assert result is None
+        assert err is not None
+        assert "unsupported_prop_array" in err
+
+    @pytest.mark.asyncio
+    async def test_missing_node_errors_cleanly(self, fake_doc):
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_does_not_exist",
+                prop="data",
+                match={"index": 0},
+                partial={},
+            )
+        assert result is None
+        assert "no node with id" in err
+
+    @pytest.mark.asyncio
+    async def test_item_not_found_returns_error(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {"data": [{"label": "A", "value": 1}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Z"},
+                partial={"value": 99},
+            )
+        assert result is None
+        assert "not_found" in err
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_match_returns_candidates(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "Other", "value": 1},
+                    {"label": "Other", "value": 2},
+                ]
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+                partial={"value": 99},
+            )
+        assert result is None
+        assert "ambiguous" in err
