@@ -21,6 +21,19 @@ import uuid
 from typing import Any
 
 import pytest
+
+# Every test under ``tests/cloud/`` exercises ``ee.cloud.*``, which pulls
+# ``beanie`` (the cloud-extras stack) on import. Skip the whole tree with
+# a clear reason when those extras aren't installed, instead of letting
+# pytest emit a per-file collection error that's easy to miss in a
+# verbose log. CI installs everything via ``uv sync --dev --all-extras``
+# so this is a no-op there; locally it just makes the contract explicit.
+pytest.importorskip(
+    "beanie",
+    reason="ee/cloud tests require the cloud extras — install with `uv sync --dev --all-extras`",
+)
+pytest.importorskip("mongomock_motor", reason="mongomock-motor is required for cloud tests")
+
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient

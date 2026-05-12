@@ -135,6 +135,88 @@ class TestEditToolFactories:
         ]
 
 
+class TestRunEditSpecialistSuccessFlag:
+    """Lock down that ``ok`` reflects whether the backend stream actually
+    completed. Before this guard, ``run_edit_specialist`` returned
+    ``ok=True`` even when the inner backend errored mid-stream — the
+    caller had no way to tell "no work needed" from "specialist
+    crashed"."""
+
+    @pytest.mark.asyncio
+    async def test_ok_true_when_stream_completes(self) -> None:
+        from unittest.mock import MagicMock
+
+        from ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+        from pocketpaw.agents.protocol import AgentEvent
+        from pocketpaw.config import Settings
+
+        async def _stream(*args, **kwargs):
+            yield AgentEvent(type="message", content="done.")
+
+        fake_backend = MagicMock()
+        fake_backend.run = _stream
+        fake_backend.attach_specialist_tools = MagicMock()
+        fake_backend.stop = AsyncMock()
+
+        with patch(
+            "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            return_value=fake_backend,
+        ):
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1"),
+                workspace_id="w1",
+                user_id="u1",
+                settings=Settings(),
+            )
+
+        assert out.ok is True
+        assert out.error is None
+
+    @pytest.mark.asyncio
+    async def test_ok_false_when_backend_raises_mid_stream(self) -> None:
+        """A transport drop / model 400 / any exception mid-stream must
+        surface as ``ok=False`` with an error message, not a silent
+        ``ok=True, ops=[]``."""
+        from unittest.mock import MagicMock
+
+        from ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+        from pocketpaw.agents.protocol import AgentEvent
+        from pocketpaw.config import Settings
+
+        async def _exploding_stream(*args, **kwargs):
+            yield AgentEvent(type="message", content="starting...")
+            raise RuntimeError("DeepSeek 400: reasoning_content invalid")
+
+        fake_backend = MagicMock()
+        fake_backend.run = _exploding_stream
+        fake_backend.attach_specialist_tools = MagicMock()
+        fake_backend.stop = AsyncMock()
+
+        with patch(
+            "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            return_value=fake_backend,
+        ):
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1"),
+                workspace_id="w1",
+                user_id="u1",
+                settings=Settings(),
+            )
+
+        assert out.ok is False
+        assert out.error is not None
+        assert "RuntimeError" in out.error
+        assert "DeepSeek 400" in out.error
+        # backend.stop must still run on the error path.
+        fake_backend.stop.assert_awaited_once()
+
+
 class TestPromptSeparation:
     def test_main_agent_interaction_prompt_is_thin(self) -> None:
         """Main agent's prompt should be the delegation variant —

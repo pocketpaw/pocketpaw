@@ -67,49 +67,82 @@ def _patch_openai_message_serializer() -> None:
     except ImportError:
         return
 
+    # The three target symbols are private (``_convert_*``) and may be
+    # renamed or moved by a future langchain-openai release. The
+    # try/except above catches a missing module; the ``hasattr`` guards
+    # below catch a missing attribute, log loudly so a langchain upgrade
+    # surfaces in CI logs (not as a silent AttributeError on the first
+    # DeepSeek call in production), and skip the individual patch
+    # without breaking the others.
+    _patched_count = 0
+    _missing: list[str] = []
+
     # --- 1. inbound: non-streaming response → AIMessage ---
-    original_dict_to_message = _oa._convert_dict_to_message
+    if hasattr(_oa, "_convert_dict_to_message"):
+        original_dict_to_message = _oa._convert_dict_to_message
 
-    def patched_dict_to_message(_dict):  # type: ignore[no-untyped-def]
-        msg = original_dict_to_message(_dict)
-        if msg.type == "ai":
-            rc = _dict.get("reasoning_content")
-            if rc:
-                msg.additional_kwargs["reasoning_content"] = rc
-        return msg
+        def patched_dict_to_message(_dict):  # type: ignore[no-untyped-def]
+            msg = original_dict_to_message(_dict)
+            if msg.type == "ai":
+                rc = _dict.get("reasoning_content")
+                if rc:
+                    msg.additional_kwargs["reasoning_content"] = rc
+            return msg
 
-    _oa._convert_dict_to_message = patched_dict_to_message
+        _oa._convert_dict_to_message = patched_dict_to_message
+        _patched_count += 1
+    else:
+        _missing.append("_convert_dict_to_message")
 
     # --- 2. inbound: streaming delta → AIMessageChunk ---
-    original_delta_to_chunk = _oa._convert_delta_to_message_chunk
+    if hasattr(_oa, "_convert_delta_to_message_chunk"):
+        original_delta_to_chunk = _oa._convert_delta_to_message_chunk
 
-    def patched_delta_to_chunk(_dict, default_class):  # type: ignore[no-untyped-def]
-        chunk = original_delta_to_chunk(_dict, default_class)
-        rc = _dict.get("reasoning_content")
-        if rc and hasattr(chunk, "additional_kwargs"):
-            existing = chunk.additional_kwargs.get("reasoning_content") or ""
-            chunk.additional_kwargs["reasoning_content"] = existing + rc
-        return chunk
+        def patched_delta_to_chunk(_dict, default_class):  # type: ignore[no-untyped-def]
+            chunk = original_delta_to_chunk(_dict, default_class)
+            rc = _dict.get("reasoning_content")
+            if rc and hasattr(chunk, "additional_kwargs"):
+                existing = chunk.additional_kwargs.get("reasoning_content") or ""
+                chunk.additional_kwargs["reasoning_content"] = existing + rc
+            return chunk
 
-    _oa._convert_delta_to_message_chunk = patched_delta_to_chunk
+        _oa._convert_delta_to_message_chunk = patched_delta_to_chunk
+        _patched_count += 1
+    else:
+        _missing.append("_convert_delta_to_message_chunk")
 
     # --- 3. outbound: AIMessage → request dict ---
-    original_message_to_dict = _oa._convert_message_to_dict
+    if hasattr(_oa, "_convert_message_to_dict"):
+        original_message_to_dict = _oa._convert_message_to_dict
 
-    def patched_message_to_dict(message, api="chat/completions"):  # type: ignore[no-untyped-def]
-        msg_dict = original_message_to_dict(message, api=api)
-        if msg_dict.get("role") == "assistant":
-            rc = getattr(message, "additional_kwargs", {}).get("reasoning_content")
-            if rc and not msg_dict.get("reasoning_content"):
-                msg_dict["reasoning_content"] = rc
-        return msg_dict
+        def patched_message_to_dict(message, api="chat/completions"):  # type: ignore[no-untyped-def]
+            msg_dict = original_message_to_dict(message, api=api)
+            if msg_dict.get("role") == "assistant":
+                rc = getattr(message, "additional_kwargs", {}).get("reasoning_content")
+                if rc and not msg_dict.get("reasoning_content"):
+                    msg_dict["reasoning_content"] = rc
+            return msg_dict
 
-    _oa._convert_message_to_dict = patched_message_to_dict
+        _oa._convert_message_to_dict = patched_message_to_dict
+        _patched_count += 1
+    else:
+        _missing.append("_convert_message_to_dict")
 
     _OPENAI_PATCHED = True
-    logger.info(
-        "Patched langchain_openai message serializers for DeepSeek reasoning_content round-trip"
-    )
+    if _missing:
+        logger.error(
+            "langchain_openai upgrade broke the DeepSeek reasoning_content patch: "
+            "missing %s on langchain_openai.chat_models.base. Multi-turn DeepSeek "
+            "thinking-mode calls will 400. Update the patch in "
+            "src/pocketpaw/agents/deep_agents.py:_patch_openai_message_serializer.",
+            ", ".join(_missing),
+        )
+    if _patched_count:
+        logger.info(
+            "Patched %d/3 langchain_openai message serializers for DeepSeek "
+            "reasoning_content round-trip",
+            _patched_count,
+        )
 
 
 def _patch_litellm_message_serializer() -> None:

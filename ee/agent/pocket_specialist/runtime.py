@@ -450,6 +450,7 @@ class PocketSpecialistEditOutput(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     duration_ms: int
     backend_used: str
+    error: str | None = None
 
 
 async def run_edit_specialist(
@@ -525,6 +526,12 @@ async def run_edit_specialist(
         "append_",
         "patch_",
     )
+    # success starts False and flips True only after the backend.run
+    # loop completes without exception. Catches the silent-failure mode
+    # where the inner backend errors mid-stream (transport drop, model
+    # 400, etc.) and the caller previously saw ok=True with ops=[].
+    success = False
+    error_msg: str | None = None
     try:
         async for event in backend.run(user_message, system_prompt=system_prompt):
             if event.type == "tool_use":
@@ -534,6 +541,15 @@ async def run_edit_specialist(
                     # the desktop client renders per-op progress (matches
                     # TOOL_LABELS entries in paw-enterprise chat/service.ts).
                     _push_chat_status(tool_name, event.metadata.get("input") or {})
+        success = True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[pocket-specialist:edit] backend stream errored: %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        error_msg = f"{type(exc).__name__}: {exc}"
     finally:
         await backend.stop()
 
@@ -541,17 +557,20 @@ async def run_edit_specialist(
     ops = list(ops_capture.get("ops", []))
 
     log.info(
-        "[pocket-specialist:edit] complete: pocket_id=%s ops=%d backend=%s duration=%dms",
+        "[pocket-specialist:edit] complete: pocket_id=%s ops=%d success=%s "
+        "backend=%s duration=%dms",
         input.pocket_id,
         len(ops),
+        success,
         backend_name,
         duration_ms,
     )
 
     return PocketSpecialistEditOutput(
-        ok=True,
+        ok=success,
         pocket_id=input.pocket_id,
         ops=ops,
         duration_ms=duration_ms,
         backend_used=backend_name,
+        error=error_msg,
     )

@@ -86,3 +86,37 @@ def test_patch_is_idempotent() -> None:
     )
     out = _oa._convert_message_to_dict(msg)
     assert out["reasoning_content"] == "y"  # not "yy" or any accumulator artifact
+
+
+def test_patch_logs_loudly_when_a_target_symbol_is_missing(monkeypatch, caplog) -> None:
+    """If a future langchain-openai release renames or removes one of
+    the private ``_convert_*`` symbols, the patch must log a loud error
+    naming the missing symbol — NOT silently AttributeError on the
+    first DeepSeek call in production. The other two patches still
+    apply so partial functionality survives."""
+    import logging
+
+    from langchain_openai.chat_models import base as _oa
+
+    import pocketpaw.agents.deep_agents as deep_agents_mod
+
+    # Reset the patched flag and the target attribute. The original
+    # function gets restored at the end so other tests aren't poisoned.
+    monkeypatch.setattr(deep_agents_mod, "_OPENAI_PATCHED", False)
+    original = _oa._convert_dict_to_message
+    monkeypatch.delattr(_oa, "_convert_dict_to_message", raising=True)
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="pocketpaw.agents.deep_agents"):
+            _patch_openai_message_serializer()
+    finally:
+        # Restore so the next test sees a normal module + a re-runnable patch.
+        _oa._convert_dict_to_message = original
+        monkeypatch.setattr(deep_agents_mod, "_OPENAI_PATCHED", False)
+        _patch_openai_message_serializer()
+
+    assert any(
+        "_convert_dict_to_message" in rec.message
+        and "langchain_openai upgrade broke" in rec.message
+        for rec in caplog.records
+    ), "missing-symbol error log not emitted"
