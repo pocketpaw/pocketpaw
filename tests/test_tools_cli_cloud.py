@@ -17,8 +17,18 @@ import pytest
 @pytest.fixture(autouse=True)
 def _stub_db_init():
     """Pretend Beanie is already initialized — the CLI's lazy boot path
-    is exercised separately in ``test_ensures_db_when_missing``."""
-    with patch("pocketpaw.tools.cli._ensure_cloud_db_initialized", new=AsyncMock()):
+    is exercised separately in ``test_ensures_db_when_missing``.
+
+    ``_ensure_cloud_db_initialized`` is just an alias for
+    ``_ensure_cloud_runtime_initialized``, but ``_run_cloud_handler``
+    calls the canonical name directly — so the patch has to target
+    that, not the alias, or the boot logic still runs and fails on the
+    missing ``POCKETPAW_MONGO_URI`` env var.
+    """
+    with (
+        patch("pocketpaw.tools.cli._ensure_cloud_runtime_initialized", new=AsyncMock()),
+        patch("pocketpaw.tools.cli._ensure_cloud_db_initialized", new=AsyncMock()),
+    ):
         yield
 
 
