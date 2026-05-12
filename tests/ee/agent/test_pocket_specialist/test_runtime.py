@@ -88,10 +88,6 @@ class TestRunSpecialistHappyPath:
                 return_value=fake_backend,
             ),
             patch(
-                "ee.agent.pocket_specialist.runtime.emit_specialist_event",
-                new=AsyncMock(),
-            ) as mock_emit,
-            patch(
                 "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
                 side_effect=_persist_factory_stub(captured_pocket),
             ),
@@ -106,9 +102,6 @@ class TestRunSpecialistHappyPath:
         assert out.ok is True
         assert out.action in ("created", "extended")
         assert out.pocket["id"] == "p-new"
-        emitted = [c.args[0].value for c in mock_emit.await_args_list]
-        assert emitted[0] == "specialist:start"
-        assert emitted[-1] == "specialist:done"
 
     @pytest.mark.asyncio
     async def test_hints_target_pocket_id_locks_update_path(self):
@@ -127,10 +120,6 @@ class TestRunSpecialistHappyPath:
             patch(
                 "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
                 return_value=fake_backend,
-            ),
-            patch(
-                "ee.agent.pocket_specialist.runtime.emit_specialist_event",
-                new=AsyncMock(),
             ),
             patch(
                 "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
@@ -173,10 +162,6 @@ class TestRunSpecialistFailureMode:
             patch(
                 "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
                 return_value=fake_backend,
-            ),
-            patch(
-                "ee.agent.pocket_specialist.runtime.emit_specialist_event",
-                new=AsyncMock(),
             ),
         ):
             out = await run_specialist(

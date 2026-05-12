@@ -12,10 +12,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ee.agent.pocket_specialist.events import (
-    SpecialistEvent,
-    emit_specialist_event,
-)
 from ee.agent.pocket_specialist.settings import (
     _BACKEND_MODEL_FIELD,
     resolve_specialist_model,
@@ -154,13 +150,11 @@ async def run_specialist(
         except Exception:
             log.debug("push_chat_status failed (non-fatal)", exc_info=True)
 
-    await emit_specialist_event(
-        SpecialistEvent.START,
-        {
-            "brief": input.brief[:200],
-            "hints": input.hints.model_dump() if input.hints else None,
-            "backend": backend_name,
-        },
+    log.info(
+        "[pocket-specialist] start brief=%r hints=%s backend=%s",
+        input.brief[:80],
+        input.hints.model_dump() if input.hints else None,
+        backend_name,
     )
     _push_chat_status("pocket_specialist:build")
 
@@ -212,7 +206,6 @@ async def run_specialist(
             if event.type == "tool_use":
                 tool_name = (event.metadata or {}).get("name", "")
                 if tool_name == "persist_pocket":
-                    await emit_specialist_event(SpecialistEvent.PERSISTING, {})
                     _push_chat_status("pocket_specialist:save")
     finally:
         await backend.stop()
@@ -235,18 +228,10 @@ async def run_specialist(
         # canvases captioned "auto-created from a brief".
         log.warning(
             "[pocket-specialist] no pocket persisted — returning failure "
-            "(backend=%s duration=%dms)",
+            "(backend=%s duration=%dms warnings=%d)",
             backend_name,
             duration_ms,
-        )
-        await emit_specialist_event(
-            SpecialistEvent.DONE,
-            {
-                "pocket_id": "",
-                "action": "failed",
-                "duration_ms": duration_ms,
-                "warning_count": len(captured_warnings),
-            },
+            len(captured_warnings),
         )
         return PocketSpecialistCreateOutput(
             ok=False,
@@ -267,18 +252,7 @@ async def run_specialist(
         "extended" if (input.hints and input.hints.target_pocket_id) else "created"
     )
 
-    await emit_specialist_event(
-        SpecialistEvent.DONE,
-        {
-            "pocket_id": captured_pocket.get("id", ""),
-            "action": action,
-            "duration_ms": duration_ms,
-            "warning_count": len(captured_warnings),
-        },
-    )
-
-    # Single-line operator-grep summary: emit OUTSIDE the per-event helper
-    # so it shows up once per run regardless of bus state.
+    # Single-line operator-grep summary.
     log.info(
         "[pocket-specialist] complete: pocket_id=%s action=%s backend=%s duration=%dms warnings=%d",
         captured_pocket.get("id", ""),
@@ -496,15 +470,26 @@ async def run_edit_specialist(
     backend_name = settings.pocket_specialist_backend
     model_id = resolve_specialist_model(settings)
 
-    await emit_specialist_event(
-        SpecialistEvent.START,
-        {
-            "intent": input.intent[:200],
-            "pocket_id": input.pocket_id,
-            "backend": backend_name,
-            "mode": "edit",
-        },
+    log.info(
+        "[pocket-specialist:edit] start pocket_id=%s intent=%r backend=%s",
+        input.pocket_id,
+        input.intent[:80],
+        backend_name,
     )
+
+    # Push a chat-stream tool_start so the desktop client shows
+    # "Editing pocket..." while the inner specialist works. Each granular
+    # op the specialist's LLM emits is forwarded below as its own
+    # tool_start, so the user sees per-op progress too.
+    def _push_chat_status(stage: str, payload: dict[str, Any] | None = None) -> None:
+        try:
+            from ee.cloud.chat.agent_service import push_sse_event
+
+            push_sse_event("tool_start", {"tool": stage, "input": payload or {}})
+        except Exception:
+            log.debug("push_chat_status failed (non-fatal)", exc_info=True)
+
+    _push_chat_status("pocket_specialist:edit")
 
     override: dict[str, Any] = {}
     if model_id:
@@ -531,29 +516,29 @@ async def run_edit_specialist(
         model_id or "<inherited>",
     )
 
+    _GRANULAR_OP_PREFIXES = (
+        "set_",
+        "add_",
+        "remove_",
+        "move_",
+        "replace_",
+        "append_",
+        "patch_",
+    )
     try:
         async for event in backend.run(user_message, system_prompt=system_prompt):
             if event.type == "tool_use":
                 tool_name = (event.metadata or {}).get("name", "")
-                if tool_name.startswith(
-                    ("set_", "add_", "remove_", "move_", "replace_", "append_", "patch_")
-                ):
-                    await emit_specialist_event(SpecialistEvent.PERSISTING, {"op": tool_name})
+                if tool_name.startswith(_GRANULAR_OP_PREFIXES):
+                    # Forward each inner op to the outer chat SSE stream so
+                    # the desktop client renders per-op progress (matches
+                    # TOOL_LABELS entries in paw-enterprise chat/service.ts).
+                    _push_chat_status(tool_name, event.metadata.get("input") or {})
     finally:
         await backend.stop()
 
     duration_ms = int((time.monotonic() - started) * 1000)
     ops = list(ops_capture.get("ops", []))
-
-    await emit_specialist_event(
-        SpecialistEvent.DONE,
-        {
-            "pocket_id": input.pocket_id,
-            "mode": "edit",
-            "ops_count": len(ops),
-            "duration_ms": duration_ms,
-        },
-    )
 
     log.info(
         "[pocket-specialist:edit] complete: pocket_id=%s ops=%d backend=%s duration=%dms",
