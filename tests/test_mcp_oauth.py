@@ -256,14 +256,14 @@ class TestOAuthCallbackCoordination:
         from pocketpaw.mcp import manager
 
         state_token, state_id = _create_state_token(
-            user_id="local_user", provider="test_server", upstream_state="upstream_state_1"
+            user_id="test_user", provider="test_server", upstream_state="upstream_state_1"
         )
         manager._oauth_pending[state_id] = _PendingOAuthFlow(
             future=future,
             server_name="test_server",
             created_at=time.time(),
             provider="test_server",
-            user_id="local_user",
+            user_id="test_user",
             upstream_state="upstream_state_1",
         )
 
@@ -295,14 +295,14 @@ class TestOAuthCallbackCoordination:
         from pocketpaw.mcp import manager
 
         state_token, state_id = _create_state_token(
-            user_id="local_user", provider="test_server", upstream_state="upstream_state_2"
+            user_id="test_user", provider="test_server", upstream_state="upstream_state_2"
         )
         manager._oauth_pending[state_id] = _PendingOAuthFlow(
             future=future,
             server_name="test_server",
             created_at=time.time(),
             provider="test_server",
-            user_id="local_user",
+            user_id="test_user",
             upstream_state="upstream_state_2",
         )
 
@@ -325,14 +325,14 @@ class TestOAuthCallbackCoordination:
         from pocketpaw.mcp import manager
 
         state_token, state_id = _create_state_token(
-            user_id="local_user", provider="test_server", upstream_state="upstream_state_expired"
+            user_id="test_user", provider="test_server", upstream_state="upstream_state_expired"
         )
         manager._oauth_pending[state_id] = _PendingOAuthFlow(
             future=future,
             server_name="test_server",
             created_at=time.time(),
             provider="test_server",
-            user_id="local_user",
+            user_id="test_user",
             upstream_state="upstream_state_expired",
         )
 
@@ -356,14 +356,14 @@ def test_set_oauth_callback_result_rejects_tampered_signature(self):
     from pocketpaw.mcp import manager
 
     state_token, state_id = _create_state_token(
-        user_id="local_user", provider="test_server", upstream_state="upstream_state_sig"
+        user_id="test_user", provider="test_server", upstream_state="upstream_state_sig"
     )
     manager._oauth_pending[state_id] = _PendingOAuthFlow(
         future=future,
         server_name="test_server",
         created_at=time.time(),
         provider="test_server",
-        user_id="local_user",
+        user_id="test_user",
         upstream_state="upstream_state_sig",
     )
     payload_b64, sig_b64 = state_token.split(".", 1)
@@ -418,14 +418,14 @@ def test_set_oauth_callback_result_rejects_provider_binding_mismatch(self):
     from pocketpaw.mcp import manager
 
     state_token, state_id = _create_state_token(
-        user_id="local_user", provider="token_provider", upstream_state="upstream_prv"
+        user_id="test_user", provider="token_provider", upstream_state="upstream_prv"
     )
     manager._oauth_pending[state_id] = _PendingOAuthFlow(
         future=future,
         server_name="test_server",
         created_at=time.time(),
         provider="pending_provider",
-        user_id="local_user",
+        user_id="test_user",
         upstream_state="upstream_prv",
     )
     assert set_oauth_callback_result(state_token, "code") is False
@@ -449,14 +449,14 @@ def test_set_oauth_callback_result_rejects_stale_pending_flow(self):
     from pocketpaw.mcp import manager
 
     state_token, state_id = _create_state_token(
-        user_id="local_user", provider="test_server", upstream_state="upstream_stale"
+        user_id="test_user", provider="test_server", upstream_state="upstream_stale"
     )
     manager._oauth_pending[state_id] = _PendingOAuthFlow(
         future=future,
         server_name="test_server",
         created_at=time.time() - (_OAUTH_STATE_TTL_SECONDS + 1),
         provider="test_server",
-        user_id="local_user",
+        user_id="test_user",
         upstream_state="upstream_stale",
     )
     assert set_oauth_callback_result(state_token, "code") is False
@@ -479,14 +479,14 @@ def test_set_oauth_callback_result_replay_second_call_fails(self):
     from pocketpaw.mcp import manager
 
     state_token, state_id = _create_state_token(
-        user_id="local_user", provider="test_server", upstream_state="upstream_replay"
+        user_id="test_user", provider="test_server", upstream_state="upstream_replay"
     )
     manager._oauth_pending[state_id] = _PendingOAuthFlow(
         future=future,
         server_name="test_server",
         created_at=time.time(),
         provider="test_server",
-        user_id="local_user",
+        user_id="test_user",
         upstream_state="upstream_replay",
     )
     assert set_oauth_callback_result(state_token, "first_code") is True
