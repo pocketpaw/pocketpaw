@@ -683,3 +683,87 @@ class TestSetPropArrayItem:
             )
         assert result is None
         assert "ambiguous" in err
+
+
+# ---------------------------------------------------------------------------
+# append_prop_array_item — append (or insert-after-match) into a prop-array.
+# ---------------------------------------------------------------------------
+
+
+class TestAppendPropArrayItem:
+    @pytest.mark.asyncio
+    async def test_appends_to_end_by_default(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}, {"orderId": "#2"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#3"},
+            )
+        assert err is None
+        assert result["item_index"] == 2
+        assert table["props"]["rows"][-1] == {"orderId": "#3"}
+
+    @pytest.mark.asyncio
+    async def test_inserts_after_matched_item(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}, {"orderId": "#3"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#2"},
+                after={"by_field": "orderId", "equals": "#1"},
+            )
+        assert err is None
+        assert result["item_index"] == 1
+        assert [r["orderId"] for r in table["props"]["rows"]] == ["#1", "#2", "#3"]
+
+    @pytest.mark.asyncio
+    async def test_creates_empty_array_if_missing(self, fake_doc):
+        feed = {"id": "n_feed0001", "type": "feed", "props": {}}
+        fake_doc.rippleSpec["ui"]["children"].append(feed)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_feed0001",
+                prop="items",
+                value={"text": "Hi"},
+            )
+        assert err is None
+        assert feed["props"]["items"] == [{"text": "Hi"}]
+        assert result["item_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_after_target_not_found_errors(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#2"},
+                after={"by_field": "orderId", "equals": "#999"},
+            )
+        assert result is None
+        assert "not_found" in err

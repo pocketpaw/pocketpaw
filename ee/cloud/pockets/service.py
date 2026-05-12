@@ -1233,6 +1233,85 @@ async def agent_set_prop_array_item(
         )
 
 
+async def agent_append_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    value: Any,
+    after: dict[str, Any] | None = None,
+) -> tuple[dict | None, str | None]:
+    """Append ``value`` to ``node.props[prop]``. If ``after`` is given,
+    insert immediately AFTER the first item matching that ItemMatch.
+
+    Returns ``({"item_index": int, "item": <inserted>, "pocket": <view>}, None)``.
+
+    Errors: see ``agent_set_prop_array_item``. ``after`` resolution uses
+    the same match grammar; ``not_found`` / ``ambiguous`` propagate.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        props = node.setdefault("props", {})
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
+        arr = props.get(prop)
+        if arr is None:
+            arr = []
+            props[prop] = arr
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        if after is None:
+            arr.append(value)
+            idx = len(arr) - 1
+        else:
+            try:
+                candidates = spec_ops.match_array_item_candidates(arr, after)
+            except ValueError as exc:
+                return None, str(exc)
+            if len(candidates) == 0:
+                return None, "not_found: after target did not match"
+            if len(candidates) > 1:
+                return (
+                    None,
+                    f"ambiguous: after matched {len(candidates)} items; "
+                    f"candidates={candidates[:5]}",
+                )
+            arr.insert(candidates[0] + 1, value)
+            idx = candidates[0] + 1
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "item_index": idx,
+                "item": value,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
 async def agent_move_node(
     pocket_id: str,
     *,
