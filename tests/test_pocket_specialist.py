@@ -22,54 +22,22 @@ def test_delegation_rule_points_at_mcp_tool():
     assert "subagent_type='pocket_specialist'" not in POCKET_DELEGATION_RULE
 
 
-def test_main_agent_keeps_read_only_pocket_tools():
-    """The read-only pocket tool IDs must NOT appear in the mutation
-    filter — they stay on the main agent's allowlist so it can answer
-    conversational queries about pockets without delegating."""
-    from pocketpaw.agents.claude_sdk import _POCKET_MUTATION_TOOL_IDS
-
-    read_only_ids = {
-        "mcp__pocketpaw_pocket__list_pockets",
-        "mcp__pocketpaw_pocket__get_pocket",
-    }
-    leaked = read_only_ids & _POCKET_MUTATION_TOOL_IDS
-    assert not leaked, f"read-only tool IDs ended up in the mutation filter: {leaked}"
-
-
-def test_main_agent_allowlist_excludes_pocket_mutation_tools():
-    """The pocket mutation tool IDs must NOT appear in the main agent's
-    allowed tool surface — they're owned by the pocket specialist.
-    Without this filter, the main agent could call them directly and
-    bypass the delegation rule.
-
-    The set covers BOTH the original pocket-level mutators
-    (``create_pocket``, ``update_pocket``, legacy widget ops) AND the
-    granular ``rippleSpec.ui`` node ops (``add_node`` / ``replace_node`` /
-    ``set_node_prop`` / ``move_node`` / ``remove_node``). The node ops
-    operate directly on rendered UI; allowing them on the main agent
-    would let it skip the specialist's list-before-create + validation
-    workflow entirely.
+def test_pocket_mcp_server_is_read_only():
+    """The ``pocketpaw_pocket`` MCP server exposes ONLY read tools. All
+    mutation tool ids must be gone — pocket writes flow through the
+    ``pocket_specialist__create`` / ``__edit`` tools, which run an
+    isolated specialist backend with its own StructuredTool wrappers.
     """
-    from pocketpaw.agents.claude_sdk import _POCKET_MUTATION_TOOL_IDS
+    from pocketpaw.agents.sdk_mcp_pocket import POCKET_TOOL_IDS
 
-    expected = {
-        "mcp__pocketpaw_pocket__create_pocket",
-        "mcp__pocketpaw_pocket__update_pocket",
-        "mcp__pocketpaw_pocket__add_widget",
-        "mcp__pocketpaw_pocket__update_widget",
-        "mcp__pocketpaw_pocket__remove_widget",
-        "mcp__pocketpaw_pocket__add_node",
-        "mcp__pocketpaw_pocket__replace_node",
-        "mcp__pocketpaw_pocket__set_node_prop",
-        "mcp__pocketpaw_pocket__move_node",
-        "mcp__pocketpaw_pocket__remove_node",
-        "mcp__pocketpaw_pocket__set_state",
-        "mcp__pocketpaw_pocket__append_state",
-        "mcp__pocketpaw_pocket__remove_state",
-        "mcp__pocketpaw_pocket__patch_state",
+    expected_read_only = {
+        "mcp__pocketpaw_pocket__get_pocket",
+        "mcp__pocketpaw_pocket__list_pockets",
+        "mcp__pocketpaw_pocket__get_widget_spec",
+        "mcp__pocketpaw_pocket__get_inline_widget_help",
     }
-    assert _POCKET_MUTATION_TOOL_IDS == expected, (
-        "drift between mutation-tool filter and the canonical name set"
+    assert set(POCKET_TOOL_IDS) == expected_read_only, (
+        f"drift in pocket MCP tool surface: {set(POCKET_TOOL_IDS) ^ expected_read_only}"
     )
 
 

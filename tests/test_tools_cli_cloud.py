@@ -97,7 +97,8 @@ def test_legacy_pocket_mutation_handlers_are_dropped():
     calling-agent equivalents of the specialist tool. They are now
     filtered out of the CLI dispatcher so subprocess agents (codex_cli,
     opencode, gemini_cli, copilot_sdk) can't bypass the specialist —
-    matching the ``_POCKET_MUTATION_TOOL_IDS`` filter in claude_agent_sdk."""
+    matching the read-only-only surface the ``pocketpaw_pocket`` MCP
+    server exposes to the claude_agent_sdk backend."""
     from pocketpaw.tools import cli as cli_module
 
     assert "cloud_create_pocket" not in cli_module._CLOUD_HANDLERS

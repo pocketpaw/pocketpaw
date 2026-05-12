@@ -34,37 +34,6 @@ _DEFAULT_IDENTITY = (
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
 
-# Pocket mutation tools — write-side MCP tools the main chat agent is NOT
-# allowed to call. Pocket mutations go through the
-# ``pocket_specialist__create`` MCP tool, which runs the full
-# list/validate/persist workflow as an isolated specialist run. Read-side
-# tools (``get_pocket``, ``list_pockets``, ``get_widget_spec``,
-# ``get_inline_widget_help``) stay on the main allowlist so the agent
-# can answer conversational questions about existing pockets.
-_POCKET_MUTATION_TOOL_IDS: frozenset[str] = frozenset(
-    {
-        "mcp__pocketpaw_pocket__create_pocket",
-        "mcp__pocketpaw_pocket__update_pocket",
-        "mcp__pocketpaw_pocket__add_widget",
-        "mcp__pocketpaw_pocket__update_widget",
-        "mcp__pocketpaw_pocket__remove_widget",
-        # Granular rippleSpec.ui ops — same structural-enforcement rule:
-        # only the pocket_specialist subagent may invoke these.
-        "mcp__pocketpaw_pocket__add_node",
-        "mcp__pocketpaw_pocket__replace_node",
-        "mcp__pocketpaw_pocket__set_node_prop",
-        "mcp__pocketpaw_pocket__move_node",
-        "mcp__pocketpaw_pocket__remove_node",
-        # Granular rippleSpec.state ops — same rule: data writes flow
-        # through the specialist so list-before-create + validation
-        # still apply.
-        "mcp__pocketpaw_pocket__set_state",
-        "mcp__pocketpaw_pocket__append_state",
-        "mcp__pocketpaw_pocket__remove_state",
-        "mcp__pocketpaw_pocket__patch_state",
-    }
-)
-
 
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
@@ -876,20 +845,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 blocked = set(all_sdk_tools) - set(allowed_tools)
                 logger.info("Tool policy blocked SDK tools: %s", blocked)
 
-            # In-process pocket-context tools — always allowed. Each tool
-            # short-circuits without a valid ``pocket_id``, so the cost of
-            # leaving them enabled for non-pocket sessions is negligible.
-            # Full set: ``get_pocket``, ``list_pockets``, ``create_pocket``,
-            # ``update_pocket``, ``add_widget``, ``update_widget``,
-            # ``remove_widget``, ``get_widget_spec``,
-            # ``get_inline_widget_help`` — see ``agents/sdk_mcp_pocket.py``.
-            # The mutation subset is filtered out immediately below.
+            # In-process pocket-context tools — read-only surface only:
+            # ``get_pocket``, ``list_pockets``, ``get_widget_spec``,
+            # ``get_inline_widget_help``. Mutations flow through the
+            # ``pocket_specialist__create`` / ``__edit`` MCP tools below,
+            # which run an isolated specialist backend with its own
+            # ``StructuredTool`` wrappers — see
+            # ``ee/agent/pocket_specialist/tools.py``.
             from pocketpaw.agents.sdk_mcp_pocket import POCKET_TOOL_IDS
 
             allowed_tools.extend(POCKET_TOOL_IDS)
 
-            # Pocket specialist — single ``create`` tool that runs the full
-            # listing → validate → persist workflow as an isolated subagent.
+            # Pocket specialist — ``create`` / ``edit`` tools that run the
+            # full listing → validate → persist workflow as an isolated
+            # specialist backend.
             try:
                 from ee.agent.pocket_specialist.mcp_tool import (
                     POCKET_SPECIALIST_TOOL_IDS,
@@ -901,19 +870,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "pocket_specialist tool ids not added to allowlist: %s",
                     exc,
                 )
-
-            # Filter pocket mutation tools off the main agent's allowlist.
-            # Mutation tools (``create_pocket``, ``update_pocket``,
-            # ``add_widget``, ``update_widget``, ``remove_widget``) are
-            # owned by the ``pocket_specialist__create`` MCP tool, which
-            # runs the full list/validate/persist workflow as an isolated
-            # specialist run. Surviving on the main agent: read-only +
-            # catalog tools only (``get_pocket``, ``list_pockets``,
-            # ``get_widget_spec``, ``get_inline_widget_help``). The main
-            # agent receives POCKET_DELEGATION_RULE (not the heavy
-            # creation/interaction prompts), so it never tries to call
-            # the filtered-out tools.
-            allowed_tools = [t for t in allowed_tools if t not in _POCKET_MUTATION_TOOL_IDS]
 
             # Build hooks for security
             hooks = {
