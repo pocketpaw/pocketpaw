@@ -74,18 +74,23 @@ def _install_ee_cloud_stubs(monkeypatch, *, user, workspace_by_id=None, create_r
     _SessionDoc.find_one = AsyncMock(return_value=None)  # type: ignore[attr-defined]
     fake_session_mod.Session = _SessionDoc
 
-    # PocketService.create(...) — returns the created pocket doc.
+    # pockets_service.create(...) — returns the created pocket doc.
+    # 2026-05-12 rebase: the production code now imports
+    # ``from ee.cloud.pockets.dto import CreatePocketRequest`` (was
+    # ``.schemas``) and calls ``pockets_service.create(workspace_id,
+    # user_id, body)`` as a module-level function (was
+    # ``PocketService.create``). Stubs updated to match.
     pocket_create = AsyncMock(return_value=create_ret or {"_id": "pocket-xyz"})
-    fake_pockets_schemas = types.ModuleType("ee.cloud.pockets.schemas")
+    fake_pockets_dto = types.ModuleType("ee.cloud.pockets.dto")
 
     class _CreatePocketRequest:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    fake_pockets_schemas.CreatePocketRequest = _CreatePocketRequest
+    fake_pockets_dto.CreatePocketRequest = _CreatePocketRequest
 
     fake_pockets_service = types.ModuleType("ee.cloud.pockets.service")
-    fake_pockets_service.PocketService = SimpleNamespace(create=pocket_create)
+    fake_pockets_service.create = pocket_create
 
     # PydanticObjectId(oid) — just return the string, the stub get/find
     # operations don't care about the real type.
@@ -101,7 +106,7 @@ def _install_ee_cloud_stubs(monkeypatch, *, user, workspace_by_id=None, create_r
         "ee.cloud.models.workspace": fake_ws_mod,
         "ee.cloud.models.session": fake_session_mod,
         "ee.cloud.pockets": types.ModuleType("ee.cloud.pockets"),
-        "ee.cloud.pockets.schemas": fake_pockets_schemas,
+        "ee.cloud.pockets.dto": fake_pockets_dto,
         "ee.cloud.pockets.service": fake_pockets_service,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
