@@ -331,3 +331,13 @@ class TestPromptSeparation:
         assert len(POCKET_EDIT_SPECIALIST_PROMPT_MCP) > len(POCKET_INTERACTION_PROMPT_MCP) * 5, (
             "edit specialist prompt should dwarf the thin main-agent prompt"
         )
+
+
+def test_edit_tool_bundle_includes_prop_array_item_tools():
+    from ee.agent.pocket_specialist import tools
+
+    bundle = tools.make_edit_pocket_tools(pocket_id="p1")
+    names = {t.name for t in bundle}
+    assert "set_prop_array_item" in names
+    assert "append_prop_array_item" in names
+    assert "remove_prop_array_item" in names
