@@ -504,11 +504,19 @@ class AgentLoop:
             self._router = AgentRouter(fresh_settings)
             # Best-effort cleanup of the previous backend (may own a
             # subprocess like Codex). Fire-and-forget so we don't block
-            # the next ``run()``.
+            # the next ``run()``. The ``inspect.iscoroutine`` guard is
+            # there for two reasons: (a) some test backends mock
+            # ``stop()`` with a plain ``MagicMock`` whose call returns a
+            # ``MagicMock`` (not awaitable), and (b) defensive — a
+            # backend whose stop is sync would TypeError otherwise.
+            import inspect
+
             try:
-                task = asyncio.create_task(old.stop())
-                self._bg_tasks.add(task)
-                task.add_done_callback(self._bg_tasks.discard)
+                maybe_coro = old.stop()
+                if inspect.iscoroutine(maybe_coro):
+                    task = asyncio.create_task(maybe_coro)
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
             except RuntimeError:
                 # No running loop (sync caller during shutdown).
                 pass
