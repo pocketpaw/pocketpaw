@@ -323,12 +323,83 @@ def move_node(
     return old_parent_id, src_idx
 
 
+# ---------------------------------------------------------------------------
+# Prop-array item matching
+#
+# Used by the Tier-2 array-element ops (set_prop_array_item etc.) to locate
+# a single item inside a node's prop-array (chart.data, table.rows, …)
+# without forcing the agent to copy-paste the entire array.
+# ---------------------------------------------------------------------------
+
+
+def _match_form(match: dict[str, Any]) -> str:
+    if not isinstance(match, dict) or not match:
+        raise ValueError("empty match")
+    if "index" in match:
+        return "index"
+    if "id" in match:
+        return "id"
+    if "by_key" in match:
+        return "by_key"
+    if "by_field" in match and "equals" in match:
+        return "by_field"
+    raise ValueError(f"unknown match form: {sorted(match.keys())}")
+
+
+def _item_matches(item: Any, form: str, match: dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if form == "id":
+        return item.get("id") == match["id"]
+    if form == "by_key":
+        pairs = match["by_key"]
+        if not isinstance(pairs, dict) or not pairs:
+            raise ValueError("by_key must be a non-empty mapping")
+        return all(item.get(k) == v for k, v in pairs.items())
+    if form == "by_field":
+        return item.get(match["by_field"]) == match["equals"]
+    return False
+
+
+def match_array_item(arr: list[Any], match: dict[str, Any]) -> int | None:
+    """Return the index of the FIRST item in ``arr`` matching ``match``,
+    or ``None`` if no item matches. Raises ``ValueError`` on a malformed
+    or out-of-range ``index`` match form.
+
+    Match forms: see module docstring / design doc. Use
+    ``match_array_item_candidates`` to detect ambiguity (multiple matches).
+    """
+    form = _match_form(match)
+    if form == "index":
+        idx = match["index"]
+        if not isinstance(idx, int) or idx < 0 or idx >= len(arr):
+            raise ValueError(f"index {idx!r} out of range [0,{len(arr)})")
+        return idx
+    for i, item in enumerate(arr):
+        if _item_matches(item, form, match):
+            return i
+    return None
+
+
+def match_array_item_candidates(arr: list[Any], match: dict[str, Any]) -> list[int]:
+    """Return ALL indices in ``arr`` whose item matches ``match``. Used by
+    the service layer to render `ambiguous` errors with candidates."""
+    form = _match_form(match)
+    if form == "index":
+        # Positional match is never ambiguous.
+        idx = match_array_item(arr, match)
+        return [idx] if idx is not None else []
+    return [i for i, item in enumerate(arr) if _item_matches(item, form, match)]
+
+
 __all__ = [
     "ensure_ids",
     "find_by_id",
     "find_parent",
     "insert_child",
     "is_valid_id",
+    "match_array_item",
+    "match_array_item_candidates",
     "move_node",
     "new_node_id",
     "remove_node",
