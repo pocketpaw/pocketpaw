@@ -767,3 +767,51 @@ class TestAppendPropArrayItem:
             )
         assert result is None
         assert "not_found" in err
+
+
+class TestRemovePropArrayItem:
+    @pytest.mark.asyncio
+    async def test_removes_matched_item(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "A", "value": 1},
+                    {"label": "Other", "value": 2},
+                    {"label": "B", "value": 3},
+                ]
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_remove_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+            )
+        assert err is None
+        assert result["removed_index"] == 1
+        assert result["removed_item"] == {"label": "Other", "value": 2}
+        assert [d["label"] for d in chart["props"]["data"]] == ["A", "B"]
+
+    @pytest.mark.asyncio
+    async def test_not_found_errors(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {"data": [{"label": "A"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_remove_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Z"},
+            )
+        assert result is None
+        assert "not_found" in err

@@ -1312,6 +1312,74 @@ async def agent_append_prop_array_item(
         )
 
 
+async def agent_remove_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    match: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Remove the first item in ``node.props[prop]`` matching ``match``.
+
+    Returns ``({"removed_index": int, "removed_item": Any, "pocket": <view>},
+    None)``.
+
+    Errors: see ``agent_set_prop_array_item``. Refuses ambiguous matches —
+    the agent must disambiguate.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        props = node.get("props")
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has no props"
+        arr = props.get(prop)
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        try:
+            candidates = spec_ops.match_array_item_candidates(arr, match)
+        except ValueError as exc:
+            return None, str(exc)
+        if len(candidates) == 0:
+            return None, "not_found: no item matched"
+        if len(candidates) > 1:
+            return None, f"ambiguous: {len(candidates)} items matched; candidates={candidates[:5]}"
+
+        idx = candidates[0]
+        removed = arr.pop(idx)
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "removed_index": idx,
+                "removed_item": removed,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
 async def agent_move_node(
     pocket_id: str,
     *,
