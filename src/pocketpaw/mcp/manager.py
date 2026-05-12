@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from pocketpaw.config import get_settings
 from pocketpaw.mcp.config import MCPServerConfig, load_mcp_config, save_mcp_config
+from contextvars import ContextVar, Token
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ _oauth_pending: dict[str, _PendingOAuthFlow] = {}
 
 # WebSocket broadcast function injected by dashboard at startup
 _ws_broadcast: Callable | None = None
+
+_oauth_subject_id: ContextVar[str | None] = ContextVar("oauth_subject_id", default=None)
 
 
 def _b64url(data: bytes) -> str:
@@ -112,6 +115,19 @@ def set_ws_broadcast(fn: Callable) -> None:
     """Set the WebSocket broadcast function (called by dashboard at startup)."""
     global _ws_broadcast
     _ws_broadcast = fn
+
+
+def set_oauth_subject_id(subject_id: str | None) -> Token[str | None]:
+    """Set current OAuth subject binding for the active request/task context.
+
+    Returns a context token that can be passed to :func:`reset_oauth_subject_id`.
+    """
+    return _oauth_subject_id.set(subject_id)
+
+
+def reset_oauth_subject_id(token: Token[str | None]) -> None:
+    """Reset OAuth subject binding using token from set_oauth_subject_id."""
+    _oauth_subject_id.reset(token)
 
 
 def set_oauth_callback_result(state: str, code: str) -> bool:
@@ -340,7 +356,8 @@ class MCPManager:
             if upstream_state:
                 loop = asyncio.get_running_loop()
                 future = loop.create_future()
-                user_id = "local_user"
+                # user_id = "local_user"
+                user_id = _oauth_subject_id.get()
                 signed_state, state_id = _create_state_token(
                     user_id=user_id,
                     provider=config.name,
