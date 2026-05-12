@@ -946,3 +946,47 @@ class TestPropArrayItemWrappers:
         assert push["prop"] == "data"
         assert push["removed_index"] == 1
         assert push["removed_item"] == {"label": "Other", "value": 2}
+
+
+# ---------------------------------------------------------------------------
+# End-to-end canary: the 12-row "All Orders" table edit from the design doc.
+# This is the regression the whole Tier-2 work was driven by — editing one
+# row must leave every other row byte-identical.
+# ---------------------------------------------------------------------------
+
+
+class TestArrayItemCanary:
+    """End-to-end: the 12-row 'All Orders' table edit from the design doc."""
+
+    @pytest.mark.asyncio
+    async def test_one_row_edit_does_not_rewrite_other_rows(self, fake_doc):
+        rows = [
+            {"orderId": f"#{1030 + i}", "customer": f"C{i}", "status": "Fulfilled"}
+            for i in range(12)
+        ]
+        snapshot = [dict(r) for r in rows]
+        table = {
+            "id": "n_orders00",
+            "type": "table",
+            "props": {"rows": rows},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.set_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_orders00",
+                prop="rows",
+                match={"by_field": "orderId", "equals": "#1039"},
+                partial={"status": "Shipped"},
+            )
+        assert result["ok"] is True
+        assert result["item_index"] == 9
+        # All other rows are byte-identical.
+        for i, original in enumerate(snapshot):
+            if i == 9:
+                continue
+            assert table["props"]["rows"][i] == original, f"row {i} drifted"
+        assert table["props"]["rows"][9]["status"] == "Shipped"
+        assert table["props"]["rows"][9]["customer"] == "C9"  # untouched field
