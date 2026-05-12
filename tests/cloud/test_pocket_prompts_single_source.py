@@ -169,3 +169,22 @@ class TestSpecialistDelegationBlock:
 
         assert "cloud_create_pocket" not in POCKET_CREATION_PROMPT_CLI
         assert "cloud_update_pocket" not in POCKET_CREATION_PROMPT_CLI
+
+
+def test_edit_specialist_prompt_mentions_array_item_ops():
+    from ee.ripple._pockets import POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+    prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP
+    assert "set_prop_array_item" in prompt
+    assert "append_prop_array_item" in prompt
+    assert "remove_prop_array_item" in prompt
+
+
+def test_edit_specialist_prompt_warns_against_full_array_rewrite():
+    from ee.ripple._pockets import POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+    prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP
+    # The cheatsheet must steer the agent to the array-item ops for
+    # single-row edits rather than set_node_prop on the whole array.
+    assert "set_prop_array_item" in prompt
+    assert "rewrite" in prompt.lower() or "copy" in prompt.lower()

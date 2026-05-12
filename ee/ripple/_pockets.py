@@ -565,7 +565,22 @@ Three layers, pick the right tool for the edit:
   LAYER 2 — WIDGET APPEARANCE / BEHAVIOR
     set_node_prop(node_id, prop, value)
                                  change one prop on a widget
-                                 (label, show, on_click, color…)
+                                 (label, show, on_click, color…).
+                                 Use for scalar props OR full array
+                                 replacement.
+    set_prop_array_item(node_id, prop, match, partial)
+    append_prop_array_item(node_id, prop, value, after?)
+    remove_prop_array_item(node_id, prop, match)
+                                 Surgical EDITS to ONE item inside a
+                                 widget's prop-array. Allowed widgets:
+                                 chart.data, table.rows, table.columns,
+                                 kanban.columns, calendar.events,
+                                 feed.items, tabs.items, nav.items,
+                                 select.options, form-layout.fields.
+                                 PREFER these over set_node_prop when
+                                 you only need to change one row /
+                                 slice — never rewrite the whole array
+                                 just to change one value.
     replace_node(node_id, spec)  swap one subtree for another
 
   LAYER 3 — STRUCTURE
@@ -585,6 +600,17 @@ ALWAYS reach for the LOWEST applicable layer:
 - "add a stat widget for revenue"       → add_node(parent_id, {type:"stat",…})
 - "move the chart below the table"      → move_node(chart_id, root_id, after_id=table_id)
 - "remove the old metric card"          → remove_node(metric_id)
+- "change Restaurant value in donut to 8500"
+                                       → set_prop_array_item(chart_id, "data",
+                                          {by_field:"label", equals:"Restaurant"},
+                                          {value: 8500})
+- "mark order #1039 shipped"           → set_prop_array_item(table_id, "rows",
+                                          {by_field:"orderId", equals:"#1039"},
+                                          {fulfillment:"Shipped"})
+- "remove Other slice from donut"      → remove_prop_array_item(chart_id, "data",
+                                          {by_field:"label", equals:"Other"})
+- "add a new row to Top Products"      → append_prop_array_item(table_id, "rows",
+                                          {product:"...", units:0, ...})
 
 Why this matters: every widget bound to `{state.x}` re-renders
 automatically when state changes — set_state is the cheapest possible
@@ -602,6 +628,10 @@ Reach for `update_pocket(ripple_spec=...)` only when:
 
 Never use `update_pocket` to change one row, one prop, one widget, or
 to nudge an existing node. The granular ops exist for exactly that.
+
+Never rewrite a whole array via set_node_prop when you only meant to
+change one row. Use set_prop_array_item / append_prop_array_item /
+remove_prop_array_item.
 </mutation-strategy>
 
 Step 2 — when building a new subtree (for add_node / replace_node):
