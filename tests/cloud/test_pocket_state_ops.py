@@ -12,6 +12,7 @@ back to a whole-pocket rewrite.
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -77,27 +78,53 @@ def fake_doc():
 
 
 def _patches(doc: _FakeDoc):
+    """Patch the doc fetch + emit/push seams + identity ContextVars.
+
+    ``_agent_load_doc`` reads workspace/user from per-stream ContextVars
+    and rejects when they don't match the pocket's tenancy. Default to
+    the doc's own workspace + owner so the happy-path tests pass; the
+    auth-gate tests at the bottom of this file override these mocks.
+
+    Returns ``(ExitStack, push_calls)`` — use as ``with ctx: ...``.
+    """
     push_calls: list[dict[str, Any]] = []
 
     def _capture(payload: dict[str, Any]) -> None:
         push_calls.append(payload)
 
-    ctx = (
+    stack = ExitStack()
+    stack.enter_context(
         patch(
             "ee.cloud.pockets.service._PocketDoc.get",
             new=AsyncMock(return_value=doc),
-        ),
-        patch("ee.cloud.pockets.service.emit", new=AsyncMock()),
+        )
+    )
+    stack.enter_context(patch("ee.cloud.pockets.service.emit", new=AsyncMock()))
+    stack.enter_context(
         patch(
             "ee.cloud.pockets.service._pocket_event_payload",
             new=AsyncMock(return_value={"pocket_id": doc.id}),
-        ),
+        )
+    )
+    stack.enter_context(
         patch(
             "ee.cloud.chat.agent_service.push_pocket_mutation",
             new=MagicMock(side_effect=_capture),
-        ),
+        )
     )
-    return ctx, push_calls
+    stack.enter_context(
+        patch(
+            "ee.cloud.chat.agent_service.current_workspace_id",
+            new=MagicMock(return_value=doc.workspace),
+        )
+    )
+    stack.enter_context(
+        patch(
+            "ee.cloud.chat.agent_service.current_user_id",
+            new=MagicMock(return_value=doc.owner),
+        )
+    )
+    return stack, push_calls
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +134,7 @@ def _patches(doc: _FakeDoc):
 
 async def test_set_state_top_level(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.set_state_for_agent(fake_doc.id, "filter", "done")
     assert result["ok"] is True
     assert result["old_value"] == "all"
@@ -121,7 +148,7 @@ async def test_set_state_top_level(fake_doc):
 
 async def test_set_state_array_index(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.set_state_for_agent(fake_doc.id, "tasks[0].status", "done")
     assert result["ok"] is True
     assert fake_doc.rippleSpec["state"]["tasks"][0]["status"] == "done"
@@ -133,7 +160,7 @@ async def test_set_state_creates_intermediates(fake_doc):
     the way. Lets the agent set up nested state without a separate
     bootstrap call."""
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.set_state_for_agent(
             fake_doc.id, "ui_prefs.theme.color", "blue"
         )
@@ -143,7 +170,7 @@ async def test_set_state_creates_intermediates(fake_doc):
 
 async def test_set_state_out_of_range_errors(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.set_state_for_agent(fake_doc.id, "tasks[99].label", "x")
     assert result["ok"] is False
     assert "out of range" in result["error"]
@@ -157,7 +184,7 @@ async def test_set_state_creates_state_when_pocket_has_none():
         {"version": "1.0", "ui": {"id": "n_root0000", "type": "flex"}},
     )
     ctx, _ = _patches(doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.set_state_for_agent(doc.id, "count", 1)
     assert result["ok"] is True
     assert doc.rippleSpec["state"] == {"count": 1}
@@ -170,7 +197,7 @@ async def test_set_state_creates_state_when_pocket_has_none():
 
 async def test_append_state_grows_array(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.append_state_for_agent(
             fake_doc.id, "tasks", {"id": "t3", "label": "pay bills", "status": "todo"}
         )
@@ -184,7 +211,7 @@ async def test_append_state_grows_array(fake_doc):
 
 async def test_append_state_creates_missing_list(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.append_state_for_agent(fake_doc.id, "tags", "important")
     assert result["ok"] is True
     assert fake_doc.rippleSpec["state"]["tags"] == ["important"]
@@ -192,7 +219,7 @@ async def test_append_state_creates_missing_list(fake_doc):
 
 async def test_append_state_to_non_list_errors(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.append_state_for_agent(fake_doc.id, "filter", "x")
     assert result["ok"] is False
 
@@ -204,7 +231,7 @@ async def test_append_state_to_non_list_errors(fake_doc):
 
 async def test_remove_state_pops_array_element(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.remove_state_for_agent(fake_doc.id, "tasks[0]")
     assert result["ok"] is True
     assert result["removed"]["id"] == "t1"
@@ -214,7 +241,7 @@ async def test_remove_state_pops_array_element(fake_doc):
 
 async def test_remove_state_deletes_key(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.remove_state_for_agent(fake_doc.id, "filter")
     assert result["ok"] is True
     assert "filter" not in fake_doc.rippleSpec["state"]
@@ -222,7 +249,7 @@ async def test_remove_state_deletes_key(fake_doc):
 
 async def test_remove_state_missing_errors(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.remove_state_for_agent(fake_doc.id, "ghost")
     assert result["ok"] is False
 
@@ -234,7 +261,7 @@ async def test_remove_state_missing_errors(fake_doc):
 
 async def test_patch_state_merges_top_level(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3]:
+    with ctx:
         result = await agent_context.patch_state_for_agent(
             fake_doc.id, {"filter": "done", "draft": ""}
         )
@@ -270,10 +297,7 @@ async def test_update_one_task_in_100_emits_one_state_set_frame():
 
     ctx, push_calls = _patches(doc)
     with (
-        ctx[0],
-        ctx[1],
-        ctx[2],
-        ctx[3],
+        ctx,
         patch.object(pocket_service, "agent_update", new=update_sentinel),
     ):
         result = await agent_context.set_state_for_agent(doc.id, "tasks[42].status", "done")

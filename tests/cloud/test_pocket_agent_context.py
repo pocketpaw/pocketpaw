@@ -35,6 +35,23 @@ async def _make_pocket(**fields):
     return doc
 
 
+@pytest.fixture
+def agent_identity():
+    """Attach the default ``w1`` / ``u1`` identity for the duration of a
+    test that exercises ``_agent_load_doc`` (which enforces workspace +
+    edit-access checks via per-stream ContextVars). Tests that need to
+    vary identity should attach their own via ``attach_agent_identity``;
+    tests that need to exercise the no-identity path should NOT request
+    this fixture."""
+    from ee.cloud.chat.agent_service import attach_agent_identity, detach_agent_identity
+
+    tokens = attach_agent_identity(workspace_id="w1", user_id="u1")
+    try:
+        yield
+    finally:
+        detach_agent_identity(tokens)
+
+
 # ---------------------------------------------------------------------------
 # list_pockets_for_agent
 # ---------------------------------------------------------------------------
@@ -87,7 +104,7 @@ async def test_list_pockets_for_agent_errors_outside_stream():
 
 
 @pytest.mark.asyncio
-async def test_update_pocket_patches_only_provided_fields(mongo_db):
+async def test_update_pocket_patches_only_provided_fields(mongo_db, agent_identity):
     from ee.cloud.models.pocket import Pocket
     from ee.cloud.pockets.agent_context import update_pocket_for_agent
 
@@ -103,7 +120,7 @@ async def test_update_pocket_patches_only_provided_fields(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_update_pocket_normalizes_ripple_spec(mongo_db):
+async def test_update_pocket_normalizes_ripple_spec(mongo_db, agent_identity):
     from ee.cloud.models.pocket import Pocket
     from ee.cloud.pockets.agent_context import update_pocket_for_agent
 
@@ -120,7 +137,7 @@ async def test_update_pocket_normalizes_ripple_spec(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_update_pocket_propagates_load_error(mongo_db):
+async def test_update_pocket_propagates_load_error(mongo_db, agent_identity):
     from ee.cloud.pockets.agent_context import update_pocket_for_agent
 
     # Valid ObjectId shape but no matching doc.
@@ -135,7 +152,7 @@ async def test_update_pocket_propagates_load_error(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_add_widget_appends_with_defaults(mongo_db):
+async def test_add_widget_appends_with_defaults(mongo_db, agent_identity):
     from ee.cloud.models.pocket import Pocket
     from ee.cloud.pockets.agent_context import add_widget_for_agent
 
@@ -167,7 +184,7 @@ async def test_add_widget_rejects_non_dict_widget(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_update_widget_patches_listed_fields(mongo_db):
+async def test_update_widget_patches_listed_fields(mongo_db, agent_identity):
     from ee.cloud.models.pocket import Pocket, Widget
     from ee.cloud.pockets.agent_context import update_widget_for_agent
 
@@ -187,7 +204,7 @@ async def test_update_widget_patches_listed_fields(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_update_widget_returns_error_when_widget_missing(mongo_db):
+async def test_update_widget_returns_error_when_widget_missing(mongo_db, agent_identity):
     from ee.cloud.pockets.agent_context import update_widget_for_agent
 
     pocket = await _make_pocket()
@@ -203,7 +220,7 @@ async def test_update_widget_returns_error_when_widget_missing(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_remove_widget_drops_matching_id(mongo_db):
+async def test_remove_widget_drops_matching_id(mongo_db, agent_identity):
     from ee.cloud.models.pocket import Pocket, Widget
     from ee.cloud.pockets.agent_context import remove_widget_for_agent
 
@@ -220,7 +237,7 @@ async def test_remove_widget_drops_matching_id(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_remove_widget_errors_when_id_unknown(mongo_db):
+async def test_remove_widget_errors_when_id_unknown(mongo_db, agent_identity):
     from ee.cloud.pockets.agent_context import remove_widget_for_agent
 
     pocket = await _make_pocket()
@@ -237,7 +254,7 @@ async def test_remove_widget_errors_when_id_unknown(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_update_pocket_pushes_mutation_when_sink_attached(mongo_db):
+async def test_update_pocket_pushes_mutation_when_sink_attached(mongo_db, agent_identity):
     from ee.cloud.chat.agent_service import (
         attach_sse_event_sink,
         detach_sse_event_sink,
@@ -262,7 +279,7 @@ async def test_update_pocket_pushes_mutation_when_sink_attached(mongo_db):
 
 
 @pytest.mark.asyncio
-async def test_push_is_noop_without_sink(mongo_db):
+async def test_push_is_noop_without_sink(mongo_db, agent_identity):
     """Calling the mutation helpers outside an SSE stream must not raise."""
     from ee.cloud.pockets.agent_context import update_pocket_for_agent
 

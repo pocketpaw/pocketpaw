@@ -15,6 +15,7 @@ carries the touched subtree.
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -110,40 +111,65 @@ def fake_doc():
 
 def _patches(doc: _FakeDoc):
     """Patch the seams every granular op touches: doc fetch, realtime
-    emit, payload builder (sidesteps domain mapping), and the SSE push.
+    emit, payload builder (sidesteps domain mapping), the SSE push, and
+    the per-stream identity ContextVars ``_agent_load_doc`` reads to
+    enforce workspace + edit-access checks.
 
-    Returns the ``push_calls`` list every test asserts against.
+    Returns ``(ExitStack, push_calls)``. Use as ``with ctx: ...``.
     """
     push_calls: list[dict[str, Any]] = []
 
     def _capture(payload: dict[str, Any]) -> None:
         push_calls.append(payload)
 
-    ctx = (
+    stack = ExitStack()
+    stack.enter_context(
         patch(
             "ee.cloud.pockets.service._PocketDoc.get",
             new=AsyncMock(return_value=doc),
-        ),
-        patch("ee.cloud.pockets.service.emit", new=AsyncMock()),
+        )
+    )
+    stack.enter_context(patch("ee.cloud.pockets.service.emit", new=AsyncMock()))
+    stack.enter_context(
         patch(
             "ee.cloud.pockets.service._pocket_event_payload",
             new=AsyncMock(return_value={"pocket_id": doc.id}),
-        ),
-        # The MCP wrapper imports lazily from ee.cloud.chat.agent_service.
-        # Patch where it's looked up.
+        )
+    )
+    # The MCP wrapper imports lazily from ee.cloud.chat.agent_service.
+    # Patch where it's looked up.
+    stack.enter_context(
         patch(
             "ee.cloud.chat.agent_service.push_pocket_mutation",
             new=MagicMock(side_effect=_capture),
-        ),
-        # normalize_ripple_spec is fine to leave as-is, but it pulls in
-        # the manifest module on first import; patching to identity keeps
-        # the test hermetic and fast.
+        )
+    )
+    # normalize_ripple_spec is fine to leave as-is, but it pulls in
+    # the manifest module on first import; patching to identity keeps
+    # the test hermetic and fast.
+    stack.enter_context(
         patch(
             "ee.cloud.pockets.service.normalize_ripple_spec",
             new=lambda s: s,
-        ),
+        )
     )
-    return ctx, push_calls
+    # _agent_load_doc reads workspace + user from ContextVars and checks
+    # access. Default to the matching owner so the existing tests cover
+    # the happy path; cross-workspace + access-denied behavior gets its
+    # own dedicated tests at the bottom of this file.
+    stack.enter_context(
+        patch(
+            "ee.cloud.chat.agent_service.current_workspace_id",
+            new=MagicMock(return_value=doc.workspace),
+        )
+    )
+    stack.enter_context(
+        patch(
+            "ee.cloud.chat.agent_service.current_user_id",
+            new=MagicMock(return_value=doc.owner),
+        )
+    )
+    return stack, push_calls
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +179,7 @@ def _patches(doc: _FakeDoc):
 
 async def test_add_node_appends_under_parent(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.add_node_for_agent(
             fake_doc.id,
             parent_id="n_table000",
@@ -180,7 +206,7 @@ async def test_add_node_appends_under_parent(fake_doc):
 
 async def test_add_node_after_id_inserts_in_position(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         await agent_context.add_node_for_agent(
             fake_doc.id,
             parent_id="n_table000",
@@ -193,7 +219,7 @@ async def test_add_node_after_id_inserts_in_position(fake_doc):
 
 async def test_add_node_unknown_parent_errors(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.add_node_for_agent(
             fake_doc.id,
             parent_id="n_ghost000",
@@ -213,7 +239,7 @@ async def test_add_node_unknown_parent_errors(fake_doc):
 
 async def test_replace_node_swaps_subtree_preserves_id(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.replace_node_for_agent(
             fake_doc.id,
             node_id="n_header00",
@@ -228,7 +254,7 @@ async def test_replace_node_swaps_subtree_preserves_id(fake_doc):
 
 async def test_replace_node_unknown_id_errors(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.replace_node_for_agent(
             fake_doc.id,
             node_id="n_ghost000",
@@ -244,7 +270,7 @@ async def test_replace_node_unknown_id_errors(fake_doc):
 
 async def test_set_node_prop_writes_into_props(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.set_node_prop_for_agent(
             fake_doc.id,
             node_id="n_row00002",
@@ -267,7 +293,7 @@ async def test_set_node_prop_writes_into_props(fake_doc):
 
 async def test_set_node_prop_handles_top_level_key(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.set_node_prop_for_agent(
             fake_doc.id,
             node_id="n_row00001",
@@ -288,7 +314,7 @@ async def test_set_node_prop_handles_top_level_key(fake_doc):
 
 async def test_move_node_to_new_parent(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.move_node_for_agent(
             fake_doc.id,
             node_id="n_header00",
@@ -303,7 +329,7 @@ async def test_move_node_to_new_parent(fake_doc):
 
 async def test_move_node_into_descendant_rejected(fake_doc):
     ctx, _ = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.move_node_for_agent(
             fake_doc.id,
             node_id="n_table000",
@@ -320,7 +346,7 @@ async def test_move_node_into_descendant_rejected(fake_doc):
 
 async def test_remove_node_drops_subtree(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.remove_node_for_agent(fake_doc.id, node_id="n_row00002")
     assert result["ok"] is True
     rows = fake_doc.rippleSpec["ui"]["children"][1]["children"]
@@ -333,7 +359,7 @@ async def test_remove_node_drops_subtree(fake_doc):
 
 async def test_remove_root_errors(fake_doc):
     ctx, push_calls = _patches(fake_doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         result = await agent_context.remove_node_for_agent(fake_doc.id, node_id="n_root0000")
     assert result["ok"] is False
     assert push_calls == []
@@ -366,7 +392,7 @@ async def test_legacy_pocket_gets_ids_on_first_op():
         },
     )
     ctx, _ = _patches(doc)
-    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4]:
+    with ctx:
         # First call targets a parent we don't yet know — the op fails
         # (parent_id="UNKNOWN" not found) but ids get assigned during
         # the load-and-ensure-ids phase before the failure.
@@ -416,11 +442,7 @@ async def test_rename_one_row_in_100_row_table_emits_one_subtree_frame():
 
     ctx, push_calls = _patches(doc)
     with (
-        ctx[0],
-        ctx[1],
-        ctx[2],
-        ctx[3],
-        ctx[4],
+        ctx,
         patch.object(pocket_service, "agent_update", new=update_sentinel),
     ):
         result = await agent_context.set_node_prop_for_agent(
@@ -451,3 +473,94 @@ async def test_rename_one_row_in_100_row_table_emits_one_subtree_frame():
         if i == 42:
             continue
         assert row == snapshot["ui"]["children"][i], f"row {i} drifted"
+
+
+# ---------------------------------------------------------------------------
+# Auth gate on _agent_load_doc — the entry point for every granular
+# mutation. The cross-tenant + access-denied paths must look identical
+# to a genuinely missing pocket so an agent in workspace A can't
+# enumerate the existence of pockets in workspace B by ObjectId guess.
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_workspace_mutation_rejected_as_not_found(fake_doc):
+    """An agent whose ContextVars are bound to a different workspace
+    must NOT be able to touch this pocket — and the failure must not
+    leak existence (same `<id> not found` shape as a genuinely missing
+    pocket)."""
+    ctx, push_calls = _patches(fake_doc)
+    with ctx:
+        # Override the workspace ContextVar mock to a foreign workspace.
+        with patch(
+            "ee.cloud.chat.agent_service.current_workspace_id",
+            new=MagicMock(return_value="w-other"),
+        ):
+            result = await agent_context.set_node_prop_for_agent(
+                fake_doc.id, node_id="n_header00", prop="text", value="hijacked"
+            )
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+    assert push_calls == []
+    assert fake_doc.saves == 0
+    # Importantly: spec is unchanged.
+    assert fake_doc.rippleSpec["ui"]["children"][0]["props"]["text"] == "Hi"
+
+
+async def test_non_owner_private_pocket_rejected(fake_doc):
+    """A user who isn't the owner, isn't in ``shared_with``, and the
+    pocket isn't workspace-visible — same `not found` mask."""
+    fake_doc.visibility = "private"
+    fake_doc.shared_with = []
+    ctx, push_calls = _patches(fake_doc)
+    with ctx:
+        with patch(
+            "ee.cloud.chat.agent_service.current_user_id",
+            new=MagicMock(return_value="u-stranger"),
+        ):
+            result = await agent_context.set_node_prop_for_agent(
+                fake_doc.id, node_id="n_header00", prop="text", value="hijacked"
+            )
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+    assert push_calls == []
+
+
+async def test_shared_with_can_edit(fake_doc):
+    """``shared_with`` entries get edit access — mirrors the REST
+    path's ``_check_domain_edit_access``."""
+    fake_doc.visibility = "private"
+    fake_doc.shared_with = ["u-collaborator"]
+    ctx, push_calls = _patches(fake_doc)
+    with ctx:
+        with patch(
+            "ee.cloud.chat.agent_service.current_user_id",
+            new=MagicMock(return_value="u-collaborator"),
+        ):
+            result = await agent_context.set_node_prop_for_agent(
+                fake_doc.id, node_id="n_header00", prop="text", value="updated"
+            )
+    assert result["ok"] is True
+    assert len(push_calls) == 1
+
+
+async def test_no_active_stream_rejected(fake_doc):
+    """When ContextVars aren't set (e.g. called outside a chat stream),
+    every agent op fails with a clear message."""
+    ctx, push_calls = _patches(fake_doc)
+    with ctx:
+        with (
+            patch(
+                "ee.cloud.chat.agent_service.current_workspace_id",
+                new=MagicMock(return_value=None),
+            ),
+            patch(
+                "ee.cloud.chat.agent_service.current_user_id",
+                new=MagicMock(return_value=None),
+            ),
+        ):
+            result = await agent_context.set_node_prop_for_agent(
+                fake_doc.id, node_id="n_header00", prop="text", value="x"
+            )
+    assert result["ok"] is False
+    assert "no active workspace/user" in result["error"]
+    assert push_calls == []

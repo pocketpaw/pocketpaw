@@ -690,13 +690,39 @@ def _agent_view_dict(doc: _PocketDoc) -> dict:
 
 
 async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None]:
+    """Load a pocket for an agent-initiated mutation, with workspace +
+    access-control checks.
+
+    Pulls ``workspace_id`` and ``user_id`` from the per-stream
+    ContextVars set by ``agent_router._run_agent_stream``. Rejects when
+    no stream is active, when the pocket belongs to a different
+    workspace, or when the caller lacks edit access — mirroring the
+    REST path's ``_check_domain_edit_access`` (owner OR shared_with OR
+    workspace-visible). Cross-workspace mismatches return the same
+    "not found" message as a genuinely missing pocket so the agent can't
+    enumerate the existence of pockets in other tenants.
+    """
+    from ee.cloud.chat.agent_service import current_user_id, current_workspace_id
+
     if not pocket_id or not isinstance(pocket_id, str):
         return None, "pocket_id is required (string)"
+    workspace_id = current_workspace_id()
+    user_id = current_user_id()
+    if not workspace_id or not user_id:
+        return None, (
+            "no active workspace/user — agent pocket mutations require a cloud SSE chat stream"
+        )
     try:
         doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
     except Exception as exc:  # noqa: BLE001
         return None, f"could not load pocket {pocket_id}: {exc}"
-    if doc is None:
+    if doc is None or doc.workspace != workspace_id:
+        return None, f"pocket {pocket_id} not found"
+    if (
+        doc.owner != user_id
+        and user_id not in (doc.shared_with or [])
+        and doc.visibility != "workspace"
+    ):
         return None, f"pocket {pocket_id} not found"
     return doc, None
 
