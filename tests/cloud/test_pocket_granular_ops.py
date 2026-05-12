@@ -815,3 +815,134 @@ class TestRemovePropArrayItem:
             )
         assert result is None
         assert "not_found" in err
+
+
+# ---------------------------------------------------------------------------
+# *_for_agent wrappers — exercise the agent_context.py layer that drives
+# SSE node ops + the uniform {ok, ...} shape consumed by LangChain tools.
+# ---------------------------------------------------------------------------
+
+
+class TestPropArrayItemWrappers:
+    """The thin wrappers in agent_context.py: push SSE node ops + return
+    the uniform {ok, ...} shape consumed by the LangChain edit tools."""
+
+    @pytest.mark.asyncio
+    async def test_set_prop_array_item_for_agent_pushes_sse(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "Online Store", "value": 62},
+                    {"label": "Other", "value": 8},
+                ],
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.set_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+                partial={"value": 5},
+            )
+
+        assert result["ok"] is True
+        assert result["item_index"] == 1
+        assert result["item"] == {"label": "Other", "value": 5}
+        assert chart["props"]["data"][1]["value"] == 5
+        # Exactly one SSE push with the granular action.
+        assert len(push_calls) == 1
+        push = push_calls[0]
+        assert push["action"] == "node_prop_array_item_set"
+        assert push["node_id"] == "n_chart000"
+        assert push["prop"] == "data"
+        assert push["item_index"] == 1
+        assert push["item"] == {"label": "Other", "value": 5}
+        # Subtree-only; never the full pocket.
+        assert "pocket" not in push
+
+    @pytest.mark.asyncio
+    async def test_set_prop_array_item_for_agent_propagates_error(self, fake_doc):
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.set_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_header00",  # unsupported widget for prop-array ops
+                prop="text",
+                match={"index": 0},
+                partial={"text": "x"},
+            )
+        assert result["ok"] is False
+        assert "unsupported_prop_array" in result["error"]
+        assert push_calls == []
+
+    @pytest.mark.asyncio
+    async def test_append_prop_array_item_for_agent_pushes_sse(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}, {"orderId": "#3"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.append_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#2"},
+                after={"by_field": "orderId", "equals": "#1"},
+            )
+
+        assert result["ok"] is True
+        assert result["item_index"] == 1
+        assert [r["orderId"] for r in table["props"]["rows"]] == ["#1", "#2", "#3"]
+        assert len(push_calls) == 1
+        push = push_calls[0]
+        assert push["action"] == "node_prop_array_item_appended"
+        assert push["node_id"] == "n_table111"
+        assert push["prop"] == "rows"
+        assert push["item_index"] == 1
+        assert push["item"] == {"orderId": "#2"}
+
+    @pytest.mark.asyncio
+    async def test_remove_prop_array_item_for_agent_pushes_sse(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "A", "value": 1},
+                    {"label": "Other", "value": 2},
+                    {"label": "B", "value": 3},
+                ],
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.remove_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+            )
+
+        assert result["ok"] is True
+        assert result["removed_index"] == 1
+        assert result["removed_item"] == {"label": "Other", "value": 2}
+        assert [d["label"] for d in chart["props"]["data"]] == ["A", "B"]
+        assert len(push_calls) == 1
+        push = push_calls[0]
+        assert push["action"] == "node_prop_array_item_removed"
+        assert push["node_id"] == "n_chart000"
+        assert push["prop"] == "data"
+        assert push["removed_index"] == 1
+        assert push["removed_item"] == {"label": "Other", "value": 2}
