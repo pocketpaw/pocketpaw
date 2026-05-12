@@ -10,6 +10,11 @@ import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+try:
+    from pocketpaw_scanner import injection_detect as _native_injection_detect
+except Exception:
+    _native_injection_detect = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -153,6 +158,28 @@ class InjectionScanner:
         """
         if not content:
             return ScanResult(source=source, sanitized_content=content)
+
+        # Fast path: optional native scanner wheel (pocketpaw-scanner).
+        if _native_injection_detect is not None:
+            try:
+                native = _native_injection_detect(content, source)
+                threat_level = ThreatLevel(native.threat_level)
+                logger.debug(
+                    "Native injection scanner detected %s threat from %s — patterns: %s",
+                    threat_level.value,
+                    source,
+                    ", ".join(sorted(set(native.matched_patterns))),
+                )
+
+                return ScanResult(
+                    threat_level=threat_level,
+                    matched_patterns=sorted(set(native.matched_patterns)),
+                    sanitized_content=native.sanitized_content,
+                    source=native.source,
+                )
+            except Exception as e:
+                # Never fail closed here — keep behavior stable with Python fallback.
+                logger.debug("Native injection scanner failed, using Python fallback: %s", e)
 
         # Normalize Unicode to defeat homoglyph/encoding tricks
         normalized = self._normalize(content)

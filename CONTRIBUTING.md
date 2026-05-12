@@ -50,6 +50,11 @@ If you're new and want to contribute, check [`good first issue`](https://github.
    ```bash
    uv sync --dev
    ```
+   Optional: enable the native scanner extra (faster injection/PII scanning). This
+   requires a Rust toolchain from [rustup.rs](https://rustup.rs/):
+   ```bash
+   uv sync --extra scanner
+   ```
 4. **Install pre-commit hooks** (ruff lint/format on commit, tests on push):
    ```bash
    uv tool install pre-commit

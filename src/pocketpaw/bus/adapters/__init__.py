@@ -17,15 +17,19 @@ from pocketpaw.bus.queue import MessageBus
 _log = logging.getLogger(__name__)
 
 
-def auto_install(extra: str, verify_import: str) -> dict[str, str]:
+def auto_install(
+    extra: str, verify_import: str, pip_spec_override: str | None = None
+) -> dict[str, str]:
     """Auto-install an optional dependency if it is missing.
 
-    Uses ``pocketpaw[<extra>]`` so version constraints stay in pyproject.toml
-    (single source of truth).
+    Uses ``pocketpaw[<extra>]`` by default so version constraints stay in
+    pyproject.toml (single source of truth). Callers may pass
+    ``pip_spec_override`` for special local-path installs.
 
     Args:
         extra: The pocketpaw extra name (e.g. "discord").
         verify_import: A top-level module to try importing after install (e.g. "discord").
+        pip_spec_override: Optional explicit pip target (e.g. local path).
 
     Returns:
         A dict with keys:
@@ -35,19 +39,19 @@ def auto_install(extra: str, verify_import: str) -> dict[str, str]:
     Raises:
         RuntimeError: If installation fails or tools are missing (backward compatible).
     """
-    pip_spec = f"pocketpaw[{extra}]"
+    pip_spec = pip_spec_override or f"pocketpaw[{extra}]"
     _log.info("Auto-installing missing dependency: %s", pip_spec)
 
     # Prefer uv (fast), fall back to pip
     in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
     uv = shutil.which("uv")
     if uv:
-        cmd = [uv, "pip", "install"]
+        cmd = [uv, "pip", "install", "--python", sys.executable]
         if not in_venv:
             cmd.append("--system")
         cmd.append(pip_spec)
     else:
-        cmd = ["pip", "install"]
+        cmd = [sys.executable, "-m", "pip", "install"]
         if not in_venv:
             cmd.append("--user")
         cmd.append(pip_spec)

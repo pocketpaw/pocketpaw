@@ -13,6 +13,7 @@ import asyncio
 import logging
 import re
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -31,6 +32,14 @@ from pocketpaw.dashboard_state import (
 logger = logging.getLogger(__name__)
 
 channels_router = APIRouter()
+
+
+def _find_repo_root(start: Path) -> Path | None:
+    """Find repository root by locating pyproject.toml + src/pocketpaw marker."""
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists() and (candidate / "src" / "pocketpaw").exists():
+            return candidate
+    return None
 
 
 # ─── Adapter Lifecycle ───────────────────────────────────────────
@@ -466,8 +475,29 @@ async def install_extras(request: Request):
 
     # Map channel name → pip extra name (most match, except whatsapp → whatsapp-personal)
     extra_name = "whatsapp-personal" if extra == "whatsapp" else extra
+
+    # Scanner is currently developed as a local sibling package.
+    # Install directly from local path when available to avoid pulling an older
+    # published pocketpaw release that may not include the scanner extra.
+    pip_spec_override: str | None = None
+    if extra == "scanner":
+        module_dir = Path(__file__).resolve().parent
+        repo_root = _find_repo_root(module_dir)
+        if repo_root is not None:
+            scanner_pkg = repo_root / "pocketpaw-scanner"
+            if (scanner_pkg / "pyproject.toml").exists():
+                pip_spec_override = str(scanner_pkg)
+
     try:
-        result = await asyncio.to_thread(auto_install, extra_name, import_mod)
+        if pip_spec_override:
+            result = await asyncio.to_thread(
+                auto_install,
+                extra_name,
+                import_mod,
+                pip_spec_override,
+            )
+        else:
+            result = await asyncio.to_thread(auto_install, extra_name, import_mod)
     except RuntimeError as exc:
         return {"error": str(exc)}
 

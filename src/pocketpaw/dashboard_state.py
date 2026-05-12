@@ -135,6 +135,7 @@ _CHANNEL_DEPS: dict[str, tuple[str, str, str]] = {
     "teams": ("botbuilder.core", "botbuilder-core", "pocketpaw[teams]"),
     "google_chat": ("googleapiclient.discovery", "google-api-python-client", "pocketpaw[gchat]"),
     "graph": ("networkx", "networkx", "pocketpaw[graph]"),
+    "scanner": ("pocketpaw_scanner", "pocketpaw-scanner", "pocketpaw[scanner]"),
 }
 
 _MEMORY_CONFIG_KEYS = {

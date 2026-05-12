@@ -146,6 +146,28 @@ class TestExtrasInstall:
         assert resp.status_code == 200
         mock_install.assert_called_once_with("whatsapp-personal", "neonize")
 
+    def test_install_scanner_uses_scanner_extra(self, test_client):
+        """Scanner install should use the scanner extra and module check."""
+        with (
+            _auth_bypass(),
+            _dep_missing(),
+            patch(
+                "pocketpaw.bus.adapters.auto_install",
+                return_value={"status": "ok"},
+            ) as mock_install,
+        ):
+            resp = test_client.post(
+                "/api/extras/install",
+                json={"extra": "scanner"},
+            )
+        assert resp.status_code == 200
+        mock_install.assert_called_once()
+        args = mock_install.call_args[0]
+        assert args[0] == "scanner"
+        assert args[1] == "pocketpaw_scanner"
+        assert len(args) == 3
+        assert args[2].endswith("pocketpaw-scanner")
+
     def test_install_failure_returns_error(self, test_client):
         """If auto_install raises RuntimeError, return the error message."""
         with (

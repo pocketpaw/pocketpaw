@@ -1,0 +1,16 @@
+[package]
+name = "pocketpaw-scanner"
+version = "0.1.0"
+edition = "2024"
+description = "Native scanning engine for PocketPaw (injection, PII, content classification)"
+license = "MIT"
+
+[lib]
+name = "pocketpaw_scanner"
+crate-type = ["cdylib"]
+
+[dependencies]
+once_cell = "1.20"
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py311"] }
+regex = "1.11"
+unicode-normalization = "0.1"

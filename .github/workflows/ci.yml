@@ -37,6 +37,28 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+  scanner-extra:
+    name: Scanner extra install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set Python version
+        run: uv python install 3.12
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install scanner extra
+        run: uv sync --extra scanner
+
+      - name: Verify native scanner import
+        run: uv run python -c "import pocketpaw_scanner; print('scanner import OK')"
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

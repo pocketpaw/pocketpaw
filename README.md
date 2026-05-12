@@ -90,6 +90,18 @@ pocketpaw
 curl -fsSL https://pocketpaw.xyz/install.sh | sh
 ```
 
+**Optional native scanner fast-path:**
+
+If you want the Rust scanner acceleration used by `injection_scanner.py` and `pii.py`, install
+the local package into the same environment after cloning the repo:
+
+```bash
+uv pip install -e ./pocketpaw-scanner
+```
+
+Prerequisites: Python 3.11+, `uv`, and a Rust toolchain (`rustup`, `cargo`). If you do not
+install it, PocketPaw will keep working and will fall back to the Python scanner path.
+
 </details>
 
 <details>

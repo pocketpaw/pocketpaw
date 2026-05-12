@@ -1643,6 +1643,32 @@
             </label>
           </div>
 
+          <!-- Native scanner dependency install -->
+          <div
+            x-show="!scannerDependencyInstalled"
+            class="pl-7 mt-2"
+          >
+            <div class="text-[12px] text-white/70 flex items-center justify-between gap-3 bg-white/5 border border-[var(--glass-border)] rounded-lg px-3 py-2">
+              <div class="min-w-0">
+                <p>
+                  Native scanner acceleration is not installed.
+                  Install <span class="text-white/85" x-text="scannerDependencyPackage"></span> for faster Injection Scanner and PII Protection checks.
+                </p>
+                <p class="text-[11px] text-white/45 mt-1">
+                  <span>Install target:</span>
+                  <span class="text-white/60" x-text="scannerDependencyPipSpec"></span>
+                </p>
+              </div>
+              <button
+                @click="installScannerDependency()"
+                :disabled="scannerDependencyInstallLoading || scannerDependencyCheckLoading"
+                class="shrink-0 px-2.5 py-1 rounded-md text-[11px] bg-white/10 hover:bg-white/15 text-white/85 transition-colors disabled:opacity-50"
+              >
+                <span x-text="scannerDependencyInstallLoading ? 'Installing...' : (scannerDependencyCheckLoading ? 'Checking...' : 'Install')"></span>
+              </button>
+            </div>
+          </div>
+
           <!-- LLM Deep Scan -->
           <div class="pl-7" x-show="settings.injectionScanEnabled" x-transition>
             <label class="flex items-start gap-2.5 cursor-pointer group">

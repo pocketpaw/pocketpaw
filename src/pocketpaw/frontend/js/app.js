@@ -191,6 +191,11 @@ function app() {
         _backendsData: [],
         backendInstallLoading: false,
         serverRestarting: false,
+        scannerDependencyInstalled: true,
+        scannerDependencyPackage: 'pocketpaw-scanner',
+        scannerDependencyPipSpec: 'pocketpaw[scanner]',
+        scannerDependencyCheckLoading: false,
+        scannerDependencyInstallLoading: false,
 
         // Spread feature states
         ...featureStates,
@@ -624,6 +629,7 @@ function app() {
             this.settingsSearchResults = [];
             this.settingsValidationWarnings = [];
             this.showSettings = true;
+            this.refreshScannerDependencyStatus();
         },
 
         /**
@@ -887,6 +893,74 @@ function app() {
                 this.showToast('Install failed: ' + e.message, 'error');
             } finally {
                 this.backendInstallLoading = false;
+            }
+        },
+
+        /**
+         * Check whether optional native scanner dependency is installed.
+         */
+        async refreshScannerDependencyStatus() {
+            this.scannerDependencyCheckLoading = true;
+            try {
+                const resp = await fetch('/api/extras/check?channel=scanner');
+                if (!resp.ok) {
+                    return;
+                }
+                const data = await resp.json();
+                this.scannerDependencyInstalled = !!data.installed;
+                this.scannerDependencyPackage = data.package || 'pocketpaw-scanner';
+                this.scannerDependencyPipSpec = data.pip_spec || 'pocketpaw[scanner]';
+            } catch (_e) {
+                // Keep current values when check fails to avoid noisy UI state.
+            } finally {
+                this.scannerDependencyCheckLoading = false;
+            }
+        },
+
+        /**
+         * Install optional native scanner dependency via extras API.
+         */
+        async installScannerDependency() {
+            this.scannerDependencyInstallLoading = true;
+            try {
+                const resp = await fetch('/api/extras/install', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ extra: 'scanner' }),
+                });
+                const data = await resp.json();
+
+                if (data.error || data.detail) {
+                    this.showToast(`Install failed: ${data.error || data.detail}`, 'error');
+                    return;
+                }
+
+                if (data.restart_required) {
+                    const restartNow = confirm(
+                        `${this.scannerDependencyPackage} installed. Server restart is required to load it. Restart now?`
+                    );
+                    if (restartNow) {
+                        await fetch('/api/system/restart', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ confirm: true }),
+                        });
+                        this.showToast('Server restarting...', 'info');
+                    } else {
+                        this.showToast(
+                            `${this.scannerDependencyPackage} installed. Restart server when ready.`,
+                            'info'
+                        );
+                    }
+                    return;
+                }
+
+                this.showToast(`${this.scannerDependencyPackage} installed successfully`, 'success');
+            } catch (e) {
+                this.showToast(`Install failed: ${e.message}`, 'error');
+            } finally {
+                this.scannerDependencyInstallLoading = false;
+                await this.refreshScannerDependencyStatus();
             }
         },
 

@@ -82,6 +82,9 @@ postgresql = ["sqlalchemy[asyncio]>=2.0.0", "asyncpg>=0.29.0"]
 mysql = ["sqlalchemy[asyncio]>=2.0.0", "aiomysql>=0.2.0"]
 mongodb = ["motor>=3.3.0", "beanie>=1.26.0"]
 graph = ["networkx>=3.0"]
+scanner = [
+    "pocketpaw-scanner",
+]
 dashboard = [
     # Kept for backward compat — dashboard deps are now in core.
     # Users with `pip install pocketpaw[dashboard]` in scripts won't break.
@@ -331,6 +334,9 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.8.0",
 ]
+
+[tool.uv.sources]
+pocketpaw-scanner = { path = "./pocketpaw-scanner", editable = true }
 
 [project.scripts]
 pocketpaw = "pocketpaw.__main__:main"

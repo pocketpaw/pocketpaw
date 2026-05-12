@@ -60,6 +60,11 @@ idocs/
 # Build artifacts
 *.pyc
 *.pyo
+pocketpaw-scanner/target/
+pocketpaw-scanner/python/pocketpaw_scanner/_core*.so
+pocketpaw-scanner/python/pocketpaw_scanner/*.dylib
+pocketpaw-scanner/python/pocketpaw_scanner/*.pyd
+pocketpaw-scanner/python/pocketpaw_scanner/*.dSYM/
 
 temp
 

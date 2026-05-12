@@ -11,6 +11,11 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+try:
+    from pocketpaw_scanner import pii_detect as _native_pii_detect
+except Exception:
+    _native_pii_detect = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -162,6 +167,12 @@ class PIIScanner:
         if not text:
             return PIIScanResult(original_text=text, sanitized_text=text, scan_source=source)
 
+        if _native_pii_detect is not None:
+            try:
+                return self._scan_native(text, source)
+            except Exception as e:
+                logger.debug("Native PII scanner failed, using Python fallback: %s", e)
+
         matches: list[PIIMatch] = []
 
         for pattern, pii_type in _COMPILED_PII:
@@ -180,6 +191,56 @@ class PIIScanner:
                 )
 
         # Deduplicate overlapping ranges, apply replacements in reverse order
+        sorted_matches = sorted(matches, key=lambda m: m.start, reverse=True)
+        seen_ranges: set[tuple[int, int]] = set()
+        deduped: list[PIIMatch] = []
+        sanitized = text
+
+        for match in sorted_matches:
+            key = (match.start, match.end)
+            if key not in seen_ranges:
+                seen_ranges.add(key)
+                deduped.append(match)
+                if match.action != PIIAction.LOG:
+                    sanitized = (
+                        sanitized[: match.start] + match.replacement + sanitized[match.end :]
+                    )
+
+        return PIIScanResult(
+            original_text=text,
+            sanitized_text=sanitized,
+            matches=list(reversed(deduped)),
+            scan_source=source,
+        )
+
+    def _scan_native(self, text: str, source: str) -> PIIScanResult:
+        """Native scanner path with policy-preserving replacement behavior."""
+        if _native_pii_detect is None:
+            raise RuntimeError("Native PII scanner is not available")
+
+        native_matches = _native_pii_detect(text)
+        logger.debug("Native PII scanner found %d matches", len(native_matches))
+        if not native_matches:
+            return PIIScanResult(original_text=text, sanitized_text=text, scan_source=source)
+
+        matches: list[PIIMatch] = []
+        for native in native_matches:
+            pii_type = PIIType(native.pii_type)
+            action = self._get_action(pii_type)
+            replacement = self._apply_action(native.original, pii_type, action)
+            matches.append(
+                PIIMatch(
+                    pii_type=pii_type,
+                    original=native.original,
+                    start=native.start,
+                    end=native.end,
+                    replacement=replacement,
+                    action=action,
+                )
+            )
+
+        logger.debug("Converted native matches to PIIMatch with actions applied")
+
         sorted_matches = sorted(matches, key=lambda m: m.start, reverse=True)
         seen_ranges: set[tuple[int, int]] = set()
         deduped: list[PIIMatch] = []

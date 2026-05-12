@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pocketpaw-scanner"
+version = "0.1.0"
+description = "Native Rust scanner for injection detection, PII scanning, and content classification"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "PocketPaw Team", email = "hello@pocketpaw.ai" },
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "pocketpaw_scanner._core"
+bindings = "pyo3"
