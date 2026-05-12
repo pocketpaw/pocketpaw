@@ -12,6 +12,7 @@ chat agent stops sourcing prompts from ``ee.ripple``.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,9 @@ def agent_service_source() -> str:
 
 
 def test_no_cloud_pocket_prompt_constants(agent_service_source: str) -> None:
-    """No ``_CLOUD_POCKET_*`` prompt strings live in the cloud agent."""
+    """No pocket-prompt constants are *defined* in the cloud agent.
+    Imports from ``ee.ripple._pockets`` are fine — what we're guarding
+    against is duplication that drifts from the canonical source."""
     forbidden = (
         "_CLOUD_POCKET_INTERACTION_PROMPT",
         "_CLOUD_POCKET_CREATION_PROMPT",
@@ -36,8 +39,11 @@ def test_no_cloud_pocket_prompt_constants(agent_service_source: str) -> None:
         "_MCP_POCKET_BACKENDS",
     )
     for name in forbidden:
-        assert name not in agent_service_source, (
-            f"{name!r} reintroduced in agent_service.py — pocket prompts live in ee.ripple"
+        # Match `<name> =` at line start (assignment), not `import <name>`
+        # or `if x in <name>` which are legitimate consumers.
+        defn_pattern = rf"^{re.escape(name)}\s*=(?!=)"
+        assert not re.search(defn_pattern, agent_service_source, re.MULTILINE), (
+            f"{name!r} defined in agent_service.py — pocket prompts live in ee.ripple"
         )
 
 
@@ -56,26 +62,39 @@ def test_canonical_prompts_carry_required_features() -> None:
     from ee.ripple import (
         POCKET_CREATION_PROMPT_CLI,
         POCKET_CREATION_PROMPT_MCP,
+        POCKET_EDIT_SPECIALIST_PROMPT_CLI,
+        POCKET_EDIT_SPECIALIST_PROMPT_MCP,
         POCKET_INTERACTION_PROMPT_CLI,
         POCKET_INTERACTION_PROMPT_MCP,
         POCKET_SPECIALIST_PROMPT,
     )
 
-    # Calling-agent creation prompts: scope/canvas + STEP 0 delegate.
+    # Calling-agent creation prompts: scope/canvas + delegate-to-specialist
+    # framing. The two variants diverged: MCP got rewritten to a richer
+    # "TWO-PHASE DELEGATION" two-step plan; CLI kept the simple STEP 0 marker.
     for prompt in (POCKET_CREATION_PROMPT_MCP, POCKET_CREATION_PROMPT_CLI):
         assert "<pocket-creation>" in prompt
-        assert "DELEGATE TO SPECIALIST" in prompt
+    assert "TWO-PHASE DELEGATION" in POCKET_CREATION_PROMPT_MCP
+    assert "DELEGATE TO SPECIALIST" in POCKET_CREATION_PROMPT_CLI
 
-    # Interaction prompts unchanged.
+    # Calling-agent interaction prompts: slim — scope + delegation block.
+    # The heavy <interactive-by-default> / <pocket-workflow> content moved
+    # to the edit specialist's prompt.
     for prompt in (POCKET_INTERACTION_PROMPT_MCP, POCKET_INTERACTION_PROMPT_CLI):
+        assert "<pocket-interaction>" in prompt
+        assert "<current-pocket>" in prompt
+
+    # Edit specialist carries the heavy edit-time guidance.
+    for prompt in (POCKET_EDIT_SPECIALIST_PROMPT_MCP, POCKET_EDIT_SPECIALIST_PROMPT_CLI):
         assert "<interactive-by-default>" in prompt
         assert "<pocket-workflow>" in prompt
 
-    # Specialist prompt carries the heavy creation lift.
+    # Creation specialist carries the heavy create-time lift. The
+    # specialist runtime only attaches ``persist_pocket`` (validation is
+    # inline; list_pockets is handled by the parent agent before
+    # delegation), so that's the only tool the prompt names.
     assert "<interactive-by-default>" in POCKET_SPECIALIST_PROMPT
     assert "<specialist-workflow>" in POCKET_SPECIALIST_PROMPT
-    assert "list_pockets" in POCKET_SPECIALIST_PROMPT
-    assert "validate_spec" in POCKET_SPECIALIST_PROMPT
     assert "persist_pocket" in POCKET_SPECIALIST_PROMPT
 
     # Tool-surface separation in the calling-agent delegation blocks: MCP
@@ -128,7 +147,9 @@ class TestSpecialistDelegationBlock:
         from ee.ripple._pockets import POCKET_CREATION_PROMPT_MCP
 
         assert "pocket_specialist__create" in POCKET_CREATION_PROMPT_MCP
-        assert "DELEGATE TO SPECIALIST" in POCKET_CREATION_PROMPT_MCP
+        # The MCP variant uses the "TWO-PHASE DELEGATION" framing
+        # (think first, hand off). CLI keeps the older STEP-0 marker.
+        assert "TWO-PHASE DELEGATION" in POCKET_CREATION_PROMPT_MCP
 
     def test_cli_prompt_has_delegation_block(self):
         from ee.ripple._pockets import POCKET_CREATION_PROMPT_CLI
