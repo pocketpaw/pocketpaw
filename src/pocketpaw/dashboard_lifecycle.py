@@ -348,9 +348,16 @@ async def startup_event(
     # bridged-from-EE entries whose Rule no longer exists don't keep
     # firing crons forever (test fixtures, deleted rules, manual edits).
     try:
+        from pocketpaw.daemon.intentions import get_intention_store
         from pocketpaw.ee.automations.bridge import prune_orphan_auto_intentions
 
         prune_orphan_auto_intentions()
+        # Single line that tells the truth at startup-completion. The
+        # ``Loaded N intentions`` line from the IntentionStore singleton
+        # fires before pruning and can mislead readers when N includes
+        # orphans that get cleared a few lines later.
+        active = len(get_intention_store().get_enabled())
+        logger.info("Active intentions: %d", active)
     except Exception:
         logger.exception("Failed to prune orphan [auto] intentions; continuing")
 

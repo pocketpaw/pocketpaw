@@ -1,14 +1,24 @@
-"""Sessions domain — Pydantic request/response schemas + domain → wire mapper."""
+"""Sessions domain — Pydantic request/response schemas + domain → wire mapper.
+
+Recent change: added the ``surface`` field on ``CreateSessionRequest`` and
+``SessionResponse`` (and the wire dict) so the frontend can stamp / read the
+originating chat surface (``chat`` / ``files`` / ``pocket_creation``). Field
+is optional everywhere so legacy callers and pre-fix rows still validate.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from ee.cloud._core.time import iso_utc
 from ee.cloud.sessions.domain import Session
+
+# Surface tag values — kept in lockstep with ``models.session.SurfaceType``.
+Surface = Literal["chat", "files", "pocket_creation"]
+
 
 # ---------------------------------------------------------------------------
 # Requests
@@ -21,6 +31,10 @@ class CreateSessionRequest(BaseModel):
     group_id: str | None = None
     agent_id: str | None = None
     session_id: str | None = None  # Link to existing runtime session (e.g. "websocket_abc123")
+    # Originating UI surface — frontend stamps this so /chat sidebar can
+    # filter out pocket-creation / files-panel sessions. Optional; legacy
+    # callers can omit it.
+    surface: Surface | None = None
 
 
 class UpdateSessionRequest(BaseModel):
@@ -46,6 +60,7 @@ class SessionResponse(BaseModel):
     last_activity: datetime
     created_at: datetime
     deleted_at: datetime | None = None
+    surface: Surface | None = None
 
 
 def session_to_wire_dict(s: Session) -> dict[str, Any]:
@@ -64,6 +79,7 @@ def session_to_wire_dict(s: Session) -> dict[str, Any]:
         "pocket": s.pocket,
         "group": s.group,
         "agent": s.agent,
+        "surface": s.surface,
         "messageCount": s.message_count,
         "lastActivity": iso_utc(s.last_activity),
         "createdAt": iso_utc(s.created_at),

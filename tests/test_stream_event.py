@@ -264,6 +264,11 @@ class TestLoopThinkingIntegration:
             from pocketpaw.agents.loop import AgentLoop
 
             loop = AgentLoop()
+            # Pin agent_id so _get_router() returns the mocked router via the
+            # per-agent fast path (line 430-431 of loop.py) and skips the
+            # default-loop's backend-change rebuild — that rebuild calls
+            # ``old.stop()`` on the prior router and chokes on a MagicMock.
+            loop.agent_id = "test-agent"
 
             # Mock router to yield thinking + done
             router = MagicMock()
@@ -329,6 +334,9 @@ class TestLoopThinkingIntegration:
             from pocketpaw.agents.loop import AgentLoop
 
             loop = AgentLoop()
+            # See comment in test_loop_thinking_publishes_system_event re:
+            # agent_id pinning the per-agent fast path.
+            loop.agent_id = "test-agent"
 
             router = MagicMock()
 

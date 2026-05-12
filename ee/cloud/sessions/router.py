@@ -9,6 +9,7 @@ from ee.cloud.license import require_license
 from ee.cloud.sessions import service as sessions_service
 from ee.cloud.sessions.dto import (
     CreateSessionRequest,
+    Surface,
     UpdateSessionRequest,
     session_to_wire_dict,
 )
@@ -39,16 +40,24 @@ async def create_session(
 @router.get("", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
 async def list_sessions(
     agent_id: str | None = None,
+    surface: Surface | None = None,
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> list[dict]:
-    """List the user's sessions. ``?agent_id=X`` filters to DM sessions for
-    that agent (used by the frontend to resolve the DM room)."""
+    """List the user's sessions.
+
+    Query params:
+    - ``agent_id`` filters to DM sessions for that agent (used by the
+      frontend to resolve the DM room).
+    - ``surface`` filters to sessions stamped with the given originating
+      surface (``chat`` / ``files`` / ``pocket_creation``). Omitted →
+      every row, including legacy ``surface=None`` rows.
+    """
     ctx = sessions_service.legacy_ctx(user_id, workspace_id)
     if agent_id:
         items = await sessions_service.list_by_agent(ctx, workspace_id, agent_id)
     else:
-        items = await sessions_service.list_for_owner(ctx, workspace_id)
+        items = await sessions_service.list_for_owner(ctx, workspace_id, surface=surface)
     return [session_to_wire_dict(s) for s in items]
 
 

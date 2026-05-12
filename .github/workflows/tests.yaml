@@ -42,7 +42,6 @@ jobs:
         # changes and goes red when someone introduces a new regression:
         #   - #1079: tests/test_concurrency.py — list-membership flakes
         #   - #1080: tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
-        #   - #1081: tests/test_stream_event.py — thinking-event ordering
         # Remove the corresponding --deselect once each issue lands its fix.
         run: |
           uv run pytest tests/ \
@@ -52,8 +51,6 @@ jobs:
             --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel \
             --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency \
             --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch \
-            --deselect tests/test_stream_event.py::TestLoopThinkingIntegration::test_loop_thinking_publishes_system_event \
-            --deselect tests/test_stream_event.py::TestLoopThinkingIntegration::test_loop_thinking_not_in_memory \
             -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
