@@ -180,7 +180,7 @@ class Settings(BaseSettings):
     """PocketPaw settings with env and file support."""
 
     oauth_state_secret: str = Field(
-        default=get_or_generate_secret, env="POCKETPAW_OAUTH_STATE_SECRET"
+        default_factory=get_or_generate_secret, env="POCKETPAW_OAUTH_STATE_SECRET"
     )
     model_config = SettingsConfigDict(
         env_prefix="POCKETPAW_",
