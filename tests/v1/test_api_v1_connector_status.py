@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -32,14 +32,18 @@ class _FakeRegistry:
     Sticks to the subset of the real surface the connector router touches:
     get_definition, get_adapter, connect, disconnect, status, available,
     _definitions.
+
+    Uses the resolved connector name ``drive`` (not ``google_drive``) to
+    match the name-aliasing logic in the router (``_resolve_connector_name``
+    maps ``google_drive → drive``).
     """
 
     def __init__(self) -> None:
-        self._definitions = {"google_drive": _FakeDefn("google_drive")}
+        self._definitions = {"drive": _FakeDefn("drive")}
         self._instances: dict[str, MagicMock] = {}
         self.available = [
             {
-                "name": "google_drive",
+                "name": "drive",
                 "display_name": "Google Drive",
                 "type": "rest",
                 "icon": "drive",
@@ -55,8 +59,17 @@ class _FakeRegistry:
     async def connect(self, pocket_id: str, connector_name: str, config: dict):
         if connector_name not in self._definitions:
             return None
+        from pocketpaw.connectors.protocol import ConnectorHealth, ConnectorStatus
+
         adapter = MagicMock()
         adapter.execute = MagicMock()
+        adapter.health = AsyncMock(
+            return_value=ConnectorHealth(
+                ok=True,
+                status=ConnectorStatus.CONNECTED,
+                message="healthy",
+            )
+        )
         self._instances[f"{pocket_id}:{connector_name}"] = adapter
         return ConnectionResult(
             success=True,
@@ -91,6 +104,19 @@ def _reset_extras():
     connectors_module._STATUS_EXTRAS.clear()
     yield
     connectors_module._STATUS_EXTRAS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_lazy_connect(monkeypatch):
+    """Prevent _try_lazy_connect from hitting the real filesystem token store.
+
+    Tests that want to exercise the lazy-connect path can restore or mock
+    the token store explicitly.
+    """
+    async def _null_lazy_connect(reg, pid, cname):
+        return None
+
+    monkeypatch.setattr(connectors_module, "_try_lazy_connect", _null_lazy_connect)
 
 
 @pytest.fixture
@@ -188,9 +214,11 @@ class TestConnectorStatusRoute:
     def test_expired_state_is_surfaced(self, client: TestClient) -> None:
         """The helper accepts an 'expired' cred_state override so the OAuth
         refresh path can flip the UI badge without reconnecting."""
+        # Use the resolved connector name ("drive") because the route
+        # resolves "google_drive" → "drive" before looking up extras.
         connectors_module.record_connector_event(
             pocket_id="p1",
-            connector_name="google_drive",
+            connector_name="drive",
             cred_state="expired",
         )
         status = client.get("/api/v1/connectors/google_drive/status?pocket_id=p1").json()

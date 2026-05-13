@@ -1,6 +1,4 @@
 # OAuth Integration routes — authorize + callback for Google, Spotify, etc.
-# Created: 2026-03-31
-# Extracted from dashboard.py so these work in both dashboard and serve modes.
 
 from __future__ import annotations
 
@@ -31,21 +29,40 @@ OAUTH_SCOPES: dict[str, list[str]] = {
     ],
 }
 
+# Map OAuth service names to connector registry names.
+# OAuth uses "google_drive" but connectors use "drive" — this bridges the two.
+SERVICE_TO_CONNECTOR: dict[str, str] = {
+    "google_gmail": "gmail",
+    "google_calendar": "gcalendar",
+    "google_drive": "drive",
+    "google_docs": "gdocs",
+    "spotify": "spotify",
+}
+
+# Reverse map: connector registry name -> OAuth service name
+CONNECTOR_TO_SERVICE: dict[str, str] = {v: k for k, v in SERVICE_TO_CONNECTOR.items()}
+
 
 @router.get("/oauth/integrations/authorize")
 async def oauth_authorize(service: str = Query("google_gmail")):
-    """Start OAuth flow — redirects user to provider consent screen."""
+    """Start OAuth flow — redirects user to provider consent screen.
+
+    Accepts either an OAuth service name (``google_drive``) or a connector
+    name (``drive``). Connector names are resolved via ``CONNECTOR_TO_SERVICE``.
+    """
     from fastapi.responses import RedirectResponse
 
     from pocketpaw.config import Settings
 
     settings = Settings.load()
 
-    scopes = OAUTH_SCOPES.get(service)
+    # Accept both service names (google_drive) and connector names (drive).
+    resolved = CONNECTOR_TO_SERVICE.get(service, service)
+    scopes = OAUTH_SCOPES.get(resolved)
     if not scopes:
         raise HTTPException(status_code=400, detail=f"Unknown service: {service}")
 
-    if service == "spotify":
+    if resolved == "spotify":
         provider = "spotify"
         client_id = settings.spotify_client_id
         if not client_id:
@@ -66,7 +83,7 @@ async def oauth_authorize(service: str = Query("google_gmail")):
 
     manager = OAuthManager()
     redirect_uri = f"http://localhost:{settings.web_port}/api/v1/oauth/integrations/callback"
-    state = f"{provider}:{service}"
+    state = f"{provider}:{resolved}"
 
     auth_url = manager.get_auth_url(
         provider=provider,

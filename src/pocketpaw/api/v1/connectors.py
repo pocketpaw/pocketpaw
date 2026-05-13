@@ -24,12 +24,36 @@ router = APIRouter(tags=["Connectors"], dependencies=[Depends(require_scope("con
 # Singleton registry — lazily initialized.
 _registry: ConnectorRegistry | None = None
 
+# Alternate name lookup: some UIs pass "google_drive" but the registry key is "drive".
+_ALT_NAMES: dict[str, str] = {
+    "google_drive": "drive",
+    "google_gmail": "gmail",
+    "google_calendar": "gcalendar",
+    "google_docs": "gdocs",
+}
+
 
 def _get_registry() -> ConnectorRegistry:
     global _registry
     if _registry is None:
         _registry = ConnectorRegistry(Path("connectors"))
     return _registry
+
+
+def _resolve_connector_name(name: str) -> str:
+    """Resolve aliased connector names to their registry key."""
+    return _ALT_NAMES.get(name, name)
+
+
+# Connector registry name → OAuth token store service name.
+# Used by lazy-connect and disconnect to read / delete the right tokens.
+_CONNECTOR_TO_TOKEN_SERVICE: dict[str, str] = {
+    "drive": "google_drive",
+    "gmail": "google_gmail",
+    "gcalendar": "google_calendar",
+    "gdocs": "google_docs",
+    "spotify": "spotify",
+}
 
 
 # ── Request / Response models ────────────────────────────────────────────────
@@ -170,21 +194,52 @@ async def get_connector_status(
     A pocket_id the caller doesn't have access to will simply return
     ``connected=false`` without leaking whether the connector exists for
     another pocket.
+
+    Unlike the initial implementation (which returned a stale ``cred_state``
+    cached at connect-time), this version:
+
+    1. Resolves alternate names (``google_drive`` → ``drive``).
+    2. Lazy-connects if the OAuth token store has valid credentials but no
+       in-memory adapter exists yet (handles server restarts and delayed
+       adapter creation after the OAuth callback).
+    3. Calls ``health()`` on the adapter for a real-time ``cred_state``
+       instead of returning a stale cached value.
     """
+    resolved_name = _resolve_connector_name(connector_name)
     reg = _get_registry()
-    defn = reg.get_definition(connector_name)
+    defn = reg.get_definition(resolved_name)
     if not defn:
         from fastapi import HTTPException
 
-        raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
+        raise HTTPException(status_code=404, detail=f"Connector '{resolved_name}' not found")
 
-    adapter = reg.get_adapter(pocket_id, connector_name)
+    adapter = reg.get_adapter(pocket_id, resolved_name)
+
+    # Lazy connect: if no adapter in memory but the OAuth token store
+    # has credentials for this connector, try to instantiate now.
+    if adapter is None:
+        adapter = await _try_lazy_connect(reg, pocket_id, resolved_name)
+
+    extras = _STATUS_EXTRAS.get(_extras_key(pocket_id, resolved_name), {})
     connected = adapter is not None
-
-    extras = _STATUS_EXTRAS.get(_extras_key(pocket_id, connector_name), {})
-    cred_state = extras.get("cred_state") or ("valid" if connected else "missing")
     last_sync = extras.get("last_sync")
     scope = extras.get("scope", "")
+
+    if connected:
+        # Real-time health check so cred_state reflects actual token validity.
+        try:
+            health = await adapter.health()
+            cred_state = "valid" if health.ok else "expired"
+        except Exception:
+            cred_state = extras.get("cred_state", "valid")
+        # Persist the updated cred_state for the next poll.
+        record_connector_event(
+            pocket_id=pocket_id,
+            connector_name=resolved_name,
+            cred_state=cred_state,
+        )
+    else:
+        cred_state = extras.get("cred_state", "missing")
 
     return ConnectorStatusResponse(
         name=connector_name,
@@ -194,6 +249,51 @@ async def get_connector_status(
         cred_state=cred_state,
         scope=scope,
     )
+
+
+async def _try_lazy_connect(
+    reg: ConnectorRegistry,
+    pocket_id: str,
+    connector_name: str,
+) -> Any | None:
+    """Try to create an adapter if the OAuth token store has credentials.
+
+    This handles two scenarios:
+    - Server restart: adapters are in-memory, tokens are on disk.
+    - OAuth callback: tokens were saved but no adapter was registered.
+    """
+    # Only connectors with OAuth clients in the token store qualify.
+    # Check if the token store has saved tokens for this connector.
+    try:
+        from pocketpaw.clients.token_store import TokenStore
+
+        store = TokenStore()
+
+        service = _CONNECTOR_TO_TOKEN_SERVICE.get(connector_name)
+        if service is None:
+            return None  # Not an OAuth connector — can't lazy connect.
+
+        tokens = store.load(service)
+        if tokens is None:
+            return None  # No saved tokens — nothing to connect with.
+
+        # Tokens exist on disk. Try to connect the adapter.
+        config: dict[str, Any] = {"scope": " ".join(tokens.scopes) if tokens.scopes else ""}
+        result = await reg.connect(pocket_id, connector_name, config)
+        if result and result.success:
+            record_connector_event(
+                pocket_id=pocket_id,
+                connector_name=connector_name,
+                cred_state="valid",
+                scope=config["scope"],
+            )
+            logger.info("Lazy-connected %s for pocket %s (tokens found on disk)", connector_name, pocket_id)
+            return reg.get_adapter(pocket_id, connector_name)
+
+        return None
+    except Exception as exc:
+        logger.debug("Lazy connect failed for %s: %s", connector_name, exc)
+        return None
 
 
 @router.get("/connectors", response_model=list[ConnectorInfo])
@@ -217,6 +317,7 @@ async def list_connectors(pocket_id: str = "default"):
 @router.get("/connectors/{connector_name}", response_model=ConnectorDetailResponse)
 async def get_connector_detail(connector_name: str, pocket_id: str = "default"):
     """Get connector details including available actions and required credentials."""
+    connector_name = _resolve_connector_name(connector_name)
     reg = _get_registry()
     defn = reg.get_definition(connector_name)
     if not defn:
@@ -262,20 +363,16 @@ async def connect_connector(req: ConnectRequest):
     """Connect to a data source with credentials."""
     from datetime import datetime
 
+    connector_name = _resolve_connector_name(req.connector_name)
     reg = _get_registry()
-    result = await reg.connect(req.pocket_id, req.connector_name, req.config)
+    result = await reg.connect(req.pocket_id, connector_name, req.config)
     if result is None:
         return ConnectResponse(success=False, message=f"Unknown connector: {req.connector_name}")
     if result.success:
-        # Track status without retaining the config payload itself. We
-        # deliberately do NOT record anything from req.config here — only
-        # the grant descriptor if present. The registry layer has already
-        # handed the secret material to the adapter; the status side-table
-        # stays secret-free.
         scope = str(req.config.get("scope") or req.config.get("scopes") or "")
         record_connector_event(
             pocket_id=req.pocket_id,
-            connector_name=req.connector_name,
+            connector_name=connector_name,
             cred_state="valid",
             last_sync=datetime.now(UTC).isoformat(),
             scope=scope,
@@ -289,13 +386,17 @@ async def connect_connector(req: ConnectRequest):
 
 @router.post("/connectors/disconnect", response_model=ConnectResponse)
 async def disconnect_connector(req: DisconnectRequest):
-    """Disconnect a data source."""
+    """Disconnect a data source and delete stored OAuth tokens."""
+    connector_name = _resolve_connector_name(req.connector_name)
     reg = _get_registry()
-    ok = await reg.disconnect(req.pocket_id, req.connector_name)
+    ok = await reg.disconnect(req.pocket_id, connector_name)
     if ok:
+        # Delete stored OAuth tokens so the connector stays disconnected
+        # after server restart and doesn't lazy-connect on the next status poll.
+        _delete_oauth_tokens(connector_name)
         record_connector_event(
             pocket_id=req.pocket_id,
-            connector_name=req.connector_name,
+            connector_name=connector_name,
             cred_state="missing",
             scope="",
         )
@@ -305,13 +406,28 @@ async def disconnect_connector(req: DisconnectRequest):
     )
 
 
+def _delete_oauth_tokens(connector_name: str) -> None:
+    """Delete OAuth tokens for a connector from the token store."""
+    try:
+        from pocketpaw.clients.token_store import TokenStore
+
+        store = TokenStore()
+        service = _CONNECTOR_TO_TOKEN_SERVICE.get(connector_name)
+        if service:
+            store.delete(service)
+            logger.info("Deleted OAuth tokens for %s (%s)", connector_name, service)
+    except Exception as exc:
+        logger.debug("Could not delete OAuth tokens for %s: %s", connector_name, exc)
+
+
 @router.post("/connectors/execute", response_model=ExecuteResponse)
 async def execute_connector_action(req: ExecuteRequest):
     """Execute an action on a connected data source."""
     from datetime import datetime
 
+    connector_name = _resolve_connector_name(req.connector_name)
     reg = _get_registry()
-    adapter = reg.get_adapter(req.pocket_id, req.connector_name)
+    adapter = reg.get_adapter(req.pocket_id, connector_name)
     if not adapter:
         return ExecuteResponse(
             success=False,
@@ -322,7 +438,8 @@ async def execute_connector_action(req: ExecuteRequest):
     if result.success:
         record_connector_event(
             pocket_id=req.pocket_id,
-            connector_name=req.connector_name,
+            connector_name=connector_name,
+            cred_state="valid",
             last_sync=datetime.now(UTC).isoformat(),
         )
     return ExecuteResponse(

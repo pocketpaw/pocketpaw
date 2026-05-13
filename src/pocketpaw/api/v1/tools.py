@@ -58,24 +58,36 @@ async def list_tools():
     except Exception:
         logger.debug("MCP manager not available for tools listing", exc_info=True)
 
-    # OAuth connection status — check which services have saved tokens.
+    # OAuth connection status — check each service's token validity.
+    # Uses OAuthManager.get_valid_token() which auto-refreshes expired
+    # access tokens and only returns None when the refresh token is also
+    # invalid or missing.
     oauth_status: dict[str, str] = {}
     try:
+        from pocketpaw.clients.oauth import OAuthManager
         from pocketpaw.clients.token_store import TokenStore
         from pocketpaw.config import Settings
 
         settings = Settings.load()
-        store = TokenStore()
+        manager = OAuthManager(TokenStore())
         has_google_creds = bool(settings.google_oauth_client_id)
+        has_spotify_creds = bool(settings.spotify_client_id)
 
         for svc in ("google_gmail", "google_calendar", "google_drive", "google_docs", "spotify"):
-            tokens = store.load(svc)
-            if tokens and tokens.access_token:
-                oauth_status[svc] = "connected"
-            elif svc.startswith("google_") and not has_google_creds:
+            if svc.startswith("google_") and not has_google_creds:
                 oauth_status[svc] = "not_configured"
-            else:
-                oauth_status[svc] = "disconnected"
+                continue
+            if svc == "spotify" and not has_spotify_creds:
+                oauth_status[svc] = "not_configured"
+                continue
+
+            token = await manager.get_valid_token(
+                service=svc,
+                client_id=settings.google_oauth_client_id or "",
+                client_secret=settings.google_oauth_client_secret or "",
+                provider="spotify" if svc == "spotify" else "google",
+            )
+            oauth_status[svc] = "connected" if token else "disconnected"
     except Exception:
         logger.debug("OAuth status check failed", exc_info=True)
 
