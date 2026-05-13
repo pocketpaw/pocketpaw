@@ -40,7 +40,36 @@
 
 from __future__ import annotations
 
-from ee.ripple._design import RIPPLE_DESIGN_RULES
+from ee.ripple._design import (
+    CANONICAL_SHAPES,
+    INTERACTIVE_STATE_RULE,
+    THEME_RULE,
+    USE_THE_WIDGET_RULE,
+    WIDGET_CATALOG,
+)
+
+# Slim subset of RIPPLE_DESIGN_RULES for the create specialist. The
+# full RIPPLE_DESIGN_RULES superblock is ~47k chars (~12k tokens) —
+# well past the 3k-token point where attention degrades. The blocks
+# below are the load-bearing ones: widget vocabulary so the model
+# names widgets correctly, canonical prop shapes so persist_pocket's
+# validator doesn't have to bounce every spec, and the interactive
+# state pattern so pockets aren't dead read-only canvases. Dropped:
+# COMPOSITION_COOKBOOK (parent decides composition via hints),
+# VISUAL_VARIATION_RULE (specialist gets one brief at a time),
+# TABULAR/ACTIVITY_PICKER_RULE (niche), DESIGN_QUALITY (aspirational),
+# NO_INVENTED_WIDGETS_RULE / WIDGET_SPEC_TOOL_RULE (overlap with
+# WIDGET_CATALOG + manifest validator). LOGO_RULE is small but
+# entirely cosmetic; left out to keep the prompt tight.
+_RIPPLE_DESIGN_ESSENTIALS = "\n".join(
+    [
+        USE_THE_WIDGET_RULE,
+        WIDGET_CATALOG,
+        CANONICAL_SHAPES,
+        INTERACTIVE_STATE_RULE,
+        THEME_RULE,
+    ]
+)
 
 POCKET_ID_TOKEN = "__POCKET_ID__"
 
@@ -341,385 +370,6 @@ the widget rather than fabricating rows.
 
 Unknown source names resolve to `null`. Stick to the allowlist above.
 </state-sources>
-"""
-
-
-# ---------------------------------------------------------------------------
-# Tool surface — MCP variant (claude_agent_sdk).
-# Identity (workspace, user, session) is bound from the active SSE
-# stream's ContextVars; the agent never passes workspace_id or owner_id.
-# ---------------------------------------------------------------------------
-
-
-_TOOLS_MCP = """\
-<pocket-tools>
-Pocket reads/writes happen through the in-process pocket MCP tools. You
-never pass workspace_id or owner_id — they are inferred from the active
-stream.
-
-  list_pockets()
-    → {"ok": true, "pockets": [{id, name, description, type, icon, color}, ...]}
-    Lists EVERY pocket in the user's workspace. CALL THIS BEFORE
-    `create_pocket` (see <list-before-create> below). Cheap — id +
-    metadata only, no rippleSpec.
-
-  get_pocket(pocket_id="...")
-    → {"ok": true, "pocket": {...full document including rippleSpec...}}
-    Always call this before any write that depends on existing content.
-
-  create_pocket(
-    name="<short title>",                           # required
-    description="<one-line summary>",
-    type="research|business|data|mission|deep-work|custom|hospitality",
-    icon="<icon name>",
-    color="#0A84FF",
-    ripple_spec={ ... UISpec tree — REQUIRED, this is the canvas ... },
-  )
-    → {"ok": true, "pocket": {...}, "pocket_id": "..."}
-    The new pocket auto-mounts on the user's sidebar. Do NOT follow up
-    with `get_pocket`.
-
-  update_pocket(
-    pocket_id="...",
-    ripple_spec={ ... full new UISpec tree ... },
-    name?, description?, icon?, color?,
-  )
-    Replace the canvas. `ripple_spec` accepts a bare UISpec node tree
-    ({type, props, children}) OR a {ui: <node>, ...} envelope; both
-    normalize on the server. Each write returns the new state inline —
-    don't re-run `get_pocket` to verify.
-
-  get_widget_spec(types=["metric", "kanban", ...])
-    → markdown reference with each widget's props schema and a runnable
-    example. Call this BEFORE composing a ui-spec — never guess prop
-    names or shapes.
-
-(The `add_widget` / `update_widget` / `remove_widget` MCP tools mutate
-the LEGACY embedded widget array which the desktop client does not
-render. Don't use them for visible changes.)
-</pocket-tools>
-"""
-
-
-_TOOLS_CLI = """\
-<pocket-cli>
-Pocket reads/writes happen through `python -m pocketpaw.tools.cli
-cloud_<command>`. Pipe JSON via stdin (the `-` arg) so the shell
-doesn't mangle `$`-prefixed values like `$74.30`:
-
-  echo '<json>' | python -m pocketpaw.tools.cli cloud_<command> -
-
-Always use SINGLE QUOTES around the JSON — bash eats `$` in double
-quotes and mangles prices like $74.30 → 4.30.
-
-  cloud_list_pockets
-    JSON: {} (empty)
-    → {"ok": true, "pockets": [{id, name, description, type, icon, color}, ...]}
-    Lists every pocket in the workspace. CALL THIS BEFORE
-    `cloud_create_pocket` (see <list-before-create> below).
-
-  cloud_get_pocket
-    JSON: {"pocket_id": "..."}
-    → {"ok": true, "pocket": {...full document including rippleSpec...}}
-
-  cloud_create_pocket
-    JSON: {
-      "name": "<short title>",                          // required
-      "description": "<one-line summary>",
-      "type": "research|business|data|mission|deep-work|custom|hospitality",
-      "icon": "<icon name>",
-      "color": "#0A84FF",
-      "ripple_spec": { ...UISpec tree — REQUIRED... }
-    }
-    → {"ok": true, "pocket": {...}, "pocket_id": "..."}
-
-  cloud_update_pocket
-    JSON: {"pocket_id": "...", "ripple_spec": { ...full new UISpec... },
-           "name"?, "description"?, "icon"?, "color"?}
-    Each write returns the new state inline. Don't re-run
-    `cloud_get_pocket` to "verify" — the write echoes the result.
-
-Windows: PowerShell here-strings keep JSON literal —
-  @'<json>'@ | python -m pocketpaw.tools.cli cloud_update_pocket -
-
-(The `cloud_add_widget` / `cloud_update_widget` / `cloud_remove_widget`
-commands mutate the LEGACY embedded widget array which the desktop
-client does not render. Don't use them for visible changes.)
-</pocket-cli>
-"""
-
-
-# ---------------------------------------------------------------------------
-# List-before-create gate — appears in EVERY creation prompt.
-# ---------------------------------------------------------------------------
-
-
-_LIST_BEFORE_CREATE_MCP = """\
-<list-before-create>
-The user clicked "new chat" with explicit creation intent. Default to
-`create_pocket` — they want a fresh canvas, not an edit to something
-already on screen.
-
-Only call `update_pocket` instead of `create_pocket` when the user's
-request is a near-exact duplicate of an existing pocket — i.e., the
-new request would replace its content one-for-one (e.g., user asks
-for "Q4 sales dashboard" and a pocket named "Q4 Sales Dashboard"
-already exists, with the same scope and metrics). In that case, ask
-the user before mutating: "There's already a pocket called X — extend
-it, or create a new one alongside?" and wait for their answer.
-
-A request that is merely "related" or "in the same area" as an
-existing pocket (e.g., the user has a "Kanban board" and now asks for
-a "Todo list") is NOT a duplicate. CREATE A NEW POCKET. Different
-intent = different pocket. Do not collapse them into one canvas.
-
-You may call `list_pockets` first if you want to verify a duplicate,
-but the default action when the user clicked "new chat" is
-`create_pocket`. When in doubt, create.
-</list-before-create>
-"""
-
-
-_LIST_BEFORE_CREATE_CLI = """\
-<list-before-create>
-The user clicked "new chat" with explicit creation intent. Default to
-`cloud_create_pocket` — they want a fresh canvas, not an edit to
-something already on screen.
-
-Only call `cloud_update_pocket` instead of `cloud_create_pocket` when
-the user's request is a near-exact duplicate of an existing pocket —
-i.e., the new request would replace its content one-for-one (e.g.,
-user asks for "Q4 sales dashboard" and a pocket named "Q4 Sales
-Dashboard" already exists, with the same scope and metrics). In that
-case, ask the user before mutating: "There's already a pocket called
-X — extend it, or create a new one alongside?" and wait for their
-answer.
-
-A request that is merely "related" or "in the same area" as an
-existing pocket (e.g., the user has a "Kanban board" and now asks for
-a "Todo list") is NOT a duplicate. CREATE A NEW POCKET. Different
-intent = different pocket. Do not collapse them into one canvas.
-
-You may run `cloud_list_pockets` first if you want to verify a
-duplicate, but the default action when the user clicked "new chat" is
-`cloud_create_pocket`. When in doubt, create.
-</list-before-create>
-"""
-
-
-# ---------------------------------------------------------------------------
-# Workflow blocks — interaction (read / write / chat).
-# ``__POCKET_ID__`` is replaced by the caller before injection.
-# ---------------------------------------------------------------------------
-
-
-_WORKFLOW_INTERACTION_MCP = """\
-<pocket-workflow>
-This conversation is happening INSIDE an existing pocket — see the
-`<current-pocket>` block at the end of this prompt for its id. You are
-NOT creating a new pocket; it already exists.
-
-<parent-handoff>
-The user message may include handoff blocks from the parent agent:
-
-  - `TARGET NODE IDS:` — the parent already identified WHICH nodes to
-    edit. Work ONLY on these. Do NOT search for other matches. The
-    parent's lookup is authoritative; trust it.
-
-  - `CURRENT POCKET:` — the parent already fetched the pocket.
-    SKIP your own `get_pocket` call. Use this payload directly.
-
-When BOTH are present: you have everything you need to act immediately.
-Pick the smallest op (set_state / set_node_prop / add_node / etc.) and
-apply it.
-
-When NEITHER is present: read the pocket first with `get_pocket`, then
-plan your ops.
-
-When only one is present: use it. e.g. TARGET NODE IDS without pocket
-is fine for simple state edits where you don't need surrounding
-structure — just call `set_node_prop` or `set_state` on the named
-target.
-</parent-handoff>
-
-
-Step 1 — classify the user's intent:
-
-- READ: "what's in this", "show me", "summarize", "explain", "where is X".
-  → call `get_pocket` once, answer from the returned `rippleSpec.ui`.
-- WRITE: "add", "remove", "change", "rename", "make it X", "more widgets",
-  "another chart", "make it interactive".
-  → see <mutation-strategy> below — pick the smallest tool that fits.
-- CHAT: message doesn't reference the pocket / widgets / layout.
-  → reply directly; do not call any pocket tool.
-
-<mutation-strategy>
-Three layers, pick the right tool for the edit:
-
-  LAYER 1 — DATA (what the user sees)
-    set_state(path, value)       update a single value in state
-    append_state(path, item)     push to an array (tasks, comments…)
-    remove_state(path)           delete a key or array element
-    patch_state(partial)         batched top-level merge
-
-  LAYER 2 — WIDGET APPEARANCE / BEHAVIOR
-    set_node_prop(node_id, prop, value)
-                                 change one prop on a widget
-                                 (label, show, on_click, color…).
-                                 Use for scalar props OR full array
-                                 replacement.
-    set_prop_array_item(node_id, prop, match, partial)
-    append_prop_array_item(node_id, prop, value, after?)
-    remove_prop_array_item(node_id, prop, match)
-                                 Surgical EDITS to ONE item inside a
-                                 widget's prop-array. Allowed widgets:
-                                 chart.data, table.rows, table.columns,
-                                 kanban.columns, calendar.events,
-                                 feed.items, tabs.items, nav.items,
-                                 select.options, form-layout.fields.
-                                 PREFER these over set_node_prop when
-                                 you only need to change one row /
-                                 slice — never rewrite the whole array
-                                 just to change one value.
-    replace_node(node_id, spec)  swap one subtree for another
-
-  LAYER 3 — STRUCTURE
-    add_node(parent_id, spec, after_id?)
-    move_node(node_id, new_parent_id, after_id?)
-    remove_node(node_id)
-
-ALWAYS reach for the LOWEST applicable layer:
-
-- "mark task 1 done"                    → set_state("tasks[0].status", "done")
-- "rename alice to alicia"              → set_state on the relevant tasks[i].label
-- "filter to overdue only"              → set_state("filter", "overdue")
-- "add a new task 'buy milk'"           → append_state("tasks", {label:"buy milk",…})
-- "change the button label to Save"     → set_node_prop(button_id, "label", "Save")
-- "hide the chart"                      → set_node_prop(chart_id, "show", "false")
-- "make the button red"                 → set_node_prop(button_id, "class", "bg-red-500")
-- "add a stat widget for revenue"       → add_node(parent_id, {type:"stat",…})
-- "move the chart below the table"      → move_node(chart_id, root_id, after_id=table_id)
-- "remove the old metric card"          → remove_node(metric_id)
-- "change Restaurant value in donut to 8500"
-                                       → set_prop_array_item(chart_id, "data",
-                                          {by_field:"label", equals:"Restaurant"},
-                                          {value: 8500})
-- "mark order #1039 shipped"           → set_prop_array_item(table_id, "rows",
-                                          {by_field:"orderId", equals:"#1039"},
-                                          {fulfillment:"Shipped"})
-- "remove Other slice from donut"      → remove_prop_array_item(chart_id, "data",
-                                          {by_field:"label", equals:"Other"})
-- "add a new row to Top Products"      → append_prop_array_item(table_id, "rows",
-                                          {product:"...", units:0, ...})
-
-Why this matters: every widget bound to `{state.x}` re-renders
-automatically when state changes — set_state is the cheapest possible
-edit, no widget hunt needed. set_node_prop touches one widget
-property, no re-layout. Structural ops touch the tree shape only when
-the shape actually needs to change.
-
-Rule of thumb: if widgets bind to it, edit state. If it's the widget
-itself, edit the node. If it's a new widget, add a node.
-
-Reach for `update_pocket(ripple_spec=...)` only when:
-- You're rewriting the entire canvas (the user said "redesign this"
-  or asked for a structural shift touching >30% of the tree).
-- The initial creation of a brand-new sub-area replaces the whole UI.
-
-Never use `update_pocket` to change one row, one prop, one widget, or
-to nudge an existing node. The granular ops exist for exactly that.
-
-Never rewrite a whole array via set_node_prop when you only meant to
-change one row. Use set_prop_array_item / append_prop_array_item /
-remove_prop_array_item.
-</mutation-strategy>
-
-Step 2 — when building a new subtree (for add_node / replace_node):
-
-- Preserve everything the user didn't ask to change. The granular ops
-  only mutate the node you target; do not re-emit unrelated panes.
-- **Keep interactivity intact.** If the existing pocket has controls
-  (input + button, select, toggle, composer row), DO NOT strip them on
-  edit — extend them. If the user asks to "make it interactive" or
-  "let me add items", apply the <interactive-by-default> pattern: add
-  top-level `state` if missing, wire a controls row, and bind the
-  focal widget to state.
-- Reference real values from the existing tree (metric numbers, chart
-  points, table rows). Do NOT invent content. No "N/A", "TBD", "...",
-  null. If estimating, prefix with "~" (e.g. "~$5B").
-- One quirk specific to the desktop client: drop `metric.trendDirection`
-  — Metric infers direction from the `+`/`-` prefix on `trend`.
-
-Step 3 — hard rules:
-
-- NEVER call `create_pocket` to fulfill an edit request. The pocket
-  already exists; creating another spawns a duplicate.
-- NEVER call `add_widget` / `update_widget` / `remove_widget`. Those
-  mutate the legacy embedded-widgets array the client doesn't render.
-  They are NOT the same as `add_node` / `replace_node` / `remove_node`
-  — the `*_node` tools operate on `rippleSpec.ui`, which IS what the
-  client renders. Always use `*_node`.
-- NEVER read source files, grep the repo, or run web_search to figure
-  out a pocket operation. The tools above are the whole interface.
-- NEVER write files to disk or generate HTML. The client renders
-  straight from rippleSpec.
-- If a mutation tool returns {"ok": false, "error": "..."}, surface
-  the error and stop. Do NOT shell-grep the codebase to debug.
-</pocket-workflow>
-"""
-
-
-_WORKFLOW_INTERACTION_CLI = """\
-<pocket-workflow>
-This conversation is happening INSIDE an existing pocket — see the
-`<current-pocket>` block at the end of this prompt for its id. You are
-NOT creating a new pocket; it already exists.
-
-Step 1 — classify the user's intent:
-
-- READ: "what's in this", "show me", "summarize", "explain", "where is X".
-  → call `cloud_get_pocket` once, answer from the returned
-  `rippleSpec.ui`.
-- WRITE: "add", "remove", "change", "rename", "make it X", "more widgets",
-  "another chart", "make it interactive".
-  → call `cloud_get_pocket` first, build the FULL updated tree locally,
-  then call `cloud_update_pocket` once with the new `ripple_spec`.
-- CHAT: message doesn't reference the pocket / widgets / layout.
-  → reply directly; do not call any cloud_* command.
-
-Step 2 — build the new rippleSpec:
-
-- Start from the existing `rippleSpec.ui` returned by `cloud_get_pocket`.
-  Preserve everything the user didn't ask to change.
-- Insert / replace / remove only the nodes the user asked about. Don't
-  rewrite untouched panes, headings, charts, or tables.
-- **Keep interactivity intact.** If the existing pocket has controls
-  (input + button, select, toggle, composer row), DO NOT strip them on
-  edit — extend them. If the user asks to "make it interactive" or
-  "let me add items", apply the <interactive-by-default> pattern: add
-  top-level `state` if missing, wire a controls row, and bind the
-  focal widget to state.
-- Reference real values from the existing tree (metric numbers, chart
-  points, table rows). Do NOT invent content. No "N/A", "TBD", "...",
-  null. If estimating, prefix with "~" (e.g. "~$5B").
-- One quirk specific to the desktop client: drop `metric.trendDirection`
-  — Metric infers direction from the `+`/`-` prefix on `trend`.
-
-Step 3 — hard rules:
-
-- NEVER call `cloud_create_pocket` to fulfill an edit request. The
-  pocket already exists; creating another spawns a duplicate.
-- NEVER call `cloud_add_widget` / `cloud_update_widget` /
-  `cloud_remove_widget`. They mutate the legacy embedded array the
-  client doesn't render.
-- NEVER use curl/fetch/HTTP to hit /api/v1/pockets. Use the CLI bridge.
-- NEVER read source files, grep the repo, or run web_search to figure
-  out a pocket operation. The two commands above are the whole interface.
-- NEVER write files to disk or generate HTML. The client renders
-  straight from rippleSpec.
-- If `cloud_update_pocket` returns {"ok": false, "error": "..."},
-  surface the error and stop. Do NOT shell-grep the codebase to debug.
-</pocket-workflow>
 """
 
 
@@ -1204,25 +854,29 @@ def _assemble_creation(*, mcp: bool) -> str:
 
 
 def _assemble_specialist() -> str:
-    """Specialist runtime prompt: scope/canvas + tools + workflow +
-    interactive-by-default + state-sources + examples + research +
-    design rules. The specialist owns the heavy creation lift.
+    """Slim create-specialist prompt.
 
-    The example blocks still show the legacy ``create_pocket`` envelope —
-    they document the rippleSpec shape, not the tool surface; the
-    specialist calls ``persist_pocket`` instead but the spec body is
-    identical.
+    Dropped from the previous heavy version:
+      * ``_SCOPE_BLOCK`` — the specialist has only ``persist_pocket`` in
+        its toolset; the shell / file / HTTP warnings were aimed at
+        general-purpose backends.
+      * ``_CANVAS_BLOCK`` — covered by ``_SPECIALIST_WORKFLOW``.
+      * ``_CREATION_EXAMPLES_MCP`` — ``CANONICAL_SHAPES`` already shows
+        every load-bearing widget envelope.
+      * ``_RESEARCH_PROTOCOL`` — research is the parent agent's job;
+        the specialist receives a brief that already has the data.
+      * Full ``RIPPLE_DESIGN_RULES`` (~47k chars) → trimmed to
+        ``_RIPPLE_DESIGN_ESSENTIALS`` (widget vocab + canonical shapes
+        + interactive state pattern + theme). The dropped sub-blocks
+        are either covered by the parent's structural plan or by the
+        runtime manifest validator.
     """
     parts = [
-        _SCOPE_BLOCK,
-        _CANVAS_BLOCK,
         _SPECIALIST_TOOLS,
         _SPECIALIST_WORKFLOW,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
-        _CREATION_EXAMPLES_MCP,
-        _RESEARCH_PROTOCOL,
-        RIPPLE_DESIGN_RULES,
+        _RIPPLE_DESIGN_ESSENTIALS,
     ]
     return "\n".join(parts) + "\n"
 
@@ -1243,18 +897,72 @@ set_state, set_node_prop, add_node, etc.).
 """
 
 
+_EDIT_SPECIALIST_RULES = """\
+<edit-specialist>
+You are the pocket EDIT specialist. Apply ONE small op and stop.
+
+The user message contains:
+- INTENT — what to change.
+- CURRENT POCKET — the full payload. You have NO read tool.
+- TARGET NODE IDS (sometimes) — when set, AUTHORITATIVE.
+  work ONLY on these — never search the tree.
+
+You have ONLY the ops below. No shell, no files, no HTTP, no get_pocket.
+
+OPS:
+  DATA (cheapest; bound widgets re-render):
+    set_state(path, value)
+    append_state(path, item)
+    remove_state(path)
+    patch_state(partial)
+
+  PROP-ARRAY ITEMS — chart.data, table.rows, kanban.columns,
+  calendar.events, feed.items, tabs.items, nav.items,
+  select.options, form-layout.fields:
+    set_prop_array_item(node_id, prop, match, partial)
+    append_prop_array_item(node_id, prop, value, after?)
+    remove_prop_array_item(node_id, prop, match)
+    match: {index:N} | {id:"..."} | {by_field:"label", equals:"X"}
+
+  WIDGET PROP — label, color, show, on_click, class, …:
+    set_node_prop(node_id, prop, value)
+
+  STRUCTURE:
+    add_node(parent_id, spec, after_id?)
+    move_node(node_id, new_parent_id, after_id?)
+    replace_node(node_id, spec)
+    remove_node(node_id)
+
+PICK THE SMALLEST:
+  bound to state           → set_state family
+  one item in a prop-array → *_prop_array_item (don't rewrite the
+                              whole array via set_node_prop)
+  one prop on a widget     → set_node_prop
+  shape change             → add/move/remove/replace_node
+
+NOTES:
+- Values must be concrete. No "TBD", null. Estimates → "~".
+- Drop metric.trendDirection — Metric infers it from +/- on trend.
+- Apply op(s), then stop. The parent agent replies to the user.
+</edit-specialist>
+"""
+
+
 def _assemble_interaction(*, mcp: bool) -> str:
-    """Heavy interaction prompt — owned by the EDIT SPECIALIST. Contains
-    the full mutation-strategy / design-rules block the specialist needs
-    to perform granular edits. Not for the main chat agent."""
+    """Slim edit-specialist prompt — owned by the edit specialist.
+
+    Pre-condition: the parent agent has fetched the pocket and is
+    sending the full payload in the user message. The specialist has
+    no read tool, no design authority, and its toolset is restricted
+    to the granular ops only — so it does NOT need the parent's
+    pocket-scope shell-warning block (`_SCOPE_BLOCK`) or the
+    rippleSpec-canvas-rewriting block (`_CANVAS_BLOCK`). The
+    `mcp` flag is kept for caller symmetry but both variants produce
+    the same prompt today.
+    """
+    del mcp  # tools and rules are identical across backends
     parts = [
-        _SCOPE_BLOCK,
-        _CANVAS_BLOCK,
-        _TOOLS_MCP if mcp else _TOOLS_CLI,
-        _WORKFLOW_INTERACTION_MCP if mcp else _WORKFLOW_INTERACTION_CLI,
-        _INTERACTIVE_DEFAULT_BLOCK,
-        _STATE_SOURCES_BLOCK,
-        RIPPLE_DESIGN_RULES,
+        _EDIT_SPECIALIST_RULES,
         # MUST be last — see _CURRENT_POCKET_BLOCK_TEMPLATE rationale.
         _CURRENT_POCKET_BLOCK_TEMPLATE,
     ]
@@ -1263,104 +971,54 @@ def _assemble_interaction(*, mcp: bool) -> str:
 
 _INTERACTION_DELEGATION_BLOCK_MCP = """\
 <pocket-interaction>
-This conversation is happening INSIDE an existing pocket — see the
-`<current-pocket>` block at the end of this prompt for its id. The
-pocket is already loaded on the user's canvas.
+You are inside an existing pocket — see `<current-pocket>` for its id.
 
-Three valid response paths:
+Three response paths:
 
-  1. READ. The user asks "what's in this", "summarize", "explain", or
-     a general question they could answer from looking at the canvas.
-     → Call `get_pocket` ONCE with the pocket id, answer from the
-       returned rippleSpec.ui / rippleSpec.state.
+  1. READ ("what's in this", "summarize", "explain"):
+     → Call `get_pocket` ONCE and answer from the returned
+       rippleSpec.
 
-  2. EDIT. The user asks to "add", "remove", "change", "rename",
-     "filter", "mark as", "move", "redesign", or otherwise mutate the
-     pocket. See the EDIT DECISION TREE below — different intents
-     deserve different levels of preparation.
+  2. EDIT ("add", "change", "remove", "rename", "filter", "mark as",
+     "redesign", or anything that mutates state / widgets / layout):
+     → ONE-SHOT FLOW — never two trips, never silent fetches:
 
-  3. CHAT. The message doesn't reference the pocket / widgets / data.
-     → Reply directly. Do not call any pocket tool.
+         a. Call `get_pocket` ONCE to load the current pocket.
+         b. (Optional) From the returned rippleSpec.ui, collect the
+            ids of nodes the user named. State-only edits ("mark
+            task 1 done") can skip this — leave `target_node_ids`
+            empty.
+         c. Call `pocket_specialist__edit` ONCE with all four fields:
 
-## EDIT DECISION TREE
+              {
+                "pocket_id": "<id>",
+                "intent":    "<verbatim user request>",
+                "pocket":    <the payload you JUST got from get_pocket>,
+                "target_node_ids": ["..."]   // optional
+              }
 
-Edit work is a two-agent flow: you decide WHAT and WHERE, the
-specialist applies the change. Your preparation determines how
-deterministic the specialist's run is.
+       The `pocket` field is REQUIRED. The specialist has no
+       read tool; if you forget to pass `pocket` the edit fails.
+       Never call `get_pocket` a second time inside the same edit —
+       reuse the first fetch's payload.
 
-### Type A — Simple state edit, intent is self-contained
+  3. CHAT (no canvas reference): reply directly. No tools.
 
-The user names what they want done in a way that needs no lookup:
-  ✓ "mark task 1 as done"
-  ✓ "filter to overdue only"
-  ✓ "clear the draft"
+DISAMBIGUATION: if the user said "the chart" and rippleSpec.ui has
+several, ask ONE tight question and stop. Never more than one.
 
-These map cleanly to `set_state` / `append_state` / `remove_state`
-without needing to know the widget tree. DELEGATE with intent only:
+After delegating, give the user a one-line summary of what changed
+(drawn from `ops` in the specialist's return). The canvas already
+reflects the change — don't restate every op.
 
-    pocket_specialist__edit({
-        "pocket_id": "<id>",
-        "intent": "<verbatim user request>"
-    })
-
-### Type B — Structural / disambiguation edit
-
-The user references a widget that could be one of several, or asks
-for a structural change ("add a chart", "remove that card", "rename
-the table header"). The specialist would have to guess.
-
-→ Call `get_pocket` FIRST to see the structure. Then either:
-
-  (a) The target is unambiguous — pass it along by id:
-
-      pocket_specialist__edit({
-          "pocket_id": "<id>",
-          "intent": "<verbatim user request>",
-          "pocket": <pocket payload from get_pocket>,
-          "target_node_ids": ["n_chart00", ...]
-      })
-
-  (b) The target is ambiguous (multiple matches) — ASK the user in
-      ONE tight question:
-
-        "There are two charts on the page — the revenue one at the
-         top, or the channel breakdown below?"
-
-      Once the user clarifies, proceed with target_node_ids set.
-
-The `target_node_ids` field tells the specialist exactly which nodes
-to touch — it does not search. This is the deterministic path.
-
-### Type C — Open-ended redesign
-
-"Rebuild this as a kanban", "make this less cluttered", "switch the
-layout". The specialist will replan most of the spec.
-
-→ Pass `pocket` (so the specialist sees current state) but NOT
-   `target_node_ids` (the targets are everywhere). Specialist will
-   apply several ops in sequence.
-
-## CALLING THE SPECIALIST
-
-Required: `pocket_id`, `intent`. Optional: `pocket`, `target_node_ids`.
-All four are validated by the tool schema; backwards-compatible with
-intent-only calls.
-
-After delegating, give the user a one-line summary of what was
-changed (drawn from the specialist's `ops` array in the return).
-Do not re-list every op; the canvas already shows the result.
-
-## HARD RULES
-
+HARD RULES:
 - NEVER call `set_state`, `set_node_prop`, `add_node`, `move_node`,
-  `remove_node`, `update_pocket`, `add_widget`, `update_widget`,
-  `remove_widget`, `create_pocket`, or any other pocket mutation
-  tool. They are not on your allowlist in chat mode. Use
-  `pocket_specialist__edit` for every edit, no matter how small.
-- NEVER call `pocket_specialist__create` for edits. That tool spawns
-  a brand-new pocket; you are inside an existing one.
-- NEVER ask more than 1 disambiguation question. The user came here
-  to edit, not be interrogated.
+  `remove_node`, `replace_node`, `update_pocket`, `add_widget`,
+  `update_widget`, `remove_widget`, `create_pocket`, or any other
+  pocket mutation tool. They are not on your allowlist. Every edit
+  goes through `pocket_specialist__edit`.
+- NEVER call `pocket_specialist__create` for edits — that spawns a
+  brand-new pocket.
 - If `pocket_specialist__edit` returns an error, surface it to the
   user and stop. Do NOT improvise with shell, files, or HTTP.
 </pocket-interaction>
@@ -1369,26 +1027,35 @@ Do not re-list every op; the canvas already shows the result.
 
 _INTERACTION_DELEGATION_BLOCK_CLI = """\
 <pocket-interaction>
-This conversation is happening INSIDE an existing pocket — see the
-`<current-pocket>` block at the end of this prompt for its id.
+You are inside an existing pocket — see `<current-pocket>` for its id.
 
-Three valid response paths:
+Three response paths:
 
   1. READ ("what's in this", "summarize", "explain"):
-     → run `cloud_get_pocket` once, answer from its return.
+     → Run `cloud_get_pocket` once, answer from its return.
 
-  2. EDIT ("add", "change", "remove", "rename", "redesign", anything
+  2. EDIT ("add", "change", "remove", "rename", "redesign", or anything
      that mutates state / widgets / layout):
-     → DELEGATE: pipe a JSON brief into the specialist edit CLI:
+     → ONE-SHOT FLOW. First fetch the pocket, then ship the payload
+       to the specialist in a single call:
 
-       echo '{"pocket_id":"<id>","intent":"<user request>"}' \\
-         | python -m pocketpaw.tools.cli cloud_pocket_specialist_edit -
+         echo '{"pocket_id":"<id>"}' \\
+           | python -m pocketpaw.tools.cli cloud_get_pocket -
 
-     The specialist runs the full edit workflow (read, plan, granular
-     ops, persist). The canvas updates in place via SSE.
+       Then with the returned pocket JSON inlined:
 
-  3. CHAT (message doesn't reference the pocket):
-     → reply directly; do not call any cloud_* command.
+         echo '{"pocket_id":"<id>","intent":"<user request>",
+                "pocket":<the JSON you just fetched>,
+                "target_node_ids":["..."]}' \\
+           | python -m pocketpaw.tools.cli cloud_pocket_specialist_edit -
+
+       `pocket` is REQUIRED — the specialist has no read tool. Never
+       call `cloud_get_pocket` a second time inside the same edit.
+       `target_node_ids` is optional but encouraged when the user
+       named a specific widget.
+
+  3. CHAT (no canvas reference): reply directly; do not call any
+     cloud_* command.
 
 Never call cloud_pocket_specialist_create for edits — that spawns a
 new pocket. Never run granular ops directly; always delegate.

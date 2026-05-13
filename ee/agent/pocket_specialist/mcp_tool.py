@@ -253,12 +253,14 @@ def build_pocket_specialist_server() -> Any:
     @tool(
         "edit",
         (
-            "Edit an existing pocket from a natural-language intent. The "
-            "specialist reads the current pocket, picks the smallest set "
-            "of granular ops (set_state for data, set_node_prop for "
-            "widget appearance, add/move/remove_node for structure), and "
-            "applies them. Each op persists and pushes its own SSE event "
-            "so the canvas updates in place. Returns "
+            "Edit an existing pocket in ONE LLM round-trip. Call "
+            "get_pocket first, then pass the result here as `pocket` "
+            "(required). The specialist has no read tool — without "
+            "`pocket` the edit fails. It picks the smallest set of "
+            "granular ops (set_state for data, set_node_prop for "
+            "widget appearance, add/move/remove_node for structure) "
+            "and applies them. Each op persists and pushes its own "
+            "SSE event so the canvas updates in place. Returns "
             "{ok, pocket_id, ops, duration_ms}."
         ),
         {
@@ -282,27 +284,25 @@ def build_pocket_specialist_server() -> Any:
                 "pocket": {
                     "type": "object",
                     "description": (
-                        "OPTIONAL handoff. The current pocket view "
-                        "(rippleSpec + metadata) you already fetched. "
-                        "When passed, the specialist skips its own "
-                        "get_pocket call. Pass this when you read the "
-                        "pocket to disambiguate or confirm the edit."
+                        "REQUIRED. The current pocket view (rippleSpec "
+                        "+ metadata) you fetched with get_pocket. The "
+                        "specialist reads this directly and has no way "
+                        "to fetch it itself — pass it on EVERY edit "
+                        "call, no exceptions."
                     ),
                 },
                 "target_node_ids": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "OPTIONAL handoff. Node ids you identified as "
-                        "edit targets after reading the pocket. When "
-                        "set, the specialist works ONLY on these nodes "
-                        "and does not search. Best practice for any "
-                        "edit that needs disambiguation (the user said "
-                        "'the chart' and there are three)."
+                        "OPTIONAL but encouraged. Node ids you "
+                        "identified as edit targets after reading the "
+                        "pocket. When set, the specialist works ONLY "
+                        "on these nodes and does not search."
                     ),
                 },
             },
-            "required": ["pocket_id", "intent"],
+            "required": ["pocket_id", "intent", "pocket"],
             "additionalProperties": False,
         },
     )

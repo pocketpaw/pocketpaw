@@ -354,10 +354,9 @@ def _build_user_message(input: PocketSpecialistCreateInput) -> str:
 def _build_edit_user_message(input: PocketSpecialistEditInput) -> str:
     """Build the edit specialist's first user message.
 
-    When the parent already read the pocket and/or identified the
-    target nodes, surface that in the body of the message. The
-    specialist's system prompt has matching rules for skipping its
-    own ``get_pocket`` call and working only on the targeted nodes.
+    The parent agent is contractually required to send the current
+    ``pocket`` payload — the specialist has no read tool. The message
+    always inlines the pocket, plus optional target node ids.
     """
     import json as _json
 
@@ -370,27 +369,19 @@ def _build_edit_user_message(input: PocketSpecialistEditInput) -> str:
     if input.target_node_ids:
         lines.append("")
         lines.append(
-            "TARGET NODE IDS (from parent agent — these are already "
-            "the right nodes; do not search for others):"
+            "TARGET NODE IDS (from parent agent — authoritative, "
+            "work ONLY on these; do not search for others):"
         )
         for nid in input.target_node_ids:
             lines.append(f"  - {nid}")
     if input.pocket is not None:
-        # Compact JSON to keep token count tight. The specialist prompt
-        # tells it where to look.
         try:
             payload = _json.dumps(input.pocket, separators=(",", ":"))
         except Exception:
             payload = str(input.pocket)
         lines.append("")
-        lines.append(
-            "CURRENT POCKET (parent agent already read it — skip get_pocket, use this directly):"
-        )
+        lines.append("CURRENT POCKET (use directly — there is no get_pocket tool):")
         lines.append(payload)
-    elif not input.target_node_ids:
-        # No payload, no targets — tell the specialist to read first.
-        lines.append("")
-        lines.append("Read the pocket first with get_pocket, then apply ops.")
     return "\n".join(lines)
 
 
@@ -477,6 +468,29 @@ async def run_edit_specialist(
         input.intent[:80],
         backend_name,
     )
+
+    # Parent contract: pocket payload is required. The specialist has no
+    # read tool — without the payload it cannot proceed. Fail fast so
+    # the parent can re-issue with the prefetched pocket rather than
+    # burning an LLM call that is doomed to noop.
+    if input.pocket is None:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        log.warning(
+            "[pocket-specialist:edit] missing pocket payload — refusing run (pocket_id=%s)",
+            input.pocket_id,
+        )
+        return PocketSpecialistEditOutput(
+            ok=False,
+            pocket_id=input.pocket_id,
+            ops=[],
+            duration_ms=duration_ms,
+            backend_used=backend_name,
+            error=(
+                "pocket payload missing — the edit specialist has no read "
+                "tool. Parent agent must call get_pocket once and pass the "
+                "result as `pocket` on every pocket_specialist__edit call."
+            ),
+        )
 
     # Push a chat-stream tool_start so the desktop client shows
     # "Editing pocket..." while the inner specialist works. Each granular

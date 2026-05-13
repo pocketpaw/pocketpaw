@@ -79,12 +79,18 @@ class TestActivityPickerRule:
 
         assert "NEVER a `table`" in ACTIVITY_PICKER_RULE or "NEVER a table" in ACTIVITY_PICKER_RULE
 
-    def test_activity_picker_in_ripple_design_rules(self) -> None:
-        """The block must be wired into the assembled prompt the
-        specialist actually reads."""
-        from ee.ripple._design import RIPPLE_DESIGN_RULES
+    def test_activity_picker_reachable_via_widget_help(self) -> None:
+        """The activity-picker rule is no longer eager in
+        RIPPLE_DESIGN_RULES (it was paid for by 100% of calls and
+        used by maybe 10%). It now lives in OPTIONAL_DESIGN_SECTIONS
+        and is fetched on demand by widget_help() / get_widget_spec.
+        Verify the lookup path returns the block."""
+        from ee.ripple._design import OPTIONAL_DESIGN_SECTIONS
+        from ee.ripple._inline_core import widget_help
 
-        assert "ACTIVITY PICKER" in RIPPLE_DESIGN_RULES
+        assert "activity-picker" in OPTIONAL_DESIGN_SECTIONS
+        out = widget_help(types=["activity-picker"])
+        assert "ACTIVITY PICKER" in out
 
 
 class TestTableCap:

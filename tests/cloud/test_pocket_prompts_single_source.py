@@ -84,10 +84,13 @@ def test_canonical_prompts_carry_required_features() -> None:
         assert "<pocket-interaction>" in prompt
         assert "<current-pocket>" in prompt
 
-    # Edit specialist carries the heavy edit-time guidance.
+    # Edit specialist prompt is now slim — the parent agent ships the
+    # pocket payload and the specialist needs only a granular-op cheat
+    # sheet. Heavy design/interactive blocks are intentionally absent.
     for prompt in (POCKET_EDIT_SPECIALIST_PROMPT_MCP, POCKET_EDIT_SPECIALIST_PROMPT_CLI):
-        assert "<interactive-by-default>" in prompt
-        assert "<pocket-workflow>" in prompt
+        assert "<edit-specialist>" in prompt
+        assert "<interactive-by-default>" not in prompt
+        assert "<pocket-workflow>" not in prompt
 
     # Creation specialist carries the heavy create-time lift. The
     # specialist runtime only attaches ``persist_pocket`` (validation is

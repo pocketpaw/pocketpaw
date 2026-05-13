@@ -324,8 +324,10 @@ def test_non_subagent_backend_pocket_id_inlines_interaction_prompt():
     block = build_context_block(ctx_edit, backend_name="codex_cli")
     # The pocket id was substituted into the interaction prompt.
     assert "pocket-abc" in block
-    # Heavy interaction guidance IS present.
-    assert "<pocket-workflow>" in block
+    # Interaction guidance IS present. (Block tag was renamed from the
+    # legacy <pocket-workflow> to <pocket-interaction> when the prompt
+    # was slimmed to a one-shot delegation flow.)
+    assert "<pocket-interaction>" in block
     # Delegation rule is NOT.
     assert "<pocket-delegation>" not in block
 

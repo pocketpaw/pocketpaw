@@ -770,14 +770,16 @@ def make_remove_prop_array_item_tool(
 def make_edit_pocket_tools(
     *, pocket_id: str, capture: dict[str, Any] | None = None
 ) -> list[StructuredTool]:
-    """Bundle the full edit-specialist tool set for one pocket.
+    """Bundle the edit-specialist tool set for one pocket.
 
-    Order is the order the LLM sees them; we lead with the read tool
-    so the agent is prompted toward "get then mutate" rather than
-    blind writes.
+    The parent agent fetches the pocket and passes it in the user
+    message. The specialist therefore has NO read tool — it cannot
+    re-fetch and never needs to: one-shot edit, no round-trips.
+    ``make_get_pocket_tool`` is still exported for any external caller
+    that needs a read-only view but is intentionally not part of this
+    bundle.
     """
     return [
-        make_get_pocket_tool(pocket_id=pocket_id),
         make_set_state_tool(pocket_id=pocket_id, capture=capture),
         make_append_state_tool(pocket_id=pocket_id, capture=capture),
         make_remove_state_tool(pocket_id=pocket_id, capture=capture),

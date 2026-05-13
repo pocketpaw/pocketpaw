@@ -82,9 +82,10 @@ class TestEditToolFactories:
 
         tools = make_edit_pocket_tools(pocket_id="p1")
         names = [t.name for t in tools]
-        # The 10 granular ops the edit specialist gets.
+        # Granular ops the edit specialist gets. NO get_pocket — the
+        # parent agent fetches the pocket and passes it in the user
+        # message; the specialist has no read tool by design.
         for expected in (
-            "get_pocket",
             "set_state",
             "append_state",
             "remove_state",
@@ -96,6 +97,11 @@ class TestEditToolFactories:
             "remove_node",
         ):
             assert expected in names, f"missing tool: {expected}"
+        # Explicit absence — adding get_pocket back here is a regression.
+        assert "get_pocket" not in names, (
+            "edit specialist must not have a read tool; parent agent passes "
+            "the pocket payload in the user message instead"
+        )
 
     def test_pocket_id_is_closed_over_not_exposed_to_llm(self) -> None:
         """The LLM should NEVER see pocket_id as an argument — it's
@@ -227,7 +233,15 @@ class TestRunEditSpecialistSuccessFlag:
     completed. Before this guard, ``run_edit_specialist`` returned
     ``ok=True`` even when the inner backend errored mid-stream — the
     caller had no way to tell "no work needed" from "specialist
-    crashed"."""
+    crashed".
+
+    All tests pass a non-None ``pocket`` — the runtime fail-fasts when
+    pocket is missing (covered by TestRuntimeFailsFastWithoutPocket in
+    test_edit_handoff.py), so success-flag tests need to clear that
+    gate first.
+    """
+
+    _POCKET_FIXTURE = {"_id": "p1", "rippleSpec": {"state": {}, "ui": {"type": "flex"}}}
 
     @pytest.mark.asyncio
     async def test_ok_true_when_stream_completes(self) -> None:
@@ -253,7 +267,11 @@ class TestRunEditSpecialistSuccessFlag:
             return_value=fake_backend,
         ):
             out = await run_edit_specialist(
-                PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1"),
+                PocketSpecialistEditInput(
+                    pocket_id="p1",
+                    intent="rename row 1",
+                    pocket=self._POCKET_FIXTURE,
+                ),
                 workspace_id="w1",
                 user_id="u1",
                 settings=Settings(),
@@ -290,7 +308,11 @@ class TestRunEditSpecialistSuccessFlag:
             return_value=fake_backend,
         ):
             out = await run_edit_specialist(
-                PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1"),
+                PocketSpecialistEditInput(
+                    pocket_id="p1",
+                    intent="rename row 1",
+                    pocket=self._POCKET_FIXTURE,
+                ),
                 workspace_id="w1",
                 user_id="u1",
                 settings=Settings(),
@@ -319,18 +341,38 @@ class TestPromptSeparation:
         # Pocket-scope guardrails still apply:
         assert "<pocket-scope>" in POCKET_INTERACTION_PROMPT_MCP
 
-    def test_edit_specialist_prompt_is_heavy(self) -> None:
-        """The specialist's prompt MUST carry the full mutation rules
-        + design block — it's the agent actually doing edits."""
-        from ee.ripple import POCKET_EDIT_SPECIALIST_PROMPT_MCP
-
-        assert "<mutation-strategy>" in POCKET_EDIT_SPECIALIST_PROMPT_MCP
-        # Should be substantially larger than the main agent's prompt.
-        from ee.ripple import POCKET_INTERACTION_PROMPT_MCP
-
-        assert len(POCKET_EDIT_SPECIALIST_PROMPT_MCP) > len(POCKET_INTERACTION_PROMPT_MCP) * 5, (
-            "edit specialist prompt should dwarf the thin main-agent prompt"
+    def test_edit_specialist_prompt_is_slim(self) -> None:
+        """The specialist's prompt is deliberately small now — the
+        parent agent sends the pocket payload and (optionally) target
+        node ids, so the specialist needs only a granular-op cheat
+        sheet, not the full design-rules block. Big prompts caused the
+        model to hallucinate read tools and redesign the canvas."""
+        from ee.ripple import (
+            POCKET_EDIT_SPECIALIST_PROMPT_MCP,
+            POCKET_INTERACTION_PROMPT_MCP,
         )
+
+        # The block the slim prompt is built around must exist:
+        assert "<edit-specialist>" in POCKET_EDIT_SPECIALIST_PROMPT_MCP
+        # And the heavy design block + mutation-strategy block are GONE:
+        assert "<mutation-strategy>" not in POCKET_EDIT_SPECIALIST_PROMPT_MCP
+        # RIPPLE_DESIGN_RULES is no longer spliced in.
+        assert "VISUAL VARIATION" not in POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+        # Hard ceiling — the whole point of this change is to keep the
+        # specialist prompt well under the size that caused trouble
+        # (the old prompt was ~40k chars). 12k chars (~3k tokens) is a
+        # comfortable upper bound for the slim version; raise this only
+        # if a deliberate addition justifies it.
+        assert len(POCKET_EDIT_SPECIALIST_PROMPT_MCP) < 12_000, (
+            f"edit specialist prompt is {len(POCKET_EDIT_SPECIALIST_PROMPT_MCP)} "
+            "chars; the one-shot redesign expects it to stay slim"
+        )
+
+        # Still in the same order of magnitude as the parent (both are
+        # slim now) — the specialist no longer dwarfs the parent.
+        ratio = len(POCKET_EDIT_SPECIALIST_PROMPT_MCP) / max(len(POCKET_INTERACTION_PROMPT_MCP), 1)
+        assert ratio < 5, f"specialist/parent prompt ratio is {ratio:.1f}x; should be small now"
 
 
 def test_edit_tool_bundle_includes_prop_array_item_tools():

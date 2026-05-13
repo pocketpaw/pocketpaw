@@ -1,34 +1,22 @@
-"""Regression: every prompt that builds rippleSpec teaches the $source mechanism.
+"""Regression: every prompt that AUTHORS a fresh rippleSpec teaches the
+``$source`` mechanism.
 
-Post-Task-11: the calling-agent creation prompts only carry the STEP 0
-delegation block, so the heavy ``<state-sources>`` / ``<creation-examples>``
-content moved onto the specialist's own prompt
-(``POCKET_SPECIALIST_PROMPT``). Interaction prompts still need it because
-they edit existing pockets directly.
+Post one-shot edit redesign: the parent interaction prompts delegate
+(no authoring) and the edit specialist prompt only applies granular
+ops to a payload the parent already fetched (no fresh authoring) — so
+``<state-sources>`` is only required on the create specialist's prompt,
+which is the one drafting brand-new ``rippleSpec`` from scratch.
 """
 
 from __future__ import annotations
 
-import pytest
-
-from ee.ripple._pockets import (
-    POCKET_INTERACTION_PROMPT_CLI,
-    POCKET_INTERACTION_PROMPT_MCP,
-    POCKET_SPECIALIST_PROMPT,
-)
-
-_PROMPTS_WITH_SOURCES = [
-    POCKET_SPECIALIST_PROMPT,
-    POCKET_INTERACTION_PROMPT_MCP,
-    POCKET_INTERACTION_PROMPT_CLI,
-]
-_IDS = ["specialist", "interact-mcp", "interact-cli"]
+from ee.ripple._pockets import POCKET_SPECIALIST_PROMPT
 
 
-@pytest.mark.parametrize("prompt", _PROMPTS_WITH_SOURCES, ids=_IDS)
-def test_prompts_that_build_specs_contain_state_sources_block(prompt: str) -> None:
-    """Specialist (creates) and interaction (edits) agents must know about
-    $source — they're the ones authoring rippleSpec."""
+def test_specialist_prompt_contains_state_sources_block() -> None:
+    """The create specialist is the only agent authoring fresh rippleSpec
+    from scratch, so it must know about $source markers."""
+    prompt = POCKET_SPECIALIST_PROMPT
     assert "<state-sources>" in prompt
     assert "</state-sources>" in prompt
     assert "workspace.pockets" in prompt
@@ -36,10 +24,12 @@ def test_prompts_that_build_specs_contain_state_sources_block(prompt: str) -> No
     assert '"$source"' in prompt
 
 
-def test_state_sources_block_appears_before_examples_in_specialist() -> None:
-    """Agents anchor on examples; the rule must come first so the example
-    can demonstrate it. Specialist prompt only — interaction prompts have
-    no examples block, calling-agent creation prompts have neither."""
+def test_state_sources_block_appears_before_canonical_shapes_in_specialist() -> None:
+    """Agents anchor on concrete props; the state-sources rule must come
+    first so the canonical-shapes block can demonstrate $source seeds
+    in context. The slim specialist prompt dropped the standalone
+    examples block — CANONICAL_SHAPES carries the worked examples now,
+    so we anchor the ordering check to it instead."""
     sources_idx = POCKET_SPECIALIST_PROMPT.index("<state-sources>")
-    examples_idx = POCKET_SPECIALIST_PROMPT.index("<creation-examples>")
-    assert sources_idx < examples_idx
+    shapes_idx = POCKET_SPECIALIST_PROMPT.index("CANONICAL SHAPES")
+    assert sources_idx < shapes_idx
