@@ -956,6 +956,92 @@ wheels = [
 ]
 
 [[package]]
+name = "composio"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "composio-client" },
+    { name = "json-schema-to-pydantic" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "pysher" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/99/27/f24c1aac8f5ac92fd667b87561e4e2d11d54fc8e428ef58bd148cf909099/composio-0.13.0.tar.gz", hash = "sha256:edab729a9cf79e7050220d54132f23fb3f7b891231f86060a2da8c4a50fdfd51", size = 203436, upload-time = "2026-05-07T15:39:06.463Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e6/aa/aacc2388b4d5f1eaa2057a1e2865e4938aa090113a82710daefda8c66b3b/composio-0.13.0-py3-none-any.whl", hash = "sha256:adf6cf77190518397c76f6ed0524d2b73e882728e703c2330b59951a5eae0cc6", size = 138105, upload-time = "2026-05-07T15:38:51.333Z" },
+]
+
+[[package]]
+name = "composio-claude-agent-sdk"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "claude-agent-sdk" },
+    { name = "composio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/11/44332f8937559877381e1ac11ccdd2405a1aabede666a6493cb7a35fb6dc/composio_claude_agent_sdk-0.13.0.tar.gz", hash = "sha256:513e449caadefc7ac063b685e8df3d19266ce4a02632fdc01440c6f89d0ee176", size = 5920, upload-time = "2026-05-07T15:39:08.912Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/85/6e4ca770e43f6cde6762a5bde6c00e9d57eaf44974a73dfd272b33fe7e15/composio_claude_agent_sdk-0.13.0-py3-none-any.whl", hash = "sha256:bc7f8d4ea480ed76f89a8e9283a28e03b4ea6fc95b5bdff659c8d7617978e7d7", size = 6866, upload-time = "2026-05-07T15:38:55.18Z" },
+]
+
+[[package]]
+name = "composio-client"
+version = "1.37.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/75/14/d0a1cb2fb202357e4e49bdbd017d96131f0e821d136943074e9f9933436c/composio_client-1.37.0.tar.gz", hash = "sha256:b9f5c4b97863f98714634b88f61139aceef11274ee74a6fda59afc4095c5d094", size = 242029, upload-time = "2026-05-07T03:09:36.419Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/98/cfc8d6c6208e00e015db59278855831d77b73730cb4e574c330fcfd53d4a/composio_client-1.37.0-py3-none-any.whl", hash = "sha256:bb228899c294c348cd982bcea9a33773bd65185108e863d41465e51890872bc5", size = 278188, upload-time = "2026-05-07T03:09:34.69Z" },
+]
+
+[[package]]
+name = "composio-google-adk"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "composio" },
+    { name = "google-adk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0a/6f/87b4573194cab53991fa66f27d873e72b72b37694b6cecec8e84ff28ef48/composio_google_adk-0.13.0.tar.gz", hash = "sha256:7a1d83e0a567238a6840a6431bcc59992fcedda550cf07e0ac3112a604470e51", size = 2501, upload-time = "2026-05-07T15:39:11.295Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/50/669a4c4157d55f7ff83069c4943797188ead78de83b12218a6dd3963f7f3/composio_google_adk-0.13.0-py3-none-any.whl", hash = "sha256:9d3315645511082b1b0298724bc915406df630c7e9bc76b18bdb4c1fd8f8e638", size = 2810, upload-time = "2026-05-07T15:39:00.111Z" },
+]
+
+[[package]]
+name = "composio-langgraph"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "composio" },
+    { name = "langgraph" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/5d/61da80c31e686447a01bf591ea23cefa6c89a5f611a0f42af86f0d686a52/composio_langgraph-0.13.0.tar.gz", hash = "sha256:eb0572685b65f5ad3a3bbe06c6616a1c210f9bdb0f1cc84da42ef219e2ad0c34", size = 4149, upload-time = "2026-05-07T15:39:12.861Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/4d/70f7d51de992bacb1635d2284026a3bee7fad42add9de609e84ba3ff62ae/composio_langgraph-0.13.0-py3-none-any.whl", hash = "sha256:3477f63185af0d9a475a9e4c1c6ef7ffa179ee3429743491b1d18163b92d6f20", size = 4386, upload-time = "2026-05-07T15:39:02.165Z" },
+]
+
+[[package]]
+name = "composio-openai-agents"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "composio" },
+    { name = "openai-agents" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/71/d7/89a488fb584072dc58704020d535544c77d41d99657d25848207b687cb8d/composio_openai_agents-0.13.0.tar.gz", hash = "sha256:6458457002eee1ed429e73e361e8b87202e6630b8147753478c6ff3d7f22cba1", size = 3865, upload-time = "2026-05-07T15:39:15.056Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/97/762ff08f604217872232cd47c43837aa4c4ef6a9dae9f7225f5b192a23c8/composio_openai_agents-0.13.0-py3-none-any.whl", hash = "sha256:6fb8d68413d2f7cb4b0f787f938646691a85d63ccf614520d543fdeb879be4ef", size = 4217, upload-time = "2026-05-07T15:39:05.26Z" },
+]
+
+[[package]]
 name = "courlan"
 version = "1.3.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2707,6 +2793,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d3/59/322338183ecda247fb5d1763a6cbe46eff7222eaeebafd9fa65d4bf5cb11/jmespath-1.1.0.tar.gz", hash = "sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d", size = 27377, upload-time = "2026-01-22T16:35:26.279Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl", hash = "sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64", size = 20419, upload-time = "2026-01-22T16:35:24.919Z" },
+]
+
+[[package]]
+name = "json-schema-to-pydantic"
+version = "0.4.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/d8/423895b918706c80db1cee679c13fbe810200b9a9d9a9442c7a58d35c3f2/json_schema_to_pydantic-0.4.11.tar.gz", hash = "sha256:35448ed711a28dd33396b095c8492939b4925aa30eb31942e9b8e08d04279465", size = 56597, upload-time = "2026-03-09T20:53:55.692Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/64/7cfeb8c6d2a5e73e0f8d732032aa62be9a7724c04beb461d677de0b4beb3/json_schema_to_pydantic-0.4.11-py3-none-any.whl", hash = "sha256:da2ccc39d070ee03dbcf0517d16720e3e33f7aa8d61257ace09af8c51bd46348", size = 17842, upload-time = "2026-03-09T20:53:54.576Z" },
 ]
 
 [[package]]
@@ -4668,6 +4766,11 @@ drive = [
 enterprise = [
     { name = "beanie" },
     { name = "boto3" },
+    { name = "composio" },
+    { name = "composio-claude-agent-sdk" },
+    { name = "composio-google-adk" },
+    { name = "composio-langgraph" },
+    { name = "composio-openai-agents" },
     { name = "fastapi-users", extra = ["beanie", "oauth"] },
     { name = "google-api-python-client" },
     { name = "google-auth" },
@@ -4833,6 +4936,11 @@ requires-dist = [
     { name = "chromadb", marker = "extra == 'vector'" },
     { name = "claude-agent-sdk", specifier = ">=0.1.72" },
     { name = "click", specifier = ">=8.0" },
+    { name = "composio", marker = "extra == 'enterprise'", specifier = ">=0.7.0" },
+    { name = "composio-claude-agent-sdk", marker = "extra == 'enterprise'", specifier = ">=0.7.0" },
+    { name = "composio-google-adk", marker = "extra == 'enterprise'", specifier = ">=0.7.0" },
+    { name = "composio-langgraph", marker = "extra == 'enterprise'", specifier = ">=0.7.0" },
+    { name = "composio-openai-agents", marker = "extra == 'enterprise'", specifier = ">=0.7.0" },
     { name = "cryptography", specifier = ">=46.0.0" },
     { name = "deepagents", marker = "extra == 'all'", specifier = ">=0.5.8,<0.6.0" },
     { name = "deepagents", marker = "extra == 'deep-agents'", specifier = ">=0.5.8,<0.6.0" },
@@ -5881,6 +5989,16 @@ dependencies = [
     { name = "pillow", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ee/f0/cb456ac4f1a73723d5b866933b7986f02bacea27516629c00f8e7da94c2d/pyscreeze-1.0.1.tar.gz", hash = "sha256:cf1662710f1b46aa5ff229ee23f367da9e20af4a78e6e365bee973cad0ead4be", size = 27826, upload-time = "2024-08-20T23:03:07.291Z" }
+
+[[package]]
+name = "pysher"
+version = "1.0.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "websocket-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/12/a0/d0638470df605ce266991fb04f74c69ab1bed3b90ac3838e9c3c8b69b66a/Pysher-1.0.8.tar.gz", hash = "sha256:7849c56032b208e49df67d7bd8d49029a69042ab0bb45b2ed59fa08f11ac5988", size = 9071, upload-time = "2022-10-10T13:41:09.936Z" }
 
 [[package]]
 name = "pytesseract"

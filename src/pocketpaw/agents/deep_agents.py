@@ -607,6 +607,29 @@ class DeepAgentsBackend:
             return self._cached_agent
 
         all_tools = self._build_custom_tools() + (mcp_tools or [])
+
+        # Composio — per-stream tools fetched via the langgraph provider.
+        # Skipped on pocket sessions: pocket specialist runs on this
+        # backend, and we keep its tool surface narrow + Composio-free
+        # (parent agent fetches Composio data, passes it down in brief).
+        if not is_pocket_session:
+            try:
+                from ee.cloud.composio.providers import (
+                    BACKEND_DEEP_AGENTS,
+                    build_tools_for_backend,
+                )
+
+                composio_tools = build_tools_for_backend(
+                    BACKEND_DEEP_AGENTS, settings=self.settings
+                )
+                if composio_tools:
+                    all_tools = all_tools + list(composio_tools)
+                    logger.info("Composio: appended %d langgraph tools", len(composio_tools))
+            except ImportError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Composio langgraph build failed: %s", exc)
+
         if is_pocket_session:
             # Drop shell + filesystem tools — pocket flow has MCP tools
             # for everything it needs. Without this filter the agent has

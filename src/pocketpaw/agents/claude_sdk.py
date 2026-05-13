@@ -537,6 +537,35 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocket_specialist MCP server not registered: %s", exc)
 
+        # Composio — per-stream in-process MCP server built via
+        # ``composio_claude_agent_sdk.ClaudeAgentSDKProvider``. The
+        # provider returns SDK-compatible tools; we wrap them with
+        # ``create_sdk_mcp_server`` so they appear under
+        # ``mcp_servers["composio"]`` alongside the rest. The
+        # user_id flows through per-stream contextvars — multi-tenant
+        # safe because ``_get_mcp_servers`` is invoked per ``run()``.
+        try:
+            from ee.cloud.composio.providers import (
+                BACKEND_CLAUDE_SDK,
+                build_tools_for_backend,
+            )
+
+            composio_tools = build_tools_for_backend(BACKEND_CLAUDE_SDK, settings=self.settings)
+            if composio_tools and self._policy.is_mcp_server_allowed("composio"):
+                from claude_agent_sdk import create_sdk_mcp_server
+
+                servers["composio"] = create_sdk_mcp_server(
+                    name="composio",
+                    version="1.0.0",
+                    tools=composio_tools,
+                )
+                logger.info("Composio: injected %d tools as MCP server", len(composio_tools))
+        except ImportError:
+            # Composio module / SDK not installed — OSS-local runs.
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Composio MCP build failed: %s", exc)
+
         return servers
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:

@@ -279,6 +279,18 @@ enterprise = [
     "google-api-python-client>=2.100.0",
     "google-auth>=2.25.0",
     "google-auth-oauthlib>=1.2.0",
+    # Composio — 200+ pre-built OAuth integrations (Gmail, Slack, GitHub,
+    # Calendar, Drive, Linear, …). Each agent backend gets its own
+    # Composio provider package; the wiring lives in
+    # ``ee/cloud/composio/providers.py`` and is invoked per-stream by
+    # each backend's tool-build path. The pocket specialist runs on
+    # deep_agents but zeros its tools via attach_specialist_tools, so
+    # Composio reaches the parent agent only.
+    "composio>=0.7.0",
+    "composio_claude_agent_sdk>=0.7.0",
+    "composio_openai_agents>=0.7.0",
+    "composio_google_adk>=0.7.0",
+    "composio_langgraph>=0.7.0",
     "pocketpaw[soul]"
 ]
 all = [

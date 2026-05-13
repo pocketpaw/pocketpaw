@@ -42,6 +42,63 @@ _CLAUDE_SDK_EXCLUDED = frozenset(
     }
 )
 
+# Tool names (NOT class names) that overlap with Composio's hosted
+# integrations. When Composio is enabled (cloud, with
+# ``composio_api_key`` set), these YAML-/native-connector-backed tools
+# are dropped from the agent's surface so the LLM has exactly one path
+# per integration. Without this, the agent gets confused between
+# Composio's ``GMAIL_SEND_EMAIL`` and the legacy ``gmail_send``, and
+# tends to fall back on the legacy tool's "Settings → Google OAuth"
+# auth flow (which is a paw-enterprise UI affordance, not a chat one).
+_COMPOSIO_OVERLAPPING_TOOL_NAMES = frozenset(
+    {
+        # Gmail
+        "gmail_search",
+        "gmail_read",
+        "gmail_send",
+        "gmail_list_labels",
+        "gmail_create_label",
+        "gmail_modify",
+        "gmail_trash",
+        "gmail_batch_modify",
+        # Google Calendar
+        "calendar_list",
+        "calendar_create",
+        "calendar_prep",
+        # Google Docs
+        "docs_read",
+        "docs_create",
+        "docs_search",
+        # Google Drive
+        "drive_list",
+        "drive_download",
+        "drive_upload",
+        "drive_share",
+        # Reddit
+        "reddit_search",
+        "reddit_read",
+        "reddit_trending",
+        # Spotify
+        "spotify_search",
+        "spotify_now_playing",
+        "spotify_playback",
+        "spotify_playlist",
+    }
+)
+
+
+def _is_composio_enabled() -> bool:
+    """True when Composio is configured. Read lazily so OSS-local runs
+    don't pay the ``Settings.load`` cost up front."""
+    try:
+        from pocketpaw.config import Settings
+
+        s = Settings.load()
+        return bool(s.composio_api_key and s.composio_enterprise_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Backends that receive ``PocketSpecialistTool`` via this bridge as a native
 # function tool. Must stay in sync with ``ee.ripple._pockets._MCP_POCKET_BACKENDS``
 # minus ``claude_agent_sdk`` (which goes through its own in-process MCP server,
@@ -96,6 +153,21 @@ def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
             tools.extend(soul_mgr.get_tools())
     except Exception:
         pass  # Soul not available
+
+    # When Composio is configured, drop the YAML-/native-connector tools
+    # whose integrations are now served by Composio's hosted ``*_*``
+    # tools (GMAIL_SEND_EMAIL, etc.). Prevents the LLM from mixing
+    # two integration paths and surfacing paw-enterprise's
+    # "Settings → Google OAuth" affordance in chat.
+    if _is_composio_enabled():
+        before = len(tools)
+        tools = [t for t in tools if t.name not in _COMPOSIO_OVERLAPPING_TOOL_NAMES]
+        dropped = before - len(tools)
+        if dropped:
+            logger.info(
+                "tool_bridge: dropped %d YAML-connector tools (Composio is enabled)",
+                dropped,
+            )
 
     # Inject the ee/cloud pocket specialist tool for MCP-capable function-tool
     # backends only (deep_agents, google_adk, openai_agents). Same opt-in

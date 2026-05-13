@@ -248,6 +248,26 @@ class OpenAIAgentsBackend(BaseAgentBackend):
                 instructions = self._inject_history(instructions, history)
 
             custom_tools = self._build_custom_tools()
+
+            # Composio — per-stream tools via the documented
+            # ``composio_openai_agents.OpenAIAgentsProvider``.
+            try:
+                from ee.cloud.composio.providers import (
+                    BACKEND_OPENAI_AGENTS,
+                    build_tools_for_backend,
+                )
+
+                composio_tools = build_tools_for_backend(
+                    BACKEND_OPENAI_AGENTS, settings=self.settings
+                )
+                if composio_tools:
+                    custom_tools = list(custom_tools) + list(composio_tools)
+                    logger.info("Composio: appended %d openai-agents tools", len(composio_tools))
+            except ImportError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Composio openai-agents build failed: %s", exc)
+
             agent = Agent(
                 name="PocketPaw",
                 instructions=instructions,

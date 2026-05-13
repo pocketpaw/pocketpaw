@@ -171,12 +171,12 @@ class GoogleADKBackend(BaseAgentBackend):
                         ),
                     )
                     toolsets.append(toolset)
-                elif cfg.transport in ("sse", "http"):
+                elif cfg.transport in ("sse", "http", "streamable-http"):
                     if cfg.url:
                         toolset = McpToolset(
                             connection_params=SseConnectionParams(
                                 url=cfg.url,
-                                headers=cfg.headers or {},
+                                headers=cfg.env or {},
                             ),
                         )
                         toolsets.append(toolset)
@@ -252,8 +252,23 @@ class GoogleADKBackend(BaseAgentBackend):
 
             instruction = system_prompt or _DEFAULT_IDENTITY
 
-            # Build tools: custom PocketPaw tools + MCP toolsets
+            # Build tools: custom PocketPaw tools + MCP toolsets + Composio
+            # (per-stream via the documented composio_google_adk provider).
             tools = self._build_custom_tools() + self._build_mcp_toolsets()
+            try:
+                from ee.cloud.composio.providers import (
+                    BACKEND_GOOGLE_ADK,
+                    build_tools_for_backend,
+                )
+
+                composio_tools = build_tools_for_backend(BACKEND_GOOGLE_ADK, settings=self.settings)
+                if composio_tools:
+                    tools = tools + list(composio_tools)
+                    logger.info("Composio: appended %d ADK tools", len(composio_tools))
+            except ImportError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Composio ADK build failed: %s", exc)
 
             # Session management: reuse sessions for multi-turn, seed history on first call
             user_id = "pocketpaw_user"

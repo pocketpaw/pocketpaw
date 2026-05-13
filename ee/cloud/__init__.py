@@ -322,6 +322,12 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_agent_bridge()
 
+    # NOTE: Composio is wired per-backend via ``ee.cloud.composio.providers``
+    # — each agent backend (claude_sdk, openai_agents, google_adk,
+    # deep_agents) calls ``build_tools_for_backend()`` in its own tool-build
+    # path to fetch Composio tools using the official provider package for
+    # that SDK. No cloud-bootstrap registration is needed.
+
     # Initialise the realtime EventBus eagerly.
     #
     # The host app (src/pocketpaw/dashboard.py) uses a FastAPI ``lifespan``
