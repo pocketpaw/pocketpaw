@@ -45,6 +45,7 @@ Thumbs.db
 htmlcov/
 .tox/
 .nox/
+.tmp/
 
 # Internal drafts
 idocs/
