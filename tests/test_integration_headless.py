@@ -618,21 +618,41 @@ class TestToolBridgePipelineIntegration:
             )
 
     def test_tool_count_is_consistent_across_backends(self):
-        """The number of tools for non-SDK backends should be equal.
+        """Non-SDK backends split into two groups by pocket_specialist integration.
 
-        All non-claude_agent_sdk backends use the same exclusion set
-        (_ALWAYS_EXCLUDED only), so they should return the same tool count.
+        Function-tool bridge backends (``openai_agents``, ``google_adk``) receive
+        ``PocketSpecialistTool`` as a native function tool, so their count is
+        exactly one more than shell-CLI backends (``opencode``, ``codex_cli``,
+        ``copilot_sdk``), which dispatch the specialist via
+        ``cloud_pocket_specialist_create`` from ``_CLOUD_HANDLERS`` instead.
+        See ``_SPECIALIST_FUNCTION_TOOL_BACKENDS`` in ``tool_bridge.py``.
+
+        Within each group the counts must match exactly. Any other divergence
+        is a backend-specific exclusion that crept in by accident.
         """
         from pocketpaw.agents.tool_bridge import _instantiate_all_tools
 
-        non_sdk_backends = ["openai_agents", "google_adk", "opencode", "codex_cli", "copilot_sdk"]
-        counts = {b: len(_instantiate_all_tools(backend=b)) for b in non_sdk_backends}
+        function_tool_backends = ["openai_agents", "google_adk"]
+        shell_cli_backends = ["opencode", "codex_cli", "copilot_sdk"]
 
-        # All non-SDK backends must return the same count
-        unique_counts = set(counts.values())
-        assert len(unique_counts) == 1, (
-            f"Non-SDK backends returned different tool counts: {counts}. "
-            "This means backend-specific exclusions were accidentally added."
+        fn_counts = {b: len(_instantiate_all_tools(backend=b)) for b in function_tool_backends}
+        cli_counts = {b: len(_instantiate_all_tools(backend=b)) for b in shell_cli_backends}
+
+        assert len(set(fn_counts.values())) == 1, (
+            f"Function-tool bridge backends returned different counts: {fn_counts}. "
+            "Backend-specific exclusion crept in."
+        )
+        assert len(set(cli_counts.values())) == 1, (
+            f"Shell-CLI backends returned different counts: {cli_counts}. "
+            "Backend-specific exclusion crept in."
+        )
+
+        fn_count = next(iter(fn_counts.values()))
+        cli_count = next(iter(cli_counts.values()))
+        assert fn_count == cli_count + 1, (
+            f"Function-tool backends ({fn_count}) should have exactly one more "
+            f"tool than shell-CLI backends ({cli_count}) — the pocket_specialist "
+            f"function tool. Got fn={fn_counts}, cli={cli_counts}."
         )
 
     def test_claude_sdk_backend_has_fewer_tools_than_others(self):
