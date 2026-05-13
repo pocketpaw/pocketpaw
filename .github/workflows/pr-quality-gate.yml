@@ -10,8 +10,8 @@ permissions:
   pull-requests: write
   issues: write
   contents: read
-  repository-projects: read  
-
+  repository-projects: read
+  checks: read  # Add this
 jobs:
   check-quality:
     runs-on: ubuntu-latest
