@@ -10,6 +10,7 @@ permissions:
   pull-requests: write
   issues: write
   contents: read
+  repository-projects: read  
 
 jobs:
   check-quality:
