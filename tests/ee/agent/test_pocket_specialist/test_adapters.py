@@ -190,14 +190,14 @@ class TestAgentModeAdapterDraftKit:
         assert out.action == "draft_kit"
         assert out.draft_kit is not None
         assert out.draft_kit["structural_plan"] == {}
-        # Starter list expanded from 10 → 40+ widgets so the chat agent
+        # Starter list expanded from 10 → 50+ widgets so the chat agent
         # has visibility into the actual library (Ripple ships 150
         # widgets; the prior 10-item starter list was provably too
         # narrow). Bound is conservative — drop in case someone trims
         # the tuple aggressively in a future cleanup.
         starters = out.draft_kit["starter_widget_kinds"]
         assert isinstance(starters, list)
-        assert len(starters) >= 30
+        assert len(starters) >= 40
         # The polished pattern layouts MUST be in the starter list —
         # they're the lever that flips the LLM away from "compose a
         # dashboard from scratch" toward "use the pre-composed widget".
@@ -212,6 +212,24 @@ class TestAgentModeAdapterDraftKit:
         ):
             assert required in starters, (
                 f"starter_widget_kinds missing high-leverage widget {required!r}"
+            )
+        # The full-fledged-app chrome widgets MUST also be in the
+        # starter list so "build me an app for X" briefs land on
+        # app-shell + sidebar instead of composing the chrome from
+        # flex + tabs. This is the gap the showcase Layout tab
+        # exposed in 0.2.0.
+        for chrome in (
+            "app-shell",
+            "sidebar",
+            "breadcrumb",
+            "sheet",
+            "modal",
+            "command-palette",
+            "coachmark",
+            "dropdown-menu",
+        ):
+            assert chrome in starters, (
+                f"starter_widget_kinds missing app-chrome widget {chrome!r}"
             )
 
     @pytest.mark.asyncio
@@ -240,6 +258,12 @@ class TestAgentModeAdapterDraftKit:
         # Spot-check the dashboard family — this is the case the team-
         # dashboard regression came in through.
         assert "pipeline-dashboard" in rich["dashboard"]
+        # And spot-check the app family includes the full-fledged-app
+        # chrome — "build me an app for X" briefs should land here.
+        for chrome in ("app-shell", "sidebar", "sheet", "command-palette"):
+            assert chrome in rich["app"], (
+                f"rich_widgets_by_pattern.app missing chrome widget {chrome!r}"
+            )
         # And the widget-quality-bar reminder ties it together.
         assert "widget_quality_bar" in out.draft_kit
         assert (

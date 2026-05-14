@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 _STARTER_WIDGET_KINDS: tuple[str, ...] = (
     # containers + structure
     "flex", "grid", "split", "tabs", "card", "section", "page-header", "hero",
+    # full-fledged app shell (use when the brief is "an app for X")
+    "app-shell", "sidebar", "breadcrumb",
     # display
     "text", "heading", "badge", "callout", "stat", "metric",
     # apps (interactive focal widgets)
@@ -58,6 +60,9 @@ _STARTER_WIDGET_KINDS: tuple[str, ...] = (
     # rich inputs
     "input", "textarea", "select", "combobox", "multi-select", "filter-bar",
     "date-picker", "location-picker", "search",
+    # overlays + chrome (UX building blocks for apps)
+    "sheet", "modal", "confirm-dialog", "dropdown-menu", "command-palette",
+    "coachmark",
     # enterprise / advanced
     "comment-thread", "tree-table", "org-chart", "saved-views",
     "notification-center", "error-state", "empty-state",
@@ -205,6 +210,18 @@ def _draft_kit_response(input: Any, *, started: float) -> Any:
                 "comparison-layout",
             ],
             "app": [
+                # Shell — the chrome of a full-fledged app. Reach for
+                # these when the brief is "an app for X" (not just a
+                # single-widget tool).
+                "app-shell",
+                "sidebar",
+                "tabs",
+                "breadcrumb",
+                "sheet",
+                "modal",
+                "command-palette",
+                "coachmark",
+                # Focal widgets — the WORK happens inside one of these.
                 "kanban",
                 "calendar",
                 "gantt",

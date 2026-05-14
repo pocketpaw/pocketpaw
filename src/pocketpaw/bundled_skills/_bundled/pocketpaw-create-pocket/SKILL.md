@@ -83,12 +83,32 @@ When ``viewer``:
 - ``comparison-layout`` — X vs Y / feature comparison
 
 When ``app``:
+
+For **single-purpose tools** (one focal widget IS the app):
 - ``kanban`` — workflow / board / sprint board (NOT a table with status badges)
 - ``calendar`` — schedule / month view / time blocks
 - ``gantt`` — roadmap / sprint plan
 - ``form-layout`` — signup / contact / multi-field form
 - ``wizard-layout`` — multi-step setup / onboarding
 - ``checklist-layout`` — launch checklist / runbook / pre-flight
+
+For **full-fledged apps** (sidebar nav + multiple views + chrome —
+CRM, support tool, project tracker, knowledge base), compose with:
+- ``app-shell`` — root container: sidebar + topbar + content slots
+- ``sidebar`` — nav rail with sections (Inbox / Tickets / Settings …)
+- ``breadcrumb`` — context trail inside content (Tickets › 4587)
+- ``master-detail`` — list + drill into selected record
+- ``sheet`` — slide-in drawer for "New X" / "Edit X" flows
+- ``modal`` — focused dialog for destructive confirms / quick forms
+- ``dropdown-menu`` — overflow menus on toolbar / row actions
+- ``command-palette`` — ``cmd-k`` / quick-jump / search-everywhere
+- ``coachmark`` — first-time-user product tour
+- ``notification-center`` — bell icon + unread inbox dropdown
+- ``empty-state`` / ``error-state`` — when no selection or load failed
+
+A "build me an app for X" brief should usually start with ``app-shell``
+as the root, with the focal widget (kanban / master-detail / form-
+layout / etc.) in the content slot.
 
 When ``browser``:
 - ``master-detail`` — list on the left, detail on the right (Material 3 "list-detail")

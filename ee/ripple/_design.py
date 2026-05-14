@@ -140,6 +140,20 @@ of text rows" rebuild looks worse than the real widget.
   confirm before destructive action  → confirm-dialog
   glass-tinted card surface          → glass-card
   C4 architecture diagram            → c4
+
+  ## Full-fledged app chrome (compose these for "an app for X" briefs)
+
+  full app shell (sidebar + topbar)  → app-shell as root, with
+                                        ``sidebar``, ``breadcrumb``,
+                                        and a focal widget inside
+  left nav rail / sections           → sidebar (NOT a column of buttons)
+  context trail (Tickets › 4587)     → breadcrumb
+  slide-in editor / "New X" drawer   → sheet (NOT modal — drawer feel)
+  focused dialog / quick form        → modal (NOT sheet — page-modal)
+  toolbar overflow / row actions     → dropdown-menu (NOT a separate row
+                                        of buttons)
+  cmd-k / quick-jump / search-all    → command-palette
+  first-time-user walkthrough        → coachmark
 """
 
 
