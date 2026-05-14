@@ -173,24 +173,27 @@ async def startup_event(
     except ImportError:
         pass
 
-    # Mirror bundled Claude Code skills into ``~/.claude/skills/`` so
-    # the chat agent's SDK picks them up. Idempotent — SHA-256 hash
-    # compare per file, no-op when the destination already matches.
-    # Best-effort: a failure here just means the chat agent won't have
+    # Mirror PocketPaw's bundled AgentSkills-format SKILL.md files into
+    # ``~/.claude/skills/<name>/`` so PocketPaw's own ``SkillLoader``
+    # (and Claude Code's native discovery, for claude_agent_sdk users)
+    # picks them up. Skills loaded from there work across every chat
+    # backend via PocketPaw's slash-command dispatcher; claude_agent_sdk
+    # additionally auto-discovers them on natural-language intent.
+    # Best-effort — a failure here just means the chat agent won't have
     # the ``pocketpaw-create-pocket`` skill available; the MCP tool
-    # surface still works. Opt-out: ``POCKETPAW_AUTO_INSTALL_CLAUDE_SKILLS=false``.
+    # surface still works. Opt-out: ``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false``.
     try:
-        from pocketpaw.claude_skills import install_bundled_skills
+        from pocketpaw.bundled_skills import install_bundled_skills
         from pocketpaw.config import Settings as _SkillsSettings
 
-        if _SkillsSettings.load().auto_install_claude_skills:
+        if _SkillsSettings.load().auto_install_bundled_skills:
             results = install_bundled_skills()
             installed = sum(1 for r in results if r.status == "installed")
             updated = sum(1 for r in results if r.status == "updated")
             skipped = sum(1 for r in results if r.status == "skipped")
             failed = [r for r in results if r.status == "failed"]
             logger.info(
-                "Claude Code skills sync: %d installed / %d updated / %d skipped / %d failed",
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed",
                 installed,
                 updated,
                 skipped,

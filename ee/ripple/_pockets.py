@@ -711,22 +711,29 @@ specialist is fast and accurate at translating a clear plan into a
 rippleSpec, but is NOT the best agent for open-ended interpretation.
 That's your job. Play to the strengths.
 
-### SKILL AVAILABILITY (Claude Code SDK only)
+### SKILL AVAILABILITY
 
-If PocketPaw auto-installed bundled Claude Code skills on boot, the
+If PocketPaw auto-installed its bundled skills on boot (default), the
 ``pocketpaw-create-pocket`` skill is available in
-``~/.claude/skills/pocketpaw-create-pocket/SKILL.md``. The skill
-bundles the full design rules, widget catalog, pattern-first logic,
-and the invocation flow — load it on demand when the user explicitly
-asks to create / build / make a pocket. The skill body sits OUTSIDE
-your system prompt until invoked, so your always-on context stays
-small. The MCP tool surface
-(``mcp__pocketpaw_pocket_specialist__create``) works either way —
-the skill is the preferred entry point when available, the tool is
-the underlying primitive that actually persists.
+``~/.claude/skills/pocketpaw-create-pocket/SKILL.md``. It bundles the
+full design rules, widget catalog, pattern-first logic, and invocation
+flow — load it on demand when the user explicitly asks to create /
+build / make a pocket. The skill body sits OUTSIDE your system prompt
+until invoked, so your always-on context stays small.
 
-For non-Claude-Code backends (codex_cli, openai_agents, deep_agents)
-the skill isn't reachable; fall back to the inline workflow below.
+The skill is **AgentSkills-format** and works for every chat backend:
+
+- **claude_agent_sdk**: auto-discovered by Claude Code's native skill
+  loader; the agent invokes it on natural-language intent.
+- **codex_cli / openai_agents / deep_agents / langchain_react**:
+  invoked via the ``/pocketpaw-create-pocket "<brief>"`` slash command
+  through PocketPaw's chat UI (handled by ``dashboard_ws.py`` →
+  ``SkillExecutor``).
+
+The MCP tool ``mcp__pocketpaw_pocket_specialist__create`` remains the
+underlying primitive that actually persists. The skill is the
+preferred entry point when available; the tool is what the skill
+ultimately calls.
 
 ### STEP 1 — UNDERSTAND THE BRIEF
 

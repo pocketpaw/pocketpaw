@@ -361,17 +361,21 @@ class Settings(BaseSettings):
             "entirely — the chat agent's runtime is the LLM."
         ),
     )
-    auto_install_claude_skills: bool = Field(
+    auto_install_bundled_skills: bool = Field(
         default=True,
         description=(
-            "On dashboard startup, mirror bundled Claude Code skills from "
-            "``pocketpaw/claude_skills/_bundled/`` into the user's "
-            "``~/.claude/skills/`` directory so the chat agent can invoke "
-            "them. Idempotent — SHA-256 hash compare per file, no-op when "
-            "the destination already matches. Set ``false`` to freeze a "
-            "manually-customized copy or to disable bundled skills entirely. "
-            "Skill installation is best-effort: pocket creation still works "
-            "via the MCP tool surface even when no skill is installed."
+            "On dashboard startup, mirror bundled AgentSkills-format "
+            "SKILL.md files from ``pocketpaw/bundled_skills/_bundled/`` "
+            "into ``~/.claude/skills/<name>/SKILL.md``. That destination "
+            "is covered by both Claude Code's native skill discovery AND "
+            "PocketPaw's ``SkillLoader.SKILL_PATHS`` — so the skill works "
+            "for all chat backends (claude_agent_sdk via natural-language "
+            "invocation, codex_cli / openai_agents / deep_agents via the "
+            "``/<skill-name>`` slash command). Idempotent — SHA-256 hash "
+            "compare per file. Set ``false`` to freeze a manually-customized "
+            "copy or disable bundled skills entirely. Skill installation "
+            "is best-effort: pocket creation still works via the MCP tool "
+            "surface even when no skill is installed."
         ),
     )
     deep_agents_skills: list[str] = Field(

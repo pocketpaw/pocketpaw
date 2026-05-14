@@ -5,7 +5,7 @@
 # per file), best-effort (errors logged not raised), and discovers
 # new skills by directory iteration so adding a skill doesn't need
 # code changes.
-"""Tests for ``pocketpaw.claude_skills.installer.install_bundled_skills``.
+"""Tests for ``pocketpaw.bundled_skills.installer.install_bundled_skills``.
 
 Each test installs into a tmp_path destination (no touching the user's
 real ``~/.claude/skills/`` directory) and exercises one branch of
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from pocketpaw.claude_skills.installer import (
+from pocketpaw.bundled_skills.installer import (
     InstallResult,
     install_bundled_skills,
 )
@@ -91,7 +91,7 @@ def test_install_never_raises_on_oserror(tmp_path: Path, monkeypatch) -> None:
     """OSError during copy returns a ``failed`` result rather than
     propagating. The chat agent path is best-effort — a single failed
     skill must not block other skills (or the rest of dashboard boot)."""
-    import pocketpaw.claude_skills.installer as installer_mod
+    import pocketpaw.bundled_skills.installer as installer_mod
 
     def _explode(*args, **kwargs):  # noqa: ANN001 - test stub
         raise OSError("simulated permission denied")
@@ -108,7 +108,7 @@ def test_install_skips_when_bundled_dir_missing(monkeypatch, tmp_path: Path) -> 
     """If the package's ``_bundled`` dir vanishes (corrupt install /
     bad package), the installer logs and returns an empty list rather
     than crashing the boot."""
-    import pocketpaw.claude_skills.installer as installer_mod
+    import pocketpaw.bundled_skills.installer as installer_mod
 
     monkeypatch.setattr(
         installer_mod, "_BUNDLED_DIR", tmp_path / "definitely-does-not-exist"

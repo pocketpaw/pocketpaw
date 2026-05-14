@@ -1,7 +1,7 @@
-# src/pocketpaw/claude_skills/installer.py
+# src/pocketpaw/bundled_skills/installer.py
 # Created: 2026-05-14 (feat/pocket-creator-skill) — auto-installs the
 # bundled Claude Code skill files from
-# ``src/pocketpaw/claude_skills/_bundled/<name>/`` into the user's
+# ``src/pocketpaw/bundled_skills/_bundled/<name>/`` into the user's
 # ``~/.claude/skills/<name>/`` so the chat agent can invoke them
 # without the operator manually staging the files. Idempotent via
 # SHA-256 hash comparison.
@@ -17,7 +17,7 @@ skills aren't visible — the chat agent only sees ``~/.claude/skills/``.
 
 We ship the ``pocketpaw-create-pocket`` skill (and any future skills)
 inside the Python package at
-``src/pocketpaw/claude_skills/_bundled/<name>/SKILL.md``. On boot,
+``src/pocketpaw/bundled_skills/_bundled/<name>/SKILL.md``. On boot,
 the installer mirrors those files into ``~/.claude/skills/<name>/``
 so the SDK picks them up.
 
@@ -40,7 +40,7 @@ Opt-out
 Set ``POCKETPAW_AUTO_INSTALL_SKILLS=false`` in the environment to
 disable the installer entirely. The MCP-tool flow still works; users
 who want the skill behavior can stage the files manually from
-``src/pocketpaw/claude_skills/_bundled/``.
+``src/pocketpaw/bundled_skills/_bundled/``.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def install_bundled_skills(
 
     if not _BUNDLED_DIR.is_dir():
         logger.warning(
-            "claude_skills.installer: bundled dir %s missing — nothing to install",
+            "bundled_skills.installer: bundled dir %s missing — nothing to install",
             _BUNDLED_DIR,
         )
         return []
@@ -110,7 +110,7 @@ def install_bundled_skills(
         result = _install_one(skill_dir, destination_root)
         results.append(result)
         logger.info(
-            "claude_skills.installer: %s -> %s",
+            "bundled_skills.installer: %s -> %s",
             skill_dir.name,
             result.status,
         )
