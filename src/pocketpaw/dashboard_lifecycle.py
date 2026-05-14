@@ -173,6 +173,34 @@ async def startup_event(
     except ImportError:
         pass
 
+    # Mirror PocketPaw's pre-compiled kb-go scopes into
+    # ``~/.knowledge-base/`` so the existing context_builder injection
+    # can retrieve recipes at pocket-creation time. Best-effort — a
+    # failure here just means the agent loses the recipe-retrieval
+    # boost; the MCP tool + skill flow still works.
+    # Opt-out: ``POCKETPAW_AUTO_INSTALL_BUNDLED_KB_SCOPES=false``.
+    try:
+        from pocketpaw.bundled_kb import install_bundled_kb_scopes
+        from pocketpaw.config import Settings as _KbSettings
+
+        if _KbSettings.load().auto_install_bundled_kb_scopes:
+            kb_results = install_bundled_kb_scopes()
+            installed = sum(1 for r in kb_results if r.status == "installed")
+            updated = sum(1 for r in kb_results if r.status == "updated")
+            skipped = sum(1 for r in kb_results if r.status == "skipped")
+            failed = [r for r in kb_results if r.status == "failed"]
+            logger.info(
+                "Bundled kb-go scopes sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("KB scope %s failed to install: %s", r.name, r.error)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bundled kb-go scopes install failed (non-fatal): %s", exc)
+
     # Initialize enterprise cloud DB (Beanie/MongoDB) — best-effort
     try:
         import os

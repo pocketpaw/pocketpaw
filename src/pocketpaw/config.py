@@ -361,6 +361,23 @@ class Settings(BaseSettings):
             "entirely — the chat agent's runtime is the LLM."
         ),
     )
+    auto_install_bundled_kb_scopes: bool = Field(
+        default=True,
+        description=(
+            "On dashboard startup, mirror PocketPaw's pre-compiled kb-go "
+            "scopes from ``pocketpaw/bundled_kb/_bundled/<scope>/`` into "
+            "``~/.knowledge-base/<scope>/``. The bundle ships "
+            "``ripple-recipes`` — pattern recipes (sales-pipeline, "
+            "customer-support-app, recipe/how-to viewer) that the chat "
+            "agent retrieves at pocket-creation time via the existing "
+            "``_get_kb_context`` injection in bootstrap.context_builder. "
+            "Idempotent — SHA-256 hash compare per file, no-op when the "
+            "destination already matches. Set ``false`` to freeze a "
+            "hand-customised scope or disable bundled KB entirely. KB "
+            "retrieval is a non-critical enhancement: pocket creation "
+            "still works via the MCP tool surface + the bundled skill."
+        ),
+    )
     deep_agents_skills: list[str] = Field(
         default_factory=list,
         description=(
