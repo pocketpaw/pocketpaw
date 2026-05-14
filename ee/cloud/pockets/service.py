@@ -1162,6 +1162,14 @@ async def agent_set_prop_array_item(
     matches ``match``. Surgical alternative to ``set_node_prop`` when the
     agent only wants to change one row/slice in a chart/table/etc.
 
+    Merge is SHALLOW: top-level keys in ``partial`` overwrite the matched
+    item's keys, but nested dicts/lists are replaced wholesale rather
+    than deep-merged. Matches ``patch_state`` semantics; if the agent
+    needs to preserve nested structure, fetch the item first and pass a
+    fully-built nested dict in ``partial``. Non-dict matched items are
+    replaced wholesale by ``partial`` (rare — most prop-array items are
+    dicts).
+
     Returns ``({"item_index": int, "item": <new item>, "old_item": <prev>,
     "pocket": <view>}, None)``.
 
@@ -1192,8 +1200,10 @@ async def agent_set_prop_array_item(
             return None, f"unsupported_prop_array: {wtype}.{prop}"
 
         props = node.get("props")
-        if not isinstance(props, dict):
+        if props is None:
             return None, f"node {node_id!r} has no props"
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
         arr = props.get(prop)
         if not isinstance(arr, list):
             return None, f"prop {prop!r} is not an array on node {node_id!r}"
@@ -1209,7 +1219,7 @@ async def agent_set_prop_array_item(
             return None, f"ambiguous: {len(candidates)} items matched; candidates={preview}"
 
         idx = candidates[0]
-        old_item = copy.deepcopy(arr[idx]) if isinstance(arr[idx], dict) else arr[idx]
+        old_item = copy.deepcopy(arr[idx])
         if isinstance(arr[idx], dict):
             arr[idx] = {**arr[idx], **partial}
         else:
@@ -1266,6 +1276,10 @@ async def agent_append_prop_array_item(
         if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
             return None, f"unsupported_prop_array: {wtype}.{prop}"
 
+        # Append intentionally creates props and the array on demand —
+        # set/remove bail when either is missing because there is no
+        # item to address, but append's whole job is to add the first
+        # one. Asymmetry is by design.
         props = node.setdefault("props", {})
         if not isinstance(props, dict):
             return None, f"node {node_id!r} has non-dict props"
@@ -1345,8 +1359,10 @@ async def agent_remove_prop_array_item(
             return None, f"unsupported_prop_array: {wtype}.{prop}"
 
         props = node.get("props")
-        if not isinstance(props, dict):
+        if props is None:
             return None, f"node {node_id!r} has no props"
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
         arr = props.get(prop)
         if not isinstance(arr, list):
             return None, f"prop {prop!r} is not an array on node {node_id!r}"
