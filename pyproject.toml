@@ -592,3 +592,50 @@ forbidden_modules = [
     "ee.cloud.models.user",
     "ee.cloud.models.agent",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Tasks — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.tasks.router",
+    "ee.cloud.tasks.dto",
+    "ee.cloud.tasks.domain",
+    "ee.cloud.tasks.listeners",
+]
+forbidden_modules = ["ee.cloud.models.task"]
+
+
+# Mission Control façade — the façade reads through Instinct's store
+# (SQLite) plus the in-process activity buffer; it has no Beanie
+# collection of its own in PR 1. The forbidden contract here keeps the
+# router/dto/domain from sprouting one accidentally — when the Tasks
+# entity ships (PR 2) it adds its own ``models.work_item`` entry to the
+# forbidden list, matching the canonical Pockets shape.
+[[tool.importlinter.contracts]]
+name = "Mission Control — no Beanie touches from façade layer"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.mission_control.router",
+    "ee.cloud.mission_control.dto",
+    "ee.cloud.mission_control.domain",
+]
+forbidden_modules = [
+    "ee.cloud.models.pocket",
+    "ee.cloud.models.notification",
+    "ee.cloud.models.user",
+    "ee.cloud.models.agent",
+]
+
+[[tool.importlinter.contracts]]
+name = "Cycles — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.cycles.router",
+    "ee.cloud.cycles.dto",
+    "ee.cloud.cycles.domain",
+    "ee.cloud.cycles.snapshot_job",
+]
+forbidden_modules = ["ee.cloud.models.cycle"]

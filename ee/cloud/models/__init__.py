@@ -5,6 +5,7 @@ from __future__ import annotations
 from ee.cloud.models.agent import Agent, AgentConfig
 from ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from ee.cloud.models.connector import WorkspaceConnector
+from ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from ee.cloud.models.file import FileObj
 from ee.cloud.models.group import Group, GroupAgent
 from ee.cloud.models.invite import Invite
@@ -13,6 +14,7 @@ from ee.cloud.models.notification import Notification, NotificationSource
 from ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from ee.cloud.models.read_state import ReadState
 from ee.cloud.models.session import Session
+from ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
@@ -39,6 +41,8 @@ __all__ = [
     "Comment",
     "CommentAuthor",
     "CommentTarget",
+    "Cycle",
+    "CycleDailyPoint",
     "FileFolder",
     "FileObj",
     "FileUpload",
@@ -54,6 +58,9 @@ __all__ = [
     "Reaction",
     "ReadState",
     "Session",
+    "Task",
+    "TaskAssignee",
+    "TaskSource",
     "User",
     "Widget",
     "WidgetPosition",
@@ -83,6 +90,8 @@ def get_all_documents():
         Group,
         Message,
         ReadState,
+        Task,
+        Cycle,
     ]
 
 

@@ -1,5 +1,7 @@
 # Instinct data models — decision pipeline types.
 # Created: 2026-03-28
+# Updated: 2026-05-13 (feat/mission-control-facade) — added optional ``assignee``
+#   to Action so The Tray can filter pending items to a specific human approver.
 
 from __future__ import annotations
 
@@ -71,6 +73,14 @@ class Action(BaseModel):
     approved_by: str | None = None
     approved_at: datetime | None = None
     rejected_reason: str | None = None
+    assignee: str | None = Field(
+        default=None,
+        description=(
+            "Optional human user id the Nudge is awaiting approval from. "
+            "Used by Mission Control's The Tray feed to filter to items "
+            "the current operator owns."
+        ),
+    )
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     executed_at: datetime | None = None

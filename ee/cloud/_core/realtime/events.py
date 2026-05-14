@@ -299,6 +299,32 @@ class PocketDeleted(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.deleted"
 
 
+# Tasks (Mission Control work-item primitive)
+@dataclass
+class TaskProposed(Event):
+    EVENT_TYPE: ClassVar[str] = "task.proposed"
+
+
+@dataclass
+class TaskUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "task.updated"
+
+
+@dataclass
+class TaskClaimed(Event):
+    EVENT_TYPE: ClassVar[str] = "task.claimed"
+
+
+@dataclass
+class TaskResolved(Event):
+    EVENT_TYPE: ClassVar[str] = "task.resolved"
+
+
+@dataclass
+class TaskBlocked(Event):
+    EVENT_TYPE: ClassVar[str] = "task.blocked"
+
+
 # Notifications
 @dataclass
 class NotificationNew(Event):
@@ -313,3 +339,28 @@ class NotificationRead(Event):
 @dataclass
 class NotificationCleared(Event):
     EVENT_TYPE: ClassVar[str] = "notification.cleared"
+
+
+# Cycles — Mission Control time-boxed work windows.
+# The daily-snapshot job (``ee.cloud.cycles.snapshot_job``) emits
+# ``CycleSnapshotted`` after appending a new point to a cycle's daily
+# series; the frontend's burnup chart subscribes and patches the active
+# cycle without a full refetch.
+@dataclass
+class CycleCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.created"
+
+
+@dataclass
+class CycleUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.updated"
+
+
+@dataclass
+class CycleClosed(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.closed"
+
+
+@dataclass
+class CycleSnapshotted(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.snapshotted"

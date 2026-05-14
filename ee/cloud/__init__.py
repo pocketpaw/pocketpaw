@@ -1,5 +1,20 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated: 2026-05-13 — Mission Control cleanup PR. Lifted the 501 stubs
+    on Mission Control's bulk-reassign / bulk-snooze (they now delegate
+    to the Tasks service), added emit-or-no-event comments to the bulk
+    approve/reject paths and the cycle counter-sync read, documented the
+    snapshot_job's wiring placeholder in ``mount_cloud``, and pinned the
+    UTC weekend-flag drift note onto the cycle snapshot docstring.
+Updated: 2026-05-13 — Mission Control PR 2 of 3. Added the Tasks
+    entity (unified work-item primitive: Nudges + agent tasks +
+    projections) and its in-process listener that fans ``task.proposed``
+    out to human assignees via the existing notifications surface.
+Updated: 2026-05-13 — Mission Control PR 3. Mounts the Cycles router on
+    ``mount_cloud()``. The Cycles daily-snapshot job lives at
+    ``ee.cloud.cycles.snapshot_job`` and is invoked by the host platform's
+    scheduler (cron / Kubernetes CronJob / Celery beat) rather than wired
+    as an in-process loop — see that module's docstring for rationale.
 Updated: 2026-04-30 — Stage 1.B of "Files as Knowledge". Wires
     ``register_upload_listeners`` into ``mount_cloud`` so the FileReady
     bus subscriber drives KB indexing for every workspace upload.
@@ -9,8 +24,15 @@ Updated: 2026-04-19 (Cluster C / PR1) — Mounted ee.cloud.kb.knowledge_router,
 Updated: 2026-04-19 (Cluster B) — Added pocket journal SSE stream router to
     mount_cloud() — feeds the RippleGraphWidget with a live, pocket-scoped
     slice of the org journal.
+Updated: 2026-05-13 (feat/mission-control-facade) — mounted the Mission
+    Control façade router at /api/v1/mission-control/* and wired the
+    in-process activity buffer's bus subscribers after init_realtime so
+    the live ticker fills in from agent.thinking / agent.tool_use /
+    agent.stream_end events. PR 1 of three; Tasks (PR 2) and Cycles
+    (PR 3) plug into the same façade in follow-ups.
 
-Domains: auth, workspace, chat, pockets, sessions, agents, kb, knowledge.
+Domains: auth, workspace, chat, pockets, sessions, agents, kb, knowledge,
+mission_control, cycles, tasks.
 Each has router.py (thin), service.py (logic), schemas.py (validation).
 """
 
@@ -73,6 +95,7 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.auth.router import router as auth_router
     from ee.cloud.chat.router import router as chat_router
     from ee.cloud.connectors.router import router as connectors_router
+    from ee.cloud.cycles.router import router as cycles_router
     from ee.cloud.license import get_license_info
     from ee.cloud.pockets.router import router as pockets_router
     from ee.cloud.sessions.router import router as sessions_router
@@ -85,6 +108,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
+    app.include_router(cycles_router, prefix="/api/v1")
 
     # Phase 1 PR-8: register the connector bus listener so local-mode
     # CLI actions (firebase, gcp, …) get picked up by the in-process
@@ -116,7 +140,9 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(pockets_journal_stream_router, prefix="/api/v1")
 
     from ee.cloud.kb.router import router as kb_router
+    from ee.cloud.mission_control.router import router as mission_control_router
     from ee.cloud.notifications.router import router as notifications_router
+    from ee.cloud.tasks.router import router as tasks_router
     from ee.cloud.uploads.router import router as uploads_router
     from ee.paw_print.router import router as paw_print_router
 
@@ -124,7 +150,9 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(knowledge_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
     app.include_router(notifications_router, prefix="/api/v1")
+    app.include_router(tasks_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
+    app.include_router(mission_control_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
@@ -346,6 +374,28 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.uploads.listeners import register_upload_listeners
 
     register_upload_listeners()
+
+    # Tasks → notifications fan-out. When a Task is proposed to a human
+    # assignee, drop an in-app notification so they see it even without
+    # Mission Control open. Agent assignees skip this path — they pick
+    # up work via the claim flow.
+    from ee.cloud.tasks.listeners import register_task_listeners
+
+    register_task_listeners()
+
+    # TODO: wire daily-snapshot scheduler — see ``ee.cloud.cycles.snapshot_job``
+    # for cron / Kubernetes CronJob / Celery beat wiring patterns. We
+    # deliberately do NOT spin up an in-process loop here; the host
+    # platform owns scheduling (its scheduler knows the tenant list and
+    # has the right retry / backoff semantics). Wiring lives in the
+    # deployment layer.
+
+    # Mission Control activity buffer — per-workspace ring buffer fed by
+    # agent.* bus events. Same constraint as the upload listeners: subscribe
+    # AFTER init_realtime installed the singleton bus.
+    from ee.cloud.activity.buffer import register_activity_listeners
+
+    register_activity_listeners()
 
     # Start/stop agent pool with app lifecycle.
     #

@@ -22,6 +22,12 @@
 #   business-tier (or higher) plans. Closes the plan-tier bypass where a
 #   team-plan member who passed the workspace RBAC check still hit Instinct for
 #   free.
+# Updated: 2026-05-13 (feat/mission-control-facade) — added ``assignee`` query
+#   param to GET /instinct/actions/pending (filter The Tray to a single human's
+#   queue) plus POST /instinct/actions/bulk-approve and
+#   POST /instinct/actions/bulk-reject. Bulk endpoints write N audit rows with
+#   a shared ``bulk_id`` UUID so the bulk transaction is replay-able per item
+#   and query-able as a unit.
 
 from __future__ import annotations
 
@@ -144,6 +150,54 @@ class CorrectionsListResponse(BaseModel):
     total: int
 
 
+class BulkApproveRequest(BaseModel):
+    """Body for POST /instinct/actions/bulk-approve.
+
+    ``ids`` is the list of pending action ids to flip to approved. ``note``
+    is an optional operator-supplied note tagged onto every audit row in
+    the bulk transaction (also surfaced in the shared ``bulk_id`` group).
+    """
+
+    ids: list[str] = Field(min_length=1)
+    note: str | None = None
+    approver: str = "user"
+
+
+class BulkRejectRequest(BaseModel):
+    """Body for POST /instinct/actions/bulk-reject.
+
+    ``reason`` is required — the UI gates the bulk-reject button behind a
+    typed reason. The server enforces non-empty so we don't end up with
+    silently rejected items that confuse a later audit review.
+    """
+
+    ids: list[str] = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    rejector: str = "user"
+
+
+class BulkActionResponse(BaseModel):
+    """Response shape for both bulk-approve and bulk-reject."""
+
+    bulk_id: str = Field(
+        description=(
+            "UUID4 hex tag stamped onto every audit row written for this "
+            "bulk transaction. Query ``GET /instinct/audit`` and filter "
+            "client-side on ``context.bulk_id`` to recover the group."
+        ),
+    )
+    affected: list[Action]
+    missing: list[str] = Field(
+        default_factory=list,
+        description=(
+            "IDs that did not flip — either the row didn't exist or it was "
+            "not in ``pending`` state. The frontend can surface these "
+            "individually so the operator knows which items still need "
+            "manual attention."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Action endpoints
 # ---------------------------------------------------------------------------
@@ -181,9 +235,20 @@ async def propose_action(req: ProposeRequest):
     response_model=list[Action],
     dependencies=[Depends(require_action_any_workspace("instinct.read"))],
 )
-async def pending_actions(pocket_id: str | None = Query(None)):
+async def pending_actions(
+    pocket_id: str | None = Query(None),
+    assignee: str | None = Query(
+        None,
+        description=(
+            "Filter to actions awaiting approval from a specific human "
+            "(user id). Drives The Tray in Mission Control so an operator "
+            "only sees the items they own. When omitted, behavior is "
+            "unchanged from before — every pending item is returned."
+        ),
+    ),
+):
     """List actions waiting for human approval."""
-    return await _store().pending(pocket_id=pocket_id)
+    return await _store().pending(pocket_id=pocket_id, assignee=assignee)
 
 
 @router.get(
@@ -207,6 +272,52 @@ async def list_actions(
         limit=limit,
     )
     return ActionsListResponse(actions=actions, total=len(actions))
+
+
+# Bulk endpoints must be registered BEFORE the parameterised
+# ``/instinct/actions/{action_id}/approve`` and ``.../reject`` routes:
+# FastAPI matches in registration order and ``bulk-approve`` would
+# otherwise be eaten by ``{action_id}`` and fail validation.
+@router.post(
+    "/instinct/actions/bulk-approve",
+    response_model=BulkActionResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
+)
+async def bulk_approve_actions(req: BulkApproveRequest) -> BulkActionResponse:
+    """Approve N pending actions in one call.
+
+    Each item is flipped individually (so per-item audit replay still
+    works) but every audit row carries a shared ``bulk_id`` UUID under
+    ``context.bulk_id``. The operator can query the audit log filtered
+    by that key to recover the bulk transaction as a unit. Items that
+    are missing or already resolved come back in ``missing`` rather than
+    raising — a partial-success surface beats a single all-or-nothing
+    failure on the operator console.
+    """
+    approved, missing, bulk_id = await _store().bulk_approve(
+        list(req.ids), approver=req.approver, note=req.note
+    )
+    return BulkActionResponse(bulk_id=bulk_id, affected=approved, missing=missing)
+
+
+@router.post(
+    "/instinct/actions/bulk-reject",
+    response_model=BulkActionResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
+)
+async def bulk_reject_actions(req: BulkRejectRequest) -> BulkActionResponse:
+    """Reject N pending actions in one call. ``reason`` is required.
+
+    Mirrors ``bulk_approve_actions``: shared ``bulk_id``, per-item audit
+    rows, partial-success surface via ``missing``. The reason text lands
+    on every audit row's ``context.reason`` and on each Action's
+    ``rejected_reason`` so the soul-bridge correction pipeline still
+    sees the same shape it sees on single-item rejects.
+    """
+    rejected, missing, bulk_id = await _store().bulk_reject(
+        list(req.ids), reason=req.reason, rejector=req.rejector
+    )
+    return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
 
 @router.post(
