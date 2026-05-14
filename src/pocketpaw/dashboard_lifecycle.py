@@ -173,6 +173,34 @@ async def startup_event(
     except ImportError:
         pass
 
+    # Mirror bundled Claude Code skills into ``~/.claude/skills/`` so
+    # the chat agent's SDK picks them up. Idempotent — SHA-256 hash
+    # compare per file, no-op when the destination already matches.
+    # Best-effort: a failure here just means the chat agent won't have
+    # the ``pocketpaw-create-pocket`` skill available; the MCP tool
+    # surface still works. Opt-out: ``POCKETPAW_AUTO_INSTALL_CLAUDE_SKILLS=false``.
+    try:
+        from pocketpaw.claude_skills import install_bundled_skills
+        from pocketpaw.config import Settings as _SkillsSettings
+
+        if _SkillsSettings.load().auto_install_claude_skills:
+            results = install_bundled_skills()
+            installed = sum(1 for r in results if r.status == "installed")
+            updated = sum(1 for r in results if r.status == "updated")
+            skipped = sum(1 for r in results if r.status == "skipped")
+            failed = [r for r in results if r.status == "failed"]
+            logger.info(
+                "Claude Code skills sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("Skill %s failed to install: %s", r.name, r.error)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bundled-skills install failed (non-fatal): %s", exc)
+
     # Initialize enterprise cloud DB (Beanie/MongoDB) — best-effort
     try:
         import os
