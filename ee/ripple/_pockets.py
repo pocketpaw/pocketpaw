@@ -45,6 +45,7 @@ from ee.ripple._design import (
     INTERACTIVE_STATE_RULE,
     THEME_RULE,
     USE_THE_WIDGET_RULE,
+    VISUAL_VARIATION_RULE,
     WIDGET_CATALOG,
 )
 
@@ -54,9 +55,12 @@ from ee.ripple._design import (
 # below are the load-bearing ones: widget vocabulary so the model
 # names widgets correctly, canonical prop shapes so persist_pocket's
 # validator doesn't have to bounce every spec, and the interactive
-# state pattern so pockets aren't dead read-only canvases. Dropped:
+# state pattern so pockets aren't dead read-only canvases.
+#
+# VISUAL_VARIATION_RULE is included even on a one-brief-at-a-time path:
+# the pattern-first / anti-dashboard rebalance (which lives in that
+# block) corrects a per-brief bias, not a cross-brief one. Dropped:
 # COMPOSITION_COOKBOOK (parent decides composition via hints),
-# VISUAL_VARIATION_RULE (specialist gets one brief at a time),
 # TABULAR/ACTIVITY_PICKER_RULE (niche), DESIGN_QUALITY (aspirational),
 # NO_INVENTED_WIDGETS_RULE / WIDGET_SPEC_TOOL_RULE (overlap with
 # WIDGET_CATALOG + manifest validator). LOGO_RULE is small but
@@ -67,6 +71,7 @@ _RIPPLE_DESIGN_ESSENTIALS = "\n".join(
         WIDGET_CATALOG,
         CANONICAL_SHAPES,
         INTERACTIVE_STATE_RULE,
+        VISUAL_VARIATION_RULE,
         THEME_RULE,
     ]
 )
@@ -114,12 +119,15 @@ whose **only renderable surface is `rippleSpec.ui`**, a UISpec node tree
 ({type, props, children}).
 
 A pocket can be ANYTHING the user asks for:
-  • A dashboard (KPIs, charts, tables, mission-control views)
-  • A research page or report (article + sources + supporting data)
   • An interactive app (todo list, notes, planner, calculator, timer,
     journal, habit tracker, expense tracker, scratchpad)
+  • A viewer / reference panel (recipe, article, glossary, runbook,
+    cheat sheet, profile card, command list)
   • A workflow tool (kanban board, gantt roadmap, calendar, form, wizard)
-  • A reference panel (cheat sheet, glossary, command list, runbook)
+  • A research page or write-up (article + sources + supporting data)
+  • A feed (activity log, timeline, audit trail, news stream)
+  • A dashboard (KPIs, charts, tables, mission-control views) — only
+    when the user explicitly asked for metrics / overview / KPIs
   • A custom tool the user invented two seconds ago
 
 When the user says "pocket", "this pocket", "edit the pocket", "add a
@@ -185,8 +193,8 @@ the user.
 
 Good preface examples (one sentence each — no preambles like "Sure!" or
 "I'll get on it"):
-  - "Building your Sales Pipeline dashboard now — funnel + leaderboard + bookings."
-  - "Spinning up a GitHub overview with repos, issues, and a commit heatmap."
+  - "Spinning up your interview-prep wizard now — sections for STAR stories, take-home prep, and reference questions."
+  - "Building a reading list with master-detail — articles on the left, full text + my notes on the right."
   - "Reshaping the chart to use {label, value} so the bars render correctly."
 
 Bad — DO NOT do these:
@@ -424,10 +432,11 @@ pocket) and content seeds (concrete values to populate it).
 Read the brief and identify any concrete inputs the user implied
 but didn't give. The agent does NOT have these by default.
 
-  • "dashboard for MY github account"    → ASK their username
+  • "viewer for MY github repos"          → ASK their github username
+  • "reading list for MY books to read"   → ASK the source (Goodreads / Notion / manual)
   • "track my Linear tickets"             → ASK workspace / project
   • "shipment status for order 4587"      → ASK carrier / tracking #
-  • "metrics for our team standup"        → ASK team / repo names
+  • "kanban for our team sprint"          → ASK team / repo names
   • "weather pocket for my city"          → ASK city
   • "expenses since I started this job"   → ASK start date
 
@@ -467,16 +476,23 @@ If the user says "you decide", proceed with your best guess.
 Decide these BEFORE calling the specialist. Don't make the
 specialist re-derive them from a vague brief:
 
-  • **layout**: one of
-      hero+grid       — KPI dashboards, summary reports
+  • **layout**: one of (in rough order of frequency — hero+grid LAST
+    on purpose; only pick it when the pattern is `dashboard`)
       single-pane     — calendar / kanban / data-grid / tree-table /
                         funnel / heatmap / treemap / timeline as the
-                        whole canvas
-      sidebar+main    — browse-and-detail tools
-      tabs            — multi-aspect entity pages
-      master-detail   — list + selection-driven detail
-      stacked         — research-style: header + sources + body
-      wizard          — multi-step setup / onboarding / form
+                        whole canvas. Default for `app` pattern.
+      master-detail   — list + selection-driven detail. Default for
+                        `browser` / `viewer` patterns. Maps to Material
+                        3's "list-detail" canonical layout.
+      sidebar+main    — nav rail + focal widget. Default for tools.
+      stacked         — header + sources + body + callouts. Default
+                        for `viewer` / research write-ups.
+      tabs            — multi-aspect entity pages (Overview / Activity
+                        / Settings — each tab STRUCTURALLY DIFFERENT).
+      wizard          — multi-step setup / onboarding / form / quiz.
+      hero+grid       — KPI tiles + chart + summary table. **Use ONLY
+                        when pattern=dashboard.** Default visual for
+                        explicit dashboard briefs.
 
   • **focal_widget**: the ONE widget that IS this pocket. Most
     pockets are dominated by one widget. Pick it.
@@ -646,28 +662,37 @@ For widgets not shown here, call ``get_widget_spec``.
     }
   )
 
-## Display pocket (read-only facts — concrete numbers, no "TBD")
+## Display pocket (viewer — read-only facts, NOT a dashboard)
+
+This is a ``viewer`` pattern (entity-detail / stacked write-up). Note
+the absence of ``stat`` tiles and ``chart`` widgets — the canonical
+viewer is text + structured facts, not KPIs. Pick this shape for
+recipes, notes, articles, profile cards, how-to references, runbooks.
 
   create_pocket(
-    name="Q4 Revenue Report",
-    description="Quarter-end review",
+    name="Espresso 101",
+    description="Pull notes from my favorite barista",
     type="business",
     ripple_spec={"type": "flex",
       "props": {"direction": "column", "gap": "16px"},
       "children": [
-        {"type": "page-header", "props": {"title": "Q4 Revenue Report"}},
-        {"type": "grid", "props": {"columns": 3, "gap": "12px"}, "children": [
-          {"type": "stat", "props": {"label": "Revenue", "value": 4500000,
-            "format": "currency", "deltaPercent": 15.3, "direction": "up-good"}},
-          {"type": "stat", "props": {"label": "NRR", "value": 118,
-            "format": "percent", "deltaPercent": 4, "direction": "up-good"}},
-          {"type": "stat", "props": {"label": "Logos", "value": 312,
-            "deltaPercent": 8.2, "direction": "up-good"}}
-        ]},
-        {"type": "chart", "props": {"type": "area", "data": [
-          {"label": "Q1", "value": 2400000}, {"label": "Q2", "value": 3100000},
-          {"label": "Q3", "value": 3800000}, {"label": "Q4", "value": 4500000}
-        ]}}
+        {"type": "page-header", "props": {"title": "Espresso 101",
+          "subtitle": "Notes from my favorite barista"}},
+        {"type": "text", "props": {
+          "content": "A double shot is 14 g of finely ground coffee extracted with 36 g of water at 93 °C in 25-30 seconds. Pull too fast → tighten the grind. Pull too slow → loosen it.",
+          "variant": "lead"
+        }},
+        {"type": "kv-table", "props": {"items": [
+          {"k": "Dose", "v": "14 g"},
+          {"k": "Yield", "v": "36 g"},
+          {"k": "Water temp", "v": "93 °C"},
+          {"k": "Time", "v": "25-30 s"},
+          {"k": "Grind", "v": "fine"}
+        ]}},
+        {"type": "text", "props": {
+          "content": "Cup before you pull. Tare the scale. Start the timer when you press the button — not when the first drop appears. Stop at yield, not at time.",
+          "variant": "body"
+        }}
       ]
     }
   )
@@ -720,25 +745,30 @@ For widgets not shown here, run ``cloud_get_widget_spec``.
       ]}
   }}' | python -m pocketpaw.tools.cli cloud_create_pocket -
 
-## Display pocket (read-only facts)
+## Display pocket (viewer — read-only facts, NOT a dashboard)
 
-  echo '{"name":"Q4 Revenue Report","type":"business",
+This is a ``viewer`` pattern (text + structured facts). No ``stat``
+tiles, no ``chart``. Pick for recipes, notes, articles, profiles,
+runbooks, how-to references.
+
+  echo '{"name":"Espresso 101","type":"business",
   "ripple_spec":{"type":"flex",
     "props":{"direction":"column","gap":"16px"},
     "children":[
-      {"type":"page-header","props":{"title":"Q4 Revenue Report"}},
-      {"type":"grid","props":{"columns":3,"gap":"12px"},"children":[
-        {"type":"stat","props":{"label":"Revenue","value":4500000,
-          "format":"currency","deltaPercent":15.3,"direction":"up-good"}},
-        {"type":"stat","props":{"label":"NRR","value":118,
-          "format":"percent","deltaPercent":4,"direction":"up-good"}},
-        {"type":"stat","props":{"label":"Logos","value":312,
-          "deltaPercent":8.2,"direction":"up-good"}}
-      ]},
-      {"type":"chart","props":{"type":"area","data":[
-        {"label":"Q1","value":2400000},{"label":"Q2","value":3100000},
-        {"label":"Q3","value":3800000},{"label":"Q4","value":4500000}
-      ]}}
+      {"type":"page-header","props":{"title":"Espresso 101",
+        "subtitle":"Notes from my favorite barista"}},
+      {"type":"text","props":{
+        "content":"A double shot is 14 g of finely ground coffee extracted with 36 g of water at 93 °C in 25-30 seconds. Pull too fast → tighten the grind. Pull too slow → loosen it.",
+        "variant":"lead"}},
+      {"type":"kv-table","props":{"items":[
+        {"k":"Dose","v":"14 g"},
+        {"k":"Yield","v":"36 g"},
+        {"k":"Water temp","v":"93 °C"},
+        {"k":"Time","v":"25-30 s"},
+        {"k":"Grind","v":"fine"}]}},
+      {"type":"text","props":{
+        "content":"Cup before you pull. Tare the scale. Start the timer when you press the button — not when the first drop appears. Stop at yield, not at time.",
+        "variant":"body"}}
     ]}
   }' | python -m pocketpaw.tools.cli cloud_create_pocket -
 </creation-examples>

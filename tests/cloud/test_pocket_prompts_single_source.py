@@ -191,3 +191,94 @@ def test_edit_specialist_prompt_warns_against_full_array_rewrite():
     # single-row edits rather than set_node_prop on the whole array.
     assert "set_prop_array_item" in prompt
     assert "rewrite" in prompt.lower() or "copy" in prompt.lower()
+
+
+class TestAntiDashboardRebalance:
+    """The specialist prompt now leads with a pattern-first step that
+    diversifies output away from the default dashboard shape, while
+    still treating `dashboard` as a valid pattern when the user asked
+    for one. These assertions pin that contract — a regression that
+    drops a pattern, drops the dashboard caveat, or reverts hero+grid
+    to first-mentioned in the layout menu fails here.
+    """
+
+    @pytest.fixture
+    def specialist_prompt(self) -> str:
+        from ee.ripple import POCKET_SPECIALIST_PROMPT
+
+        return POCKET_SPECIALIST_PROMPT
+
+    def test_pattern_first_step_is_present(self, specialist_prompt: str) -> None:
+        """The pattern-first forced step must appear before the layout
+        menu so the LLM names the pattern before reaching for shapes."""
+        assert "PICK THE PATTERN" in specialist_prompt
+        # All 7 patterns must be named in the menu.
+        for pattern in (
+            "dashboard",
+            "app",
+            "viewer",
+            "composer",
+            "browser",
+            "wizard",
+            "feed",
+        ):
+            assert pattern in specialist_prompt, (
+                f"pattern '{pattern}' missing from VISUAL_VARIATION_RULE"
+            )
+
+    def test_dashboard_default_rule_present(self, specialist_prompt: str) -> None:
+        """``dashboard`` remains a valid pattern but cannot be the
+        default — the prompt must carry the "only when the user
+        explicitly asked" caveat."""
+        # Either the exact phrasing or close variants — search for the
+        # constraint shape, not the literal wording.
+        text = specialist_prompt.lower()
+        assert "explicitly asked" in text or "explicitly ask" in text
+        assert "do not default to" in text or "not automatically a dashboard" in text
+
+    def test_external_design_grounding_present(self, specialist_prompt: str) -> None:
+        """The EXTERNAL DESIGN GROUNDING block tells the model that the
+        pattern names map to canonical Material 3 / Apple HIG layouts,
+        broadening the mental model beyond dashboards."""
+        assert "EXTERNAL DESIGN GROUNDING" in specialist_prompt
+        # At least one external system named so the LLM can anchor to
+        # its training data.
+        assert "Material 3" in specialist_prompt
+        assert "list-detail" in specialist_prompt
+
+    def test_layout_menu_does_not_lead_with_hero_grid(self, specialist_prompt: str) -> None:
+        """``hero+grid`` (the canonical dashboard layout) used to be
+        listed first; first-mentioned options bias the LLM's choice.
+        After the rebalance it must appear AFTER another option."""
+        # Find where the design.py layout menu starts.
+        idx_pattern_step = specialist_prompt.find("PICK THE PATTERN")
+        assert idx_pattern_step != -1
+        idx_first_pane = specialist_prompt.find("Single full-pane")
+        idx_hero_grid = specialist_prompt.find("Hero + grid")
+        # Both must be present after the pattern-first step.
+        assert idx_first_pane > idx_pattern_step
+        assert idx_hero_grid > idx_pattern_step
+        # And hero+grid must come AFTER single-pane in the menu order.
+        assert idx_first_pane < idx_hero_grid, (
+            "hero+grid is leading the layout menu again — the rebalance "
+            "ordered it last on purpose; revert the reorder if you "
+            "really want to lead with it."
+        )
+
+    def test_canonical_examples_include_non_dashboard_viewer(
+        self,
+    ) -> None:
+        """The second creation example used to be a Q4 Revenue dashboard
+        (page-header + 3 stats + area chart). It was replaced with a
+        viewer pattern (text + kv-table) so the LLM sees a non-KPI
+        shape as a first-class example."""
+        from ee.ripple._pockets import _CREATION_EXAMPLES_CLI, _CREATION_EXAMPLES_MCP
+
+        for examples in (_CREATION_EXAMPLES_MCP, _CREATION_EXAMPLES_CLI):
+            # Old dashboard example is gone.
+            assert "Q4 Revenue Report" not in examples
+            # New viewer example is in.
+            assert "Espresso 101" in examples
+            # And it explicitly demonstrates kv-table — the canonical
+            # viewer widget the old example never used.
+            assert "kv-table" in examples

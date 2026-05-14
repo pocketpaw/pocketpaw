@@ -50,6 +50,16 @@ class PocketSpecialistHintsModel(BaseModel):
 class PocketSpecialistArgs(BaseModel):
     brief: str = Field(..., min_length=10, max_length=4000)
     hints: PocketSpecialistHintsModel | None = None
+    spec: str | dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Agent-mode second-call argument: a pre-drafted rippleSpec the "
+            "calling chat agent produced after receiving the draft kit. "
+            "Accepted as a dict (MCP path) or a JSON-serialized string "
+            "(OpenAI Agents / strict-schema path) — the handler normalizes "
+            "before delegating. Ignored in subagent mode."
+        ),
+    )
 
 
 _PARAMS_JSON_SCHEMA: dict[str, Any] = {
@@ -76,6 +86,18 @@ _PARAMS_JSON_SCHEMA: dict[str, Any] = {
             },
             "description": (
                 "Optional caller-supplied overrides for fields the user named explicitly."
+            ),
+        },
+        "spec": {
+            "type": "string",
+            "description": (
+                "Agent-mode second-call: a JSON-serialized rippleSpec the "
+                "chat agent drafted after receiving the draft kit on the "
+                "first call. The specialist parses it, validates against "
+                "the widget manifest, and persists. Pass as a string (e.g., "
+                "``json.dumps(spec)``) so the schema stays strict-mode-"
+                "compatible across all backends. Omit on the first call in "
+                "agent mode and on every call in subagent mode."
             ),
         },
     },
@@ -106,8 +128,9 @@ class PocketSpecialistTool(BaseTool):
     async def execute(self, **params: Any) -> str:
         brief = params.get("brief", "")
         hints = params.get("hints")
+        spec = _normalize_spec(params.get("spec"))
         normalized = _normalize_hints(hints)
-        return await _run_handler(brief, normalized)
+        return await _run_handler(brief, normalized, spec=spec)
 
 
 def _normalize_hints(hints: Any) -> dict[str, Any] | None:
@@ -139,13 +162,47 @@ def _normalize_hints(hints: Any) -> dict[str, Any] | None:
     return None
 
 
-async def _run_handler(brief: str, hints: dict[str, Any] | None) -> str:
+def _normalize_spec(spec: Any) -> dict[str, Any] | None:
+    """Accept ``spec`` as dict, JSON-serialized string, or None.
+
+    Strict-schema-mode backends (OpenAI Agents) require ``spec`` to be a
+    string in the tool schema; the lenient MCP path passes it as a dict.
+    Both wire shapes funnel through this helper so ``_run_handler``
+    always sees a dict-or-None.
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, dict):
+        return spec
+    if isinstance(spec, str):
+        text = spec.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("pocket_specialist: dropped unparseable spec string")
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    logger.warning("pocket_specialist: dropped spec of unsupported type %s", type(spec).__name__)
+    return None
+
+
+async def _run_handler(
+    brief: str,
+    hints: dict[str, Any] | None,
+    *,
+    spec: dict[str, Any] | None = None,
+) -> str:
     """Dispatch to ``run_specialist`` and serialize the result as JSON.
 
     Reads workspace_id / user_id from the per-stream ContextVars. Returns
     an ``{"ok": False, "error": ...}`` envelope (JSON-encoded) when
     identity is missing or the run raises — the calling agent surfaces the
     string back to the user.
+
+    ``spec`` carries the agent-mode second-call payload (a pre-drafted
+    rippleSpec). Forwarded as-is; subagent mode ignores it.
     """
     from ee.agent.pocket_specialist.runtime import (
         PocketSpecialistCreateInput,
@@ -170,7 +227,7 @@ async def _run_handler(brief: str, hints: dict[str, Any] | None) -> str:
 
     parsed_hints = PocketSpecialistHints(**hints) if hints else None
     try:
-        payload = PocketSpecialistCreateInput(brief=brief, hints=parsed_hints)
+        payload = PocketSpecialistCreateInput(brief=brief, hints=parsed_hints, spec=spec)
     except Exception as exc:  # pydantic ValidationError lands here
         return json.dumps({"ok": False, "error": f"invalid input: {exc}"})
 

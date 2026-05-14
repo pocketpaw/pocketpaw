@@ -1245,6 +1245,26 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     _event_count,
                 )
 
+                # ── Close the inner async generator LAST. ──
+                # ``_resilient_receive`` / ``_resilient_query`` spawn
+                # background ``asend`` tasks under the hood; without
+                # ``aclose()`` those tasks linger in the loop's pending
+                # set until GC, surfacing as
+                # ``Task exception was never retrieved`` +
+                # ``StopAsyncIteration`` log noise on every turn (most
+                # visible right after the soul-mutation hook fires).
+                #
+                # Order matters: aclose runs AFTER the drain decision
+                # has read ``_saw_result`` so closing the generator
+                # cannot influence that branch. Idempotent + safe on a
+                # generator that already exited cleanly.
+                close = getattr(event_stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("event_stream aclose error (non-fatal): %s", exc)
+
             yield AgentEvent(type="done", content="")
 
         except Exception as e:

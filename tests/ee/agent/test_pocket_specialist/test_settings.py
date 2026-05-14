@@ -37,7 +37,12 @@ class TestPocketSpecialistSettings:
     def test_defaults(self):
         s = Settings(_env_file=None)
         assert s.pocket_specialist_backend == "deep_agents"
-        assert s.pocket_specialist_model == ""
+        # The specialist emits structured rippleSpec JSON from a stable
+        # ~12k-token design-rules prompt — Haiku handles that workload at
+        # roughly 2-4x Sonnet's wall-time without measurable quality loss.
+        # Operators wanting creative liberty (Sonnet) or cheap self-hosted
+        # inference (DeepSeek) can override.
+        assert s.pocket_specialist_model == "anthropic:claude-haiku-4-5-20251001"
         assert s.pocket_specialist_max_validation_retries == 3
 
     def test_env_var_override(self, monkeypatch):
@@ -61,9 +66,15 @@ class TestResolveSpecialistModel:
         assert resolve_specialist_model(s) == "openai_compatible:deepseek-v4-pro"
 
     def test_falls_back_to_backend_default_when_unset(self):
+        # ``pocket_specialist_model=""`` opts out of the Haiku default and
+        # falls through to whatever the chosen backend's ``*_model``
+        # setting is. Operators who want to track a single project-wide
+        # model (e.g., always Sonnet) set both the backend's model and
+        # blank the specialist override.
         s = Settings(
             _env_file=None,
             pocket_specialist_backend="deep_agents",
+            pocket_specialist_model="",
             deep_agents_model="anthropic:claude-sonnet-4-6",
         )
         assert resolve_specialist_model(s) == "anthropic:claude-sonnet-4-6"
@@ -71,7 +82,13 @@ class TestResolveSpecialistModel:
     def test_returns_empty_when_backend_has_no_model_setting(self):
         # opencode has opencode_model; copilot_sdk has copilot_sdk_model;
         # if a backend has none, resolver returns "" — caller must handle.
-        s = Settings(_env_file=None, pocket_specialist_backend="not_a_real_backend")
+        # Pin pocket_specialist_model="" so the Haiku default doesn't
+        # short-circuit the fallback path being tested.
+        s = Settings(
+            _env_file=None,
+            pocket_specialist_backend="not_a_real_backend",
+            pocket_specialist_model="",
+        )
         assert resolve_specialist_model(s) == ""
 
     def test_falls_back_to_claude_sdk_model_for_claude_agent_sdk_backend(self):
@@ -82,6 +99,7 @@ class TestResolveSpecialistModel:
         s = Settings(
             _env_file=None,
             pocket_specialist_backend="claude_agent_sdk",
+            pocket_specialist_model="",
             claude_sdk_model="anthropic:claude-sonnet-4-6",
         )
         assert resolve_specialist_model(s) == "anthropic:claude-sonnet-4-6"

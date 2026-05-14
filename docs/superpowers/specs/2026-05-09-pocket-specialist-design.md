@@ -349,11 +349,15 @@ pocket_specialist_backend: str = Field(
     ),
 )
 pocket_specialist_model: str = Field(
-    default="",
+    default="anthropic:claude-haiku-4-5-20251001",
     description=(
-        "Model override for the specialist run (empty = use the chosen "
-        "backend's default model setting). provider:model format, e.g. "
-        "'openai_compatible:deepseek-v4-pro' for cheap fast specs."
+        "Model the specialist uses for spec generation. Defaults to Haiku — "
+        "the specialist's job is emitting structured rippleSpec JSON from a "
+        "stable ~12k-token design-rules prompt, which Haiku handles at ~2-4x "
+        "Sonnet speed with no measurable quality loss. Override with "
+        "provider:model when you need creative liberty (Sonnet) or cheap "
+        "self-hosted inference ('openai_compatible:deepseek-v4-pro'). Set to "
+        "an empty string to fall back to the chosen backend's default."
     ),
 )
 pocket_specialist_max_validation_retries: int = Field(
@@ -363,11 +367,43 @@ pocket_specialist_max_validation_retries: int = Field(
         "with remaining warnings."
     ),
 )
+pocket_specialist_mode: Literal["subagent", "agent"] = Field(
+    default="subagent",
+    description=(
+        "Which adapter handles create. ``subagent`` (default) spawns "
+        "an isolated backend running the specialist's own model — the "
+        "historical flow. ``agent`` uses a two-call protocol: first "
+        "call returns a draft kit; the calling chat agent drafts the "
+        "rippleSpec inline using its own LLM and calls back with "
+        "``spec=<draft>``. Agent mode ignores backend + model settings."
+    ),
+)
 ```
 
 Env vars: `POCKETPAW_POCKET_SPECIALIST_BACKEND`,
 `POCKETPAW_POCKET_SPECIALIST_MODEL`,
-`POCKETPAW_POCKET_SPECIALIST_MAX_VALIDATION_RETRIES`.
+`POCKETPAW_POCKET_SPECIALIST_MAX_VALIDATION_RETRIES`,
+`POCKETPAW_POCKET_SPECIALIST_MODE`.
+
+### Adapter dispatch (added 2026-05-14)
+
+`run_specialist` is a thin dispatch shim — the real work lives in one of
+two adapters in `ee/agent/pocket_specialist/adapters.py`:
+
+| Adapter | Triggered by | What it does |
+|---|---|---|
+| `SubagentAdapter` | `pocket_specialist_mode="subagent"` (default) | Wraps the historical `_run_subagent_pipeline` — spawns an isolated backend with the specialist's own model, runs the agent loop, persists. |
+| `AgentModeAdapter` | `pocket_specialist_mode="agent"` | Two-call protocol. First call (no `spec` arg) returns `{action: "draft_kit", draft_kit: {...}}` with the structural plan echoed back, a rippleSpec shape reminder, a starter list of widget kinds, and instructions. The chat agent drafts the spec using its own LLM and calls again with `spec=<draft>`. The second call skips the LLM and goes straight to `make_persist_pocket_tool` for validate-and-persist. |
+
+`pick_adapter(mode)` is the dispatch function; unknown modes fall back to
+`SubagentAdapter` with a warning log. Adding a new mode (e.g., remote
+spec service): implement `SpecialistCreateAdapter` and wire a branch
+into `pick_adapter`.
+
+The MCP/CLI/BaseTool surfaces all pass `spec` through transparently —
+in OpenAI Agents (strict-schema mode) the wire shape is a
+JSON-serialized string normalized by `tool._normalize_spec`; in MCP and
+CLI the wire shape is a dict.
 
 ## Specialist-internal tools
 

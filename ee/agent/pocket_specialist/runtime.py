@@ -99,16 +99,33 @@ class PocketSpecialistHints(BaseModel):
 class PocketSpecialistCreateInput(BaseModel):
     brief: str = Field(..., min_length=10, max_length=4000)
     hints: PocketSpecialistHints | None = None
+    spec: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Pre-drafted rippleSpec for agent-mode's second call. When set, "
+            "the specialist skips its own LLM draft phase and goes straight "
+            "to validate-and-persist. Ignored in subagent mode."
+        ),
+    )
 
 
 class PocketSpecialistCreateOutput(BaseModel):
     ok: bool
-    action: Literal["created", "extended", "failed"]
+    action: Literal["created", "extended", "failed", "draft_kit", "redraft"]
     pocket: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
     duration_ms: int
     backend_used: str
+    draft_kit: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Agent-mode first-call payload: design rules digest, structural "
+            "plan echo, available widget list, and instructions for the "
+            "calling chat agent to draft a rippleSpec and call back with "
+            "``spec=<draft>``. None in subagent mode."
+        ),
+    )
 
 
 async def run_specialist(
@@ -118,13 +135,44 @@ async def run_specialist(
     user_id: str,
     settings: Settings,
 ) -> PocketSpecialistCreateOutput:
-    """Run the pocket specialist end-to-end.
+    """Entry point — pick the adapter for ``settings.pocket_specialist_mode``
+    and delegate.
+
+    Two adapters live in ``adapters.py``. The default ``subagent`` mode
+    runs the historical pipeline below (an isolated backend with the
+    specialist's own model). The ``agent`` mode short-circuits the
+    backend spawn and hands a draft kit back to the calling chat agent
+    so it can draft the rippleSpec inline using its own LLM.
+
+    Signature is the public contract — call sites in ``mcp_tool``,
+    ``cli_tool``, and ``tool`` rely on it being adapter-agnostic.
+    """
+    from ee.agent.pocket_specialist.adapters import pick_adapter
+
+    adapter = pick_adapter(settings.pocket_specialist_mode)
+    return await adapter.create(
+        input, workspace_id=workspace_id, user_id=user_id, settings=settings
+    )
+
+
+async def _run_subagent_pipeline(
+    input: PocketSpecialistCreateInput,
+    *,
+    workspace_id: str,
+    user_id: str,
+    settings: Settings,
+) -> PocketSpecialistCreateOutput:
+    """Subagent-mode pipeline (historical flow).
 
     Builds an isolated backend, attaches the three internal tools, runs the
     agent loop, captures the persist_pocket result, and emits status events
     along the way. Always returns a persisted pocket - the safety-net
     fallback (Task 8) covers the rare case where the LLM finishes without
     calling persist_pocket.
+
+    Invoked by ``SubagentAdapter.create`` — kept private so the only
+    entry point remains ``run_specialist`` (which dispatches via
+    ``pick_adapter``).
     """
     started = time.monotonic()
     backend_name = settings.pocket_specialist_backend

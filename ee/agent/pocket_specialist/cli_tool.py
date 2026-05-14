@@ -50,6 +50,7 @@ async def _cloud_pocket_specialist_create(args: dict[str, Any]) -> dict[str, Any
     """
     brief = args.get("brief", "")
     raw_hints = args.get("hints")
+    raw_spec = args.get("spec")
 
     workspace_id = (
         current_workspace_id()
@@ -71,7 +72,11 @@ async def _cloud_pocket_specialist_create(args: dict[str, Any]) -> dict[str, Any
     hints = PocketSpecialistHints(**raw_hints) if raw_hints else None
 
     try:
-        payload = PocketSpecialistCreateInput(brief=brief, hints=hints)
+        payload = PocketSpecialistCreateInput(
+            brief=brief,
+            hints=hints,
+            spec=raw_spec if isinstance(raw_spec, dict) else None,
+        )
     except Exception as exc:  # noqa: BLE001 — pydantic ValidationError surfaces here
         return {"ok": False, "error": f"invalid input: {exc}"}
 

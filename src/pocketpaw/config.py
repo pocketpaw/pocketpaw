@@ -328,11 +328,16 @@ class Settings(BaseSettings):
         ),
     )
     pocket_specialist_model: str = Field(
-        default="",
+        default="anthropic:claude-haiku-4-5-20251001",
         description=(
-            "Model override for the specialist run (empty = use the chosen backend's "
-            "default *_model setting). provider:model format, e.g. "
-            "'openai_compatible:deepseek-v4-pro' for cheap fast specs."
+            "Model the specialist uses for spec generation. Defaults to Haiku — "
+            "the specialist's job is emitting structured rippleSpec JSON from a "
+            "stable ~12k-token design-rules prompt, which Haiku handles at ~2-4x "
+            "Sonnet speed with no measurable quality loss. Override with "
+            "provider:model when you need creative liberty (Sonnet) or cheap "
+            "self-hosted inference ('openai_compatible:deepseek-v4-pro'). Set to "
+            "an empty string to fall back to the chosen backend's default "
+            "*_model setting."
         ),
     )
     pocket_specialist_max_validation_retries: int = Field(
@@ -340,6 +345,20 @@ class Settings(BaseSettings):
         description=(
             "Max draft -> validate -> revise iterations before persisting with "
             "remaining warnings. Specialist always persists; this only bounds revision."
+        ),
+    )
+    pocket_specialist_mode: Literal["subagent", "agent"] = Field(
+        default="subagent",
+        description=(
+            "Which adapter handles ``pocket_specialist__create`` calls. "
+            "``subagent`` (default) spawns an isolated backend running the "
+            "specialist's own model — the historical flow. ``agent`` uses a "
+            "two-call protocol: the first call returns a draft kit (design "
+            "rules digest + structural plan + widget list); the chat agent "
+            "drafts the rippleSpec inline using its own model and calls back "
+            "with ``spec=<draft>`` for validate-and-persist. ``agent`` mode "
+            "ignores ``pocket_specialist_backend`` and ``pocket_specialist_model`` "
+            "entirely — the chat agent's runtime is the LLM."
         ),
     )
     deep_agents_skills: list[str] = Field(

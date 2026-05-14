@@ -65,7 +65,12 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
 
     raw_hints = args.get("hints")
     hints = PocketSpecialistHints(**raw_hints) if raw_hints else None
-    payload = PocketSpecialistCreateInput(brief=args.get("brief", ""), hints=hints)
+    raw_spec = args.get("spec")
+    payload = PocketSpecialistCreateInput(
+        brief=args.get("brief", ""),
+        hints=hints,
+        spec=raw_spec if isinstance(raw_spec, dict) else None,
+    )
 
     try:
         out = await run_specialist(
@@ -241,6 +246,19 @@ def build_pocket_specialist_server() -> Any:
                         },
                     },
                     "additionalProperties": False,
+                },
+                "spec": {
+                    "type": "object",
+                    "description": (
+                        "Agent-mode second call: a pre-drafted rippleSpec "
+                        "from the chat agent. The specialist validates it "
+                        "against the widget manifest and persists. Omit on "
+                        "the first call (in agent mode you'll get back "
+                        "``action='draft_kit'`` with instructions). In "
+                        "subagent mode this argument is ignored — the "
+                        "spawned specialist drafts its own spec."
+                    ),
+                    "additionalProperties": True,
                 },
             },
             "required": ["brief"],

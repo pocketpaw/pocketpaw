@@ -1,4 +1,13 @@
-"""run_specialist end-to-end with a mocked backend."""
+"""run_specialist end-to-end with a mocked backend.
+
+These tests exercise the SUBAGENT-mode pipeline specifically — they
+mock the backend stream and assert that ``run_specialist`` returns
+the persisted pocket via the side-channel capture dict. The
+``_subagent_settings`` fixture pins ``pocket_specialist_mode="subagent"``
+so an operator shell env var (POCKETPAW_POCKET_SPECIALIST_MODE=agent)
+doesn't reroute the run through ``AgentModeAdapter`` and produce a
+``draft_kit`` response that these assertions weren't designed for.
+"""
 
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,6 +21,16 @@ from ee.agent.pocket_specialist.runtime import (
 )
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+
+
+@pytest.fixture
+def _subagent_settings() -> Settings:
+    """Settings pinned to subagent mode so operator env vars don't
+    smuggle agent mode into these tests. Use this instead of
+    ``Settings()`` whenever a test calls ``run_specialist`` and
+    expects the subagent pipeline to run."""
+
+    return Settings(_env_file=None, pocket_specialist_mode="subagent")
 
 
 def _stream(events: list[AgentEvent]):
@@ -64,7 +83,7 @@ def _validate_factory_stub(warnings: list[str] | None = None):
 
 class TestRunSpecialistHappyPath:
     @pytest.mark.asyncio
-    async def test_returns_persisted_pocket_via_tool_capture(self):
+    async def test_returns_persisted_pocket_via_tool_capture(self, _subagent_settings):
         captured_pocket = {"id": "p-new", "name": "Repos", "color": "#0ea5e9"}
         # Real backends only emit {"name": tool_name} in tool_result metadata
         # - they never include the tool's return dict. The runtime now relies
@@ -96,7 +115,7 @@ class TestRunSpecialistHappyPath:
                 PocketSpecialistCreateInput(brief="Track my repos across repos foo, bar, baz"),
                 workspace_id="ws-1",
                 user_id="user-A",
-                settings=Settings(),
+                settings=_subagent_settings,
             )
 
         assert out.ok is True
@@ -104,7 +123,7 @@ class TestRunSpecialistHappyPath:
         assert out.pocket["id"] == "p-new"
 
     @pytest.mark.asyncio
-    async def test_hints_target_pocket_id_locks_update_path(self):
+    async def test_hints_target_pocket_id_locks_update_path(self, _subagent_settings):
         captured_pocket = {"id": "p-1", "name": "Updated"}
         events = [
             AgentEvent(type="tool_use", content="", metadata={"name": "persist_pocket"}),
@@ -133,7 +152,7 @@ class TestRunSpecialistHappyPath:
                 ),
                 workspace_id="ws-1",
                 user_id="user-A",
-                settings=Settings(),
+                settings=_subagent_settings,
             )
 
         assert out.action == "extended"
@@ -148,7 +167,7 @@ class TestRunSpecialistFailureMode:
     from a brief" are worse than "I couldn't build that, try again"."""
 
     @pytest.mark.asyncio
-    async def test_no_pocket_returns_failure_result(self):
+    async def test_no_pocket_returns_failure_result(self, _subagent_settings):
         events = [
             AgentEvent(type="message", content="I'm done."),
             AgentEvent(type="done", content=""),
@@ -168,7 +187,7 @@ class TestRunSpecialistFailureMode:
                 PocketSpecialistCreateInput(brief="A vague brief here for testing"),
                 workspace_id="ws-1",
                 user_id="user-A",
-                settings=Settings(),
+                settings=_subagent_settings,
             )
 
         assert out.ok is False

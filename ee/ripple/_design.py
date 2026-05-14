@@ -21,22 +21,27 @@ layout      flex, grid, card, container, tabs, accordion, split,
             section, app-shell, sidebar, breadcrumb, comparison-layout,
             map, checklist-layout, entity-detail, form-layout,
             invoice-layout, location-picker, order-status,
-            report-layout, wizard-layout
+            report-layout, wizard-layout, glass-card, ripple-frame
 display     heading, text, badge, metric, stat, progress, progress-ring,
-            avatar, image, markdown, code-block, code, kbd, icon,
-            quote, highlight, definition-list, comparison-table,
+            avatar, image, markdown, rich-text, code-block, code, kbd,
+            icon, quote, highlight, definition-list, comparison-table,
             pros-cons, steps, status-dot, trend, link-preview, qr,
-            diff, copy, chip, empty-state, loading
+            diff, copy, chip, empty-state, loading, skeleton,
+            company-header, article-meta, soul-status, c4, terminal
 input       button, input, textarea, select, combobox, multi-select,
             checkbox, switch, radio-group, slider, rating, date-picker,
             time-picker, number-input, segmented, color-picker,
-            file-upload, form, filter-bar
+            file-upload, form, filter-bar, search, mention, otp-input,
+            range-bar, code-editor
 data        chart, table, data-grid, kanban, gantt, calendar, timeline,
             tree, tree-table, virtual-list, sparkline, gauge, funnel,
-            heatmap, sankey, treemap
+            heatmap, sankey, treemap, workflow
+dashboard   pipeline-dashboard, analytics-dashboard, ops-dashboard,
+            exec-dashboard, project-dashboard, dashboard, dashboard-slot,
+            analyst-bar, bulk-action-bar, saved-views
 overlay     alert, callout, tooltip, popover, hover-card, dropdown-menu,
             toast, command-palette, context-menu, notification-center,
-            error-state
+            error-state, sheet, modal, confirm-dialog, coachmark
 research    source-card, citation, sources-bar, discover-card, follow-up,
             kv-table, news-card, ticker
 vertical    pricing-table, settings-list, comment-thread, audit-log,
@@ -90,6 +95,51 @@ of text rows" rebuild looks worse than the real widget.
   filter a list by status/category    → `select` or `filter-bar`
                                         bound to `state.filter`
                                         — NOT tabs
+
+  ## Polished pattern layouts — reach for these BEFORE composing from primitives
+
+  When the user described a familiar domain shape, the library
+  already has the composed layout. Picking the polished widget reads
+  better than rebuilding it from a 3-stat grid + chart + table:
+
+  sales pipeline / quota tracker     → pipeline-dashboard
+                                        (funnel + reps + conversions
+                                        + quota progress, composed)
+  product / web analytics            → analytics-dashboard
+  on-call / incidents / sre          → ops-dashboard
+  delivery / project status          → project-dashboard
+  exec / leadership weekly review    → exec-dashboard
+  invoice / quote / receipt          → invoice-layout
+  order / shipment tracking          → order-status
+  record / profile / entity facts    → entity-detail (NOT page-header
+                                        + grid of stats)
+  pricing / plans / tiers            → pricing-table
+  quarterly / status write-up        → report-layout
+  feature / product comparison       → comparison-layout
+  launch checklist / runbook         → checklist-layout
+  multi-step setup / onboarding      → wizard-layout
+  signup / contact / multi-field     → form-layout
+
+  ## Other widgets to reach for when the brief matches
+
+  product tour / onboarding hint     → coachmark
+  notification bell / inbox          → notification-center
+  saved filter / view picker         → saved-views
+  bulk action bar (select N rows)    → bulk-action-bar
+  analyst control bar (date+filter)  → analyst-bar
+  mention picker (@user)             → mention
+  one-time password input            → otp-input
+  range slider (min/max)             → range-bar
+  rich text editor                   → rich-text (NOT markdown for
+                                        editable content)
+  code editor (IDE-like)             → code-editor (NOT code-block)
+  terminal / shell output            → terminal
+  loading placeholder                → skeleton (NOT empty `text`)
+  modal dialog                       → modal (lightweight) or sheet
+                                        (drawer-style)
+  confirm before destructive action  → confirm-dialog
+  glass-tinted card surface          → glass-card
+  C4 architecture diagram            → c4
 """
 
 
@@ -919,18 +969,67 @@ stats → chart → table`, you have built the same pocket three times
 with different field values. That is the failure mode this section
 exists to prevent.
 
+## STEP 1 — PICK THE PATTERN (do this before touching widgets)
+
+Before reaching for a layout or a widget, name the **pattern** this
+pocket fits. The pattern decides what content is primary and which
+widgets are even on the table. Pick ONE — and do not default to
+`dashboard`. The vast majority of briefs are NOT dashboards.
+
+  • dashboard — overview of metrics, trends, and roll-up tables.
+                KPI tiles + charts + summary roster. **Only pick
+                this when the user explicitly asked for metrics /
+                KPIs / overview / "dashboard for X".** A brief like
+                "team page" or "project tracker" is NOT
+                automatically a dashboard.
+  • app       — interactive tool the user OPERATES. Persistent
+                state, controls that mutate it, an action verb in
+                the title (todo, kanban, planner, calculator,
+                tracker, journal, scratchpad).
+  • viewer    — read-only inspection of ONE thing. Article, recipe,
+                profile card, dataset detail, runbook, glossary
+                entry. Text + structured facts; no KPI tiles.
+  • composer  — focused authoring surface. Writer, mood logger, idea
+                capture, daily check-in. Input is the focal widget.
+  • browser   — list + drill into the selection. File explorer,
+                mailbox, archive, reading list. Master-detail.
+  • wizard    — multi-step linear flow. Setup, onboarding, quiz,
+                multi-page form, interview prep.
+  • feed      — reverse-chronological stream. Activity log, news,
+                timeline of events, audit trail.
+
+**Default rule:** if the user did not name one of these patterns AND
+did not explicitly ask for metrics/KPIs/overview, do NOT pick
+`dashboard`. Pick the pattern that fits the *primary action* (read,
+operate, write, browse, walk through, scroll). Visual style follows
+pattern — not the other way around.
+
+When the user explicitly said "dashboard" (or asked for KPIs, metrics,
+overview), `dashboard` IS the right pick — build it confidently with
+the hero+grid layout below.
+
+## STEP 2 — PICK THE LAYOUT (shape of the page)
+
 Vary the SHAPE of the page across pockets. Pick from this menu (mix
 freely; combine across panes):
 
-  A. Hero + grid                — big page-header / hero, then KPI grid.
-                                  Default for "report" / "summary" feel.
-  B. Single full-pane widget    — calendar, kanban, gantt, treemap, or
+  A. Single full-pane widget    — calendar, kanban, gantt, treemap, or
                                   data-grid fills the canvas. Thin stat
-                                  strip above OK. Default for "app" feel.
+                                  strip above OK. Default for `app`
+                                  pattern.
+  B. Master–detail              — `master-detail` widget: list on the
+                                  left, detail of selection on the right.
+                                  Default for `browser` / `viewer`
+                                  patterns. Maps to Material 3's
+                                  "list-detail" canonical layout.
   C. Split (sidebar + main)     — `split` layout: nav / filter list on
                                   the left, focal widget on the right.
                                   Default for "tool" feel.
-  D. Tabs                       — `tabs` widget, one logical view per
+  D. Stacked recipe blocks      — page-header + sources-bar + text +
+                                  focal widget + callout + follow-up.
+                                  Default for `viewer` / research /
+                                  write-up patterns.
+  E. Tabs                       — `tabs` widget, one logical view per
                                   tab. Default for "multi-aspect record"
                                   (Overview / Activity / Settings).
                                   Each tab must be STRUCTURALLY DIFFERENT
@@ -939,14 +1038,14 @@ freely; combine across panes):
                                   `select` or `filter-bar` instead. Tabs
                                   are NOT a sort — use `sortable:true`
                                   on table columns instead.
-  E. Master–detail              — `master-detail` widget: list on the
-                                  left, detail of selection on the right.
-                                  Default for "browse + inspect" flows.
-  F. Stacked recipe blocks      — page-header + sources-bar + text +
-                                  focal widget + callout + follow-up.
-                                  Default for "research / write-up" feel.
-  G. Wizard / steps             — `wizard-layout`. Default for "setup /
-                                  onboarding / multi-step form" feel.
+  F. Wizard / steps             — `wizard-layout`. Default for `wizard`
+                                  pattern (setup / onboarding / multi-
+                                  step form / quiz).
+  G. Hero + grid                — big page-header / hero, then KPI grid +
+                                  chart + summary table. **Default for
+                                  `dashboard` pattern ONLY.** If you
+                                  didn't pick `dashboard` in STEP 1, do
+                                  not pick this layout.
 
 Vary the FOCAL WIDGET. The agent's standard combo (`stat` + `chart` +
 `table`) is correct for ~30% of pockets and lazy for the other 70%.
@@ -995,6 +1094,32 @@ A pocket with one well-chosen focal widget + one sortable table +
 two more typed widgets reads as a designed page. Four tables reads
 as "the agent didn't pick anything; it just dumped each list of data
 into the same widget."
+
+## EXTERNAL DESIGN GROUNDING (these patterns are not novel)
+
+The patterns in STEP 1 are PocketPaw vocabulary, but they're the same
+shapes documented in widely-cited design systems. Your training data
+has examples — draw on them. If you find yourself defaulting to "a
+dashboard" because that's the only shape you remember, recall that
+these are first-class layouts everywhere else too:
+
+  • `viewer` / `browser`  →  Material 3 "list-detail" canonical layout.
+                             Apple HIG calls this a "list pattern".
+  • `feed`                →  Material 3 "feed" canonical layout.
+                             Twitter / Mastodon / news apps.
+  • `app` / `composer`    →  Material 3 "supporting-pane" or single-pane
+                             with focal control. Notes apps, journals,
+                             trackers, calculators.
+  • `wizard`              →  Multi-step flow. Stripe Onboarding, Apple
+                             Setup Assistant, Linear's first-run.
+  • `dashboard`           →  KPI-tile + chart overview. Datadog, Stripe
+                             dashboard, Linear Insights — **not** every
+                             internal tool.
+
+The point is mental-model breadth. An "article reader" is not a
+PocketPaw-specific construct. It's the list-detail / viewer pattern
+that's existed in every design system for a decade. Use that
+grounding to pick a non-dashboard shape when the brief calls for it.
 """
 
 
