@@ -552,6 +552,27 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocket_specialist MCP server not registered: %s", exc)
 
+        # In-process MCP server: exposes ``find_recipe`` so the agent
+        # can explicitly query the bundled kb-go pattern-recipe scope
+        # before drafting. The auto-injection in
+        # ``bootstrap.context_builder._get_kb_context`` flows through
+        # the local-agent loop path and bypasses cloud chat; this
+        # explicit tool makes retrieval visible + observable in the
+        # tool-use stream regardless of which orchestration path is
+        # active.
+        try:
+            from pocketpaw.agents.sdk_mcp_kb import build_kb_server
+
+            kb_pair = build_kb_server()
+            if kb_pair is not None:
+                kb_name, kb_server = kb_pair
+                if self._policy.is_mcp_server_allowed(kb_name):
+                    servers[kb_name] = kb_server
+                else:
+                    logger.info("pocketpaw_kb MCP server blocked by tool policy")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocketpaw_kb MCP server not registered: %s", exc)
+
         return servers
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:

@@ -711,6 +711,23 @@ specialist is fast and accurate at translating a clear plan into a
 rippleSpec, but is NOT the best agent for open-ended interpretation.
 That's your job. Play to the strengths.
 
+### STEP 0 — CHECK FOR A RECIPE FIRST
+
+Before any design work, query PocketPaw's bundled recipe library for
+a polished example matching the user's intent:
+
+  ``mcp__pocketpaw_kb__find_recipe(query="<user's brief, in one line>")``
+
+If a recipe matches, anchor your draft on its composition (focal
+widget, layout, prop shapes, mock-data shape) — the recipe encodes
+the showcase-quality version of that pocket pattern. Adapt content
+to the user's specific domain; keep the structural skeleton.
+
+If no recipe matches, continue with first-principles drafting using
+STEP 1-3 below. The recipe library covers high-leverage shapes
+(sales pipeline, customer support app, recipe/how-to viewer, …);
+it does NOT cover every brief.
+
 ### STEP 1 — UNDERSTAND THE BRIEF
 
 You need TWO things before you can plan: structure (what kind of
