@@ -285,15 +285,24 @@ rows with bullets and the user notices instantly.
 """
 
 
-CANONICAL_SHAPES = """\
-# CANONICAL SHAPES — inlined for the highest-traffic widgets only
+_CANONICAL_SHAPES_PREAMBLE = """\
+# CANONICAL SHAPES — inlined for the highest-traffic widgets
 
-The four shapes below are inlined because EVERY pocket touches them.
-For every other widget — stat, timeline, gantt, calendar,
-heatmap, pricing-table, comparison-table, kv-table, source-card,
-sources-bar, gauge, funnel, sankey, treemap, sparkline, etc. — call
-`get_widget_spec` per the WIDGET SPEC TOOL RULE above. Don't guess.
+The shapes below are inlined because they're the highest-traffic
+widgets and the prop schema is most often hallucinated. For widgets
+outside this list (stat, gantt, calendar, heatmap, pricing-table,
+comparison-table, kv-table, source-card, sources-bar, gauge, funnel,
+sankey, treemap, sparkline, etc.) call `get_widget_spec` — don't guess.
+"""
 
+
+# Per-widget canonical shapes. Keyed by widget `type` so both the
+# inline-Ripple `widget_help` tool and the pocket create specialist
+# can fetch JUST the widget they need, instead of loading the entire
+# blob. Keeping per-widget granularity is what makes lazy retrieval
+# actually lazy.
+WIDGET_SHAPES: dict[str, str] = {
+    "chart": """\
 `chart` — Ripple's chart has a SMALL fixed prop set. **Allowed props:**
 `type`, `data`, `title`, `height`, `colors`, `tooltip`. THAT IS THE
 WHOLE LIST. Anything else is invented and the renderer ignores it.
@@ -349,7 +358,8 @@ and want a chart, you have two options:
       the state — emit `chartData` alongside the source array), or
   (b) emit the chart-shaped array directly as `chartData` in state and
       keep the source array for the table.
-
+""",
+    "table": """\
 `table` — `columns` are OBJECTS with `accessorKey`; `rows` is an array
 of OBJECTS keyed by accessorKey. NEVER pass `columns: [str]` +
 `rows: [[]]` — the cells silently render empty.
@@ -388,7 +398,8 @@ table.
   Format at display time via the renderer's column formatter, not at
   emit time. If you must emit pre-formatted strings, do not enable
   sort on that column.
-
+""",
+    "data-grid": """\
 `data-grid` — HIGH DENSITY tabular: sticky headers, resizable columns,
 search, per-column sort, dense cells. Use when row count ≥ 50 or the
 user wants a "power user" feel (operational dashboards, log viewers,
@@ -429,7 +440,8 @@ ranked datasets, monitoring lists).
   - For 1000+ rows prefer `virtual-list` (call get_widget_spec).
   - Same numeric-sort gotcha as `table`: emit numbers, not formatted
     strings, on any column where sort is enabled.
-
+""",
+    "kanban": """\
 `kanban` — columns are headers ONLY; cards live in a flat list in
 `state`, reach the widget via `bind`, and `columnKey` says which card
 field maps to which column. Without `bind`, drag-to-move snaps back:
@@ -443,7 +455,8 @@ field maps to which column. Without `bind`, drag-to-move snaps back:
                    { "id": "done", "title": "Done" } ],
       "columnKey": "status"
   }}
-
+""",
+    "audit-log": """\
 `audit-log` — THE widget for "Recent Activity", event streams, audit
 trails, history logs. Each entry has actor + action + target. Far
 better than a `table` for this shape: dense per-row layout, icon per
@@ -465,7 +478,8 @@ timestamp}" rows is an audit-log emitted as the wrong widget.
   Use `groupBy: "day"` or `"week"` for chronological feeds; omit
   (`"none"`) for tight chronological streams. `showFilters: true`
   surfaces a filter-by-type chip row.
-
+""",
+    "timeline": """\
 `timeline` — milestones / dated events with optional rich detail.
 Vertical timeline rendering. Use for project history, release notes,
 contribution graphs, lifecycle events.
@@ -484,7 +498,8 @@ contribution graphs, lifecycle events.
   When in doubt between `audit-log` and `timeline`:
     audit-log → who did what (actor-driven)
     timeline  → what happened when (event-driven, often single actor)
-
+""",
+    "tabs": """\
 `tabs` — labels in `props.tabs`; CONTENT in the node's `children` array,
 one child per tab by index. Do NOT use `props.tabs[i].content` — ignored:
   { "type": "tabs",
@@ -528,308 +543,174 @@ one child per tab by index. Do NOT use `props.tabs[i].content` — ignored:
   one screen would feel CROWDED with structurally different things,
   tabs are correct. If it would feel REPETITIVE (same widget, same
   rows, just filtered differently), use a filter — not tabs.
-"""
+""",
+}
+
+
+# Backward-compat: the full canonical-shapes block remains exported as
+# the same prose blob it always was. Callers that want per-widget
+# granularity should reach for ``WIDGET_SHAPES`` directly.
+CANONICAL_SHAPES = _CANONICAL_SHAPES_PREAMBLE + "\n" + "\n".join(WIDGET_SHAPES.values())
 
 
 INTERACTIVE_STATE_RULE = """\
-# INTERACTIVE STATE RULE — universal principles for interactive UI
+# INTERACTIVE STATE RULE
 
-## Spec shape (read this first)
+## Spec shape
 
-Every spec has TWO top-level keys that matter for interactivity:
+Top-level keys: `state` (mutable data) + `ui` (renderable tree).
+The tree field is `ui` — not root/tree/view/body/content. Missing
+`ui` renders as "No widgets yet".
 
-  {
-    "state": { ... },   // top-level — the source of truth for mutable data
-    "ui":    { ... }    // top-level — the renderable node tree (REQUIRED)
-  }
+Each node: `{type, props, children?, style?, bind?, on_click?, ...}`.
+Nest with `children` in flex/grid/each.
 
-The renderable tree's field name is **`ui`** — not `root`, not `tree`,
-not `view`, not `body`, not `content`. Ripple reads `spec.ui` to mount
-the canvas; if `ui` is missing the pocket renders as "No widgets yet"
-even when the rest of the spec is valid.
+## Control flow widgets use NODE fields, not `bind`
 
-Inside `ui`, each node is `{type, props, children?, style?, bind?,
-on_click?, ...}`. Nest with `children` arrays in `flex`/`grid`/`each`.
+  each: { "type":"each", "items":"{state.todos}",
+          "item_as":"todo", "index_as":"i",
+          "children":[ <one node rendered per item> ] }
+  if:   { "type":"if", "condition":"{state.signed_in}",
+          "children":[...], "else_children":[...] }
 
-## Node-level fields vs `bind` — DON'T confuse them
-
+`each.bind` / `if.when` / `if.if` are all ignored.
 `bind` is for value-bound DATA widgets (input, checkbox, switch,
-kanban cards, slider, rating, date-picker, etc.) — the renderer
-routes the widget's `value` and `onchange` through it.
+kanban cards, slider, rating, date-picker, etc.).
 
-Control-flow widgets do NOT use `bind`. They have their own
-node-level fields:
+## Mutation triangle — any mutable data needs all three
 
-  `each` reads from `items`:
-    { "type": "each", "items": "{state.todos}",
-      "item_as": "todo", "index_as": "i",
-      "children": [ <one or more nodes rendered per item> ] }
+  (1) DATA in top-level `state`.
+  (2) READ via `bind` or a `{state.x}` expression.
+  (3) WRITE via an action chain on a button / on_change / drag handler.
 
-  `if` reads from `condition`:
-    { "type": "if", "condition": "{state.user.signed_in}",
-      "children": [...], "else_children": [...] }
+Drop any leg → broken UI (data in props with no state, state with no
+read, data+read with no write).
 
-If you write `{ "type": "each", "bind": "todos" }`, the loop renders
-zero iterations and the user sees an empty list. The field is
-`items`, and its value is a path expression (`"{state.todos}"` or the
-shorthand `"todos"`). Same rule for `if`: the gate is `condition`,
-not `bind` / `when` / `if`.
+## First-load test
 
-These are PRINCIPLES the agent applies to any widget, not a cookbook
-of per-widget recipes. If a widget is interactive, you compose the
-solution from the toolkit below — the principles tell you what
-"finished" looks like.
+The fresh canvas must let the user DO the thing implied by the pocket
+without going back to chat. Clear it by:
+  (a) seeding `state` with 3–5 starter items, AND
+  (b) providing in-canvas controls (add / remove / edit).
 
-## Principle 1 — The Mutation Triangle
+## Identity
 
-For any data the user is supposed to MUTATE (drag, click, type,
-toggle, edit, drop, sort, add, remove), three things must coexist:
+Items in state arrays need stable unique `id` fields. Use a counter
+(`state.next_id`) and bump it in the same on_click chain that pushes;
+never reuse user-typed strings.
 
-  (1) DATA in `state` — the source of truth, top-level on the spec.
-  (2) READ via `bind` (or via a `{state.x}` expression for widgets
-      that read non-`value` props like `data` / `items` / `events`).
-  (3) WRITE via an action chain — the user's path to mutate the data
-      (button, input on_change, drag handler, etc.).
+## Native inputs are already interactive
 
-Drop any leg of the triangle and the UI is broken:
-  - data inline in `props`, no `state` → mutations have nowhere to go.
-  - `state` exists but no `bind`/expression reading from it → stale UI.
-  - data + bind but no buttons / no editable inputs / no drag target →
-    user is stranded; can only mutate by going back to chat.
-
-## Principle 2 — Empty state never strands the user
-
-Before emitting an interactive pocket, run the FIRST-LOAD test:
-"If the user opens this fresh and stays in the canvas (never goes
-back to chat), can they DO the thing this pocket implies?"
-
-If the answer is "only by going back to chat" or "they have to wait
-for the agent to put data here," the spec is incomplete. Two ways to
-clear the test, used together:
-
-  (a) Seed `state` with 3–5 sample / starter items so the canvas is
-      alive on first paint. They give the user something to drag,
-      check, edit, or delete immediately.
-  (b) Provide IN-CANVAS controls to add / remove / edit. A bound
-      list / board / timeline paired with no controls and no items is the
-      worst possible first impression.
-
-This applies to every app pocket, regardless of widget — kanban,
-table-as-list, calendar of events, calculator history,
-form draft, anything user-mutable.
-
-## Principle 3 — Identity for collections
-
-Items in a state array MUST have stable unique `id` fields. Drag
-trackers, list reconciliation, and `remove` by value all rely on it.
-Use a counter (`state.next_id`) and bump it in the same on_click
-chain that pushes the new item — never reuse a user-typed string as
-the id (collisions break the widget).
-
-## Principle 4 — Read tools first, only build composites when needed
-
-Many widgets accept inputs natively (input/textarea/select/
-checkbox/switch/slider/rating/date-picker/file-upload — all the
-input-category widgets) and only need `bind` to be interactive. Only
-when the widget is purely read-only (kanban, table, timeline, calendar,
-chart) do you compose external CONTROLS around it. Don't add a
-composer next to a `form` widget — the form already IS one.
+Input-category widgets (input/textarea/select/checkbox/switch/slider/
+rating/date-picker/file-upload, plus `form`) only need `bind`. Only
+read-only widgets (kanban, table, timeline, calendar, chart) need
+external controls composed around them. Don't wrap a `form` widget
+in a custom composer — the form already IS one.
 
 ---
 
-## Toolkit — the action vocabulary
+## Action vocabulary
 
-The dispatcher recognizes these actions inside `on_click` /
-`on_change` / `on_submit`. Combine them; `on_click` accepts an array
-of actions run in order.
+  set       overwrite a state key
+            { "action":"set", "target":"draft", "value":"" }
+  push      append to an array (creates if missing)
+            { "action":"push", "target":"items", "value":{...} }
+  remove    drop array item by `index` or deep-equal `value`
+            { "action":"remove", "target":"items", "index":2 }
+            { "action":"remove", "target":"items", "value":"{item}" }
+  toggle    flip a boolean, or add/remove value in array
+            { "action":"toggle", "target":"done.{i}" }
+  branch    if/else: { "action":"branch", "if":"{state.x > 0}",
+                       "then":[...], "else":[...] }
+  validate  guard: { "action":"validate",
+                     "condition":"{state.draft.length > 0}",
+                     "message":"Type something first" }
+  flow      sequence with on_error rescue
+  confirm   prompt then on_confirm / on_cancel
+  api       backend call with on_success / on_error
+  navigate / toast / emit / pin / unpin — host-handled
 
-  set      — overwrite a state key
-             { "action": "set", "target": "draft", "value": "" }
+## Expression language
 
-  push     — append to an array (creates one if missing)
-             { "action": "push", "target": "items",
-               "value": { ... } }
+Resolved inside any string value:
 
-  remove   — drop an array item by `index` or by deep-equal `value`
-             { "action": "remove", "target": "items", "index": 2 }
-             { "action": "remove", "target": "items", "value": "{item}" }
+  {state.x}              read state
+  {state.x + 1}          arithmetic (+ - * / %)
+  {state.x.length}       property access
+  {a > 0 ? b : c}        ternary, comparisons (== === != !== > < >= <=)
+  {a && b} {a || b} {!f} {a ?? b}
+  {item} {card} {index}  loop context
+  {event}                payload from on_change / on_submit
 
-  toggle   — flip a boolean, or add/remove `value` in an array
-             { "action": "toggle", "target": "done.{i}" }
+Inline literals — arrays [1,'two'], objects {k:v}, strings, numbers,
+bool, null/undefined.
 
-  branch   — if/else: { "action":"branch", "if":"{state.x > 0}",
-                        "then":[...], "else":[...] }
+Whitelisted method calls (no callbacks):
 
-  validate — guard a flow: { "action":"validate",
-                             "condition":"{state.draft.length > 0}",
-                             "message":"Type something first" }
+  string  .toLowerCase() .toUpperCase() .trim()
+          .includes(s) .startsWith(s) .endsWith(s)
+  number  .toFixed(n)
+  array   .includes(v) .join(sep) .sum(field) .count()
+          .first() .last() .reverse() .limit(n)
+          .where(field, value)        equality filter; pass-through
+                                       on null/undefined/'All'
+          .whereIn(field, values)     pass-through on empty array
+          .sortBy(field, 'asc'|'desc') non-mutating, numeric-aware
 
-  flow     — sequence with on_error rescue
-  confirm  — prompt the user, then run on_confirm / on_cancel
-  api      — call backend; chain on_success / on_error
-  navigate / toast / emit / pin / unpin — host-handled events
+NEVER: arrow fns, .map/.filter/.find/.reduce/.flatMap, function /
+class / new / typeof / instanceof / await, for/while loops, template
+literals, spread, any method outside the whitelist. Anything outside
+returns `undefined`.
 
-## Toolkit — the expression language
+Bracket indexing: {state.repos[0].name}, {state.byLang['Astro']},
+{state.byLang[state.language]}.
 
-This is the EXACT grammar the renderer's expression resolver supports.
-Anything outside it returns `undefined` at runtime and triggers a
-write-time warning. There is no `eval`, no arbitrary JS — keep
-expressions simple and use state seed values for anything richer.
+For "no value" placeholder options, seed the placeholder list in
+state — don't inline it inside a ternary:
 
-Inside any string value the dispatcher resolves:
+  ✓  state: { team: [], team_options: [{value:"-",label:"None"}] }
+     options: "{state.team.length > 0 ? state.team : state.team_options}"
 
-  {state.x}              — read state
-  {state.x + 1}          — arithmetic (+ - * / %)
-  {state.x.length}       — property access
-  {state.x > 0 ? a : b}  — ternary, comparisons (== === != !== > < >= <=)
-  {a && b} / {a || b} / {!flag} / {a ?? b}
-  {item} / {card} / {index}    — loop context
-  {event}                — payload from on_change / on_submit
+## Deriving filtered / sorted views
 
-Inline literals (each item / value is itself an expression):
+Read derived views in the binding so external controls aren't dead:
 
-  Array literal   — [1, 2, 'three']  /  [{value: 'a', label: 'A'}]
-  Object literal  — {n: state.x, label: 'Hello'}
-  String literal  — 'foo' or "foo"
-  Number literal  — 42, -1.5
-  Boolean / null  — true, false, null, undefined
+  state: { language_filter: "All", sort_by: "stars", all_repos: [...] }
+  select bind: language_filter
+  segmented bind: sort_by
+  table rows: "{state.all_repos
+                .where('language', state.language_filter)
+                .sortBy(state.sort_by, 'desc')}"
 
-Whitelisted method calls on resolved values (no callbacks; args are
-literals or expressions only):
+`.where` treats 'All'/null/undefined as "no filter" — default select
+option needs no special branch.
 
-  string  — .toLowerCase() .toUpperCase() .trim()
-            .includes(s) .startsWith(s) .endsWith(s)
-  number  — .toFixed(n)
-  array   — .includes(v) .join(sep) .sum(field) .count()
-            .first() .last() .reverse() .limit(n)
-            .where(field, value)         — equality filter; pass-through
-                                           when value is null/undefined
-                                           or the literal 'All', so a
-                                           "no filter" select binds
-                                           directly with no ternary
-            .whereIn(field, values)      — pass-through on empty array
-            .sortBy(field, 'asc'|'desc') — non-mutating, numeric-aware
+## Every interactive element has a handler
 
-NEVER use these — they will silently break the widget:
+A labeled button / chip / nav item with no on_click (or no `actions`
+on entity-detail items) is dead UI. If there's nothing for it to do,
+omit it.
 
-  ✗ arrow functions       i => i.name
-  ✗ .map / .filter / .find / .reduce / .flatMap   (use .where / .sortBy /
-                                                   .limit instead, or
-                                                   precompute in `state`)
-  ✗ function / class / new / typeof / instanceof / await
-  ✗ for / while loops, template literals (backticks), spread (...x)
-  ✗ ANY method not in the whitelist above
+  ✓ { id:"view", label:"View", icon:"external-link",
+      actions:[{ action:"navigate", url:"https://github.com/{state.handle}" }] }
 
-When a control's "no value" option needs a placeholder list, put the
-placeholder in `state` and bind directly — don't put a literal array of
-placeholder objects inside a ternary expression on the prop.
+## Recipe — add an item to a list (generalize from this one)
 
-  ✗ wrong:
-    "options": "{state.team.length > 0 ? state.team
-                : [{value: 'placeholder', label: 'No teammates'}]}"
+  state: { draft:"", next_id:1, items:[] }
+  input  bind:"draft"
+  button on_click:[
+    { action:"validate",
+      condition:"{state.draft.length > 0}",
+      message:"Type something first" },
+    { action:"push", target:"items",
+      value:{ id:"i-{state.next_id}", title:"{state.draft}" } },
+    { action:"set", target:"next_id", value:"{state.next_id + 1}" },
+    { action:"set", target:"draft", value:"" }
+  ]
 
-  ✓ right:
-    "state": { "team": [], "team_options": [
-        {"value": "placeholder", "label": "No teammates"}
-      ] }
-    "options": "{state.team.length > 0 ? state.team : state.team_options}"
-
-Bracket indexing in paths (key may be literal or an expression):
-
-  {state.repos[0].name}
-  {state.byLang['Astro']}
-  {state.byLang[state.language]}
-
-### Deriving filtered / sorted views from state
-
-NEVER read a raw collection into a list/table when external controls
-exist to filter or sort it — the controls become dead UI. Compose
-`.where(...).sortBy(...).limit(...)` in the data binding so the view
-recomputes when bound state changes.
-
-  // state seed
-  "state": {
-    "language_filter": "All",
-    "sort_by": "stars",
-    "all_repos": [ ... ]
-  }
-
-  // controls
-  { "type": "select", "bind": "language_filter",
-    "props": { "options": [{"value":"All","label":"All"}, ...] } }
-  { "type": "segmented", "bind": "sort_by",
-    "props": { "options": [{"value":"stars","label":"Stars"}, ...] } }
-
-  // the table reads a derived view, not the raw array
-  { "type": "table",
-    "props": {
-      "columns": [...],
-      "rows": "{state.all_repos
-                 .where('language', state.language_filter)
-                 .sortBy(state.sort_by, 'desc')}"
-    } }
-
-  (Newlines shown above for readability — emit the expression on a single
-   line in the actual JSON.)
-
-`where` treats `'All'`/`null`/`undefined` as "no filter", so the
-default-selected option needs no special branch. Same composition
-works for `data` on charts, `items` on grids/feeds, etc.
-
-This is enough to build any add/remove/edit/toggle/filter/sort flow
-without inventing new actions.
-
-## Interactive elements must have handlers
-
-Every clickable / changeable widget in a pocket needs a wired handler.
-A button with `id` and `label` but no `on_click` (or, on `entity-detail`
-action items, no `actions` field) is dead UI — it renders, the user
-clicks, nothing happens.
-
-  // wrong — looks interactive, isn't
-  { "id": "view", "label": "View on GitHub", "icon": "external-link" }
-
-  // right — every action item declares what it does
-  { "id": "view", "label": "View on GitHub", "icon": "external-link",
-    "actions": [{ "action": "navigate",
-                  "url": "https://github.com/{state.handle}" }] }
-  { "id": "refresh", "label": "Refresh", "icon": "refresh-cw",
-    "actions": [{ "action": "emit", "target": "refresh.repos" }] }
-
-If you genuinely have nothing for a button to do, omit the button.
-Never ship a labeled control with no behavior behind it.
-
-## Generic recipe — adding an item to a list (any widget)
-
-This is the ONLY recipe the prompt needs to show. It generalizes:
-input bound to a draft + button whose on_click runs [push,
-bump-counter, clear-draft]. Swap the input for whatever the widget
-needs (textarea for long notes, select for category, multi-input
-form, etc.). Swap the bound list widget for whatever displays the
-items.
-
-  // state seed
-  "state": { "draft": "", "next_id": 1, "items": [] }
-
-  // controls
-  { "type": "input", "bind": "draft", "props": { "placeholder": "..." } }
-  { "type": "button", "props": { "label": "Add" },
-    "on_click": [
-      { "action": "validate",
-        "condition": "{state.draft.length > 0}",
-        "message": "Type something first" },
-      { "action": "push", "target": "items",
-        "value": { "id": "i-{state.next_id}", "title": "{state.draft}" } },
-      { "action": "set", "target": "next_id",
-        "value": "{state.next_id + 1}" },
-      { "action": "set", "target": "draft", "value": "" }
-    ]
-  }
-
-For removing: per-row button with
-  { "action": "remove", "target": "items", "value": "{item}" }
-inside a loop / cardTemplate, or
-  { "action": "remove", "target": "items", "index": "{index}" }
+Remove (per-row button inside an `each` / cardTemplate):
+  { action:"remove", target:"items", value:"{item}" }
+  // or by index: { action:"remove", target:"items", index:"{index}" }
 
 For toggling done state:
   { "action": "toggle", "target": "items.{index}.done" }
@@ -1117,10 +998,33 @@ into the same widget."
 """
 
 
+# Niche / situational blocks — pulled out of the eager
+# RIPPLE_DESIGN_RULES assembly. They're still callable via
+# get_inline_widget_help / get_widget_spec by passing one of these
+# keys, but they don't bloat the base prompt for the 95% of pockets
+# that don't need them. Keys are lowercased layout / picker / theme
+# identifiers the parent agent might pass via `hints.layout` or that
+# the inline-Ripple agent might ask about explicitly.
+OPTIONAL_DESIGN_SECTIONS: dict[str, str] = {
+    "tabular-picker": TABULAR_PICKER_RULE,
+    "activity-picker": ACTIVITY_PICKER_RULE,
+    "visual-variation": VISUAL_VARIATION_RULE,
+    "composition-cookbook": COMPOSITION_COOKBOOK,
+    "full-pane": FULL_PANE_RULE,
+    "logo": LOGO_RULE,
+    "design-quality": DESIGN_QUALITY,
+}
+
+
+# Eager design-rules superblock. Trimmed to the load-bearing rules
+# every pocket / chat reply touches. Niche rules live in
+# OPTIONAL_DESIGN_SECTIONS and are fetched on demand. The full-pane,
+# composition cookbook, picker, visual-variation, logo, and design-
+# quality blocks are intentionally NOT inlined here — they were paid
+# for by 100% of calls and used by maybe 10%.
 RIPPLE_DESIGN_RULES = "\n".join(
     [
         USE_THE_WIDGET_RULE,
-        # FULL_PANE_RULE,
         WIDGET_CATALOG,
         NO_INVENTED_WIDGETS_RULE,
         WIDGET_SPEC_TOOL_RULE,
@@ -1128,29 +1032,27 @@ RIPPLE_DESIGN_RULES = "\n".join(
         TABULAR_PICKER_RULE,
         ACTIVITY_PICKER_RULE,
         INTERACTIVE_STATE_RULE,
-        COMPOSITION_COOKBOOK,
-        VISUAL_VARIATION_RULE,
         THEME_RULE,
-        LOGO_RULE,
-        DESIGN_QUALITY,
     ]
 )
 
 
 __all__ = [
-    "WIDGET_CATALOG",
-    "USE_THE_WIDGET_RULE",
-    "FULL_PANE_RULE",
-    "NO_INVENTED_WIDGETS_RULE",
-    "WIDGET_SPEC_TOOL_RULE",
-    "COMPOSITION_COOKBOOK",
-    "CANONICAL_SHAPES",
-    "TABULAR_PICKER_RULE",
     "ACTIVITY_PICKER_RULE",
-    "VISUAL_VARIATION_RULE",
-    "INTERACTIVE_STATE_RULE",
-    "THEME_RULE",
-    "LOGO_RULE",
+    "CANONICAL_SHAPES",
+    "COMPOSITION_COOKBOOK",
     "DESIGN_QUALITY",
+    "FULL_PANE_RULE",
+    "INTERACTIVE_STATE_RULE",
+    "LOGO_RULE",
+    "NO_INVENTED_WIDGETS_RULE",
+    "OPTIONAL_DESIGN_SECTIONS",
     "RIPPLE_DESIGN_RULES",
+    "TABULAR_PICKER_RULE",
+    "THEME_RULE",
+    "USE_THE_WIDGET_RULE",
+    "VISUAL_VARIATION_RULE",
+    "WIDGET_CATALOG",
+    "WIDGET_SHAPES",
+    "WIDGET_SPEC_TOOL_RULE",
 ]

@@ -518,21 +518,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocket_context MCP server not registered: %s", exc)
 
-        # In-process MCP server: exposes Mission Control Tasks tools
-        # (``list_my_tasks``, ``claim_task``, ``complete_task``) so an
-        # agent running inside a workspace can pick up work routed to
-        # it without an out-of-band HTTP client. Same lifecycle as the
-        # pocket-context server above.
-        try:
-            from pocketpaw.agents.sdk_mcp_tasks import build_tasks_context_server
-
-            tasks_server = build_tasks_context_server()
-            if tasks_server is not None:
-                name, cfg_entry = tasks_server
-                servers[name] = cfg_entry
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("pocketpaw_tasks MCP server not registered: %s", exc)
-
         # In-process MCP server: exposes ``pocket_specialist__create`` so the
         # main agent can hand a brief to the specialist tool, which runs
         # the full list/validate/persist workflow as an isolated specialist
@@ -870,19 +855,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
             from pocketpaw.agents.sdk_mcp_pocket import POCKET_TOOL_IDS
 
             allowed_tools.extend(POCKET_TOOL_IDS)
-
-            # Mission Control Tasks tools — agents need these to pull
-            # work from their queue and report completion. Surface is
-            # tiny (3 tools); allowlisting unconditionally keeps the
-            # claim flow available wherever the SDK backend runs.
-            try:
-                from pocketpaw.agents.sdk_mcp_tasks import TASK_TOOL_IDS
-
-                allowed_tools.extend(TASK_TOOL_IDS)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "pocketpaw_tasks tool ids not added to allowlist: %s", exc
-                )
 
             # Pocket specialist — ``create`` / ``edit`` tools that run the
             # full listing → validate → persist workflow as an isolated

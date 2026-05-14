@@ -84,10 +84,13 @@ def test_canonical_prompts_carry_required_features() -> None:
         assert "<pocket-interaction>" in prompt
         assert "<current-pocket>" in prompt
 
-    # Edit specialist carries the heavy edit-time guidance.
+    # Edit specialist prompt is now slim — the parent agent ships the
+    # pocket payload and the specialist needs only a granular-op cheat
+    # sheet. Heavy design/interactive blocks are intentionally absent.
     for prompt in (POCKET_EDIT_SPECIALIST_PROMPT_MCP, POCKET_EDIT_SPECIALIST_PROMPT_CLI):
-        assert "<interactive-by-default>" in prompt
-        assert "<pocket-workflow>" in prompt
+        assert "<edit-specialist>" in prompt
+        assert "<interactive-by-default>" not in prompt
+        assert "<pocket-workflow>" not in prompt
 
     # Creation specialist carries the heavy create-time lift. The
     # specialist runtime only attaches ``persist_pocket`` (validation is
@@ -169,3 +172,22 @@ class TestSpecialistDelegationBlock:
 
         assert "cloud_create_pocket" not in POCKET_CREATION_PROMPT_CLI
         assert "cloud_update_pocket" not in POCKET_CREATION_PROMPT_CLI
+
+
+def test_edit_specialist_prompt_mentions_array_item_ops():
+    from ee.ripple._pockets import POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+    prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP
+    assert "set_prop_array_item" in prompt
+    assert "append_prop_array_item" in prompt
+    assert "remove_prop_array_item" in prompt
+
+
+def test_edit_specialist_prompt_warns_against_full_array_rewrite():
+    from ee.ripple._pockets import POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+    prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP
+    # The cheatsheet must steer the agent to the array-item ops for
+    # single-row edits rather than set_node_prop on the whole array.
+    assert "set_prop_array_item" in prompt
+    assert "rewrite" in prompt.lower() or "copy" in prompt.lower()

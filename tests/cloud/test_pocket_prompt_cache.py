@@ -21,10 +21,14 @@ from ee.ripple import (
     POCKET_ID_TOKEN,
 )
 
-# If you legitimately need to shrink the prompt, drop this floor —
-# but check that the prompt still teaches the design rules adequately.
-# The number is in chars, not tokens (chars/4 ≈ tokens).
-_MIN_CACHEABLE_CHARS = 40_000  # ~10k tokens at minimum
+# The edit-specialist prompt is intentionally slim now (one-shot edit
+# contract: the parent agent fetches the pocket and sends the full
+# payload; the specialist has no read tool). Prompt caching still
+# matters but the entire prompt is small enough that cache hits aren't
+# load-bearing the way they were under the previous ~40k-char heavy
+# variant. This floor only guards against POCKET_ID_TOKEN drifting up
+# into the body of the prompt — keep it modest. Chars, not tokens.
+_MIN_CACHEABLE_CHARS = 1_500
 
 
 @pytest.mark.parametrize(
@@ -51,8 +55,11 @@ def test_pocket_id_token_appears_only_once_at_end(name: str, prompt: str) -> Non
         f"(< {_MIN_CACHEABLE_CHARS}). Something moved POCKET_ID_TOKEN earlier "
         "in the prompt — DeepSeek/Anthropic cache hit rate will crater."
     )
-    # And it must be in the trailing region — within the last 5% of the prompt.
-    trailing_threshold = int(len(prompt) * 0.95)
+    # And it must be in the trailing region — within the last 250 chars,
+    # which fits the `<current-pocket>` template comfortably. A percentage
+    # threshold worked for the old ~60k-char prompt but breaks down on
+    # a 2k-char prompt where the trailing template itself is ~170 chars.
+    trailing_threshold = max(len(prompt) - 250, 0)
     assert first >= trailing_threshold, (
         f"{name} prompt: POCKET_ID_TOKEN sits at offset {first} of "
         f"{len(prompt)} ({first / len(prompt) * 100:.1f}%). It must live in "
