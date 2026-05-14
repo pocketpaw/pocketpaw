@@ -179,3 +179,22 @@ class TestSpecialistPromptHandoffRules:
         assert "TARGET NODE IDS" in POCKET_EDIT_SPECIALIST_PROMPT_MCP
         assert "AUTHORITATIVE" in POCKET_EDIT_SPECIALIST_PROMPT_MCP
         assert "work ONLY on these" in POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+    def test_specialist_prompt_teaches_bound_vs_literal_decision(self) -> None:
+        """When `widget.props.<arr>` is `{state.<path>}`, the specialist
+        must route to the state ops; only LITERAL arrays should reach
+        for the Tier-2 prop-array ops. State-first pockets dominate, so
+        without this guidance the agent reaches for set_prop_array_item
+        on bound widgets and the canvas drifts."""
+        from ee.ripple._pockets import POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+        prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP
+        # Both branches of the decision must appear.
+        assert "BOUND" in prompt
+        assert "UNBOUND" in prompt
+        # Concrete handle the agent can grep for in the pocket payload.
+        assert '"{state.' in prompt or "{state." in prompt
+        # Worked examples for each branch so the model sees the shape,
+        # not just the rule.
+        assert "set_state(" in prompt
+        assert "set_prop_array_item(" in prompt

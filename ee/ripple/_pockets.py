@@ -373,6 +373,32 @@ Unknown source names resolve to `null`. Stick to the allowlist above.
 """
 
 
+_CHAT_SEND_BLOCK = """\
+<chat-send-from-canvas>
+Buttons on the canvas can drop a pre-filled prompt into the pocket's
+chat sidebar — useful for "Ask the agent" affordances on a widget (a
+table row's "Summarize", a chart's "Explain this dip", a stat card's
+"Draft an email about this"). Pattern:
+
+  {"type": "button",
+   "props": {"label": "Summarize Q4 revenue"},
+   "on_click": {"action": "emit", "name": "chat.send",
+                "value": "Summarize the Q4 revenue chart and call out the biggest mover."}}
+
+The value can interpolate state: `"value": "Draft an email about
+{state.selected_deal.account}"`. The chat sidebar receives the text and
+submits it as if the user typed it — full SSE stream, full tool access.
+
+Use this sparingly: a chat-send button is a SLOW interaction (multiple
+seconds for the agent to respond). Reach for it only when the canvas
+naturally hands off to free-form reasoning — never for actions that
+can be solved by `set_state` or a deterministic widget click. Two
+chat-send buttons per pocket is plenty; ten is a sign the canvas
+should be doing more itself.
+</chat-send-from-canvas>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Creation overview blocks. Substitute the right tool surface description.
 # ---------------------------------------------------------------------------
@@ -876,6 +902,7 @@ def _assemble_specialist() -> str:
         _SPECIALIST_WORKFLOW,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
+        _CHAT_SEND_BLOCK,
         _RIPPLE_DESIGN_ESSENTIALS,
     ]
     return "\n".join(parts) + "\n"
@@ -934,15 +961,45 @@ OPS:
     remove_node(node_id)
 
 PICK THE SMALLEST:
-  bound to state           → set_state family
-  one item in a prop-array → *_prop_array_item (don't rewrite the
-                              whole array via set_node_prop)
-  one prop on a widget     → set_node_prop
-  shape change             → add/move/remove/replace_node
+  CHECK THE WIDGET FIRST. Read the target widget from CURRENT POCKET
+  and look at the array prop you want to edit (chart.data, table.rows,
+  feed.items, etc.):
+
+    props.<arr> is "{state.<path>}"  → BOUND. Edit STATE at <path>:
+                                       set_state("orders[3].status",
+                                       "Shipped")
+                                       append_state("orders",
+                                       {id, ...})
+                                       remove_state("orders[3]")
+    props.<arr> is a literal array   → UNBOUND. Edit the PROP-ARRAY ITEM:
+                                       set_prop_array_item(node_id,
+                                       "data",
+                                       {by_field: "label",
+                                       equals: "Other"},
+                                       {value: 5})
+
+  Then for the remaining cases:
+    one prop on a widget (non-array) → set_node_prop
+    shape change                     → add/move/remove/replace_node
+
+  Most pockets are state-first (data lives in top-level `state`,
+  widgets bind via `{state.<path>}`) so the majority of edits route
+  through the set_state family. The Tier-2 prop-array ops are ONLY
+  correct when the array lives DIRECTLY in props — display pockets,
+  static charts, hard-coded reference rows. Reaching for
+  *_prop_array_item on a bound widget writes the change in the wrong
+  place; the bound state stays stale and the canvas drifts.
 
 NOTES:
 - Values must be concrete. No "TBD", null. Estimates → "~".
 - Drop metric.trendDirection — Metric infers it from +/- on trend.
+- NEVER rewrite a whole prop-array via set_node_prop when you only
+  need to change one item — copy mistakes drift the untouched rows.
+  Use set/append/remove_prop_array_item instead.
+- "Ask the agent" / "Summarize" / "Explain this" buttons emit
+  `{action:'emit', name:'chat.send', value:'<prompt>'}` — preserve
+  these on edits and add new ones when the user asks for a "talk to
+  the agent" affordance.
 - Apply op(s), then stop. The parent agent replies to the user.
 </edit-specialist>
 """
