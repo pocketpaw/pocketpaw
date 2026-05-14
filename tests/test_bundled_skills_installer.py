@@ -31,19 +31,33 @@ from pocketpaw.bundled_skills.installer import (
 
 
 def test_install_creates_skill_files_in_destination(tmp_path: Path) -> None:
-    """First run mirrors bundled SKILL.md into the destination."""
+    """First run mirrors every bundled SKILL.md into the destination."""
     results = install_bundled_skills(destination_root=tmp_path)
 
-    # The bundle ships at least the pocketpaw-create-pocket skill.
+    # Both shipping skills must land. Adding a new bundled skill is a
+    # drop-a-directory operation — the test grows by one assert each.
     assert any(r.name == "pocketpaw-create-pocket" for r in results)
+    assert any(r.name == "pocketpaw-edit-pocket" for r in results)
 
-    skill_file = tmp_path / "pocketpaw-create-pocket" / "SKILL.md"
-    assert skill_file.is_file()
-    body = skill_file.read_text()
-    # Sanity-check the frontmatter — confirms file content actually
-    # landed (not just an empty target file).
-    assert "name: pocketpaw-create-pocket" in body
-    assert "STEP 1 — Pick the pattern" in body
+    # ---- create skill: frontmatter + STEP 1 marker ----
+    create_file = tmp_path / "pocketpaw-create-pocket" / "SKILL.md"
+    assert create_file.is_file()
+    create_body = create_file.read_text()
+    assert "name: pocketpaw-create-pocket" in create_body
+    assert "STEP 1 — Pick the pattern" in create_body
+
+    # ---- edit skill: frontmatter + Type A/B/C decision tree ----
+    # The decision tree is the load-bearing content for edit
+    # delegation — a regression that drops it would silently route
+    # every edit through the wrong shape of specialist call.
+    edit_file = tmp_path / "pocketpaw-edit-pocket" / "SKILL.md"
+    assert edit_file.is_file()
+    edit_body = edit_file.read_text()
+    assert "name: pocketpaw-edit-pocket" in edit_body
+    assert "Type A — Simple state edit" in edit_body
+    assert "Type B — Structural" in edit_body
+    assert "Type C — Open-ended redesign" in edit_body
+    assert "pocket_specialist__edit" in edit_body
 
 
 def test_first_install_returns_installed_status(tmp_path: Path) -> None:

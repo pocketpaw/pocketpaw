@@ -122,9 +122,9 @@ primitive.
 | Name | Purpose |
 | --- | --- |
 | `pocketpaw-create-pocket` | Pattern-first pocket creation workflow with 150-widget catalog reference, rich-widgets-by-pattern map, and the canonical invocation flow. |
+| `pocketpaw-edit-pocket` | READ / EDIT / CHAT path-selection + the Type A / B / C edit decision tree for delegating to `pocket_specialist__edit`. Routes simple state edits, structural edits, and open-ended redesigns through the right shape of specialist call. |
 
 Planned (not yet shipped):
-- `pocketpaw-edit-pocket` — edit existing pocket via the edit specialist
 - `pocketpaw-audit-pocket` — review an existing pocket for design issues
 - `pocketpaw-migrate-dashboard` — convert dashboard-style pockets to the right pattern
 
