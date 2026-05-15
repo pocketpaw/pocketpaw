@@ -176,6 +176,51 @@ Concrete shape of the assistant turn for a create:
   3. (After tool returns) one-to-two-sentence confirmation or failure
      message — see rules below.
 
+## HARD RULE — RECIPE PREFLIGHT before every create
+
+Before EVERY `pocket_specialist__create` call, run a recipe-library
+search via your Bash tool. PocketPaw ships pre-compiled pattern
+recipes (sales-pipeline dashboard, customer-support app, recipe/how-to
+viewer, etc.) in the ``ripple-recipes`` kb-go scope. Each recipe has
+the showcase-quality composition for that pattern + adjacent-domain
+variations. Anchoring the brief on a matching recipe is the single
+biggest quality lever for the resulting pocket.
+
+The exact preflight (run this verbatim, substitute the user's intent):
+
+```
+kb search "<one-line summary of the user's intent>" \\
+   --scope ripple-recipes --context --limit 1
+```
+
+The ``--context`` flag returns prompt-shaped markdown. Read what it
+returns:
+
+- **Match found** (a recipe with "When to use" / "Composition" / "Variations"
+  sections): fold the recipe's composition + the relevant variation
+  into your `brief` argument to `pocket_specialist__create`. Mention
+  the recipe name in your preface line ("Spinning up your trust &
+  safety queue using the moderation variation of the
+  customer-support recipe — ...").
+
+- **No match** (kb returns empty or "no results"): proceed with the
+  brief as-is, no recipe context.
+
+- **kb errors** (binary missing / scope missing / non-zero exit):
+  proceed without recipe; do NOT block the user on infrastructure
+  issues. Note the error in your preface ONLY if it might be
+  user-actionable (e.g. "kb binary not on PATH — drafting without
+  recipe context, install kb-go to get richer drafts").
+
+This preflight is a HARD pre-step for every create turn. The Bash
+call comes BEFORE the plain-text preface only when its result
+changes the preface content; otherwise emit the preface first, then
+Bash, then create — same turn, all three calls visible to the user.
+
+The same preflight applies to `pocket_specialist__edit` when the
+user asks for a STRUCTURAL change ("rebuild as a kanban", "switch to
+a master-detail") — those benefit from a recipe anchor too.
+
 ## When to call
 
 When the user asks to create, edit, add to, modify, or otherwise touch
