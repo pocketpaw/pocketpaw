@@ -228,6 +228,29 @@ async def test_delete_unassigns_pockets_tasks_cycles() -> None:
     assert cycle_after.project_id is None
 
 
+async def test_delete_aborts_if_cascade_unassign_fails(monkeypatch) -> None:
+    """If any cascade-unassign step raises, the project row must NOT be
+    deleted. Otherwise we'd leak orphaned ``project_id`` references on
+    pockets/tasks/cycles. The whole operation is retry-safe only when
+    the failure aborts the delete."""
+    from ee.cloud.tasks import service as tasks_service
+
+    ctx = _ctx()
+    project = await projects_service.agent_create(ctx, CreateProjectRequest(name="P"))
+
+    async def boom(*_args, **_kwargs) -> None:
+        raise RuntimeError("transient mongo error")
+
+    monkeypatch.setattr(tasks_service, "unassign_project_on_tasks", boom)
+
+    with pytest.raises(RuntimeError, match="transient mongo error"):
+        await projects_service.agent_delete(ctx, project.id)
+
+    # Project row must still exist — the caller can retry.
+    surviving = await projects_service.agent_get(ctx, project.id)
+    assert surviving.id == project.id
+
+
 # ---------------------------------------------------------------------------
 # Validation helper used by sibling services
 # ---------------------------------------------------------------------------

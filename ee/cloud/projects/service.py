@@ -217,9 +217,10 @@ async def agent_delete(ctx: RequestContext, project_id: str) -> None:
     """Hard-delete a project + soft-unassign children.
 
     Order matters: unassign children FIRST so their ``project_id`` is
-    cleared before the project row goes away. If the delete fails after
-    the unassign, the caller can retry safely (children are already in a
-    consistent state).
+    cleared before the project row goes away. ``_unassign_project``
+    raises on any cascade failure (other than a missing child entity at
+    import time), which aborts the delete and leaves both the project
+    row and its children intact — the caller can retry safely.
     """
     doc = await _fetch_project(ctx, project_id)
     payload = {
@@ -245,8 +246,11 @@ async def _unassign_project(ctx: RequestContext, project_id: str) -> None:
     inlining a Beanie write against another entity's collection from
     here — we delegate.
 
-    Lazy imports keep startup cheap and avoid circular-import risk if
-    one of the child entities later wants to import this module.
+    Lazy imports keep startup cheap and let forks that ship without one
+    of the child entities still install the projects module. ImportError
+    is swallowed for that reason; anything else propagates so a transient
+    bulk-update failure cannot leave the project row deleted while its
+    children keep dangling ``project_id`` values.
     """
     if not ctx.workspace_id:
         return
@@ -254,44 +258,32 @@ async def _unassign_project(ctx: RequestContext, project_id: str) -> None:
     # --- Pockets -----------------------------------------------------------
     try:
         from ee.cloud.pockets import service as pockets_service
-
+    except ImportError:
+        logger.warning("projects.unassign: pockets entity not installed; skipping")
+    else:
         unassign_pocket = getattr(pockets_service, "unassign_project_on_pockets", None)
         if unassign_pocket is not None:
             await unassign_pocket(ctx.workspace_id, project_id)
-    except Exception:
-        logger.warning(
-            "projects.unassign: pocket unassign step failed for project=%s",
-            project_id,
-            exc_info=True,
-        )
 
     # --- Tasks -------------------------------------------------------------
     try:
         from ee.cloud.tasks import service as tasks_service
-
+    except ImportError:
+        logger.warning("projects.unassign: tasks entity not installed; skipping")
+    else:
         unassign_task = getattr(tasks_service, "unassign_project_on_tasks", None)
         if unassign_task is not None:
             await unassign_task(ctx.workspace_id, project_id)
-    except Exception:
-        logger.warning(
-            "projects.unassign: task unassign step failed for project=%s",
-            project_id,
-            exc_info=True,
-        )
 
     # --- Cycles ------------------------------------------------------------
     try:
         from ee.cloud.cycles import service as cycles_service
-
+    except ImportError:
+        logger.warning("projects.unassign: cycles entity not installed; skipping")
+    else:
         unassign_cycle = getattr(cycles_service, "unassign_project_on_cycles", None)
         if unassign_cycle is not None:
             await unassign_cycle(ctx.workspace_id, project_id)
-    except Exception:
-        logger.warning(
-            "projects.unassign: cycle unassign step failed for project=%s",
-            project_id,
-            exc_info=True,
-        )
 
 
 async def exists_in_workspace(workspace_id: str, project_id: str) -> bool:
