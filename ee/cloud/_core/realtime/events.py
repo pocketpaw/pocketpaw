@@ -364,3 +364,28 @@ class CycleClosed(Event):
 @dataclass
 class CycleSnapshotted(Event):
     EVENT_TYPE: ClassVar[str] = "cycle.snapshotted"
+
+
+# Projects — Linear-style scoping primitive for Mission Control.
+# Pocket, Task, and Cycle entities carry an optional ``project_id``
+# pointer; mutating a project doesn't cascade-delete its children, it
+# just soft-unassigns them. Listeners (search index, dashboards) use
+# these events to refresh project-grouped views.
+@dataclass
+class ProjectCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "project.created"
+
+
+@dataclass
+class ProjectUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "project.updated"
+
+
+@dataclass
+class ProjectArchived(Event):
+    EVENT_TYPE: ClassVar[str] = "project.archived"
+
+
+@dataclass
+class ProjectDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "project.deleted"

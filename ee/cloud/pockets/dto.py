@@ -3,6 +3,10 @@
 Changes: Added agents, rippleSpec (aliased), and widgets fields to CreatePocketRequest
 so the frontend can pass the full pocket spec on creation instead of requiring
 separate follow-up calls.
+
+Updated: 2026-05-16 — added optional ``project_id`` (aliased as
+``projectId`` on the wire) to CreatePocketRequest / UpdatePocketRequest /
+PocketResponse so pockets can be grouped under a Mission Control Project.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ class CreatePocketRequest(BaseModel):
     agents: list[str] = Field(default_factory=list)  # Agent IDs to assign
     ripple_spec: dict | None = Field(default=None, alias="rippleSpec")
     widgets: list[dict] = Field(default_factory=list)  # Initial widget definitions
+    project_id: str | None = Field(default=None, alias="projectId")
 
     model_config = {"populate_by_name": True}
 
@@ -36,6 +41,7 @@ class UpdatePocketRequest(BaseModel):
     color: str | None = None
     visibility: str | None = None
     ripple_spec: dict | None = Field(default=None, alias="rippleSpec")
+    project_id: str | None = Field(default=None, alias="projectId")
 
     model_config = {"populate_by_name": True}
 
@@ -92,6 +98,7 @@ class PocketResponse(BaseModel):
     share_link_token: str | None = None
     share_link_access: str = "view"
     shared_with: list[str]
+    project_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -132,6 +139,7 @@ def pocket_to_wire_dict(p) -> dict:
         "shareLinkToken": p.share_link_token,
         "shareLinkAccess": p.share_link_access,
         "sharedWith": list(p.shared_with),
+        "projectId": p.project_id,
         "createdAt": iso_utc(p.created_at),
         "updatedAt": iso_utc(p.updated_at),
     }

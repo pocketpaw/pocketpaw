@@ -54,6 +54,7 @@ async def list_tasks(
     status: str | None = Query(default=None),
     cycle_id: str | None = Query(default=None),
     pocket_id: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
     creator_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
@@ -64,6 +65,7 @@ async def list_tasks(
         status=status,
         cycle_id=cycle_id,
         pocket_id=pocket_id,
+        project_id=project_id,
         creator_id=creator_id,
         limit=limit,
     )

@@ -97,6 +97,7 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         share_link_access=doc.share_link_access,
         shared_with=tuple(doc.shared_with),
         tool_specs=tuple(doc.tool_specs),
+        project_id=getattr(doc, "project_id", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -260,7 +261,14 @@ async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str
 
 
 async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> dict:
-    """Create a pocket with optional agents, widgets, and rippleSpec."""
+    """Create a pocket with optional agents, widgets, and rippleSpec.
+
+    ``project_id`` is optional — when supplied, the service validates it
+    points at a real project in the same workspace and rejects with
+    ``project.not_found`` otherwise. Pockets without a ``project_id``
+    surface as "unassigned" in the Mission Control project picker, which
+    is exactly the pre-projects-rollout shape.
+    """
     from ee.cloud.sessions import service as sessions_service
 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
@@ -268,8 +276,12 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
     widget_docs = [_build_widget_doc(w) for w in (body.widgets or [])]
 
+    if body.project_id:
+        await _ensure_project_in_workspace(workspace_id, body.project_id)
+
     doc = _PocketDoc(
         workspace=workspace_id,
+        project_id=body.project_id,
         name=body.name,
         description=body.description,
         type=body.type,
@@ -291,7 +303,12 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     return await _resolved_wire_dict(doc, user_id)
 
 
-async def list_pockets(workspace_id: str, user_id: str) -> list[dict]:
+async def list_pockets(
+    workspace_id: str,
+    user_id: str,
+    *,
+    project_id: str | None = None,
+) -> list[dict]:
     """List pockets visible to the user (owned, shared_with, or workspace-visible).
 
     Each returned pocket has its rippleSpec ``$source`` markers resolved
@@ -299,17 +316,24 @@ async def list_pockets(workspace_id: str, user_id: str) -> list[dict]:
     directly from this list response, so unresolved markers would surface
     as empty widgets. Resolution per pocket is independent; sources that
     fail fall back to raw markers individually (see ``_resolved_wire_dict``).
+
+    ``project_id`` filter: when provided, narrows the result to pockets
+    whose ``project_id`` matches. Pass an empty string to filter for
+    "no project assigned" — that's the Mission Control "Unassigned"
+    bucket. Kept as a kwarg so existing callers don't change.
     """
-    docs = await _PocketDoc.find(
-        {
-            "workspace": workspace_id,
-            "$or": [
-                {"owner": user_id},
-                {"shared_with": user_id},
-                {"visibility": "workspace"},
-            ],
-        }
-    ).to_list()
+    query: dict = {
+        "workspace": workspace_id,
+        "$or": [
+            {"owner": user_id},
+            {"shared_with": user_id},
+            {"visibility": "workspace"},
+        ],
+    }
+    if project_id is not None:
+        # Empty string is intentional → "no project assigned".
+        query["project_id"] = project_id or None
+    docs = await _PocketDoc.find(query).to_list()
     return [await _resolved_wire_dict(d, user_id) for d in docs]
 
 
@@ -359,9 +383,52 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
         doc.visibility = body.visibility
     if normalized_spec is not None:
         doc.rippleSpec = normalized_spec
+    if body.project_id is not None:
+        # Empty string is the "unassign" signal; non-empty must point at a
+        # real project in the same workspace.
+        if body.project_id:
+            await _ensure_project_in_workspace(doc.workspace, body.project_id)
+            doc.project_id = body.project_id
+        else:
+            doc.project_id = None
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
+
+
+async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
+    """Validate that ``project_id`` exists in the workspace. Lazy-imports
+    the projects service to avoid a circular import at module load and
+    to degrade silently if the projects entity is missing on a fork.
+    """
+    try:
+        from ee.cloud.projects import service as projects_service
+    except Exception:
+        # Projects entity unavailable on this branch — accept the id as-is
+        # for forward-compat; the rollout PR has the entity present.
+        return
+    ok = await projects_service.exists_in_workspace(workspace_id, project_id)
+    if not ok:
+        raise NotFound("project", project_id)
+
+
+async def unassign_project_on_pockets(workspace_id: str, project_id: str) -> int:
+    """Soft-unassign every pocket in ``workspace_id`` whose ``project_id``
+    matches. Called by ``projects.service.agent_delete`` when a project
+    is removed — pockets keep their data, only the project reference
+    clears. Returns the number of rows updated.
+
+    Stays inside the pockets service so the 4-file rule holds (only
+    ``pockets/service.py`` may write to the Pocket Beanie collection).
+    """
+    if not workspace_id or not project_id:
+        return 0
+    collection = _PocketDoc.get_pymongo_collection()
+    result = await collection.update_many(
+        {"workspace": workspace_id, "project_id": project_id},
+        {"$set": {"project_id": None}},
+    )
+    return getattr(result, "modified_count", 0) or 0
 
 
 async def delete(pocket_id: str, user_id: str) -> None:
@@ -1487,6 +1554,7 @@ __all__ = [
     "remove_widget",
     "reorder_widgets",
     "revoke_share_link",
+    "unassign_project_on_pockets",
     "update",
     "update_share_link",
     "update_widget",

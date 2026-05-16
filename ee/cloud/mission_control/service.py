@@ -96,7 +96,7 @@ def _require_workspace(ctx: RequestContext) -> str:
     return ctx.workspace_id
 
 
-async def _visible_pocket_ids(ctx: RequestContext) -> set[str]:
+async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = None) -> set[str]:
     """Return the set of pocket ids the caller can see in their workspace.
 
     Drives the workspace filter on Instinct reads: a Nudge surfaces in
@@ -105,9 +105,15 @@ async def _visible_pocket_ids(ctx: RequestContext) -> set[str]:
     enforces ``workspace + (owner | shared_with | visibility)`` per
     pocket. If a pocket isn't visible at the pocket layer, its Nudges
     aren't visible at the Mission Control layer either.
+
+    ``project_id`` narrows the set to pockets in a single project (or to
+    "no project assigned" when an empty string is supplied). Threading
+    the filter down here is how Nudges inherit the project assignment
+    from their parent pocket — Instinct itself doesn't know about
+    projects, but it knows about pockets.
     """
     workspace_id = _require_workspace(ctx)
-    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id)
+    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id, project_id=project_id)
     return {p["_id"] for p in pockets if p.get("_id")}
 
 
@@ -191,7 +197,7 @@ async def agent_list_work_items(
     """
     body = ListWorkItemsRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx)
+    visible = await _visible_pocket_ids(ctx, project_id=body.project_id)
     if not visible:
         return []
 

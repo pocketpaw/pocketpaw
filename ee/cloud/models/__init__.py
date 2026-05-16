@@ -12,6 +12,7 @@ from ee.cloud.models.invite import Invite
 from ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from ee.cloud.models.notification import Notification, NotificationSource
 from ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
+from ee.cloud.models.project import Project
 from ee.cloud.models.read_state import ReadState
 from ee.cloud.models.session import Session
 from ee.cloud.models.task import Task, TaskAssignee, TaskSource
@@ -55,6 +56,7 @@ __all__ = [
     "NotificationSource",
     "OAuthAccount",
     "Pocket",
+    "Project",
     "Reaction",
     "ReadState",
     "Session",
@@ -92,6 +94,7 @@ def get_all_documents():
         ReadState,
         Task,
         Cycle,
+        Project,
     ]
 
 

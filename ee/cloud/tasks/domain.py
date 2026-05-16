@@ -91,6 +91,7 @@ class Task:
     summary: str
     pocket_id: str | None = None
     cycle_id: str | None = None
+    project_id: str | None = None
     due_at: datetime | None = None
     blocked_reason: str | None = None
     created_at: datetime | None = None

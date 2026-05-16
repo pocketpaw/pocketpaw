@@ -69,6 +69,7 @@ class Task(TimestampedDocument):
     workspace_id: Indexed(str)  # type: ignore[valid-type]
     pocket_id: str | None = None
     cycle_id: str | None = None
+    project_id: str | None = None
     creator_id: str
 
     title: str

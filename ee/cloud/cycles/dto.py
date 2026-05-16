@@ -35,6 +35,7 @@ class CreateCycleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     pocket_id: str | None = None
+    project_id: str | None = None
     start: date
     end: date
     status: CycleStatusLiteral = "upcoming"
@@ -53,12 +54,16 @@ class UpdateCycleRequest(BaseModel):
     dates edited — the router enforces the status check via the service.
     Status transitions go through ``POST /cycles/{id}/close`` (or the
     snapshot job's auto-promote) rather than this PATCH endpoint.
+
+    ``project_id`` is editable on any status — moving an in-flight cycle
+    between projects is a low-risk operation (just a grouping change).
     """
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     start: date | None = None
     end: date | None = None
+    project_id: str | None = None
 
     @model_validator(mode="after")
     def _check_dates(self) -> UpdateCycleRequest:
@@ -95,6 +100,7 @@ class CycleListItemResponse(BaseModel):
     name: str
     description: str
     pocket_id: str | None
+    project_id: str | None = None
     start: str  # ISO date
     end: str  # ISO date
     status: CycleStatusLiteral

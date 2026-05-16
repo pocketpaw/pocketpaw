@@ -62,6 +62,7 @@ class Cycle:
     completed: int = 0
     daily: tuple[CycleDailyPoint, ...] = field(default_factory=tuple)
     created_by: str = ""
+    project_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

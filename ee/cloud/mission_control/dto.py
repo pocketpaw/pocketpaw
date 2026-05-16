@@ -46,11 +46,21 @@ class ListWorkItemsRequest(BaseModel):
     other filters compose with it. ``limit`` caps the projected list
     after Instinct fan-in so the response stays bounded even when the
     backend store has thousands of historical rows.
+
+    ``project_id`` narrows the feed to one Mission Control Project. The
+    Tasks half of the projection threads ``project_id`` directly through
+    ``tasks.service.agent_list_tasks``; the Instinct half (Nudges) is
+    project-aware via the underlying pocket's ``project_id`` (a Nudge
+    inherits its parent pocket's project assignment).
     """
 
     section: WorkItemSection | None = None
     agent: str | None = Field(default=None, description="Filter by agent id")
     pocket: str | None = Field(default=None, description="Filter by pocket id")
+    project_id: str | None = Field(
+        default=None,
+        description="Filter by project id; empty string narrows to 'Unassigned'.",
+    )
     limit: int = Field(default=50, ge=1, le=500)
 
 

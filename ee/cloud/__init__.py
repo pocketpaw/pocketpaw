@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated: 2026-05-16 — Mission Control backend completion. Mounts the
+    Projects entity (workspace > project > pocket/task/cycle hierarchy)
+    and wires the in-process daily-snapshot scheduler, gated on
+    ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` (default false). Each
+    child entity (Pocket / Task / Cycle) now carries an optional
+    ``project_id`` reference; project delete soft-unassigns rather than
+    cascading the underlying work.
 Updated: 2026-05-13 — Mission Control cleanup PR. Lifted the 501 stubs
     on Mission Control's bulk-reassign / bulk-snooze (they now delegate
     to the Tasks service), added emit-or-no-event comments to the bulk
@@ -98,6 +105,7 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.cycles.router import router as cycles_router
     from ee.cloud.license import get_license_info
     from ee.cloud.pockets.router import router as pockets_router
+    from ee.cloud.projects.router import router as projects_router
     from ee.cloud.sessions.router import router as sessions_router
     from ee.cloud.workspace.router import router as workspace_router
 
@@ -107,6 +115,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
+    app.include_router(projects_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
 
@@ -377,12 +386,29 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_task_listeners()
 
-    # TODO: wire daily-snapshot scheduler — see ``ee.cloud.cycles.snapshot_job``
-    # for cron / Kubernetes CronJob / Celery beat wiring patterns. We
-    # deliberately do NOT spin up an in-process loop here; the host
-    # platform owns scheduling (its scheduler knows the tenant list and
-    # has the right retry / backoff semantics). Wiring lives in the
-    # deployment layer.
+    # In-process daily-snapshot scheduler — opt-in via env var.
+    #
+    # Default OFF in tests + dev (each pytest run would otherwise spawn a
+    # background loop that outlives the test). Production deployments set
+    # ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` to flip it on. Hosts that
+    # prefer external cron / Kubernetes CronJob / Celery beat (see the
+    # ``ee.cloud.cycles.snapshot_job`` docstring) leave the flag unset
+    # and dispatch the same ``snapshot_all_active`` callable from their
+    # platform scheduler.
+    import os as _os
+
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from ee.cloud.cycles.scheduler import start_in_process_scheduler
+
+        @app.on_event("startup")
+        async def _start_cycle_scheduler() -> None:
+            await start_in_process_scheduler(app)
+
+        @app.on_event("shutdown")
+        async def _stop_cycle_scheduler() -> None:
+            from ee.cloud.cycles.scheduler import stop_in_process_scheduler
+
+            await stop_in_process_scheduler(app)
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

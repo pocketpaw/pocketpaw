@@ -54,6 +54,7 @@ class CreateTaskRequest(BaseModel):
     assignee: AssigneeDTO
     pocket_id: str | None = None
     cycle_id: str | None = None
+    project_id: str | None = None
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
     kind: Literal["task", "nudge", "projection", "automation"] = "task"
     source: SourceDTO = Field(default_factory=SourceDTO)
@@ -69,6 +70,7 @@ class UpdateTaskRequest(BaseModel):
     priority: Literal["low", "normal", "high", "urgent"] | None = None
     pocket_id: str | None = None
     cycle_id: str | None = None
+    project_id: str | None = None
     due_at: datetime | None = None
 
 
@@ -130,6 +132,7 @@ class ListTasksRequest(BaseModel):
     status: str | None = None
     cycle_id: str | None = None
     pocket_id: str | None = None
+    project_id: str | None = None
     creator_id: str | None = None
     limit: int = Field(default=50, ge=1, le=500)
 
@@ -158,6 +161,7 @@ class TaskResponse(BaseModel):
     summary: str
     pocket_id: str | None = None
     cycle_id: str | None = None
+    project_id: str | None = None
     due_at: str | None = None
     blocked_reason: str | None = None
     created_at: str | None = None
@@ -193,6 +197,7 @@ def task_to_dto(task: Task) -> TaskResponse:
         summary=task.summary,
         pocket_id=task.pocket_id,
         cycle_id=task.cycle_id,
+        project_id=task.project_id,
         due_at=iso_utc(task.due_at),
         blocked_reason=task.blocked_reason,
         created_at=iso_utc(task.created_at),

@@ -625,5 +625,17 @@ source_modules = [
     "ee.cloud.cycles.dto",
     "ee.cloud.cycles.domain",
     "ee.cloud.cycles.snapshot_job",
+    "ee.cloud.cycles.scheduler",
 ]
 forbidden_modules = ["ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "Projects — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.projects.router",
+    "ee.cloud.projects.dto",
+    "ee.cloud.projects.domain",
+]
+forbidden_modules = ["ee.cloud.models.project"]

@@ -56,15 +56,24 @@ async def list_items(
     section: str | None = Query(None),
     agent: str | None = Query(None),
     pocket: str | None = Query(None),
+    project_id: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[WorkItemResponse]:
     """Workspace-aware work item feed.
 
-    Filters compose: ``section`` narrows to one pane; ``agent`` and
-    ``pocket`` further restrict; ``limit`` caps the projected list.
+    Filters compose: ``section`` narrows to one pane; ``agent``, ``pocket``,
+    and ``project_id`` further restrict; ``limit`` caps the projected list.
+    Pass ``project_id`` as an empty string to filter for "no project
+    assigned".
     """
-    body = ListWorkItemsRequest(section=section, agent=agent, pocket=pocket, limit=limit)
+    body = ListWorkItemsRequest(
+        section=section,
+        agent=agent,
+        pocket=pocket,
+        project_id=project_id,
+        limit=limit,
+    )
     return await mc_service.agent_list_work_items(ctx, body)
 
 

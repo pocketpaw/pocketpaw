@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 
@@ -190,8 +190,9 @@ async def create_pocket(
 async def list_pockets(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
+    project_id: str | None = Query(default=None, alias="project_id"),
 ) -> list[dict]:
-    return await pockets_service.list_pockets(workspace_id, user_id)
+    return await pockets_service.list_pockets(workspace_id, user_id, project_id=project_id)
 
 
 @router.get("/{pocket_id}")
