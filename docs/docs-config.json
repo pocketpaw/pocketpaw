@@ -650,6 +650,11 @@
             "icon": "lucide:radar"
           },
           {
+            "label": "Mission Control (Cloud)",
+            "href": "/advanced/mission-control-cloud",
+            "icon": "lucide:cloud"
+          },
+          {
             "label": "Autonomous Messaging",
             "href": "/advanced/autonomous-messaging",
             "icon": "lucide:bell"
