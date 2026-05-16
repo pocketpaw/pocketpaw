@@ -52,6 +52,8 @@ ensure_uv() {
     if $DOWNLOAD https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; then
         # Refresh PATH to pick up the new binary
         export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        update_profile "$HOME/.local/bin"
+        update_profile "$HOME/.cargo/bin"
         if command -v uv >/dev/null 2>&1; then
             UV_AVAILABLE=1
             printf '  \033[32m✓\033[0m uv installed\n'
@@ -61,6 +63,19 @@ ensure_uv() {
 
     printf '  \033[33mWarn:\033[0m Could not install uv automatically.\n'
     return 1
+}
+
+update_profile() {
+    path_to_add="$1"
+    # shellcheck disable=SC2088
+    for profile in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        if [ -f "$profile" ]; then
+            if ! grep -q "$path_to_add" "$profile"; then
+                printf '\n# PocketPaw PATH\nexport PATH="%s:$PATH"\n' "$path_to_add" >> "$profile"
+                printf '  \033[32m✓\033[0m Added %s to %s\n' "$path_to_add" "$(basename "$profile")"
+            fi
+        fi
+    done
 }
 
 # ── Find Python 3.11+ ──────────────────────────────────────────────────

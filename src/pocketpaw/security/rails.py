@@ -23,9 +23,12 @@ import re
 DANGEROUS_PATTERNS: list[str] = [
     # -- Destructive file operations --
     r"rm\s+(-[rf]+\s+)*[/~]",  # rm -rf /, rm -r -f ~, etc.
+    r"rm\s+(-[rf]+)*(?=[/~])", # rm -rf/ (no space)
+    r"rm\s+.*(--recursive|--force).*[/~]", # rm --recursive /
     r"rm\s+[/~]\s+(-[rf]+\s*)+",  # rm / -rf, rm ~ -fr
     r"rm\s+(-[rf]+\s+)*\*",  # rm -rf *
     r"sudo\s+rm\b",  # Any sudo rm
+    r"rm\s+.*\$\(.*\)", # rm $(anything) - covers potential expansion bypasses
     r">\s*/dev/",  # Write to devices
     r">\s*/etc/",  # Overwrite system config
     r"mkfs\.",  # Format filesystem

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -4282,7 +4282,7 @@ wheels = [
 
 [[package]]
 name = "pocketpaw"
-version = "0.4.16"
+version = "0.4.18"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
