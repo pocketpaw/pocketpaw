@@ -51,11 +51,15 @@ def store(tmp_path: Path) -> InstinctStore:
 
 @pytest.fixture(autouse=True)
 def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
-    """Wire the service's two read sources to test doubles.
+    """Wire the service's three read sources to test doubles.
 
     - ``get_instinct_store`` → the per-test SQLite store
     - ``pockets_service.list_pockets`` → AsyncMock returning the seeded
       pockets so we don't need a Mongo fixture for façade-level tests
+    - ``tasks_service.agent_list_tasks`` → stub returning [] so the
+      Mission Control façade can compose Tasks alongside Nudges without
+      forcing every façade test to initialize Beanie. Tests that
+      exercise the Tasks branch override this with their own patch.
     """
     monkeypatch.setattr(mc_service, "get_instinct_store", lambda: store)
     monkeypatch.setattr(
@@ -63,6 +67,7 @@ def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
         "list_pockets",
         AsyncMock(return_value=[{"_id": "p1"}, {"_id": "p2"}]),
     )
+    monkeypatch.setattr("ee.cloud.tasks.service.agent_list_tasks", AsyncMock(return_value=[]))
     yield
 
 
@@ -138,9 +143,7 @@ class TestListWorkItems:
     async def test_returns_empty_when_workspace_has_no_pockets(
         self, monkeypatch, store: InstinctStore
     ) -> None:
-        monkeypatch.setattr(
-            mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[])
-        )
+        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
         await store.propose("p1", "would surface", "", "", _trigger())
         out = await mc_service.agent_list_work_items(_ctx(), {})
         assert out == []
@@ -151,6 +154,48 @@ class TestListWorkItems:
             await store.propose("p1", f"item-{i}", "", "", _trigger())
         out = await mc_service.agent_list_work_items(_ctx(), ListWorkItemsRequest(limit=3))
         assert len(out) == 3
+
+    @pytest.mark.asyncio
+    async def test_includes_tasks_alongside_nudges(self, monkeypatch) -> None:
+        """Regression: a Task created via POST /tasks must surface in
+        GET /mission-control/items. The original façade only queried
+        Instinct and silently dropped Tasks — operators creating tasks
+        through the modal saw their new work disappear from the feed."""
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from ee.cloud.tasks.domain import Task, TaskAssignee, TaskSource
+        from ee.cloud.tasks.dto import task_to_dto
+
+        sample = Task(
+            id="t_sample",
+            workspace_id="w1",
+            creator_id="u1",
+            assignee=TaskAssignee(kind="human", id="u1", name="u1"),
+            status="in_progress",
+            priority="normal",
+            kind="task",
+            source=TaskSource(type="user_request"),
+            title="Drafted from the modal",
+            summary="",
+            pocket_id=None,
+            created_at=_dt.now(UTC),
+            updated_at=_dt.now(UTC),
+        )
+
+        async def fake_list_tasks(_ctx_, _body):
+            return [task_to_dto(sample)]
+
+        monkeypatch.setattr("ee.cloud.tasks.service.agent_list_tasks", fake_list_tasks)
+        out = await mc_service.agent_list_work_items(_ctx(), {})
+        titles = [it.title for it in out]
+        assert "Drafted from the modal" in titles
+        # Pocket-less tasks must surface even when the workspace has no
+        # visible pockets at all (Tasks are workspace-scoped, not
+        # pocket-scoped).
+        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        out2 = await mc_service.agent_list_work_items(_ctx(), {})
+        assert "Drafted from the modal" in [it.title for it in out2]
 
 
 # ---------------------------------------------------------------------------
@@ -163,9 +208,7 @@ class TestBulkApproveService:
     async def test_approves_visible_actions(self, store: InstinctStore) -> None:
         a = await store.propose("p1", "A", "", "", _trigger())
         b = await store.propose("p1", "B", "", "", _trigger())
-        result = await mc_service.agent_bulk_approve(
-            _ctx(), BulkActionRequest(ids=[a.id, b.id])
-        )
+        result = await mc_service.agent_bulk_approve(_ctx(), BulkActionRequest(ids=[a.id, b.id]))
         assert "bulk_id" in result
         approved_ids = {row["id"] for row in result["approved"]}
         assert approved_ids == {a.id, b.id}

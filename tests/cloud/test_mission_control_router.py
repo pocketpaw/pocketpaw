@@ -43,6 +43,7 @@ def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
         "list_pockets",
         AsyncMock(return_value=[{"_id": "p1"}, {"_id": "p2"}]),
     )
+    monkeypatch.setattr("ee.cloud.tasks.service.agent_list_tasks", AsyncMock(return_value=[]))
     yield
 
 

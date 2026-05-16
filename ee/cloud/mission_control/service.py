@@ -180,6 +180,66 @@ def _trigger_assignee(action: Action) -> str | None:
     return None
 
 
+# Status maps for projecting Tasks into the unified WorkItem shape.
+_TASK_STATUS_MAP = {
+    "proposed": WorkItemStatus.IN_PROGRESS,
+    "in_progress": WorkItemStatus.IN_PROGRESS,
+    "awaiting_approval": WorkItemStatus.AWAITING_APPROVAL,
+    "done": WorkItemStatus.DONE,
+    "reverted": WorkItemStatus.REJECTED,
+    "failed": WorkItemStatus.FAILED,
+    "blocked": WorkItemStatus.BLOCKED,
+}
+
+
+def _task_section(task_status: str, assignee_kind: str) -> WorkItemSection:
+    """Bucket a Task into a Mission Control section.
+
+    Agents-in-flight covers any in-progress / proposed agent work.
+    Awaiting-approval lands in The Tray regardless of assignee.
+    Terminal states route to Pawprints / Snags. Human in-progress falls
+    through to TRAY — the frontend's section logic then splits "mine"
+    vs "delegated" by comparing the assignee id to the caller.
+    """
+    if task_status in ("done", "reverted"):
+        return WorkItemSection.PAWPRINTS
+    if task_status in ("failed", "blocked"):
+        return WorkItemSection.SNAGS
+    if task_status in ("proposed", "in_progress") and assignee_kind == "agent":
+        return WorkItemSection.AGENTS
+    return WorkItemSection.TRAY
+
+
+def _task_to_work_item(task: Any, workspace_id: str) -> WorkItem:
+    """Project a ``Task`` (or its DTO) into a Mission Control ``WorkItem``.
+
+    Accepts either a ``tasks.domain.Task`` or a ``TaskResponse`` DTO —
+    both expose the same field names so attribute access works on either.
+    """
+    assignee = task.assignee
+    assignee_kind = AssigneeKind.AGENT if assignee.kind == "agent" else AssigneeKind.USER
+    status = _TASK_STATUS_MAP.get(task.status, WorkItemStatus.IN_PROGRESS)
+    section = _task_section(task.status, assignee.kind)
+    return WorkItem(
+        id=f"task:{task.id}",
+        workspace_id=workspace_id,
+        section=section,
+        status=status,
+        title=task.title,
+        description=task.summary or "",
+        assignee_kind=assignee_kind,
+        assignee_id=assignee.id,
+        pocket_id=task.pocket_id or None,
+        agent_id=assignee.id if assignee.kind == "agent" else None,
+        source_kind="task",
+        source_id=task.id,
+        priority=task.priority,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        fabric_refs=(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public service API
 # ---------------------------------------------------------------------------
@@ -198,28 +258,52 @@ async def agent_list_work_items(
     body = ListWorkItemsRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     visible = await _visible_pocket_ids(ctx, project_id=body.project_id)
-    if not visible:
-        return []
 
-    store = get_instinct_store()
-    # Pull pending + recent resolved in two reads. The pending list lives
-    # under the section=TRAY bucket; the audit projection covers the rest.
-    pending = await store.pending(pocket_id=body.pocket)
-    resolved = await store.list_actions(pocket_id=body.pocket, limit=200)
+    items: list[WorkItem] = []
 
-    actions: list[Action] = []
-    seen: set[str] = set()
-    for a in (*pending, *resolved):
-        if a.id in seen:
-            continue
-        if a.pocket_id not in visible:
-            continue
-        if body.agent and a.trigger.source != body.agent:
-            continue
-        seen.add(a.id)
-        actions.append(a)
+    # --- Instinct Nudges (pocket-scoped) -----------------------------------
+    # Nudges always live inside a pocket, so an empty visible set means
+    # there are no Nudges to show. Tasks below have their own workspace-
+    # level tenancy and are NOT gated by pocket visibility.
+    if visible:
+        store = get_instinct_store()
+        pending = await store.pending(pocket_id=body.pocket)
+        resolved = await store.list_actions(pocket_id=body.pocket, limit=200)
 
-    items = [_action_to_work_item(a, workspace_id) for a in actions]
+        actions: list[Action] = []
+        seen: set[str] = set()
+        for a in (*pending, *resolved):
+            if a.id in seen:
+                continue
+            if a.pocket_id not in visible:
+                continue
+            if body.agent and a.trigger.source != body.agent:
+                continue
+            seen.add(a.id)
+            actions.append(a)
+        items.extend(_action_to_work_item(a, workspace_id) for a in actions)
+
+    # --- Tasks (workspace-scoped) ------------------------------------------
+    # Lazy import keeps the façade installable on forks that haven't
+    # adopted the Tasks entity yet (matches the projects/_unassign_project
+    # pattern). Tasks live alongside Nudges in the unified feed.
+    try:
+        from ee.cloud.tasks import service as tasks_service
+        from ee.cloud.tasks.dto import ListTasksRequest
+    except ImportError:
+        logger.info("mission_control.list: tasks entity not installed; skipping")
+    else:
+        task_req = ListTasksRequest(
+            pocket_id=body.pocket,
+            project_id=body.project_id,
+            limit=200,
+        )
+        tasks = await tasks_service.agent_list_tasks(ctx, task_req)
+        for t in tasks:
+            if body.agent and (t.assignee.kind != "agent" or t.assignee.name != body.agent):
+                continue
+            items.append(_task_to_work_item(t, workspace_id))
+
     if body.section is not None:
         items = [it for it in items if it.section == body.section]
     # Stable order: newest first by created_at, falling back to id.
