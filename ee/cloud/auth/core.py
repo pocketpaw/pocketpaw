@@ -1,7 +1,17 @@
 """Enterprise auth — fastapi-users with JWT cookie + bearer transport.
 
-Changes: Added seed_workspace() to auto-create default workspace + General group
-on first boot, so admin can immediately use the app after seeding.
+Changes:
+    2026-05-17 (security #1117 P1) — Cookie transport hardening:
+        - cookie_secure is now env-driven (POCKETPAW_AUTH_COOKIE_SECURE,
+          defaults to false for local HTTP dev; production must set true).
+        - cookie_httponly explicitly pinned to True so JS can never read
+          the JWT (defence against XSS token theft).
+        - Bearer transport stays registered for back-compat (native /
+          Tauri / API consumers); web build moves to cookie + CSRF.
+        - Slated for removal once all clients ship the cookie path —
+          see ee/cloud/auth/router.py for the deprecation note.
+    Earlier: Added seed_workspace() to auto-create default workspace +
+        General group on first boot.
 
 Provides:
 - POST /auth/register — sign up with email + password
@@ -38,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 SECRET = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
 TOKEN_LIFETIME = 60 * 60 * 24 * 7  # 7 days
+
+# Cookie hardening — flip to true via env in any deployment that terminates
+# TLS in front of the cloud (i.e. production). Local dev runs over plain
+# HTTP, where Secure cookies would be silently dropped by the browser.
+_COOKIE_SECURE = os.environ.get("POCKETPAW_AUTH_COOKIE_SECURE", "false").lower() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +91,8 @@ async def get_user_manager(user_db=Depends(get_user_db)):
 cookie_transport = CookieTransport(
     cookie_name="paw_auth",
     cookie_max_age=TOKEN_LIFETIME,
-    cookie_secure=False,  # Set True in production with HTTPS
+    cookie_secure=_COOKIE_SECURE,  # env-driven; True in prod (HTTPS), False locally
+    cookie_httponly=True,  # explicit — JS must never read the JWT
     cookie_samesite="lax",
 )
 

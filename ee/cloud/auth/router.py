@@ -40,7 +40,17 @@ _MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 # ---------------------------------------------------------------------------
-# fastapi-users sub-routers (login/logout/register) — unchanged
+# fastapi-users sub-routers (login/logout/register)
+#
+# Both transports stay live during the cookie+CSRF rollout (security
+# #1117 P1). Cookie is the long-term path for browser clients; Bearer
+# is retained for back-compat with the Tauri desktop client and any
+# automation / MCP tools that hold a token directly.
+#
+# Deprecation timeline: drop the ``/auth/bearer/*`` sub-router once the
+# Tauri client moves to the OS keychain flow (#1117 P2) and we've
+# audited internal scripts. Until then, removing Bearer would force a
+# coordinated multi-repo migration with no rollback path.
 # ---------------------------------------------------------------------------
 
 router.include_router(
