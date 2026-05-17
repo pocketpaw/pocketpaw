@@ -269,9 +269,29 @@ async def _write_planner_files(
     and the KB indexer picks the PRD up automatically.
     """
 
+    from ee.cloud.uploads.mongo_store import MongoFileStore
     from ee.cloud.uploads.service import write_text_file
 
     folder_path = f"/projects/{project_id}"
+
+    # Re-plan safety: soft-delete prior PRD / goal.md / plan.json rows in
+    # this folder before writing the new run. Without this, the file
+    # store inserts a second row at the same path (no unique constraint
+    # on (workspace, folder_path, filename)) and `_list_planner_files`
+    # returns the stale first-run id via dict.setdefault — operator opens
+    # the old PRD after a re-plan.
+    workspace_id = ctx.workspace_id or ""
+    if workspace_id:
+        store = MongoFileStore()
+        try:
+            await store.soft_delete_under_prefix(workspace_id, folder_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "planner: soft-delete of %s prior to re-plan failed: %s",
+                folder_path,
+                exc,
+            )
+
     refs: dict[str, str] = {}
 
     prd_content = getattr(planner_result, "prd_content", "") or ""
