@@ -160,7 +160,12 @@ class TestListWorkItems:
         """Regression: a Task created via POST /tasks must surface in
         GET /mission-control/items. The original façade only queried
         Instinct and silently dropped Tasks — operators creating tasks
-        through the modal saw their new work disappear from the feed."""
+        through the modal saw their new work disappear from the feed.
+
+        Also asserts (P4) that the projected WorkItem carries
+        ``blocked_by`` with the ``task:`` prefix applied so the
+        frontend can resolve dependency edges to other WorkItem rows.
+        """
         from datetime import UTC
         from datetime import datetime as _dt
 
@@ -179,6 +184,7 @@ class TestListWorkItems:
             title="Drafted from the modal",
             summary="",
             pocket_id=None,
+            blocked_by=("t_dep1", "t_dep2"),
             created_at=_dt.now(UTC),
             updated_at=_dt.now(UTC),
         )
@@ -190,6 +196,13 @@ class TestListWorkItems:
         out = await mc_service.agent_list_work_items(_ctx(), {})
         titles = [it.title for it in out]
         assert "Drafted from the modal" in titles
+
+        # P4: the projected WorkItem prefixes each blocked_by id with
+        # ``task:`` so the frontend can dereference dependency edges to
+        # the right WorkItem rows in the heterogeneous feed.
+        target = next(it for it in out if it.title == "Drafted from the modal")
+        assert target.blocked_by == ["task:t_dep1", "task:t_dep2"]
+
         # Pocket-less tasks must surface even when the workspace has no
         # visible pockets at all (Tasks are workspace-scoped, not
         # pocket-scoped).

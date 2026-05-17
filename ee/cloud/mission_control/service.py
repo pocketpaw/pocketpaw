@@ -8,6 +8,11 @@
 # skip non-Task ids (Instinct Actions don't reassign or snooze). Also
 # tagged the per-bulk approve/reject loops with ``# no-event`` comments
 # so rule #9 is satisfied without redundant double-emits.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+# threaded ``task.blocked_by`` through the WorkItem projection. Each
+# dependency id is prefixed with ``task:`` so the frontend's heterogeneous
+# feed can link dependency edges to their corresponding WorkItem rows
+# without translating ids client-side.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -215,11 +220,17 @@ def _task_to_work_item(task: Any, workspace_id: str) -> WorkItem:
 
     Accepts either a ``tasks.domain.Task`` or a ``TaskResponse`` DTO —
     both expose the same field names so attribute access works on either.
+
+    ``blocked_by`` ids are prefixed with ``task:`` to match the
+    WorkItem id convention — the frontend can resolve a dependency edge
+    back to its WorkItem row without a translation step.
     """
     assignee = task.assignee
     assignee_kind = AssigneeKind.AGENT if assignee.kind == "agent" else AssigneeKind.USER
     status = _TASK_STATUS_MAP.get(task.status, WorkItemStatus.IN_PROGRESS)
     section = _task_section(task.status, assignee.kind)
+    blocked_by_raw = getattr(task, "blocked_by", None) or ()
+    blocked_by = tuple(f"task:{dep_id}" for dep_id in blocked_by_raw)
     return WorkItem(
         id=f"task:{task.id}",
         workspace_id=workspace_id,
@@ -237,6 +248,7 @@ def _task_to_work_item(task: Any, workspace_id: str) -> WorkItem:
         created_at=task.created_at,
         updated_at=task.updated_at,
         fabric_refs=(),
+        blocked_by=blocked_by,
     )
 
 

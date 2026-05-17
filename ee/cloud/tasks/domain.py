@@ -3,6 +3,10 @@
 #   are the unified work-item primitive used by Mission Control's
 #   feed. Domain objects are plain Python so services can be tested
 #   without Beanie; the service layer converts to/from the Mongo doc.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+#   added the ``blocked_by`` field carrying cloud Task ids this task
+#   depends on. Tuple stays read-only on the frozen dataclass; the
+#   service writes it via ``agent_create_task`` + ``agent_update_task``.
 """Domain value objects for the Tasks entity.
 
 Pure-Python frozen dataclasses. ``tasks/service.py`` owns the
@@ -92,6 +96,7 @@ class Task:
     pocket_id: str | None = None
     cycle_id: str | None = None
     project_id: str | None = None
+    blocked_by: tuple[str, ...] = ()
     due_at: datetime | None = None
     blocked_reason: str | None = None
     created_at: datetime | None = None

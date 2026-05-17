@@ -15,6 +15,12 @@
 #   line on every call so the creator/assignee-guard bypass is
 #   reviewable. PR #1097's reviewer flagged the silent privilege bypass
 #   as the highest-priority follow-up.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+#   ``agent_create_task`` persists ``blocked_by`` from the request;
+#   ``agent_update_task`` flips it tri-state (None = no change, [] =
+#   explicit clear, [...] = replace). Domain mapper threads the field
+#   through ``_to_domain`` so projectors (Mission Control's WorkItem)
+#   pick it up automatically.
 """Tasks entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -103,6 +109,7 @@ def _to_domain(doc: _TaskDoc) -> Task:
         pocket_id=doc.pocket_id,
         cycle_id=doc.cycle_id,
         project_id=getattr(doc, "project_id", None),
+        blocked_by=tuple(getattr(doc, "blocked_by", None) or ()),
         due_at=doc.due_at,
         blocked_reason=doc.blocked_reason,
         created_at=getattr(doc, "createdAt", None),
@@ -196,6 +203,7 @@ async def agent_create_task(ctx: RequestContext, body: CreateTaskRequest) -> Tas
             ref_id=body.source.ref_id,
             metadata=dict(body.source.metadata or {}),
         ),
+        blocked_by=list(body.blocked_by or []),
         due_at=body.due_at,
     )
     await doc.insert()
@@ -284,6 +292,12 @@ async def agent_update_task(
             doc.project_id = body.project_id
         else:
             doc.project_id = None
+    if body.blocked_by is not None:
+        # Tri-state: None = no change (handled by the outer guard),
+        # [] = explicit clear, [...] = replace the full set. The Beanie
+        # field defaults to ``[]`` for old docs so the assignment is
+        # always safe.
+        doc.blocked_by = list(body.blocked_by)
     if body.due_at is not None:
         doc.due_at = body.due_at
 
