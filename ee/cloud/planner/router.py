@@ -3,6 +3,11 @@
 #   ``planner.service`` → return DTO. No ``HTTPException`` here —
 #   services raise CloudError subclasses and ``_core.http`` maps them
 #   to JSON.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P3
+#   added ``POST /planner/resolve-gap`` for the agent-gap → create-agent
+#   flow. Frontend calls ``POST /api/v1/agents`` directly to create the
+#   missing agent (no NEW agent-creation endpoint here) and then posts
+#   to this route with the agent id it received.
 """Planner REST router.
 
 Endpoints:
@@ -23,7 +28,12 @@ from starlette.responses import Response
 from ee.cloud._core.context import RequestContext, request_context
 from ee.cloud.license import require_license
 from ee.cloud.planner import service as planner_service
-from ee.cloud.planner.dto import PlanProjectRequest, PlanProjectResult
+from ee.cloud.planner.dto import (
+    PlanProjectRequest,
+    PlanProjectResult,
+    ResolveGapRequest,
+    ResolveGapResult,
+)
 
 router = APIRouter(
     prefix="/planner",
@@ -61,3 +71,19 @@ async def get_plan_by_project(
     if result is None:
         return Response(status_code=204)
     return result
+
+
+@router.post("/resolve-gap", response_model=ResolveGapResult)
+async def resolve_agent_gap(
+    body: ResolveGapRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> ResolveGapResult:
+    """Reassign human-fallback tasks for a missing agent spec to the
+    newly-created cloud Agent.
+
+    Called by the FE after the operator creates an agent for a
+    planner-recommended spec the workspace was missing. The FE's
+    create-agent call goes to ``POST /api/v1/agents`` directly; this
+    route handles the post-create reassignment + gap cleanup.
+    """
+    return await planner_service.agent_resolve_gap(ctx, body)

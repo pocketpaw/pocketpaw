@@ -4,6 +4,11 @@
 # into the unified frontend representation. Frozen dataclass per the ee/cloud
 # Code Rules (CLAUDE.md §3): workspace + assignee tenancy fields are required,
 # so constructing a WorkItem without them is a type error.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+# added ``blocked_by: tuple[str, ...]`` carrying ``task:<id>``-prefixed
+# WorkItem ids the row depends on. The projector in mission_control.service
+# threads ``Task.blocked_by`` through with the prefix so the frontend can
+# render dependency edges in the unified feed.
 """Mission Control domain value objects.
 
 Pure-Python frozen dataclasses. No Beanie, no Pydantic, no FastAPI
@@ -84,6 +89,11 @@ class WorkItem:
     created_at: datetime | None
     updated_at: datetime | None
     fabric_refs: tuple[str, ...] = field(default_factory=tuple)
+    # Prefixed WorkItem ids this row depends on (``task:<task_id>`` for
+    # Tasks, future ``nudge:<id>`` etc. when other sources gain deps).
+    # Empty tuple for sources that don't model dependencies (Instinct
+    # Nudges, activity ticker entries).
+    blocked_by: tuple[str, ...] = field(default_factory=tuple)
 
 
 __all__ = [

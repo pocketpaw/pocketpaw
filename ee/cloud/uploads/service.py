@@ -305,9 +305,7 @@ async def write_text_file(
     adapter = build_adapter(root)
 
     payload = content.encode("utf-8") if isinstance(content, str) else content
-    storage_key = new_storage_key(
-        "planner", _PLANNER_EXTENSION_BY_MIME.get(mime, "bin")
-    )
+    storage_key = new_storage_key("planner", _PLANNER_EXTENSION_BY_MIME.get(mime, "bin"))
 
     async def _body() -> AsyncIterator[bytes]:
         yield payload

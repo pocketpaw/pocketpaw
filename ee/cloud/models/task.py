@@ -6,6 +6,10 @@
 #   workspace always. Indexes back the two hot query paths:
 #     - "list my work" by (workspace_id, assignee_id, status)
 #     - "items in this cycle" by (workspace_id, cycle_id)
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+#   added ``blocked_by: list[str]`` carrying cloud Task ids this task
+#   depends on. No migration script — Mongo absorbs the new field on
+#   next write; reads of old docs default to ``[]``.
 """Task document — Mission Control work-item primitive.
 
 Embedded sub-documents:
@@ -91,6 +95,14 @@ class Task(TimestampedDocument):
     kind: str = Field(default="task", pattern="^(task|nudge|projection|automation)$")
 
     source: TaskSource = Field(default_factory=TaskSource)
+
+    # Task ids this task depends on. Populated by the planner's two-pass
+    # materializer for ``TaskSpec.blocked_by_keys`` and by direct callers
+    # that pass ``blocked_by`` on Create/Update. Plain string list — we
+    # don't enforce referential integrity at the DB layer because cross-
+    # workspace ids are already filtered out by the tenant guard on every
+    # service write.
+    blocked_by: list[str] = Field(default_factory=list)
 
     due_at: datetime | None = None
     blocked_reason: str | None = None

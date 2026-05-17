@@ -398,3 +398,13 @@ class ProjectDeleted(Event):
 @dataclass
 class PlanGenerated(Event):
     EVENT_TYPE: ClassVar[str] = "plan.generated"
+
+
+# Planner — fires after ``ee.cloud.planner.service.agent_resolve_gap``
+# reassigns the human-fallback tasks for a previously-missing agent spec
+# to a newly-created cloud Agent. Listeners refresh the Plan tab's
+# agent-gap card (removing the resolved spec) and the Mission Control
+# feed (rows whose assignee changed).
+@dataclass
+class PlanGapResolved(Event):
+    EVENT_TYPE: ClassVar[str] = "plan.gap_resolved"

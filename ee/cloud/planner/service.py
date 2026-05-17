@@ -5,6 +5,18 @@
 #   except via the public OSS API surface (``PlannerAgent``, ``PlannerResult``,
 #   ``TaskSpec``, ``AgentSpec``) — the OSS module is sacred and changes go
 #   through the OSS PR flow, not through ee/cloud.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P3 + P4.
+#   P3: persist a ``PlanSession`` Beanie doc per run so ``agent_resolve_gap``
+#   can look up which tasks fell back to a human for a given missing spec
+#   and reassign them after the operator creates the cloud Agent. Tasks
+#   that fall back from agent → human now record the wanted spec name on
+#   ``assignee.name`` (and on ``source.metadata.wanted_agent_spec_name``)
+#   so the resolve flow can filter precisely without a JSON-blob parse.
+#   P4: two-pass task materialization — pass 1 inserts each task with
+#   ``blocked_by=[]`` and builds a ``spec_key → cloud_task_id`` map; pass
+#   2 patches ``blocked_by`` via ``agent_update_task``. Unknown deps
+#   surface as ``dependency_warnings`` on the response, not as a fatal
+#   error — the planner keeps a partial result the operator can ship.
 """Planner entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -45,12 +57,16 @@ from typing import Any
 from ee.cloud._core.context import RequestContext
 from ee.cloud._core.errors import NotFound, ValidationError
 from ee.cloud._core.realtime.emit import emit
-from ee.cloud._core.realtime.events import PlanGenerated
+from ee.cloud._core.realtime.events import PlanGapResolved, PlanGenerated
+from ee.cloud.models.planner import PlanSession as _PlanSessionDoc
+from ee.cloud.models.planner import PlanSessionAgentGap as _PlanSessionAgentGapDoc
 from ee.cloud.planner.domain import AgentGap, PlanSession
 from ee.cloud.planner.dto import (
     AgentGapDTO,
     PlanProjectRequest,
     PlanProjectResult,
+    ResolveGapRequest,
+    ResolveGapResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,7 +111,7 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
         goal=body.goal,
         planner_result=planner_result,
     )
-    task_ids = await _materialize_tasks(
+    task_ids, dependency_warnings = await _materialize_tasks(
         ctx=ctx,
         project=project,
         planner_result=planner_result,
@@ -105,8 +121,16 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
         planner_result=planner_result,
     )
 
+    session_id = await _persist_plan_session(
+        workspace_id=ctx.workspace_id,
+        project_id=project.id,
+        file_refs=file_refs,
+        task_ids=task_ids,
+        agent_gaps=agent_gaps,
+    )
+
     session = PlanSession(
-        id=project.id,  # OSS planner doesn't mint a separate session id today
+        id=session_id,
         workspace_id=ctx.workspace_id,
         project_id=project.id,
         status="ready",
@@ -115,6 +139,7 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
         goal_file_id=file_refs.get("goal"),
         task_ids=tuple(task_ids),
         agent_gaps=tuple(agent_gaps),
+        dependency_warnings=tuple(dependency_warnings),
     )
 
     await emit(
@@ -133,31 +158,183 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
     return _session_to_dto(session)
 
 
+async def agent_resolve_gap(ctx: RequestContext, body: ResolveGapRequest) -> ResolveGapResult:
+    """Reassign human-fallback tasks for a missing agent spec to the
+    newly-created cloud Agent.
+
+    Called after the operator creates an Agent (via ``POST /api/v1/agents``)
+    for a spec the planner originally wanted but the workspace was
+    missing. The service:
+
+      1. Loads the PlanSession doc — workspace tenant-checked. Unknown
+         session id → ``NotFound``.
+      2. Loads the new cloud Agent — workspace tenant-checked via
+         ``agents_service.get`` + a workspace cross-check. Unknown agent
+         id or cross-workspace → ``NotFound`` (uniform 404 to prevent
+         id enumeration).
+      3. Finds every task in the session whose ``assignee.kind == 'human'``
+         AND ``assignee.name == spec_name`` (the fallback marker set in
+         ``_resolve_assignee``). The ``source.metadata.wanted_agent_spec_name``
+         column is the defensive cross-check.
+      4. Reassigns each matching task to the new agent via
+         ``tasks_service.agent_reassign_task``.
+      5. Pops the resolved spec out of the PlanSession's ``agent_gaps``.
+      6. Emits ``PlanGapResolved`` so the FE Plan tab can patch the
+         gap card stack without a refetch.
+    """
+
+    body = ResolveGapRequest.model_validate(body)
+    if not ctx.workspace_id:
+        raise ValidationError(
+            "planner.no_workspace",
+            "resolving a plan gap requires an active workspace",
+        )
+
+    session_doc = await _load_plan_session_or_404(ctx, body.plan_session_id)
+    new_agent = await _load_agent_for_gap_or_404(
+        workspace_id=ctx.workspace_id,
+        agent_id=body.new_agent_id,
+    )
+
+    from ee.cloud.tasks import service as tasks_service
+    from ee.cloud.tasks.dto import ListTasksRequest, ReassignTaskRequest
+
+    # The list of tasks belonging to this plan session is canonical on
+    # the PlanSession doc — we filter the session-scoped slice down to
+    # human-fallback rows matching the spec name. The wanted-spec
+    # metadata is the safe cross-check (an operator could have renamed
+    # the assignee in the meantime; the source metadata is immutable).
+    rows = await tasks_service.agent_list_tasks(
+        ctx, ListTasksRequest(project_id=session_doc.project_id, limit=500)
+    )
+    spec_name_lower = body.spec_name.lower()
+    targets = [
+        r
+        for r in rows
+        if r.id in session_doc.task_ids
+        and r.assignee.kind == "human"
+        and (
+            (r.assignee.name or "").lower() == spec_name_lower
+            or (r.source.metadata or {}).get("wanted_agent_spec_name", "").lower()
+            == spec_name_lower
+        )
+    ]
+
+    reassign_body = ReassignTaskRequest(
+        assignee_kind="agent",
+        assignee_id=body.new_agent_id,
+        assignee_name=new_agent.name,
+    )
+    reassigned_task_ids: list[str] = []
+    for task_row in targets:
+        try:
+            await tasks_service.agent_reassign_task(ctx, task_row.id, reassign_body)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "resolve_gap reassignment failed for task=%s spec=%s",
+                task_row.id,
+                body.spec_name,
+            )
+            continue
+        reassigned_task_ids.append(task_row.id)
+
+    # Strip the resolved spec out of the persisted gap list. Match is
+    # case-insensitive on spec_name to mirror the planner's detection
+    # path (``_detect_agent_gaps`` lowercases for the existing-name set).
+    remaining_gaps_docs = [
+        g for g in session_doc.agent_gaps if (g.spec_name or "").lower() != spec_name_lower
+    ]
+    session_doc.agent_gaps = remaining_gaps_docs
+    if reassigned_task_ids:
+        # Refresh task_ids only if we actually wrote — keeps the doc
+        # stable when the resolve hits an empty target set.
+        pass  # task_ids unchanged: same tasks, different assignee.
+    await session_doc.save()
+
+    remaining_dto = [
+        AgentGapDTO(
+            spec_name=g.spec_name,
+            recommended_role=g.recommended_role,
+            specialties=list(g.specialties),
+        )
+        for g in remaining_gaps_docs
+    ]
+
+    await emit(
+        PlanGapResolved(
+            data={
+                "workspace_id": ctx.workspace_id,
+                "project_id": session_doc.project_id,
+                "plan_session_id": str(session_doc.id),
+                "spec_name": body.spec_name,
+                "new_agent_id": body.new_agent_id,
+                "reassigned_task_count": len(reassigned_task_ids),
+                "remaining_gap_count": len(remaining_gaps_docs),
+            }
+        )
+    )
+
+    return ResolveGapResult(
+        plan_session_id=str(session_doc.id),
+        spec_name=body.spec_name,
+        new_agent_id=body.new_agent_id,
+        reassigned_task_ids=reassigned_task_ids,
+        remaining_gaps=remaining_dto,
+    )
+
+
 async def get_plan_for_project(ctx: RequestContext, project_id: str) -> PlanProjectResult | None:
     """Return the most recent plan summary for ``project_id``, or ``None``.
 
-    There is no PlanSession Beanie document in v0 — the plan output IS
-    the persistent record (files in the Files panel + tasks in
-    Mission Control). We reconstruct the summary by:
+    P3 added a persisted PlanSession Beanie doc — when it exists we
+    return its persisted shape (so plan_session_id, agent_gaps, and
+    dependency_warnings round-trip across refreshes). Pre-P3 plans (and
+    forks that disabled the doc) still reconstruct from the files panel
+    so the read path stays backwards-compatible.
 
-      1. Verifying the project exists in the caller's workspace
+    Reconstruction steps:
+
+      1. Verify the project exists in the caller's workspace
          (tenant check; raises NotFound otherwise).
-      2. Looking for the PRD file at the conventional path
-         ``/projects/{project_id}/prd.md``. If absent, no plan exists yet.
-      3. Surfacing the matching tasks via the existing tasks service.
+      2. If a PlanSession doc exists, hydrate from it directly.
+      3. Otherwise look for the PRD file at
+         ``/projects/{project_id}/prd.md``; absent → no plan yet.
+      4. Surface the matching tasks via the existing tasks service.
 
     Agent-gap detection is intentionally NOT re-run here — it's a
     point-in-time signal from the original plan; re-running it on
     every Plan-tab refresh would hit the agents list for nothing.
-    The FE renders the persisted gaps from the most recent
-    ``PlanGenerated`` event payload, or shows an empty gap list when
-    the route is a cold-start hydration.
     """
 
     if not ctx.workspace_id:
         return None
 
     project = await _load_project_or_404(ctx, project_id)
+
+    # P3 happy path — persisted doc carries everything the FE needs.
+    persisted = await _PlanSessionDoc.find_one(
+        {"workspace": ctx.workspace_id, "project_id": project.id}
+    )
+    if persisted is not None:
+        session = PlanSession(
+            id=str(persisted.id),
+            workspace_id=ctx.workspace_id,
+            project_id=project.id,
+            status=persisted.status,
+            prd_file_id=persisted.prd_file_id,
+            plan_file_id=persisted.plan_file_id,
+            goal_file_id=persisted.goal_file_id,
+            task_ids=tuple(persisted.task_ids),
+            agent_gaps=tuple(
+                AgentGap(
+                    spec_name=g.spec_name,
+                    recommended_role=g.recommended_role,
+                    specialties=tuple(g.specialties),
+                )
+                for g in persisted.agent_gaps
+            ),
+        )
+        return _session_to_dto(session)
 
     folder_path = f"/projects/{project.id}"
     files_by_name = await _list_planner_files(
@@ -324,8 +501,14 @@ async def _materialize_tasks(
     ctx: RequestContext,
     project: Any,
     planner_result: Any,
-) -> list[str]:
-    """Create one cloud Task per OSS TaskSpec.
+) -> tuple[list[str], list[str]]:
+    """Create one cloud Task per OSS TaskSpec via two passes.
+
+    Pass 1 inserts every Task with ``blocked_by=[]`` so we have cloud
+    ids to point at; pass 2 patches ``blocked_by`` once the
+    ``spec_key → cloud_task_id`` map is fully populated. This handles
+    forward references — a TaskSpec may depend on a sibling that wasn't
+    created yet at the time of its own insert.
 
     Assignee resolution:
 
@@ -334,21 +517,22 @@ async def _materialize_tasks(
         team_recommendation entry that covers any of those specialties,
         assign the task to that agent (kind=agent).
       * Otherwise fall back to the project's lead_id (or the caller)
-        as a human assignee — the operator sees the task in their tray
-        and can re-route from there.
+        as a human assignee, recording the planner-wanted spec name on
+        ``assignee.name`` so the resolve-gap flow can find the row.
 
-    OSS TaskSpec → cloud CreateTaskRequest field map:
-      - key → ignored (cloud Task id is mongo-generated)
-      - title → title
-      - description → summary
-      - priority → priority (normalized to the cloud's normal/high/etc.)
-      - task_type → drives assignee kind (human/agent/review)
-      - blocked_by_keys → ignored in v0 (P4 per the brief)
+    Returns ``(task_ids, dependency_warnings)`` — warnings carry any
+    ``blocked_by_keys`` entries that didn't resolve to a sibling spec
+    (planner bug — we skip the unknown dep but still create the task).
     """
 
     from ee.cloud.agents import service as agents_service
     from ee.cloud.tasks import service as tasks_service
-    from ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+    from ee.cloud.tasks.dto import (
+        AssigneeDTO,
+        CreateTaskRequest,
+        SourceDTO,
+        UpdateTaskRequest,
+    )
 
     # Build a name → cloud Agent lookup once so the per-task loop is
     # O(1). Cloud's ``list_agents`` is workspace-scoped and cheap.
@@ -372,9 +556,14 @@ async def _materialize_tasks(
     plan_session_ref = project.id  # see PlanSession.id comment in service top
     fallback_assignee_id = getattr(project, "lead_id", None) or ctx.user_id
 
+    # Pass 1 — create every task with empty blocked_by, build the
+    # spec_key → cloud_task_id map for pass 2.
     task_ids: list[str] = []
+    spec_key_to_task_id: dict[str, str] = {}
+    created_pairs: list[tuple[Any, str]] = []  # (spec, task_id) for pass 2
+
     for spec in all_specs:
-        assignee_kind, assignee_id, assignee_name = _resolve_assignee(
+        assignee_kind, assignee_id, assignee_name, wanted_spec_name = _resolve_assignee(
             spec=spec,
             specialty_to_agent_name=specialty_to_agent_name,
             by_name=by_name,
@@ -382,6 +571,16 @@ async def _materialize_tasks(
             fallback_name="",
         )
         priority = _normalize_priority(getattr(spec, "priority", "medium"))
+
+        source_metadata = {
+            "planner_task_key": getattr(spec, "key", ""),
+            "task_type": getattr(spec, "task_type", "agent"),
+        }
+        if wanted_spec_name:
+            # Resolve-gap filters on this key — the planner wanted spec
+            # X but no cloud Agent matched, so we recorded the want
+            # alongside the fallback assignment.
+            source_metadata["wanted_agent_spec_name"] = wanted_spec_name
 
         req = CreateTaskRequest(
             title=spec.title or spec.key or "Untitled task",
@@ -396,11 +595,9 @@ async def _materialize_tasks(
             source=SourceDTO(
                 type="planner",
                 ref_id=plan_session_ref,
-                metadata={
-                    "planner_task_key": getattr(spec, "key", ""),
-                    "task_type": getattr(spec, "task_type", "agent"),
-                },
+                metadata=source_metadata,
             ),
+            blocked_by=[],
         )
 
         try:
@@ -412,8 +609,46 @@ async def _materialize_tasks(
             )
             continue
         task_ids.append(created.id)
+        spec_key = getattr(spec, "key", "") or ""
+        if spec_key:
+            spec_key_to_task_id[spec_key] = created.id
+        created_pairs.append((spec, created.id))
 
-    return task_ids
+    # Pass 2 — wire dependencies. Each TaskSpec's ``blocked_by_keys``
+    # references sibling spec keys; we translate to the cloud task ids
+    # we minted in pass 1 and patch the row via agent_update_task. Any
+    # unresolved name surfaces as a warning rather than aborting.
+    dependency_warnings: list[str] = []
+    for spec, task_id in created_pairs:
+        dep_keys = list(getattr(spec, "blocked_by_keys", []) or [])
+        if not dep_keys:
+            continue
+        resolved_ids: list[str] = []
+        for dep_key in dep_keys:
+            cloud_id = spec_key_to_task_id.get(dep_key)
+            if cloud_id is None:
+                warning = (
+                    f"task {getattr(spec, 'key', '?')!r} depends on unknown "
+                    f"spec {dep_key!r}; skipping"
+                )
+                logger.warning(warning)
+                dependency_warnings.append(dep_key)
+                continue
+            resolved_ids.append(cloud_id)
+        if not resolved_ids:
+            continue
+        try:
+            await tasks_service.agent_update_task(
+                ctx, task_id, UpdateTaskRequest(blocked_by=resolved_ids)
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "dependency wiring failed for task %s spec=%s",
+                task_id,
+                getattr(spec, "key", "?"),
+            )
+
+    return task_ids, dependency_warnings
 
 
 def _resolve_assignee(
@@ -423,31 +658,46 @@ def _resolve_assignee(
     by_name: dict[str, Any],
     fallback_id: str,
     fallback_name: str,
-) -> tuple[str, str, str]:
-    """Map an OSS TaskSpec to a cloud assignee triple.
+) -> tuple[str, str, str, str]:
+    """Map an OSS TaskSpec to a cloud assignee 4-tuple.
 
-    Returns ``(kind, id, name)`` suitable for AssigneeDTO. Human falls
-    back to the project lead — the cloud tasks service flips human
-    tasks straight into ``in_progress`` so the operator sees them.
+    Returns ``(kind, id, name, wanted_spec_name)``. ``wanted_spec_name``
+    is non-empty only when the planner wanted an agent we couldn't
+    resolve — it records which team-recommendation spec we fell back
+    from so the resolve-gap flow can match the rows precisely. For
+    human-typed specs the wanted name stays empty (the planner
+    explicitly asked for a human; there's no "missing agent" to resolve).
+
+    Human fallback assignees carry ``assignee.name = wanted_spec_name``
+    so the operator UI can render "wanted: events-coordinator (fallback
+    to lead)" without a separate field, and so the resolve-gap filter
+    matches on a single column.
     """
 
     task_type = getattr(spec, "task_type", "agent")
     if task_type == "human":
-        return ("human", fallback_id, fallback_name)
+        return ("human", fallback_id, fallback_name, "")
 
     specialties = [sp.lower() for sp in getattr(spec, "required_specialties", []) or []]
+    wanted_team_name = ""
     for sp in specialties:
         team_name = specialty_to_agent_name.get(sp)
         if not team_name:
             continue
+        # Remember the first team-recommendation name we tried so the
+        # fallback path can record it even when no cloud Agent matched.
+        if not wanted_team_name:
+            wanted_team_name = team_name
         agent = by_name.get(team_name.lower())
         if agent is not None:
-            return ("agent", str(agent.id), agent.name)
+            return ("agent", str(agent.id), agent.name, "")
 
     # No specialty match — fall back to ``human`` so the operator
     # explicitly re-routes rather than us silently picking a random
-    # cloud agent.
-    return ("human", fallback_id, fallback_name)
+    # cloud agent. Record the wanted spec name on the assignee so the
+    # resolve-gap flow can find the row by ``assignee.name``.
+    fallback_display_name = wanted_team_name or fallback_name
+    return ("human", fallback_id, fallback_display_name, wanted_team_name)
 
 
 def _normalize_priority(raw: str) -> str:
@@ -596,10 +846,100 @@ def _session_to_dto(session: PlanSession) -> PlanProjectResult:
             )
             for g in session.agent_gaps
         ],
+        dependency_warnings=list(session.dependency_warnings),
     )
+
+
+# ---------------------------------------------------------------------------
+# PlanSession persistence + load helpers
+# ---------------------------------------------------------------------------
+
+
+async def _persist_plan_session(
+    *,
+    workspace_id: str,
+    project_id: str,
+    file_refs: dict[str, str],
+    task_ids: list[str],
+    agent_gaps: list[AgentGap],
+) -> str:
+    """Insert (or replace) the PlanSession doc for ``project_id``.
+
+    We re-run by deleting the prior doc rather than upserting because
+    Beanie docs carry a generated ObjectId we don't want to retain
+    across re-plans (the previous run's id would still flow through
+    PlanGapResolved events for the new run). One doc per workspace +
+    project enforces "one active plan session per project".
+    """
+
+    existing = await _PlanSessionDoc.find(
+        {"workspace": workspace_id, "project_id": project_id}
+    ).to_list()
+    for prior in existing:
+        await prior.delete()
+
+    doc = _PlanSessionDoc(
+        workspace=workspace_id,
+        project_id=project_id,
+        status="ready",
+        prd_file_id=file_refs.get("prd"),
+        plan_file_id=file_refs.get("plan"),
+        goal_file_id=file_refs.get("goal"),
+        task_ids=list(task_ids),
+        agent_gaps=[
+            _PlanSessionAgentGapDoc(
+                spec_name=g.spec_name,
+                recommended_role=g.recommended_role,
+                specialties=list(g.specialties),
+            )
+            for g in agent_gaps
+        ],
+    )
+    await doc.insert()
+    return str(doc.id)
+
+
+async def _load_plan_session_or_404(ctx: RequestContext, plan_session_id: str) -> _PlanSessionDoc:
+    """Tenant-checked PlanSession load. Uniform NotFound on miss /
+    cross-workspace ids (id enumeration mitigation, matching the tasks
+    service ``_fetch_task`` pattern).
+    """
+
+    from beanie import PydanticObjectId
+
+    try:
+        oid = PydanticObjectId(plan_session_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("plan_session", plan_session_id) from exc
+    doc = await _PlanSessionDoc.get(oid)
+    if doc is None or doc.workspace != ctx.workspace_id:
+        raise NotFound("plan_session", plan_session_id)
+    return doc
+
+
+async def _load_agent_for_gap_or_404(*, workspace_id: str, agent_id: str) -> Any:
+    """Load a cloud Agent + cross-check workspace tenancy.
+
+    ``agents_service.get`` doesn't take a workspace argument (it's a
+    by-id loader that returns the agent regardless of workspace) so we
+    enforce the tenancy check here. Uniform NotFound on either branch
+    so the operator can't probe whether a given agent id exists in
+    another workspace.
+    """
+
+    from ee.cloud.agents import service as agents_service
+
+    try:
+        agent = await agents_service.get(agent_id)
+    except NotFound:
+        raise NotFound("agent", agent_id) from None
+    if agent.workspace_id != workspace_id:
+        raise NotFound("agent", agent_id)
+    return agent
 
 
 __all__ = [
     "agent_plan_project",
+    "agent_resolve_gap",
     "get_plan_for_project",
 ]

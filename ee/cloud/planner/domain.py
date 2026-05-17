@@ -3,6 +3,10 @@
 #   operator UI. Both are constructed only by ``planner.service`` after
 #   a successful OSS planner run; routers + tests consume the DTO wire
 #   shapes in ``planner.dto``.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+#   added ``dependency_warnings`` to PlanSession so the planner can
+#   surface unresolved TaskSpec.blocked_by_keys without failing the
+#   whole materialization.
 """Planner entity — domain value objects.
 
 A :class:`PlanSession` is the cloud-side record of one OSS planner run.
@@ -44,6 +48,7 @@ class PlanSession:
     goal_file_id: str | None
     task_ids: tuple[str, ...]
     agent_gaps: tuple[AgentGap, ...]
+    dependency_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

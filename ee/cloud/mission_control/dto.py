@@ -10,6 +10,10 @@
 # WorkItem domain still uses ``AssigneeKind.USER`` ("user") for Instinct
 # projections, but the reassign endpoint only acts on Tasks, so the wire
 # contract for the request body follows Tasks.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+# added ``blocked_by: list[str]`` to ``WorkItemResponse`` and threaded it
+# through ``work_item_to_response`` so the frontend feed shows dependency
+# edges in the unified WorkItem shape.
 """Mission Control wire DTOs.
 
 The audit doc (``docs/internal/2026-05-mission-control-backend-audit.md``,
@@ -153,6 +157,7 @@ class WorkItemResponse(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     fabric_refs: list[str] = Field(default_factory=list)
+    blocked_by: list[str] = Field(default_factory=list)
 
 
 def work_item_to_response(item: WorkItem) -> WorkItemResponse:
@@ -174,6 +179,7 @@ def work_item_to_response(item: WorkItem) -> WorkItemResponse:
         created_at=item.created_at,
         updated_at=item.updated_at,
         fabric_refs=list(item.fabric_refs),
+        blocked_by=list(item.blocked_by),
     )
 
 
