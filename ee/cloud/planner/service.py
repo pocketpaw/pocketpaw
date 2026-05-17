@@ -127,6 +127,7 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
         file_refs=file_refs,
         task_ids=task_ids,
         agent_gaps=agent_gaps,
+        dependency_warnings=dependency_warnings,
     )
 
     session = PlanSession(
@@ -208,10 +209,13 @@ async def agent_resolve_gap(ctx: RequestContext, body: ResolveGapRequest) -> Res
         ctx, ListTasksRequest(project_id=session_doc.project_id, limit=500)
     )
     spec_name_lower = body.spec_name.lower()
+    # O(n) membership check per row instead of O(n²) — relevant once a
+    # plan session has more than a few dozen tasks.
+    session_task_id_set = set(session_doc.task_ids)
     targets = [
         r
         for r in rows
-        if r.id in session_doc.task_ids
+        if r.id in session_task_id_set
         and r.assignee.kind == "human"
         and (
             (r.assignee.name or "").lower() == spec_name_lower
@@ -333,6 +337,7 @@ async def get_plan_for_project(ctx: RequestContext, project_id: str) -> PlanProj
                 )
                 for g in persisted.agent_gaps
             ),
+            dependency_warnings=tuple(persisted.dependency_warnings),
         )
         return _session_to_dto(session)
 
@@ -862,6 +867,7 @@ async def _persist_plan_session(
     file_refs: dict[str, str],
     task_ids: list[str],
     agent_gaps: list[AgentGap],
+    dependency_warnings: list[str] | None = None,
 ) -> str:
     """Insert (or replace) the PlanSession doc for ``project_id``.
 
@@ -894,6 +900,7 @@ async def _persist_plan_session(
             )
             for g in agent_gaps
         ],
+        dependency_warnings=list(dependency_warnings or []),
     )
     await doc.insert()
     return str(doc.id)

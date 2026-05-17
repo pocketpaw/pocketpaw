@@ -54,6 +54,11 @@ class PlanSession(TimestampedDocument):
     goal_file_id: str | None = None
     task_ids: list[str] = Field(default_factory=list)
     agent_gaps: list[PlanSessionAgentGap] = Field(default_factory=list)
+    # Soft warnings emitted by the planner when a TaskSpec dependency
+    # couldn't be resolved (unknown name, cyclic ref). Carried across
+    # GET refreshes so the operator sees the signal until they
+    # re-plan — vanished on cold hydration before this field landed.
+    dependency_warnings: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "plan_sessions"
