@@ -1,16 +1,11 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
-Updated: 2026-05-17 (audit-cloud B1) — Mounts the workspace-scoped Audit
-    entity at ``/api/v1/audit``. Wraps the existing SQLite-backed
-    ``pocketpaw.audit.store`` with tenancy enforced from
-    ``RequestContext.workspace_id``. The legacy
-    ``/api/v1/runtime/audit`` stays live for the local-runtime path.
-Updated: 2026-05-17 (security #1117 P1) — Mounts ``CSRFMiddleware`` and
-    the ``/auth/csrf`` token endpoint so the web build can use the
-    HttpOnly auth cookie without exposing CSRF surface. Bearer-auth
-    clients (Tauri, MCP, scripts) skip the middleware entirely so
-    nothing breaks for existing callers; see ``ee/cloud/_core/csrf.py``
-    for the decision tree.
+Updated: 2026-05-17 — Mounts the workspace-scoped Audit entity at
+    ``/api/v1/audit`` (B1) with tenancy from ``RequestContext.workspace_id``,
+    the legacy ``/api/v1/runtime/audit`` remaining live; also mounts
+    ``CSRFMiddleware`` and the ``/auth/csrf`` token endpoint (#1117) so
+    cookie-auth callers echo ``X-CSRF-Token`` while Bearer-auth clients
+    (Tauri, MCP, scripts) bypass entirely — see ``ee/cloud/_core/csrf.py``.
 Updated: 2026-05-17 (pocketpaw#1118 P1) — Mounts the planner router
     (``/api/v1/planner/run``, ``/api/v1/planner/by-project/{id}``).
     The planner module wraps the OSS deep_work planner and lands its

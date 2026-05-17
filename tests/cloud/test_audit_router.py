@@ -316,8 +316,9 @@ async def test_ctx_without_workspace_returns_empty(
     matching test in ``test_audit_service.py``.
     """
     # No active workspace at all — current_workspace_id (used by the
-    # action guard) raises HTTPException(400). Either 400 or 200 is
-    # acceptable here; both prove "no cross-tenant leak".
+    # action guard) raises HTTPException(400) before the handler runs.
+    # The service-level empty-response invariant is owned by
+    # test_audit_service.py::test_ctx_without_workspace_returns_empty.
     app = _build_app(
         audit_store_tmp, workspace_id=None, monkeypatch=monkeypatch
     )
@@ -325,9 +326,7 @@ async def test_ctx_without_workspace_returns_empty(
     try:
         async with AsyncClient(transport=transport, base_url="http://t") as client:
             r = await client.get("/audit")
-            assert r.status_code in (200, 400)
-            if r.status_code == 200:
-                assert r.json() == {"entries": [], "total": 0}
+            assert r.status_code == 400
     finally:
         _restore_service()
 
