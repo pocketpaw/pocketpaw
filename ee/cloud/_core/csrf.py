@@ -108,11 +108,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         # Safe methods: never check. Same for the bootstrap path list.
         if method not in _PROTECTED_METHODS or _path_is_exempt(request.url.path):
-            return await call_next(request)
+            response = await call_next(request)
+            self._maybe_clear_csrf_on_logout(request, response)
+            return response
 
         # Bearer caller — browsers won't auto-attach, so no CSRF surface.
         if _request_uses_bearer_auth(request):
-            return await call_next(request)
+            response = await call_next(request)
+            self._maybe_clear_csrf_on_logout(request, response)
+            return response
 
         # No cookie auth either? Let the route's own auth dep return 401
         # rather than masking it with a confusing 403.
@@ -138,7 +142,33 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             logger.debug("csrf reject: mismatch path=%s", request.url.path)
             return JSONResponse({"detail": "csrf_invalid"}, status_code=403)
 
-        return await call_next(request)
+        response = await call_next(request)
+        self._maybe_clear_csrf_on_logout(request, response)
+        return response
+
+    def _maybe_clear_csrf_on_logout(self, request: Request, response) -> None:
+        """If this request hit a logout endpoint, expire the paw_csrf
+        cookie alongside the auth cookie fastapi-users just cleared.
+
+        Without this, paw_csrf lives for its 7-day max-age after logout —
+        JS can still read it (it's intentionally NOT HttpOnly) and submit
+        it on the next login. Clearing here keeps the two cookies'
+        lifecycles paired without forking the fastapi-users logout route.
+        """
+        path = request.url.path
+        is_logout = path in {
+            "/api/v1/auth/logout",
+            "/api/v1/auth/cookie/logout",
+            "/api/v1/auth/bearer/logout",
+        }
+        if not is_logout:
+            return
+        # Only clear on a successful logout — leave the cookie alone if
+        # fastapi-users rejected the request.
+        if 200 <= response.status_code < 300:
+            response.delete_cookie(
+                CSRF_COOKIE_NAME, path="/", samesite="lax", secure=False
+            )
 
 
 # ---------------------------------------------------------------------------

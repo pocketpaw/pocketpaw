@@ -93,13 +93,18 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud._core.http import add_error_handler
     from ee.cloud._core.timing import TimingMiddleware
 
-    # Request-timing middleware first so it wraps every subsequent route
-    # (including CSRF rejections, which we want to see in perf data).
+    # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
+    # on inbound. Effective order here: CSRF → Timing → route handler.
+    # A CSRF 403 short-circuits before Timing observes the request, so perf
+    # data won't include rejected POSTs. That's a deliberate tradeoff: the
+    # CSRF gate exists to be fast and predictable, not measured. Reorder
+    # ONLY if you want Timing to wrap CSRF rejections (swap the two add_
+    # middleware calls — TimingMiddleware would then run outermost).
     app.add_middleware(TimingMiddleware)
 
-    # CSRF middleware — runs after Timing, before any route. Cookie-auth
-    # callers must echo X-CSRF-Token; Bearer-auth callers (Tauri, MCP,
-    # scripts) bypass entirely. See ``ee/cloud/_core/csrf.py``.
+    # CSRF middleware — outermost on inbound, runs before any route.
+    # Cookie-auth callers must echo X-CSRF-Token; Bearer-auth callers
+    # (Tauri, MCP, scripts) bypass entirely. See ``ee/cloud/_core/csrf.py``.
     app.add_middleware(CSRFMiddleware)
 
     # Global error handler — extracted to ee.cloud._core.http

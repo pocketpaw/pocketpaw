@@ -180,3 +180,56 @@ def test_login_endpoint_exempt_from_csrf(client: TestClient) -> None:
         cookies={AUTH_COOKIE_NAME: "fake-jwt-for-test"},
     )
     assert res.status_code == 200
+
+
+def test_logout_clears_paw_csrf_cookie() -> None:
+    """A successful logout must expire paw_csrf alongside paw_auth.
+
+    Without this hook, paw_csrf lived its full 7-day max_age after the
+    auth cookie was cleared. JS can read paw_csrf (it's intentionally
+    NOT HttpOnly) and could submit it on the next login — narrow but
+    real CSRF replay surface flagged in the #1119 review.
+    """
+
+    app = FastAPI()
+    app.add_middleware(CSRFMiddleware)
+
+    @app.post("/api/v1/auth/logout")
+    def fake_logout() -> dict:
+        return {"ok": True}
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/v1/auth/logout",
+        cookies={CSRF_COOKIE_NAME: "stale-token"},
+    )
+    assert res.status_code == 200
+    # The response Set-Cookie should expire paw_csrf (Max-Age=0).
+    set_cookie = res.headers.get("set-cookie", "")
+    assert CSRF_COOKIE_NAME in set_cookie, set_cookie
+    assert "Max-Age=0" in set_cookie or 'expires=Thu, 01 Jan 1970' in set_cookie.lower()
+
+
+def test_logout_failure_does_not_clear_paw_csrf() -> None:
+    """If the logout route returns non-2xx (e.g. session was already
+    invalid), we leave paw_csrf alone — only successful logouts pair the
+    two cookies' lifecycles."""
+
+    app = FastAPI()
+    app.add_middleware(CSRFMiddleware)
+
+    @app.post("/api/v1/auth/logout")
+    def failing_logout():
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=401)
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/v1/auth/logout",
+        cookies={CSRF_COOKIE_NAME: "stale-token"},
+    )
+    assert res.status_code == 401
+    set_cookie = res.headers.get("set-cookie", "")
+    # No Set-Cookie for paw_csrf at all when logout failed.
+    assert CSRF_COOKIE_NAME not in set_cookie
