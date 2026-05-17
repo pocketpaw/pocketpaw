@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated: 2026-05-17 (audit-cloud B1) — Mounts the workspace-scoped Audit
+    entity at ``/api/v1/audit``. Wraps the existing SQLite-backed
+    ``pocketpaw.audit.store`` with tenancy enforced from
+    ``RequestContext.workspace_id``. The legacy
+    ``/api/v1/runtime/audit`` stays live for the local-runtime path.
 Updated: 2026-05-17 (security #1117 P1) — Mounts ``CSRFMiddleware`` and
     the ``/auth/csrf`` token endpoint so the web build can use the
     HttpOnly auth cookie without exposing CSRF surface. Bearer-auth
@@ -123,6 +128,7 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Import and mount domain routers
     from ee.cloud.agents.router import router as agents_router
+    from ee.cloud.audit.router import router as audit_router
     from ee.cloud.auth.router import router as auth_router
     from ee.cloud.chat.router import router as chat_router
     from ee.cloud.connectors.router import router as connectors_router
@@ -139,6 +145,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(csrf_router, prefix="/api/v1")
     app.include_router(workspace_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
+    app.include_router(audit_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")

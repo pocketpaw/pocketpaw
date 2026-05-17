@@ -136,3 +136,61 @@ async def cloud_app_client() -> AsyncClient:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as client:
         yield client
+
+
+# ---------------------------------------------------------------------------
+# Audit fixtures — ee.cloud.audit entity (B1).
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def audit_store_tmp(tmp_path):
+    """Fresh AuditStore backed by a tmp SQLite file.
+
+    Tests that exercise the cloud audit entity inject this via
+    ``audit_service.agent_list_audit(ctx, body, store=...)`` so the
+    home-directory singleton (``get_audit_store``) is never touched.
+    """
+    from pocketpaw.audit.store import AuditStore
+
+    store = AuditStore(db_path=tmp_path / "audit.db")
+    yield store
+
+
+@pytest_asyncio.fixture
+async def make_audit_entry(audit_store_tmp):
+    """Factory that inserts an audit row scoped to a workspace.
+
+    The store's ``log_entry`` does not accept ``workspace_id`` directly;
+    workspace tenancy travels on ``context.workspace_id`` (the same JSON
+    column ``search_entries`` rolls up over). Tests stay terse:
+
+        await make_audit_entry("w1", action="x", description="...")
+    """
+
+    async def _make(
+        workspace_id: str,
+        *,
+        actor: str = "system",
+        action: str = "test.action",
+        category: str = "decision",
+        description: str = "test entry",
+        pocket_id: str | None = None,
+        context: dict | None = None,
+        metadata: dict | None = None,
+        status: str = "completed",
+    ) -> str:
+        merged_context = dict(context or {})
+        merged_context.setdefault("workspace_id", workspace_id)
+        return await audit_store_tmp.log_entry(
+            actor=actor,
+            action=action,
+            category=category,
+            description=description,
+            pocket_id=pocket_id,
+            context=merged_context,
+            metadata=metadata,
+            status=status,
+        )
+
+    return _make

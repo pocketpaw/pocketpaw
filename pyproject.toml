@@ -650,3 +650,14 @@ source_modules = [
     "ee.cloud.planner.domain",
 ]
 forbidden_modules = ["ee.cloud.models.planner"]
+
+[[tool.importlinter.contracts]]
+name = "Audit — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.audit.router",
+    "ee.cloud.audit.dto",
+    "ee.cloud.audit.domain",
+]
+forbidden_modules = ["ee.cloud.models.audit"]
