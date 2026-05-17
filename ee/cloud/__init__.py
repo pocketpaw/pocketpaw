@@ -1,5 +1,11 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated: 2026-05-17 (pocketpaw#1118 P1) — Mounts the planner router
+    (``/api/v1/planner/run``, ``/api/v1/planner/by-project/{id}``).
+    The planner module wraps the OSS deep_work planner and lands its
+    output into cloud Projects / Tasks / FileUploads so workspace
+    operators can plan a project from Mission Control without
+    crossing into the OSS local-filesystem state.
 Updated: 2026-05-16 — Mission Control backend completion. Mounts the
     Projects entity (workspace > project > pocket/task/cycle hierarchy)
     and wires the in-process daily-snapshot scheduler, gated on
@@ -104,6 +110,7 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.connectors.router import router as connectors_router
     from ee.cloud.cycles.router import router as cycles_router
     from ee.cloud.license import get_license_info
+    from ee.cloud.planner.router import router as planner_router
     from ee.cloud.pockets.router import router as pockets_router
     from ee.cloud.projects.router import router as projects_router
     from ee.cloud.sessions.router import router as sessions_router
@@ -116,6 +123,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
 

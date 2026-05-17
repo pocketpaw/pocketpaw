@@ -1,4 +1,11 @@
 # service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Updated: 2026-05-17 — pocketpaw#1118 P1. Added ``write_text_file()`` —
+#   a programmatic text-content write path for callers that have bytes
+#   in memory rather than an inbound HTTP ``UploadFile``. The cloud
+#   planner uses it to land PRD / goal.md / plan.json into the
+#   workspace Files panel without spinning a fake multipart request.
+#   Same MongoFileStore + StorageAdapter + FileReady emit pipeline as
+#   the HTTP path — only the source-of-bytes differs.
 # Updated: 2026-04-30 — Stage 1.B "Files as Knowledge". FileReady now fires
 #   for every successful upload (chat-scoped or workspace-only) and always
 #   carries workspace_id so downstream subscribers (the KB indexer) can route
@@ -14,6 +21,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
 from fastapi import UploadFile
 
@@ -23,7 +33,9 @@ from ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw.uploads.adapter import StorageAdapter
 from pocketpaw.uploads.config import UploadSettings
 from pocketpaw.uploads.errors import NotFound
+from pocketpaw.uploads.factory import build_adapter
 from pocketpaw.uploads.file_store import FileRecord
+from pocketpaw.uploads.keys import new_storage_key
 from pocketpaw.uploads.service import (
     BulkUploadResult,
     UploadService,
@@ -239,3 +251,102 @@ class EEUploadService:
         if rec.chat_id:
             data["group_id"] = rec.chat_id
         await emit(FileDeleted(data=data))
+
+
+# ---------------------------------------------------------------------------
+# Programmatic write helper (pocketpaw#1118 P1)
+# ---------------------------------------------------------------------------
+
+
+_PLANNER_EXTENSION_BY_MIME = {
+    "text/markdown": "md",
+    "text/plain": "txt",
+    "application/json": "json",
+}
+
+
+async def write_text_file(
+    *,
+    workspace_id: str,
+    owner_id: str,
+    folder_path: str,
+    filename: str,
+    content: str | bytes,
+    mime: str = "text/markdown",
+    pocket_id: str | None = None,
+) -> FileRecord:
+    """Persist a text blob into the workspace Files panel.
+
+    Programmatic counterpart to ``EEUploadService.upload`` for callers
+    that have bytes in memory rather than a FastAPI ``UploadFile``. The
+    cloud planner uses it to land PRD / goal.md / plan.json against a
+    Project without spinning a fake multipart request. Same
+    ``MongoFileStore`` + ``StorageAdapter`` + ``FileReady`` emit pipeline
+    the HTTP path uses — only the source-of-bytes differs.
+
+    Lives at module scope (not on :class:`EEUploadService`) because most
+    callers (services, listeners, jobs) don't have a built service
+    instance and shouldn't have to thread one through. Module-level
+    state stays minimal — the StorageAdapter is built per-call against
+    ``~/.pocketpaw/uploads`` so tests that monkeypatch ``Path.home``
+    get isolation for free.
+
+    Returns the persisted :class:`FileRecord` so callers can grab
+    ``rec.id`` for downstream linking (PlanSession.prd_file_id, etc.).
+    """
+
+    if not workspace_id:
+        raise ValueError("write_text_file: workspace_id is required")
+    if not filename:
+        raise ValueError("write_text_file: filename is required")
+
+    root = Path.home() / ".pocketpaw" / "uploads"
+    root.mkdir(parents=True, exist_ok=True)
+    adapter = build_adapter(root)
+
+    payload = content.encode("utf-8") if isinstance(content, str) else content
+    storage_key = new_storage_key(
+        "planner", _PLANNER_EXTENSION_BY_MIME.get(mime, "bin")
+    )
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield payload
+
+    obj = await adapter.put(storage_key, _body(), mime)
+
+    rec = FileRecord(
+        id=uuid4().hex,
+        storage_key=obj.key,
+        filename=filename,
+        mime=obj.mime,
+        size=obj.size,
+        owner_id=owner_id,
+        chat_id=None,
+        created=datetime.now(UTC),
+    )
+
+    store = MongoFileStore()
+    await store.save_scoped(
+        rec,
+        workspace=workspace_id,
+        folder_path=folder_path or "/",
+        pocket_id=pocket_id,
+    )
+
+    # Mirror the FileReady payload the HTTP path emits so the KB indexer
+    # and the unified Files panel don't need a separate code path for
+    # planner-written files.
+    data: dict = {
+        "workspace_id": workspace_id,
+        "file_id": rec.id,
+        "filename": rec.filename,
+        "mime": rec.mime,
+        "size": rec.size,
+        "storage_key": rec.storage_key,
+        "url": f"/api/v1/uploads/{rec.id}",
+    }
+    if pocket_id:
+        data["pocket_id"] = pocket_id
+    await emit(FileReady(data=data))
+
+    return rec

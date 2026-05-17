@@ -389,3 +389,12 @@ class ProjectArchived(Event):
 @dataclass
 class ProjectDeleted(Event):
     EVENT_TYPE: ClassVar[str] = "project.deleted"
+
+
+# Planner — fires after ``ee.cloud.planner.service.agent_plan_project``
+# finishes materializing the OSS PlannerResult into cloud primitives
+# (PRD file, plan.json, goal.md, tasks, agent-gap list). Listeners use
+# it to refresh the Mission Control Plan tab without polling.
+@dataclass
+class PlanGenerated(Event):
+    EVENT_TYPE: ClassVar[str] = "plan.generated"
