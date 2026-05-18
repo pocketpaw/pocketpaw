@@ -17,6 +17,13 @@
 #   2 patches ``blocked_by`` via ``agent_update_task``. Unknown deps
 #   surface as ``dependency_warnings`` on the response, not as a fatal
 #   error — the planner keeps a partial result the operator can ship.
+# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
+#   ``list_plan_sessions(ctx, status, limit)``: workspace-scoped Beanie
+#   read that returns ``PlanSessionSummary`` value objects for the
+#   Mission Control Plan tab drafts list. Kept in this entity because
+#   ee/cloud Rule 2 forbids any module other than planner.service from
+#   importing ``ee.cloud.models.planner`` — Mission Control consumes
+#   the typed summaries via the public API.
 """Planner entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -60,7 +67,7 @@ from ee.cloud._core.realtime.emit import emit
 from ee.cloud._core.realtime.events import PlanGapResolved, PlanGenerated
 from ee.cloud.models.planner import PlanSession as _PlanSessionDoc
 from ee.cloud.models.planner import PlanSessionAgentGap as _PlanSessionAgentGapDoc
-from ee.cloud.planner.domain import AgentGap, PlanSession
+from ee.cloud.planner.domain import AgentGap, PlanSession, PlanSessionSummary
 from ee.cloud.planner.dto import (
     AgentGapDTO,
     PlanProjectRequest,
@@ -364,6 +371,96 @@ async def get_plan_for_project(ctx: RequestContext, project_id: str) -> PlanProj
         agent_gaps=(),  # See docstring — gaps are point-in-time
     )
     return _session_to_dto(session)
+
+
+async def list_plan_sessions(
+    ctx: RequestContext,
+    *,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[PlanSessionSummary]:
+    """List persisted plan sessions for the active workspace.
+
+    Powers the Mission Control Plan tab drafts list — the façade calls
+    this and DTO-maps the summaries to the wire shape. We keep the
+    Beanie read here (per ee/cloud Rule 2: only ``planner.service`` may
+    import ``ee.cloud.models.planner``) so Mission Control stays a
+    pure consumer of typed value objects.
+
+    Tenancy:
+      - Workspace filter is mandatory; an empty / missing
+        ``ctx.workspace_id`` returns ``[]`` rather than raising, mirroring
+        the audit service's defensive empty-response pattern. The
+        router-level dep guard already 400s before we get here when the
+        user has no active workspace.
+
+    Status filter:
+      - The doc-level vocabulary is ``ready`` | ``stale``; the wire
+        vocabulary (``draft`` | ``active`` | ``archived``) is mapped at
+        the DTO boundary. Callers passing an unknown ``status`` get an
+        empty list — we don't 400, because the wire-side enum is
+        DTO-validated upstream of this call.
+
+    Name resolution:
+      - PlanSession docs don't carry a name field of their own. We
+        batch-load the linked Project docs once and inject the project
+        name into each summary. Projects in a different workspace
+        (shouldn't happen given the workspace filter, but defensive)
+        are skipped — the session shows an empty name rather than
+        leaking the other tenant's project label.
+
+    # no-event: read-only path per Rule 9.
+    """
+
+    if not ctx.workspace_id:
+        return []
+
+    query: dict[str, Any] = {"workspace": ctx.workspace_id}
+    if status is not None:
+        query["status"] = status
+
+    docs = (
+        await _PlanSessionDoc.find(query)
+        .sort("-updatedAt")
+        .limit(max(1, min(limit, 200)))
+        .to_list()
+    )
+    if not docs:
+        return []
+
+    # Batch-load project names so the listing doesn't N+1. We only
+    # surface projects that live in the caller's workspace — the
+    # ``projects.service.agent_get`` chokepoint enforces this anyway, so
+    # we go straight to the Beanie collection via the projects entity's
+    # public ``exists_in_workspace`` + ``agent_get`` pair.
+    from ee.cloud.projects import service as projects_service
+
+    project_ids = sorted({d.project_id for d in docs})
+    name_by_id: dict[str, str] = {}
+    for pid in project_ids:
+        try:
+            proj = await projects_service.agent_get(ctx, pid)
+        except NotFound:
+            # Project gone (deleted) — leave name empty. The drafts list
+            # row still renders so the operator can audit / clean up.
+            continue
+        name_by_id[pid] = proj.name
+
+    summaries: list[PlanSessionSummary] = []
+    for d in docs:
+        summaries.append(
+            PlanSessionSummary(
+                id=str(d.id),
+                workspace_id=ctx.workspace_id,
+                project_id=d.project_id,
+                name=name_by_id.get(d.project_id, ""),
+                status=d.status,
+                task_count=len(d.task_ids),
+                created_at=d.createdAt,
+                updated_at=d.updatedAt,
+            )
+        )
+    return summaries
 
 
 # ---------------------------------------------------------------------------
@@ -969,4 +1066,5 @@ __all__ = [
     "agent_plan_project",
     "agent_resolve_gap",
     "get_plan_for_project",
+    "list_plan_sessions",
 ]

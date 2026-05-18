@@ -13,6 +13,13 @@
 # dependency id is prefixed with ``task:`` so the frontend's heterogeneous
 # feed can link dependency edges to their corresponding WorkItem rows
 # without translating ids client-side.
+# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
+# ``agent_list_plan_sessions`` that delegates to
+# ``planner.service.list_plan_sessions`` (the only module allowed to
+# touch the PlanSession Beanie doc) and DTO-maps the typed summaries to
+# the wire envelope. Status vocabulary mapping (ready/stale ↔
+# draft/archived) lives here so the planner entity keeps its internal
+# vocabulary while Mission Control surfaces the operator's terms.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -67,9 +74,12 @@ from ee.cloud.mission_control.dto import (
     BulkReassignRequest,
     BulkSnoozeRequest,
     ListActivityRequest,
+    ListPlanSessionsRequest,
     ListWorkItemsRequest,
     OutcomesQueryRequest,
     OutcomeSummaryResponse,
+    PlanSessionDTO,
+    PlanSessionListResponse,
     WorkItemResponse,
     work_item_to_response,
 )
@@ -622,12 +632,103 @@ async def agent_bulk_snooze(
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
+# ---------------------------------------------------------------------------
+# Plan sessions — drafts list for the Mission Control Plan tab
+# ---------------------------------------------------------------------------
+
+
+# Doc-level → wire status. ``ready`` plans are the current materialized
+# plan for a project (operator can still review + ship), so they surface
+# as ``draft`` in the drafts list. ``stale`` plans were superseded by a
+# re-plan or marked outdated, so they land in ``archived``. There is no
+# ``active`` state in the doc today — reserved for "plan currently
+# executing" once the runtime ships it.
+_WIRE_STATUS_BY_DOC: dict[str, str] = {
+    "ready": "draft",
+    "stale": "archived",
+}
+
+# Inverse map for filtering: the wire filter ``?status=draft`` reads
+# back as the doc-level ``ready`` query. Unknown wire values produce
+# ``None`` and the service returns an empty list — the DTO regex on
+# the wire enum already catches typos before we get here.
+_DOC_STATUS_BY_WIRE: dict[str, str] = {v: k for k, v in _WIRE_STATUS_BY_DOC.items()}
+
+
+def _plan_session_to_dto(summary: Any) -> PlanSessionDTO:
+    """Map a ``PlanSessionSummary`` domain object to its wire DTO.
+
+    Status falls back to ``draft`` when the doc carries an unknown
+    value — defensive against future doc-level statuses we haven't
+    taught Mission Control about yet. Timestamps are serialized to
+    ISO-8601 with timezone so the frontend doesn't have to coerce
+    naive datetimes.
+    """
+    wire_status = _WIRE_STATUS_BY_DOC.get(summary.status, "draft")
+    return PlanSessionDTO(
+        id=summary.id,
+        name=summary.name,
+        status=wire_status,  # type: ignore[arg-type]
+        task_count=summary.task_count,
+        created_at=summary.created_at.isoformat(),
+        updated_at=summary.updated_at.isoformat(),
+    )
+
+
+async def agent_list_plan_sessions(
+    ctx: RequestContext, body: ListPlanSessionsRequest | dict[str, Any]
+) -> PlanSessionListResponse:
+    """List the workspace's persisted plan sessions for the drafts list.
+
+    Read-only — no Beanie writes here. Delegates to
+    ``planner.service.list_plan_sessions`` (the entity that owns the
+    PlanSession doc per ee/cloud Rule 2) and wire-maps the typed
+    summaries into the response envelope.
+
+    Tenancy:
+      - ``ctx.workspace_id`` is the source of truth; an empty / missing
+        workspace returns an empty envelope rather than 500ing. Routers
+        reject ``?workspace_id=`` query params before we get here.
+
+    # no-event: read-only per Rule 9.
+    """
+    body = ListPlanSessionsRequest.model_validate(body)
+    if not ctx.workspace_id:
+        return PlanSessionListResponse(sessions=[], total=0)
+
+    # Lazy import so the façade still installs cleanly on forks that
+    # disabled the planner entity (mirrors the Tasks branch in
+    # ``agent_list_work_items``). When planner is missing we surface an
+    # empty list — the drafts tab renders the empty-state copy without
+    # crashing the whole MC console.
+    try:
+        from ee.cloud.planner import service as planner_service
+    except ImportError:
+        logger.info("mission_control.plan_sessions: planner entity not installed")
+        return PlanSessionListResponse(sessions=[], total=0)
+
+    doc_status: str | None = None
+    if body.status is not None:
+        doc_status = _DOC_STATUS_BY_WIRE.get(body.status)
+        if doc_status is None:
+            # Wire status that doesn't map to any doc state today
+            # (``active`` until the runtime ships it). Return empty so
+            # the frontend doesn't break when the operator filters by
+            # a reserved-but-empty bucket.
+            return PlanSessionListResponse(sessions=[], total=0)
+
+    summaries = await planner_service.list_plan_sessions(ctx, status=doc_status, limit=body.limit)
+    dtos = [_plan_session_to_dto(s) for s in summaries]
+    return PlanSessionListResponse(sessions=dtos, total=len(dtos))
+
+
 __all__ = [
     "agent_bulk_approve",
     "agent_bulk_reassign",
     "agent_bulk_reject",
     "agent_bulk_snooze",
     "agent_list_activity",
+    "agent_list_plan_sessions",
     "agent_list_work_items",
     "agent_outcomes_summary",
 ]

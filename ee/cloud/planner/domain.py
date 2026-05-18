@@ -7,6 +7,12 @@
 #   added ``dependency_warnings`` to PlanSession so the planner can
 #   surface unresolved TaskSpec.blocked_by_keys without failing the
 #   whole materialization.
+# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
+#   ``PlanSessionSummary`` value object: a workspace-listing projection
+#   that drops the file-id + agent-gap detail and keeps just what the
+#   Mission Control Plan tab drafts list needs (name from project,
+#   status, task_count, timestamps). Workspace-scoped reads land via
+#   ``planner.service.list_plan_sessions``.
 """Planner entity — domain value objects.
 
 A :class:`PlanSession` is the cloud-side record of one OSS planner run.
@@ -24,6 +30,7 @@ the planner already wrote into the materialized tasks.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -66,4 +73,38 @@ class AgentGap:
     specialties: tuple[str, ...]
 
 
-__all__ = ["AgentGap", "PlanSession"]
+@dataclass(frozen=True)
+class PlanSessionSummary:
+    """Compact listing projection for the Mission Control Plan tab.
+
+    The full :class:`PlanSession` carries file ids + agent-gap detail
+    that the drafts list does not need. The summary drops those and
+    adds:
+
+      - ``name`` — display label sourced from the linked Project's
+        name. The cloud-side ``PlanSession`` doc has no name field of
+        its own (a plan is "the plan for that project"), so we resolve
+        it at read time.
+      - ``task_count`` — len(task_ids) snapshotted at materialization
+        time. Cheap, and stable across the drafts list refresh cycle.
+
+    ``status`` is intentionally the raw doc-level status (``ready`` |
+    ``stale``); the DTO layer maps it to the wire vocabulary
+    (``active`` | ``draft`` | ``archived``) so the domain stays a
+    1:1 projection of the storage shape.
+
+    Tenancy required at construction time per ee/cloud Rule 3 —
+    constructing a summary without ``workspace_id`` is a type error.
+    """
+
+    id: str
+    workspace_id: str
+    project_id: str
+    name: str
+    status: str
+    task_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+__all__ = ["AgentGap", "PlanSession", "PlanSessionSummary"]

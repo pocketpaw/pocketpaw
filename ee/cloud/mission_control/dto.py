@@ -14,6 +14,13 @@
 # added ``blocked_by: list[str]`` to ``WorkItemResponse`` and threaded it
 # through ``work_item_to_response`` so the frontend feed shows dependency
 # edges in the unified WorkItem shape.
+# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
+# ``ListPlanSessionsRequest``, ``PlanSessionDTO`` and
+# ``PlanSessionListResponse`` for the new
+# ``GET /mission-control/plan-sessions`` endpoint. Status values on the
+# wire use the operator vocabulary (``draft``/``active``/``archived``);
+# the service maps to the doc-level ``ready``/``stale`` storage form so
+# the frontend never has to learn the planner's internal terms.
 """Mission Control wire DTOs.
 
 The audit doc (``docs/internal/2026-05-mission-control-backend-audit.md``,
@@ -133,6 +140,26 @@ class ListActivityRequest(BaseModel):
     limit: int = Field(default=30, ge=1, le=200)
 
 
+# Wire-level vocabulary the frontend speaks. The Mission Control Plan tab
+# renders "Draft · N tasks" rows; status semantics map to the underlying
+# planner doc statuses at the service boundary so the wire stays stable
+# even when the doc-level state machine evolves.
+PlanSessionStatus = Literal["draft", "active", "archived"]
+
+
+class ListPlanSessionsRequest(BaseModel):
+    """Query filters for ``GET /mission-control/plan-sessions``.
+
+    Both fields are optional. ``status`` narrows to a single Plan-tab
+    bucket (drafts vs. active vs. archived); ``limit`` caps the listing
+    so a workspace with hundreds of plan sessions doesn't blow up the
+    drafts panel.
+    """
+
+    status: PlanSessionStatus | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
 # ---------------------------------------------------------------------------
 # Responses
 # ---------------------------------------------------------------------------
@@ -211,15 +238,62 @@ class ActivityEventResponse(BaseModel):
     ts: float
 
 
+class PlanSessionDTO(BaseModel):
+    """Wire shape for one plan session in the drafts list.
+
+    Carries only the metadata the drafts list needs:
+      - ``id`` — opaque PlanSession doc id; the frontend round-trips it
+        when the operator opens a draft for full detail (separate
+        endpoint, not in scope here).
+      - ``name`` — display label from the linked Project. Empty string
+        when the project was deleted underneath the session.
+      - ``status`` — wire vocabulary (``draft``/``active``/``archived``).
+        The service maps doc-level ``ready``/``stale`` into this enum.
+      - ``task_count`` — number of materialized tasks at plan time.
+      - ``created_at`` / ``updated_at`` — ISO-8601 strings rather than
+        ``datetime`` objects so the frontend doesn't have to parse a
+        Pydantic-serialized timestamp; matches the audit envelope's
+        approach.
+
+    The Plan detail (PRD, plan.json, agent gaps) lives behind the
+    existing planner endpoints — this DTO intentionally does NOT
+    expose the plan content so the drafts list stays cheap.
+    """
+
+    id: str
+    name: str
+    status: PlanSessionStatus
+    task_count: int
+    created_at: str
+    updated_at: str
+
+
+class PlanSessionListResponse(BaseModel):
+    """Envelope for ``GET /mission-control/plan-sessions``.
+
+    Matches the Audit endpoint's ``{ entries, total }`` shape with a
+    ``sessions`` key instead of ``entries`` to keep the resource name
+    visible. ``total`` is the count of sessions in this response (not
+    a workspace-wide total) — the drafts list isn't paginated in v0.
+    """
+
+    sessions: list[PlanSessionDTO]
+    total: int
+
+
 __all__ = [
     "ActivityEventResponse",
     "BulkActionRequest",
     "BulkReassignRequest",
     "BulkSnoozeRequest",
     "ListActivityRequest",
+    "ListPlanSessionsRequest",
     "ListWorkItemsRequest",
     "OutcomeSummaryResponse",
     "OutcomesQueryRequest",
+    "PlanSessionDTO",
+    "PlanSessionListResponse",
+    "PlanSessionStatus",
     "WorkItemResponse",
     "work_item_to_response",
 ]

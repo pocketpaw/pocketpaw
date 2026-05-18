@@ -7,6 +7,10 @@
 # bulk-reassign / bulk-snooze. Both now return a ``BulkActionResponse``
 # shape (``affected`` + ``skipped`` + ``bulk_id``) by delegating per-id
 # to the Tasks service.
+# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
+# ``GET /plan-sessions`` for the Plan tab drafts list. Rejects the
+# ``?workspace_id`` query param before DTO construction (tenancy from
+# auth ctx) per the Audit endpoint's pattern.
 """Mission Control façade router.
 
 Thin per ee/cloud rule #4 — parses requests, delegates to
@@ -23,13 +27,15 @@ canonical URLs are:
   POST /api/v1/mission-control/items/bulk-snooze
   GET  /api/v1/mission-control/outcomes
   GET  /api/v1/mission-control/activity
+  GET  /api/v1/mission-control/plan-sessions
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from ee.cloud._core.context import RequestContext, request_context
+from ee.cloud._core.errors import CloudError
 from ee.cloud.license import require_license
 from ee.cloud.mission_control import service as mc_service
 from ee.cloud.mission_control.dto import (
@@ -38,9 +44,12 @@ from ee.cloud.mission_control.dto import (
     BulkReassignRequest,
     BulkSnoozeRequest,
     ListActivityRequest,
+    ListPlanSessionsRequest,
     ListWorkItemsRequest,
     OutcomesQueryRequest,
     OutcomeSummaryResponse,
+    PlanSessionListResponse,
+    PlanSessionStatus,
     WorkItemResponse,
 )
 
@@ -153,3 +162,31 @@ async def activity(
     """
     body = ListActivityRequest(limit=limit)
     return await mc_service.agent_list_activity(ctx, body)
+
+
+@router.get("/plan-sessions", response_model=PlanSessionListResponse)
+async def list_plan_sessions(
+    request: Request,
+    status: PlanSessionStatus | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    ctx: RequestContext = Depends(request_context),
+) -> PlanSessionListResponse:
+    """List the workspace's persisted plan sessions for the Plan tab drafts list.
+
+    Tenancy lives on the auth ctx — passing ``?workspace_id`` is a 400
+    rather than a silent leak. ``status`` filters to one drafts-list
+    bucket (``draft`` / ``active`` / ``archived``); the service maps to
+    the doc-level vocabulary internally.
+
+    Response keys: ``sessions`` (list of plan-session DTOs) + ``total``
+    (count of returned sessions). Empty workspaces return
+    ``{"sessions": [], "total": 0}`` with HTTP 200.
+    """
+    if "workspace_id" in request.query_params:
+        raise CloudError(
+            400,
+            "plan_sessions.workspace_id_forbidden",
+            "workspace_id is taken from auth context, not query",
+        )
+    body = ListPlanSessionsRequest(status=status, limit=limit)
+    return await mc_service.agent_list_plan_sessions(ctx, body)
