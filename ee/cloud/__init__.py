@@ -294,6 +294,12 @@ def mount_cloud(app: FastAPI) -> None:
     # reach /api/v1/paw-print/* without a second app setup entry point.
     app.include_router(paw_print_router, prefix="/api/v1")
 
+    # Calendar router declares its own full prefix (/api/v1/calendar) so it
+    # is mounted without an additional prefix here. See ee/calendar/router.py.
+    from ee.calendar import router as calendar_router
+
+    app.include_router(calendar_router)
+
     # User search endpoint — used by group settings, pocket sharing
     from ee.cloud.models.user import User as UserModel
     from ee.cloud.shared.deps import (
