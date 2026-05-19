@@ -235,11 +235,15 @@ async def _has_active_overlap(
     """Return True if another active cycle on the same pocket overlaps the
     proposed range.
 
-    Decision (v1): we only block overlap on the **same pocket** — workspaces
-    routinely have multiple engagements in flight on different pockets at
-    the same time. Cycles with no ``pocket_id`` collide only with other
-    no-pocket cycles. Relaxing the rule entirely (allow any overlap) is
-    tracked as a follow-up if operators push back.
+    Decision (v1): we only block overlap on the **same pocket** —
+    workspaces routinely have multiple engagements in flight on
+    different pockets at the same time. Workspace-wide cycles (no
+    ``pocket_id``) were originally collapsed into a single
+    ``pocket_id=None`` bucket but as of 2026-05-19 the caller in
+    ``agent_create_cycle`` short-circuits this helper when
+    ``pocket_id is None``, so multiple workspace-wide cycles can run
+    in parallel — operators routinely do that across events,
+    workstreams, and experiments.
     """
     query: dict[str, Any] = {
         "workspace": workspace_id,

@@ -182,6 +182,17 @@ class AttachCycleItemsRequest(BaseModel):
 
 
 class AttachCycleItemsResponse(BaseModel):
+    """Result of a bulk-attach call.
+
+    Partial success is the explicit posture: every input ``item_id``
+    lands in exactly one of ``attached`` or ``skipped``. ``attached``
+    lists ids that were successfully written to the sprint (cycle_id
+    flipped on the underlying Task). ``skipped`` lists ids the caller
+    couldn't see in their workspace (cross-tenant, deleted, malformed
+    id) — the operation never raises for these, so a partially-stale
+    operator selection still succeeds for the visible subset.
+    """
+
     attached: list[str]
     skipped: list[str] = Field(default_factory=list)
     cycle_id: str
