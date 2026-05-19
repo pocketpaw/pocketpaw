@@ -567,6 +567,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocket_specialist MCP server not registered: %s", exc)
 
+        # In-process MCP server: exposes ``schedule_meeting``,
+        # ``list_meetings``, ``cancel_meeting``, ``search_meetings``, and
+        # ``find_meeting_transcript`` so the agent can manage Zoom + Google
+        # Meet meetings natively from chat. Per-workspace BYO credentials
+        # are resolved by the meetings adapter factory at call time.
+        try:
+            from pocketpaw.agents.sdk_mcp_meetings import build_meetings_context_server
+
+            meetings_server = build_meetings_context_server()
+            if meetings_server is not None:
+                name, cfg_entry = meetings_server
+                servers[name] = cfg_entry
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocketpaw_meetings MCP server not registered: %s", exc)
+
         return servers
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
@@ -895,9 +910,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
                 allowed_tools.extend(TASK_TOOL_IDS)
             except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "pocketpaw_tasks tool ids not added to allowlist: %s", exc
-                )
+                logger.debug("pocketpaw_tasks tool ids not added to allowlist: %s", exc)
 
             # Pocket specialist — ``create`` / ``edit`` tools that run the
             # full listing → validate → persist workflow as an isolated
@@ -911,6 +924,18 @@ class ClaudeSDKBackend(BaseAgentBackend):
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "pocket_specialist tool ids not added to allowlist: %s",
+                    exc,
+                )
+
+            # Meetings — schedule/list/cancel/search/find_transcript for
+            # the workspace's configured Zoom + Google Meet providers.
+            try:
+                from pocketpaw.agents.sdk_mcp_meetings import MEETING_TOOL_IDS
+
+                allowed_tools.extend(MEETING_TOOL_IDS)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "pocketpaw_meetings tool ids not added to allowlist: %s",
                     exc,
                 )
 

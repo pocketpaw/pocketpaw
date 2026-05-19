@@ -1,0 +1,130 @@
+# Meetings — request / response schemas.
+# Created: 2026-05-19. Every request schema is distinct from every
+# response schema (cloud rule §4).
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+MeetingProviderName = Literal["google_meet", "zoom"]
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+
+
+class StoreZoomCredentialsRequest(BaseModel):
+    """POST /meetings/credentials/zoom body.
+
+    Server-to-Server OAuth app credentials, pasted by the workspace
+    admin from the Zoom Marketplace developer console.
+    """
+
+    account_id: str = Field(min_length=1)
+    client_id: str = Field(min_length=1)
+    client_secret: str = Field(min_length=1)
+
+
+class StoreGoogleMeetCredentialsRequest(BaseModel):
+    """POST /meetings/credentials/google_meet body.
+
+    The OAuth app's ``client_id`` and ``client_secret`` only. The
+    refresh token is obtained later via the consent callback flow at
+    ``POST /meetings/credentials/google_meet/callback``.
+    """
+
+    client_id: str = Field(min_length=1)
+    client_secret: str = Field(min_length=1)
+
+
+class CompleteGoogleMeetOAuthRequest(BaseModel):
+    """POST /meetings/credentials/google_meet/callback body.
+
+    Posted by the desktop client after Google redirects the browser
+    back to our callback URL with ``?code=...&state=...``. The state
+    parameter encodes ``workspace_id`` so we know whose creds to write.
+    """
+
+    code: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+
+
+class CredentialsResponse(BaseModel):
+    """One provider's configured state — safe to send to the frontend."""
+
+    provider: MeetingProviderName
+    enabled: bool
+    has_credentials: bool
+    last_validated_at: datetime | None
+    last_error: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Meetings
+# ---------------------------------------------------------------------------
+
+
+class CreateMeetingRequest(BaseModel):
+    """POST /meetings body."""
+
+    provider: MeetingProviderName
+    title: str = Field(min_length=1, max_length=300)
+    scheduled_start: datetime | None = None
+    duration_minutes: int = Field(default=30, ge=1, le=1440)
+
+
+class ListMeetingsRequest(BaseModel):
+    """Query params for GET /meetings — validated server-side."""
+
+    since: datetime | None = None
+    until: datetime | None = None
+    status: str | None = None
+    provider: MeetingProviderName | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class MeetingResponse(BaseModel):
+    """Wire shape for one meeting."""
+
+    id: str
+    provider: MeetingProviderName
+    provider_meeting_id: str
+    title: str | None
+    join_url: str
+    organizer_email: str | None
+    scheduled_start: datetime | None
+    scheduled_end: datetime | None
+    actual_start: datetime | None
+    actual_end: datetime | None
+    status: str
+    participants: list[dict[str, Any]] = Field(default_factory=list)
+    recording_file_ids: list[str] = Field(default_factory=list)
+    transcript_available: bool = False
+    created_at: datetime | None = None
+
+
+class MeetingDetailResponse(MeetingResponse):
+    """GET /meetings/{id} — includes the full participants snapshot."""
+
+    raw_provider_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Transcripts
+# ---------------------------------------------------------------------------
+
+
+class TranscriptResponse(BaseModel):
+    """One transcript metadata row. The actual text lives in the file."""
+
+    meeting_id: str
+    file_id: str | None
+    entry_count: int
+    speaker_count: int
+    language: str | None
+    fetched_at: datetime | None
+    indexed_in_kb: bool

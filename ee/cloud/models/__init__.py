@@ -9,6 +9,7 @@ from ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from ee.cloud.models.file import FileObj
 from ee.cloud.models.group import Group, GroupAgent
 from ee.cloud.models.invite import Invite
+from ee.cloud.models.meeting import Meeting, MeetingProviderCredentials, MeetingTranscript
 from ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from ee.cloud.models.notification import Notification, NotificationSource
 from ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -51,6 +52,9 @@ __all__ = [
     "Group",
     "GroupAgent",
     "Invite",
+    "Meeting",
+    "MeetingProviderCredentials",
+    "MeetingTranscript",
     "Mention",
     "Message",
     "Notification",
@@ -99,6 +103,9 @@ def get_all_documents():
         Cycle,
         Project,
         PlanSession,
+        Meeting,
+        MeetingProviderCredentials,
+        MeetingTranscript,
     ]
 
 
