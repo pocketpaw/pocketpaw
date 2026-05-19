@@ -1,5 +1,9 @@
 # tests/ee/calendar/test_router_mount.py — Calendar router mount smoke test.
-# Created: 2026-05-19 (feat/calendar-router-mount).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H-NEW-1).
+#
+# Changes:
+# - _make_event_response now sets created_by_user_id; EventResponse
+#   requires it after the H-NEW-1 fix.
 #
 # Verifies that mount_cloud() wires the calendar router into the cloud app
 # so /api/v1/calendar/* endpoints are reachable. The companion file
@@ -50,6 +54,8 @@ def _make_event_response() -> EventResponse:
         starts_at=datetime(2026, 5, 19, 9, 0),
         ends_at=datetime(2026, 5, 19, 10, 0),
         timezone="UTC",
+        # H-NEW-1: required on EventResponse now.
+        created_by_user_id="user-test",
         location=None,
         attendees=[],
         recurrence=None,

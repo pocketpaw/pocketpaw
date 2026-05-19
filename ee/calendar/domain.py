@@ -1,5 +1,5 @@
 # Calendar module — domain value objects.
-# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 M1-M3).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 M1-M3 + H-NEW-1).
 #
 # Changes:
 # - Attendee.email now uses EmailStr (M3) — Pydantic's email-validator
@@ -9,6 +9,10 @@
 #   pathological RRULE strings that could choke recurrence expansion.
 # - Recurrence.exceptions capped at 500 entries (M2) — guards against
 #   unbounded growth that would slow down conflict detection.
+# - H-NEW-1: Event now requires created_by_user_id (no default). The
+#   service sets it from ctx.user_id on create_event. policy.
+#   check_event_modify gates update/delete on creator-equality so a
+#   synthetic-default Calendar doesn't grant cross-user modify access.
 #
 # Frozen Pydantic models representing the public calendar domain.
 # workspace_id is required on Event and Calendar — enforced at construction
@@ -104,6 +108,13 @@ class Event(BaseModel):
     starts_at: datetime
     ends_at: datetime
     timezone: str  # IANA timezone string, e.g. "America/Los_Angeles"
+    created_by_user_id: str = Field(
+        ...,
+        description=(
+            "User who created this event. Used by policy.check_event_modify "
+            "to gate update/delete authz on synthetic-default calendars."
+        ),
+    )
     description: str = ""
     location: str | None = None
     attendees: list[Attendee] = Field(default_factory=list)

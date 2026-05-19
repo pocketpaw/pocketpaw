@@ -1,5 +1,11 @@
 # Calendar module — external calendar sync.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H-NEW-1).
+#
+# Changes:
+# - H-NEW-1: imported gcalendar events now carry created_by_user_id =
+#   ctx.user_id (the syncing user). The external creator isn't always a
+#   user in the workspace; the syncing user becomes the local steward
+#   and can edit / delete the imported event.
 #
 # Only Google Calendar is implemented in this PR. Outlook and iCloud are
 # placeholders that raise NotImplementedError so a future PR can wire them
@@ -93,6 +99,12 @@ async def pull_from_gcalendar(ctx: RequestContext, calendar_id: str) -> int:
                 ends_at=ends_at,
                 # gcalendar dateTime carries its own offset; we keep UTC as the canonical store.
                 timezone="UTC",
+                # H-NEW-1: imported events are owned by the user running the
+                # sync. We don't try to reconstruct the original gcalendar
+                # creator — that user may not exist in the workspace. The
+                # syncing user therefore acts as the local steward and can
+                # update or delete the imported event.
+                created_by_user_id=ctx.user_id,
                 location=ext.get("location") or None,
                 attendees=attendees,
                 source_connector="gcalendar",

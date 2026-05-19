@@ -1,5 +1,12 @@
 # Calendar module — request/response DTOs.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H-NEW-1).
+#
+# Changes:
+# - H-NEW-1: EventResponse now exposes created_by_user_id so the
+#   frontend can render "created by X" badges and gate Edit/Delete
+#   buttons on the client. CreateEventRequest deliberately omits it —
+#   the server fills it from ctx.user_id; never trust the client to
+#   self-attest the creator.
 #
 # Distinct request and response classes per operation. Requests are
 # minimal (no workspace_id — that comes from the auth context). Responses
@@ -115,6 +122,10 @@ class EventResponse(BaseModel):
     starts_at: datetime
     ends_at: datetime
     timezone: str
+    # H-NEW-1: surfaced to the client so the UI can render "created by X"
+    # and decide whether to show Edit/Delete affordances. The server is
+    # the source of truth; never accept this from the client on writes.
+    created_by_user_id: str
     location: str | None
     attendees: list[Attendee]
     recurrence: Recurrence | None

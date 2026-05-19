@@ -1,5 +1,11 @@
 # tests/ee/calendar/conftest.py — Pytest fixtures for the calendar module.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H-NEW-1).
+#
+# Changes:
+# - event_factory now sets created_by_user_id (default "user-test", the
+#   same id ctx() uses) so freshly-built domain Events satisfy the new
+#   required field. Tests that need a non-creator scenario pass it
+#   explicitly.
 #
 # We deliberately avoid spinning up a real Mongo for these tests. The
 # service layer is exercised by stubbing _EventDoc at the boundary so we
@@ -54,6 +60,10 @@ def event_factory():
             starts_at=starts_at,
             ends_at=ends_at,
             timezone=overrides.pop("timezone", "UTC"),
+            # H-NEW-1: required field; default matches ctx() so happy-path
+            # tests just work. Pass `created_by_user_id="someone-else"` to
+            # exercise the non-creator-denied path.
+            created_by_user_id=overrides.pop("created_by_user_id", "user-test"),
             description=overrides.pop("description", ""),
             location=overrides.pop("location", None),
             attendees=overrides.pop("attendees", []),

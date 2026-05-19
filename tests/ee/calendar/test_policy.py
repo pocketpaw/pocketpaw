@@ -1,12 +1,19 @@
 # tests/ee/calendar/test_policy.py — calendar access-policy tests.
-# Created: 2026-05-19 (fix/calendar-security-hardening, #1142 H1).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H1 + H-NEW-1).
+#
+# Changes:
+# - Added unit tests for policy.check_event_modify (creator allowed,
+#   non-creator denied, cross-workspace denied, admin path TODO'd).
+# - _PolicyFakeEventDoc now defaults created_by_user_id so existing
+#   tests keep working; H-NEW-1 tests pass explicit ids.
 #
 # Exercises the policy.check_calendar_read / check_calendar_write /
-# can_read_calendar helpers across the cross-workspace + within-workspace
-# matrix. Also runs an end-to-end check that service.create_event,
-# update_event, delete_event, get_event, list_events, detect_conflicts,
-# and get_freebusy all surface Forbidden when a non-owner / non-shared
-# user touches a private or shared calendar.
+# can_read_calendar / check_event_modify helpers across the
+# cross-workspace + within-workspace matrix. Also runs an end-to-end
+# check that service.create_event, update_event, delete_event, get_event,
+# list_events, detect_conflicts, and get_freebusy all surface Forbidden
+# when a non-owner / non-shared / non-creator user touches a private or
+# shared calendar.
 
 from __future__ import annotations
 
@@ -154,6 +161,65 @@ class TestCanReadCalendar:
         assert policy.can_read_calendar(_ctx("alice", workspace_id="ws-1"), cal) is False
 
 
+class TestCheckEventModify:
+    """check_event_modify is the H-NEW-1 gate — creator-or-admin only.
+
+    Synthetic-default Calendar makes check_calendar_write trivially pass
+    for every workspace member, so update_event / delete_event must call
+    this on the event itself to keep cross-user modify access closed.
+    """
+
+    def test_event_modify_creator_allowed(self, event_factory):
+        """Alice created the event → alice can modify."""
+        event = event_factory(
+            workspace_id="ws-1",
+            created_by_user_id="alice",
+        )
+        # No exception means access granted.
+        policy.check_event_modify(_ctx("alice", workspace_id="ws-1"), event)
+
+    def test_event_modify_non_creator_denied(self, event_factory):
+        """Bob, same workspace, is NOT the creator → Forbidden."""
+        event = event_factory(
+            workspace_id="ws-1",
+            created_by_user_id="alice",
+        )
+        with pytest.raises(Forbidden) as exc_info:
+            policy.check_event_modify(_ctx("bob", workspace_id="ws-1"), event)
+        assert "event.modify_denied" in str(exc_info.value)
+
+    def test_event_modify_cross_workspace_denied(self, event_factory):
+        """Defensive guard: even if the caller IS the creator, a workspace
+        mismatch fails closed. The tenant filter upstream usually catches
+        this first via 404, but this assertion documents the policy itself."""
+        event = event_factory(
+            workspace_id="ws-other",
+            created_by_user_id="alice",
+        )
+        with pytest.raises(Forbidden) as exc_info:
+            policy.check_event_modify(_ctx("alice", workspace_id="ws-1"), event)
+        assert "event.modify_denied" in str(exc_info.value)
+
+    @pytest.mark.skip(
+        reason=(
+            "TODO(h-new-1-admin): workspace-admin override not yet plumbed "
+            "through RequestContext. Once the calendar context carries a "
+            "role/permissions field, this test asserts an admin (non-creator) "
+            "can still modify. Tracked alongside the policy.check_event_modify "
+            "TODO."
+        )
+    )
+    def test_event_modify_admin_allowed(self, event_factory):  # pragma: no cover
+        """Workspace admins should bypass the creator check. Skipped until
+        the role plumbing lands."""
+        event = event_factory(
+            workspace_id="ws-1",
+            created_by_user_id="alice",
+        )
+        # Future shape: _ctx("bob-admin") would resolve a role of "admin".
+        policy.check_event_modify(_ctx("bob-admin", workspace_id="ws-1"), event)
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — policy wired into service.* operations.
 # ---------------------------------------------------------------------------
@@ -210,6 +276,10 @@ class _PolicyFakeEventDoc:
         self.source_external_id = getattr(self, "source_external_id", None)
         self.created_at = getattr(self, "created_at", datetime.now(UTC))
         self.updated_at = getattr(self, "updated_at", datetime.now(UTC))
+        # H-NEW-1: real _EventDoc requires it. Default to the test's owner
+        # ("alice") so existing tests where alice is both calendar owner
+        # and event creator stay green.
+        self.created_by_user_id = getattr(self, "created_by_user_id", "alice")
 
     async def insert(self) -> None:
         pass
@@ -325,6 +395,7 @@ def _seed_event(
     starts: datetime | None = None,
     ends: datetime | None = None,
     attendees: list[dict] | None = None,
+    created_by_user_id: str = "alice",
 ) -> _PolicyFakeEventDoc:
     doc = _PolicyFakeEventDoc(
         workspace=workspace,
@@ -334,6 +405,10 @@ def _seed_event(
         ends_at=ends or datetime(2026, 5, 19, 9, 30),
         timezone="UTC",
         attendees=attendees or [],
+        # H-NEW-1: default matches the alice-owned calendar fixture so
+        # existing tests stay green. Pass explicitly for non-creator
+        # scenarios.
+        created_by_user_id=created_by_user_id,
     )
     # Mirror id as a separate field so _PolicyFakeEventStore.find_one
     # can match by `_FieldEq("id_str", ...)`.
@@ -424,7 +499,11 @@ async def test_owner_can_update_event_on_private_calendar(patch_stores, bus_spy)
     assert result.title == "Owner-driven update"
 
 
-async def test_shared_user_can_update_event(patch_stores, bus_spy):
+async def test_shared_user_can_update_their_own_event(patch_stores, bus_spy):
+    """H-NEW-1 tightening: a shared user can WRITE to the calendar (e.g.,
+    create new events), but on UPDATE they must also be the event creator.
+    Here bob is shared on alice's calendar AND created the event himself,
+    so the update succeeds."""
     cal_store, event_store = patch_stores
     _seed_calendar(
         cal_store,
@@ -432,7 +511,10 @@ async def test_shared_user_can_update_event(patch_stores, bus_spy):
         visibility="shared_with_users",
         shared_with=["bob"],
     )
-    event = _seed_event(event_store)
+    # Bob created this event (not alice). check_calendar_write passes
+    # because bob is in shared_with; check_event_modify passes because
+    # bob == created_by_user_id.
+    event = _seed_event(event_store, created_by_user_id="bob")
 
     result = await service_module.update_event(
         _ctx("bob"),
@@ -440,6 +522,29 @@ async def test_shared_user_can_update_event(patch_stores, bus_spy):
         UpdateEventRequest(title="Shared user update"),
     )
     assert result.title == "Shared user update"
+
+
+async def test_shared_user_cannot_update_someone_elses_event(patch_stores, bus_spy):
+    """H-NEW-1: even with calendar-write access, a shared user cannot edit
+    events they didn't create. The event-level gate fires."""
+    cal_store, event_store = patch_stores
+    _seed_calendar(
+        cal_store,
+        owner="alice",
+        visibility="shared_with_users",
+        shared_with=["bob"],
+    )
+    # Event was created by alice. Bob has calendar-write but no
+    # event-modify access.
+    event = _seed_event(event_store, created_by_user_id="alice")
+
+    with pytest.raises(Forbidden) as exc_info:
+        await service_module.update_event(
+            _ctx("bob"),
+            str(event.id),
+            UpdateEventRequest(title="Bob tries to overwrite alice's event"),
+        )
+    assert "event.modify_denied" in str(exc_info.value)
 
 
 async def test_list_events_filters_inaccessible_calendars(patch_stores):
@@ -570,3 +675,57 @@ async def test_detect_conflicts_blocked_for_non_owner_on_private_calendar(
 
     with pytest.raises(Forbidden):
         await service_module.detect_conflicts(_ctx("bob"), str(event.id))
+
+
+# ---------------------------------------------------------------------------
+# H-NEW-1: synthetic-default Calendar must not bypass event-level authz.
+# ---------------------------------------------------------------------------
+#
+# When _CalendarDoc has no row for a calendar_id, service._load_calendar
+# returns a synthetic Calendar with owner_user_id = ctx.user_id +
+# visibility = public-to-workspace. That makes check_calendar_write a
+# no-op for every caller. These tests assert that policy.check_event_modify
+# still blocks non-creators from mutating other users' events on that path.
+
+
+async def test_h_new_1_update_blocked_on_synthetic_calendar(patch_stores, bus_spy):
+    """Alice creates an event on a calendar with no backing _CalendarDoc
+    row (synthetic-default path). Bob (same workspace) cannot update it
+    even though check_calendar_write trivially passes."""
+    _cal_store, event_store = patch_stores
+    # IMPORTANT: NO _seed_calendar — leaving the store empty forces the
+    # service to fall through to the synthetic default.
+    event = _seed_event(event_store, created_by_user_id="alice")
+
+    with pytest.raises(Forbidden) as exc_info:
+        await service_module.update_event(
+            _ctx("bob"),
+            str(event.id),
+            UpdateEventRequest(title="Should be denied"),
+        )
+    assert "event.modify_denied" in str(exc_info.value)
+
+
+async def test_h_new_1_delete_blocked_on_synthetic_calendar(patch_stores, bus_spy):
+    """Same shape — delete must also fail when bob tries to drop alice's
+    event on a synthetic-default Calendar."""
+    _cal_store, event_store = patch_stores
+    event = _seed_event(event_store, created_by_user_id="alice")
+
+    with pytest.raises(Forbidden) as exc_info:
+        await service_module.delete_event(_ctx("bob"), str(event.id))
+    assert "event.modify_denied" in str(exc_info.value)
+
+
+async def test_h_new_1_creator_can_still_update_on_synthetic_calendar(patch_stores, bus_spy):
+    """The fix is creator-equality, not "synthetic = read-only". Alice (the
+    creator) still has the happy path."""
+    _cal_store, event_store = patch_stores
+    event = _seed_event(event_store, created_by_user_id="alice")
+
+    resp = await service_module.update_event(
+        _ctx("alice"),
+        str(event.id),
+        UpdateEventRequest(title="Owner-edit ok"),
+    )
+    assert resp.title == "Owner-edit ok"

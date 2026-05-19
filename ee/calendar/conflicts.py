@@ -1,5 +1,10 @@
 # Calendar module — conflict detection.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H-NEW-1).
+#
+# Changes:
+# - _doc_to_event now propagates created_by_user_id from the Beanie doc
+#   into the domain Event. Required for policy.check_event_modify on
+#   update/delete paths.
 #
 # Finds other events in the same workspace that overlap a given event's
 # window and share at least one attendee. Excludes the event itself.
@@ -24,6 +29,10 @@ def _doc_to_event(doc: _EventDoc) -> Event:
         starts_at=doc.starts_at,
         ends_at=doc.ends_at,
         timezone=doc.timezone,
+        # H-NEW-1: hydrate the creator field so check_event_modify works
+        # on Events returned by conflict scans (and any other domain
+        # transit through this helper).
+        created_by_user_id=doc.created_by_user_id,
         location=doc.location,
         attendees=attendees,
         recurrence=recurrence,

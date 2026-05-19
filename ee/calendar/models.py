@@ -1,5 +1,11 @@
 # Calendar module — Beanie document models.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H-NEW-1).
+#
+# Changes:
+# - H-NEW-1: _EventDoc now persists created_by_user_id (no default). The
+#   service writes ctx.user_id on insert; policy.check_event_modify reads
+#   it on update/delete to gate authz on the synthetic-default calendar
+#   path.
 #
 # Internal-only — never imported outside ee/calendar/. The single rule:
 # nothing outside this module talks to the database. Callers go through
@@ -73,6 +79,11 @@ class _EventDoc(Document):
     starts_at: datetime
     ends_at: datetime
     timezone: str
+    # H-NEW-1: required for event-level modify authz. Set from ctx.user_id
+    # on insert. No default — old docs predating the field will surface as
+    # a Pydantic validation error on read, which is the right behaviour
+    # since H-NEW-1 shipped before any production data was written.
+    created_by_user_id: str
     location: str | None = None
     attendees: list[dict[str, Any]] = Field(default_factory=list)
     recurrence: dict[str, Any] | None = None
@@ -94,4 +105,8 @@ class _EventDoc(Document):
             ),
             IndexModel([("workspace", ASCENDING), ("starts_at", ASCENDING)]),
             IndexModel([("source_connector", ASCENDING), ("source_external_id", ASCENDING)]),
+            # H-NEW-1: support cheap "events I created" filters (future:
+            # personal-view, modify-allowlist UI). Composite with workspace
+            # to honour the tenant filter rule.
+            IndexModel([("workspace", ASCENDING), ("created_by_user_id", ASCENDING)]),
         ]

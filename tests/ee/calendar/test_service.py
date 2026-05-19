@@ -1,5 +1,5 @@
 # tests/ee/calendar/test_service.py — service-layer tests.
-# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 + H-NEW-1).
 #
 # Changes:
 # - Added ``fake_calendar_store`` (auto-applied) that patches
@@ -10,6 +10,12 @@
 # - update_event payload assertion lives in test_policy.py /
 #   test_update_event_changed_fields below — the bus event now carries
 #   ``changed_fields`` (names only), not raw content.
+# - H-NEW-1: ``_FakeDoc`` now defaults ``created_by_user_id`` to
+#   "user-test" (matching ctx()), and ``_new_doc`` accepts an explicit
+#   override so non-creator scenarios can be set up. Four new tests cover
+#   the synthetic-calendar modify-authz behaviour: creator can update +
+#   delete, non-creator can't, and create still works for any workspace
+#   member.
 #
 # Approach: we don't spin up real Mongo. Instead we replace _EventDoc at
 # the class level with a fake that mimics the small slice of Beanie we
@@ -172,6 +178,10 @@ class _FakeDoc:
         self.source_external_id = getattr(self, "source_external_id", None)
         self.created_at = getattr(self, "created_at", datetime.now(UTC))
         self.updated_at = getattr(self, "updated_at", datetime.now(UTC))
+        # H-NEW-1: required on the real _EventDoc — default here to keep
+        # legacy tests happy. The user id matches the default ctx() fixture
+        # so creator-equality passes by default.
+        self.created_by_user_id = getattr(self, "created_by_user_id", "user-test")
 
     async def insert(self) -> None:
         self._store.rows[str(self.id)] = self
@@ -237,6 +247,7 @@ def _new_doc(
     starts_at: datetime | None = None,
     ends_at: datetime | None = None,
     attendees: list[dict] | None = None,
+    created_by_user_id: str = "user-test",
 ) -> _FakeDoc:
     """Helper: stuff a doc into the fake store directly (skip service)."""
     oid = ObjectId()
@@ -252,6 +263,10 @@ def _new_doc(
         description="",
         location=None,
         attendees=attendees or [],
+        # H-NEW-1: defaults to the ctx() user so happy-path callers don't
+        # have to know about this. Pass a different id to exercise the
+        # non-creator denial path on update_event / delete_event.
+        created_by_user_id=created_by_user_id,
     )
     # mirror the id as a string field so `_FieldEq("id_str", oid)` works.
     doc.id_str = oid
@@ -434,3 +449,103 @@ async def test_detect_conflicts_overlapping_events(ctx, fake_store, bus_spy, mon
     assert len(report.conflicting_events) == 1
     topics = [t for t, _ in bus_spy]
     assert TOPIC_CONFLICT_DETECTED in topics
+
+
+# ---------------------------------------------------------------------------
+# H-NEW-1: event-level modify authz on the synthetic-default Calendar path.
+# ---------------------------------------------------------------------------
+#
+# The audit on #1143 surfaced that _load_calendar returns a synthetic Calendar
+# with owner_user_id = ctx.user_id whenever no _CalendarDoc row exists. The
+# autouse `fake_calendar_store` fixture in this module always returns None
+# from find_one, so every test here exercises that synthetic-default path.
+# These four tests assert that policy.check_event_modify closes the gap.
+
+
+async def test_update_event_non_creator_denied_synthetic_calendar(fake_store, bus_spy):
+    """Bob (same workspace, NOT the event creator) cannot update Alice's event
+    even though the parent Calendar is synthetic-default."""
+    from ee.calendar._context import RequestContext
+    from ee.cloud.shared.errors import Forbidden
+
+    # Event was created by alice. Bob shares the workspace.
+    doc = _new_doc(fake_store, workspace="ws-test", created_by_user_id="alice")
+    bob_ctx = RequestContext(workspace_id="ws-test", user_id="bob")
+
+    with pytest.raises(Forbidden) as exc_info:
+        await service_module.update_event(
+            bob_ctx,
+            str(doc.id),
+            UpdateEventRequest(title="Hijacked"),
+        )
+    assert "event.modify_denied" in str(exc_info.value)
+
+
+async def test_delete_event_non_creator_denied_synthetic_calendar(fake_store, bus_spy):
+    """Same shape as the update test but for delete_event — bob can't drop
+    alice's event on the synthetic-default Calendar."""
+    from ee.calendar._context import RequestContext
+    from ee.cloud.shared.errors import Forbidden
+
+    doc = _new_doc(fake_store, workspace="ws-test", created_by_user_id="alice")
+    bob_ctx = RequestContext(workspace_id="ws-test", user_id="bob")
+
+    with pytest.raises(Forbidden) as exc_info:
+        await service_module.delete_event(bob_ctx, str(doc.id))
+    assert "event.modify_denied" in str(exc_info.value)
+    # Event still in the store — delete must have aborted before .delete().
+    assert str(doc.id) in fake_store.rows
+
+
+async def test_update_event_creator_allowed_synthetic_calendar(ctx, fake_store, bus_spy):
+    """Regression: the creator can still update their own event on a
+    synthetic-default Calendar (happy path after the H-NEW-1 fix)."""
+    # ctx fixture: user_id="user-test". Doc default creator matches.
+    doc = _new_doc(fake_store, workspace=ctx.workspace_id, title="Original")
+    resp = await service_module.update_event(
+        ctx,
+        str(doc.id),
+        UpdateEventRequest(title="Edited by creator"),
+    )
+    assert resp.title == "Edited by creator"
+    assert resp.created_by_user_id == "user-test"
+
+
+async def test_create_event_synthetic_calendar_still_works(ctx, fake_store, bus_spy):
+    """Regression: any workspace member can create events on a synthetic-
+    default Calendar. The H-NEW-1 fix gates update/delete, not create."""
+    body = CreateEventRequest(
+        calendar_id="cal-1",
+        title="Newcomer's first event",
+        starts_at=datetime(2026, 5, 20, 14, 0),
+        ends_at=datetime(2026, 5, 20, 15, 0),
+        timezone="UTC",
+    )
+    resp = await service_module.create_event(ctx, body)
+    # Creator stamped from ctx.user_id, never from the body.
+    assert resp.created_by_user_id == ctx.user_id
+    assert resp.title == "Newcomer's first event"
+
+
+async def test_create_event_ignores_client_supplied_creator(ctx, fake_store, bus_spy):
+    """The DTO doesn't accept created_by_user_id; even if a malicious client
+    appends it, Pydantic's default model_config (extra=ignore) drops it and
+    the service stamps ctx.user_id."""
+    # Build the DTO with extra fields — Pydantic silently drops them by default.
+    raw = {
+        "calendar_id": "cal-1",
+        "title": "Spoof attempt",
+        "starts_at": datetime(2026, 5, 20, 14, 0),
+        "ends_at": datetime(2026, 5, 20, 15, 0),
+        "timezone": "UTC",
+        # Attempt to override the creator. Should be ignored.
+        "created_by_user_id": "someone-else",
+    }
+    body = CreateEventRequest.model_validate(raw)
+    # Sanity: DTO doesn't carry the spoofed field on the way in.
+    assert not hasattr(body, "created_by_user_id")
+
+    resp = await service_module.create_event(ctx, body)
+    # Service stamped its own ctx.user_id, not the spoofed value.
+    assert resp.created_by_user_id == ctx.user_id
+    assert resp.created_by_user_id != "someone-else"

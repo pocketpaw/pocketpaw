@@ -1,5 +1,5 @@
 # Calendar module — service layer (module-level async functions).
-# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H1/H2/M4).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H1/H2/M4 + H-NEW-1).
 #
 # Changes:
 # - H1: Every CRUD path now resolves the parent Calendar and invokes
@@ -14,6 +14,14 @@
 #   ``location``/``starts_at``/``ends_at`` content into the
 #   ``CalendarEventUpdated`` bus payload. Bus subscribers receive a
 #   ``changed_fields`` list (field names only) instead.
+# - H-NEW-1: ``create_event`` now stamps ``created_by_user_id`` from
+#   ``ctx.user_id`` on the new ``_EventDoc``. ``update_event`` and
+#   ``delete_event`` call ``policy.check_event_modify(ctx, event)`` after
+#   ``check_calendar_write`` so the synthetic-default Calendar path (used
+#   until Calendar CRUD ships) can't be exploited to mutate other
+#   members' events. ``_doc_to_event`` (in conflicts.py) propagates the
+#   field into the domain Event so the modify check has the data it
+#   needs.
 # - Helper ``_load_calendar`` falls back to a synthesized default
 #   Calendar when no ``_CalendarDoc`` row exists yet. The Calendar CRUD
 #   surface ships in a follow-up; until then policy still enforces the
@@ -198,6 +206,9 @@ async def create_event(ctx: RequestContext, body: CreateEventRequest) -> EventRe
         starts_at=body.starts_at,
         ends_at=body.ends_at,
         timezone=body.timezone,
+        # H-NEW-1: stamp the creator from the request context. Never accept
+        # this from the client — the DTO doesn't expose it for that reason.
+        created_by_user_id=ctx.user_id,
         location=body.location,
         attendees=[a.model_dump() for a in body.attendees],
         recurrence=body.recurrence.model_dump() if body.recurrence else None,
@@ -241,6 +252,13 @@ async def update_event(
     # H1: enforce write access on the event's calendar.
     calendar = await _load_calendar(ctx, doc.calendar_id)
     policy.check_calendar_write(ctx, calendar)
+
+    # H-NEW-1: calendar-level write isn't enough on a synthetic-default
+    # Calendar, where check_calendar_write trivially passes for every
+    # workspace member (because the synthetic owner = ctx.user_id). The
+    # event-level gate ensures only the creator (or, later, a workspace
+    # admin) can edit an existing event.
+    policy.check_event_modify(ctx, _doc_to_event(doc))
 
     # M4: track only the names of fields that changed, NOT the values.
     # Bus subscribers (notifications, search reindex, soul memory) only
@@ -307,6 +325,11 @@ async def delete_event(ctx: RequestContext, event_id: str) -> None:
     # H1: enforce write access before deletion.
     calendar = await _load_calendar(ctx, doc.calendar_id)
     policy.check_calendar_write(ctx, calendar)
+
+    # H-NEW-1: same rationale as update_event — calendar-level write
+    # passes trivially on a synthetic-default Calendar, so we add the
+    # event-level creator gate before destroying the row.
+    policy.check_event_modify(ctx, _doc_to_event(doc))
 
     event_id_str = str(doc.id)
     calendar_id = doc.calendar_id

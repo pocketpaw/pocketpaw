@@ -1,5 +1,5 @@
 # tests/ee/calendar/test_router.py — FastAPI router tests.
-# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H3).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H3 + H-NEW-1).
 #
 # Changes:
 # - Added test_list_events_malformed_starts_after_returns_422 — covers H3.
@@ -8,6 +8,8 @@
 #   response is now 422 with the standard validation envelope.
 # - Added test_list_events_missing_starts_before_returns_422 — required
 #   query params are still required.
+# - H-NEW-1: _make_event_response now populates created_by_user_id since
+#   EventResponse exposes it for the UI.
 #
 # Mount the router on a throwaway FastAPI app, install a global CloudError
 # handler (so we get the same envelope the real cloud app emits), and
@@ -55,6 +57,9 @@ def _make_event_response(**overrides: Any) -> EventResponse:
         starts_at=datetime(2026, 5, 19, 9, 0),
         ends_at=datetime(2026, 5, 19, 10, 0),
         timezone="UTC",
+        # H-NEW-1: EventResponse now exposes this so the UI can render
+        # "created by X" and gate Edit/Delete affordances.
+        created_by_user_id="user-test",
         location=None,
         attendees=[],
         recurrence=None,
