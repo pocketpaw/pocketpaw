@@ -11,7 +11,7 @@ This matters for our tenancy model: a user can click Connect, then
 authorize as ANY account they have access to — their personal GitHub
 instead of their work one, a shared mailbox instead of their own. The
 agent has no way to detect that without an explicit probe. We surface
-the probed identity back to the chat ("Connected as @prakashUXtech —
+the probed identity back to the chat ("Connected as @octocat —
 continue?") so wrong-account binds are caught the first time.
 
 The registry below maps toolkit slug → ``IdentityProbe``. To add a

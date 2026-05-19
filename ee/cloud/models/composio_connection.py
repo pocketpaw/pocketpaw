@@ -31,7 +31,7 @@ class ComposioConnection(TimestampedDocument):
     (keeps re-verification idempotent under race).
 
     ``external_identity`` is the verbatim string returned by the
-    per-toolkit probe (e.g. ``"prakashUXtech"`` for GitHub,
+    per-toolkit probe (e.g. ``"octocat"`` for GitHub,
     ``"user@example.com"`` for Gmail). ``None`` means a verification
     was attempted but the probe couldn't resolve the identity (toolkit
     has no probe registered, or the call failed) — distinct from no

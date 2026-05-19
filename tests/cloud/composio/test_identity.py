@@ -56,11 +56,11 @@ def test_probe_returns_value_from_flat_dict_envelope() -> None:
     """``tools.execute`` returns ``{"data": {"login": "x"}, "successful": True}``."""
     client = MagicMock()
     client.tools.execute.return_value = {
-        "data": {"login": "prakashUXtech"},
+        "data": {"login": "octocat"},
         "successful": True,
     }
     out = identity.probe_identity_sync(client, user_id="u", toolkit="github")
-    assert out == "prakashUXtech"
+    assert out == "octocat"
 
 
 def test_probe_walks_nested_field_path() -> None:
@@ -124,18 +124,18 @@ async def test_record_connection_first_time_inserts_and_emits_verified(
     rec = await composio_service.record_connection(
         _ctx(),
         toolkit="github",
-        external_identity="prakashUXtech",
+        external_identity="octocat",
     )
     assert isinstance(rec, ConnectionRecord)
     assert rec.status == "verified"
-    assert rec.external_identity == "prakashUXtech"
+    assert rec.external_identity == "octocat"
     assert rec.previous_identity is None
 
     from ee.cloud.models.composio_connection import ComposioConnection
 
     docs = await ComposioConnection.find().to_list()
     assert len(docs) == 1
-    assert docs[0].external_identity == "prakashUXtech"
+    assert docs[0].external_identity == "octocat"
     assert docs[0].mismatch_count == 0
 
     events = [e for e in recording_bus.events if isinstance(e, ComposioConnectionVerified)]
@@ -151,13 +151,11 @@ async def test_record_connection_match_reverifies_quietly(
     """Re-probing with the same identity bumps last_verified_at and
     emits verified-not-first-time, no mismatch."""
     ctx = _ctx()
-    await composio_service.record_connection(
-        ctx, toolkit="github", external_identity="prakashUXtech"
-    )
+    await composio_service.record_connection(ctx, toolkit="github", external_identity="octocat")
     recording_bus.events.clear()
 
     rec = await composio_service.record_connection(
-        ctx, toolkit="github", external_identity="prakashUXtech"
+        ctx, toolkit="github", external_identity="octocat"
     )
     assert rec.status == "verified"
     assert rec.previous_identity is None  # matched, no diff to surface
@@ -177,17 +175,15 @@ async def test_record_connection_mismatch_does_not_overwrite(
     external_identity is NOT overwritten — the user must confirm
     via confirm_identity_change."""
     ctx = _ctx()
-    await composio_service.record_connection(
-        ctx, toolkit="github", external_identity="prakashUXtech"
-    )
+    await composio_service.record_connection(ctx, toolkit="github", external_identity="octocat")
     recording_bus.events.clear()
 
     rec = await composio_service.record_connection(
-        ctx, toolkit="github", external_identity="DevRohit06"
+        ctx, toolkit="github", external_identity="octocat-alt"
     )
     assert rec.status == "mismatch"
-    assert rec.external_identity == "DevRohit06"  # what was probed
-    assert rec.previous_identity == "prakashUXtech"  # what was stored
+    assert rec.external_identity == "octocat-alt"  # what was probed
+    assert rec.previous_identity == "octocat"  # what was stored
 
     from ee.cloud.models.composio_connection import ComposioConnection
 
@@ -197,14 +193,14 @@ async def test_record_connection_mismatch_does_not_overwrite(
         ComposioConnection.toolkit == "github",
     )
     assert doc is not None
-    assert doc.external_identity == "prakashUXtech"  # NOT overwritten
+    assert doc.external_identity == "octocat"  # NOT overwritten
     assert doc.mismatch_count == 1
-    assert doc.last_mismatch_identity == "DevRohit06"
+    assert doc.last_mismatch_identity == "octocat-alt"
 
     mm = [e for e in recording_bus.events if isinstance(e, ComposioConnectionMismatch)]
     assert len(mm) == 1
-    assert mm[0].data["stored_identity"] == "prakashUXtech"
-    assert mm[0].data["probed_identity"] == "DevRohit06"
+    assert mm[0].data["stored_identity"] == "octocat"
+    assert mm[0].data["probed_identity"] == "octocat-alt"
 
 
 @pytest.mark.asyncio
@@ -268,17 +264,15 @@ async def test_confirm_identity_change_overwrites_and_clears_mismatch(
     new identity overwrites the stored value and clears the mismatch
     flags so subsequent probes re-verify cleanly."""
     ctx = _ctx()
-    await composio_service.record_connection(
-        ctx, toolkit="github", external_identity="prakashUXtech"
-    )
-    await composio_service.record_connection(ctx, toolkit="github", external_identity="DevRohit06")
+    await composio_service.record_connection(ctx, toolkit="github", external_identity="octocat")
+    await composio_service.record_connection(ctx, toolkit="github", external_identity="octocat-alt")
     recording_bus.events.clear()
 
     confirmed = await composio_service.confirm_identity_change(
-        ctx, toolkit="github", external_identity="DevRohit06"
+        ctx, toolkit="github", external_identity="octocat-alt"
     )
     assert confirmed.status == "verified"
-    assert confirmed.previous_identity == "prakashUXtech"
+    assert confirmed.previous_identity == "octocat"
 
     from ee.cloud.models.composio_connection import ComposioConnection
 
@@ -288,14 +282,14 @@ async def test_confirm_identity_change_overwrites_and_clears_mismatch(
         ComposioConnection.toolkit == "github",
     )
     assert doc is not None
-    assert doc.external_identity == "DevRohit06"  # overwritten
+    assert doc.external_identity == "octocat-alt"  # overwritten
     assert doc.last_mismatch_identity is None
     assert doc.last_mismatch_at is None
 
-    # Re-probing now treats DevRohit06 as the canonical identity.
+    # Re-probing now treats octocat-alt as the canonical identity.
     recording_bus.events.clear()
     rec = await composio_service.record_connection(
-        ctx, toolkit="github", external_identity="DevRohit06"
+        ctx, toolkit="github", external_identity="octocat-alt"
     )
     assert rec.status == "verified"
     mm = [e for e in recording_bus.events if isinstance(e, ComposioConnectionMismatch)]

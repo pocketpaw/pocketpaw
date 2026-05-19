@@ -245,7 +245,7 @@ async def test_search_fallback_failure_is_non_fatal(mock_composio_client):
 
 ## Task 4a: Post-connection identity verification
 
-Composio does **not** expose a uniform `whoami(user_id, toolkit)` primitive. `connected_accounts.get()` returns the OAuth token state but not the underlying GitHub login / Gmail address / Slack team. The documented pattern is toolkit-specific identity probes. Without this step, a user can authorize the wrong account (e.g. a personal GitHub instead of their work one) and the agent silently operates as the wrong identity — this is the bug surfaced in initial testing where `prakashUXtech` got bound to a session expected to be `DevRohit06`.
+Composio does **not** expose a uniform `whoami(user_id, toolkit)` primitive. `connected_accounts.get()` returns the OAuth token state but not the underlying GitHub login / Gmail address / Slack team. The documented pattern is toolkit-specific identity probes. Without this step, a user can authorize the wrong account (e.g. a personal GitHub instead of their work one) and the agent silently operates as the wrong identity — this is the bug surfaced in initial testing where a personal GitHub account got bound to a session expected to be a different teammate's.
 
 **Files:**
 - Create: `backend/ee/cloud/composio/identity.py` — per-toolkit identity-probe registry:
@@ -263,7 +263,7 @@ Composio does **not** expose a uniform `whoami(user_id, toolkit)` primitive. `co
 - Create: `backend/ee/cloud/composio/domain.py` — extend with `ComposioConnection` value object (frozen, fields: `workspace_id`, `paw_user_id`, `toolkit`, `external_identity`, `verified_at`).
 - Create: `backend/ee/cloud/models/composio_connection.py` — Beanie document, unique index on `(workspace, paw_user_id, toolkit)`.
 - Create: `backend/ee/cloud/composio/service.py::record_connection(ctx, toolkit, external_identity)` — upserts the doc, emits `ComposioConnectionVerified` event.
-- Modify: `backend/ee/cloud/composio/service.py` — after a Connect Link auth flow completes, the next agent turn runs `probe_identity` for the just-connected toolkit, stores the result via `record_connection`, and emits an inline Ripple confirmation ("Connected as `@prakashUXtech`. Continue / disconnect?") via the existing chat-send loop.
+- Modify: `backend/ee/cloud/composio/service.py` — after a Connect Link auth flow completes, the next agent turn runs `probe_identity` for the just-connected toolkit, stores the result via `record_connection`, and emits an inline Ripple confirmation ("Connected as `@octocat`. Continue / disconnect?") via the existing chat-send loop.
 - Modify: `backend/ee/cloud/composio/connect_link.py` — `as_inline_ripple` gains a "verification pending" variant that shows the identity once it's known.
 
 **Step 1: Write failing tests** covering:
