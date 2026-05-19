@@ -616,6 +616,7 @@ forbidden_modules = [
     "ee.cloud.models.user",
     "ee.cloud.models.agent",
     "ee.cloud.models.planner",
+    "ee.cloud.models.cycle",
 ]
 
 [[tool.importlinter.contracts]]

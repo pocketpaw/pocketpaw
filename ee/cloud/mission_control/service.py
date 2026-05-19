@@ -20,6 +20,14 @@
 # the wire envelope. Status vocabulary mapping (ready/stale ↔
 # draft/archived) lives here so the planner entity keeps its internal
 # vocabulary while Mission Control surfaces the operator's terms.
+# Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added
+# ``agent_create_cycle`` that backs POST /mission-control/cycles for the
+# rail's "+ New cycle" button. Parses the wire's ISO strings, derives
+# ``status`` from start/end relative to ``now`` (upcoming | active), and
+# delegates the actual Beanie write to ``cycles.service.agent_create_cycle``
+# — the single-owner rule (only ``ee.cloud.cycles.service`` may write to
+# the Cycle Beanie doc) is enforced by an import-linter forbidden
+# contract; the MC façade can never bypass it.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -55,7 +63,7 @@ Actions don't carry a polymorphic assignee or a due date.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from ee.api import get_instinct_store
@@ -73,6 +81,7 @@ from ee.cloud.mission_control.dto import (
     BulkActionRequest,
     BulkReassignRequest,
     BulkSnoozeRequest,
+    CreateCycleRequest,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -722,11 +731,140 @@ async def agent_list_plan_sessions(
     return PlanSessionListResponse(sessions=dtos, total=len(dtos))
 
 
+# ---------------------------------------------------------------------------
+# Cycles — workspace-scoped create for the Mission Control rail's
+# "+ New cycle" button.
+# ---------------------------------------------------------------------------
+
+
+def _parse_wire_date(value: str, *, field_name: str) -> date:
+    """Parse an ISO-8601 date or datetime string into a ``date``.
+
+    The wire takes either "2026-05-19" (the raw <input type="date"> value
+    the frontend posts) or "2026-05-19T12:00:00Z" (a datetime, in case a
+    different caller serializes a JS ``Date`` straight to ISO). Invalid
+    strings surface as a 422 ``cycle.invalid_date`` so the operator gets
+    a clear error rather than a 500.
+
+    We accept both the bare date and the datetime forms by trying date
+    first then datetime — fromisoformat handles each in one pass without
+    a regex or third-party parser.
+    """
+    try:
+        # date.fromisoformat handles "2026-05-19" cleanly. It rejects
+        # "2026-05-19T12:00:00Z", which falls through to the datetime
+        # path below.
+        return date.fromisoformat(value)
+    except ValueError:
+        pass
+    try:
+        # Coerce trailing "Z" to "+00:00" so datetime.fromisoformat
+        # accepts the common JS toISOString() output.
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError as exc:
+        raise ValidationError(
+            "cycle.invalid_date",
+            f"{field_name} must be an ISO-8601 date or datetime; got {value!r}",
+        ) from exc
+
+
+def _derive_status_from_dates(start: date, end: date, *, today: date | None = None) -> str:
+    """Derive a cycle's status from its date range relative to today.
+
+    Rule (per spec): a cycle whose ``start`` is in the future is
+    ``upcoming``; one whose ``start`` has passed and ``end`` hasn't is
+    ``active``. ``completed`` is intentionally NOT derived here — it's
+    set by the separate close workflow (``cycles.service.agent_close_cycle``)
+    or by the daily snapshot job's auto-rollover, never by create.
+
+    A cycle whose ``end`` is already in the past at create time falls
+    through to ``upcoming`` — backfilling historical cycles isn't a
+    create-time concern, so we don't silently promote them to a
+    terminal state.
+    """
+    today = today or datetime.now(UTC).date()
+    if start <= today < end:
+        return "active"
+    return "upcoming"
+
+
+async def agent_create_cycle(
+    ctx: RequestContext, body: CreateCycleRequest | dict[str, Any]
+) -> Any:
+    """Create a cycle in the caller's workspace from the Mission Control rail.
+
+    Mirrors the audit + plan-sessions pattern: workspace tenancy from
+    ``ctx``, wire-friendly string dates, status derived from the parsed
+    range. The actual Beanie write happens inside
+    ``cycles.service.agent_create_cycle`` — single owner per ee/cloud
+    Rule 2, enforced by an import-linter contract that forbids
+    ``ee.cloud.models.cycle`` from this façade module.
+
+    Behavior:
+      - Reads ``ctx.workspace_id`` (rejected ``?workspace_id`` upstream
+        in the router).
+      - Parses ``start`` / ``end`` from ISO strings; surfaces invalid
+        strings as 422 ``cycle.invalid_date``.
+      - Requires ``start < end`` — 422 ``cycle.invalid_date_range`` when
+        violated.
+      - Derives ``status`` from the dates: future → ``upcoming``;
+        spanning now → ``active``.
+      - Delegates project tenancy + the actual write to the cycles
+        service, which already enforces project-in-workspace and emits
+        ``cycle.created`` on the bus.
+
+    Returns the cycles entity's ``CycleResponse`` directly — the
+    frontend's existing listCycles row shape matches verbatim so
+    ``cycles.unshift(response)`` works without re-fetch.
+    """
+    body = CreateCycleRequest.model_validate(body)
+
+    start = _parse_wire_date(body.start, field_name="start")
+    end = _parse_wire_date(body.end, field_name="end")
+    if start >= end:
+        raise ValidationError(
+            "cycle.invalid_date_range",
+            "start must be before end",
+        )
+
+    status = _derive_status_from_dates(start, end)
+
+    # Lazy import keeps the façade installable on forks that disabled
+    # the cycles entity (same pattern as the planner / tasks branches
+    # above). When cycles is missing we raise a clear 422 rather than
+    # a 500 — the operator's frontend renders the message.
+    try:
+        from ee.cloud.cycles import service as cycles_service
+        from ee.cloud.cycles.dto import CreateCycleRequest as CyclesCreateRequest
+    except ImportError as exc:
+        raise ValidationError(
+            "cycle.entity_unavailable",
+            "Cycles entity is not installed on this deployment.",
+        ) from exc
+
+    cycles_body = CyclesCreateRequest(
+        name=body.name,
+        description="",
+        pocket_id=None,
+        project_id=body.project_id,
+        start=start,
+        end=end,
+        status=status,  # type: ignore[arg-type]
+        scope=body.scope,
+    )
+    # The cycles service performs the Beanie write, validates project
+    # tenancy via ``_ensure_project_in_workspace`` (raises NotFound when
+    # the project isn't in this workspace), and emits ``cycle.created``
+    # — no second emit needed from here per Rule 9.
+    return await cycles_service.agent_create_cycle(ctx, cycles_body)
+
+
 __all__ = [
     "agent_bulk_approve",
     "agent_bulk_reassign",
     "agent_bulk_reject",
     "agent_bulk_snooze",
+    "agent_create_cycle",
     "agent_list_activity",
     "agent_list_plan_sessions",
     "agent_list_work_items",

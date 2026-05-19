@@ -11,6 +11,12 @@
 # ``GET /plan-sessions`` for the Plan tab drafts list. Rejects the
 # ``?workspace_id`` query param before DTO construction (tenancy from
 # auth ctx) per the Audit endpoint's pattern.
+# Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added
+# ``POST /cycles`` so the rail's "+ New cycle" button has a façade
+# endpoint to call. Rejects ``?workspace_id`` before DTO construction
+# (mirrors the audit + plan-sessions guard); the actual Beanie write
+# is delegated to ``cycles.service.agent_create_cycle`` via the MC
+# service so the cycles entity stays the sole owner of the write path.
 """Mission Control façade router.
 
 Thin per ee/cloud rule #4 — parses requests, delegates to
@@ -28,6 +34,7 @@ canonical URLs are:
   GET  /api/v1/mission-control/outcomes
   GET  /api/v1/mission-control/activity
   GET  /api/v1/mission-control/plan-sessions
+  POST /api/v1/mission-control/cycles
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from ee.cloud._core.context import RequestContext, request_context
 from ee.cloud._core.errors import CloudError
+from ee.cloud.cycles.dto import CycleResponse
 from ee.cloud.license import require_license
 from ee.cloud.mission_control import service as mc_service
 from ee.cloud.mission_control.dto import (
@@ -43,6 +51,7 @@ from ee.cloud.mission_control.dto import (
     BulkActionRequest,
     BulkReassignRequest,
     BulkSnoozeRequest,
+    CreateCycleRequest,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -162,6 +171,44 @@ async def activity(
     """
     body = ListActivityRequest(limit=limit)
     return await mc_service.agent_list_activity(ctx, body)
+
+
+@router.post("/cycles", response_model=CycleResponse)
+async def create_cycle(
+    request: Request,
+    body: CreateCycleRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> CycleResponse:
+    """Create a workspace-scoped cycle from the Mission Control rail.
+
+    Mirrors the audit + plan-sessions endpoint patterns:
+      - Tenancy lives on the auth ctx; passing ``?workspace_id`` is a
+        400 ``cycles.workspace_id_forbidden`` rather than a silent leak.
+      - The wire body uses ISO-8601 strings for ``start`` / ``end`` so
+        a raw ``<input type="date">`` value posts directly.
+      - ``status`` is derived in the service from the parsed dates
+        (``upcoming`` vs ``active``); the wire intentionally doesn't
+        accept a status — the rail's flow is "create a new one" not
+        "backfill historical state".
+
+    The handler delegates straight to ``mc_service.agent_create_cycle``
+    which itself delegates the Beanie write to
+    ``ee.cloud.cycles.service.agent_create_cycle`` — single-owner rule
+    (Rule 2) holds, and the cycles service already emits
+    ``cycle.created`` so the frontend's live activity feed and the
+    rail's left list update via the bus.
+
+    Returns the cycles entity's ``CycleResponse`` directly so the
+    frontend can ``cycles.unshift(response)`` after the post and avoid
+    a re-fetch.
+    """
+    if "workspace_id" in request.query_params:
+        raise CloudError(
+            400,
+            "cycles.workspace_id_forbidden",
+            "workspace_id is taken from auth context, not query",
+        )
+    return await mc_service.agent_create_cycle(ctx, body)
 
 
 @router.get("/plan-sessions", response_model=PlanSessionListResponse)

@@ -21,6 +21,14 @@
 # wire use the operator vocabulary (``draft``/``active``/``archived``);
 # the service maps to the doc-level ``ready``/``stale`` storage form so
 # the frontend never has to learn the planner's internal terms.
+# Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added
+# ``CreateCycleRequest`` for the new POST /mission-control/cycles
+# endpoint that backs the rail's "+ New cycle" button. Wire format takes
+# ISO-8601 strings for ``start`` / ``end`` (date or datetime) so the
+# frontend's native ``<input type="date">`` value can post directly
+# without coercion. The service derives ``status`` from the dates
+# relative to ``now`` (``upcoming`` vs ``active``); ``completed`` is set
+# by a separate workflow.
 """Mission Control wire DTOs.
 
 The audit doc (``docs/internal/2026-05-mission-control-backend-audit.md``,
@@ -160,6 +168,42 @@ class ListPlanSessionsRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
 
 
+class CreateCycleRequest(BaseModel):
+    """Body for ``POST /mission-control/cycles``.
+
+    Wire format from the rail's "+ New cycle" form. Mirrors the audit +
+    plan-sessions surface conventions: wire stays string-friendly so
+    the frontend can post the raw ``<input type="date">`` values without
+    coercion, and the service does the parsing + status derivation.
+
+    Fields:
+      - ``name`` — operator-supplied label; 1-200 chars per the spec.
+      - ``start`` / ``end`` — ISO-8601 date ("2026-05-19") or datetime
+        ("2026-05-19T12:00:00Z"). The service parses these and stores
+        the date component; ``start`` must be strictly before ``end``.
+      - ``project_id`` — optional Mission Control Project the cycle is
+        grouped under. When set, the service verifies the project
+        belongs to the caller's workspace.
+      - ``scope`` — operator's planned-task-count target. Seeds the
+        denormalized counter; tasks attaching to the cycle later
+        overwrite it from the Tasks collection. ``0`` means unscoped.
+
+    Notes:
+      - ``status`` is intentionally absent — the service derives it from
+        the parsed dates relative to ``now``. ``completed`` is set via a
+        separate close workflow, not by create.
+      - ``pocket_id`` isn't in the wire body either — the rail's "+ New
+        cycle" button is a workspace-level action; cycles created from
+        within a pocket use the cycles entity's own endpoint.
+    """
+
+    name: str = Field(min_length=1, max_length=200)
+    start: str
+    end: str
+    project_id: str | None = None
+    scope: int = Field(default=0, ge=0)
+
+
 # ---------------------------------------------------------------------------
 # Responses
 # ---------------------------------------------------------------------------
@@ -286,6 +330,7 @@ __all__ = [
     "BulkActionRequest",
     "BulkReassignRequest",
     "BulkSnoozeRequest",
+    "CreateCycleRequest",
     "ListActivityRequest",
     "ListPlanSessionsRequest",
     "ListWorkItemsRequest",

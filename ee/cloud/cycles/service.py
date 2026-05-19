@@ -295,6 +295,7 @@ async def agent_create_cycle(ctx: RequestContext, body: CreateCycleRequest) -> C
         start=body.start,
         end=body.end,
         status=body.status,
+        scope=body.scope,
         created_by=ctx.user_id,
     )
     await doc.insert()

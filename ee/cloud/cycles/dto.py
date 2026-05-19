@@ -7,6 +7,12 @@ and output (fields leak silently).
 Domain → DTO mapping lives in ``service.py`` as private helpers. The
 ``Response`` shapes here are deliberately denormalized into wire-friendly
 ISO strings so the frontend doesn't have to parse timezones.
+
+Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added ``scope`` to
+``CreateCycleRequest`` so the Mission Control "+ New cycle" form can
+seed the planned-task-count target. The denormalized counter is then
+overwritten from Tasks at read time and by the snapshot job; the
+operator's initial value is treated as the starting point.
 """
 
 from __future__ import annotations
@@ -30,6 +36,14 @@ class CreateCycleRequest(BaseModel):
     ``status`` defaults to ``upcoming``; the service promotes a cycle to
     ``active`` only when explicitly created with that status (and the
     overlap rule passes) or via the snapshot job once ``start`` arrives.
+
+    ``scope`` is the operator-supplied planned-task-count target — the
+    Mission Control rail surfaces it as the "+ New cycle" form's
+    headline number ("planning ~20 tasks this week"). It seeds the
+    denormalized counter; the snapshot job + read-time refresh will
+    overwrite it from the Tasks collection as tasks attach to the cycle.
+    Defaults to ``0`` ("unscoped") so existing call sites that don't pass
+    a target keep working.
     """
 
     name: str = Field(min_length=1, max_length=200)
@@ -39,6 +53,7 @@ class CreateCycleRequest(BaseModel):
     start: date
     end: date
     status: CycleStatusLiteral = "upcoming"
+    scope: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _check_dates(self) -> CreateCycleRequest:
