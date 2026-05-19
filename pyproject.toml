@@ -68,6 +68,8 @@ dependencies = [
     # Promoted from optional extra to base dep in v0.3.1 integration work;
     # the runtime now takes a hard dependency on the journal primitives.
     "soul-protocol[engine]>=0.3.1",
+    "livekit-agents[codecs]>=1.5.9",
+    "livekit-plugins-deepgram>=1.5.9",
 ]
 
 [project.optional-dependencies]
@@ -616,6 +618,7 @@ forbidden_modules = [
     "ee.cloud.models.user",
     "ee.cloud.models.agent",
     "ee.cloud.models.planner",
+    "ee.cloud.models.cycle",
 ]
 
 [[tool.importlinter.contracts]]

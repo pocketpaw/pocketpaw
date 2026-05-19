@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from pocketpaw.bootstrap.protocol import BootstrapContext
 
 if TYPE_CHECKING:
     from soul_protocol import Soul
+
+logger = logging.getLogger(__name__)
 
 
 class SoulBootstrapProvider:
@@ -76,6 +79,22 @@ class SoulBootstrapProvider:
                 knowledge.append(f"Memories: {soul.memory_count}")
             except Exception:
                 pass
+
+        # Cross-session soul memory — inject general semantic facts the soul has
+        # learned so the agent carries persistent context across chat sessions.
+        try:
+            from soul_protocol import MemoryType
+
+            semantic_memories = await soul.recall(
+                query="",
+                types=[MemoryType.SEMANTIC],
+                limit=5,
+            )
+            if semantic_memories:
+                for m in semantic_memories:
+                    knowledge.append(f"[{m.type.value}] {m.content}")
+        except Exception:
+            logger.debug("Soul semantic recall failed for bootstrap context", exc_info=True)
 
         return BootstrapContext(
             name=soul.name if hasattr(soul, "name") else "Paw",

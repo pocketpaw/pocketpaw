@@ -138,6 +138,40 @@ async def test_create_allows_overlap_on_different_pockets() -> None:
     assert out.pocket_id == "p2"
 
 
+async def test_create_allows_workspace_wide_overlap() -> None:
+    """Workspace-wide cycles (no ``pocket_id``) are allowed to coexist on
+    overlapping dates. Operators routinely run multiple workspace-level
+    cycles in parallel — different events, workstreams, experiments —
+    all at the workspace tier. Locks in the 2026-05-19 relaxation in
+    ``agent_create_cycle`` so a future refactor can't silently
+    re-collapse the overlap check to ``pocket_id=None``.
+    """
+    ctx = _ctx()
+    first = await cycles_service.agent_create_cycle(
+        ctx,
+        CreateCycleRequest(
+            name="Workspace Cycle A",
+            pocket_id=None,
+            start=date(2026, 5, 1),
+            end=date(2026, 5, 29),
+            status="active",
+        ),
+    )
+    second = await cycles_service.agent_create_cycle(
+        ctx,
+        CreateCycleRequest(
+            name="Workspace Cycle B",
+            pocket_id=None,
+            start=date(2026, 5, 15),
+            end=date(2026, 6, 10),
+            status="active",
+        ),
+    )
+    assert first.pocket_id is None
+    assert second.pocket_id is None
+    assert first.id != second.id
+
+
 async def test_create_requires_workspace() -> None:
     """Routes without an active workspace surface 403 rather than 500."""
     ctx = RequestContext(

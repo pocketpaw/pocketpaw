@@ -307,6 +307,42 @@ async def agent_update_task(
     return task_to_dto(task)
 
 
+async def agent_set_task_cycle(
+    ctx: RequestContext, task_id: str, cycle_id: str | None
+) -> TaskResponse:
+    """Attach (or detach when ``cycle_id`` is ``None``) a task to a sprint.
+
+    Project-management primitive used by the Mission Control facade for the
+    "+ existing" attach flow. Unlike :func:`agent_update_task` this does NOT
+    enforce the creator/assignee gate — any caller with workspace access can
+    set the cycle pointer, which is the right posture for sprint planning
+    (the sprint owner is typically not the task's creator or assignee).
+    Workspace tenancy is still enforced via ``_fetch_task``.
+
+    Audit: emits a structured ``tasks.set_cycle`` log line on every call so
+    the creator/assignee-guard bypass is reviewable, matching the precedent
+    set by :func:`agent_reassign_task_cycle` after PR #1097's review. The
+    distinct log key (``set_cycle`` vs ``reassign_cycle``) lets audit queries
+    separate the sprint-planning attach flow from the cycle-rollover flow.
+    """
+
+    doc = await _fetch_task(ctx, task_id)
+    previous_cycle_id = doc.cycle_id
+    doc.cycle_id = cycle_id
+    await doc.save()
+    logger.info(
+        "tasks.set_cycle workspace=%s caller=%s task=%s from=%s to=%s",
+        ctx.workspace_id,
+        ctx.user_id,
+        task_id,
+        previous_cycle_id,
+        cycle_id,
+    )
+    task = _to_domain(doc)
+    await emit(TaskUpdated(data=_event_payload(doc, task)))
+    return task_to_dto(task)
+
+
 # ---------------------------------------------------------------------------
 # State-machine verbs
 # ---------------------------------------------------------------------------
@@ -580,6 +616,7 @@ __all__ = [
     "agent_list_tasks",
     "agent_reassign_task",
     "agent_reassign_task_cycle",
+    "agent_set_task_cycle",
     "agent_update_task",
     "list_for_agent_runtime",
     "unassign_project_on_tasks",
