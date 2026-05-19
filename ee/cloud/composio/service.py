@@ -15,10 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ee.cloud._core.context import RequestContext
 from ee.cloud._core.errors import Internal, ValidationError
+from ee.cloud._core.realtime.emit import emit
+from ee.cloud._core.realtime.events import (
+    ComposioConnectionMismatch,
+    ComposioConnectionVerified,
+)
 from ee.cloud.composio.domain import ComposioUserId
 from pocketpaw.config import Settings
 
@@ -158,6 +165,214 @@ def _list_toolkits_sync(client: Any) -> list[str]:
         if slug:
             slugs.append(str(slug))
     return slugs
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionRecord:
+    """Result of ``record_connection`` — what the caller surfaces to the agent.
+
+    ``status`` is one of:
+        * ``"verified"`` — first time recording this identity, or a fresh
+          probe matched the previously stored one. Caller renders
+          "Connected as X. Continue?".
+        * ``"mismatch"`` — probe returned a different identity than the
+          stored one. Caller renders "Connected as X — this differs from
+          previously verified Y. Confirm?" and waits for the user to
+          explicitly accept the change before retrying the original tool.
+        * ``"unverified"`` — probe returned ``None`` (toolkit lacks a
+          registered probe, or the probe call failed). Caller renders
+          "Connected to <toolkit> — identity verification unavailable".
+    """
+
+    status: str  # "verified" | "mismatch" | "unverified"
+    toolkit: str
+    external_identity: str | None
+    previous_identity: str | None = None
+
+
+async def record_connection(
+    ctx: RequestContext,
+    *,
+    toolkit: str,
+    external_identity: str | None,
+) -> ConnectionRecord:
+    """Upsert the verified identity for ``(workspace, user, toolkit)``.
+
+    ``external_identity=None`` means the probe couldn't resolve an
+    identity (no probe registered, call failed). We still bump
+    ``last_verified_at`` so the chat can confirm something was probed,
+    but we don't store a value for tripwire comparison.
+
+    Tripwire: when the new identity is non-empty and differs from the
+    stored one, we DO NOT overwrite. The mismatch is recorded
+    (``mismatch_count``, ``last_mismatch_identity``, ``last_mismatch_at``)
+    and surfaced via ``ComposioConnectionMismatch``. The agent layer
+    blocks until the user explicitly confirms the change, at which
+    point a second call (with ``external_identity`` matching) succeeds.
+
+    Multi-tenancy: ``workspace_id`` is required on ``ctx``; the find
+    filters on it. Two users in different workspaces can each have their
+    own connected GitHub without collision.
+    """
+    if not ctx.workspace_id:
+        raise ValidationError("composio.workspace_required", "RequestContext.workspace_id is empty")
+    if not ctx.user_id:
+        raise ValidationError("composio.user_id_missing", "RequestContext.user_id is empty")
+    toolkit_slug = toolkit.strip().lower()
+    if not toolkit_slug:
+        raise ValidationError("composio.toolkit_required", "toolkit slug is required")
+
+    from ee.cloud.models.composio_connection import ComposioConnection
+
+    now = datetime.now(UTC)
+    doc = await ComposioConnection.find_one(
+        ComposioConnection.workspace == ctx.workspace_id,
+        ComposioConnection.paw_user_id == ctx.user_id,
+        ComposioConnection.toolkit == toolkit_slug,
+    )
+
+    if doc is None:
+        doc = ComposioConnection(
+            workspace=ctx.workspace_id,
+            paw_user_id=ctx.user_id,
+            toolkit=toolkit_slug,
+            external_identity=external_identity,
+            last_verified_at=now,
+        )
+        await doc.insert()
+        status = "verified" if external_identity else "unverified"
+        await emit(
+            ComposioConnectionVerified(
+                data={
+                    "workspace_id": ctx.workspace_id,
+                    "user_id": ctx.user_id,
+                    "toolkit": toolkit_slug,
+                    "external_identity": external_identity,
+                    "first_time": True,
+                }
+            )
+        )
+        return ConnectionRecord(
+            status=status,
+            toolkit=toolkit_slug,
+            external_identity=external_identity,
+        )
+
+    stored = doc.external_identity
+    if external_identity is None:
+        # Probe couldn't resolve — bump verified_at as a heartbeat but
+        # don't pretend we re-confirmed the identity.
+        doc.last_verified_at = now
+        await doc.save()
+        return ConnectionRecord(
+            status="unverified",
+            toolkit=toolkit_slug,
+            external_identity=stored,
+        )
+
+    if stored is None or stored == external_identity:
+        # First-time confirmation OR a matching re-probe. Safe to update.
+        doc.external_identity = external_identity
+        doc.last_verified_at = now
+        await doc.save()
+        await emit(
+            ComposioConnectionVerified(
+                data={
+                    "workspace_id": ctx.workspace_id,
+                    "user_id": ctx.user_id,
+                    "toolkit": toolkit_slug,
+                    "external_identity": external_identity,
+                    "first_time": stored is None,
+                }
+            )
+        )
+        return ConnectionRecord(
+            status="verified",
+            toolkit=toolkit_slug,
+            external_identity=external_identity,
+        )
+
+    # Tripwire: identity changed. Record the mismatch without
+    # overwriting the stored external_identity — the user must confirm.
+    doc.mismatch_count += 1
+    doc.last_mismatch_identity = external_identity
+    doc.last_mismatch_at = now
+    await doc.save()
+    await emit(
+        ComposioConnectionMismatch(
+            data={
+                "workspace_id": ctx.workspace_id,
+                "user_id": ctx.user_id,
+                "toolkit": toolkit_slug,
+                "stored_identity": stored,
+                "probed_identity": external_identity,
+                "mismatch_count": doc.mismatch_count,
+            }
+        )
+    )
+    return ConnectionRecord(
+        status="mismatch",
+        toolkit=toolkit_slug,
+        external_identity=external_identity,
+        previous_identity=stored,
+    )
+
+
+async def confirm_identity_change(
+    ctx: RequestContext,
+    *,
+    toolkit: str,
+    external_identity: str,
+) -> ConnectionRecord:
+    """Accept an identity change the user explicitly confirmed.
+
+    After a ``"mismatch"`` result from ``record_connection``, the chat
+    asks the user to confirm. On "yes", this overwrites the stored
+    ``external_identity`` so future probes match and re-verify cleanly.
+    """
+    if not ctx.workspace_id or not ctx.user_id:
+        raise ValidationError(
+            "composio.workspace_or_user_missing", "RequestContext.workspace_id/user_id is empty"
+        )
+    toolkit_slug = toolkit.strip().lower()
+
+    from ee.cloud.models.composio_connection import ComposioConnection
+
+    doc = await ComposioConnection.find_one(
+        ComposioConnection.workspace == ctx.workspace_id,
+        ComposioConnection.paw_user_id == ctx.user_id,
+        ComposioConnection.toolkit == toolkit_slug,
+    )
+    if doc is None:
+        raise ValidationError(
+            "composio.connection_not_found",
+            f"No prior connection record for toolkit {toolkit_slug!r} — cannot confirm change",
+        )
+
+    previous = doc.external_identity
+    doc.external_identity = external_identity
+    doc.last_verified_at = datetime.now(UTC)
+    doc.last_mismatch_identity = None
+    doc.last_mismatch_at = None
+    await doc.save()
+    await emit(
+        ComposioConnectionVerified(
+            data={
+                "workspace_id": ctx.workspace_id,
+                "user_id": ctx.user_id,
+                "toolkit": toolkit_slug,
+                "external_identity": external_identity,
+                "first_time": False,
+                "confirmed_change_from": previous,
+            }
+        )
+    )
+    return ConnectionRecord(
+        status="verified",
+        toolkit=toolkit_slug,
+        external_identity=external_identity,
+        previous_identity=previous,
+    )
 
 
 def reset_client_cache_for_tests() -> None:

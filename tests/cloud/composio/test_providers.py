@@ -45,6 +45,28 @@ def _fake_ctx() -> RequestContext:
     )
 
 
+def _named_tool(name: str) -> MagicMock:
+    """Build a MagicMock whose ``.name`` attribute is the given string.
+
+    MagicMock auto-creates ``.name`` as a Mock by default — the dedup
+    loop in providers.py reads it via ``getattr(t, "name", None)`` so
+    we need a real string there for the seen-names set to work.
+    """
+    t = MagicMock()
+    t.name = name
+    return t
+
+
+def _tool_name(t: object) -> str | None:
+    """Mirror providers.py's name-extraction: getattr first, dict fallback."""
+    name = getattr(t, "name", None)
+    if isinstance(name, str):
+        return name
+    if isinstance(t, dict):
+        return t.get("name")  # type: ignore[no-any-return]
+    return None
+
+
 @pytest.fixture(autouse=True)
 def _reset_caches() -> None:
     composio_service.reset_client_cache_for_tests()
@@ -77,18 +99,30 @@ def stub_provider_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMoc
         instance = MagicMock(name="ComposioClient")
         captured["last_init_kwargs"] = kwargs  # type: ignore[assignment]
 
-        # The new direct-tools path: providers.py calls
-        # ``client.tools.get(user_id=..., toolkits=[...])``. We return
-        # one fake tool per toolkit so tests can assert on the call.
+        # providers.py calls ``client.tools.get(...)`` in two shapes:
+        #   (a) per-toolkit direct tools: ``toolkits=[slug], limit=N``
+        #   (b) meta-tools by name:       ``tools=[slug1, slug2, ...]``
+        # We dispatch on which kwarg is present and return MagicMock
+        # objects with a ``name`` attribute the dedup loop in providers.py
+        # reads via ``getattr(t, "name", None)``.
         def _fake_tools_get(
-            user_id: str, toolkits: list[str], limit: int | None = None
+            user_id: str,
+            toolkits: list[str] | None = None,
+            tools: list[str] | None = None,
+            limit: int | None = None,
         ) -> list[object]:
+            if tools is not None:
+                captured["last_meta_get"] = {  # type: ignore[assignment]
+                    "user_id": user_id,
+                    "tools": list(tools),
+                }
+                return [_named_tool(slug) for slug in tools]
             captured["last_tools_get"] = {  # type: ignore[assignment]
                 "user_id": user_id,
-                "toolkits": list(toolkits),
+                "toolkits": list(toolkits or []),
                 "limit": limit,
             }
-            return [MagicMock(name=f"tool({tk})") for tk in toolkits]
+            return [_named_tool(f"tool({tk})") for tk in (toolkits or [])]
 
         instance.tools.get.side_effect = _fake_tools_get
         return instance
@@ -356,3 +390,108 @@ def test_deep_agents_skips_composio_on_pocket_session() -> None:
     # And the call must reference BACKEND_DEEP_AGENTS so we know we're
     # passing the right provider key.
     assert "BACKEND_DEEP_AGENTS" in source
+
+
+# ---------------------------------------------------------------------------
+# Search-fallback meta-tools (Task 3a)
+# ---------------------------------------------------------------------------
+
+
+def test_search_fallback_meta_tools_appended(
+    stub_provider_modules: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    force_settings,  # type: ignore[no-untyped-def]
+) -> None:
+    """The 3 search-flow meta-tools must be appended to the direct tools
+    so the agent has a discovery fallback when its tool index can't
+    surface a specific action. COMPOSIO_MANAGE_CONNECTIONS must NOT be
+    included — we own the connect flow via connection_tool.py."""
+    force_settings(_enabled_settings(composio_toolkits=["gmail", "github"]))
+    monkeypatch.setattr(composio_providers, "_resolve_ctx", lambda: _fake_ctx())
+
+    tools = composio_providers.build_tools_for_backend("claude_agent_sdk")
+    names = {_tool_name(t) for t in tools}
+
+    assert "COMPOSIO_SEARCH_TOOLS" in names
+    assert "COMPOSIO_GET_TOOL_SCHEMAS" in names
+    assert "COMPOSIO_MULTI_EXECUTE_TOOL" in names
+    # Connect flow stays on our side; meta-tool form is excluded.
+    assert "COMPOSIO_MANAGE_CONNECTIONS" not in names
+    # Direct tools still present alongside meta-tools.
+    assert "tool(gmail)" in names
+    assert "tool(github)" in names
+
+
+def test_search_fallback_failure_keeps_direct_tools(
+    stub_provider_modules: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    force_settings,  # type: ignore[no-untyped-def]
+) -> None:
+    """If the meta-tools fetch raises, direct tools must still come
+    back — losing search degrades capability, not the whole turn."""
+    force_settings(_enabled_settings(composio_toolkits=["gmail"]))
+    monkeypatch.setattr(composio_providers, "_resolve_ctx", lambda: _fake_ctx())
+
+    # Re-wire the fake client so meta-tool fetches (tools=[...]) raise
+    # but per-toolkit fetches (toolkits=[...]) still succeed.
+    composio_cls = stub_provider_modules["Composio"]
+
+    def _factory(*args: object, **kwargs: object) -> MagicMock:
+        inst = MagicMock(name="ComposioClient")
+
+        def _selective_get(
+            user_id: str,
+            toolkits: list[str] | None = None,
+            tools: list[str] | None = None,
+            limit: int | None = None,
+        ) -> list[object]:
+            if tools is not None:
+                raise RuntimeError("meta-tools 503")
+            return [_named_tool(f"tool({tk})") for tk in (toolkits or [])]
+
+        inst.tools.get.side_effect = _selective_get
+        return inst
+
+    composio_cls.side_effect = _factory
+
+    out = composio_providers.build_tools_for_backend("claude_agent_sdk")
+    names = {_tool_name(t) for t in out}
+    assert "tool(gmail)" in names  # direct tools survived
+    assert "COMPOSIO_SEARCH_TOOLS" not in names  # meta-tools absent
+
+
+def test_search_fallback_dedupes_against_direct_tools(
+    stub_provider_modules: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    force_settings,  # type: ignore[no-untyped-def]
+) -> None:
+    """If Composio ever returned a meta-tool slug from a regular toolkit
+    fetch, we mustn't double-register it. Mirrors the seen_names guard
+    in providers.py."""
+    force_settings(_enabled_settings(composio_toolkits=["composio"]))
+    monkeypatch.setattr(composio_providers, "_resolve_ctx", lambda: _fake_ctx())
+
+    composio_cls = stub_provider_modules["Composio"]
+
+    def _factory(*args: object, **kwargs: object) -> MagicMock:
+        inst = MagicMock(name="ComposioClient")
+
+        def _get(
+            user_id: str,
+            toolkits: list[str] | None = None,
+            tools: list[str] | None = None,
+            limit: int | None = None,
+        ) -> list[object]:
+            if tools is not None:
+                return [_named_tool(s) for s in tools]
+            # Per-toolkit fetch happens to also include SEARCH_TOOLS:
+            return [_named_tool("COMPOSIO_SEARCH_TOOLS"), _named_tool("other")]
+
+        inst.tools.get.side_effect = _get
+        return inst
+
+    composio_cls.side_effect = _factory
+
+    out = composio_providers.build_tools_for_backend("claude_agent_sdk")
+    search_tools = [t for t in out if _tool_name(t) == "COMPOSIO_SEARCH_TOOLS"]
+    assert len(search_tools) == 1  # deduped, not double-listed

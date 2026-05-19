@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ee.cloud.models.agent import Agent, AgentConfig
 from ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
+from ee.cloud.models.composio_connection import ComposioConnection
 from ee.cloud.models.connector import WorkspaceConnector
 from ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from ee.cloud.models.file import FileObj
@@ -41,6 +42,7 @@ __all__ = [
     "Comment",
     "CommentAuthor",
     "CommentTarget",
+    "ComposioConnection",
     "Cycle",
     "CycleDailyPoint",
     "FileFolder",
@@ -86,6 +88,7 @@ def get_all_documents():
         FileFolder,
         Workspace,
         WorkspaceConnector,
+        ComposioConnection,
         Invite,
         Group,
         Message,
