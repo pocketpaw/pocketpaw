@@ -307,6 +307,27 @@ async def agent_update_task(
     return task_to_dto(task)
 
 
+async def agent_set_task_cycle(
+    ctx: RequestContext, task_id: str, cycle_id: str | None
+) -> TaskResponse:
+    """Attach (or detach when ``cycle_id`` is ``None``) a task to a sprint.
+
+    Project-management primitive used by the Mission Control facade for the
+    "+ existing" attach flow. Unlike :func:`agent_update_task` this does NOT
+    enforce the creator/assignee gate — any caller with workspace access can
+    set the cycle pointer, which is the right posture for sprint planning
+    (the sprint owner is typically not the task's creator or assignee).
+    Workspace tenancy is still enforced via ``_fetch_task``.
+    """
+
+    doc = await _fetch_task(ctx, task_id)
+    doc.cycle_id = cycle_id
+    await doc.save()
+    task = _to_domain(doc)
+    await emit(TaskUpdated(data=_event_payload(doc, task)))
+    return task_to_dto(task)
+
+
 # ---------------------------------------------------------------------------
 # State-machine verbs
 # ---------------------------------------------------------------------------

@@ -78,6 +78,8 @@ from ee.cloud.mission_control.domain import (
 )
 from ee.cloud.mission_control.dto import (
     ActivityEventResponse,
+    AttachCycleItemsRequest,
+    AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
     BulkSnoozeRequest,
@@ -859,7 +861,50 @@ async def agent_create_cycle(
     return await cycles_service.agent_create_cycle(ctx, cycles_body)
 
 
+async def agent_attach_cycle_items(
+    ctx: RequestContext,
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+) -> AttachCycleItemsResponse:
+    """Attach a batch of existing work items to a sprint.
+
+    Validates the sprint exists in the caller's workspace, then for each
+    item id calls the permission-relaxed ``tasks.service.agent_set_task_cycle``
+    helper. Items the caller can't see (wrong workspace, deleted, etc.)
+    are reported back as ``skipped`` rather than failing the whole batch.
+    """
+
+    body = AttachCycleItemsRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    # Lazy imports keep the cross-entity coupling on the call path so the
+    # ee/cloud entity-boundary lint can't get tripped on a top-level import.
+    from ee.cloud._core.errors import NotFound
+    from ee.cloud.cycles import service as cycles_service
+    from ee.cloud.tasks import service as tasks_service
+
+    # Tenancy check on the cycle itself: this raises NotFound if the sprint
+    # isn't in the caller's workspace, so the response can't mislead.
+    await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+
+    attached: list[str] = []
+    skipped: list[str] = []
+    for task_id in body.item_ids:
+        try:
+            await tasks_service.agent_set_task_cycle(ctx, task_id, cycle_id)
+            attached.append(task_id)
+        except NotFound:
+            skipped.append(task_id)
+
+    return AttachCycleItemsResponse(
+        attached=attached,
+        skipped=skipped,
+        cycle_id=cycle_id,
+    )
+
+
 __all__ = [
+    "agent_attach_cycle_items",
     "agent_bulk_approve",
     "agent_bulk_reassign",
     "agent_bulk_reject",

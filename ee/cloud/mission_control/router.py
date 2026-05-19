@@ -48,6 +48,8 @@ from ee.cloud.license import require_license
 from ee.cloud.mission_control import service as mc_service
 from ee.cloud.mission_control.dto import (
     ActivityEventResponse,
+    AttachCycleItemsRequest,
+    AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
     BulkSnoozeRequest,
@@ -209,6 +211,25 @@ async def create_cycle(
             "workspace_id is taken from auth context, not query",
         )
     return await mc_service.agent_create_cycle(ctx, body)
+
+
+@router.post(
+    "/cycles/{cycle_id}/items/attach",
+    response_model=AttachCycleItemsResponse,
+)
+async def attach_cycle_items(
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> AttachCycleItemsResponse:
+    """Attach existing workspace work items to a sprint.
+
+    Powers the Mission Control "+ existing" picker in the sprint header.
+    Item ids the caller can't see (wrong workspace, deleted, etc.) are
+    reported back in ``skipped`` rather than failing the whole batch,
+    so a half-stale selection still partially succeeds.
+    """
+    return await mc_service.agent_attach_cycle_items(ctx, cycle_id, body)
 
 
 @router.get("/plan-sessions", response_model=PlanSessionListResponse)

@@ -168,6 +168,25 @@ class ListPlanSessionsRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
 
 
+class AttachCycleItemsRequest(BaseModel):
+    """Bulk-attach existing workspace work items to a sprint.
+
+    Used by the Mission Control "+ existing" picker in the sprint
+    header. Workspace tenancy is enforced per-item via the task service;
+    items not visible to the caller are reported back as ``skipped``
+    rather than rejected wholesale, so a half-stale operator selection
+    still partially succeeds (Linear's posture).
+    """
+
+    item_ids: list[str] = Field(..., min_length=1, max_length=200)
+
+
+class AttachCycleItemsResponse(BaseModel):
+    attached: list[str]
+    skipped: list[str] = Field(default_factory=list)
+    cycle_id: str
+
+
 class CreateCycleRequest(BaseModel):
     """Body for ``POST /mission-control/cycles``.
 
