@@ -196,9 +196,11 @@ uses different patterns; these rules don't apply there.
 
 5. **Service signature.**
    ```python
-   async def op(ctx: RequestContext, body: <RequestSchema>) -> <ResponseSchema>:
+   async def op(workspace_id: str, user_id: str, body: <RequestSchema>) -> dict:
    ```
-   Module-level `async def`, not a class. Multi-tenancy via `ctx.workspace_id` — never accept `workspace_id` as a separate parameter.
+   Module-level `async def`, not a class. Multi-tenancy via the explicit `workspace_id` parameter. `user_id` carries the viewer context for permission checks. Public APIs return wire dicts (`dict`) for legacy router compatibility — see `pockets/service.py` for the canonical shape, including the `_resolved_wire_dict` helper that produces the wire dict from a Beanie doc.
+
+   *Note: a future migration may move toward a `RequestContext` value object that bundles `(workspace_id, user_id, viewer_metadata)`. New modules that anticipate this can mint a private `_context.py:RequestContext` (see `ee/calendar/_context.py` in PR #1132 for an example), but the mainline pattern remains the explicit parameter pair until pockets migrates.*
 
 6. **Validate at entry.** First line of every service function: `body = <RequestSchema>.model_validate(body)`. FastAPI parses HTTP bodies; services re-parse for internal callers (bus handlers, MCP tools, CLI, jobs).
 
@@ -208,7 +210,7 @@ uses different patterns; these rules don't apply there.
 
 9. **Emit on every write.** State-mutating service functions end with `await emit(<Event>(data=...))` — or have an explicit `# no-event: <reason>` comment on the line before return. Silent mutations desync downstream handlers (search index, soul memory, ripple invalidation).
 
-10. **Errors via CloudError.** Use `_core.errors` subclasses (`NotFound`, `Forbidden`, `Conflict`, etc.). Never `raise HTTPException` in services or routers — `_core.http` maps `CloudError` to JSON.
+10. **Errors via CloudError.** Use `_core.errors` subclasses (`NotFound`, `Forbidden`, `Conflict`, `ValidationError`, etc.). The canonical location is `ee/cloud/_core/errors.py`; `ee/cloud/shared/errors.py` is a transitional re-export shim from the 2026-04-27 cloud-restructure that remains for backwards compatibility. **New code should import from `ee.cloud._core.errors` directly.** Some existing modules (including `pockets/service.py`) still import via the shared shim; that's tracked for touch-time migration. Never `raise HTTPException` in services or routers — `_core.http` maps `CloudError` to JSON.
 
 11. **Prefer events over transactions.** Only money, identity, and permission flows reach for `session.start_transaction()`.
 
