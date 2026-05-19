@@ -15,6 +15,12 @@
 #   line on every call so the creator/assignee-guard bypass is
 #   reviewable. PR #1097's reviewer flagged the silent privilege bypass
 #   as the highest-priority follow-up.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+#   ``agent_create_task`` persists ``blocked_by`` from the request;
+#   ``agent_update_task`` flips it tri-state (None = no change, [] =
+#   explicit clear, [...] = replace). Domain mapper threads the field
+#   through ``_to_domain`` so projectors (Mission Control's WorkItem)
+#   pick it up automatically.
 """Tasks entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -102,6 +108,8 @@ def _to_domain(doc: _TaskDoc) -> Task:
         summary=doc.summary,
         pocket_id=doc.pocket_id,
         cycle_id=doc.cycle_id,
+        project_id=getattr(doc, "project_id", None),
+        blocked_by=tuple(getattr(doc, "blocked_by", None) or ()),
         due_at=doc.due_at,
         blocked_reason=doc.blocked_reason,
         created_at=getattr(doc, "createdAt", None),
@@ -169,11 +177,15 @@ async def agent_create_task(ctx: RequestContext, body: CreateTaskRequest) -> Tas
 
     status = "proposed" if body.assignee.kind == "agent" else "in_progress"
 
+    if body.project_id:
+        await _ensure_project_in_workspace(ctx.workspace_id, body.project_id)
+
     doc = _TaskDoc(
         workspace_id=ctx.workspace_id,
         creator_id=ctx.user_id,
         pocket_id=body.pocket_id,
         cycle_id=body.cycle_id,
+        project_id=body.project_id,
         title=body.title,
         summary=body.summary,
         assignee=_AssigneeDoc(
@@ -191,6 +203,7 @@ async def agent_create_task(ctx: RequestContext, body: CreateTaskRequest) -> Tas
             ref_id=body.source.ref_id,
             metadata=dict(body.source.metadata or {}),
         ),
+        blocked_by=list(body.blocked_by or []),
         due_at=body.due_at,
     )
     await doc.insert()
@@ -222,6 +235,10 @@ async def agent_list_tasks(ctx: RequestContext, body: ListTasksRequest) -> list[
         query["cycle_id"] = body.cycle_id
     if body.pocket_id:
         query["pocket_id"] = body.pocket_id
+    if body.project_id is not None:
+        # Empty string filters for "no project assigned" — the Mission
+        # Control "Unassigned" bucket.
+        query["project_id"] = body.project_id or None
     if body.creator_id:
         query["creator_id"] = body.creator_id
 
@@ -269,10 +286,58 @@ async def agent_update_task(
         doc.pocket_id = body.pocket_id
     if body.cycle_id is not None:
         doc.cycle_id = body.cycle_id
+    if body.project_id is not None:
+        if body.project_id:
+            await _ensure_project_in_workspace(doc.workspace_id, body.project_id)
+            doc.project_id = body.project_id
+        else:
+            doc.project_id = None
+    if body.blocked_by is not None:
+        # Tri-state: None = no change (handled by the outer guard),
+        # [] = explicit clear, [...] = replace the full set. The Beanie
+        # field defaults to ``[]`` for old docs so the assignment is
+        # always safe.
+        doc.blocked_by = list(body.blocked_by)
     if body.due_at is not None:
         doc.due_at = body.due_at
 
     await doc.save()
+    task = _to_domain(doc)
+    await emit(TaskUpdated(data=_event_payload(doc, task)))
+    return task_to_dto(task)
+
+
+async def agent_set_task_cycle(
+    ctx: RequestContext, task_id: str, cycle_id: str | None
+) -> TaskResponse:
+    """Attach (or detach when ``cycle_id`` is ``None``) a task to a sprint.
+
+    Project-management primitive used by the Mission Control facade for the
+    "+ existing" attach flow. Unlike :func:`agent_update_task` this does NOT
+    enforce the creator/assignee gate — any caller with workspace access can
+    set the cycle pointer, which is the right posture for sprint planning
+    (the sprint owner is typically not the task's creator or assignee).
+    Workspace tenancy is still enforced via ``_fetch_task``.
+
+    Audit: emits a structured ``tasks.set_cycle`` log line on every call so
+    the creator/assignee-guard bypass is reviewable, matching the precedent
+    set by :func:`agent_reassign_task_cycle` after PR #1097's review. The
+    distinct log key (``set_cycle`` vs ``reassign_cycle``) lets audit queries
+    separate the sprint-planning attach flow from the cycle-rollover flow.
+    """
+
+    doc = await _fetch_task(ctx, task_id)
+    previous_cycle_id = doc.cycle_id
+    doc.cycle_id = cycle_id
+    await doc.save()
+    logger.info(
+        "tasks.set_cycle workspace=%s caller=%s task=%s from=%s to=%s",
+        ctx.workspace_id,
+        ctx.user_id,
+        task_id,
+        previous_cycle_id,
+        cycle_id,
+    )
     task = _to_domain(doc)
     await emit(TaskUpdated(data=_event_payload(doc, task)))
     return task_to_dto(task)
@@ -364,7 +429,9 @@ async def agent_complete_task(
     if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
         # Only the creator or the assignee can mark a task complete.
         # Other workspace members must reassign or escalate.
-        raise Forbidden("task.complete_denied", "Only the creator or assignee can complete this task")
+        raise Forbidden(
+            "task.complete_denied", "Only the creator or assignee can complete this task"
+        )
 
     if doc.status in {"done", "reverted", "failed"}:
         raise ValidationError("task.terminal", f"task is already {doc.status!r}")
@@ -419,7 +486,9 @@ async def agent_reassign_task(
     if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
         # Only the creator or current assignee can reassign. Workspace
         # members at large must go through their own delegation path.
-        raise Forbidden("task.reassign_denied", "Only the creator or assignee can reassign this task")
+        raise Forbidden(
+            "task.reassign_denied", "Only the creator or assignee can reassign this task"
+        )
     doc.assignee = _AssigneeDoc(
         kind=body.assignee_kind,
         id=body.assignee_id,
@@ -503,6 +572,41 @@ async def list_for_agent_runtime(
     return [task_to_dto(_to_domain(d)) for d in docs]
 
 
+async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
+    """Validate that ``project_id`` exists in the workspace. Lazy-imports
+    the projects service to avoid circular imports at module load and to
+    degrade silently on forks that predate the Projects entity.
+    """
+    try:
+        from ee.cloud.projects import service as projects_service
+    except Exception:
+        return
+    ok = await projects_service.exists_in_workspace(workspace_id, project_id)
+    if not ok:
+        from ee.cloud._core.errors import NotFound as _NotFound
+
+        raise _NotFound("project", project_id)
+
+
+async def unassign_project_on_tasks(workspace_id: str, project_id: str) -> int:
+    """Soft-unassign every task in ``workspace_id`` whose ``project_id``
+    matches. Called by ``projects.service.agent_delete`` when a project
+    is removed — tasks keep their data, only the project reference
+    clears. Returns the number of rows updated.
+
+    Stays inside the tasks service so the 4-file rule holds (only
+    ``tasks/service.py`` may write to the Task Beanie collection).
+    """
+    if not workspace_id or not project_id:
+        return 0
+    collection = _TaskDoc.get_pymongo_collection()
+    result = await collection.update_many(
+        {"workspace_id": workspace_id, "project_id": project_id},
+        {"$set": {"project_id": None}},
+    )
+    return getattr(result, "modified_count", 0) or 0
+
+
 __all__ = [
     "agent_block_task",
     "agent_claim_task",
@@ -512,6 +616,8 @@ __all__ = [
     "agent_list_tasks",
     "agent_reassign_task",
     "agent_reassign_task_cycle",
+    "agent_set_task_cycle",
     "agent_update_task",
     "list_for_agent_runtime",
+    "unassign_project_on_tasks",
 ]

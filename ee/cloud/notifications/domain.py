@@ -31,6 +31,7 @@ class NotificationSource:
     type: str
     id: str
     pocket_id: str | None = None
+    room_id: str | None = None
 
 
 @dataclass(frozen=True)

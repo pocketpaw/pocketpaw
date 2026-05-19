@@ -54,6 +54,10 @@ class Cycle(TimestampedDocument):
     # pocket for filtering; tasks with any pocket assignment can reference
     # the cycle as long as the workspace matches.
     pocket_id: str | None = None
+    # Optional Mission Control Project the cycle is grouped under. Same
+    # backwards-compat story as Pocket / Task — None means "no project
+    # assigned" so existing cycles read back unchanged.
+    project_id: str | None = None
     start: date
     end: date
     status: str = Field(default="upcoming", pattern="^(active|upcoming|completed)$")

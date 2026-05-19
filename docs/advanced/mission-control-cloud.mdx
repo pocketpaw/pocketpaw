@@ -1,0 +1,167 @@
+---
+title: "Mission Control (Cloud): operator console for the SaaS surface"
+description: "Mission Control (Cloud) is the operator console for the PocketPaw enterprise cloud — Tray, Pawprints, Snags, Projects, Cycles. Workspace-scoped REST API + SSE event stream, backed by MongoDB."
+section: Advanced
+ogType: article
+keywords: ["mission control", "cloud", "saas", "operator console", "tray", "pawprints", "cycles", "projects"]
+tags: ["advanced", "cloud", "saas", "operator"]
+---
+
+# Mission Control (Cloud)
+
+<Callout type="info">
+**Different surface from the local Mission Control.** The page at [/advanced/mission-control](/advanced/mission-control) describes the *local multi-agent orchestration framework* — file-based JSON storage at `~/.pocketpaw/mission_control/`, single-process, used by Deep Work and CLI tooling.
+
+This page describes the **cloud SaaS surface**: workspace-scoped REST API + MongoDB-backed entities, served by the enterprise dashboard at `pocketpaw/ee/cloud/`. The two surfaces share a name (and a mental model) but no code paths.
+</Callout>
+
+Mission Control (Cloud) is the operator console for the PocketPaw enterprise cloud. It projects every kind of work the operator can see — Nudges waiting for approval, Tasks in flight, Cycles in progress, Pawprints already shipped — into a unified work-item feed, scoped to the active workspace.
+
+## Vocabulary
+
+| Term | Meaning |
+|------|---------|
+| **Tray** | Items awaiting human approval (Nudges from Instinct). |
+| **Pawprints** | Items already approved, rejected, or executed (audit projection). |
+| **Snags** | Items that failed or are blocked — recoverable. |
+| **Agents** | Tasks currently in flight, claimed by an agent runtime. |
+| **Cycle** | A time-boxed work window — Linear-style. Carries a burnup chart fed by the daily snapshot job. |
+| **Project** | A workspace-scoped grouping of pockets, tasks, and cycles. Optional reference everywhere. |
+| **Pocket** | The canvas / workspace surface. Pockets live inside a workspace and optionally inside a Project. |
+| **Nudge** | A pending action proposed by Instinct, surfaced in the Tray for human approval. |
+
+## Hierarchy
+
+```
+Workspace
+  └── Project (optional)
+        └── Pocket
+              └── Cycle (optional, pocket-scoped)
+              └── Task (optional, can attach to Project, Pocket, Cycle, or none)
+```
+
+Every level except the workspace is optional. A task created without a `project_id`, `pocket_id`, or `cycle_id` lands in the workspace-wide "unassigned" bucket and still shows up in Mission Control. The frontend rolls items up into project / cycle / pocket buckets as the operator drills down.
+
+## WorkItem shape
+
+`GET /api/v1/mission-control/items` returns a list of `WorkItem` records — the unified projection over Instinct nudges + the Tasks entity. Every entry carries:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | string | Prefixed: `nudge:<action_id>` or `task:<task_id>`. |
+| `workspace_id` | string | Always the caller's active workspace. |
+| `section` | enum | `tray` / `pawprints` / `snags` / `agents`. |
+| `status` | enum | `awaiting_approval` / `approved` / `rejected` / `in_progress` / `done` / `blocked` / `failed`. |
+| `title` | string | The headline shown in the feed row. |
+| `description` | string | Subtitle / recommendation text. |
+| `assignee_kind` | enum | `user` or `agent`. |
+| `assignee_id` | string | Workspace member id or agent runtime id. |
+| `pocket_id` | string \| null | The pocket the work attaches to (if any). |
+| `agent_id` | string \| null | The agent runtime that proposed / picked up the work. |
+| `source_kind` | string | `nudge` (Instinct) or `task` (Tasks entity). |
+| `source_id` | string | The id in the source store, without the prefix. |
+| `priority` | string | `low` / `normal` / `high` / `urgent` (Tasks) or `low` / `medium` / `high` / `critical` (Instinct). |
+| `created_at`, `updated_at` | datetime | UTC ISO-8601. |
+| `fabric_refs` | string[] | Fabric object ids linked from the source. |
+
+## REST endpoints
+
+All routes are mounted at `/api/v1/` and require Bearer auth + an active workspace. Errors flow as `CloudError` JSON envelopes (`{"error": {"code": ..., "message": ...}}`), never raw `HTTPException`.
+
+### Mission Control façade
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/mission-control/items` | List work items. Query: `section`, `agent`, `pocket`, `project_id`, `limit`. |
+| `POST` | `/mission-control/items/bulk-approve` | Approve N pending nudges. Body: `{ids, note?}`. |
+| `POST` | `/mission-control/items/bulk-reject` | Reject N pending nudges. Body: `{ids, reason}`. |
+| `POST` | `/mission-control/items/bulk-reassign` | Reassign N tasks. Body: `{ids, to: {kind, id, name?}}`. |
+| `POST` | `/mission-control/items/bulk-snooze` | Snooze N tasks. Body: `{ids, until_iso}`. |
+| `GET` | `/mission-control/outcomes` | Aggregated outcome counts. Query: `window` = `1h`/`24h`/`7d`. |
+| `GET` | `/mission-control/activity` | Live activity ticker. Query: `limit`. |
+
+### Tasks
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/tasks` | Create a task. |
+| `GET` | `/tasks` | List with filters: `assignee`, `assignee_kind`, `status`, `cycle_id`, `pocket_id`, `project_id`, `creator_id`, `limit`. |
+| `GET` | `/tasks/{id}` | Fetch one. |
+| `PATCH` | `/tasks/{id}` | Partial update. |
+| `POST` | `/tasks/{id}/claim` | Agent claims a `proposed` task. |
+| `POST` | `/tasks/{id}/complete` | Mark done or request approval. |
+| `POST` | `/tasks/{id}/block` | Pause with a reason (Snag). |
+| `POST` | `/tasks/{id}/reassign` | Hand off to another assignee. |
+
+### Cycles
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/cycles` | Create a cycle. |
+| `GET` | `/cycles` | List in the workspace. Query: `project_id`. |
+| `GET` | `/cycles/{id}` | Fetch one, including the daily burnup series. |
+| `PATCH` | `/cycles/{id}` | Edit metadata (upcoming cycles only for dates / name). |
+| `POST` | `/cycles/{id}/close` | Mark `completed`, roll incomplete tasks forward. |
+| `GET` | `/cycles/{id}/items` | List the tasks attached to this cycle. |
+| `POST` | `/cycles/{id}/snapshot` | Manually trigger today's snapshot. Idempotent. |
+
+### Projects
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/projects` | Create a project. |
+| `GET` | `/projects` | List. Query: `status` (`active` / `archived`), `limit`. |
+| `GET` | `/projects/{id}` | Fetch one. |
+| `PATCH` | `/projects/{id}` | Partial update (`name`, `description`, `color`, `lead_id`, `status`). |
+| `POST` | `/projects/{id}/archive` | Soft-archive. Idempotent. |
+| `DELETE` | `/projects/{id}` | Hard-delete + soft-unassign children. |
+
+### Cascade behaviour on project delete
+
+Deleting a project soft-unassigns every Pocket, Task, and Cycle in the workspace where `project_id` matches the deleted project. Children are **not** cascade-deleted — historical work stays alive. Each child entity's own `*.updated` event fires per row so downstream listeners (search index, Pawprints projection) stay consistent.
+
+## SSE event surface
+
+The enterprise dashboard subscribes to a WebSocket at `/ws/cloud?token=...` and receives the realtime event types listed below. Mission Control's frontend patches its store directly from these events rather than refetching after every mutation.
+
+| Event | Carrier of |
+|-------|------------|
+| `task.proposed` | New `proposed` task — feeds the Tray for human assignees and the Agents pane for agent assignees. |
+| `task.updated` | Any patch (assignee, priority, due_at, project_id, etc.). |
+| `task.claimed` | Atomic `proposed → in_progress` flip. |
+| `task.resolved` | `done` or `awaiting_approval`. |
+| `task.blocked` | `blocked` with a reason — surfaces in Snags. |
+| `cycle.created` / `cycle.updated` / `cycle.closed` | Cycle lifecycle. |
+| `cycle.snapshotted` | New daily point — feeds the burnup chart. |
+| `project.created` / `project.updated` / `project.archived` / `project.deleted` | Project lifecycle. |
+| `pocket.created` / `pocket.updated` / `pocket.deleted` | Canvas lifecycle. |
+
+The bus uses an audience resolver (`ee.cloud._core.realtime.audience.AudienceResolver`) so each event fans out to exactly the recipients allowed to see it — workspace members for project / cycle events; creator + human assignee for task events.
+
+## Scheduler wiring
+
+The Cycles tab's burnup chart is fed by `ee.cloud.cycles.snapshot_job`. The job appends one (scope, started, completed) data point per active cycle per UTC day. It's idempotent within a calendar day — a second call on the same day is a no-op.
+
+### In-process scheduler (opt-in)
+
+Set `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true` to start an in-process `asyncio` loop at app boot. The loop sleeps until the next UTC midnight, then calls `snapshot_all_active` for every workspace that has at least one active cycle.
+
+```bash
+POCKETPAW_CLOUD_SCHEDULER_ENABLED=true uv run pocketpaw
+```
+
+Default is **off** so tests + dev shells don't spawn a perpetual background loop.
+
+### External scheduler (recommended for multi-instance deployments)
+
+Leave the in-process flag unset and dispatch `snapshot_all_active(workspace_id)` from your platform's scheduler — the same callable, same idempotency. The job module's docstring covers cron, Kubernetes CronJob, and Celery beat wiring patterns.
+
+### Manual trigger
+
+`POST /api/v1/cycles/{id}/snapshot` forces today's snapshot for one cycle. Useful for tests + intern-onboarding ("force a snapshot now to see the chart update"). Returns the newly-appended point on success, or `null` if today's point already existed.
+
+## See also
+
+- [Mission Control (local)](/advanced/mission-control) — the local Deep Work / orchestration framework.
+- [Pockets API](/api/get-pockets) — REST surface for the canvas entities.
+- [Deep Work](/advanced/deep-work) — the prep-and-execute pattern that drives Cycles.

@@ -1,5 +1,24 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated: 2026-05-17 — Mounts the workspace-scoped Audit entity at
+    ``/api/v1/audit`` (B1) with tenancy from ``RequestContext.workspace_id``,
+    the legacy ``/api/v1/runtime/audit`` remaining live; also mounts
+    ``CSRFMiddleware`` and the ``/auth/csrf`` token endpoint (#1117) so
+    cookie-auth callers echo ``X-CSRF-Token`` while Bearer-auth clients
+    (Tauri, MCP, scripts) bypass entirely — see ``ee/cloud/_core/csrf.py``.
+Updated: 2026-05-17 (pocketpaw#1118 P1) — Mounts the planner router
+    (``/api/v1/planner/run``, ``/api/v1/planner/by-project/{id}``).
+    The planner module wraps the OSS deep_work planner and lands its
+    output into cloud Projects / Tasks / FileUploads so workspace
+    operators can plan a project from Mission Control without
+    crossing into the OSS local-filesystem state.
+Updated: 2026-05-16 — Mission Control backend completion. Mounts the
+    Projects entity (workspace > project > pocket/task/cycle hierarchy)
+    and wires the in-process daily-snapshot scheduler, gated on
+    ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` (default false). Each
+    child entity (Pocket / Task / Cycle) now carries an optional
+    ``project_id`` reference; project delete soft-unassigns rather than
+    cascading the underlying work.
 Updated: 2026-05-13 — Mission Control cleanup PR. Lifted the 501 stubs
     on Mission Control's bulk-reassign / bulk-snooze (they now delegate
     to the Tasks service), added emit-or-no-event comments to the bulk
@@ -76,11 +95,23 @@ def init_realtime() -> None:
 def mount_cloud(app: FastAPI) -> None:
     """Mount all cloud domain routers, the error handler, and the
     request-timing middleware."""
+    from ee.cloud._core.csrf import CSRFMiddleware, csrf_router
     from ee.cloud._core.http import add_error_handler
     from ee.cloud._core.timing import TimingMiddleware
 
-    # Request-timing middleware first so it wraps every subsequent route
+    # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
+    # on inbound. Effective order here: CSRF → Timing → route handler.
+    # A CSRF 403 short-circuits before Timing observes the request, so perf
+    # data won't include rejected POSTs. That's a deliberate tradeoff: the
+    # CSRF gate exists to be fast and predictable, not measured. Reorder
+    # ONLY if you want Timing to wrap CSRF rejections (swap the two add_
+    # middleware calls — TimingMiddleware would then run outermost).
     app.add_middleware(TimingMiddleware)
+
+    # CSRF middleware — outermost on inbound, runs before any route.
+    # Cookie-auth callers must echo X-CSRF-Token; Bearer-auth callers
+    # (Tauri, MCP, scripts) bypass entirely. See ``ee/cloud/_core/csrf.py``.
+    app.add_middleware(CSRFMiddleware)
 
     # Global error handler — extracted to ee.cloud._core.http
     add_error_handler(app)
@@ -92,21 +123,29 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Import and mount domain routers
     from ee.cloud.agents.router import router as agents_router
+    from ee.cloud.audit.router import router as audit_router
     from ee.cloud.auth.router import router as auth_router
     from ee.cloud.chat.router import router as chat_router
     from ee.cloud.connectors.router import router as connectors_router
     from ee.cloud.cycles.router import router as cycles_router
     from ee.cloud.license import get_license_info
+    from ee.cloud.planner.router import router as planner_router
     from ee.cloud.pockets.router import router as pockets_router
+    from ee.cloud.projects.router import router as projects_router
     from ee.cloud.sessions.router import router as sessions_router
     from ee.cloud.workspace.router import router as workspace_router
 
     app.include_router(auth_router, prefix="/api/v1")
+    # CSRF token-mint endpoint sits alongside the rest of /auth/*.
+    app.include_router(csrf_router, prefix="/api/v1")
     app.include_router(workspace_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
+    app.include_router(audit_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
+    app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
 
@@ -140,6 +179,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(pockets_journal_stream_router, prefix="/api/v1")
 
     from ee.cloud.kb.router import router as kb_router
+    from ee.cloud.livekit.router import router as livekit_router
     from ee.cloud.mission_control.router import router as mission_control_router
     from ee.cloud.notifications.router import router as notifications_router
     from ee.cloud.tasks.router import router as tasks_router
@@ -153,6 +193,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(tasks_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
     app.include_router(mission_control_router, prefix="/api/v1")
+    app.include_router(livekit_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
@@ -377,12 +418,29 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_task_listeners()
 
-    # TODO: wire daily-snapshot scheduler — see ``ee.cloud.cycles.snapshot_job``
-    # for cron / Kubernetes CronJob / Celery beat wiring patterns. We
-    # deliberately do NOT spin up an in-process loop here; the host
-    # platform owns scheduling (its scheduler knows the tenant list and
-    # has the right retry / backoff semantics). Wiring lives in the
-    # deployment layer.
+    # In-process daily-snapshot scheduler — opt-in via env var.
+    #
+    # Default OFF in tests + dev (each pytest run would otherwise spawn a
+    # background loop that outlives the test). Production deployments set
+    # ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` to flip it on. Hosts that
+    # prefer external cron / Kubernetes CronJob / Celery beat (see the
+    # ``ee.cloud.cycles.snapshot_job`` docstring) leave the flag unset
+    # and dispatch the same ``snapshot_all_active`` callable from their
+    # platform scheduler.
+    import os as _os
+
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from ee.cloud.cycles.scheduler import start_in_process_scheduler
+
+        @app.on_event("startup")
+        async def _start_cycle_scheduler() -> None:
+            await start_in_process_scheduler(app)
+
+        @app.on_event("shutdown")
+        async def _stop_cycle_scheduler() -> None:
+            from ee.cloud.cycles.scheduler import stop_in_process_scheduler
+
+            await stop_in_process_scheduler(app)
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

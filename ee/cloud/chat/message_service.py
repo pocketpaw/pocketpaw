@@ -35,6 +35,7 @@ from ee.cloud.models.message import Mention as _MentionDoc
 from ee.cloud.models.message import Message as _MessageDoc
 from ee.cloud.models.message import Reaction as _ReactionDoc
 from ee.cloud.models.notification import NotificationSource
+from ee.cloud.models.user import User as _UserDoc
 from ee.cloud.notifications import service as notifications_service
 from ee.cloud.realtime.emit import emit
 from ee.cloud.realtime.events import (
@@ -44,6 +45,7 @@ from ee.cloud.realtime.events import (
     MessageReaction,
     MessageSent,
     MessageUiStateUpdated,
+    ThreadReply,
     UnreadUpdate,
 )
 from ee.cloud.shared.errors import Forbidden, NotFound
@@ -85,6 +87,8 @@ def _message_doc_to_domain(doc: _MessageDoc) -> _MessageDomain:
         mentions=tuple(_mention_to_domain(m) for m in doc.mentions),
         reply_to=doc.reply_to,
         thread_count=doc.thread_count,
+        thread_id=getattr(doc, "thread_id", None),
+        is_thread_parent=getattr(doc, "is_thread_parent", False),
         attachments=tuple(_attachment_to_domain(a) for a in doc.attachments),
         reactions=tuple(_reaction_to_domain(r) for r in doc.reactions),
         edited=doc.edited,
@@ -222,6 +226,8 @@ async def _create_group_message_doc(
     mentions: list[dict] | None = None,
     attachments: list[dict] | None = None,
     reply_to: str | None = None,
+    thread_id: str | None = None,
+    is_thread_parent: bool = False,
 ) -> _MessageDomain:
     """Insert a new group-context message."""
     mention_docs = [_MentionDoc(**m) for m in mentions or []]
@@ -236,6 +242,8 @@ async def _create_group_message_doc(
         mentions=mention_docs,
         attachments=attachment_docs,
         reply_to=reply_to,
+        thread_id=thread_id,
+        is_thread_parent=is_thread_parent,
     )
     await doc.insert()
     return _message_doc_to_domain(doc)
@@ -328,6 +336,8 @@ def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) ->
         "replyTo": msg.reply_to,
         "replyPreview": _reply_preview(parent) if msg.reply_to else None,
         "threadCount": msg.thread_count,
+        "threadId": getattr(msg, "thread_id", None),
+        "isThreadParent": getattr(msg, "is_thread_parent", False),
         "attachments": [a.model_dump() for a in msg.attachments],
         "reactions": [r.model_dump() for r in msg.reactions],
         "edited": msg.edited,
@@ -370,6 +380,14 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
     group = await _get_group_or_404(group_id)
     _require_can_post(group, user_id)
 
+    # Enforce per-member posting restrictions
+    member_role = group_service._role_for(group, user_id)
+    if member_role == "post_no_media" and body.attachments:
+        raise Forbidden(
+            "group.attachments_disabled",
+            "Your role does not allow sending file attachments",
+        )
+
     if group.archived:
         raise Forbidden("group.archived", "Cannot send messages to an archived group")
 
@@ -381,6 +399,7 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         mentions=body.mentions,
         attachments=body.attachments,
         reply_to=body.reply_to,
+        thread_id=body.thread_id,
     )
 
     bumped_at = domain_msg.created_at or datetime.now(UTC)
@@ -426,6 +445,43 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         await asyncio.gather(*unread_tasks)
 
     group_name = getattr(group, "name", "") or ""
+
+    # --- In-app notification: create for DM and group messages ---
+    group_type = getattr(group, "type", "")
+    is_dm = group_type == "dm"
+
+    # Only create notifications for non-self messages
+    notif_recipients = [m for m in group.members if m != user_id]
+    if notif_recipients:
+        try:
+            sender_doc = await _UserDoc.get(PydanticObjectId(user_id))
+            sender_name = sender_doc.full_name or sender_doc.email or "Someone"
+        except (ValueError, AttributeError):
+            sender_name = "Someone"
+
+        title = (
+            f"New message from {sender_name}" if is_dm
+            else f"New message in #{group_name}" if group_name
+            else "New message"
+        )
+
+        notif_tasks = [
+            notifications_service.create(
+                workspace_id=str(group.workspace),
+                recipient=member,
+                kind="message",
+                title=title,
+                body=body.content[:200],
+                source=NotificationSource(
+                    type="message",
+                    id=domain_msg.id,
+                    pocket_id=None,
+                    room_id=group_id,
+                ),
+            )
+            for member in notif_recipients
+        ]
+        await asyncio.gather(*notif_tasks)
     broadcast_types = {"here", "channel", "everyone"}
     recipients: set[str] = set()
 
@@ -453,6 +509,7 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
                 type="message",
                 id=domain_msg.id,
                 pocket_id=None,
+                room_id=group_id,
             ),
         )
         await unread_service.bump_mention(target, group_id)
@@ -573,7 +630,11 @@ async def toggle_reaction(message_id: str, user_id: str, emoji: str) -> dict:
             kind="reaction",
             title=f"{emoji} on your message",
             body=(domain_msg.content or "")[:200],
-            source=NotificationSource(type="message", id=domain_msg.id),
+            source=NotificationSource(
+                type="message",
+                id=domain_msg.id,
+                room_id=cast(str, domain_msg.group),
+            ),
         )
 
     return message_to_wire_dict(domain_msg)
@@ -771,6 +832,246 @@ async def get_thread(message_id: str, user_id: str) -> list[dict]:
 
     replies = await _list_replies(msg.id)
     return [message_to_wire_dict(r) for r in replies]
+
+# ---------------------------------------------------------------------------
+# Thread operations
+# ---------------------------------------------------------------------------
+
+
+async def create_thread(
+    group_id: str, user_id: str, message_id: str
+) -> dict:
+    """Create a thread from a message.
+
+    Marks the message as a thread parent and adds the message id to the
+    group's active_threads list. Returns the parent message dict.
+    """
+    from ee.cloud.chat.dto import message_to_wire_dict
+
+    group = await _get_group_or_404(group_id)
+    _require_can_post(group, user_id)
+
+    msg = await _MessageDoc.get(PydanticObjectId(message_id))
+    if not msg or msg.deleted or msg.context_type != "group" or msg.group != group_id:
+        raise NotFound("message", message_id)
+
+    # Mark the message as a thread parent
+    if not msg.is_thread_parent:
+        msg.is_thread_parent = True
+        # Bump thread_count to indicate it has replies (even if 0 yet)
+        await msg.save()
+
+    # Add to the group's active_threads list if not already there
+    if message_id not in group.active_threads:
+        group.active_threads.append(message_id)
+        await group.save()
+
+    domain_msg = _message_doc_to_domain(msg)
+    wire = message_to_wire_dict(domain_msg)
+
+    await emit(
+        ThreadReply(
+            data={
+                "type": "thread.created",
+                "group_id": group_id,
+                "message_id": message_id,
+                "message": wire,
+            }
+        )
+    )
+
+    return wire
+
+
+async def get_active_threads(group_id: str, user_id: str) -> list[dict]:
+    """List active (non-closed) threads in a group.
+
+    Returns thread parent messages ordered by most recent thread activity.
+    Includes a ``replyCount`` and ``lastReplyAt`` field on each item.
+    """
+    from ee.cloud.chat.dto import message_to_wire_dict
+
+    group = await _get_group_or_404(group_id)
+    if group.type in ("private", "dm"):
+        _require_group_member(group, user_id)
+
+    if not group.active_threads:
+        return []
+
+    # Fetch all thread parent messages
+    oids: list[PydanticObjectId] = []
+    for tid in group.active_threads:
+        try:
+            oids.append(PydanticObjectId(tid))
+        except Exception:
+            continue
+
+    if not oids:
+        return []
+
+    parent_docs = await _MessageDoc.find({"_id": {"$in": oids}, "deleted": False}).to_list()
+    parent_by_id = {str(p.id): p for p in parent_docs}
+
+    active_thread_ids = [str(p.id) for p in parent_docs]
+    if not active_thread_ids:
+        return []
+
+    # Single aggregation to get reply_count and last_reply_at for all active threads
+    pipeline = [
+        {"$match": {
+            "context_type": "group",
+            "thread_id": {"$in": active_thread_ids},
+            "deleted": False,
+        }},
+        {"$group": {
+            "_id": "$thread_id",
+            "reply_count": {"$sum": 1},
+            "last_reply_at": {"$max": "$createdAt"},
+        }},
+    ]
+    agg_cursor = _MessageDoc.aggregate(pipeline)
+    thread_stats: dict[str, dict] = {}
+    async for doc in agg_cursor:
+        tid = doc["_id"]
+        thread_stats[tid] = {
+            "reply_count": doc["reply_count"],
+            "last_reply_at": doc.get("last_reply_at"),
+        }
+
+    # Build response using the aggregated stats
+    result = []
+    for tid in active_thread_ids:
+        parent = parent_by_id[tid]
+        stats = thread_stats.get(tid, {})
+        reply_count = stats.get("reply_count", 0)
+        last_reply_at = stats.get("last_reply_at") or parent.createdAt
+
+        domain_msg = _message_doc_to_domain(parent)
+        wire = message_to_wire_dict(domain_msg)
+        wire["replyCount"] = reply_count
+        wire["lastReplyAt"] = iso_utc(last_reply_at)
+        result.append(wire)
+
+    # Sort by most recent reply first
+    result.sort(key=lambda x: x.get("lastReplyAt", "") or "", reverse=True)
+    return result
+
+
+async def close_thread(group_id: str, user_id: str, thread_id: str) -> None:
+    """Close/archive a thread.
+
+    Removes the thread parent message id from the group's active_threads.
+    The thread messages remain but the thread no longer appears in the
+    active threads list.
+    """
+    group = await _get_group_or_404(group_id)
+
+    # Only group admins/owner or thread author can close
+    if group.owner != user_id and group.member_roles.get(user_id) != "admin":
+        msg = await _MessageDoc.get(PydanticObjectId(thread_id))
+        if not msg or msg.deleted or str(msg.group) != group_id:
+            raise NotFound("thread", thread_id)
+        if msg.sender != user_id:
+            raise Forbidden(
+                "thread.not_authorized",
+                "Only group admins or the thread author can close a thread",
+            )
+
+    if thread_id not in group.active_threads:
+        raise NotFound("thread", thread_id)
+
+    group.active_threads.remove(thread_id)
+    await group.save()
+
+    await emit(
+        ThreadReply(
+            data={
+                "type": "thread.closed",
+                "group_id": group_id,
+                "thread_id": thread_id,
+            }
+        )
+    )
+
+
+async def get_thread_messages(
+    thread_id: str, user_id: str, *, group_id: str | None = None,
+    cursor: str | None = None, limit: int = 50,
+) -> dict:
+    """Get all messages in a thread, paginated oldest-first.
+
+    Includes the parent message as the first item.
+
+    If *group_id* is provided it is validated against the parent message's
+    stored group to prevent cross-group access via the URL parameter.
+    """
+    from ee.cloud.chat.dto import message_to_wire_dict
+
+    # Verify the thread parent exists and user can access
+    parent = await _message_get_domain(thread_id)
+    if not parent or parent.deleted or parent.context_type != "group" or not parent.group:
+        raise NotFound("thread", thread_id)
+
+    # If caller supplied a group_id URL param, assert it matches the
+    # parent message's actual group — prevents cross-group access.
+    if group_id is not None and str(parent.group) != group_id:
+        raise NotFound("thread", thread_id)
+
+    group = await _get_group_or_404(parent.group)
+    if group.type in ("private", "dm"):
+        _require_group_member(group, user_id)
+
+    # Build response: parent + thread replies
+    before_time: datetime | None = None
+    before_id: str | None = None
+    if cursor:
+        parts = cursor.split("|", 1)
+        if len(parts) == 2:
+            try:
+                before_time = datetime.fromisoformat(parts[0])
+                before_id = parts[1]
+            except ValueError:
+                before_time = None
+                before_id = None
+
+    # Fetch thread replies with cursor pagination (oldest-first after parent)
+    query: dict = {
+        "context_type": "group",
+        "thread_id": thread_id,
+        "deleted": False,
+    }
+    if before_time is not None and before_id is not None:
+        try:
+            cursor_oid = PydanticObjectId(before_id)
+        except Exception:
+            cursor_oid = None
+        if cursor_oid is not None:
+            query["$or"] = [
+                {"createdAt": {"$gt": before_time}},
+                {"createdAt": before_time, "_id": {"$gt": cursor_oid}},
+            ]
+
+    replies = (
+        await _MessageDoc.find(query)
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(limit + 1)
+        .to_list()
+    )
+
+    has_more = len(replies) > limit
+    if has_more:
+        replies = replies[:limit]
+
+    items = [message_to_wire_dict(parent)]
+    items.extend(message_to_wire_dict(_message_doc_to_domain(r)) for r in replies)
+
+    next_cursor: str | None = None
+    if has_more and replies:
+        last = replies[-1]
+        if last.createdAt:
+            next_cursor = f"{last.createdAt.isoformat()}|{str(last.id)}"
+
+    return {"items": items, "nextCursor": next_cursor, "hasMore": has_more}
 
 
 async def pin_message(group_id: str, user_id: str, message_id: str) -> None:
@@ -1020,13 +1321,17 @@ async def persist_assistant_message_for_scope(
 
 
 __all__ = [
+    "close_thread",
     "create_agent_message",
+    "create_thread",
     "delete_message",
     "delete_message_doc_by_id",
     "edit_message",
     "find_pocket_dedup_twin_id",
+    "get_active_threads",
     "get_messages",
     "get_thread",
+    "get_thread_messages",
     "list_recent_for_group",
     "patch_ui_state",
     "persist_assistant_message_for_scope",

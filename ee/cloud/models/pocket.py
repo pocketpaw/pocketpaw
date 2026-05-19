@@ -40,9 +40,16 @@ class Widget(BaseModel):
 
 
 class Pocket(TimestampedDocument):
-    """Pocket workspace with widgets, team, and ripple spec."""
+    """Pocket workspace with widgets, team, and ripple spec.
+
+    Updated: 2026-05-16 — added optional ``project_id`` so pockets can be
+    grouped under a Mission Control Project. Optional everywhere
+    (default None) to keep the migration backwards-compatible — existing
+    pockets read back as "no project assigned".
+    """
 
     workspace: Indexed(str)  # type: ignore[valid-type]
+    project_id: str | None = None
     name: str
     description: str = ""
     type: str = "custom"  # no pattern restriction — frontend sends data, deep-work, etc.

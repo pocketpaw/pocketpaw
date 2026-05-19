@@ -35,6 +35,7 @@ from ee.cloud.chat.schemas import (
     AddGroupAgentRequest,
     AddGroupMembersRequest,
     CreateGroupRequest,
+    CreateThreadRequest,
     EditMessageRequest,
     ReactRequest,
     SendMessageRequest,
@@ -290,6 +291,53 @@ async def get_thread(
     return await message_service.get_thread(message_id, user_id)
 
 
+# ---------------------------------------------------------------------------
+# Threads
+# ---------------------------------------------------------------------------
+
+
+@_licensed.post("/groups/{group_id}/threads")
+async def create_thread(
+    group_id: str,
+    body: CreateThreadRequest,
+    user_id: str = Depends(current_user_id),
+):
+    """Create a thread from a message. The message_id comes from the request body."""
+    return await message_service.create_thread(group_id, user_id, body.message_id)
+
+
+@_licensed.get("/groups/{group_id}/threads")
+async def list_active_threads(
+    group_id: str,
+    user_id: str = Depends(current_user_id),
+):
+    """List active threads in a group."""
+    return await message_service.get_active_threads(group_id, user_id)
+
+
+@_licensed.get("/groups/{group_id}/threads/{thread_id}/messages")
+async def get_thread_messages(
+    group_id: str,
+    thread_id: str,
+    user_id: str = Depends(current_user_id),
+    cursor: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+):
+    """Get all messages in a thread (parent + replies), oldest-first."""
+    return await message_service.get_thread_messages(thread_id, user_id, group_id=group_id, cursor=cursor, limit=limit)
+
+
+@_licensed.post("/groups/{group_id}/threads/{thread_id}/close")
+async def close_thread(
+    group_id: str,
+    thread_id: str,
+    user_id: str = Depends(current_user_id),
+):
+    """Close/archive a thread so it no longer appears in the active list."""
+    await message_service.close_thread(group_id, user_id, thread_id)
+    return {"ok": True}
+
+
 @_licensed.patch("/messages/{message_id}/ui-state")
 async def patch_message_ui_state(
     message_id: str,
@@ -531,6 +579,31 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             await _schedule_presence_offline(last_user)
 
 
+async def _ws_thread_create(user_id: str, msg: WsInbound) -> None:
+    if not msg.group_id or not msg.message_id:
+        return
+    await message_service.create_thread(msg.group_id, user_id, msg.message_id)
+
+
+async def _ws_thread_close(user_id: str, msg: WsInbound) -> None:
+    if not msg.group_id or not msg.message_id:
+        return
+    await message_service.close_thread(msg.group_id, user_id, msg.message_id)
+
+
+async def _ws_thread_send(user_id: str, msg: WsInbound) -> None:
+    if not msg.group_id or not msg.content or not msg.message_id:
+        return
+    body = SendMessageRequest(
+        content=msg.content,
+        thread_id=msg.message_id,  # the parent message id
+        reply_to=msg.reply_to,
+        mentions=msg.mentions,
+        attachments=msg.attachments,
+    )
+    await message_service.send_message(msg.group_id, user_id, body)
+
+
 async def _schedule_presence_offline(user_id: str) -> None:
     """Queue a delayed ``presence.offline`` broadcast.
 
@@ -582,6 +655,12 @@ async def _handle_ws_message(websocket: WebSocket, user_id: str, msg: WsInbound)
         pass  # Will be wired in Task 19
     elif msg.type == "read.ack":
         await _ws_read_ack(user_id, msg)
+    elif msg.type == "thread.create":
+        await _ws_thread_create(user_id, msg)
+    elif msg.type == "thread.close":
+        await _ws_thread_close(user_id, msg)
+    elif msg.type == "thread.send":
+        await _ws_thread_send(user_id, msg)
     elif msg.type == "room.join":
         if msg.group_id:
             members = await group_service.list_member_ids(msg.group_id)

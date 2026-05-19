@@ -533,6 +533,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocketpaw_tasks MCP server not registered: %s", exc)
 
+        # In-process MCP server: exposes the cloud Planner as a single
+        # ``plan_project`` tool. The agent invokes it to run the full
+        # deep_work planner against a workspace Project and receive the
+        # materialized PRD / tasks / agent gaps. Same lifecycle as the
+        # other in-process MCP servers above.
+        try:
+            from pocketpaw.agents.sdk_mcp_planner import build_planner_context_server
+
+            planner_server = build_planner_context_server()
+            if planner_server is not None:
+                name, cfg_entry = planner_server
+                servers[name] = cfg_entry
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocketpaw_planner MCP server not registered: %s", exc)
+
         # In-process MCP server: exposes ``pocket_specialist__create`` so the
         # main agent can hand a brief to the specialist tool, which runs
         # the full list/validate/persist workflow as an isolated specialist

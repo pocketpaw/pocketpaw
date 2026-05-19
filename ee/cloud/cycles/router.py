@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from ee.cloud._core.context import RequestContext, request_context
 from ee.cloud.cycles import service as cycles_service
 from ee.cloud.cycles.dto import (
     CreateCycleRequest,
+    CycleDailyPointResponse,
     CycleListItemResponse,
     CycleResponse,
     UpdateCycleRequest,
@@ -34,9 +35,10 @@ async def create_cycle(
 
 @router.get("", response_model=list[CycleListItemResponse])
 async def list_cycles(
+    project_id: str | None = Query(default=None),
     ctx: RequestContext = Depends(request_context),
 ) -> list[CycleListItemResponse]:
-    return await cycles_service.agent_list_cycles(ctx)
+    return await cycles_service.agent_list_cycles(ctx, project_id=project_id)
 
 
 @router.get("/{cycle_id}", response_model=CycleResponse)
@@ -78,3 +80,33 @@ async def list_cycle_items(
     unchanged once PR 2 ships.
     """
     return await cycles_service.agent_list_cycle_items(ctx, cycle_id)
+
+
+@router.post("/{cycle_id}/snapshot", response_model=CycleDailyPointResponse | None)
+async def snapshot_cycle(
+    cycle_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> CycleDailyPointResponse | None:
+    """Manually trigger today's snapshot for one cycle.
+
+    Useful for tests + intern-onboarding ("force a snapshot now to see
+    the chart update"). Idempotent: if today's point already exists, the
+    response body is ``null`` and no new point is appended. Returns the
+    newly-appended point on success.
+
+    Returns 404 when the cycle doesn't exist in the caller's workspace
+    (the tenancy guard inside ``_snapshot_cycle_daily`` raises NotFound,
+    which ``_core.http`` maps to the JSON envelope).
+    """
+    point = await cycles_service._snapshot_cycle_daily(ctx, cycle_id)
+    # _snapshot_cycle_daily returns None for "already snapshotted today"
+    # OR for "tasks unavailable". The frontend treats both as benign no-ops.
+    if point is None:
+        # Verify the cycle existed (else _fetch_in_workspace would have
+        # raised NotFound). Re-fetch only to surface a clearer 404 on a
+        # missing/cross-tenant id; the cycle does exist if we got here.
+        return None
+    return point
+
+
+__all__ = ["router"]

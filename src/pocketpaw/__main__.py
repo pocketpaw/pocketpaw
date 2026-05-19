@@ -381,8 +381,10 @@ def _serve(
     The probe binds to the same host the server will use, fixing the
     0.0.0.0 vs 127.0.0.1 mismatch. Scanning starts from the requested port,
     not from 8000, so fallback is always requested+N.
-    SO_REUSEADDR is deliberately not set on the probe socket so that
-    ports in TIME_WAIT are detected as busy and not handed to the server.
+    SO_REUSEADDR is set on the probe socket so it mirrors uvicorn's
+    behaviour — uvicorn sets SO_REUSEADDR on its own socket, so the probe
+    must do the same to correctly detect ports briefly held in TIME_WAIT
+    after a clean shutdown as available rather than skipping them.
     """
 
     import errno as _errno
@@ -390,10 +392,12 @@ def _serve(
 
     current_port = port
     for attempt in range(max_attempts):
-        # Best-effort probe using same host the server will bind to
+        # Best-effort probe using same host the server will bind to.
+        # SO_REUSEADDR mirrors uvicorn's default so that TIME_WAIT ports
+        # (briefly held after a clean Ctrl+C shutdown) are correctly
+        # detected as available and not skipped to port+1.
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-            # Do NOT set SO_REUSEADDR here — we want the probe to fail on
-            # ports in TIME_WAIT so we don't hand a busy port to the server.
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
             try:
                 s.bind((host, current_port))
             except OSError:

@@ -136,3 +136,120 @@ async def cloud_app_client() -> AsyncClient:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as client:
         yield client
+
+
+# ---------------------------------------------------------------------------
+# Audit fixtures — ee.cloud.audit entity (B1).
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def audit_store_tmp(tmp_path):
+    """Fresh AuditStore backed by a tmp SQLite file.
+
+    Tests that exercise the cloud audit entity inject this via
+    ``audit_service.agent_list_audit(ctx, body, store=...)`` so the
+    home-directory singleton (``get_audit_store``) is never touched.
+    """
+    from pocketpaw.audit.store import AuditStore
+
+    store = AuditStore(db_path=tmp_path / "audit.db")
+    yield store
+
+
+@pytest_asyncio.fixture
+async def make_audit_entry(audit_store_tmp):
+    """Factory that inserts an audit row scoped to a workspace.
+
+    The store's ``log_entry`` does not accept ``workspace_id`` directly;
+    workspace tenancy travels on ``context.workspace_id`` (the same JSON
+    column ``search_entries`` rolls up over). Tests stay terse:
+
+        await make_audit_entry("w1", action="x", description="...")
+    """
+
+    async def _make(
+        workspace_id: str,
+        *,
+        actor: str = "system",
+        action: str = "test.action",
+        category: str = "decision",
+        description: str = "test entry",
+        pocket_id: str | None = None,
+        context: dict | None = None,
+        metadata: dict | None = None,
+        status: str = "completed",
+    ) -> str:
+        merged_context = dict(context or {})
+        merged_context.setdefault("workspace_id", workspace_id)
+        return await audit_store_tmp.log_entry(
+            actor=actor,
+            action=action,
+            category=category,
+            description=description,
+            pocket_id=pocket_id,
+            context=merged_context,
+            metadata=metadata,
+            status=status,
+        )
+
+    return _make
+
+
+# ---------------------------------------------------------------------------
+# Plan session fixtures — ee.cloud.planner / mission_control plan-sessions
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def make_plan_session(mongo_db):  # noqa: ARG001 — fixture forces Beanie init
+    """Factory that inserts a ``PlanSession`` Beanie doc + a linked Project.
+
+    The drafts list endpoint resolves session ``name`` from the linked
+    Project, so the factory inserts both — callers that only care about
+    the session can ignore the returned project id.
+
+    Each call returns ``(plan_session_id, project_id)`` so tests can
+    correlate the inserted doc with its display name.
+    """
+
+    from ee.cloud.models.planner import PlanSession as _PlanSessionDoc
+    from ee.cloud.models.project import Project as _ProjectDoc
+
+    async def _make(
+        workspace_id: str,
+        *,
+        name: str = "Q2 Marketing Plan",
+        status: str = "ready",
+        task_ids: list[str] | None = None,
+        project_id: str | None = None,
+    ) -> tuple[str, str]:
+        # Insert the Project first so the listing endpoint can resolve
+        # the display name.
+        proj = _ProjectDoc(
+            workspace=workspace_id,
+            name=name,
+            description="",
+            color="",
+            lead_id=None,
+            status="active",
+            created_by="u1",
+        )
+        await proj.insert()
+        resolved_project_id = project_id or str(proj.id)
+
+        doc = _PlanSessionDoc(
+            workspace=workspace_id,
+            project_id=resolved_project_id,
+            status=status,
+            prd_file_id=None,
+            plan_file_id=None,
+            goal_file_id=None,
+            task_ids=list(task_ids or []),
+            agent_gaps=[],
+            dependency_warnings=[],
+        )
+        await doc.insert()
+        return str(doc.id), resolved_project_id
+
+    return _make

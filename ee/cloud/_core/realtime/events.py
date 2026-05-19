@@ -364,3 +364,47 @@ class CycleClosed(Event):
 @dataclass
 class CycleSnapshotted(Event):
     EVENT_TYPE: ClassVar[str] = "cycle.snapshotted"
+
+
+# Projects — Linear-style scoping primitive for Mission Control.
+# Pocket, Task, and Cycle entities carry an optional ``project_id``
+# pointer; mutating a project doesn't cascade-delete its children, it
+# just soft-unassigns them. Listeners (search index, dashboards) use
+# these events to refresh project-grouped views.
+@dataclass
+class ProjectCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "project.created"
+
+
+@dataclass
+class ProjectUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "project.updated"
+
+
+@dataclass
+class ProjectArchived(Event):
+    EVENT_TYPE: ClassVar[str] = "project.archived"
+
+
+@dataclass
+class ProjectDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "project.deleted"
+
+
+# Planner — fires after ``ee.cloud.planner.service.agent_plan_project``
+# finishes materializing the OSS PlannerResult into cloud primitives
+# (PRD file, plan.json, goal.md, tasks, agent-gap list). Listeners use
+# it to refresh the Mission Control Plan tab without polling.
+@dataclass
+class PlanGenerated(Event):
+    EVENT_TYPE: ClassVar[str] = "plan.generated"
+
+
+# Planner — fires after ``ee.cloud.planner.service.agent_resolve_gap``
+# reassigns the human-fallback tasks for a previously-missing agent spec
+# to a newly-created cloud Agent. Listeners refresh the Plan tab's
+# agent-gap card (removing the resolved spec) and the Mission Control
+# feed (rows whose assignee changed).
+@dataclass
+class PlanGapResolved(Event):
+    EVENT_TYPE: ClassVar[str] = "plan.gap_resolved"

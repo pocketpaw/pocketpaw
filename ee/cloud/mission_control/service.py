@@ -8,6 +8,26 @@
 # skip non-Task ids (Instinct Actions don't reassign or snooze). Also
 # tagged the per-bulk approve/reject loops with ``# no-event`` comments
 # so rule #9 is satisfied without redundant double-emits.
+# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
+# threaded ``task.blocked_by`` through the WorkItem projection. Each
+# dependency id is prefixed with ``task:`` so the frontend's heterogeneous
+# feed can link dependency edges to their corresponding WorkItem rows
+# without translating ids client-side.
+# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
+# ``agent_list_plan_sessions`` that delegates to
+# ``planner.service.list_plan_sessions`` (the only module allowed to
+# touch the PlanSession Beanie doc) and DTO-maps the typed summaries to
+# the wire envelope. Status vocabulary mapping (ready/stale ↔
+# draft/archived) lives here so the planner entity keeps its internal
+# vocabulary while Mission Control surfaces the operator's terms.
+# Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added
+# ``agent_create_cycle`` that backs POST /mission-control/cycles for the
+# rail's "+ New cycle" button. Parses the wire's ISO strings, derives
+# ``status`` from start/end relative to ``now`` (upcoming | active), and
+# delegates the actual Beanie write to ``cycles.service.agent_create_cycle``
+# — the single-owner rule (only ``ee.cloud.cycles.service`` may write to
+# the Cycle Beanie doc) is enforced by an import-linter forbidden
+# contract; the MC façade can never bypass it.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -43,7 +63,7 @@ Actions don't carry a polymorphic assignee or a due date.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from ee.api import get_instinct_store
@@ -58,13 +78,19 @@ from ee.cloud.mission_control.domain import (
 )
 from ee.cloud.mission_control.dto import (
     ActivityEventResponse,
+    AttachCycleItemsRequest,
+    AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
     BulkSnoozeRequest,
+    CreateCycleRequest,
     ListActivityRequest,
+    ListPlanSessionsRequest,
     ListWorkItemsRequest,
     OutcomesQueryRequest,
     OutcomeSummaryResponse,
+    PlanSessionDTO,
+    PlanSessionListResponse,
     WorkItemResponse,
     work_item_to_response,
 )
@@ -96,7 +122,7 @@ def _require_workspace(ctx: RequestContext) -> str:
     return ctx.workspace_id
 
 
-async def _visible_pocket_ids(ctx: RequestContext) -> set[str]:
+async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = None) -> set[str]:
     """Return the set of pocket ids the caller can see in their workspace.
 
     Drives the workspace filter on Instinct reads: a Nudge surfaces in
@@ -105,9 +131,15 @@ async def _visible_pocket_ids(ctx: RequestContext) -> set[str]:
     enforces ``workspace + (owner | shared_with | visibility)`` per
     pocket. If a pocket isn't visible at the pocket layer, its Nudges
     aren't visible at the Mission Control layer either.
+
+    ``project_id`` narrows the set to pockets in a single project (or to
+    "no project assigned" when an empty string is supplied). Threading
+    the filter down here is how Nudges inherit the project assignment
+    from their parent pocket — Instinct itself doesn't know about
+    projects, but it knows about pockets.
     """
     workspace_id = _require_workspace(ctx)
-    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id)
+    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id, project_id=project_id)
     return {p["_id"] for p in pockets if p.get("_id")}
 
 
@@ -174,6 +206,73 @@ def _trigger_assignee(action: Action) -> str | None:
     return None
 
 
+# Status maps for projecting Tasks into the unified WorkItem shape.
+_TASK_STATUS_MAP = {
+    "proposed": WorkItemStatus.IN_PROGRESS,
+    "in_progress": WorkItemStatus.IN_PROGRESS,
+    "awaiting_approval": WorkItemStatus.AWAITING_APPROVAL,
+    "done": WorkItemStatus.DONE,
+    "reverted": WorkItemStatus.REJECTED,
+    "failed": WorkItemStatus.FAILED,
+    "blocked": WorkItemStatus.BLOCKED,
+}
+
+
+def _task_section(task_status: str, assignee_kind: str) -> WorkItemSection:
+    """Bucket a Task into a Mission Control section.
+
+    Agents-in-flight covers any in-progress / proposed agent work.
+    Awaiting-approval lands in The Tray regardless of assignee.
+    Terminal states route to Pawprints / Snags. Human in-progress falls
+    through to TRAY — the frontend's section logic then splits "mine"
+    vs "delegated" by comparing the assignee id to the caller.
+    """
+    if task_status in ("done", "reverted"):
+        return WorkItemSection.PAWPRINTS
+    if task_status in ("failed", "blocked"):
+        return WorkItemSection.SNAGS
+    if task_status in ("proposed", "in_progress") and assignee_kind == "agent":
+        return WorkItemSection.AGENTS
+    return WorkItemSection.TRAY
+
+
+def _task_to_work_item(task: Any, workspace_id: str) -> WorkItem:
+    """Project a ``Task`` (or its DTO) into a Mission Control ``WorkItem``.
+
+    Accepts either a ``tasks.domain.Task`` or a ``TaskResponse`` DTO —
+    both expose the same field names so attribute access works on either.
+
+    ``blocked_by`` ids are prefixed with ``task:`` to match the
+    WorkItem id convention — the frontend can resolve a dependency edge
+    back to its WorkItem row without a translation step.
+    """
+    assignee = task.assignee
+    assignee_kind = AssigneeKind.AGENT if assignee.kind == "agent" else AssigneeKind.USER
+    status = _TASK_STATUS_MAP.get(task.status, WorkItemStatus.IN_PROGRESS)
+    section = _task_section(task.status, assignee.kind)
+    blocked_by_raw = getattr(task, "blocked_by", None) or ()
+    blocked_by = tuple(f"task:{dep_id}" for dep_id in blocked_by_raw)
+    return WorkItem(
+        id=f"task:{task.id}",
+        workspace_id=workspace_id,
+        section=section,
+        status=status,
+        title=task.title,
+        description=task.summary or "",
+        assignee_kind=assignee_kind,
+        assignee_id=assignee.id,
+        pocket_id=task.pocket_id or None,
+        agent_id=assignee.id if assignee.kind == "agent" else None,
+        source_kind="task",
+        source_id=task.id,
+        priority=task.priority,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        fabric_refs=(),
+        blocked_by=blocked_by,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public service API
 # ---------------------------------------------------------------------------
@@ -191,29 +290,53 @@ async def agent_list_work_items(
     """
     body = ListWorkItemsRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx)
-    if not visible:
-        return []
+    visible = await _visible_pocket_ids(ctx, project_id=body.project_id)
 
-    store = get_instinct_store()
-    # Pull pending + recent resolved in two reads. The pending list lives
-    # under the section=TRAY bucket; the audit projection covers the rest.
-    pending = await store.pending(pocket_id=body.pocket)
-    resolved = await store.list_actions(pocket_id=body.pocket, limit=200)
+    items: list[WorkItem] = []
 
-    actions: list[Action] = []
-    seen: set[str] = set()
-    for a in (*pending, *resolved):
-        if a.id in seen:
-            continue
-        if a.pocket_id not in visible:
-            continue
-        if body.agent and a.trigger.source != body.agent:
-            continue
-        seen.add(a.id)
-        actions.append(a)
+    # --- Instinct Nudges (pocket-scoped) -----------------------------------
+    # Nudges always live inside a pocket, so an empty visible set means
+    # there are no Nudges to show. Tasks below have their own workspace-
+    # level tenancy and are NOT gated by pocket visibility.
+    if visible:
+        store = get_instinct_store()
+        pending = await store.pending(pocket_id=body.pocket)
+        resolved = await store.list_actions(pocket_id=body.pocket, limit=200)
 
-    items = [_action_to_work_item(a, workspace_id) for a in actions]
+        actions: list[Action] = []
+        seen: set[str] = set()
+        for a in (*pending, *resolved):
+            if a.id in seen:
+                continue
+            if a.pocket_id not in visible:
+                continue
+            if body.agent and a.trigger.source != body.agent:
+                continue
+            seen.add(a.id)
+            actions.append(a)
+        items.extend(_action_to_work_item(a, workspace_id) for a in actions)
+
+    # --- Tasks (workspace-scoped) ------------------------------------------
+    # Lazy import keeps the façade installable on forks that haven't
+    # adopted the Tasks entity yet (matches the projects/_unassign_project
+    # pattern). Tasks live alongside Nudges in the unified feed.
+    try:
+        from ee.cloud.tasks import service as tasks_service
+        from ee.cloud.tasks.dto import ListTasksRequest
+    except ImportError:
+        logger.info("mission_control.list: tasks entity not installed; skipping")
+    else:
+        task_req = ListTasksRequest(
+            pocket_id=body.pocket,
+            project_id=body.project_id,
+            limit=200,
+        )
+        tasks = await tasks_service.agent_list_tasks(ctx, task_req)
+        for t in tasks:
+            if body.agent and (t.assignee.kind != "agent" or t.assignee.name != body.agent):
+                continue
+            items.append(_task_to_work_item(t, workspace_id))
+
     if body.section is not None:
         items = [it for it in items if it.section == body.section]
     # Stable order: newest first by created_at, falling back to id.
@@ -520,12 +643,275 @@ async def agent_bulk_snooze(
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
+# ---------------------------------------------------------------------------
+# Plan sessions — drafts list for the Mission Control Plan tab
+# ---------------------------------------------------------------------------
+
+
+# Doc-level → wire status. ``ready`` plans are the current materialized
+# plan for a project (operator can still review + ship), so they surface
+# as ``draft`` in the drafts list. ``stale`` plans were superseded by a
+# re-plan or marked outdated, so they land in ``archived``. There is no
+# ``active`` state in the doc today — reserved for "plan currently
+# executing" once the runtime ships it.
+_WIRE_STATUS_BY_DOC: dict[str, str] = {
+    "ready": "draft",
+    "stale": "archived",
+}
+
+# Inverse map for filtering: the wire filter ``?status=draft`` reads
+# back as the doc-level ``ready`` query. Unknown wire values produce
+# ``None`` and the service returns an empty list — the DTO regex on
+# the wire enum already catches typos before we get here.
+_DOC_STATUS_BY_WIRE: dict[str, str] = {v: k for k, v in _WIRE_STATUS_BY_DOC.items()}
+
+
+def _plan_session_to_dto(summary: Any) -> PlanSessionDTO:
+    """Map a ``PlanSessionSummary`` domain object to its wire DTO.
+
+    Status falls back to ``draft`` when the doc carries an unknown
+    value — defensive against future doc-level statuses we haven't
+    taught Mission Control about yet. Timestamps are serialized to
+    ISO-8601 with timezone so the frontend doesn't have to coerce
+    naive datetimes.
+    """
+    wire_status = _WIRE_STATUS_BY_DOC.get(summary.status, "draft")
+    return PlanSessionDTO(
+        id=summary.id,
+        name=summary.name,
+        status=wire_status,  # type: ignore[arg-type]
+        task_count=summary.task_count,
+        created_at=summary.created_at.isoformat(),
+        updated_at=summary.updated_at.isoformat(),
+    )
+
+
+async def agent_list_plan_sessions(
+    ctx: RequestContext, body: ListPlanSessionsRequest | dict[str, Any]
+) -> PlanSessionListResponse:
+    """List the workspace's persisted plan sessions for the drafts list.
+
+    Read-only — no Beanie writes here. Delegates to
+    ``planner.service.list_plan_sessions`` (the entity that owns the
+    PlanSession doc per ee/cloud Rule 2) and wire-maps the typed
+    summaries into the response envelope.
+
+    Tenancy:
+      - ``ctx.workspace_id`` is the source of truth; an empty / missing
+        workspace returns an empty envelope rather than 500ing. Routers
+        reject ``?workspace_id=`` query params before we get here.
+
+    # no-event: read-only per Rule 9.
+    """
+    body = ListPlanSessionsRequest.model_validate(body)
+    if not ctx.workspace_id:
+        return PlanSessionListResponse(sessions=[], total=0)
+
+    # Lazy import so the façade still installs cleanly on forks that
+    # disabled the planner entity (mirrors the Tasks branch in
+    # ``agent_list_work_items``). When planner is missing we surface an
+    # empty list — the drafts tab renders the empty-state copy without
+    # crashing the whole MC console.
+    try:
+        from ee.cloud.planner import service as planner_service
+    except ImportError:
+        logger.info("mission_control.plan_sessions: planner entity not installed")
+        return PlanSessionListResponse(sessions=[], total=0)
+
+    doc_status: str | None = None
+    if body.status is not None:
+        doc_status = _DOC_STATUS_BY_WIRE.get(body.status)
+        if doc_status is None:
+            # Wire status that doesn't map to any doc state today
+            # (``active`` until the runtime ships it). Return empty so
+            # the frontend doesn't break when the operator filters by
+            # a reserved-but-empty bucket.
+            return PlanSessionListResponse(sessions=[], total=0)
+
+    summaries = await planner_service.list_plan_sessions(ctx, status=doc_status, limit=body.limit)
+    dtos = [_plan_session_to_dto(s) for s in summaries]
+    return PlanSessionListResponse(sessions=dtos, total=len(dtos))
+
+
+# ---------------------------------------------------------------------------
+# Cycles — workspace-scoped create for the Mission Control rail's
+# "+ New cycle" button.
+# ---------------------------------------------------------------------------
+
+
+def _parse_wire_date(value: str, *, field_name: str) -> date:
+    """Parse an ISO-8601 date or datetime string into a ``date``.
+
+    The wire takes either "2026-05-19" (the raw <input type="date"> value
+    the frontend posts) or "2026-05-19T12:00:00Z" (a datetime, in case a
+    different caller serializes a JS ``Date`` straight to ISO). Invalid
+    strings surface as a 422 ``cycle.invalid_date`` so the operator gets
+    a clear error rather than a 500.
+
+    We accept both the bare date and the datetime forms by trying date
+    first then datetime — fromisoformat handles each in one pass without
+    a regex or third-party parser.
+    """
+    try:
+        # date.fromisoformat handles "2026-05-19" cleanly. It rejects
+        # "2026-05-19T12:00:00Z", which falls through to the datetime
+        # path below.
+        return date.fromisoformat(value)
+    except ValueError:
+        pass
+    try:
+        # Coerce trailing "Z" to "+00:00" so datetime.fromisoformat
+        # accepts the common JS toISOString() output.
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError as exc:
+        raise ValidationError(
+            "cycle.invalid_date",
+            f"{field_name} must be an ISO-8601 date or datetime; got {value!r}",
+        ) from exc
+
+
+def _derive_status_from_dates(start: date, end: date, *, today: date | None = None) -> str:
+    """Derive a cycle's status from its date range relative to today.
+
+    Rule (per spec): a cycle whose ``start`` is in the future is
+    ``upcoming``; one whose ``start`` has passed and ``end`` hasn't is
+    ``active``. ``completed`` is intentionally NOT derived here — it's
+    set by the separate close workflow (``cycles.service.agent_close_cycle``)
+    or by the daily snapshot job's auto-rollover, never by create.
+
+    A cycle whose ``end`` is already in the past at create time falls
+    through to ``upcoming`` — backfilling historical cycles isn't a
+    create-time concern, so we don't silently promote them to a
+    terminal state.
+    """
+    today = today or datetime.now(UTC).date()
+    if start <= today < end:
+        return "active"
+    return "upcoming"
+
+
+async def agent_create_cycle(
+    ctx: RequestContext, body: CreateCycleRequest | dict[str, Any]
+) -> Any:
+    """Create a cycle in the caller's workspace from the Mission Control rail.
+
+    Mirrors the audit + plan-sessions pattern: workspace tenancy from
+    ``ctx``, wire-friendly string dates, status derived from the parsed
+    range. The actual Beanie write happens inside
+    ``cycles.service.agent_create_cycle`` — single owner per ee/cloud
+    Rule 2, enforced by an import-linter contract that forbids
+    ``ee.cloud.models.cycle`` from this façade module.
+
+    Behavior:
+      - Reads ``ctx.workspace_id`` (rejected ``?workspace_id`` upstream
+        in the router).
+      - Parses ``start`` / ``end`` from ISO strings; surfaces invalid
+        strings as 422 ``cycle.invalid_date``.
+      - Requires ``start < end`` — 422 ``cycle.invalid_date_range`` when
+        violated.
+      - Derives ``status`` from the dates: future → ``upcoming``;
+        spanning now → ``active``.
+      - Delegates project tenancy + the actual write to the cycles
+        service, which already enforces project-in-workspace and emits
+        ``cycle.created`` on the bus.
+
+    Returns the cycles entity's ``CycleResponse`` directly — the
+    frontend's existing listCycles row shape matches verbatim so
+    ``cycles.unshift(response)`` works without re-fetch.
+    """
+    body = CreateCycleRequest.model_validate(body)
+
+    start = _parse_wire_date(body.start, field_name="start")
+    end = _parse_wire_date(body.end, field_name="end")
+    if start >= end:
+        raise ValidationError(
+            "cycle.invalid_date_range",
+            "start must be before end",
+        )
+
+    status = _derive_status_from_dates(start, end)
+
+    # Lazy import keeps the façade installable on forks that disabled
+    # the cycles entity (same pattern as the planner / tasks branches
+    # above). When cycles is missing we raise a clear 422 rather than
+    # a 500 — the operator's frontend renders the message.
+    try:
+        from ee.cloud.cycles import service as cycles_service
+        from ee.cloud.cycles.dto import CreateCycleRequest as CyclesCreateRequest
+    except ImportError as exc:
+        raise ValidationError(
+            "cycle.entity_unavailable",
+            "Cycles entity is not installed on this deployment.",
+        ) from exc
+
+    cycles_body = CyclesCreateRequest(
+        name=body.name,
+        description="",
+        pocket_id=None,
+        project_id=body.project_id,
+        start=start,
+        end=end,
+        status=status,  # type: ignore[arg-type]
+        scope=body.scope,
+    )
+    # The cycles service performs the Beanie write, validates project
+    # tenancy via ``_ensure_project_in_workspace`` (raises NotFound when
+    # the project isn't in this workspace), and emits ``cycle.created``
+    # — no second emit needed from here per Rule 9.
+    return await cycles_service.agent_create_cycle(ctx, cycles_body)
+
+
+async def agent_attach_cycle_items(
+    ctx: RequestContext,
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+) -> AttachCycleItemsResponse:
+    """Attach a batch of existing work items to a sprint.
+
+    Validates the sprint exists in the caller's workspace, then for each
+    item id calls the permission-relaxed ``tasks.service.agent_set_task_cycle``
+    helper. Items the caller can't see (wrong workspace, deleted, etc.)
+    are reported back as ``skipped`` rather than failing the whole batch.
+    """
+
+    body = AttachCycleItemsRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    # Lazy imports keep the cross-entity coupling on the call path so the
+    # ee/cloud entity-boundary lint can't get tripped on a top-level import.
+    from ee.cloud._core.errors import NotFound
+    from ee.cloud.cycles import service as cycles_service
+    from ee.cloud.tasks import service as tasks_service
+
+    # Tenancy check on the cycle itself: this raises NotFound if the sprint
+    # isn't in the caller's workspace, so the response can't mislead.
+    await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+
+    attached: list[str] = []
+    skipped: list[str] = []
+    for task_id in body.item_ids:
+        try:
+            await tasks_service.agent_set_task_cycle(ctx, task_id, cycle_id)
+            attached.append(task_id)
+        except NotFound:
+            skipped.append(task_id)
+
+    return AttachCycleItemsResponse(
+        attached=attached,
+        skipped=skipped,
+        cycle_id=cycle_id,
+    )
+
+
 __all__ = [
+    "agent_attach_cycle_items",
     "agent_bulk_approve",
     "agent_bulk_reassign",
     "agent_bulk_reject",
     "agent_bulk_snooze",
+    "agent_create_cycle",
     "agent_list_activity",
+    "agent_list_plan_sessions",
     "agent_list_work_items",
     "agent_outcomes_summary",
 ]

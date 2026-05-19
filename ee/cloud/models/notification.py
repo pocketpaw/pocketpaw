@@ -14,6 +14,7 @@ class NotificationSource(BaseModel):
     type: str
     id: str
     pocket_id: str | None = None
+    room_id: str | None = None
 
 
 class Notification(TimestampedDocument):

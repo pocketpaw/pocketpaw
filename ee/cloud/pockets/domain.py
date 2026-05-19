@@ -44,7 +44,13 @@ class Widget:
 
 @dataclass(frozen=True)
 class Pocket:
-    """Pocket workspace value object."""
+    """Pocket workspace value object.
+
+    Updated: 2026-05-16 — added optional ``project_id`` so pockets can be
+    grouped under a Mission Control Project. Optional (default None) so
+    existing pocket records — and callers that don't care about projects —
+    keep working unchanged.
+    """
 
     id: str
     workspace_id: str
@@ -63,6 +69,7 @@ class Pocket:
     share_link_access: str  # view | comment | edit
     shared_with: tuple[str, ...]
     tool_specs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    project_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

@@ -24,6 +24,7 @@ from ee.cloud.chat.schemas import (  # noqa: F401
     AddGroupAgentRequest,
     AddGroupMembersRequest,
     CreateGroupRequest,
+    CreateThreadRequest,
     CursorPage,
     EditMessageRequest,
     GroupResponse,
@@ -63,6 +64,8 @@ def message_to_wire_dict(m: Message, *, parent: Message | None = None) -> dict[s
         "replyTo": m.reply_to,
         "replyPreview": _reply_preview(parent) if m.reply_to else None,
         "threadCount": m.thread_count,
+        "threadId": m.thread_id,
+        "isThreadParent": m.is_thread_parent,
         "attachments": [
             {"type": a.type, "url": a.url, "name": a.name, "meta": dict(a.meta)}
             for a in m.attachments
@@ -153,6 +156,7 @@ def group_to_wire_dict(
         "slug": group.slug,
         "description": group.description,
         "type": group.type,
+        "visibility": group.visibility,
         "icon": group.icon,
         "color": group.color,
         "owner": group.owner,
@@ -160,6 +164,7 @@ def group_to_wire_dict(
         "memberRoles": dict(group.member_roles),
         "agents": populated_agents,
         "pinnedMessages": list(group.pinned_messages),
+        "activeThreads": list(group.active_threads),
         "archived": group.archived,
         "lastMessageAt": iso_utc(group.last_message_at),
         "messageCount": group.message_count,

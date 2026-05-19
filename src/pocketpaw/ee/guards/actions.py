@@ -175,6 +175,12 @@ ACTIONS: dict[str, ActionRule] = {
     # because per-route timing reveals traffic patterns and request
     # cadence that shouldn't be visible to every admin in a workspace.
     "admin.perf": ActionRule(WorkspaceRole.OWNER, "admin.access_denied"),
+    # Audit — workspace-scoped audit log read surface (ee.cloud.audit).
+    # ADMIN because audit entries can carry decision context, connector
+    # payloads, and AI recommendations that should not be visible to
+    # every workspace member. The role choice mirrors the existing
+    # abac.ACTION_ROLES["audit.read"] entry.
+    "audit.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
 }
 
 

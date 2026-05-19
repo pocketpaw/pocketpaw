@@ -7,6 +7,16 @@
 # bulk-reassign / bulk-snooze. Both now return a ``BulkActionResponse``
 # shape (``affected`` + ``skipped`` + ``bulk_id``) by delegating per-id
 # to the Tasks service.
+# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
+# ``GET /plan-sessions`` for the Plan tab drafts list. Rejects the
+# ``?workspace_id`` query param before DTO construction (tenancy from
+# auth ctx) per the Audit endpoint's pattern.
+# Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added
+# ``POST /cycles`` so the rail's "+ New cycle" button has a façade
+# endpoint to call. Rejects ``?workspace_id`` before DTO construction
+# (mirrors the audit + plan-sessions guard); the actual Beanie write
+# is delegated to ``cycles.service.agent_create_cycle`` via the MC
+# service so the cycles entity stays the sole owner of the write path.
 """Mission Control façade router.
 
 Thin per ee/cloud rule #4 — parses requests, delegates to
@@ -23,24 +33,34 @@ canonical URLs are:
   POST /api/v1/mission-control/items/bulk-snooze
   GET  /api/v1/mission-control/outcomes
   GET  /api/v1/mission-control/activity
+  GET  /api/v1/mission-control/plan-sessions
+  POST /api/v1/mission-control/cycles
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from ee.cloud._core.context import RequestContext, request_context
+from ee.cloud._core.errors import CloudError
+from ee.cloud.cycles.dto import CycleResponse
 from ee.cloud.license import require_license
 from ee.cloud.mission_control import service as mc_service
 from ee.cloud.mission_control.dto import (
     ActivityEventResponse,
+    AttachCycleItemsRequest,
+    AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
     BulkSnoozeRequest,
+    CreateCycleRequest,
     ListActivityRequest,
+    ListPlanSessionsRequest,
     ListWorkItemsRequest,
     OutcomesQueryRequest,
     OutcomeSummaryResponse,
+    PlanSessionListResponse,
+    PlanSessionStatus,
     WorkItemResponse,
 )
 
@@ -56,15 +76,24 @@ async def list_items(
     section: str | None = Query(None),
     agent: str | None = Query(None),
     pocket: str | None = Query(None),
+    project_id: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[WorkItemResponse]:
     """Workspace-aware work item feed.
 
-    Filters compose: ``section`` narrows to one pane; ``agent`` and
-    ``pocket`` further restrict; ``limit`` caps the projected list.
+    Filters compose: ``section`` narrows to one pane; ``agent``, ``pocket``,
+    and ``project_id`` further restrict; ``limit`` caps the projected list.
+    Pass ``project_id`` as an empty string to filter for "no project
+    assigned".
     """
-    body = ListWorkItemsRequest(section=section, agent=agent, pocket=pocket, limit=limit)
+    body = ListWorkItemsRequest(
+        section=section,
+        agent=agent,
+        pocket=pocket,
+        project_id=project_id,
+        limit=limit,
+    )
     return await mc_service.agent_list_work_items(ctx, body)
 
 
@@ -144,3 +173,88 @@ async def activity(
     """
     body = ListActivityRequest(limit=limit)
     return await mc_service.agent_list_activity(ctx, body)
+
+
+@router.post("/cycles", response_model=CycleResponse)
+async def create_cycle(
+    request: Request,
+    body: CreateCycleRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> CycleResponse:
+    """Create a workspace-scoped cycle from the Mission Control rail.
+
+    Mirrors the audit + plan-sessions endpoint patterns:
+      - Tenancy lives on the auth ctx; passing ``?workspace_id`` is a
+        400 ``cycles.workspace_id_forbidden`` rather than a silent leak.
+      - The wire body uses ISO-8601 strings for ``start`` / ``end`` so
+        a raw ``<input type="date">`` value posts directly.
+      - ``status`` is derived in the service from the parsed dates
+        (``upcoming`` vs ``active``); the wire intentionally doesn't
+        accept a status — the rail's flow is "create a new one" not
+        "backfill historical state".
+
+    The handler delegates straight to ``mc_service.agent_create_cycle``
+    which itself delegates the Beanie write to
+    ``ee.cloud.cycles.service.agent_create_cycle`` — single-owner rule
+    (Rule 2) holds, and the cycles service already emits
+    ``cycle.created`` so the frontend's live activity feed and the
+    rail's left list update via the bus.
+
+    Returns the cycles entity's ``CycleResponse`` directly so the
+    frontend can ``cycles.unshift(response)`` after the post and avoid
+    a re-fetch.
+    """
+    if "workspace_id" in request.query_params:
+        raise CloudError(
+            400,
+            "cycles.workspace_id_forbidden",
+            "workspace_id is taken from auth context, not query",
+        )
+    return await mc_service.agent_create_cycle(ctx, body)
+
+
+@router.post(
+    "/cycles/{cycle_id}/items/attach",
+    response_model=AttachCycleItemsResponse,
+)
+async def attach_cycle_items(
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> AttachCycleItemsResponse:
+    """Attach existing workspace work items to a sprint.
+
+    Powers the Mission Control "+ existing" picker in the sprint header.
+    Item ids the caller can't see (wrong workspace, deleted, etc.) are
+    reported back in ``skipped`` rather than failing the whole batch,
+    so a half-stale selection still partially succeeds.
+    """
+    return await mc_service.agent_attach_cycle_items(ctx, cycle_id, body)
+
+
+@router.get("/plan-sessions", response_model=PlanSessionListResponse)
+async def list_plan_sessions(
+    request: Request,
+    status: PlanSessionStatus | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    ctx: RequestContext = Depends(request_context),
+) -> PlanSessionListResponse:
+    """List the workspace's persisted plan sessions for the Plan tab drafts list.
+
+    Tenancy lives on the auth ctx — passing ``?workspace_id`` is a 400
+    rather than a silent leak. ``status`` filters to one drafts-list
+    bucket (``draft`` / ``active`` / ``archived``); the service maps to
+    the doc-level vocabulary internally.
+
+    Response keys: ``sessions`` (list of plan-session DTOs) + ``total``
+    (count of returned sessions). Empty workspaces return
+    ``{"sessions": [], "total": 0}`` with HTTP 200.
+    """
+    if "workspace_id" in request.query_params:
+        raise CloudError(
+            400,
+            "plan_sessions.workspace_id_forbidden",
+            "workspace_id is taken from auth context, not query",
+        )
+    body = ListPlanSessionsRequest(status=status, limit=limit)
+    return await mc_service.agent_list_plan_sessions(ctx, body)

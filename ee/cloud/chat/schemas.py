@@ -16,6 +16,7 @@ class CreateGroupRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = ""
     type: Literal["public", "private", "dm", "channel"] = "private"
+    visibility: Literal["public", "private"] = "public"
     member_ids: list[str] = Field(default_factory=list)
     icon: str = ""
     color: str = ""
@@ -29,15 +30,16 @@ class UpdateGroupRequest(BaseModel):
     # Toggle visibility — "private" (members-only) vs "public"/"channel"
     # (any workspace member can read). DMs cannot be retyped.
     type: Literal["public", "private", "channel"] | None = None
+    visibility: Literal["public", "private"] | None = None
 
 
 class AddGroupMembersRequest(BaseModel):
     user_ids: list[str]
-    role: Literal["edit", "view"] = "edit"
+    role: Literal["edit", "post_no_media", "view"] = "edit"
 
 
 class UpdateMemberRoleRequest(BaseModel):
-    role: Literal["edit", "view"]
+    role: Literal["edit", "post_no_media", "view"]
 
 
 class AddGroupAgentRequest(BaseModel):
@@ -50,11 +52,17 @@ class UpdateGroupAgentRequest(BaseModel):
     respond_mode: str
 
 
+class CreateThreadRequest(BaseModel):
+    """Create a thread from an existing message."""
+    message_id: str = Field(..., description="The message to use as thread parent")
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=10_000)
     reply_to: str | None = None
     mentions: list[dict] = Field(default_factory=list)
     attachments: list[dict] = Field(default_factory=list)
+    thread_id: str | None = None  # When set, this message is a reply in a thread
 
 
 class EditMessageRequest(BaseModel):
@@ -92,6 +100,8 @@ class MessageResponse(BaseModel):
     content: str
     mentions: list[dict]
     reply_to: str | None
+    thread_id: str | None = None
+    is_thread_parent: bool = False
     attachments: list[dict]
     reactions: list[dict]
     edited: bool
@@ -146,6 +156,9 @@ class WsInbound(BaseModel):
         "read.ack",
         "room.join",
         "room.leave",
+        "thread.create",
+        "thread.close",
+        "thread.send",
     ]
     group_id: str | None = None
     message_id: str | None = None

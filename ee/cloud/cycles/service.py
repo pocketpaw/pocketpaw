@@ -87,6 +87,7 @@ def _to_domain(doc: _CycleDoc) -> Cycle:
         completed=doc.completed,
         daily=tuple(_daily_to_domain(p) for p in doc.daily),
         created_by=doc.created_by,
+        project_id=getattr(doc, "project_id", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -113,6 +114,7 @@ def _to_list_response(c: Cycle) -> CycleListItemResponse:
         name=c.name,
         description=c.description,
         pocket_id=c.pocket_id,
+        project_id=c.project_id,
         start=c.start.isoformat(),
         end=c.end.isoformat(),
         status=c.status,
@@ -233,11 +235,15 @@ async def _has_active_overlap(
     """Return True if another active cycle on the same pocket overlaps the
     proposed range.
 
-    Decision (v1): we only block overlap on the **same pocket** — workspaces
-    routinely have multiple engagements in flight on different pockets at
-    the same time. Cycles with no ``pocket_id`` collide only with other
-    no-pocket cycles. Relaxing the rule entirely (allow any overlap) is
-    tracked as a follow-up if operators push back.
+    Decision (v1): we only block overlap on the **same pocket** —
+    workspaces routinely have multiple engagements in flight on
+    different pockets at the same time. Workspace-wide cycles (no
+    ``pocket_id``) were originally collapsed into a single
+    ``pocket_id=None`` bucket but as of 2026-05-19 the caller in
+    ``agent_create_cycle`` short-circuits this helper when
+    ``pocket_id is None``, so multiple workspace-wide cycles can run
+    in parallel — operators routinely do that across events,
+    workstreams, and experiments.
     """
     query: dict[str, Any] = {
         "workspace": workspace_id,
@@ -273,22 +279,36 @@ async def agent_create_cycle(ctx: RequestContext, body: CreateCycleRequest) -> C
     body = CreateCycleRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
 
-    if body.status == "active" and await _has_active_overlap(
-        workspace_id, body.pocket_id, body.start, body.end
+    # Overlap is a pocket-scoped constraint (one active sprint per pocket
+    # at a time). Workspace-wide cycles (no pocket_id) are allowed to
+    # coexist — operators routinely run multiple workspace-level cycles
+    # in parallel and getting blocked on first-create was the wrong
+    # default. (Local fix 2026-05-19; track follow-up to land formally.)
+    if (
+        body.status == "active"
+        and body.pocket_id is not None
+        and await _has_active_overlap(
+            workspace_id, body.pocket_id, body.start, body.end
+        )
     ):
         raise ConflictError(
             "cycle.overlap",
             "Another active cycle on the same pocket overlaps this date range",
         )
 
+    if body.project_id:
+        await _ensure_project_in_workspace(workspace_id, body.project_id)
+
     doc = _CycleDoc(
         workspace=workspace_id,
         name=body.name,
         description=body.description,
         pocket_id=body.pocket_id,
+        project_id=body.project_id,
         start=body.start,
         end=body.end,
         status=body.status,
+        scope=body.scope,
         created_by=ctx.user_id,
     )
     await doc.insert()
@@ -298,15 +318,24 @@ async def agent_create_cycle(ctx: RequestContext, body: CreateCycleRequest) -> C
     return response
 
 
-async def agent_list_cycles(ctx: RequestContext) -> list[CycleListItemResponse]:
+async def agent_list_cycles(
+    ctx: RequestContext, *, project_id: str | None = None
+) -> list[CycleListItemResponse]:
     """List cycles in the caller's workspace.
 
     Sorted by status (active → upcoming → completed) then ``start`` date
     descending — the Mission Control left list expects active engagements
     on top, then upcoming, then the historical archive most-recent-first.
+
+    ``project_id`` filter: empty string narrows to "no project assigned";
+    a non-empty value narrows to a single project; ``None`` (the default)
+    returns every cycle in the workspace.
     """
     workspace_id = _require_workspace(ctx)
-    docs = await _CycleDoc.find({"workspace": workspace_id}).to_list()
+    query: dict = {"workspace": workspace_id}
+    if project_id is not None:
+        query["project_id"] = project_id or None
+    docs = await _CycleDoc.find(query).to_list()
     domains = [_to_domain(d) for d in docs]
 
     status_rank = {"active": 0, "upcoming": 1, "completed": 2}
@@ -373,6 +402,12 @@ async def agent_update_cycle(
         doc.start = body.start
     if body.end is not None:
         doc.end = body.end
+    if body.project_id is not None:
+        if body.project_id:
+            await _ensure_project_in_workspace(doc.workspace, body.project_id)
+            doc.project_id = body.project_id
+        else:
+            doc.project_id = None
     await doc.save()
 
     response = _to_response(_to_domain(doc))
@@ -589,6 +624,64 @@ async def list_active_cycle_ids(workspace_id: str) -> list[str]:
     return ids
 
 
+async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
+    """Validate that ``project_id`` exists in the workspace. Lazy-imports
+    the projects service to avoid circular imports at module load and to
+    degrade silently on forks that predate the Projects entity.
+    """
+    try:
+        from ee.cloud.projects import service as projects_service
+    except Exception:
+        return
+    ok = await projects_service.exists_in_workspace(workspace_id, project_id)
+    if not ok:
+        raise NotFound("project", project_id)
+
+
+async def unassign_project_on_cycles(workspace_id: str, project_id: str) -> int:
+    """Soft-unassign every cycle in ``workspace_id`` whose ``project_id``
+    matches. Called by ``projects.service.agent_delete`` when a project
+    is removed — cycles keep their daily series and counters, only the
+    project reference clears. Returns the number of rows updated.
+
+    Stays inside the cycles service so the 4-file rule holds (only
+    ``cycles/service.py`` may write to the Cycle Beanie collection).
+    """
+    if not workspace_id or not project_id:
+        return 0
+    collection = _CycleDoc.get_pymongo_collection()
+    result = await collection.update_many(
+        {"workspace": workspace_id, "project_id": project_id},
+        {"$set": {"project_id": None}},
+    )
+    return getattr(result, "modified_count", 0) or 0
+
+
+async def list_active_workspace_ids() -> list[str]:
+    """Return every workspace id that has at least one active cycle.
+
+    Helper for the in-process daily-snapshot scheduler — kept inside the
+    service so the 4-file rule holds (only ``cycles/service.py`` may
+    touch the Beanie ``Cycle`` model). The scheduler iterates these ids
+    and calls ``snapshot_all_active(ws)`` per workspace.
+
+    Uses a Mongo distinct read for cheapness; the result is the set of
+    workspaces with active engagements right now, which is exactly what
+    the snapshot loop needs to iterate.
+    """
+    collection = _CycleDoc.get_pymongo_collection()
+    try:
+        ids = await collection.distinct("workspace", {"status": "active"})
+    except Exception:
+        # mongomock-motor and some older Motor versions return an awaitable
+        # cursor for ``distinct`` — fall back to a manual scan on error.
+        seen: set[str] = set()
+        async for doc in _CycleDoc.find({"status": "active"}):
+            seen.add(doc.workspace)
+        return sorted(seen)
+    return [i for i in (ids or []) if isinstance(i, str)]
+
+
 __all__ = [
     "agent_close_cycle",
     "agent_create_cycle",
@@ -597,5 +690,7 @@ __all__ = [
     "agent_list_cycles",
     "agent_update_cycle",
     "list_active_cycle_ids",
+    "list_active_workspace_ids",
+    "unassign_project_on_cycles",
     "_snapshot_cycle_daily",
 ]

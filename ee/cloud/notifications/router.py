@@ -27,13 +27,32 @@ async def list_notifications(
     return [notification_to_dto(n) for n in notes]
 
 
+@router.get("/unread-count")
+async def unread_count(
+    ctx: RequestContext = Depends(request_context),
+) -> dict:
+    """Return the unread notification count for the current user."""
+    count = await notifications_service.count_unread(ctx.user_id)
+    return {"count": count}
+
+
 @router.post("/{notification_id}/read")
+@router.patch("/{notification_id}/read")
 async def mark_read(
     notification_id: str,
     ctx: RequestContext = Depends(request_context),
 ) -> dict:
     await notifications_service.mark_read(notification_id, ctx.user_id)
     return {"ok": True}
+
+
+@router.post("/read-all")
+async def read_all(
+    ctx: RequestContext = Depends(request_context),
+) -> dict:
+    """Mark all notifications as read for the current user."""
+    count = await notifications_service.clear_all(ctx.user_id)
+    return {"cleared": count}
 
 
 @router.post("/clear")

@@ -68,6 +68,8 @@ dependencies = [
     # Promoted from optional extra to base dep in v0.3.1 integration work;
     # the runtime now takes a hard dependency on the journal primitives.
     "soul-protocol[engine]>=0.3.1",
+    "livekit-agents[codecs]>=1.5.9",
+    "livekit-plugins-deepgram>=1.5.9",
 ]
 
 [project.optional-dependencies]
@@ -608,12 +610,15 @@ source_modules = [
     "ee.cloud.mission_control.router",
     "ee.cloud.mission_control.dto",
     "ee.cloud.mission_control.domain",
+    "ee.cloud.mission_control.service",
 ]
 forbidden_modules = [
     "ee.cloud.models.pocket",
     "ee.cloud.models.notification",
     "ee.cloud.models.user",
     "ee.cloud.models.agent",
+    "ee.cloud.models.planner",
+    "ee.cloud.models.cycle",
 ]
 
 [[tool.importlinter.contracts]]
@@ -625,5 +630,39 @@ source_modules = [
     "ee.cloud.cycles.dto",
     "ee.cloud.cycles.domain",
     "ee.cloud.cycles.snapshot_job",
+    "ee.cloud.cycles.scheduler",
 ]
 forbidden_modules = ["ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "Projects — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.projects.router",
+    "ee.cloud.projects.dto",
+    "ee.cloud.projects.domain",
+]
+forbidden_modules = ["ee.cloud.models.project"]
+
+[[tool.importlinter.contracts]]
+name = "Planner — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.planner.router",
+    "ee.cloud.planner.dto",
+    "ee.cloud.planner.domain",
+]
+forbidden_modules = ["ee.cloud.models.planner"]
+
+[[tool.importlinter.contracts]]
+name = "Audit — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ee.cloud.audit.router",
+    "ee.cloud.audit.dto",
+    "ee.cloud.audit.domain",
+]
+forbidden_modules = ["ee.cloud.models.audit"]

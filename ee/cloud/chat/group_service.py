@@ -25,6 +25,8 @@ from ee.cloud.chat.schemas import (
 from ee.cloud.models.group import Group as _GroupDoc
 from ee.cloud.models.group import GroupAgent as _GroupAgentDoc
 from ee.cloud.models.group import MemberRole
+from ee.cloud.models.notification import NotificationSource
+from ee.cloud.notifications import service as notifications_service
 from ee.cloud.realtime.bus import get_resolver
 from ee.cloud.realtime.emit import emit
 from ee.cloud.realtime.events import (
@@ -65,10 +67,12 @@ def _group_doc_to_domain(doc: _GroupDoc) -> _GroupDomain:
         icon=doc.icon,
         color=doc.color,
         type=doc.type,
+        visibility=getattr(doc, "visibility", "public"),
         members=tuple(doc.members),
         member_roles=tuple(doc.member_roles.items()),
         agents=tuple(_group_agent_to_domain(a) for a in doc.agents),
         pinned_messages=tuple(doc.pinned_messages),
+        active_threads=tuple(getattr(doc, "active_threads", [])),
         owner=doc.owner,
         archived=doc.archived,
         last_message_at=doc.last_message_at,
@@ -151,11 +155,11 @@ def _require_group_admin(group: _GroupDoc, user_id: str) -> None:
     raise Forbidden("group.not_admin", "Only group admins can perform this action")
 
 
-def _role_for(group: _GroupDoc, user_id: str) -> Literal["owner", "admin", "edit", "view", "none"]:
+def _role_for(group: _GroupDoc, user_id: str) -> Literal["owner", "admin", "edit", "post_no_media", "view", "none"]:
     """Return the role of a user in a group.
 
     - "owner" if user_id == group.owner
-    - member_roles[user_id] if present ("admin" | "edit" | "view")
+    - member_roles[user_id] if present ("admin" | "edit" | "post_no_media" | "view")
     - "edit" if user is a member without an explicit role entry (back-compat default)
     - "none" if user is not a member
     """
@@ -164,7 +168,7 @@ def _role_for(group: _GroupDoc, user_id: str) -> Literal["owner", "admin", "edit
     if user_id not in group.members:
         return "none"
     explicit = group.member_roles.get(user_id)
-    if explicit in ("admin", "edit", "view"):
+    if explicit in ("admin", "edit", "post_no_media", "view"):
         return explicit  # type: ignore[return-value]
     return "edit"
 
@@ -177,6 +181,10 @@ def resolve_group_role(group: _GroupDoc, user_id: str) -> GroupRole:
     raw = _role_for(group, user_id)
     if raw == "none":
         raise Forbidden("group.not_member", "You are not a member of this group")
+    # Restriction roles (post_no_media) map to MEMBER for basic access — the
+    # posting restrictions are enforced at send time.
+    if raw == "post_no_media":
+        return GroupRole.MEMBER
     return GroupRole.from_str("edit" if raw == "edit" else raw)
 
 
@@ -292,6 +300,7 @@ async def _group_response(group: _GroupDoc) -> dict:
         "slug": group.slug,
         "description": group.description,
         "type": group.type,
+        "visibility": getattr(group, "visibility", "public"),
         "icon": group.icon,
         "color": group.color,
         "owner": group.owner,
@@ -369,14 +378,19 @@ async def _populate_lookups_for_domain_groups(
 
 
 async def _list_visible_in_workspace(workspace_id: str, user_id: str) -> list[_GroupDomain]:
-    """Public/channel groups in the workspace + private/DM groups
-    the user is a member of. Excludes archived."""
+    """Channels (public) and public groups in the workspace + private/DM groups
+    the user is a member of. Excludes archived. Private channels are only
+    surfaced to members who have been granted access."""
     docs = await _GroupDoc.find(
         {
             "workspace": workspace_id,
             "archived": False,
             "$or": [
-                {"type": {"$in": ["public", "channel"]}},
+                # Public groups and channels visible to all workspace members
+                {"type": "public"},
+                # Public channels (visibility not set, or set to "public")
+                {"type": "channel", "visibility": {"$ne": "private"}},
+                # Private groups, DMs, and private channels: membership required
                 {"members": user_id},
             ],
         }
@@ -422,6 +436,7 @@ async def _create_group_doc(
     description: str = "",
     icon: str = "",
     color: str = "",
+    visibility: str = "public",
     agents: list[tuple[str, str, str]] | None = None,
 ) -> _GroupDomain:
     """Insert a new group and return its domain projection.
@@ -443,6 +458,7 @@ async def _create_group_doc(
         slug=slug,
         description=description,
         type=type,
+        visibility=visibility,
         icon=icon,
         color=color,
         members=members,
@@ -460,6 +476,7 @@ async def _update_group_fields(
     slug: str | None = None,
     description: str | None = None,
     type: str | None = None,
+    visibility: str | None = None,
     icon: str | None = None,
     color: str | None = None,
     archived: bool | None = None,
@@ -475,6 +492,8 @@ async def _update_group_fields(
         doc.description = description
     if type is not None:
         doc.type = type
+    if visibility is not None:
+        doc.visibility = visibility
     if icon is not None:
         doc.icon = icon
     if color is not None:
@@ -516,12 +535,12 @@ async def _add_members_doc(
         if mid not in doc.members:
             doc.members.append(mid)
             newly_added.append(mid)
-        if role in ("admin", "view"):
+        if role in ("admin", "view", "post_no_media"):
             doc.member_roles[mid] = role  # type: ignore[assignment]
         elif role == "edit" and mid in doc.member_roles:
             doc.member_roles.pop(mid, None)
 
-    if newly_added or role in ("admin", "view"):
+    if newly_added or role in ("admin", "view", "post_no_media"):
         await doc.save()
     return _group_doc_to_domain(doc), newly_added
 
@@ -659,6 +678,7 @@ async def create_group(workspace_id: str, user_id: str, body: CreateGroupRequest
         slug=_generate_slug(name),
         owner=user_id,
         type=body.type,
+        visibility=body.visibility,
         members=members,
         description=body.description,
         icon=body.icon,
@@ -689,11 +709,11 @@ async def list_groups(workspace_id: str, user_id: str) -> list[dict]:
 
 
 async def get_group(group_id: str, user_id: str) -> dict:
-    """Get a single group. Private/DM groups require membership."""
+    """Get a single group. Private groups, DM, and private channels require membership."""
     from ee.cloud.chat.dto import group_to_wire_dict
 
     group = await _get_group_domain_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in ("private", "dm") or (group.type == "channel" and group.visibility == "private"):
         _require_domain_group_member(group, user_id)
     users_by_id, agents_by_id = await _populate_lookups_for_domain_groups([group])
     return group_to_wire_dict(group, users_by_id=users_by_id, agents_by_id=agents_by_id)
@@ -716,6 +736,7 @@ async def update_group(group_id: str, user_id: str, body: UpdateGroupRequest) ->
         slug=new_slug,
         description=body.description,
         type=new_type,
+        visibility=body.visibility,
         icon=body.icon,
         color=body.color,
     )
@@ -734,10 +755,16 @@ async def archive_group(group_id: str, user_id: str) -> None:
 
 
 async def join_group(group_id: str, user_id: str) -> None:
-    """Join a public group. Adds user to members list."""
+    """Join a public group or public channel. Adds user to members list.
+    Private channels must be joined via an invite flow."""
     from ee.cloud.chat.dto import group_to_wire_dict
 
     group = await _get_group_domain_or_404(group_id)
+    if group.type == "channel" and group.visibility == "private":
+        raise Forbidden(
+            "group.not_joinable",
+            "Private channels require an invite to join",
+        )
     if group.type not in ("public", "channel"):
         raise Forbidden(
             "group.not_joinable",
@@ -790,9 +817,23 @@ async def add_members(
 
     updated, newly_added = await _add_members_doc(group_id, member_ids, role=role)
 
+    group_name = updated.name or ""
+
     for added_user_id in newly_added:
         await emit(
             GroupMemberAdded(data={"group_id": group_id, "user_id": added_user_id, "role": role})
+        )
+        await notifications_service.create(
+            workspace_id=updated.workspace_id,
+            recipient=added_user_id,
+            kind="group_invite",
+            title=f"You were added to {group_name}" if group_name else "You were added to a group",
+            body="",
+            source=NotificationSource(
+                type="message",
+                id=group_id,
+                room_id=group_id,
+            ),
         )
     if newly_added:
         users_by_id, agents_by_id = await _populate_lookups_for_domain_groups([updated])
@@ -820,10 +861,10 @@ async def set_member_role(
     group_id: str, user_id: str, target_user_id: str, role: MemberRole
 ) -> MemberRole:
     """Set a member's role to "edit" / "view" / "admin". Owner only."""
-    if role not in ("admin", "edit", "view"):
+    if role not in ("admin", "edit", "view", "post_no_media"):
         raise ValidationError(
             "group.invalid_role",
-            f"Role must be one of 'admin', 'edit', 'view'; got {role!r}",
+            f"Role must be one of 'admin', 'edit', 'view', 'post_no_media'; got {role!r}",
         )
 
     group = await _get_group_domain_or_404(group_id)
@@ -1025,8 +1066,14 @@ async def seed_default_group(workspace_id: str, owner_id: str) -> _GroupDoc | No
 
 async def suggest_channels(workspace_id: str, q: str, *, limit: int = 8) -> list[dict]:
     """Return up to ``limit`` channel-type groups in the workspace that
-    match the prefix-ish query. Used by the @-mention picker."""
-    cquery: dict = {"workspace": workspace_id, "type": "channel", "archived": False}
+    match the prefix-ish query. Excludes private channels.
+    Used by the @-mention picker."""
+    cquery: dict = {
+        "workspace": workspace_id,
+        "type": "channel",
+        "archived": False,
+        "visibility": {"$ne": "private"},
+    }
     if q:
         cquery["$or"] = [
             {"name": {"$regex": q, "$options": "i"}},

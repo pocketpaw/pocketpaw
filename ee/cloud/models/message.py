@@ -63,6 +63,11 @@ class Message(TimestampedDocument):
     mentions: list[Mention] = Field(default_factory=list)
     reply_to: str | None = None
     thread_count: int = 0
+    # Threading: when set, this message is a reply within a thread whose
+    # parent is `thread_id`. When `is_thread_parent` is True, this message
+    # is the first message of a thread (the parent).
+    thread_id: str | None = None
+    is_thread_parent: bool = False
     attachments: list[Attachment] = Field(default_factory=list)
     reactions: list[Reaction] = Field(default_factory=list)
     edited: bool = False

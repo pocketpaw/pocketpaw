@@ -20,7 +20,7 @@ from typing import Literal
 # Mirror persistence-layer literals
 ContextType = Literal["pocket", "group", "session"]
 PocketRole = Literal["user", "assistant", "system"]
-MemberRole = Literal["view", "edit", "admin"]
+MemberRole = Literal["view", "edit", "post_no_media", "admin"]
 GroupType = Literal["public", "private", "dm", "channel"]
 
 
@@ -82,6 +82,8 @@ class Group:
     message_count: int
     created_at: datetime
     updated_at: datetime
+    visibility: str = "public"  # "public" | "private" — for channels
+    active_threads: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,8 @@ class Message:
     mentions: tuple[Mention, ...] = field(default_factory=tuple)
     reply_to: str | None = None
     thread_count: int = 0
+    thread_id: str | None = None
+    is_thread_parent: bool = False
     attachments: tuple[Attachment, ...] = field(default_factory=tuple)
     reactions: tuple[Reaction, ...] = field(default_factory=tuple)
     edited: bool = False
