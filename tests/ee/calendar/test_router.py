@@ -1,5 +1,13 @@
 # tests/ee/calendar/test_router.py — FastAPI router tests.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H3).
+#
+# Changes:
+# - Added test_list_events_malformed_starts_after_returns_422 — covers H3.
+#   Previously a non-ISO ``starts_after`` propagated a ``ValueError`` and
+#   became HTTP 500; with the FastAPI-native ``datetime`` query type the
+#   response is now 422 with the standard validation envelope.
+# - Added test_list_events_missing_starts_before_returns_422 — required
+#   query params are still required.
 #
 # Mount the router on a throwaway FastAPI app, install a global CloudError
 # handler (so we get the same envelope the real cloud app emits), and
@@ -217,3 +225,59 @@ def test_conflicts_endpoint(client, monkeypatch):
     assert body["event_id"] == "evt-1"
     assert body["severity"] == "low"
     assert body["conflicting_events"] == []
+
+
+# ---------------------------------------------------------------------------
+# H3 — datetime query parameter validation.
+# ---------------------------------------------------------------------------
+
+
+def test_list_events_malformed_starts_after_returns_422(client, monkeypatch):
+    """Malformed datetime → 422 (not 500). H3 of the #1132 audit.
+
+    Before the fix, the router called ``datetime.fromisoformat`` on the
+    raw string and let the ValueError bubble into the global handler as
+    HTTP 500. With the FastAPI-native ``datetime`` query type, Pydantic
+    rejects the input cleanly.
+    """
+    sentinel = AsyncMock()
+    monkeypatch.setattr(router_module, "svc_list_events", sentinel)
+
+    response = client.get(
+        "/api/v1/calendar/events",
+        params={
+            "starts_after": "not-a-date",
+            "starts_before": "2026-05-20T00:00:00",
+        },
+    )
+    assert response.status_code == 422, response.text
+    sentinel.assert_not_awaited()
+
+
+def test_list_events_malformed_starts_before_returns_422(client, monkeypatch):
+    """Same as above but on the other query param."""
+    sentinel = AsyncMock()
+    monkeypatch.setattr(router_module, "svc_list_events", sentinel)
+
+    response = client.get(
+        "/api/v1/calendar/events",
+        params={
+            "starts_after": "2026-05-19T00:00:00",
+            "starts_before": "not-a-date-either",
+        },
+    )
+    assert response.status_code == 422, response.text
+    sentinel.assert_not_awaited()
+
+
+def test_list_events_missing_starts_before_returns_422(client, monkeypatch):
+    """Both query params are required — omitting one yields 422."""
+    sentinel = AsyncMock()
+    monkeypatch.setattr(router_module, "svc_list_events", sentinel)
+
+    response = client.get(
+        "/api/v1/calendar/events",
+        params={"starts_after": "2026-05-19T00:00:00"},
+    )
+    assert response.status_code == 422
+    sentinel.assert_not_awaited()

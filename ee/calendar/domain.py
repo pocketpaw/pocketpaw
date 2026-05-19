@@ -1,5 +1,14 @@
 # Calendar module — domain value objects.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 M1-M3).
+#
+# Changes:
+# - Attendee.email now uses EmailStr (M3) — Pydantic's email-validator
+#   integration. Rejects malformed emails at the boundary instead of
+#   propagating them into the DB.
+# - Recurrence.rrule capped at 2048 chars (M1) — guards against
+#   pathological RRULE strings that could choke recurrence expansion.
+# - Recurrence.exceptions capped at 500 entries (M2) — guards against
+#   unbounded growth that would slow down conflict detection.
 #
 # Frozen Pydantic models representing the public calendar domain.
 # workspace_id is required on Event and Calendar — enforced at construction
@@ -11,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -48,7 +57,7 @@ class Attendee(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    email: str
+    email: EmailStr
     user_id: str | None = None
     name: str | None = None
     response: AttendeeResponse = AttendeeResponse.NEEDS_ACTION
@@ -61,12 +70,17 @@ class Recurrence(BaseModel):
     The master Event carries the rrule string; expansion happens at read time
     in recurrence.expand_recurrence(). Either `until` or `count` may be set;
     `rrule` may also encode its own terminator.
+
+    Length caps:
+      - rrule limited to 2048 chars (well above realistic RFC 5545 rules).
+      - exceptions limited to 500 entries (caps memory + conflict-detection
+        work for pathological inputs).
     """
 
     model_config = ConfigDict(frozen=True)
 
-    rrule: str
-    exceptions: list[datetime] = Field(default_factory=list)
+    rrule: str = Field(min_length=1, max_length=2048)
+    exceptions: list[datetime] = Field(default_factory=list, max_length=500)
     until: datetime | None = None
     count: int | None = None
 

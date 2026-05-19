@@ -1,5 +1,18 @@
 # Calendar module — free/busy availability computation.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H2).
+#
+# Changes (H2 — close the availability-oracle):
+# - compute_freebusy now accepts ``accessible_calendar_ids``: an optional
+#   set restricting which calendars contribute to the returned busy
+#   periods. Callers that have already verified the requester can read
+#   those calendars pass the resolved set; events on calendars outside
+#   the set are silently dropped from the result rather than appearing
+#   as a busy block. None preserves the legacy behaviour for callers
+#   that aren't ready to enforce yet.
+# - The function itself doesn't validate the attendee list — the service
+#   layer is the chokepoint for the "is this email known on a calendar
+#   I can see?" pre-validation (raises ValidationError before we get
+#   here).
 #
 # Given a workspace, a list of attendee emails, and a window, returns the
 # union of busy periods for each attendee. Single Mongo query with $in on
@@ -18,8 +31,16 @@ async def compute_freebusy(
     attendee_emails: list[str],
     starts_at: datetime,
     ends_at: datetime,
+    accessible_calendar_ids: set[str] | None = None,
 ) -> list[FreeBusy]:
     """Return per-attendee busy periods within [starts_at, ends_at).
+
+    ``accessible_calendar_ids`` (H2): when provided, only events whose
+    ``calendar_id`` is in the set contribute to the returned busy
+    periods. This closes the availability oracle — a requester only
+    sees busy blocks for calendars they could already read directly.
+    ``None`` keeps the legacy behaviour (return everything in the
+    workspace) and is reserved for trusted internal callers.
 
     Recurring events: this implementation queries the master rows only,
     which means recurring instances inside the window will appear as a
@@ -52,6 +73,12 @@ async def compute_freebusy(
     }
 
     for doc in overlapping:
+        # H2: skip events on calendars the caller can't read.
+        if (
+            accessible_calendar_ids is not None
+            and getattr(doc, "calendar_id", None) not in accessible_calendar_ids
+        ):
+            continue
         # Clip to window so callers don't see periods outside what they asked for.
         clipped_start = max(doc.starts_at, starts_at)
         clipped_end = min(doc.ends_at, ends_at)

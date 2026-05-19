@@ -1,5 +1,15 @@
 # tests/ee/calendar/test_service.py — service-layer tests.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142).
+#
+# Changes:
+# - Added ``fake_calendar_store`` (auto-applied) that patches
+#   ``_CalendarDoc`` to a stub returning ``None`` on every ``find_one``.
+#   The service then falls back to its synthetic default calendar so
+#   existing tests keep their pre-#1142 behaviour (within-workspace
+#   reads/writes by the caller still pass).
+# - update_event payload assertion lives in test_policy.py /
+#   test_update_event_changed_fields below — the bus event now carries
+#   ``changed_fields`` (names only), not raw content.
 #
 # Approach: we don't spin up real Mongo. Instead we replace _EventDoc at
 # the class level with a fake that mimics the small slice of Beanie we
@@ -192,6 +202,32 @@ def fake_store(monkeypatch) -> _FakeStore:
     return store
 
 
+class _FakeCalendarStore:
+    """Stand-in for ``_CalendarDoc``. By default returns ``None`` on every
+    ``find_one`` so the service falls back to its synthetic default
+    calendar (the bridge until Calendar CRUD ships). Individual tests can
+    set ``.rows`` to override and exercise the private/shared paths."""
+
+    def __init__(self) -> None:
+        self.rows: list[Any] = []
+
+    async def find_one(self, query: dict[str, Any]) -> Any | None:
+        for row in self.rows:
+            if all(getattr(row, k, None) == v for k, v in query.items() if not k.startswith("_")):
+                return row
+        return None
+
+
+@pytest.fixture(autouse=True)
+def fake_calendar_store(monkeypatch) -> _FakeCalendarStore:
+    """Patch ``_CalendarDoc`` to return ``None`` on every lookup so the
+    service exercises its synthetic-default fallback. Auto-applied to
+    every test in this module so existing behaviour is preserved."""
+    store = _FakeCalendarStore()
+    monkeypatch.setattr(service_module, "_CalendarDoc", store)
+    return store
+
+
 def _new_doc(
     store: _FakeStore,
     *,
@@ -337,15 +373,25 @@ async def test_get_event_cross_workspace_returns_404(ctx, other_ctx, fake_store)
 async def test_get_freebusy_multi_attendee(ctx, fake_store, monkeypatch):
     """Cover the freebusy path. compute_freebusy is patched because the
     fake store doesn't model the embedded-attendee $in filter that the
-    real Mongo query uses."""
+    real Mongo query uses. The H2 access-resolver is also patched so we
+    bypass the unknown-attendee gate (separately covered in
+    test_freebusy.py)."""
     from ee.calendar import service as svc
 
-    async def _fake_compute(workspace_id, attendee_emails, starts_at, ends_at):
+    async def _fake_compute(
+        workspace_id, attendee_emails, starts_at, ends_at, accessible_calendar_ids=None
+    ):
         from ee.calendar.domain import FreeBusy
 
         return [FreeBusy(attendee_email=e, busy_periods=[]) for e in attendee_emails]
 
+    async def _fake_access(ctx, *, attendee_emails, starts_at, ends_at):
+        # All emails resolve to the canonical "cal-1" — bypass the
+        # unknown-attendee gate so this test focuses on the happy path.
+        return {"cal-1"}
+
     monkeypatch.setattr(svc, "compute_freebusy", _fake_compute)
+    monkeypatch.setattr(svc, "_accessible_calendar_ids_with_email_match", _fake_access)
 
     body = FreeBusyRequest(
         attendee_emails=["a@example.com", "b@example.com"],

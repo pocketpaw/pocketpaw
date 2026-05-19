@@ -1,15 +1,21 @@
 # Calendar module — FastAPI router.
-# Created: 2026-05-19 (feat/calendar-module).
+# Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H3).
+#
+# Changes (H3):
+# - ``list_events`` now declares ``starts_after`` and ``starts_before`` as
+#   ``datetime`` query parameters directly. FastAPI parses them via
+#   Pydantic and returns a 422 on malformed input. Previously we received
+#   raw ``str`` and called ``datetime.fromisoformat`` unguarded, which
+#   bubbled a ``ValueError`` into the global handler as HTTP 500.
 #
 # Thin wrappers around service.py. No business logic here. The router is
 # the single mounting point — callers outside this module never touch
 # service.py directly. Errors raised by service propagate to the global
 # CloudError handler installed by ee.cloud (we never raise HTTPException).
-#
-# This PR does NOT mount the router into the cloud app. A separate PR will
-# wire it in (so we can roll out behind a feature flag).
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from starlette.responses import Response
@@ -74,18 +80,19 @@ async def create_event(
 
 @router.get("/events", response_model=EventListResponse)
 async def list_events(
-    starts_after: str,
-    starts_before: str,
+    starts_after: datetime,
+    starts_before: datetime,
     calendar_id: str | None = None,
     limit: int = 100,
     ctx: RequestContext = Depends(_ctx),
 ) -> EventListResponse:
-    from datetime import datetime
-
+    # H3: starts_after / starts_before are now declared as datetime — FastAPI
+    # parses them via Pydantic and returns 422 on malformed input. No more
+    # try/except around datetime.fromisoformat.
     body = ListEventsRequest(
         calendar_id=calendar_id,
-        starts_after=datetime.fromisoformat(starts_after),
-        starts_before=datetime.fromisoformat(starts_before),
+        starts_after=starts_after,
+        starts_before=starts_before,
         limit=limit,
     )
     return await svc_list_events(ctx, body)
