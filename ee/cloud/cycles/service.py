@@ -275,8 +275,17 @@ async def agent_create_cycle(ctx: RequestContext, body: CreateCycleRequest) -> C
     body = CreateCycleRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
 
-    if body.status == "active" and await _has_active_overlap(
-        workspace_id, body.pocket_id, body.start, body.end
+    # Overlap is a pocket-scoped constraint (one active sprint per pocket
+    # at a time). Workspace-wide cycles (no pocket_id) are allowed to
+    # coexist — operators routinely run multiple workspace-level cycles
+    # in parallel and getting blocked on first-create was the wrong
+    # default. (Local fix 2026-05-19; track follow-up to land formally.)
+    if (
+        body.status == "active"
+        and body.pocket_id is not None
+        and await _has_active_overlap(
+            workspace_id, body.pocket_id, body.start, body.end
+        )
     ):
         raise ConflictError(
             "cycle.overlap",
