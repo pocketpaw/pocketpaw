@@ -1,5 +1,16 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-05-20 — Fix concurrency lease race in run(). On every exit path
+  (the finally block AND the outer except handler) run() cleared the shared
+  self._client_in_use flag and nulled self._client unconditionally, so a
+  non-owning run — a stateless-fallback run, or one that failed before
+  acquiring the lease — would steal a still-streaming sibling persistent run's
+  lease and destroy its subprocess. run() now tracks ownership with a local
+  acquired_lease flag (declared above the try so it is in scope for the except
+  handler) and gates the flag clear and the persistent-client teardown on it
+  on both exit paths — only the run that actually acquired the lease may
+  release it or disconnect the shared subprocess. The event_stream.aclose()
+  in the finally is unaffected: a run always owns its own stream.
 Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
   tool calls (like memory save via Bash) hang on messaging channels (Telegram,
   Discord, Slack) because there's no terminal to approve permission prompts.
@@ -725,6 +736,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
         )
 
         _stderr_lines: list[str] = []
+
+        # Ownership flag — True only if THIS run acquired the shared
+        # _client_in_use lease. Declared above the try/except so it is always
+        # in scope in the except handler (an exception can fire before the
+        # dispatch block runs). Both the finally block and the except handler
+        # gate the lease clear and the persistent-client teardown on this so a
+        # non-owning run (stateless fallback, or a failure before acquisition)
+        # can never release a sibling's lease or destroy its subprocess.
+        acquired_lease = False
         try:
             # Resolve LLM provider early -- needed for routing + env.
             # Use per-backend provider setting (defaults to "anthropic").
@@ -1055,6 +1075,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             if not self._client_in_use:
                 try:
                     self._client_in_use = True
+                    acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
                         options, session_key=session_key
                     )
@@ -1077,10 +1098,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
                             "CLI stderr during persistent client failure:\n%s",
                             "\n".join(_stderr_lines),
                         )
-                    # Clear broken client so next call creates a fresh one
+                    # Clear broken client so next call creates a fresh one.
+                    # This run is falling back to stateless: it no longer owns
+                    # the persistent client, so drop the lease and the
+                    # ownership flag so the finally/except teardown below
+                    # cannot misfire on a client this run no longer holds.
                     self._client = None
                     self._client_options_key = None
                     self._client_in_use = False
+                    acquired_lease = False
                     _persistent_client = None
 
             if event_stream is None:
@@ -1244,7 +1270,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 # client, _resilient_receive handles this.  For the
                 # stateless path or early-break scenarios (stop flag),
                 # we still need to ensure the pipe is clean. ──
-                if _persistent_client is not None and not _saw_result and self._client is not None:
+                # Only a run that actually acquired the lease may tear down
+                # the shared persistent client — a stateless-fallback run does
+                # not own it and must leave a sibling's subprocess alone.
+                if (
+                    acquired_lease
+                    and _persistent_client is not None
+                    and not _saw_result
+                    and self._client is not None
+                ):
                     logger.warning(
                         "Main loop exited without ResultMessage — "
                         "destroying persistent client to avoid stale data"
@@ -1256,10 +1290,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     self._client = None
                     self._client_options_key = None
 
-                self._client_in_use = False
+                # Only release the lease if this run acquired it. Clearing it
+                # unconditionally would steal a sibling persistent run's lease.
+                if acquired_lease:
+                    self._client_in_use = False
                 logger.info(
-                    "SDK stream finished: %d events, _client_in_use=False",
+                    "SDK stream finished: %d events, _client_in_use=%s",
                     _event_count,
+                    self._client_in_use,
                 )
 
                 # ── Close the inner async generator LAST. ──
@@ -1296,10 +1334,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 for hint in ["bun has crashed", "panic", "switch on corrupt value"]
             )
 
-            # Clear client on any error
-            self._client = None
-            self._client_options_key = None
-            self._client_in_use = False
+            # Clear client on any error — but only if THIS run owned it.
+            # A non-owning run (stateless fallback, or a failure before
+            # lease acquisition) must not destroy a sibling persistent run's
+            # subprocess or release its lease on the error path.
+            if acquired_lease:
+                self._client = None
+                self._client_options_key = None
+                self._client_in_use = False
 
             if _is_bun_crash and not getattr(self, "_bun_retry_done", False):
                 self._bun_retry_done = True
