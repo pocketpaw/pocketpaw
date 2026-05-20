@@ -1,12 +1,15 @@
 """
 Claude Agent SDK backend for PocketPaw.
-Updated: 2026-05-20 — Fix concurrency lease race in run(). The finally block
-  cleared the shared self._client_in_use flag unconditionally, so a
-  stateless-fallback run finishing would steal a still-streaming sibling
-  persistent run's lease. run() now tracks ownership with a local
-  acquired_lease flag and gates both the flag clear and the persistent-client
-  teardown on it — only the run that actually acquired the lease may release it
-  or disconnect the shared subprocess.
+Updated: 2026-05-20 — Fix concurrency lease race in run(). On every exit path
+  (the finally block AND the outer except handler) run() cleared the shared
+  self._client_in_use flag and nulled self._client unconditionally, so a
+  non-owning run — a stateless-fallback run, or one that failed before
+  acquiring the lease — would steal a still-streaming sibling persistent run's
+  lease and destroy its subprocess. run() now tracks ownership with a local
+  acquired_lease flag (declared above the try so it is in scope for the except
+  handler) and gates the flag clear and the persistent-client teardown on it
+  on both exit paths — only the run that actually acquired the lease may
+  release it or disconnect the shared subprocess.
 Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
   tool calls (like memory save via Bash) hang on messaging channels (Telegram,
   Discord, Slack) because there's no terminal to approve permission prompts.
@@ -663,6 +666,15 @@ class ClaudeSDKBackend:
         )
 
         _stderr_lines: list[str] = []
+
+        # Ownership flag — True only if THIS run acquired the shared
+        # _client_in_use lease. Declared above the try/except so it is always
+        # in scope in the except handler (an exception can fire before the
+        # dispatch block runs). Both the finally block and the except handler
+        # gate the lease clear and the persistent-client teardown on this so a
+        # non-owning run (stateless fallback, or a failure before acquisition)
+        # can never release a sibling's lease or destroy its subprocess.
+        acquired_lease = False
         try:
             # Resolve LLM provider early -- needed for routing + env.
             # Use per-backend provider setting (defaults to "anthropic").
@@ -908,11 +920,6 @@ class ClaudeSDKBackend:
                 session_key,
             )
             _persistent_client = None
-            # Ownership flag — True only if THIS run acquired the shared
-            # _client_in_use lease. The finally block and the persistent-client
-            # teardown are both gated on this so a stateless-fallback run can
-            # never release a sibling's lease or disconnect its subprocess.
-            acquired_lease = False
             if not self._client_in_use:
                 try:
                     self._client_in_use = True
@@ -1160,10 +1167,14 @@ class ClaudeSDKBackend:
                 for hint in ["bun has crashed", "panic", "switch on corrupt value"]
             )
 
-            # Clear client on any error
-            self._client = None
-            self._client_options_key = None
-            self._client_in_use = False
+            # Clear client on any error — but only if THIS run owned it.
+            # A non-owning run (stateless fallback, or a failure before
+            # lease acquisition) must not destroy a sibling persistent run's
+            # subprocess or release its lease on the error path.
+            if acquired_lease:
+                self._client = None
+                self._client_options_key = None
+                self._client_in_use = False
 
             if _is_bun_crash and not getattr(self, "_bun_retry_done", False):
                 self._bun_retry_done = True
