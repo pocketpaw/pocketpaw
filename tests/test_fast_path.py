@@ -714,6 +714,5 @@ async def test_stateless_fallback_error_path_does_not_clear_sibling_lease():
         "belonging to a sibling persistent run."
     )
     assert not fake_sibling_client.disconnected, (
-        "BUG: stateless-fallback error path called disconnect() on the "
-        "sibling's client."
+        "BUG: stateless-fallback error path called disconnect() on the sibling's client."
     )
