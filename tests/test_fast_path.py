@@ -7,6 +7,8 @@ Covers:
   conversation compaction and caused unrecoverable context-overflow errors
   on long sessions.
 - Persistent ``ClaudeSDKClient`` reuse, reconnection, fallback, cleanup.
+- Concurrency lease bug: stateless-fallback run must NOT clear the
+  ``_client_in_use`` flag owned by a sibling persistent run.
 """
 
 from unittest.mock import MagicMock, patch
@@ -432,3 +434,192 @@ async def test_cleanup_noop_when_no_client():
     # Should not raise
     await sdk.cleanup()
     assert sdk._client is None
+
+
+# ---------------------------------------------------------------------------
+# Concurrency lease bug reproduction tests
+# ---------------------------------------------------------------------------
+# Both tests are DETERMINISTIC — no real subprocesses, no asyncio.sleep,
+# no actual concurrency. They drive the state machine directly with fakes,
+# exactly the same way the tests above do.
+#
+# Primary bug: ClaudeSDKBackend.run() always executes
+#   self._client_in_use = False
+# in its ``finally`` block (currently line 1113), even when the run took
+# the *stateless-fallback* path and never acquired the lease.  A sibling
+# persistent run that set _client_in_use=True has its flag silently cleared
+# the moment the stateless run finishes — opening a window for a third run
+# to collide on the shared subprocess.
+# ---------------------------------------------------------------------------
+
+
+async def test_stateless_fallback_does_not_clear_sibling_lease():
+    """Stateless-fallback run must NOT clear _client_in_use=True set by a sibling.
+
+    Scenario:
+      1. A persistent run is in flight — it owns the lease (_client_in_use=True).
+      2. A second concurrent message arrives; because the flag is True it takes
+         the stateless-fallback path through _resilient_query().
+      3. The stateless run finishes (generator drained).
+      4. BUG: the finally block unconditionally sets _client_in_use=False,
+         clearing the sibling's lease.
+
+    Expected (correct): _client_in_use is still True after the stateless run.
+    Actual (buggy):     _client_in_use is False — the lease was stolen.
+
+    This test FAILS against the current implementation and is the red-phase
+    reproduction for fix/sdk-client-lease-race.
+    """
+    sdk = _make_sdk()
+
+    # ── Simulate a sibling persistent run holding the lease ──────────────────
+    sdk._client_in_use = True
+
+    # ── Wire a fake stateless query that yields one AssistantMessage ─────────
+    # This is the path run() takes when _client_in_use is True on entry.
+    stateless_called = False
+
+    async def _fake_stateless_query(*, prompt, options):
+        nonlocal stateless_called
+        stateless_called = True
+        msg = MagicMock()
+        msg.__class__.__name__ = "AssistantMessage"
+        msg.content = "fallback response"
+        yield msg
+
+    sdk._query = _fake_stateless_query
+    sdk._ClaudeAgentOptions = MagicMock()
+    sdk._HookMatcher = MagicMock()
+    sdk._StreamEvent = None
+    sdk._AssistantMessage = None  # Disable isinstance branch — treated as unknown event
+    sdk._SystemMessage = None
+    sdk._UserMessage = None
+    sdk._ResultMessage = None
+
+    selection = ModelSelection(
+        complexity=TaskComplexity.MODERATE,
+        model="claude-sonnet-4-5-20250929",
+        reason="test",
+    )
+
+    with patch(_LLM_CLIENT) as mock_resolve:
+        mock_llm = MagicMock()
+        mock_llm.is_ollama = False
+        mock_llm.is_openai_compatible = False
+        mock_llm.is_gemini = False
+        mock_llm.is_litellm = False
+        mock_llm.is_openrouter = False
+        mock_llm.to_sdk_env.return_value = {"ANTHROPIC_API_KEY": "sk-test"}
+        mock_resolve.return_value = mock_llm
+
+        with patch(_MODEL_ROUTER) as MockRouter:
+            MockRouter.return_value.classify.return_value = selection
+            with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
+                events = []
+                async for ev in sdk.run("concurrent message", system_prompt="identity"):
+                    events.append(ev)
+
+    # The stateless path must have been taken (because _client_in_use was True)
+    assert stateless_called, "Expected stateless fallback path to be used"
+
+    # The run should complete cleanly
+    assert any(e.type == "done" for e in events)
+
+    # ── THE BUG: this assertion FAILS against current code ───────────────────
+    # The stateless run never acquired the lease, so it must not clear it.
+    # Currently line 1113 sets _client_in_use = False unconditionally.
+    assert sdk._client_in_use is True, (
+        "BUG REPRODUCED: stateless-fallback run cleared _client_in_use=True "
+        "that belonged to a sibling persistent run. "
+        "The finally block at line 1113 must be guarded: only clear the flag "
+        "when this run actually acquired it."
+    )
+
+
+async def test_stateless_fallback_does_not_destroy_shared_client():
+    """Stateless-fallback run must NOT disconnect the shared _client subprocess.
+
+    Scenario:
+      1. A persistent run owns the lease and has an active _client subprocess
+         (_client_in_use=True, sdk._client=<fake_client>).
+      2. A stateless-fallback run executes (because _client_in_use was True).
+         Its stream ends WITHOUT a ResultMessage (simulating an interrupted
+         or plain-text response that has no ResultMessage sentinel).
+      3. BUG concern: the teardown guard at line 1101 checks
+             ``_persistent_client is not None and not _saw_result``
+         On the stateless path _persistent_client stays None, so the guard
+         SHOULD be safe — but the unconditional _client_in_use = False at
+         line 1113 is the primary vector that makes a later run collide.
+
+    This test pins the invariant: sdk._client must still be the original
+    fake client object after the stateless run finishes (not None, not a
+    different object), confirming the teardown guard does not misfire.
+
+    NOTE: This test exercises a secondary invariant.  If it proves too
+    fragile in future refactors, it may be skipped; the primary
+    reproduction is ``test_stateless_fallback_does_not_clear_sibling_lease``.
+    """
+    sdk = _make_sdk()
+
+    # ── Simulate a sibling persistent run: owns lease AND has live client ────
+    fake_sibling_client = _FakeSDKClient()
+    fake_sibling_client.connected = True
+    sdk._client = fake_sibling_client
+    sdk._client_options_key = "sibling:session"
+    sdk._client_in_use = True  # sibling holds the lease
+
+    # ── Stateless query that finishes WITHOUT a ResultMessage ─────────────────
+    # (plain text response — no result sentinel — to exercise _saw_result=False
+    # path inside the finally block)
+    async def _fake_stateless_no_result(*, prompt, options):
+        msg = MagicMock()
+        msg.__class__.__name__ = "AssistantMessage"
+        msg.content = "response without result message"
+        yield msg
+        # Deliberately NO ResultMessage yielded
+
+    sdk._query = _fake_stateless_no_result
+    sdk._ClaudeAgentOptions = MagicMock()
+    sdk._HookMatcher = MagicMock()
+    sdk._StreamEvent = None
+    sdk._AssistantMessage = None
+    sdk._SystemMessage = None
+    sdk._UserMessage = None
+    sdk._ResultMessage = None
+
+    selection = ModelSelection(
+        complexity=TaskComplexity.MODERATE,
+        model="claude-sonnet-4-5-20250929",
+        reason="test",
+    )
+
+    with patch(_LLM_CLIENT) as mock_resolve:
+        mock_llm = MagicMock()
+        mock_llm.is_ollama = False
+        mock_llm.is_openai_compatible = False
+        mock_llm.is_gemini = False
+        mock_llm.is_litellm = False
+        mock_llm.is_openrouter = False
+        mock_llm.to_sdk_env.return_value = {"ANTHROPIC_API_KEY": "sk-test"}
+        mock_resolve.return_value = mock_llm
+
+        with patch(_MODEL_ROUTER) as MockRouter:
+            MockRouter.return_value.classify.return_value = selection
+            with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
+                events = []
+                async for ev in sdk.run("concurrent message 2", system_prompt="identity"):
+                    events.append(ev)
+
+    # The run must complete cleanly
+    assert any(e.type == "done" for e in events)
+
+    # The sibling's persistent client must NOT have been disconnected or nulled
+    # by the stateless run's teardown.
+    assert sdk._client is fake_sibling_client, (
+        "BUG: stateless-fallback run destroyed sdk._client belonging to a "
+        "sibling persistent run. The teardown guard must only fire when "
+        "_persistent_client is not None (i.e., this run owns it)."
+    )
+    assert not fake_sibling_client.disconnected, (
+        "BUG: stateless-fallback run called disconnect() on the sibling's client."
+    )
