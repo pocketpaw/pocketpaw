@@ -1,5 +1,12 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-05-20 — Fix concurrency lease race in run(). The finally block
+  cleared the shared self._client_in_use flag unconditionally, so a
+  stateless-fallback run finishing would steal a still-streaming sibling
+  persistent run's lease. run() now tracks ownership with a local
+  acquired_lease flag and gates both the flag clear and the persistent-client
+  teardown on it — only the run that actually acquired the lease may release it
+  or disconnect the shared subprocess.
 Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
   tool calls (like memory save via Bash) hang on messaging channels (Telegram,
   Discord, Slack) because there's no terminal to approve permission prompts.
@@ -901,9 +908,15 @@ class ClaudeSDKBackend:
                 session_key,
             )
             _persistent_client = None
+            # Ownership flag — True only if THIS run acquired the shared
+            # _client_in_use lease. The finally block and the persistent-client
+            # teardown are both gated on this so a stateless-fallback run can
+            # never release a sibling's lease or disconnect its subprocess.
+            acquired_lease = False
             if not self._client_in_use:
                 try:
                     self._client_in_use = True
+                    acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
                         options, session_key=session_key
                     )
@@ -926,10 +939,15 @@ class ClaudeSDKBackend:
                             "CLI stderr during persistent client failure:\n%s",
                             "\n".join(_stderr_lines),
                         )
-                    # Clear broken client so next call creates a fresh one
+                    # Clear broken client so next call creates a fresh one.
+                    # This run is falling back to stateless: it no longer owns
+                    # the persistent client, so drop the lease and the
+                    # ownership flag (Defect 2 — a dangling _persistent_client
+                    # would otherwise misfire the teardown guard below).
                     self._client = None
                     self._client_options_key = None
                     self._client_in_use = False
+                    acquired_lease = False
                     _persistent_client = None
 
             if event_stream is None:
@@ -1098,7 +1116,15 @@ class ClaudeSDKBackend:
                 # client, _resilient_receive handles this.  For the
                 # stateless path or early-break scenarios (stop flag),
                 # we still need to ensure the pipe is clean. ──
-                if _persistent_client is not None and not _saw_result and self._client is not None:
+                # Only a run that actually acquired the lease may tear down
+                # the shared persistent client — a stateless-fallback run does
+                # not own it and must leave a sibling's subprocess alone.
+                if (
+                    acquired_lease
+                    and _persistent_client is not None
+                    and not _saw_result
+                    and self._client is not None
+                ):
                     logger.warning(
                         "Main loop exited without ResultMessage — "
                         "destroying persistent client to avoid stale data"
@@ -1110,10 +1136,14 @@ class ClaudeSDKBackend:
                     self._client = None
                     self._client_options_key = None
 
-                self._client_in_use = False
+                # Only release the lease if this run acquired it. Clearing it
+                # unconditionally would steal a sibling persistent run's lease.
+                if acquired_lease:
+                    self._client_in_use = False
                 logger.info(
-                    "SDK stream finished: %d events, _client_in_use=False",
+                    "SDK stream finished: %d events, _client_in_use=%s",
                     _event_count,
+                    self._client_in_use,
                 )
 
             yield AgentEvent(type="done", content="")
