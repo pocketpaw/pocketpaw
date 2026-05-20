@@ -623,3 +623,97 @@ async def test_stateless_fallback_does_not_destroy_shared_client():
     assert not fake_sibling_client.disconnected, (
         "BUG: stateless-fallback run called disconnect() on the sibling's client."
     )
+
+
+async def test_stateless_fallback_error_path_does_not_clear_sibling_lease():
+    """A stateless-fallback run that errors hard must NOT clear a sibling's lease.
+
+    Same bug class as test_stateless_fallback_does_not_clear_sibling_lease, but
+    on the error exit path instead of the finally path.
+
+    Scenario:
+      1. A persistent run owns the lease and has a live _client subprocess
+         (_client_in_use=True, sdk._client=<fake_client>).
+      2. A second concurrent message arrives; the flag is True so it takes the
+         stateless-fallback path.
+      3. The stateless stream raises a hard exception (a plain RuntimeError —
+         NOT a MessageParseError, so _resilient_query re-raises it and it
+         escapes to run()'s outer ``except Exception`` handler).
+      4. BUG: that handler clears self._client_in_use and nulls self._client
+         unconditionally, stealing the sibling persistent run's lease and
+         destroying its subprocess.
+
+    Expected (correct): _client_in_use stays True and _client is untouched —
+    the failing run never acquired the lease, so it must not release it.
+    """
+    sdk = _make_sdk()
+
+    # ── Simulate a sibling persistent run: owns lease AND has live client ────
+    fake_sibling_client = _FakeSDKClient()
+    fake_sibling_client.connected = True
+    sdk._client = fake_sibling_client
+    sdk._client_options_key = "sibling:session"
+    sdk._client_in_use = True  # sibling holds the lease
+
+    # ── Stateless query that yields once, then raises a hard exception ───────
+    # A plain RuntimeError is not a MessageParseError, so _resilient_query
+    # re-raises it and it escapes to run()'s outer ``except Exception``.
+    async def _fake_stateless_raises(*, prompt, options):
+        msg = MagicMock()
+        msg.__class__.__name__ = "AssistantMessage"
+        msg.content = "partial response before crash"
+        yield msg
+        raise RuntimeError("simulated hard CLI failure")
+
+    sdk._query = _fake_stateless_raises
+    sdk._ClaudeAgentOptions = MagicMock()
+    sdk._HookMatcher = MagicMock()
+    sdk._StreamEvent = None
+    sdk._AssistantMessage = None
+    sdk._SystemMessage = None
+    sdk._UserMessage = None
+    sdk._ResultMessage = None
+
+    selection = ModelSelection(
+        complexity=TaskComplexity.MODERATE,
+        model="claude-sonnet-4-5-20250929",
+        reason="test",
+    )
+
+    with patch(_LLM_CLIENT) as mock_resolve:
+        mock_llm = MagicMock()
+        mock_llm.is_ollama = False
+        mock_llm.is_openai_compatible = False
+        mock_llm.is_gemini = False
+        mock_llm.is_litellm = False
+        mock_llm.is_openrouter = False
+        mock_llm.to_sdk_env.return_value = {"ANTHROPIC_API_KEY": "sk-test"}
+        mock_resolve.return_value = mock_llm
+
+        with patch(_MODEL_ROUTER) as MockRouter:
+            MockRouter.return_value.classify.return_value = selection
+            with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
+                events = []
+                async for ev in sdk.run("concurrent message 3", system_prompt="identity"):
+                    events.append(ev)
+
+    # The run hit the error path — it must surface an error event.
+    assert any(e.type == "error" for e in events)
+
+    # ── THE BUG: the outer except handler clears the lease unconditionally ───
+    # The failing run never acquired the lease, so it must leave it alone.
+    assert sdk._client_in_use is True, (
+        "BUG REPRODUCED: stateless-fallback run that errored hard cleared "
+        "_client_in_use=True belonging to a sibling persistent run. The outer "
+        "except handler must only clear the flag when this run acquired it."
+    )
+
+    # The sibling's persistent client must NOT have been nulled or disconnected.
+    assert sdk._client is fake_sibling_client, (
+        "BUG: stateless-fallback run that errored hard destroyed sdk._client "
+        "belonging to a sibling persistent run."
+    )
+    assert not fake_sibling_client.disconnected, (
+        "BUG: stateless-fallback error path called disconnect() on the "
+        "sibling's client."
+    )
