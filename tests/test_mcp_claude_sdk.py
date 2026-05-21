@@ -1,5 +1,11 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-05-21 — refactor/gate-planner-mcp. ``_strip_builtin_servers``
+  now also drops ``pocketpaw_planner`` so external-config assertions stay
+  correct after the planner became a built-in in-process MCP server
+  (fixes #1150). Added ``TestPlannerMCPGate`` covering the opt-in policy
+  gate: the planner is absent unless the tool policy explicitly allows it.
+
 All SDK imports are mocked.
 """
 
@@ -9,6 +15,7 @@ from ee.agent.pocket_specialist.mcp_tool import (
     SERVER_NAME as _POCKET_SPECIALIST_MCP_SERVER_NAME,
 )
 from pocketpaw.agents.claude_sdk import ClaudeAgentSDK
+from pocketpaw.agents.sdk_mcp_planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw.agents.sdk_mcp_pocket import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw.agents.sdk_mcp_tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
 from pocketpaw.config import Settings
@@ -16,11 +23,18 @@ from pocketpaw.mcp.config import MCPServerConfig
 
 
 def _strip_builtin_servers(result: dict) -> dict:
-    """Drop always-on in-process MCP servers so external-config assertions stay focused."""
+    """Drop always-on in-process MCP servers so external-config assertions stay focused.
+
+    Note: ``pocketpaw_planner`` is a built-in but is *not* always-on — it is
+    gated behind an explicit policy opt-in. It is stripped here so the
+    external-config assertions remain correct regardless of whether a given
+    test happens to opt the planner in.
+    """
     out = dict(result)
     out.pop(_POCKET_MCP_SERVER_NAME, None)
     out.pop(_POCKET_SPECIALIST_MCP_SERVER_NAME, None)
     out.pop(_TASKS_MCP_SERVER_NAME, None)
+    out.pop(_PLANNER_MCP_SERVER_NAME, None)
     return out
 
 
@@ -177,3 +191,63 @@ class TestClaudeSDKMCPServers:
         assert "args" not in result["mem"]
         assert result["mem"]["type"] == "stdio"
         assert result["mem"]["command"] == "npx"
+
+
+class TestPlannerMCPGate:
+    """The ``pocketpaw_planner`` MCP server must be opt-in, not ambient.
+
+    Default posture (profile ``full``, no allow list) is allow-by-default for
+    MCP servers. The planner is gated on an *explicit* policy opt-in so the
+    ``plan_project`` tool schema is only loaded into agent contexts where
+    planning is relevant — not every agent run.
+    """
+
+    def _make_sdk(self, **overrides) -> ClaudeAgentSDK:
+        settings = Settings(
+            anthropic_api_key="test-key",
+            tool_profile="full",
+            **overrides,
+        )
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_planner_absent_by_default(self):
+        """Default policy (full, no allow list) must NOT load the planner."""
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+    def test_planner_present_when_explicitly_allowed(self):
+        """An explicit ``mcp:pocketpaw_planner:*`` allow entry opts it in."""
+        sdk = self._make_sdk(tools_allow=[f"mcp:{_PLANNER_MCP_SERVER_NAME}:*"])
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME in result
+        assert result[_PLANNER_MCP_SERVER_NAME]["type"] == "sdk"
+
+    def test_planner_present_when_group_mcp_allowed(self):
+        """``group:mcp`` in the allow list also opts the planner in."""
+        sdk = self._make_sdk(tools_allow=["group:mcp"])
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME in result
+
+    def test_planner_absent_when_denied(self):
+        """A deny entry blocks the planner even with an explicit allow."""
+        sdk = self._make_sdk(
+            tools_allow=[f"mcp:{_PLANNER_MCP_SERVER_NAME}:*"],
+            tools_deny=[f"mcp:{_PLANNER_MCP_SERVER_NAME}:*"],
+        )
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+    def test_unrelated_allow_does_not_load_planner(self):
+        """Opting in some other MCP server must not leak the planner."""
+        sdk = self._make_sdk(tools_allow=["mcp:fs:*"])
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME not in result
