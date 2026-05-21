@@ -6,6 +6,13 @@ Covers the public wiring:
   * tool factories produce StructuredTool objects with the right names
   * main-agent interaction prompt is the thin delegation variant;
     specialist prompt is the heavy variant
+
+Regression tests for #1163 (silent 0-ops edits):
+  * Root cause A — backend yields AgentEvent(type="error") without raising;
+    runtime must surface ok=False, not ok=True.
+  * Root cause B — edit specialist system prompt must name the granular edit
+    tools it actually holds and must NOT advertise create_pocket / update_pocket
+    / add_widget.
 """
 
 from __future__ import annotations
@@ -317,6 +324,73 @@ class TestRunEditSpecialistSuccessFlag:
         # backend.stop must still run on the error path.
         fake_backend.stop.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_ok_false_when_backend_yields_error_event(self) -> None:
+        """#1163 root cause A — the deep_agents backend NEVER raises on error.
+        Instead it yields AgentEvent(type="error", ...) followed by
+        AgentEvent(type="done").  The runtime loop only inspects
+        ``event.type == "tool_use"`` so the error event passes silently, the
+        loop exits cleanly, ``success`` flips to ``True``, and the caller
+        gets ``ok=True, ops=[], error=None``.
+
+        Post-fix contract: a yielded error event must produce
+        ``ok=False`` with ``error`` populated — indistinguishable from a
+        raised exception from the caller's perspective.
+
+        This test FAILS today (current code returns ok=True, error=None).
+        """
+        from unittest.mock import MagicMock
+
+        from pocketpaw.agents.protocol import AgentEvent
+        from pocketpaw.config import Settings
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        # Mirrors the exact pattern in deep_agents.py:974-977 — no raise,
+        # just two yield statements: error then done.
+        async def _deep_agents_error_stream(*args, **kwargs):
+            yield AgentEvent(type="message", content="planning edit...")
+            yield AgentEvent(
+                type="error",
+                content="Deep Agents error: context length exceeded for 12KB spec",
+            )
+            yield AgentEvent(type="done", content="")
+
+        fake_backend = MagicMock()
+        fake_backend.run = _deep_agents_error_stream
+        fake_backend.attach_specialist_tools = MagicMock()
+        fake_backend.stop = AsyncMock()
+
+        with patch(
+            "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            return_value=fake_backend,
+        ):
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(
+                    pocket_id="6a0eb47ac0dd58069139b985",
+                    intent="replace team[3] Gaurv (handle TBD) with Gaurav Dewani (dewani12)",
+                ),
+                workspace_id="69e4f93b57ff64b3903868e3",
+                user_id="69d0f4d09dfb6ddfd8e2da84",
+                settings=Settings(),
+            )
+
+        # POST-FIX expectation (fails today — current code returns ok=True):
+        assert out.ok is False, (
+            f"Expected ok=False when backend yields error event, got ok={out.ok} "
+            f"error={out.error!r} — this is #1163 root cause A"
+        )
+        assert out.error is not None, "error field must be populated with backend error message"
+        assert "context length exceeded" in out.error, (
+            f"error should contain the backend's message, got: {out.error!r}"
+        )
+        # ops must be empty — no work was done.
+        assert out.ops == []
+        # backend.stop must still run regardless.
+        fake_backend.stop.assert_awaited_once()
+
 
 class TestPromptSeparation:
     def test_main_agent_interaction_prompt_is_thin(self) -> None:
@@ -345,3 +419,78 @@ class TestPromptSeparation:
         assert len(POCKET_EDIT_SPECIALIST_PROMPT_MCP) > len(POCKET_INTERACTION_PROMPT_MCP) * 5, (
             "edit specialist prompt should dwarf the thin main-agent prompt"
         )
+
+    def test_edit_specialist_prompt_names_granular_tools_not_creation_tools(self) -> None:
+        """#1163 root cause B — the edit specialist's system prompt is assembled
+        by ``_assemble_interaction`` which splices in ``_TOOLS_MCP``.  That
+        block advertises ``create_pocket``, ``update_pocket``, and ``add_widget``
+        — tools the edit specialist does NOT hold — and makes zero mention of
+        the granular edit ops the specialist actually holds (including the
+        Tier-2 array-item ops added in PR #1159).
+
+        When the LLM is told it has ``create_pocket`` but not
+        ``set_prop_array_item``, it either picks the wrong tool or declines to
+        act and emits 0 ops — exactly the silent-success pattern in #1163.
+
+        Post-fix contract:
+          (a) The prompt NAMES each granular edit tool the specialist holds —
+              at minimum: set_prop_array_item, append_prop_array_item,
+              remove_prop_array_item, set_node_prop, add_node.
+          (b) The prompt does NOT advertise create_pocket, update_pocket, or
+              add_widget as available tools.
+
+        This test FAILS today (0 mentions of the array-item ops in the prompt).
+        """
+        from pocketpaw.ripple import POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+        prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP
+
+        # --- (a) granular edit tools the specialist DOES hold ---
+        # These are the tools from make_edit_pocket_tools() — the edit
+        # specialist's actual tool surface, including the Tier-2 array-item
+        # ops from PR #1159.
+        required_tools = [
+            "set_prop_array_item",
+            "append_prop_array_item",
+            "remove_prop_array_item",
+            "set_node_prop",
+            "add_node",
+        ]
+        missing = [t for t in required_tools if t not in prompt]
+        assert not missing, (
+            f"Edit specialist prompt is missing these granular tool names: {missing}\n"
+            "The LLM cannot use tools it is not told about — "
+            "this is #1163 root cause B."
+        )
+
+        # --- (b) creation tools the specialist does NOT hold ---
+        # These should NOT appear as available tool calls.  Their presence
+        # causes the LLM to attempt the wrong tool and receive no result,
+        # producing 0 ops silently.
+        forbidden_as_available = ["create_pocket", "update_pocket", "add_widget"]
+        # Allow the words to appear in HARD RULES / prohibition text
+        # (e.g. "NEVER call create_pocket") — those are correct guard rails.
+        # What we're checking is that they do NOT appear in a tool-surface
+        # description (i.e. inside a <pocket-tools> / <specialist-tools> block
+        # that describes what the specialist can call).
+        import re
+
+        # Extract the tools block from the prompt — look for the first
+        # <pocket-tools> ... </pocket-tools> section.
+        tools_block_match = re.search(
+            r"<pocket-tools>(.*?)</pocket-tools>", prompt, re.DOTALL
+        )
+        assert tools_block_match is not None, (
+            "Edit specialist prompt has no <pocket-tools> block — "
+            "cannot verify tool surface"
+        )
+        tools_block = tools_block_match.group(1)
+
+        for forbidden in forbidden_as_available:
+            assert forbidden not in tools_block, (
+                f"Edit specialist prompt's <pocket-tools> block advertises "
+                f"'{forbidden}' — a creation tool the specialist does NOT hold. "
+                "This causes the LLM to attempt the wrong tool and produce 0 ops "
+                "(#1163 root cause B). Remove it from the tools block; "
+                "prohibition text in HARD RULES is still fine."
+            )
