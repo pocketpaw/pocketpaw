@@ -227,9 +227,7 @@ class TestAgentModeAdapterDraftKit:
             "coachmark",
             "dropdown-menu",
         ):
-            assert chrome in starters, (
-                f"starter_widget_kinds missing app-chrome widget {chrome!r}"
-            )
+            assert chrome in starters, f"starter_widget_kinds missing app-chrome widget {chrome!r}"
 
     @pytest.mark.asyncio
     async def test_draft_kit_includes_rich_widgets_by_pattern(self, agent_settings) -> None:

@@ -76,9 +76,7 @@ class KbInstallResult:
     error: str | None = None
 
 
-def install_bundled_kb_scopes(
-    *, destination_root: Path | None = None
-) -> list[KbInstallResult]:
+def install_bundled_kb_scopes(*, destination_root: Path | None = None) -> list[KbInstallResult]:
     """Mirror every bundled kb-go scope into the user's kb-go root.
 
     Args:

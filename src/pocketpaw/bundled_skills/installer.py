@@ -75,9 +75,7 @@ class InstallResult:
     error: str | None = None
 
 
-def install_bundled_skills(
-    *, destination_root: Path | None = None
-) -> list[InstallResult]:
+def install_bundled_skills(*, destination_root: Path | None = None) -> list[InstallResult]:
     """Mirror every bundled skill into the user's Claude config.
 
     Args:

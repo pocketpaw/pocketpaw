@@ -123,9 +123,7 @@ def test_install_skips_when_bundled_dir_missing(monkeypatch, tmp_path: Path) -> 
     than crashing the boot."""
     import pocketpaw.bundled_skills.installer as installer_mod
 
-    monkeypatch.setattr(
-        installer_mod, "_BUNDLED_DIR", tmp_path / "definitely-does-not-exist"
-    )
+    monkeypatch.setattr(installer_mod, "_BUNDLED_DIR", tmp_path / "definitely-does-not-exist")
     results = install_bundled_skills(destination_root=tmp_path)
     assert results == []
 
