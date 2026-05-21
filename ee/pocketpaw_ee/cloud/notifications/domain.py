@@ -41,7 +41,8 @@ class Notification:
     id: str
     workspace_id: str
     recipient_id: str
-    kind: str  # mention, comment, reply, invite, agent_complete, pocket_shared
+    kind: str  # mention, comment, reply, invite, agent_complete, pocket_shared,
+    # meeting_scheduled, meeting_cancelled, meeting_started, meeting_reminder
     title: str
     body: str
     source: NotificationSource | None

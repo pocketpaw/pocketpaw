@@ -421,6 +421,27 @@ class CallEnded(Event):
     EVENT_TYPE: ClassVar[str] = "call.ended"
 
 
+# Meetings — scheduled group meeting lifecycle
+@dataclass
+class MeetingScheduled(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.scheduled"
+
+
+@dataclass
+class MeetingUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.updated"
+
+
+@dataclass
+class MeetingCancelled(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.cancelled"
+
+
+@dataclass
+class MeetingStarted(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.started"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first

@@ -22,7 +22,8 @@ class Notification(TimestampedDocument):
 
     workspace: Indexed(str)  # type: ignore[valid-type]
     recipient: Indexed(str)  # type: ignore[valid-type]
-    type: str  # mention, comment, reply, invite, agent_complete, pocket_shared
+    type: str  # notification type: mention, comment, reply, invite, agent_complete,
+    # pocket_shared, meeting_scheduled, meeting_cancelled, meeting_started, meeting_reminder
     title: str
     body: str = ""
     source: NotificationSource | None = None

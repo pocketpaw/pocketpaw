@@ -183,6 +183,7 @@ def mount_cloud(app: FastAPI) -> None:
 
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
+    from pocketpaw_ee.cloud.meetings.router import router as meetings_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
     from pocketpaw_ee.cloud.tasks.router import router as tasks_router
@@ -200,6 +201,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(files_router, prefix="/api/v1")
     app.include_router(mission_control_router, prefix="/api/v1")
     app.include_router(livekit_router, prefix="/api/v1")
+    app.include_router(meetings_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can

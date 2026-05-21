@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pocketpaw_ee.cloud.meetings.models import MeetingSchedule
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
@@ -53,6 +54,7 @@ __all__ = [
     "Group",
     "GroupAgent",
     "Invite",
+    "MeetingSchedule",
     "Mention",
     "Message",
     "Notification",
@@ -84,6 +86,7 @@ def get_all_documents():
     return [
         User,
         Agent,
+        MeetingSchedule,
         Pocket,
         Session,
         Comment,
