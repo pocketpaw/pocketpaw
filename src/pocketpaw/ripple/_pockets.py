@@ -41,10 +41,48 @@
 # ``pocketpaw-create-pocket`` skill), a HARD RULE recipe-preflight block,
 # and a STEP 0 recipe-library check pointing at the bundled
 # ``ripple-recipes`` kb-go scope.
+# Modified: 2026-05-21 — the create specialist's prompt now splices in
+# the slim ``_RIPPLE_DESIGN_ESSENTIALS`` instead of the full
+# ``RIPPLE_DESIGN_RULES`` superblock. Reworked from PR #1106.
 
 from __future__ import annotations
 
-from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
+from pocketpaw.ripple._design import (
+    CANONICAL_SHAPES,
+    INTERACTIVE_STATE_RULE,
+    RIPPLE_DESIGN_RULES,
+    THEME_RULE,
+    USE_THE_WIDGET_RULE,
+    VISUAL_VARIATION_RULE,
+    WIDGET_CATALOG,
+)
+
+# Slim subset of RIPPLE_DESIGN_RULES for the create specialist. The
+# full RIPPLE_DESIGN_RULES superblock is ~47k chars (~12k tokens) —
+# well past the 3k-token point where attention degrades. The blocks
+# below are the load-bearing ones: widget vocabulary so the model
+# names widgets correctly, canonical prop shapes so persist_pocket's
+# validator doesn't have to bounce every spec, and the interactive
+# state pattern so pockets aren't dead read-only canvases.
+#
+# VISUAL_VARIATION_RULE is included even on a one-brief-at-a-time path:
+# the pattern-first / anti-dashboard rebalance (which lives in that
+# block) corrects a per-brief bias, not a cross-brief one. Dropped:
+# COMPOSITION_COOKBOOK (parent decides composition via hints),
+# TABULAR/ACTIVITY_PICKER_RULE (niche), DESIGN_QUALITY (aspirational),
+# NO_INVENTED_WIDGETS_RULE / WIDGET_SPEC_TOOL_RULE (overlap with
+# WIDGET_CATALOG + manifest validator). LOGO_RULE is small but
+# entirely cosmetic; left out to keep the prompt tight.
+_RIPPLE_DESIGN_ESSENTIALS = "\n".join(
+    [
+        USE_THE_WIDGET_RULE,
+        WIDGET_CATALOG,
+        CANONICAL_SHAPES,
+        INTERACTIVE_STATE_RULE,
+        VISUAL_VARIATION_RULE,
+        THEME_RULE,
+    ]
+)
 
 POCKET_ID_TOKEN = "__POCKET_ID__"
 
@@ -1310,6 +1348,12 @@ def _assemble_specialist() -> str:
     they document the rippleSpec shape, not the tool surface; the
     specialist calls ``persist_pocket`` instead but the spec body is
     identical.
+
+    Design rules are spliced in via the slim ``_RIPPLE_DESIGN_ESSENTIALS``
+    (widget vocab + canonical shapes + interactive-state pattern +
+    visual-variation + theme) rather than the full ~47k-char
+    ``RIPPLE_DESIGN_RULES`` — the dropped sub-blocks are either covered
+    by the parent's structural plan or by the runtime manifest validator.
     """
     parts = [
         _SCOPE_BLOCK,
@@ -1320,7 +1364,7 @@ def _assemble_specialist() -> str:
         _STATE_SOURCES_BLOCK,
         _CREATION_EXAMPLES_MCP,
         _RESEARCH_PROTOCOL,
-        RIPPLE_DESIGN_RULES,
+        _RIPPLE_DESIGN_ESSENTIALS,
     ]
     return "\n".join(parts) + "\n"
 

@@ -12,8 +12,65 @@
 # Composition: surface-specific framing here (intro, chat.send loop, fence
 # rules) + the shared design language from pocketpaw.ripple._design (widget
 # catalog, canonical shapes, full-pane rule, theme, design-quality bar).
+#
+# Modified: 2026-05-21 — prepended a ground-truth / do-not-mock rule to
+# the inline system prompt. Reworked from PR #1106.
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
+
+_GROUND_TRUTH_RULE = """\
+<ground-truth>
+# IMPORTANT — DO NOT MOCK. DO NOT TRUST YOUR OWN KNOWLEDGE.
+
+You know NOTHING about the user's world, their data, their tools, the
+current state of any library/API/SDK, or what is "true" right now. Your
+training data is months to years out of date and quietly wrong on
+specifics — function signatures rename, APIs deprecate, package versions
+move, prices change, events happen. A confident-sounding answer from
+memory is the #1 failure mode here; it ships broken pockets, dead links,
+and wrong numbers that look real.
+
+Default posture: research first, then answer. Memory is a hypothesis,
+not a fact.
+
+## Never invent
+
+Do NOT fabricate any of the following, ever:
+- User-specific data (their username, repo, project, team, customers,
+  bookings, revenue, calendar events, file paths). If the brief implies
+  it but doesn't name it, ASK.
+- Real-world facts that drift over time (current prices, scores,
+  weather, exchange rates, version numbers, latest releases, news,
+  policy text, API endpoints, library APIs).
+- Placeholder names that look real ("Acme Corp", "Mona Octocat",
+  "john@example.com", "user1", "Q3 2024 revenue: $4.2M") — these read
+  as production data and the user will trust them.
+
+## Acceptable order of operations
+
+1. **Research** with the tools you have (web search, fetch, get_widget_spec,
+   read docs, list_pockets, etc.) BEFORE answering anything you can't
+   verify from the current turn.
+2. **Ask** the user when you can't research — one short, concrete
+   question is always better than a guess. "What's your GitHub username?"
+   beats inventing `octocat`.
+3. **Labelled placeholders** are allowed ONLY when (a) you have no way
+   to research, (b) the user hasn't given the value, AND (c) you cannot
+   reasonably ask (e.g. they explicitly said "just put something there",
+   "stub it", "fake data is fine"). Even then, label them obviously
+   (`<your username>`, `[example value]`) so the user knows what to
+   replace.
+
+If you catch yourself about to write a confident specific (a version
+number, a function name, a price, a fact about a product) and you
+haven't verified it this turn — stop, research or ask. "I'm not sure —
+do you want to check that, or should I look it up?" is a good answer.
+A wrong-sounding-confident answer is the worst answer.
+</ground-truth>
+
+
+"""
+
 
 _INLINE_PREAMBLE = """\
 <ripple>
@@ -223,7 +280,8 @@ Final self-check before sending:
 
 
 INLINE_RIPPLE_SYSTEM_PROMPT = (
-    _INLINE_PREAMBLE
+    _GROUND_TRUTH_RULE
+    + _INLINE_PREAMBLE
     + WIDGET_CATALOG
     + "\n"
     + USE_THE_WIDGET_RULE

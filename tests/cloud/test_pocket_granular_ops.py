@@ -563,3 +563,429 @@ async def test_no_active_stream_rejected(fake_doc):
     assert result["ok"] is False
     assert "no active workspace/user" in result["error"]
     assert push_calls == []
+
+
+# ---------------------------------------------------------------------------
+# set_prop_array_item — surgical edit of one item inside a node prop-array.
+# ---------------------------------------------------------------------------
+
+
+class TestSetPropArrayItem:
+    """Surgical edit of one item inside a node's prop-array."""
+
+    @pytest.mark.asyncio
+    async def test_updates_matched_item_by_field(self, fake_doc):
+        # Seed a chart with a 4-slice donut.
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "type": "donut",
+                "data": [
+                    {"label": "Online Store", "value": 62},
+                    {"label": "POS", "value": 18},
+                    {"label": "Social", "value": 12},
+                    {"label": "Other", "value": 8},
+                ],
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+                partial={"value": 5},
+            )
+
+        assert err is None
+        assert result["item_index"] == 3
+        assert result["item"] == {"label": "Other", "value": 5}
+        assert chart["props"]["data"][3]["value"] == 5
+        # Unchanged siblings preserved.
+        assert chart["props"]["data"][0]["value"] == 62
+        assert fake_doc.saves == 1
+
+    @pytest.mark.asyncio
+    async def test_unsupported_prop_array_rejected(self, fake_doc):
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_header00",  # heading, not chart/table/etc.
+                prop="text",
+                match={"index": 0},
+                partial={"text": "Hi"},
+            )
+        assert result is None
+        assert err is not None
+        assert "unsupported_prop_array" in err
+
+    @pytest.mark.asyncio
+    async def test_missing_node_errors_cleanly(self, fake_doc):
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_does_not_exist",
+                prop="data",
+                match={"index": 0},
+                partial={},
+            )
+        assert result is None
+        assert "no node with id" in err
+
+    @pytest.mark.asyncio
+    async def test_item_not_found_returns_error(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {"data": [{"label": "A", "value": 1}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Z"},
+                partial={"value": 99},
+            )
+        assert result is None
+        assert "not_found" in err
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_match_returns_candidates(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "Other", "value": 1},
+                    {"label": "Other", "value": 2},
+                ]
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_set_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+                partial={"value": 99},
+            )
+        assert result is None
+        assert "ambiguous" in err
+
+
+# ---------------------------------------------------------------------------
+# append_prop_array_item — append (or insert-after-match) into a prop-array.
+# ---------------------------------------------------------------------------
+
+
+class TestAppendPropArrayItem:
+    @pytest.mark.asyncio
+    async def test_appends_to_end_by_default(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}, {"orderId": "#2"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#3"},
+            )
+        assert err is None
+        assert result["item_index"] == 2
+        assert table["props"]["rows"][-1] == {"orderId": "#3"}
+
+    @pytest.mark.asyncio
+    async def test_inserts_after_matched_item(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}, {"orderId": "#3"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#2"},
+                after={"by_field": "orderId", "equals": "#1"},
+            )
+        assert err is None
+        assert result["item_index"] == 1
+        assert [r["orderId"] for r in table["props"]["rows"]] == ["#1", "#2", "#3"]
+
+    @pytest.mark.asyncio
+    async def test_creates_empty_array_if_missing(self, fake_doc):
+        feed = {"id": "n_feed0001", "type": "feed", "props": {}}
+        fake_doc.rippleSpec["ui"]["children"].append(feed)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_feed0001",
+                prop="items",
+                value={"text": "Hi"},
+            )
+        assert err is None
+        assert feed["props"]["items"] == [{"text": "Hi"}]
+        assert result["item_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_after_target_not_found_errors(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_append_prop_array_item(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#2"},
+                after={"by_field": "orderId", "equals": "#999"},
+            )
+        assert result is None
+        assert "not_found" in err
+
+
+class TestRemovePropArrayItem:
+    @pytest.mark.asyncio
+    async def test_removes_matched_item(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "A", "value": 1},
+                    {"label": "Other", "value": 2},
+                    {"label": "B", "value": 3},
+                ]
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_remove_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+            )
+        assert err is None
+        assert result["removed_index"] == 1
+        assert result["removed_item"] == {"label": "Other", "value": 2}
+        assert [d["label"] for d in chart["props"]["data"]] == ["A", "B"]
+
+    @pytest.mark.asyncio
+    async def test_not_found_errors(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {"data": [{"label": "A"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result, err = await pocket_service.agent_remove_prop_array_item(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Z"},
+            )
+        assert result is None
+        assert "not_found" in err
+
+
+# ---------------------------------------------------------------------------
+# *_for_agent wrappers — exercise the agent_context.py layer that drives
+# SSE node ops + the uniform {ok, ...} shape consumed by LangChain tools.
+# ---------------------------------------------------------------------------
+
+
+class TestPropArrayItemWrappers:
+    """The thin wrappers in agent_context.py: push SSE node ops + return
+    the uniform {ok, ...} shape consumed by the LangChain edit tools."""
+
+    @pytest.mark.asyncio
+    async def test_set_prop_array_item_for_agent_pushes_sse(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "Online Store", "value": 62},
+                    {"label": "Other", "value": 8},
+                ],
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.set_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+                partial={"value": 5},
+            )
+
+        assert result["ok"] is True
+        assert result["item_index"] == 1
+        assert result["item"] == {"label": "Other", "value": 5}
+        assert chart["props"]["data"][1]["value"] == 5
+        # Exactly one SSE push with the granular action.
+        assert len(push_calls) == 1
+        push = push_calls[0]
+        assert push["action"] == "node_prop_array_item_set"
+        assert push["node_id"] == "n_chart000"
+        assert push["prop"] == "data"
+        assert push["item_index"] == 1
+        assert push["item"] == {"label": "Other", "value": 5}
+        # Subtree-only; never the full pocket.
+        assert "pocket" not in push
+
+    @pytest.mark.asyncio
+    async def test_set_prop_array_item_for_agent_propagates_error(self, fake_doc):
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.set_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_header00",  # unsupported widget for prop-array ops
+                prop="text",
+                match={"index": 0},
+                partial={"text": "x"},
+            )
+        assert result["ok"] is False
+        assert "unsupported_prop_array" in result["error"]
+        assert push_calls == []
+
+    @pytest.mark.asyncio
+    async def test_append_prop_array_item_for_agent_pushes_sse(self, fake_doc):
+        table = {
+            "id": "n_table111",
+            "type": "table",
+            "props": {"rows": [{"orderId": "#1"}, {"orderId": "#3"}]},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.append_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_table111",
+                prop="rows",
+                value={"orderId": "#2"},
+                after={"by_field": "orderId", "equals": "#1"},
+            )
+
+        assert result["ok"] is True
+        assert result["item_index"] == 1
+        assert [r["orderId"] for r in table["props"]["rows"]] == ["#1", "#2", "#3"]
+        assert len(push_calls) == 1
+        push = push_calls[0]
+        assert push["action"] == "node_prop_array_item_appended"
+        assert push["node_id"] == "n_table111"
+        assert push["prop"] == "rows"
+        assert push["item_index"] == 1
+        assert push["item"] == {"orderId": "#2"}
+
+    @pytest.mark.asyncio
+    async def test_remove_prop_array_item_for_agent_pushes_sse(self, fake_doc):
+        chart = {
+            "id": "n_chart000",
+            "type": "chart",
+            "props": {
+                "data": [
+                    {"label": "A", "value": 1},
+                    {"label": "Other", "value": 2},
+                    {"label": "B", "value": 3},
+                ],
+            },
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(chart)
+
+        ctx, push_calls = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.remove_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "Other"},
+            )
+
+        assert result["ok"] is True
+        assert result["removed_index"] == 1
+        assert result["removed_item"] == {"label": "Other", "value": 2}
+        assert [d["label"] for d in chart["props"]["data"]] == ["A", "B"]
+        assert len(push_calls) == 1
+        push = push_calls[0]
+        assert push["action"] == "node_prop_array_item_removed"
+        assert push["node_id"] == "n_chart000"
+        assert push["prop"] == "data"
+        assert push["removed_index"] == 1
+        assert push["removed_item"] == {"label": "Other", "value": 2}
+
+
+# ---------------------------------------------------------------------------
+# End-to-end canary: the 12-row "All Orders" table edit from the design doc.
+# This is the regression the whole Tier-2 work was driven by — editing one
+# row must leave every other row byte-identical.
+# ---------------------------------------------------------------------------
+
+
+class TestArrayItemCanary:
+    """End-to-end: the 12-row 'All Orders' table edit from the design doc."""
+
+    @pytest.mark.asyncio
+    async def test_one_row_edit_does_not_rewrite_other_rows(self, fake_doc):
+        rows = [
+            {"orderId": f"#{1030 + i}", "customer": f"C{i}", "status": "Fulfilled"}
+            for i in range(12)
+        ]
+        snapshot = [dict(r) for r in rows]
+        table = {
+            "id": "n_orders00",
+            "type": "table",
+            "props": {"rows": rows},
+        }
+        fake_doc.rippleSpec["ui"]["children"].append(table)
+
+        ctx, _ = _patches(fake_doc)
+        with ctx:
+            result = await agent_context.set_prop_array_item_for_agent(
+                fake_doc.id,
+                node_id="n_orders00",
+                prop="rows",
+                match={"by_field": "orderId", "equals": "#1039"},
+                partial={"status": "Shipped"},
+            )
+        assert result["ok"] is True
+        assert result["item_index"] == 9
+        # All other rows are byte-identical.
+        for i, original in enumerate(snapshot):
+            if i == 9:
+                continue
+            assert table["props"]["rows"][i] == original, f"row {i} drifted"
+        assert table["props"]["rows"][9]["status"] == "Shipped"
+        assert table["props"]["rows"][9]["customer"] == "C9"  # untouched field

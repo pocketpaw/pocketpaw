@@ -15,6 +15,10 @@
 # Modified: 2026-05-21 — added a "Full-fledged app chrome" composition
 # block (app-shell / sidebar / breadcrumb + overlay chrome) for
 # "an app for X" briefs.
+# Modified: 2026-05-21 — refactored CANONICAL_SHAPES into a keyed
+# WIDGET_SHAPES dict (per-widget lazy retrieval) and added
+# OPTIONAL_DESIGN_SECTIONS for the two-tier inline widget_help lookup.
+# Reworked from PR #1106.
 
 WIDGET_CATALOG = """\
 # WIDGET CATALOG
@@ -352,15 +356,24 @@ rows with bullets and the user notices instantly.
 """
 
 
-CANONICAL_SHAPES = """\
-# CANONICAL SHAPES — inlined for the highest-traffic widgets only
+_CANONICAL_SHAPES_PREAMBLE = """\
+# CANONICAL SHAPES — inlined for the highest-traffic widgets
 
-The four shapes below are inlined because EVERY pocket touches them.
-For every other widget — stat, timeline, gantt, calendar,
-heatmap, pricing-table, comparison-table, kv-table, source-card,
-sources-bar, gauge, funnel, sankey, treemap, sparkline, etc. — call
-`get_widget_spec` per the WIDGET SPEC TOOL RULE above. Don't guess.
+The shapes below are inlined because they're the highest-traffic
+widgets and the prop schema is most often hallucinated. For widgets
+outside this list (stat, gantt, calendar, heatmap, pricing-table,
+comparison-table, kv-table, source-card, sources-bar, gauge, funnel,
+sankey, treemap, sparkline, etc.) call `get_widget_spec` — don't guess.
+"""
 
+
+# Per-widget canonical shapes. Keyed by widget `type` so both the
+# inline-Ripple `widget_help` tool and the pocket create specialist
+# can fetch JUST the widget they need, instead of loading the entire
+# blob. Keeping per-widget granularity is what makes lazy retrieval
+# actually lazy.
+WIDGET_SHAPES: dict[str, str] = {
+    "chart": """\
 `chart` — Ripple's chart has a SMALL fixed prop set. **Allowed props:**
 `type`, `data`, `title`, `height`, `colors`, `tooltip`. THAT IS THE
 WHOLE LIST. Anything else is invented and the renderer ignores it.
@@ -416,7 +429,8 @@ and want a chart, you have two options:
       the state — emit `chartData` alongside the source array), or
   (b) emit the chart-shaped array directly as `chartData` in state and
       keep the source array for the table.
-
+""",
+    "table": """\
 `table` — `columns` are OBJECTS with `accessorKey`; `rows` is an array
 of OBJECTS keyed by accessorKey. NEVER pass `columns: [str]` +
 `rows: [[]]` — the cells silently render empty.
@@ -455,7 +469,8 @@ table.
   Format at display time via the renderer's column formatter, not at
   emit time. If you must emit pre-formatted strings, do not enable
   sort on that column.
-
+""",
+    "data-grid": """\
 `data-grid` — HIGH DENSITY tabular: sticky headers, resizable columns,
 search, per-column sort, dense cells. Use when row count ≥ 50 or the
 user wants a "power user" feel (operational dashboards, log viewers,
@@ -496,7 +511,8 @@ ranked datasets, monitoring lists).
   - For 1000+ rows prefer `virtual-list` (call get_widget_spec).
   - Same numeric-sort gotcha as `table`: emit numbers, not formatted
     strings, on any column where sort is enabled.
-
+""",
+    "kanban": """\
 `kanban` — columns are headers ONLY; cards live in a flat list in
 `state`, reach the widget via `bind`, and `columnKey` says which card
 field maps to which column. Without `bind`, drag-to-move snaps back:
@@ -510,7 +526,8 @@ field maps to which column. Without `bind`, drag-to-move snaps back:
                    { "id": "done", "title": "Done" } ],
       "columnKey": "status"
   }}
-
+""",
+    "audit-log": """\
 `audit-log` — THE widget for "Recent Activity", event streams, audit
 trails, history logs. Each entry has actor + action + target. Far
 better than a `table` for this shape: dense per-row layout, icon per
@@ -532,7 +549,8 @@ timestamp}" rows is an audit-log emitted as the wrong widget.
   Use `groupBy: "day"` or `"week"` for chronological feeds; omit
   (`"none"`) for tight chronological streams. `showFilters: true`
   surfaces a filter-by-type chip row.
-
+""",
+    "timeline": """\
 `timeline` — milestones / dated events with optional rich detail.
 Vertical timeline rendering. Use for project history, release notes,
 contribution graphs, lifecycle events.
@@ -551,7 +569,8 @@ contribution graphs, lifecycle events.
   When in doubt between `audit-log` and `timeline`:
     audit-log → who did what (actor-driven)
     timeline  → what happened when (event-driven, often single actor)
-
+""",
+    "tabs": """\
 `tabs` — labels in `props.tabs`; CONTENT in the node's `children` array,
 one child per tab by index. Do NOT use `props.tabs[i].content` — ignored:
   { "type": "tabs",
@@ -595,7 +614,14 @@ one child per tab by index. Do NOT use `props.tabs[i].content` — ignored:
   one screen would feel CROWDED with structurally different things,
   tabs are correct. If it would feel REPETITIVE (same widget, same
   rows, just filtered differently), use a filter — not tabs.
-"""
+""",
+}
+
+
+# Backward-compat: the full canonical-shapes block remains exported as
+# the same prose blob it always was. Callers that want per-widget
+# granularity should reach for ``WIDGET_SHAPES`` directly.
+CANONICAL_SHAPES = _CANONICAL_SHAPES_PREAMBLE + "\n" + "\n".join(WIDGET_SHAPES.values())
 
 
 INTERACTIVE_STATE_RULE = """\
@@ -1280,6 +1306,22 @@ RIPPLE_DESIGN_RULES = "\n".join(
 )
 
 
+# Niche / situational design sections, keyed for on-demand retrieval by
+# the inline-Ripple ``widget_help`` tool. These are already part of the
+# eager ``RIPPLE_DESIGN_RULES`` superblock; surfacing them here lets the
+# two-tier ``widget_help`` lookup answer a "tell me about <section>"
+# request without splitting the whole blob by heading.
+OPTIONAL_DESIGN_SECTIONS: dict[str, str] = {
+    "tabular-picker": TABULAR_PICKER_RULE,
+    "activity-picker": ACTIVITY_PICKER_RULE,
+    "visual-variation": VISUAL_VARIATION_RULE,
+    "composition-cookbook": COMPOSITION_COOKBOOK,
+    "full-pane": FULL_PANE_RULE,
+    "logo": LOGO_RULE,
+    "design-quality": DESIGN_QUALITY,
+}
+
+
 __all__ = [
     "WIDGET_CATALOG",
     "USE_THE_WIDGET_RULE",
@@ -1288,6 +1330,8 @@ __all__ = [
     "WIDGET_SPEC_TOOL_RULE",
     "COMPOSITION_COOKBOOK",
     "CANONICAL_SHAPES",
+    "WIDGET_SHAPES",
+    "OPTIONAL_DESIGN_SECTIONS",
     "TABULAR_PICKER_RULE",
     "ACTIVITY_PICKER_RULE",
     "VISUAL_VARIATION_RULE",
