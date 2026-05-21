@@ -1196,9 +1196,7 @@ class TestOutcomeVerificationE2E:
     output; the verdict says whether it was an outcome."""
 
     @pytest.mark.asyncio
-    async def test_executed_action_records_verified_outcome(
-        self, store: InstinctStore
-    ) -> None:
+    async def test_executed_action_records_verified_outcome(self, store: InstinctStore) -> None:
         # 1. An agent proposes an action. The task it came from carried
         #    success_criteria captured at planning intake (issue #1161).
         success_criteria = [
@@ -1221,8 +1219,7 @@ class TestOutcomeVerificationE2E:
         # 3. The action executes and produces a result. The deterministic
         #    verifier checks that result against the captured criteria.
         execution_result = (
-            "Generated the overdue invoice list and sent a reminder "
-            "email to each customer on it."
+            "Generated the overdue invoice list and sent a reminder email to each customer on it."
         )
         verdict = verify_outcome(execution_result, success_criteria)
 
@@ -1238,9 +1235,7 @@ class TestOutcomeVerificationE2E:
         assert executed.outcome.total_count == 2
 
     @pytest.mark.asyncio
-    async def test_executed_action_records_partial_verdict(
-        self, store: InstinctStore
-    ) -> None:
+    async def test_executed_action_records_partial_verdict(self, store: InstinctStore) -> None:
         # An action whose result only satisfies some of its success
         # criteria gets a PARTIAL verdict — finishing is not solving.
         success_criteria = [
@@ -1267,9 +1262,7 @@ class TestOutcomeVerificationE2E:
         assert executed.outcome.met_count == 1
 
     @pytest.mark.asyncio
-    async def test_verified_outcome_survives_store_reload(
-        self, store: InstinctStore
-    ) -> None:
+    async def test_verified_outcome_survives_store_reload(self, store: InstinctStore) -> None:
         # The structured verdict must rebuild intact when the Action is
         # reloaded from SQLite — it is stored as JSON in the outcome column.
         action = await store.propose(
@@ -1293,9 +1286,7 @@ class TestOutcomeVerificationE2E:
         assert reloaded.outcome.criteria_results[0].criterion == "A report is generated"
 
     @pytest.mark.asyncio
-    async def test_executed_action_audit_trail_intact(
-        self, store: InstinctStore
-    ) -> None:
+    async def test_executed_action_audit_trail_intact(self, store: InstinctStore) -> None:
         # Recording a structured verdict must not disturb the audit log —
         # the action_executed entry is still written.
         action = await store.propose(

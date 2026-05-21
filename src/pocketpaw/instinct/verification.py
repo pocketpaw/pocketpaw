@@ -118,9 +118,7 @@ def _tokenize(text: str) -> list[str]:
     grammatical filler, then stems each so plural and singular forms match.
     """
     tokens = _WORD_RE.findall(text.lower())
-    return [
-        _stem(t) for t in tokens if len(t) >= _MIN_TOKEN_LEN and t not in _STOPWORDS
-    ]
+    return [_stem(t) for t in tokens if len(t) >= _MIN_TOKEN_LEN and t not in _STOPWORDS]
 
 
 def _result_to_text(result: Any) -> str:
@@ -182,8 +180,7 @@ def check_criterion(result: Any, criterion: str) -> CriterionResult:
         criterion=criterion,
         met=False,
         detail=(
-            f"Matched {matched}/{len(criterion_tokens)} keywords; "
-            f"missing: {', '.join(missing)}"
+            f"Matched {matched}/{len(criterion_tokens)} keywords; missing: {', '.join(missing)}"
         ),
     )
 
