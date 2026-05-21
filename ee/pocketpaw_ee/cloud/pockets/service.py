@@ -24,6 +24,9 @@ Agent-facing granular ``rippleSpec.ui`` mutations (called from the
 
 Changes: 2026-05-14 — added the Tier-2 prop-array item ops (reworked
 onto the pocketpaw_ee layout from PR #1106).
+Changes: 2026-05-21 (#1172) — ``agent_view`` self-heals node ids via
+``_heal_node_ids`` so pockets persisted before node-id stamping became
+addressable by granular edit ops on first agent read.
 """
 
 from __future__ import annotations
@@ -876,9 +879,43 @@ async def is_member(pocket_id: str, user_id: str) -> bool:
     return getattr(doc, "visibility", "workspace") == "workspace"
 
 
+async def _heal_node_ids(doc: _PocketDoc) -> None:
+    """Defense-in-depth: stamp ``n_xxxxxxxx`` ids on a pocket's UISpec
+    tree(s) if any node lacks one, persisting the heal.
+
+    Pockets created or persisted after #1172 always carry node ids
+    (``normalize_ripple_spec`` stamps them). This heals pockets written
+    before the fix so they become editable on first agent read without
+    a separate DB migration. Idempotent — a no-op when ids are already
+    present.
+    """
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        return
+    changed = False
+    ui = spec.get("ui")
+    if isinstance(ui, dict) and spec_ops.ensure_ids(ui):
+        changed = True
+    panes = spec.get("panes")
+    if isinstance(panes, dict):
+        for pane in panes.values():
+            if isinstance(pane, dict) and spec_ops.ensure_ids(pane):
+                changed = True
+    if changed:
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pocket %s node-id heal save failed: %s", doc.id, exc)
+
+
 async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     """Read-only fetch — returns ``(view_dict, None)`` on success or
     ``(None, error)`` on failure.
+
+    Self-heals node ids: a legacy pocket persisted before #1172 has an
+    id-less ``ui`` tree, so the chat agent would have no ``n_xxxxxxxx``
+    id to address with granular edit ops. ``_heal_node_ids`` stamps and
+    persists them on first read.
 
     Note: $source markers in rippleSpec are intentionally NOT resolved
     here. The agent must see raw markers so that on edit it preserves
@@ -888,6 +925,7 @@ async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     doc, err = await _agent_load_doc(pocket_id)
     if err:
         return None, err
+    await _heal_node_ids(doc)
     return _agent_view_dict(doc), None
 
 

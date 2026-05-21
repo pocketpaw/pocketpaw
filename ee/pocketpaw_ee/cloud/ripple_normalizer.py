@@ -1,4 +1,13 @@
-"""Minimal ripple spec normalizer — ensures envelope fields and widget IDs."""
+"""Minimal ripple spec normalizer — ensures envelope fields and widget IDs.
+
+Changes: 2026-05-21 (#1172) — ``normalize_ripple_spec`` now stamps a
+stable ``n_xxxxxxxx`` id on every node of a UISpec ``ui`` tree (and
+each ``panes`` value) via ``spec_ops.ensure_ids``. Every persist path
+routes through this normalizer, so stored specs always carry node ids
+and the chat agent can address nodes with granular edit ops. Previously
+ids were minted only at the start of a granular mutation op, leaving a
+freshly created pocket's tree id-less and unaddressable.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +16,23 @@ import secrets
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+def _stamp_node_ids(ui: Any) -> Any:
+    """Assign a stable ``n_xxxxxxxx`` id to every node in a UISpec
+    tree that lacks one. Idempotent and collision-safe — nodes that
+    already carry a valid unique id pass through untouched. Returns the
+    same object (``ensure_ids`` mutates in place).
+
+    ``spec_ops`` is imported lazily: ``pockets/__init__`` pulls in the
+    pockets router, which imports ``pockets/service``, which imports
+    this module — a top-level import here would close the cycle.
+    """
+    if isinstance(ui, dict):
+        from pocketpaw_ee.cloud.pockets import spec_ops
+
+        spec_ops.ensure_ids(ui)
+    return ui
 
 
 def _short_id() -> str:
@@ -148,19 +174,20 @@ def normalize_ripple_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
         },
     }
 
-    # Multi-pane: walk every pane to fix control-flow nodes inside.
+    # Multi-pane: walk every pane to fix control-flow nodes inside, then
+    # stamp node ids so each pane tree is addressable by edit ops.
     if spec.get("panes") and isinstance(spec["panes"], dict):
-        fixed_panes = {k: _walk_and_fix(v) for k, v in spec["panes"].items()}
+        fixed_panes = {k: _stamp_node_ids(_walk_and_fix(v)) for k, v in spec["panes"].items()}
         return {**spec, **envelope, "version": spec.get("version", "1.0"), "panes": fixed_panes}
 
-    # UISpec v1.0: walk the tree before persisting.
+    # UISpec v1.0: walk the tree, then stamp node ids before persisting.
     ui = spec.get("ui")
     if isinstance(ui, dict) and ui.get("type"):
         return {
             **spec,
             **envelope,
             "version": spec.get("version", "1.0"),
-            "ui": _walk_and_fix(ui),
+            "ui": _stamp_node_ids(_walk_and_fix(ui)),
         }
 
     # UISpec under a misnamed top-level key — the agent occasionally
@@ -178,7 +205,7 @@ def normalize_ripple_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
                 **promoted,
                 **envelope,
                 "version": spec.get("version", "1.0"),
-                "ui": _walk_and_fix(candidate),
+                "ui": _stamp_node_ids(_walk_and_fix(candidate)),
             }
 
     # UISpec passed as a raw root node — i.e. ``{type: "flex", props,
@@ -194,7 +221,11 @@ def normalize_ripple_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(spec_type, str) and spec_type and ("props" in spec or "children" in spec):
         node_keys = ("type", "props", "children", "style", "show", "id")
         node = {k: v for k, v in spec.items() if k in node_keys}
-        return {**envelope, "version": spec.get("version", "1.0"), "ui": _walk_and_fix(node)}
+        return {
+            **envelope,
+            "version": spec.get("version", "1.0"),
+            "ui": _stamp_node_ids(_walk_and_fix(node)),
+        }
 
     # Flat widgets: ensure IDs
     raw_widgets = spec.get("widgets")
