@@ -9,6 +9,11 @@
 #   task starts). Both default to empty list — to_dict/from_dict stay
 #   backward-compatible with TaskSpec data persisted before this change.
 #   Unblocks the Verification primitive (pocketpaw#1162).
+# Updated: 2026-05-21 (PR #1164 review) — TaskSpec.from_dict now coerces
+#   success_criteria / preconditions items to str and drops None entries,
+#   so non-string LLM output deserializes cleanly. Reworded the
+#   description docstring: criteria live in success_criteria now, not in
+#   the freeform description string.
 #
 # Defines data structures for:
 # - Project: top-level orchestration unit grouping tasks and agents
@@ -139,7 +144,8 @@ class TaskSpec:
     Attributes:
         key: Short unique key within the project (e.g., "research-competitors")
         title: Human-readable task title
-        description: Full task description and acceptance criteria
+        description: Full task description — freeform context and approach.
+            Verifiable criteria live in ``success_criteria``, not here.
         task_type: "agent" | "human" | "review"
         priority: "low" | "medium" | "high" | "urgent"
         tags: Categorization tags
@@ -199,6 +205,8 @@ class TaskSpec:
         ``success_criteria`` and ``preconditions`` default to ``[]`` when
         absent, so TaskSpec data serialized before those fields existed
         (and LLM output that omits them) deserializes without error.
+        Their items are coerced to ``str`` (and ``None`` entries dropped)
+        because LLM output occasionally emits non-string list items.
         """
         return cls(
             key=data.get("key", ""),
@@ -212,8 +220,8 @@ class TaskSpec:
             blocked_by_keys=data.get("blocked_by_keys", []),
             max_retries=data.get("max_retries", 1),
             timeout_minutes=data.get("timeout_minutes"),
-            success_criteria=data.get("success_criteria", []),
-            preconditions=data.get("preconditions", []),
+            success_criteria=[str(v) for v in data.get("success_criteria", []) if v is not None],
+            preconditions=[str(v) for v in data.get("preconditions", []) if v is not None],
         )
 
 

@@ -8,6 +8,9 @@
 #   fields: the planner parses success_criteria / preconditions from LLM
 #   JSON, omitting them defaults cleanly to [], and the prompt instructs
 #   the planner to emit them.
+# Updated: 2026-05-21 (PR #1164 review) — added a from_dict coercion
+#   test: non-string list items are coerced to str and None entries
+#   dropped.
 #
 # Tests cover:
 #   - Prompt template placeholders
@@ -280,6 +283,25 @@ class TestTaskSpecSuccessCriteria:
         task = TaskSpec.from_dict(old_data)
         assert task.success_criteria == []
         assert task.preconditions == []
+
+    def test_from_dict_coerces_non_string_items(self):
+        """LLM output occasionally puts non-string items in the lists.
+
+        from_dict must coerce each item to str and drop None entries so a
+        downstream verifier always gets a clean list[str].
+        """
+        data = {
+            "key": "t1",
+            "title": "Task",
+            "success_criteria": ["a real criterion", 42, True, None, 3.5],
+            "preconditions": [None, "state X", 0],
+        }
+        task = TaskSpec.from_dict(data)
+        assert task.success_criteria == ["a real criterion", "42", "True", "3.5"]
+        assert task.preconditions == ["state X", "0"]
+        # Every surviving item is a plain str.
+        assert all(isinstance(c, str) for c in task.success_criteria)
+        assert all(isinstance(p, str) for p in task.preconditions)
 
     def test_default_taskspec_has_empty_criteria(self):
         """A bare TaskSpec() defaults both fields to empty list."""

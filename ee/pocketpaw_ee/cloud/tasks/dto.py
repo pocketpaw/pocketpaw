@@ -13,6 +13,9 @@
 #   to CreateTaskRequest and TaskResponse. The planner's materializer
 #   carries them from the OSS TaskSpec so completion-time verification
 #   (pocketpaw#1162) can read machine-checkable criteria off the Task.
+# Updated: 2026-05-21 (PR #1164 review) — bounded the CreateTaskRequest
+#   success_criteria / preconditions lists at max_length=20 so a
+#   hallucinating planner LLM can't write a runaway list.
 """Tasks entity — request/response DTOs."""
 
 from __future__ import annotations
@@ -77,8 +80,8 @@ class CreateTaskRequest(BaseModel):
     cycle_id: str | None = None
     project_id: str | None = None
     blocked_by: list[str] = Field(default_factory=list)
-    success_criteria: list[str] = Field(default_factory=list)
-    preconditions: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list, max_length=20)
+    preconditions: list[str] = Field(default_factory=list, max_length=20)
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
     kind: Literal["task", "nudge", "projection", "automation"] = "task"
     source: SourceDTO = Field(default_factory=SourceDTO)

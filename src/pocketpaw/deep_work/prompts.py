@@ -9,6 +9,9 @@
 #   and preconditions per task, with explicit discipline: criteria must be
 #   objectively checkable (no "works as expected" / "should work
 #   correctly"). Feeds the new first-class TaskSpec fields.
+# Updated: 2026-05-21 (PR #1164 review) — TASK_BREAKDOWN_PROMPT JSON
+#   example no longer says the description holds "acceptance criteria";
+#   criteria belong in the dedicated success_criteria array.
 #
 # Prompt templates:
 #   GOAL_PARSE_PROMPT — structured goal analysis (domain, complexity, roles)
@@ -201,7 +204,7 @@ Just the raw JSON array:
   {{
     "key": "t1",
     "title": "...",
-    "description": "... with acceptance criteria",
+    "description": "freeform context and approach for this task",
     "task_type": "agent",
     "priority": "medium",
     "tags": ["..."],

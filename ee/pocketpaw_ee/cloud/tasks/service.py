@@ -26,6 +26,9 @@
 #   ``preconditions`` from the request; ``_to_domain`` threads them
 #   through so completion-time verification (pocketpaw#1162) can read
 #   them off the Task.
+# Updated: 2026-05-21 (PR #1164 review) — documented in
+#   ``agent_update_task`` that success_criteria / preconditions are
+#   intentionally not patchable (planner-set, not ad-hoc editable).
 """Tasks entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -309,6 +312,11 @@ async def agent_update_task(
         doc.blocked_by = list(body.blocked_by)
     if body.due_at is not None:
         doc.due_at = body.due_at
+
+    # success_criteria / preconditions are deliberately NOT patchable
+    # here: they are planner-set at materialization time (the verifiable
+    # contract for the task) and should not drift via ad-hoc edits.
+    # UpdateTaskRequest omits them on purpose — not an oversight.
 
     await doc.save()
     task = _to_domain(doc)
