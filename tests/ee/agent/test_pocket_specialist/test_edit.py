@@ -341,12 +341,13 @@ class TestRunEditSpecialistSuccessFlag:
         """
         from unittest.mock import MagicMock
 
-        from pocketpaw.agents.protocol import AgentEvent
-        from pocketpaw.config import Settings
         from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistEditInput,
             run_edit_specialist,
         )
+
+        from pocketpaw.agents.protocol import AgentEvent
+        from pocketpaw.config import Settings
 
         # Mirrors the exact pattern in deep_agents.py:974-977 — no raise,
         # just two yield statements: error then done.
@@ -477,12 +478,9 @@ class TestPromptSeparation:
 
         # Extract the tools block from the prompt — look for the first
         # <pocket-tools> ... </pocket-tools> section.
-        tools_block_match = re.search(
-            r"<pocket-tools>(.*?)</pocket-tools>", prompt, re.DOTALL
-        )
+        tools_block_match = re.search(r"<pocket-tools>(.*?)</pocket-tools>", prompt, re.DOTALL)
         assert tools_block_match is not None, (
-            "Edit specialist prompt has no <pocket-tools> block — "
-            "cannot verify tool surface"
+            "Edit specialist prompt has no <pocket-tools> block — cannot verify tool surface"
         )
         tools_block = tools_block_match.group(1)
 
