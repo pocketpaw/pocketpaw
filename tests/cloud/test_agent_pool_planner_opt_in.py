@@ -72,6 +72,7 @@ async def _build_with(agent_doc, settings: Settings) -> ToolPolicy:
     """Run ``AgentPool._build`` with stubbed backend + settings, return the
     ``ToolPolicy`` the Claude SDK backend was constructed with."""
     _CapturingBackend.last_policy = None
+    _CapturingBackend.last_settings = None
     pool = AgentPool()
     with (
         patch(

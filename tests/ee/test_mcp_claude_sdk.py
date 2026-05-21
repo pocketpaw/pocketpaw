@@ -1,10 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
-Updated: 2026-05-21 — refactor/gate-planner-mcp. ``_strip_builtin_servers``
-  now also drops ``pocketpaw_planner`` so external-config assertions stay
-  correct after the planner became a built-in in-process MCP server
-  (fixes #1150). ``TestPlannerMCPGate`` covers the opt-in gate: the planner
-  loads only when an injected ``ToolPolicy`` names it in ``mcp_servers_allow``.
+Updated: 2026-05-21 — refactor/gate-planner-mcp. Expanded the
+  ``_strip_builtin_servers`` docstring to explain why ``pocketpaw_planner``
+  is stripped even though it is opt-in rather than always-on. Added
+  ``TestPlannerMCPGate`` covering the opt-in gate: the planner loads only
+  when an injected ``ToolPolicy`` names it in ``mcp_servers_allow``.
 
 All SDK imports are mocked.
 """

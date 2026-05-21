@@ -294,23 +294,6 @@ class AgentPool:
             elif "google" in settings.agent_backend:
                 settings.google_adk_model = model
 
-        # Per-agent tool policy. The agent's ``tools`` list may name
-        # built-in in-process MCP servers (e.g. ``pocketpaw_planner``); any
-        # token in ``OPT_IN_MCP_SERVERS`` becomes an ``mcp_servers_allow``
-        # entry. Tokens are the plain server name, not the internal
-        # ``mcp:<server>:*`` notation — this is the only translation point.
-        # Unknown tokens are dropped. Profile / allow / deny carry the same
-        # values as the process-wide policy — only ``mcp_servers_allow`` is
-        # per-agent, so opting one agent into the planner never affects
-        # any other tool or external MCP server (see ToolPolicy.__init__).
-        mcp_servers_allow = frozenset(t for t in config.get("tools", []) if t in OPT_IN_MCP_SERVERS)
-        agent_policy = ToolPolicy(
-            profile=settings.tool_profile,
-            allow=settings.tools_allow,
-            deny=settings.tools_deny,
-            mcp_servers_allow=mcp_servers_allow,
-        )
-
         # Instantiate backend
         backend_cls = get_backend_class(settings.agent_backend)
         if not backend_cls:
@@ -321,6 +304,26 @@ class AgentPool:
         # every other backend's ``__init__`` accepts only ``settings``, so
         # passing ``policy=`` to one would raise TypeError.
         if backend_cls is ClaudeSDKBackend:
+            # Per-agent tool policy. The agent's ``tools`` list may name
+            # built-in in-process MCP servers (e.g. ``pocketpaw_planner``);
+            # any token in ``OPT_IN_MCP_SERVERS`` becomes an
+            # ``mcp_servers_allow`` entry. Tokens are the plain server name,
+            # not the internal ``mcp:<server>:*`` notation — this is the
+            # only translation point. Unknown tokens are dropped. Profile /
+            # allow / deny carry the same values as the process-wide policy
+            # — only ``mcp_servers_allow`` is per-agent, so opting one agent
+            # into the planner never affects any other tool or external MCP
+            # server (see ToolPolicy.__init__). Built only here because no
+            # other backend reads an injected policy.
+            mcp_servers_allow = frozenset(
+                t for t in config.get("tools", []) if t in OPT_IN_MCP_SERVERS
+            )
+            agent_policy = ToolPolicy(
+                profile=settings.tool_profile,
+                allow=settings.tools_allow,
+                deny=settings.tools_deny,
+                mcp_servers_allow=mcp_servers_allow,
+            )
             backend = backend_cls(settings, policy=agent_policy)
         else:
             backend = backend_cls(settings)
