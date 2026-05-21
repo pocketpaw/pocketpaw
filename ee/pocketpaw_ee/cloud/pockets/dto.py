@@ -7,6 +7,12 @@ separate follow-up calls.
 Updated: 2026-05-16 — added optional ``project_id`` (aliased as
 ``projectId`` on the wire) to CreatePocketRequest / UpdatePocketRequest /
 PocketResponse so pockets can be grouped under a Mission Control Project.
+
+Updated: 2026-05-21 — documented the ``type="native"`` widget contract on
+``AddWidgetRequest`` (home-as-pocket foundation). A native widget is an
+ordinary widget entry whose ``type`` is ``"native"`` and whose ``name`` is
+the key the frontend uses to look up a built-in Svelte component — it
+carries no ``rippleSpec`` to render or validate.
 """
 
 from __future__ import annotations
@@ -47,6 +53,18 @@ class UpdatePocketRequest(BaseModel):
 
 
 class AddWidgetRequest(BaseModel):
+    """Body for POST /pockets/{id}/widgets.
+
+    ``type`` is free-form. Two kinds of widget ride this schema:
+
+    * ordinary Ripple-spec widgets — ``config``/``props`` carry the spec;
+    * native widgets — ``type="native"`` and ``name`` is the key the
+      frontend uses to resolve a built-in Svelte component. Native
+      widgets have no rippleSpec, so manifest validation (which only
+      walks rippleSpec trees) never touches them. ``icon``/``color`` are
+      kept for the tile chrome.
+    """
+
     name: str = Field(min_length=1, max_length=100)
     type: str = "custom"
     icon: str = ""

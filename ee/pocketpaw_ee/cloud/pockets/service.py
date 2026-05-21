@@ -6,6 +6,7 @@ Sole owner of writes to the ``Pocket`` Beanie document. Module-level
 
 Public API (returns wire dicts for legacy router compatibility):
 - ``create``, ``list_pockets``, ``get``, ``update``, ``delete``
+- ``ensure_home_pocket`` — resolve-or-provision the user's home pocket
 - ``create_from_ripple_spec`` — agent-generated pockets
 - ``add_widget``, ``update_widget``, ``remove_widget``, ``reorder_widgets``
 - ``generate_share_link``, ``revoke_share_link``, ``update_share_link``,
@@ -27,6 +28,12 @@ onto the pocketpaw_ee layout from PR #1106).
 Changes: 2026-05-21 (#1172) — ``agent_view`` self-heals node ids via
 ``_heal_node_ids`` so pockets persisted before node-id stamping became
 addressable by granular edit ops on first agent read.
+Changes: 2026-05-21 — added ``ensure_home_pocket`` (home-as-pocket
+foundation): idempotently resolves-or-provisions a per-user ``type="home"``
+pocket and persists its id onto the user's ``home_pocket_id`` setting.
+Native widgets (``type="native"``) ride the existing ``widgets[]`` paths
+unchanged — they carry no ``rippleSpec``, so manifest validation (which
+only walks ``rippleSpec`` trees) never touches them.
 """
 
 from __future__ import annotations
@@ -64,6 +71,17 @@ from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationErro
 from pocketpaw_ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
+
+# Pocket ``type`` for the per-user pocket that backs the home page. Behaves
+# like an ordinary private pocket — the type is a marker the home route and
+# the frontend key on, not a behavioural switch.
+HOME_POCKET_TYPE = "home"
+
+# Widget ``type`` for "native" widgets — widgets the frontend renders as a
+# built-in Svelte component (looked up by ``name``) rather than from a
+# ``rippleSpec``. Native widgets have no spec, so manifest validation —
+# which only walks ``rippleSpec`` trees — never touches them.
+NATIVE_WIDGET_TYPE = "native"
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +327,48 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     if body.session_id:
         await sessions_service.link_pocket(workspace_id, body.session_id, pocket.id)
 
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def ensure_home_pocket(workspace_id: str, user_id: str) -> dict:
+    """Resolve-or-provision the caller's home pocket; return its wire dict.
+
+    Idempotent. If the user's ``home_pocket_id`` setting points at a pocket
+    that still exists and is owned by the user, that pocket is returned
+    unchanged. Otherwise a fresh ``type="home"`` pocket is created
+    (``name="Home"``, ``visibility="private"``, no widgets), its id is
+    persisted back onto the user setting, and the new pocket is returned.
+
+    A stale ``home_pocket_id`` — the pocket was deleted, or it now belongs
+    to someone else — falls through to re-provisioning rather than raising.
+
+    Provisioning is deliberately empty: the client owns the home page's
+    default / seed widgets. This service only guarantees a backing pocket
+    exists.
+    """
+    from pocketpaw_ee.cloud.auth import service as auth_service
+
+    existing_id = await auth_service.get_home_pocket_id(user_id)
+    if existing_id:
+        try:
+            doc = await _fetch_pocket(existing_id)
+        except NotFound:
+            doc = None
+        if doc is not None and doc.owner == user_id:
+            return await _resolved_wire_dict(doc, user_id)
+
+    doc = _PocketDoc(
+        workspace=workspace_id,
+        name="Home",
+        description="",
+        type=HOME_POCKET_TYPE,
+        owner=user_id,
+        visibility="private",
+        widgets=[],
+    )
+    await doc.insert()
+    await auth_service.set_home_pocket_id(user_id, str(doc.id))
     await emit(PocketCreated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 

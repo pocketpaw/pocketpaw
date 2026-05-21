@@ -1,4 +1,11 @@
-"""Pocket and Widget documents."""
+"""Pocket and Widget documents.
+
+Updated: 2026-05-21 — documented the ``type="home"`` pocket type (the
+per-user pocket that backs the home page) and the ``type="native"``
+widget type (rendered by the frontend as a built-in Svelte component
+keyed on ``name``). Both reuse the free-form ``type`` field — no schema
+change, just recognized values.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +32,8 @@ class Widget(BaseModel):
 
     id: str = Field(default_factory=lambda: str(ObjectId()), alias="_id")
     name: str
+    # Free-form. ``type="native"`` marks a widget the frontend renders as a
+    # built-in Svelte component keyed on ``name`` (no rippleSpec).
     type: str = "custom"
     icon: str = ""
     color: str = ""
@@ -52,7 +61,9 @@ class Pocket(TimestampedDocument):
     project_id: str | None = None
     name: str
     description: str = ""
-    type: str = "custom"  # no pattern restriction — frontend sends data, deep-work, etc.
+    # No pattern restriction — frontend sends data, deep-work, etc.
+    # ``type="home"`` marks the per-user pocket that backs the home page.
+    type: str = "custom"
     icon: str = ""
     color: str = ""
     owner: str

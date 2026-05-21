@@ -26,6 +26,11 @@ class Widget:
     Pocket field uses tuples for hashability. ``config``, ``props``, and
     ``data`` carry arbitrary JSON which we keep as ``Any`` (frozen
     dataclasses don't enforce immutability at deeper nesting).
+
+    ``type`` is free-form. A widget with ``type="native"`` is a "native"
+    widget — the frontend renders it as a built-in Svelte component looked
+    up by ``name``, rather than from a rippleSpec. Native widgets carry no
+    spec, so they are never manifest-validated.
     """
 
     id: str
@@ -50,6 +55,10 @@ class Pocket:
     grouped under a Mission Control Project. Optional (default None) so
     existing pocket records — and callers that don't care about projects —
     keep working unchanged.
+
+    ``type`` is free-form. ``type="home"`` marks the per-user pocket that
+    backs the home page — it behaves like an ordinary private pocket; the
+    type is just a marker the home route and frontend key on.
     """
 
     id: str

@@ -1,4 +1,4 @@
-"""Auth service — profile, active-workspace, avatar.
+"""Auth service — profile, active-workspace, avatar, home pocket.
 
 Sole owner of writes to the ``User`` Beanie document for the auth domain.
 Note: fastapi-users manages registration / password / JWT lifecycle; this
@@ -9,6 +9,12 @@ Public API is module-level ``async def`` functions:
 - ``update_profile(ctx, *, full_name?, avatar?, status?)``
 - ``set_active_workspace(ctx, workspace_id)``
 - ``set_avatar_path(ctx, avatar_path)``
+- ``get_home_pocket_id(user_id)`` / ``set_home_pocket_id(user_id, pocket_id)``
+
+Updated: 2026-05-21 — added the ``home_pocket_id`` get/set pair. The
+pockets service owns home-pocket provisioning but stores the resolved id
+here so it survives across sessions and devices; routing the read/write
+through this service keeps ``models.user`` writes inside the auth entity.
 """
 
 from __future__ import annotations
@@ -91,6 +97,32 @@ async def set_avatar_path(ctx: RequestContext, avatar_path: str) -> AuthUser:
     return await update_profile(ctx, avatar=avatar_path)
 
 
+async def get_home_pocket_id(user_id: str) -> str | None:
+    """Return the user's persisted ``home_pocket_id``, or None if unset.
+
+    Takes a plain ``user_id`` (not a ``RequestContext``) so the pockets
+    service can resolve the home pocket without minting a context. Raises
+    ``NotFound`` when the user record is missing.
+    """
+    doc = await _UserDoc.get(PydanticObjectId(user_id))
+    if doc is None:
+        raise NotFound("user", user_id)
+    return doc.home_pocket_id
+
+
+async def set_home_pocket_id(user_id: str, pocket_id: str | None) -> None:
+    """Persist ``home_pocket_id`` onto the user record.
+
+    Pass ``None`` to clear the setting (e.g. when the home pocket was
+    deleted). Raises ``NotFound`` when the user record is missing.
+    """
+    doc = await _UserDoc.get(PydanticObjectId(user_id))
+    if doc is None:
+        raise NotFound("user", user_id)
+    doc.home_pocket_id = pocket_id
+    await doc.save()
+
+
 async def suggest_workspace_members(workspace_id: str, q: str, *, limit: int = 8) -> list[dict]:
     """Return up to ``limit`` workspace members matching ``q`` against
     full_name / email. Used by the chat ``/mentions/suggest`` endpoint."""
@@ -112,9 +144,11 @@ async def suggest_workspace_members(workspace_id: str, q: str, *, limit: int = 8
 
 
 __all__ = [
+    "get_home_pocket_id",
     "get_profile",
     "set_active_workspace",
     "set_avatar_path",
+    "set_home_pocket_id",
     "suggest_workspace_members",
     "update_profile",
 ]

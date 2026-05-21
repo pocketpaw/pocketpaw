@@ -10,6 +10,12 @@ close UI-TESTING-GUIDE §11 gap B5 (no widget layout save/share):
 The YAML + in-process store live in ee.cloud.pockets.layouts. Export is
 pure. Template storage is workspace-scoped and in-process for now; the
 REST contract matches the MongoDB-backed version that Wave 4 will ship.
+
+Updated: 2026-05-21 — added ``GET /pockets/home``, the home-as-pocket
+foundation. It resolves-or-provisions the caller's home pocket via
+``pockets_service.ensure_home_pocket`` and returns ``{pocket_id, pocket}``.
+Declared ahead of ``GET /{pocket_id}`` so the static ``/home`` segment
+wins the route match.
 """
 
 from __future__ import annotations
@@ -193,6 +199,21 @@ async def list_pockets(
     project_id: str | None = Query(default=None, alias="project_id"),
 ) -> list[dict]:
     return await pockets_service.list_pockets(workspace_id, user_id, project_id=project_id)
+
+
+@router.get("/home")
+async def get_home_pocket(
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Resolve-or-provision the caller's home pocket.
+
+    Declared ahead of ``GET /{pocket_id}`` so the static ``/home`` segment
+    is matched before the pocket-id wildcard. Returns ``{pocket_id, pocket}``
+    where ``pocket`` is the full wire dict (rippleSpec + widgets).
+    """
+    pocket = await pockets_service.ensure_home_pocket(workspace_id, user_id)
+    return {"pocket_id": pocket["_id"], "pocket": pocket}
 
 
 @router.get("/{pocket_id}")
