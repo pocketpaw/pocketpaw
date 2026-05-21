@@ -8,10 +8,12 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from pocketpaw_ee.agent.mcp_servers.meetings import (
+    CHECK_BOT_TOOL_ID,
     MEETING_TOOL_IDS,
     SEND_BOT_TOOL_ID,
     SERVER_NAME,
     _cancel_meeting_handler,
+    _check_bot_handler,
     _find_transcript_handler,
     _list_meetings_handler,
     _schedule_meeting_handler,
@@ -377,3 +379,49 @@ async def test_send_bot_surfaces_cloud_errors(chat_identity, monkeypatch):
     result = await _send_bot_handler({"meeting_id": "m1"})
     assert result["is_error"] is True
     assert "meeting.bot_secret_missing" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# check_meeting_bot
+# ---------------------------------------------------------------------------
+
+
+def test_check_bot_tool_id_in_allowlist():
+    """The check_meeting_bot tool must be in the global allowlist."""
+    assert CHECK_BOT_TOOL_ID in MEETING_TOOL_IDS
+
+
+async def test_check_bot_requires_meeting_id(chat_identity):
+    result = await _check_bot_handler({})
+    assert result["is_error"] is True
+    assert "meeting_id is required" in result["content"][0]["text"]
+
+
+async def test_check_bot_happy_path(chat_identity, monkeypatch):
+    """Handler returns the service's bot-status payload to the agent."""
+    import json
+
+    captured: dict = {}
+
+    async def _fake_get_bot_status(workspace_id, meeting_id):
+        captured["workspace_id"] = workspace_id
+        captured["meeting_id"] = meeting_id
+        return {
+            "meeting_id": meeting_id,
+            "has_bot": True,
+            "bot_id": "bot-abc",
+            "status": "in_waiting_room",
+            "status_detail": None,
+            "status_at": None,
+            "summary": "The bot is in the lobby — admit it.",
+        }
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.meetings.service.get_bot_status", _fake_get_bot_status)
+
+    result = await _check_bot_handler({"meeting_id": "m1"})
+    assert result.get("is_error") is not True, result
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["status"] == "in_waiting_room"
+    assert payload["has_bot"] is True
+    assert captured["workspace_id"] == "ws-alpha"
+    assert captured["meeting_id"] == "m1"

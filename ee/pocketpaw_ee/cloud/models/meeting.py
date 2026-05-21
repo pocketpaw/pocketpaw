@@ -102,6 +102,13 @@ class Meeting(TimestampedDocument):
     raw_provider_payload: dict[str, Any] = Field(default_factory=dict)
     # ``None`` = ingested from webhook (we didn't create it).
     created_by_user_id: str | None = None
+    # Recall.ai bot lifecycle status — the latest ``status_changes`` code
+    # (``joining_call`` / ``in_waiting_room`` / ``in_call_recording`` /
+    # ``done`` / ``fatal`` / …). Updated by the bot.status_change webhook
+    # and by on-demand status checks. ``None`` until a bot is dispatched.
+    bot_status: str | None = None
+    bot_status_detail: str | None = None  # Recall sub_code, e.g. bot_kicked_from_call
+    bot_status_at: datetime | None = None
 
     class Settings(TimestampedDocument.Settings):
         name = "meetings"

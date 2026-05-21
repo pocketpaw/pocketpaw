@@ -1,9 +1,9 @@
 # Meetings — inbound Recall.ai webhook.
 #
 # Recall.ai pushes bot lifecycle + transcript events to a single endpoint
-# configured in the Recall dashboard, delivered through Svix. We act on
-# `transcript.done` (and `bot.done` as a backstop): resolve the meeting
-# from the bot id, then fetch + store the transcript.
+# configured in the Recall dashboard, delivered through Svix. We handle:
+#   * `bot.*` lifecycle events       → persist the bot's status on the meeting
+#   * `transcript.done` / `bot.done` → fetch + store the transcript
 #
 # This router carries NO auth dependency — Recall is the caller. Trust is
 # established by the Svix signature instead. It is mounted separately from
@@ -32,9 +32,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/meetings/webhooks", tags=["Meetings"])
 
-# Events worth acting on. `transcript.done` is the real signal; `bot.done`
-# is a backstop in case transcription finishes before the bot shuts down.
-_ACTIONABLE_EVENTS = {"transcript.done", "bot.done"}
+# Events that trigger transcript ingestion. `transcript.done` is the real
+# signal; `bot.done` is a backstop in case transcription finishes before
+# the bot shuts down.
+_TRANSCRIPT_EVENTS = {"transcript.done", "bot.done"}
 
 # Svix tolerates a 5-minute clock skew on the signed timestamp.
 _TIMESTAMP_TOLERANCE_SECONDS = 5 * 60
@@ -44,9 +45,17 @@ _TIMESTAMP_TOLERANCE_SECONDS = 5 * 60
 async def recall_webhook(request: Request) -> dict:
     """Ingest a Recall.ai webhook.
 
+    Handles two event families:
+      * ``bot.*`` lifecycle events (``bot.joining_call``,
+        ``bot.in_waiting_room``, ``bot.in_call_recording``, ``bot.done``,
+        ``bot.fatal``, …) — persist the bot's status. Recall puts the
+        specific status in the ``event`` field; there is no generic
+        ``bot.status_change`` event.
+      * ``transcript.done`` / ``bot.done`` — fetch + store the transcript.
+
     Returns 200 on success or for ignored event types; raises ``Forbidden``
     on a bad signature. A processing failure is re-raised (→ 5xx) so Recall
-    retries — ``ingest_transcript_for_recall_bot`` is idempotent.
+    retries — both service entry points are idempotent.
     """
     raw = await request.body()
     _verify_signature(request.headers, raw)
@@ -58,17 +67,37 @@ async def recall_webhook(request: Request) -> dict:
         return {"ok": True, "ignored": "malformed_json"}
 
     event_type = str(event.get("event") or "")
-    if event_type not in _ACTIONABLE_EVENTS:
-        return {"ok": True, "ignored": event_type or "unknown"}
-
     bot_id = _extract_bot_id(event)
     if not bot_id:
         logger.warning("Recall webhook %s carried no bot id", event_type)
         return {"ok": True, "ignored": "no_bot_id"}
 
-    stored = await meetings_service.ingest_transcript_for_recall_bot(bot_id)
-    logger.info("Recall webhook %s bot=%s transcript_stored=%s", event_type, bot_id, stored)
-    return {"ok": True, "bot_id": bot_id, "transcript_stored": stored}
+    result: dict = {"ok": True, "bot_id": bot_id}
+
+    # Every `bot.*` event is a lifecycle status change. The status code is
+    # in `data.data.code`; fall back to the event suffix if it's absent.
+    if event_type.startswith("bot."):
+        code, sub_code = _extract_status(event)
+        code = code or event_type.removeprefix("bot.")
+        matched = await meetings_service.update_bot_status_for_recall_bot(bot_id, code, sub_code)
+        result["bot_status"] = code
+        logger.info(
+            "Recall webhook %s bot=%s status=%s matched=%s",
+            event_type,
+            bot_id,
+            code,
+            matched,
+        )
+
+    # transcript.done is the real transcript signal; bot.done is a backstop.
+    if event_type in _TRANSCRIPT_EVENTS:
+        stored = await meetings_service.ingest_transcript_for_recall_bot(bot_id)
+        result["transcript_stored"] = stored
+        logger.info("Recall webhook %s bot=%s transcript_stored=%s", event_type, bot_id, stored)
+
+    if "bot_status" not in result and "transcript_stored" not in result:
+        return {"ok": True, "ignored": event_type or "unknown"}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -142,3 +171,17 @@ def _extract_bot_id(event: dict) -> str:
     if isinstance(bot, dict):
         return str(bot.get("id") or "")
     return ""
+
+
+def _extract_status(event: dict) -> tuple[str, str | None]:
+    """Pull the status ``code`` + ``sub_code`` from a ``bot.*`` event payload.
+
+    Recall nests these at ``data.data.{code,sub_code}``.
+    """
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return "", None
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        return str(inner.get("code") or ""), inner.get("sub_code")
+    return "", None

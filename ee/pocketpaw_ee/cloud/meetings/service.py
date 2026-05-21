@@ -56,6 +56,9 @@ def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) ->
         recording_file_ids=list(doc.recording_file_ids),
         transcript_available=transcript_available,
         created_at=doc.createdAt,
+        bot_status=doc.bot_status,
+        bot_status_detail=doc.bot_status_detail,
+        bot_status_at=doc.bot_status_at,
     )
 
 
@@ -647,6 +650,135 @@ async def ingest_transcript_for_recall_bot(bot_id: str) -> bool:
         return False
     result = await fetch_and_store_transcript(doc.workspace, str(doc.id))
     return result is not None
+
+
+# ---------------------------------------------------------------------------
+# Bot status tracking
+# ---------------------------------------------------------------------------
+
+_BOT_STATUS_SUMMARY = {
+    "joining_call": "The bot is connecting to the meeting.",
+    "in_waiting_room": (
+        "The bot is in the lobby — someone in the meeting must admit "
+        "'PocketPaw Bot' to let it into the call."
+    ),
+    "in_call_not_recording": "The bot is in the meeting but not recording yet.",
+    "in_call_recording": "The bot is in the meeting and recording.",
+    "recording_permission_allowed": "The bot is in the meeting and recording.",
+    "recording_permission_denied": "The host denied the bot recording permission.",
+    "call_ended": "The bot has left the meeting.",
+    "done": "The bot has finished and left the meeting.",
+    "fatal": "The bot hit a fatal error and could not join the meeting.",
+}
+
+
+def _bot_status_summary(status: str | None, sub_code: str | None) -> str:
+    """Human-readable one-liner for a Recall bot status — surfaced to the agent."""
+    if not status:
+        return "No bot has been dispatched to this meeting yet."
+    base = _BOT_STATUS_SUMMARY.get(status, f"Bot status: {status}.")
+    return f"{base} ({sub_code})" if sub_code else base
+
+
+async def _resolve_meeting_doc(workspace_id: str, meeting_id: str) -> _MeetingDoc:
+    """Load a workspace-scoped Meeting doc, tolerating str or ObjectId ids."""
+    doc = await _MeetingDoc.find_one(
+        _MeetingDoc.workspace == workspace_id, _MeetingDoc.id == meeting_id
+    )
+    if doc is None:
+        try:
+            from beanie import PydanticObjectId
+
+            doc = await _MeetingDoc.find_one(
+                _MeetingDoc.workspace == workspace_id,
+                _MeetingDoc.id == PydanticObjectId(meeting_id),
+            )
+        except Exception:
+            doc = None
+    if doc is None:
+        raise NotFound("meeting", meeting_id)
+    return doc
+
+
+async def update_bot_status_for_recall_bot(
+    bot_id: str, status: str, sub_code: str | None = None
+) -> bool:
+    """Webhook entry — persist a Recall ``bot.status_change`` onto the meeting.
+
+    Cross-tenant lookup by the correlated ``bot_id`` (the webhook carries
+    no workspace context). Returns ``True`` if a meeting matched.
+    """
+    if not bot_id or not status:
+        return False
+    from datetime import UTC, datetime
+
+    # global-read: inbound webhook is cross-tenant; resolved via bot_id.
+    doc = await _MeetingDoc.find_one({"raw_provider_payload.recall.bot_id": bot_id})
+    if doc is None:
+        logger.info("Recall status webhook for unknown bot=%s — ignoring", bot_id)
+        return False
+    doc.bot_status = status
+    doc.bot_status_detail = sub_code
+    doc.bot_status_at = datetime.now(UTC)
+    await doc.save()
+    await event_bus.emit(
+        "meeting.bot_status",
+        {
+            "workspace_id": doc.workspace,
+            "meeting_id": str(doc.id),
+            "bot_status": status,
+        },
+    )
+    return True
+
+
+async def get_bot_status(workspace_id: str, meeting_id: str) -> dict:
+    """Return the current Recall bot status for a meeting.
+
+    Does one live Recall lookup and refreshes the persisted ``bot_status``
+    on the meeting row — so the field self-heals in setups where the
+    ``bot.status_change`` webhook isn't reachable (e.g. local dev).
+    Raises ``NotFound`` if the meeting is unknown to the workspace.
+    """
+    from pocketpaw_ee.cloud.meetings import recall_client
+
+    doc = await _resolve_meeting_doc(workspace_id, meeting_id)
+    bot_id = str((doc.raw_provider_payload or {}).get("recall", {}).get("bot_id") or "")
+    if not bot_id:
+        return {
+            "meeting_id": str(doc.id),
+            "has_bot": False,
+            "bot_id": None,
+            "status": None,
+            "status_detail": None,
+            "status_at": None,
+            "summary": _bot_status_summary(None, None),
+        }
+
+    try:
+        live = await recall_client.get_bot_status(bot_id)
+    except Exception as exc:  # noqa: BLE001 — fall back to the persisted value
+        logger.warning("live bot status fetch failed for meeting=%s: %s", meeting_id, exc)
+        live = None
+
+    if live is not None:
+        from datetime import UTC, datetime
+
+        doc.bot_status = live["status"]
+        doc.bot_status_detail = live.get("sub_code")
+        doc.bot_status_at = datetime.now(UTC)
+        # no-event: read-through refresh of a cached field, not a domain mutation.
+        await doc.save()
+
+    return {
+        "meeting_id": str(doc.id),
+        "has_bot": True,
+        "bot_id": bot_id,
+        "status": doc.bot_status,
+        "status_detail": doc.bot_status_detail,
+        "status_at": doc.bot_status_at,
+        "summary": _bot_status_summary(doc.bot_status, doc.bot_status_detail),
+    }
 
 
 # Tiny helper for cheap speaker-counting in VTT.

@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
@@ -333,6 +335,33 @@ async def stop_bot(
 ) -> dict:
     """Stop an active Recall.ai bot for this meeting. Idempotent."""
     return await recall_client.stop_bot(workspace_id, meeting_id)
+
+
+class BotStatusResponseDTO(BaseModel):
+    """Returned by GET /meetings/{id}/bot — the bot's live lifecycle status."""
+
+    meeting_id: str
+    has_bot: bool
+    bot_id: str | None = None
+    status: str | None = None
+    status_detail: str | None = None
+    status_at: datetime | None = None
+    summary: str
+
+
+@router.get("/{meeting_id}/bot", response_model=BotStatusResponseDTO)
+async def get_bot(
+    meeting_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> BotStatusResponseDTO:
+    """Current Recall.ai bot status for this meeting.
+
+    Live-checked against Recall on each call; the result also refreshes
+    the cached ``bot_status`` on the meeting row. Use this for a 'where is
+    the bot' poll from the desktop client.
+    """
+    status = await meetings_service.get_bot_status(workspace_id, meeting_id)
+    return BotStatusResponseDTO(**status)
 
 
 # ---------------------------------------------------------------------------

@@ -105,6 +105,10 @@ class MeetingResponse(BaseModel):
     recording_file_ids: list[str] = Field(default_factory=list)
     transcript_available: bool = False
     created_at: datetime | None = None
+    # Recall.ai bot lifecycle status — None until a bot is dispatched.
+    bot_status: str | None = None
+    bot_status_detail: str | None = None
+    bot_status_at: datetime | None = None
 
 
 class MeetingDetailResponse(MeetingResponse):

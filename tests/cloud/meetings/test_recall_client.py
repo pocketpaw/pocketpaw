@@ -103,7 +103,7 @@ async def test_request_bot_posts_correct_shape(recall_env, monkeypatch):
     assert call["url"] == "http://recall.test/api/v1/bot/"
     assert call["json"]["meeting_url"] == "https://zoom.us/j/123456789"
     assert call["json"]["bot_name"] == "PocketPaw Bot"
-    assert call["json"]["recording_config"]["transcript"]["provider"] == {"recallai_async": {}}
+    assert call["json"]["recording_config"]["transcript"]["provider"] == {"meeting_captions": {}}
     assert call["json"]["metadata"]["workspace_id"] == "ws-alpha"
     assert call["headers"]["Authorization"] == "Token test-key"
 
@@ -441,23 +441,47 @@ async def test_webhook_transcript_done_triggers_ingest(monkeypatch):
 
 
 async def test_webhook_ignores_unrelated_events(monkeypatch):
-    """A non-actionable event is acked 200 without touching the service."""
+    """An event we don't handle is acked 200 without touching the service."""
     from pocketpaw_ee.cloud.meetings import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
-
-    async def _must_not_call(bot_id):  # pragma: no cover - asserts non-invocation
-        raise AssertionError("ingest should not run for bot.joining_call")
-
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.meetings.service.ingest_transcript_for_recall_bot", _must_not_call
-    )
-
-    body = json.dumps({"event": "bot.joining_call", "data": {"bot": {"id": "bot-x"}}}).encode()
+    body = json.dumps({"event": "recording.done", "data": {"bot": {"id": "bot-x"}}}).encode()
     request = _make_request(body, _svix_headers(_WEBHOOK_SECRET, body))
 
     result = await webhooks.recall_webhook(request)
-    assert result == {"ok": True, "ignored": "bot.joining_call"}
+    assert result == {"ok": True, "ignored": "recording.done"}
+
+
+async def test_webhook_bot_status_event_persists_status(monkeypatch):
+    """A bot.* lifecycle event routes to update_bot_status_for_recall_bot."""
+    from pocketpaw_ee.cloud.meetings import webhooks
+
+    monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
+    captured: dict = {}
+
+    async def _fake_update(bot_id, status, sub_code):
+        captured.update(bot_id=bot_id, status=status, sub_code=sub_code)
+        return True
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.meetings.service.update_bot_status_for_recall_bot", _fake_update
+    )
+
+    body = json.dumps(
+        {
+            "event": "bot.in_waiting_room",
+            "data": {
+                "data": {"code": "in_waiting_room", "sub_code": None},
+                "bot": {"id": "bot-w"},
+            },
+        }
+    ).encode()
+    request = _make_request(body, _svix_headers(_WEBHOOK_SECRET, body))
+
+    result = await webhooks.recall_webhook(request)
+    assert result["ok"] is True
+    assert result["bot_status"] == "in_waiting_room"
+    assert captured == {"bot_id": "bot-w", "status": "in_waiting_room", "sub_code": None}
 
 
 async def test_webhook_rejects_bad_signature(monkeypatch):
@@ -554,3 +578,119 @@ async def test_ingest_unknown_bot_returns_false():
     from pocketpaw_ee.cloud.meetings import service as ms
 
     assert await ms.ingest_transcript_for_recall_bot("bot-does-not-exist") is False
+
+
+# ---------------------------------------------------------------------------
+# Bot status tracking
+# ---------------------------------------------------------------------------
+
+
+async def test_recall_client_get_bot_status_parses_latest(recall_env, monkeypatch):
+    """get_bot_status returns the latest status_changes entry."""
+    from pocketpaw_ee.cloud.meetings import recall_client
+
+    bot_payload = {
+        "id": "bot-s",
+        "status_changes": [
+            {"code": "joining_call", "sub_code": None, "created_at": "2026-05-21T06:00:00Z"},
+            {
+                "code": "in_waiting_room",
+                "sub_code": None,
+                "created_at": "2026-05-21T06:00:05Z",
+            },
+        ],
+    }
+    _FakeClient.reset([_resp(200, bot_payload)])
+    monkeypatch.setattr(recall_client.httpx, "AsyncClient", _FakeClient)
+
+    status = await recall_client.get_bot_status("bot-s")
+    assert status == {
+        "status": "in_waiting_room",
+        "sub_code": None,
+        "updated_at": "2026-05-21T06:00:05Z",
+    }
+
+
+async def test_recall_client_get_bot_status_404_returns_none(recall_env, monkeypatch):
+    from pocketpaw_ee.cloud.meetings import recall_client
+
+    _FakeClient.reset([_resp(404, {})])
+    monkeypatch.setattr(recall_client.httpx, "AsyncClient", _FakeClient)
+    assert await recall_client.get_bot_status("bot-gone") is None
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_update_bot_status_persists_to_meeting(monkeypatch):
+    """The webhook entry point writes bot_status onto the matched meeting."""
+    from pocketpaw_ee.cloud.meetings import service as ms
+    from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
+
+    meeting = _MD(
+        workspace="ws-9",
+        provider="google_meet",
+        provider_meeting_id="m9",
+        title="x",
+        join_url="https://meet.google.com/m9",
+        raw_provider_payload={"recall": {"bot_id": "bot-st"}},
+    )
+    await meeting.insert()
+
+    matched = await ms.update_bot_status_for_recall_bot("bot-st", "in_waiting_room", None)
+    assert matched is True
+    refreshed = await _MD.get(meeting.id)
+    assert refreshed.bot_status == "in_waiting_room"
+    assert refreshed.bot_status_at is not None
+
+    # Unknown bot is a no-op.
+    assert await ms.update_bot_status_for_recall_bot("bot-nope", "done", None) is False
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_get_bot_status_live_fetch_and_persist(monkeypatch):
+    """get_bot_status live-checks Recall, returns + persists the status."""
+    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings import service as ms
+    from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
+
+    meeting = _MD(
+        workspace="ws-9",
+        provider="google_meet",
+        provider_meeting_id="m9",
+        title="x",
+        join_url="https://meet.google.com/m9",
+        raw_provider_payload={"recall": {"bot_id": "bot-live"}},
+    )
+    await meeting.insert()
+
+    async def _fake_status(bot_id):
+        assert bot_id == "bot-live"
+        return {"status": "in_call_recording", "sub_code": None, "updated_at": None}
+
+    monkeypatch.setattr(recall_client, "get_bot_status", _fake_status)
+
+    result = await ms.get_bot_status("ws-9", str(meeting.id))
+    assert result["has_bot"] is True
+    assert result["status"] == "in_call_recording"
+    assert "recording" in result["summary"]
+    refreshed = await _MD.get(meeting.id)
+    assert refreshed.bot_status == "in_call_recording"
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_get_bot_status_no_bot_dispatched(monkeypatch):
+    """A meeting with no dispatched bot reports has_bot False."""
+    from pocketpaw_ee.cloud.meetings import service as ms
+    from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
+
+    meeting = _MD(
+        workspace="ws-9",
+        provider="zoom",
+        provider_meeting_id="m0",
+        title="x",
+        join_url="https://zoom.us/j/m0",
+    )
+    await meeting.insert()
+
+    result = await ms.get_bot_status("ws-9", str(meeting.id))
+    assert result["has_bot"] is False
+    assert result["status"] is None

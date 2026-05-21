@@ -88,13 +88,20 @@ def _recall_headers() -> dict[str, str]:
 
 
 def _transcript_provider() -> str:
-    """Async transcription provider configured on the bot at creation.
+    """Transcription provider configured on the bot at creation.
 
-    Defaults to Recall's own engine. Override with RECALL_TRANSCRIPT_PROVIDER
-    to use a bring-your-own STT vendor already linked in the Recall
-    dashboard (e.g. ``deepgram_async``, ``assembly_ai_async``).
+    Recall's ``recording_config.transcript.provider`` only accepts
+    *streaming* providers — transcription runs while the bot records and
+    the full transcript is finalized after the call. ``recallai_async``
+    is NOT valid here (that name is only for the post-call
+    ``create_transcript`` endpoint).
+
+    Defaults to ``meeting_captions`` — the meeting platform's own
+    captions, which cost nothing extra and work for Meet/Zoom/Teams.
+    Override with RECALL_TRANSCRIPT_PROVIDER for a paid STT engine
+    (e.g. ``recallai_streaming``, ``deepgram_streaming``).
     """
-    return os.environ.get("RECALL_TRANSCRIPT_PROVIDER", "recallai_async").strip()
+    return os.environ.get("RECALL_TRANSCRIPT_PROVIDER", "meeting_captions").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +129,8 @@ async def request_bot_for_meeting(workspace_id: str, meeting_id: str) -> dict[st
     body: dict[str, Any] = {
         "meeting_url": meeting.join_url,
         "bot_name": os.environ.get("POCKETPAW_BOT_DISPLAY_NAME", "PocketPaw Bot"),
-        # Configuring transcript here makes Recall auto-produce it after
-        # the call ends and fire `transcript.done` — no follow-up call.
+        # Transcript provider runs streaming while the bot records; Recall
+        # finalizes the transcript after the call and fires `transcript.done`.
         "recording_config": {"transcript": {"provider": {_transcript_provider(): {}}}},
         # Echoed back on every webhook for this bot — lets the webhook
         # cross-check the workspace without a DB round-trip.
@@ -185,6 +192,37 @@ async def stop_bot(workspace_id: str, meeting_id: str) -> dict[str, Any]:
             f"Recall.ai rejected the stop request: {resp.status_code} {resp.text[:200]}",
         )
     return {"ok": True, "stopped": True}
+
+
+async def get_bot_status(bot_id: str) -> dict[str, Any] | None:
+    """Fetch a Recall bot's current lifecycle status by ``bot_id``.
+
+    Returns ``{status, sub_code, updated_at}`` from the latest
+    ``status_changes`` entry — e.g. ``in_waiting_room`` (bot is knocking,
+    needs admission), ``in_call_recording``, ``done``, ``fatal``. Returns
+    ``None`` if Recall has no such bot.
+
+    A single on-demand call — not a poll loop. Continuous tracking comes
+    from the ``bot.status_change`` webhook (see webhooks.py).
+    """
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{_recall_base_url()}/api/v1/bot/{bot_id}/", headers=_recall_headers()
+        )
+    if resp.status_code == 404:
+        return None
+    if resp.status_code >= 400:
+        raise ValidationError(
+            "meeting.bot_service_error",
+            f"Recall.ai GET bot failed: {resp.status_code} {resp.text[:200]}",
+        )
+    changes = (resp.json() or {}).get("status_changes") or []
+    latest = changes[-1] if isinstance(changes, list) and changes else {}
+    return {
+        "status": str(latest.get("code") or "unknown"),
+        "sub_code": latest.get("sub_code"),
+        "updated_at": latest.get("created_at"),
+    }
 
 
 # ---------------------------------------------------------------------------

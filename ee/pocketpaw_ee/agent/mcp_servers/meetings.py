@@ -30,6 +30,7 @@ CANCEL_TOOL_ID = f"mcp__{SERVER_NAME}__cancel_meeting"
 SEARCH_TOOL_ID = f"mcp__{SERVER_NAME}__search_meetings"
 TRANSCRIPT_TOOL_ID = f"mcp__{SERVER_NAME}__find_meeting_transcript"
 SEND_BOT_TOOL_ID = f"mcp__{SERVER_NAME}__send_bot_to_meeting"
+CHECK_BOT_TOOL_ID = f"mcp__{SERVER_NAME}__check_meeting_bot"
 
 MEETING_TOOL_IDS = (
     SCHEDULE_TOOL_ID,
@@ -38,6 +39,7 @@ MEETING_TOOL_IDS = (
     SEARCH_TOOL_ID,
     TRANSCRIPT_TOOL_ID,
     SEND_BOT_TOOL_ID,
+    CHECK_BOT_TOOL_ID,
 )
 
 
@@ -265,6 +267,29 @@ async def _find_transcript_handler(args: dict) -> dict:
     return _success_response(response.model_dump())
 
 
+async def _check_bot_handler(args: dict) -> dict:
+    workspace_id, _ = _identity()
+    if not workspace_id:
+        return _error_response("no active workspace")
+
+    meeting_id = args.get("meeting_id")
+    if not isinstance(meeting_id, str) or not meeting_id:
+        return _error_response("meeting_id is required (string)")
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.meetings import service as ms
+
+    try:
+        status = await ms.get_bot_status(workspace_id, meeting_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("check_meeting_bot failed", exc_info=True)
+        return _error_response(f"check_meeting_bot failed: {exc}")
+
+    return _success_response(status)
+
+
 # ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
@@ -380,6 +405,22 @@ def build_meetings_context_server() -> tuple[str, Any] | None:
     async def send_bot_to_meeting(args):  # type: ignore[no-untyped-def]
         return await _send_bot_handler(args)
 
+    @tool(
+        "check_meeting_bot",
+        (
+            "Check where the recording bot is for a meeting — whether it has "
+            "joined, is still waiting in the lobby to be admitted, is "
+            "recording, or has finished. Use this whenever the user asks "
+            "'where is the bot', 'did the bot join', or 'is it recording'. "
+            "Returns the bot's live status plus a human-readable summary. "
+            "If the status is 'in_waiting_room', someone in the meeting must "
+            "admit the bot."
+        ),
+        {"meeting_id": str},
+    )
+    async def check_meeting_bot(args):  # type: ignore[no-untyped-def]
+        return await _check_bot_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
@@ -390,6 +431,7 @@ def build_meetings_context_server() -> tuple[str, Any] | None:
             search_meetings,
             find_meeting_transcript,
             send_bot_to_meeting,
+            check_meeting_bot,
         ],
     )
     return SERVER_NAME, server
@@ -397,6 +439,7 @@ def build_meetings_context_server() -> tuple[str, Any] | None:
 
 __all__ = [
     "CANCEL_TOOL_ID",
+    "CHECK_BOT_TOOL_ID",
     "LIST_TOOL_ID",
     "MEETING_TOOL_IDS",
     "SCHEDULE_TOOL_ID",
