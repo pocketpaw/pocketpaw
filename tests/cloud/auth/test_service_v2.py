@@ -9,12 +9,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.errors import NotFound, ValidationError
-from ee.cloud.auth import service as auth_service
-from ee.cloud.models.user import User as _UserDoc
-from ee.cloud.models.user import WorkspaceMembership
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud.auth import service as auth_service
+from pocketpaw_ee.cloud.models.user import User as _UserDoc
+from pocketpaw_ee.cloud.models.user import WorkspaceMembership
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 

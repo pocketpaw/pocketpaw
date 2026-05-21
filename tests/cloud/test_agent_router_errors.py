@@ -6,10 +6,9 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
-
-from ee.cloud.chat import agent_router as mod
-from ee.cloud.chat.agent_service import InvalidScope
-from ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw_ee.cloud.chat import agent_router as mod
+from pocketpaw_ee.cloud.chat.agent_service import InvalidScope
+from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
 
 
 @pytest.mark.asyncio

@@ -15,13 +15,12 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.context import RequestContext, ScopeKind, request_context
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.license import require_license
-from ee.cloud.planner.router import router as planner_router
-from ee.cloud.projects import service as projects_service
-from ee.cloud.projects.dto import CreateProjectRequest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.planner.router import router as planner_router
+from pocketpaw_ee.cloud.projects import service as projects_service
+from pocketpaw_ee.cloud.projects.dto import CreateProjectRequest
 
 
 def _make_ctx(workspace_id: str | None, user_id: str = "u1") -> RequestContext:

@@ -11,8 +11,8 @@ env vars that might be exported in the calling shell.
 """
 
 import pytest
+from pocketpaw_ee.agent.pocket_specialist.settings import resolve_specialist_model
 
-from ee.agent.pocket_specialist.settings import resolve_specialist_model
 from pocketpaw.config import Settings
 
 _LEAKY_ENV_KEYS = (

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.session import Session
+
 from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
 
@@ -33,7 +34,7 @@ class TestSessionStamping:
         )
         await store.save(entry)
 
-        from ee.cloud.models.message import Message
+        from pocketpaw_ee.cloud.models.message import Message
 
         rows = await Message.find({"session_key": key}).to_list()
         assert len(rows) == 1
@@ -50,7 +51,7 @@ class TestSessionStamping:
 
         await store.save(_entry(key, "user", "implicit"))
 
-        from ee.cloud.models.message import Message
+        from pocketpaw_ee.cloud.models.message import Message
 
         rows = await Message.find({"session_key": key}).to_list()
         assert rows[0].workspace_id == "ws-from-session"
@@ -61,7 +62,7 @@ class TestSessionStamping:
         key = f"sess-{uuid.uuid4().hex[:8]}"
         await store.save(_entry(key, "user", "untagged"))
 
-        from ee.cloud.models.message import Message
+        from pocketpaw_ee.cloud.models.message import Message
 
         rows = await Message.find({"session_key": key}).to_list()
         assert rows[0].workspace_id is None
@@ -107,7 +108,7 @@ class TestFactStamping:
         )
         await store.save(entry)
 
-        from ee.cloud.memory.documents import MemoryFactDoc
+        from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
 
         rows = await MemoryFactDoc.find({"content": "user prefers dark mode"}).to_list()
         assert rows[0].workspace_id == "ws-1"

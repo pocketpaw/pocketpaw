@@ -17,11 +17,10 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.context import RequestContext, ScopeKind, request_context
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.license import require_license
-from ee.cloud.mission_control.router import router as mc_router
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.mission_control.router import router as mc_router
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -156,23 +155,19 @@ async def test_create_persists_for_workspace_only(
     # Pull w1's cycles via the cycles read endpoint (it's the simplest
     # cross-tenant probe; the MC façade has its own list flow but the
     # service is shared so this is sufficient for tenancy proof).
-    from ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.cycles.router import router as cycles_router
 
     w1_app = _build_app(workspace_id="w1")
     w1_app.include_router(cycles_router)
     w2_app = _build_app(workspace_id="w2")
     w2_app.include_router(cycles_router)
 
-    async with AsyncClient(
-        transport=ASGITransport(app=w1_app), base_url="http://t"
-    ) as w1c:
+    async with AsyncClient(transport=ASGITransport(app=w1_app), base_url="http://t") as w1c:
         listing = await w1c.get("/cycles")
         assert listing.status_code == 200
         assert any(c["id"] == cycle_id for c in listing.json())
 
-    async with AsyncClient(
-        transport=ASGITransport(app=w2_app), base_url="http://t"
-    ) as w2c:
+    async with AsyncClient(transport=ASGITransport(app=w2_app), base_url="http://t") as w2c:
         listing = await w2c.get("/cycles")
         assert listing.status_code == 200
         assert all(c["id"] != cycle_id for c in listing.json())
@@ -237,9 +232,7 @@ async def test_status_derives_from_dates_active(w1_client: AsyncClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_project_tenancy_enforced(
-    w1_client: AsyncClient, w2_client: AsyncClient
-) -> None:
+async def test_project_tenancy_enforced(w1_client: AsyncClient, w2_client: AsyncClient) -> None:
     """A project belonging to w2 cannot be referenced from w1's create
     call. The cycles service surfaces this as 404 ``project.not_found``
     rather than 403 — by design, so cross-tenant probes can't infer the
@@ -247,7 +240,7 @@ async def test_project_tenancy_enforced(
     # Seed a project in w2 directly via the Beanie doc (the projects
     # service write path is tested elsewhere; here we only need a
     # populated project_id that w1 can't claim).
-    from ee.cloud.models.project import Project as _ProjectDoc
+    from pocketpaw_ee.cloud.models.project import Project as _ProjectDoc
 
     proj = _ProjectDoc(
         workspace="w2",
@@ -275,9 +268,7 @@ async def test_project_tenancy_enforced(
 # ---------------------------------------------------------------------------
 
 
-async def test_emits_cycle_created_event(
-    w1_client: AsyncClient, recording_bus: Any
-) -> None:
+async def test_emits_cycle_created_event(w1_client: AsyncClient, recording_bus: Any) -> None:
     """The cycles service emits ``cycle.created`` on the bus; the façade
     delegates through so the same event fires for the rail flow. The
     frontend's live activity ticker depends on this for the
@@ -289,9 +280,7 @@ async def test_emits_cycle_created_event(
     assert r.status_code == 200
     response_id = r.json()["id"]
 
-    created_events = [
-        e for e in recording_bus.events if e.EVENT_TYPE == "cycle.created"
-    ]
+    created_events = [e for e in recording_bus.events if e.EVENT_TYPE == "cycle.created"]
     assert len(created_events) == 1
     payload = created_events[0].data
     assert payload["id"] == response_id
@@ -315,9 +304,7 @@ async def test_missing_auth_returns_401() -> None:
     app.dependency_overrides[require_license] = lambda: None
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as client:
-        r = await client.post(
-            "/api/v1/mission-control/cycles", json=make_cycle_request()
-        )
+        r = await client.post("/api/v1/mission-control/cycles", json=make_cycle_request())
         assert r.status_code == 401
 
 

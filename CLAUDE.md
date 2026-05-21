@@ -6,6 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PocketPaw is a self-hosted AI agent that runs locally and is controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard. The Python package is named `pocketpaw` (the internal/legacy name), while the public-facing name is `pocketpaw`. Python 3.11+ required.
 
+### Two packages: `pocketpaw` (OSS) + `pocketpaw-ee` (enterprise)
+
+The backend ships as **two installable wheels** (open-core split):
+
+- **`pocketpaw`** (MIT) — the OSS core. Source in `src/pocketpaw/`, packaged by
+  the root `pyproject.toml`. `pip install pocketpaw` gives a fully working local
+  agent with no enterprise code on disk.
+- **`pocketpaw-ee`** (FSL-1.1) — the enterprise layer (multi-tenant cloud, auth,
+  rooms, billing, knowledge base, file storage, fleet, instinct, pocket
+  specialist). Source in `ee/pocketpaw_ee/`, packaged by `ee/pyproject.toml`. It
+  depends on `pocketpaw` and activates through the core's entry-point extension
+  registry (`pocketpaw/extensions.py` + `pocketpaw/_registry.py`).
+
+The OSS core never statically imports `pocketpaw_ee` — an import-linter contract
+enforces it. Optional enterprise behaviour is reached at runtime via
+entry-points. For a full development environment use `uv sync --dev --group ee`.
+
 ## Knowledge Base
 
 A codebase wiki lives at `docs/wiki/` — auto-generated from AST analysis + LLM compilation. **Read the relevant wiki article before modifying a module.**
@@ -18,7 +35,7 @@ cd /path/to/knowledge-base && kb search "GroupService" --scope paw-cloud
 kb show group_service --scope paw-cloud
 
 # Rebuild after big changes (also runs automatically via PostCommit hook)
-kb build ./ee/cloud --scope paw-cloud --output docs/wiki/
+kb build ./ee/pocketpaw_ee/cloud --scope paw-cloud --output docs/wiki/
 
 # Check wiki health
 kb lint --scope paw-cloud
@@ -32,13 +49,17 @@ Key wiki articles for the enterprise cloud module:
 - `docs/wiki/agent_bridge.md` — Agent orchestration for cloud chat
 - `docs/wiki/errors.md` — CloudError hierarchy
 
-The wiki auto-rebuilds on commits that touch `ee/cloud/` files (via `.claude/hooks/kb-rebuild.sh`).
+The wiki auto-rebuilds on commits that touch `ee/pocketpaw_ee/cloud/` files (via `.claude/hooks/kb-rebuild.sh`).
 
 ## Commands
 
 ```bash
-# Install dev dependencies
+# Install dev dependencies (OSS core only — no enterprise code, no pocketpaw_ee)
 uv sync --dev
+
+# Full dev install — OSS core + the pocketpaw-ee enterprise package (editable).
+# Required to run tests/ee, tests/cloud, or anything touching ee/pocketpaw_ee.
+uv sync --dev --group ee
 
 # Run the app (web dashboard is the default — auto-starts all configured adapters)
 uv run pocketpaw
@@ -82,8 +103,11 @@ uv run pocketpaw errors                     # Show recent errors (--limit, --sea
 uv run pocketpaw logs                       # Show audit log (--follow to tail)
 uv run pocketpaw update                     # Update to latest version via uv
 
-# Run all tests (excluding E2E tests)
+# Run all tests (excluding E2E tests) — needs the full install: uv sync --dev --group ee
 uv run pytest --ignore=tests/e2e
+
+# Run only the OSS-core test scope (passes on an OSS-only `uv sync --dev`)
+uv run pytest --ignore=tests/e2e --ignore=tests/cloud --ignore=tests/ee
 
 # Run a single test file
 uv run pytest tests/test_bus.py
@@ -175,20 +199,20 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Env vars**: All settings use `POCKETPAW_` prefix (e.g., `POCKETPAW_ANTHROPIC_API_KEY`)
 - **Soul config**: `POCKETPAW_SOUL_ENABLED=true`, `POCKETPAW_SOUL_NAME`, `POCKETPAW_SOUL_ARCHETYPE`, `POCKETPAW_SOUL_PATH`, `POCKETPAW_SOUL_AUTO_SAVE_INTERVAL`
 - **Files-as-Knowledge config** (Phase 1): `POCKETPAW_EXTRACTION_CHAIN` (JSON list of adapter names, e.g. `'["gemini-flash","local"]'`), `POCKETPAW_EXTRACTION_PER_MIME` (JSON map of mime→adapter), `POCKETPAW_GEMINI_API_KEY` for the cloud captioning adapter; `POCKETPAW_KB_SCOPES` (JSON list, e.g. `'["workspace:w1","agent:a1"]'`) drives multi-scope KB injection in the agent system prompt. The legacy `POCKETPAW_KB_SCOPE` (single string) still works via a deprecation shim that copies it into `kb_scopes` on startup. Phase 3 (Stage 3.E): uploads can carry `pocket_id` (form field on `POST /api/v1/uploads`, query on `GET /api/v1/files`); the FileReady listener routes pocket uploads into `pocket:{id}` KB and the agent's `_get_kb_context` resolves scope priority `pocket > agent > workspace` via the per-request `KbContext` threaded from the cloud chat path.
-- **In-process bus subscribers**: `ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
+- **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP
 - **Entry point**: `pocketpaw.__main__:main`
 - **Lazy imports**: Agent backends are imported inside `AgentRouter._initialize_agent()` to avoid loading unused dependencies
 
-## ee/cloud Code Rules
+## pocketpaw_ee/cloud Code Rules
 
-Applies to code under `ee/cloud/`. Local-runtime code (`src/pocketpaw/`)
+Applies to code under `ee/pocketpaw_ee/cloud/`. Local-runtime code (`src/pocketpaw/`)
 uses different patterns; these rules don't apply there.
 
 1. **Each entity has a 4-file shape.** `<entity>/{domain.py, dto.py, service.py, router.py}`. No `repositories.py`. The service IS the repository — Beanie writes are inline.
 
-2. **Writes go through `<entity>/service.py`.** Never import Beanie document classes (`ee.cloud.models.*`) from routers, DTOs, domains, channels, tools, or agents. Only `<entity>/service.py` may import its own `models.<entity>`.
+2. **Writes go through `<entity>/service.py`.** Never import Beanie document classes (`pocketpaw_ee.cloud.models.*`) from routers, DTOs, domains, channels, tools, or agents. Only `<entity>/service.py` may import its own `models.<entity>`.
 
 3. **Domain enforces multi-tenancy at construction.** `domain.py` value objects are frozen with required tenancy fields (`workspace_id`, `scope`, etc.) — no defaults. Constructing a domain object without tenancy info is a type error.
 
@@ -200,7 +224,7 @@ uses different patterns; these rules don't apply there.
    ```
    Module-level `async def`, not a class. Multi-tenancy via the explicit `workspace_id` parameter. `user_id` carries the viewer context for permission checks. Public APIs return wire dicts (`dict`) for legacy router compatibility — see `pockets/service.py` for the canonical shape, including the `_resolved_wire_dict` helper that produces the wire dict from a Beanie doc.
 
-   *Note: a future migration may move toward a `RequestContext` value object that bundles `(workspace_id, user_id, viewer_metadata)`. New modules that anticipate this can mint a private `_context.py:RequestContext` (see `ee/calendar/_context.py` in PR #1132 for an example), but the mainline pattern remains the explicit parameter pair until pockets migrates.*
+   *Note: a future migration may move toward a `RequestContext` value object that bundles `(workspace_id, user_id, viewer_metadata)`. New modules that anticipate this can mint a private `_context.py:RequestContext` (see `ee/pocketpaw_ee/calendar/_context.py` in PR #1132 for an example), but the mainline pattern remains the explicit parameter pair until pockets migrates.*
 
 6. **Validate at entry.** First line of every service function: `body = <RequestSchema>.model_validate(body)`. FastAPI parses HTTP bodies; services re-parse for internal callers (bus handlers, MCP tools, CLI, jobs).
 
@@ -210,13 +234,13 @@ uses different patterns; these rules don't apply there.
 
 9. **Emit on every write.** State-mutating service functions end with `await emit(<Event>(data=...))` — or have an explicit `# no-event: <reason>` comment on the line before return. Silent mutations desync downstream handlers (search index, soul memory, ripple invalidation).
 
-10. **Errors via CloudError.** Use `_core.errors` subclasses (`NotFound`, `Forbidden`, `Conflict`, `ValidationError`, etc.). The canonical location is `ee/cloud/_core/errors.py`; `ee/cloud/shared/errors.py` is a transitional re-export shim from the 2026-04-27 cloud-restructure that remains for backwards compatibility. **New code should import from `ee.cloud._core.errors` directly.** Some existing modules (including `pockets/service.py`) still import via the shared shim; that's tracked for touch-time migration. Never `raise HTTPException` in services or routers — `_core.http` maps `CloudError` to JSON.
+10. **Errors via CloudError.** Use `_core.errors` subclasses (`NotFound`, `Forbidden`, `Conflict`, `ValidationError`, etc.). The canonical location is `ee/pocketpaw_ee/cloud/_core/errors.py`; `ee/pocketpaw_ee/cloud/shared/errors.py` is a transitional re-export shim from the 2026-04-27 cloud-restructure that remains for backwards compatibility. **New code should import from `pocketpaw_ee.cloud._core.errors` directly.** Some existing modules (including `pockets/service.py`) still import via the shared shim; that's tracked for touch-time migration. Never `raise HTTPException` in services or routers — `_core.http` maps `CloudError` to JSON.
 
 11. **Prefer events over transactions.** Only money, identity, and permission flows reach for `session.start_transaction()`.
 
 ### Touch-time migration rule
 
-When you touch any `ee/cloud/<entity>/*.py` file for any reason — bug fix, feature add, refactor — bring that entity onto the 4-file shape in the same PR:
+When you touch any `ee/pocketpaw_ee/cloud/<entity>/*.py` file for any reason — bug fix, feature add, refactor — bring that entity onto the 4-file shape in the same PR:
 
 1. Check whether `<entity>/{domain.py, dto.py, service.py, router.py}` exists with no `repositories.py`. If not, refactor on the way out.
 2. Add `<Entity>Document` to the failing list in the `import-linter` contract; add `<entity>/router.py`, `<entity>/dto.py`, `<entity>/domain.py` to the source-modules list.

@@ -11,10 +11,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pocketpaw_ee.fleet import FleetConnector, FleetTemplate, install_fleet
 from soul_protocol.engine.journal import open_journal
 from soul_protocol.spec.journal import Actor
-
-from ee.fleet import FleetConnector, FleetTemplate, install_fleet
 
 # ---------------------------------------------------------------------------
 # Fixtures — parallel the existing test_fleet_installer.py shape so both

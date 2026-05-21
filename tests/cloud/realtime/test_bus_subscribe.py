@@ -9,10 +9,9 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-
-from ee.cloud._core.realtime.audience import AudienceResolver
-from ee.cloud._core.realtime.bus import InProcessBus
-from ee.cloud._core.realtime.events import FileReady, MessageSent
+from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
+from pocketpaw_ee.cloud._core.realtime.bus import InProcessBus
+from pocketpaw_ee.cloud._core.realtime.events import FileReady, MessageSent
 
 
 @pytest.mark.asyncio

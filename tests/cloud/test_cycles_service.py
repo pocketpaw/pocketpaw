@@ -14,16 +14,15 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.errors import ConflictError, Forbidden, NotFound
-from ee.cloud._core.realtime.events import (
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
+from pocketpaw_ee.cloud._core.realtime.events import (
     CycleClosed,
     CycleCreated,
     CycleUpdated,
 )
-from ee.cloud.cycles import service as cycles_service
-from ee.cloud.cycles.dto import CreateCycleRequest, UpdateCycleRequest
+from pocketpaw_ee.cloud.cycles import service as cycles_service
+from pocketpaw_ee.cloud.cycles.dto import CreateCycleRequest, UpdateCycleRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -42,8 +41,8 @@ def _tasks_available() -> bool:
     """Returns True only when PR 2's Tasks entity is mergeable on this
     branch — used to gate task-composition assertions."""
     try:
-        from ee.cloud.tasks import service as _  # noqa: F401
-        from ee.cloud.tasks.dto import ListTasksRequest as _LTR  # noqa: F401
+        from pocketpaw_ee.cloud.tasks import service as _  # noqa: F401
+        from pocketpaw_ee.cloud.tasks.dto import ListTasksRequest as _LTR  # noqa: F401
     except Exception:
         return False
     return True
@@ -381,12 +380,10 @@ async def test_close_rolls_incomplete_tasks() -> None:
     """Closing a cycle moves incomplete tasks to the next active cycle on
     the same pocket; ``done`` tasks stay attached to the closing cycle."""
     if not _tasks_available():
-        pytest.skip(
-            "Tasks entity not present on this branch — fork predates PR 2"
-        )
+        pytest.skip("Tasks entity not present on this branch — fork predates PR 2")
 
-    from ee.cloud.tasks import service as tasks_service
-    from ee.cloud.tasks.dto import (
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import (
         AssigneeDTO,
         CompleteTaskRequest,
         CreateTaskRequest,
@@ -455,12 +452,10 @@ async def test_close_drops_to_unscheduled_when_no_follow_up() -> None:
     """Cycle close with no other active cycle on the same pocket clears
     the incomplete tasks' cycle_id instead of rolling forward."""
     if not _tasks_available():
-        pytest.skip(
-            "Tasks entity not present on this branch — fork predates PR 2"
-        )
+        pytest.skip("Tasks entity not present on this branch — fork predates PR 2")
 
-    from ee.cloud.tasks import service as tasks_service
-    from ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest
 
     ctx = _ctx()
     closing = await cycles_service.agent_create_cycle(

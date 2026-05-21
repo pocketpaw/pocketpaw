@@ -19,19 +19,18 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from ee.agent.pocket_specialist.adapters import (
+from pocketpaw_ee.agent.pocket_specialist.adapters import (
     AgentModeAdapter,
     SubagentAdapter,
     pick_adapter,
 )
-from ee.agent.pocket_specialist.runtime import (
+from pocketpaw_ee.agent.pocket_specialist.runtime import (
     PocketSpecialistCreateInput,
     PocketSpecialistCreateOutput,
     PocketSpecialistHints,
 )
-from pocketpaw.config import Settings
 
+from pocketpaw.config import Settings
 
 _LEAKY_ENV_KEYS = (
     "POCKETPAW_POCKET_SPECIALIST_BACKEND",
@@ -126,14 +125,12 @@ class TestSubagentAdapter:
             backend_used="deep_agents",
         )
         with patch(
-            "ee.agent.pocket_specialist.runtime._run_subagent_pipeline",
+            "pocketpaw_ee.agent.pocket_specialist.runtime._run_subagent_pipeline",
             new=AsyncMock(return_value=expected),
         ) as mock_pipeline:
             adapter = SubagentAdapter()
             payload = PocketSpecialistCreateInput(brief="brief enough to clear minlen")
-            out = await adapter.create(
-                payload, workspace_id="w1", user_id="u1", settings=settings
-            )
+            out = await adapter.create(payload, workspace_id="w1", user_id="u1", settings=settings)
         assert out is expected
         mock_pipeline.assert_awaited_once_with(
             payload, workspace_id="w1", user_id="u1", settings=settings
@@ -215,9 +212,7 @@ class TestAgentModeAdapterDraftKit:
             )
 
     @pytest.mark.asyncio
-    async def test_draft_kit_includes_rich_widgets_by_pattern(
-        self, agent_settings
-    ) -> None:
+    async def test_draft_kit_includes_rich_widgets_by_pattern(self, agent_settings) -> None:
         """The kit carries a pattern → polished-widget map so the chat
         agent picks the composed layout instead of rebuilding it from
         primitives. Every pattern from STEP 1 of VISUAL_VARIATION_RULE
@@ -242,36 +237,27 @@ class TestAgentModeAdapterDraftKit:
         assert "pipeline-dashboard" in rich["dashboard"]
         # And the widget-quality-bar reminder ties it together.
         assert "widget_quality_bar" in out.draft_kit
-        assert (
-            "pipeline-dashboard"
-            in out.draft_kit["widget_quality_bar"].lower()
-        )
+        assert "pipeline-dashboard" in out.draft_kit["widget_quality_bar"].lower()
 
     @pytest.mark.asyncio
     async def test_no_backend_spawned_on_draft_kit(self, agent_settings) -> None:
         """Agent mode must not spin up an isolated backend for the kit
         — the chat agent's own model is the one drafting."""
-        with patch(
-            "pocketpaw.agents.router.AgentRouter.create_isolated_backend"
-        ) as mock_backend:
+        with patch("pocketpaw.agents.router.AgentRouter.create_isolated_backend") as mock_backend:
             adapter = AgentModeAdapter()
             payload = PocketSpecialistCreateInput(brief="brief enough to clear minlen")
-            await adapter.create(
-                payload, workspace_id="w1", user_id="u1", settings=agent_settings
-            )
+            await adapter.create(payload, workspace_id="w1", user_id="u1", settings=agent_settings)
         mock_backend.assert_not_called()
 
 
 class TestAgentModeAdapterPersist:
     @pytest.mark.asyncio
-    async def test_second_call_with_spec_validates_and_persists(
-        self, agent_settings
-    ) -> None:
+    async def test_second_call_with_spec_validates_and_persists(self, agent_settings) -> None:
         """The second call (input.spec set) goes through the same
         persist tool the subagent flow uses — no LLM, no backend."""
         persisted = {"id": "p-new", "name": "Cats"}
         with patch(
-            "ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
+            "pocketpaw_ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
             new=MagicMock(side_effect=_persist_factory_stub(persisted)),
         ) as mock_factory:
             adapter = AgentModeAdapter()
@@ -292,12 +278,10 @@ class TestAgentModeAdapterPersist:
         mock_factory.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_second_call_with_target_pocket_id_marks_extended(
-        self, agent_settings
-    ) -> None:
+    async def test_second_call_with_target_pocket_id_marks_extended(self, agent_settings) -> None:
         persisted = {"id": "p-existing", "name": "Cats"}
         with patch(
-            "ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
+            "pocketpaw_ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
             new=MagicMock(side_effect=_persist_factory_stub(persisted)),
         ):
             adapter = AgentModeAdapter()
@@ -312,20 +296,16 @@ class TestAgentModeAdapterPersist:
         assert out.action == "extended"
 
     @pytest.mark.asyncio
-    async def test_validation_warnings_surface_for_redraft(
-        self, agent_settings
-    ) -> None:
+    async def test_validation_warnings_surface_for_redraft(self, agent_settings) -> None:
         """When the persist tool refuses to save (warnings present, retry
         budget unspent), the adapter returns the warnings under
         ``action="redraft"`` (distinct from ``"failed"``) so the chat
         agent can switch on the action label and call again with a
         corrected spec without treating the run as a terminal error."""
         with patch(
-            "ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
+            "pocketpaw_ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
             new=MagicMock(
-                side_effect=_persist_factory_stub(
-                    None, warnings=["chart.xKey is not a valid prop"]
-                )
+                side_effect=_persist_factory_stub(None, warnings=["chart.xKey is not a valid prop"])
             ),
         ):
             adapter = AgentModeAdapter()
@@ -361,10 +341,8 @@ class TestAgentModeAdapterPersist:
         persisted = {"id": "p-imperfect", "name": "Imperfect"}
         residual = ["chart.xKey unrecognized (kept anyway after retries)"]
         with patch(
-            "ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
-            new=MagicMock(
-                side_effect=_persist_factory_stub(persisted, warnings=residual)
-            ),
+            "pocketpaw_ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
+            new=MagicMock(side_effect=_persist_factory_stub(persisted, warnings=residual)),
         ):
             adapter = AgentModeAdapter()
             payload = PocketSpecialistCreateInput(
@@ -393,7 +371,7 @@ class TestAgentModeAdapterPersist:
             return tool
 
         with patch(
-            "ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
+            "pocketpaw_ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
             new=MagicMock(side_effect=_exploding_factory),
         ):
             adapter = AgentModeAdapter()
@@ -411,20 +389,19 @@ class TestAgentModeAdapterPersist:
 
     @pytest.mark.asyncio
     async def test_no_backend_spawned_on_persist(self, agent_settings) -> None:
-        with patch(
-            "pocketpaw.agents.router.AgentRouter.create_isolated_backend"
-        ) as mock_backend, patch(
-            "ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
-            new=MagicMock(side_effect=_persist_factory_stub({"id": "p1"})),
+        with (
+            patch("pocketpaw.agents.router.AgentRouter.create_isolated_backend") as mock_backend,
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.tools.make_persist_pocket_tool",
+                new=MagicMock(side_effect=_persist_factory_stub({"id": "p1"})),
+            ),
         ):
             adapter = AgentModeAdapter()
             payload = PocketSpecialistCreateInput(
                 brief="brief enough to clear minlen",
                 spec={"type": "flex"},
             )
-            await adapter.create(
-                payload, workspace_id="w1", user_id="u1", settings=agent_settings
-            )
+            await adapter.create(payload, workspace_id="w1", user_id="u1", settings=agent_settings)
         mock_backend.assert_not_called()
 
 
@@ -437,7 +414,7 @@ class TestRunSpecialistDispatch:
     @pytest.mark.asyncio
     async def test_run_specialist_uses_subagent_adapter_by_default(self) -> None:
         """The public entry point honors settings.pocket_specialist_mode."""
-        from ee.agent.pocket_specialist.runtime import run_specialist
+        from pocketpaw_ee.agent.pocket_specialist.runtime import run_specialist
 
         s = Settings(_env_file=None)  # default mode = subagent
         sentinel = PocketSpecialistCreateOutput(
@@ -448,7 +425,7 @@ class TestRunSpecialistDispatch:
             backend_used="deep_agents",
         )
         with patch(
-            "ee.agent.pocket_specialist.runtime._run_subagent_pipeline",
+            "pocketpaw_ee.agent.pocket_specialist.runtime._run_subagent_pipeline",
             new=AsyncMock(return_value=sentinel),
         ) as mock_pipeline:
             out = await run_specialist(
@@ -462,11 +439,11 @@ class TestRunSpecialistDispatch:
 
     @pytest.mark.asyncio
     async def test_run_specialist_uses_agent_mode_adapter_when_set(self) -> None:
-        from ee.agent.pocket_specialist.runtime import run_specialist
+        from pocketpaw_ee.agent.pocket_specialist.runtime import run_specialist
 
         s = Settings(_env_file=None, pocket_specialist_mode="agent")
         with patch(
-            "ee.agent.pocket_specialist.runtime._run_subagent_pipeline",
+            "pocketpaw_ee.agent.pocket_specialist.runtime._run_subagent_pipeline",
             new=AsyncMock(),
         ) as mock_pipeline:
             out = await run_specialist(

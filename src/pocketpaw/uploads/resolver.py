@@ -19,6 +19,7 @@ from typing import Protocol
 import aiofiles
 import aiofiles.os
 
+from pocketpaw._registry import first
 from pocketpaw.uploads.adapter import StorageAdapter
 from pocketpaw.uploads.config import extension_for
 from pocketpaw.uploads.file_store import FileRecord, JSONLFileStore
@@ -148,11 +149,11 @@ async def _resolve_via_ee_mongo(
     endpoint. Multi-tenant cloud chat should route through EE with explicit
     workspace context instead of calling this.
     """
-    try:
-        from ee.cloud.uploads.router import _ADAPTER as EE_ADAPTER
-        from ee.cloud.uploads.router import _META as EE_META
-    except Exception:
+    provider = first("pocketpaw.storage_backends")
+    if provider is None:
         return None, None
+    EE_ADAPTER = provider.adapter()
+    EE_META = provider.meta()
 
     try:
         rec = await EE_META.get_unscoped(file_id)
@@ -211,9 +212,11 @@ async def resolve_media_with_records(media: list[str]) -> list[ResolvedMedia]:
             ee_path, ee_rec = await _resolve_via_ee_mongo(fid)
             if ee_rec is not None:
                 rec = ee_rec
-                from ee.cloud.uploads.router import _ADAPTER as EE_ADAPTER
-
-                adapter = EE_ADAPTER
+                # _resolve_via_ee_mongo only returns a record when a storage
+                # backend provider is registered, so first() is non-None here.
+                _sb = first("pocketpaw.storage_backends")
+                if _sb is not None:
+                    adapter = _sb.adapter()
                 # EE's LocalStorageAdapter may have given us a local path already.
                 if ee_path is not None:
                     out.append(ResolvedMedia(path=str(ee_path), record=rec))

@@ -1,11 +1,11 @@
-from ee.cloud.files.errors import (
+from pocketpaw_ee.cloud.files.errors import (
     CrossScopeMove,
     EntryNotFound,
     FilesForbidden,
     MountReadonly,
     ProviderUnsupported,
 )
-from ee.cloud.files.events import FileAdded, FileMoved, FileRemoved, FileUpdated
+from pocketpaw_ee.cloud.files.events import FileAdded, FileMoved, FileRemoved, FileUpdated
 
 
 def test_errors_have_codes():

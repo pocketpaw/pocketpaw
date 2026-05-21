@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ee.cloud.shared.events import EventBus, event_bus
+from pocketpaw_ee.cloud.shared.events import EventBus, event_bus
 
 
 async def test_subscribe_and_emit() -> None:

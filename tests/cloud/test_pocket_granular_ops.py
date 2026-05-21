@@ -20,9 +20,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from ee.cloud.pockets import agent_context
-from ee.cloud.pockets import service as pocket_service
+from pocketpaw_ee.cloud.pockets import agent_context
+from pocketpaw_ee.cloud.pockets import service as pocket_service
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -125,14 +124,14 @@ def _patches(doc: _FakeDoc):
     stack = ExitStack()
     stack.enter_context(
         patch(
-            "ee.cloud.pockets.service._PocketDoc.get",
+            "pocketpaw_ee.cloud.pockets.service._PocketDoc.get",
             new=AsyncMock(return_value=doc),
         )
     )
-    stack.enter_context(patch("ee.cloud.pockets.service.emit", new=AsyncMock()))
+    stack.enter_context(patch("pocketpaw_ee.cloud.pockets.service.emit", new=AsyncMock()))
     stack.enter_context(
         patch(
-            "ee.cloud.pockets.service._pocket_event_payload",
+            "pocketpaw_ee.cloud.pockets.service._pocket_event_payload",
             new=AsyncMock(return_value={"pocket_id": doc.id}),
         )
     )
@@ -140,7 +139,7 @@ def _patches(doc: _FakeDoc):
     # Patch where it's looked up.
     stack.enter_context(
         patch(
-            "ee.cloud.chat.agent_service.push_pocket_mutation",
+            "pocketpaw_ee.cloud.chat.agent_service.push_pocket_mutation",
             new=MagicMock(side_effect=_capture),
         )
     )
@@ -149,7 +148,7 @@ def _patches(doc: _FakeDoc):
     # the test hermetic and fast.
     stack.enter_context(
         patch(
-            "ee.cloud.pockets.service.normalize_ripple_spec",
+            "pocketpaw_ee.cloud.pockets.service.normalize_ripple_spec",
             new=lambda s: s,
         )
     )
@@ -159,13 +158,13 @@ def _patches(doc: _FakeDoc):
     # own dedicated tests at the bottom of this file.
     stack.enter_context(
         patch(
-            "ee.cloud.chat.agent_service.current_workspace_id",
+            "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
             new=MagicMock(return_value=doc.workspace),
         )
     )
     stack.enter_context(
         patch(
-            "ee.cloud.chat.agent_service.current_user_id",
+            "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
             new=MagicMock(return_value=doc.owner),
         )
     )
@@ -492,7 +491,7 @@ async def test_cross_workspace_mutation_rejected_as_not_found(fake_doc):
     with ctx:
         # Override the workspace ContextVar mock to a foreign workspace.
         with patch(
-            "ee.cloud.chat.agent_service.current_workspace_id",
+            "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
             new=MagicMock(return_value="w-other"),
         ):
             result = await agent_context.set_node_prop_for_agent(
@@ -514,7 +513,7 @@ async def test_non_owner_private_pocket_rejected(fake_doc):
     ctx, push_calls = _patches(fake_doc)
     with ctx:
         with patch(
-            "ee.cloud.chat.agent_service.current_user_id",
+            "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
             new=MagicMock(return_value="u-stranger"),
         ):
             result = await agent_context.set_node_prop_for_agent(
@@ -533,7 +532,7 @@ async def test_shared_with_can_edit(fake_doc):
     ctx, push_calls = _patches(fake_doc)
     with ctx:
         with patch(
-            "ee.cloud.chat.agent_service.current_user_id",
+            "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
             new=MagicMock(return_value="u-collaborator"),
         ):
             result = await agent_context.set_node_prop_for_agent(
@@ -550,11 +549,11 @@ async def test_no_active_stream_rejected(fake_doc):
     with ctx:
         with (
             patch(
-                "ee.cloud.chat.agent_service.current_workspace_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
                 new=MagicMock(return_value=None),
             ),
             patch(
-                "ee.cloud.chat.agent_service.current_user_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
                 new=MagicMock(return_value=None),
             ),
         ):

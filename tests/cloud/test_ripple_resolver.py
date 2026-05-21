@@ -5,8 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from ee.cloud.ripple_resolver import ResolveCtx, register, resolve_ripple_spec
+from pocketpaw_ee.cloud.ripple_resolver import ResolveCtx, register, resolve_ripple_spec
 
 
 @pytest.fixture
@@ -111,7 +110,7 @@ async def test_multiple_markers_resolved_independently(ctx: ResolveCtx) -> None:
 
 async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
     # Importing the sources module triggers @register side-effects.
-    import ee.cloud.ripple_sources  # noqa: F401
+    import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     fake_docs = [
         type(
@@ -146,7 +145,7 @@ async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
             return self._docs
 
     with patch(
-        "ee.cloud.ripple_sources._PocketDoc.find",
+        "pocketpaw_ee.cloud.ripple_sources._PocketDoc.find",
         return_value=_FakeFind(fake_docs),
     ) as find_mock:
         spec = {"state": {"all": {"$source": "workspace.pockets"}}}
@@ -174,7 +173,7 @@ async def test_workspace_pockets_source_strict_workspace_scoping(ctx: ResolveCtx
     as an exact dict key, not just substring-present in str(query). Catches refactors
     that loosen the scoping (e.g. dropping the workspace key, or moving it under $or)
     even though the structural invariant 'every find call is workspace-scoped' must hold."""
-    import ee.cloud.ripple_sources  # noqa: F401
+    import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     class _FakeFind:
         def __init__(self, docs):
@@ -184,7 +183,7 @@ async def test_workspace_pockets_source_strict_workspace_scoping(ctx: ResolveCtx
             return self._docs
 
     with patch(
-        "ee.cloud.ripple_sources._PocketDoc.find",
+        "pocketpaw_ee.cloud.ripple_sources._PocketDoc.find",
         return_value=_FakeFind([]),
     ) as find_mock:
         spec = {"state": {"all": {"$source": "workspace.pockets"}}}
@@ -205,7 +204,7 @@ async def test_workspace_pockets_source_other_workspace_ctx_scopes_to_other(
     """Cross-workspace tenancy proof — when ctx.workspace_id changes from 'w1' to 'w2',
     the find query's workspace key tracks. Demonstrates the source cannot leak across
     workspace boundaries because the query is built from ctx, not from the spec."""
-    import ee.cloud.ripple_sources  # noqa: F401
+    import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     other_ctx = ResolveCtx(workspace_id="w2", user_id="u1", pocket_id=None)
 
@@ -217,7 +216,7 @@ async def test_workspace_pockets_source_other_workspace_ctx_scopes_to_other(
             return self._docs
 
     with patch(
-        "ee.cloud.ripple_sources._PocketDoc.find",
+        "pocketpaw_ee.cloud.ripple_sources._PocketDoc.find",
         return_value=_FakeFind([]),
     ) as find_mock:
         spec = {"state": {"all": {"$source": "workspace.pockets"}}}
@@ -234,14 +233,14 @@ async def test_workspace_pockets_source_other_workspace_ctx_scopes_to_other(
 
 
 async def test_workspace_members_source_returns_enriched_member_list(ctx):
-    import ee.cloud.ripple_sources  # noqa: F401
+    import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     enriched = [
         {"id": "u1", "name": "Alex", "email": "a@x.com", "avatar": "", "role": "owner"},
         {"id": "u2", "name": "Brit", "email": "b@x.com", "avatar": "", "role": "member"},
     ]
     with patch(
-        "ee.cloud.ripple_sources._list_workspace_members",
+        "pocketpaw_ee.cloud.ripple_sources._list_workspace_members",
         new=AsyncMock(return_value=enriched),
     ):
         spec = {"state": {"team": {"$source": "workspace.members"}}}

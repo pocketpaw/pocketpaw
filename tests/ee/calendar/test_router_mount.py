@@ -24,15 +24,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
+from pocketpaw_ee.calendar.dto import EventListResponse, EventResponse
+from pocketpaw_ee.cloud import mount_cloud
+from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 from starlette.testclient import TestClient
-
-from ee.calendar.dto import EventListResponse, EventResponse
-from ee.cloud import mount_cloud
-from ee.cloud.shared.deps import current_user_id, current_workspace_id
 
 # Use importlib to grab the module, not the re-exported APIRouter. Mirrors
 # the same trick in tests/ee/calendar/test_router.py.
-_router_module = importlib.import_module("ee.calendar.router")
+_router_module = importlib.import_module("pocketpaw_ee.calendar.router")
 
 
 def _get_route_paths(app: FastAPI) -> list[str]:

@@ -7,8 +7,7 @@ import time
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.timing import (
+from pocketpaw_ee.cloud._core.timing import (
     TimingMiddleware,
     percentiles,
     report,

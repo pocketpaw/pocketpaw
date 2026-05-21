@@ -11,9 +11,9 @@ the touch lights up here first.
 from __future__ import annotations
 
 import pytest
+from pocketpaw_ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
 
-from ee.cloud.models.session import Session
-from ee.cloud.models.user import User, WorkspaceMembership
 from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
 pytestmark = pytest.mark.asyncio
@@ -80,7 +80,7 @@ class TestSessionUpkeep:
     async def test_save_without_any_user_still_persists_message(self, store) -> None:
         """Fresh install (no users) — message row survives even though no
         Session could be auto-created."""
-        from ee.cloud.models.message import Message
+        from pocketpaw_ee.cloud.models.message import Message
 
         await store.save(_entry("websocket:lonely", "hi"))
 

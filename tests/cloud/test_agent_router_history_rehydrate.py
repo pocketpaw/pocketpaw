@@ -15,10 +15,9 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
-
-from ee.cloud.chat import agent_router as router_mod
-from ee.cloud.chat import agent_service
-from ee.cloud.chat.agent_service import (
+from pocketpaw_ee.cloud.chat import agent_router as router_mod
+from pocketpaw_ee.cloud.chat import agent_service
+from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
     load_history_for_scope,
@@ -111,7 +110,7 @@ async def test_load_history_for_session_scope_uses_session_key(monkeypatch):
             _StubMsg(role="user", content="second thing"),
         ]
     )
-    import ee.cloud.models.message as message_mod
+    import pocketpaw_ee.cloud.models.message as message_mod
 
     monkeypatch.setattr(message_mod, "Message", _StubMessageModel)
 
@@ -138,7 +137,7 @@ async def test_load_history_for_group_scope_queries_by_group(monkeypatch):
             _StubMsg(sender_type="agent", content="hello humans"),
         ]
     )
-    import ee.cloud.models.message as message_mod
+    import pocketpaw_ee.cloud.models.message as message_mod
 
     monkeypatch.setattr(message_mod, "Message", _StubMessageModel)
 
@@ -163,7 +162,7 @@ async def test_load_history_returns_empty_on_mongo_error(monkeypatch):
         def find(cls, q):
             raise RuntimeError("mongo down")
 
-    import ee.cloud.models.message as message_mod
+    import pocketpaw_ee.cloud.models.message as message_mod
 
     monkeypatch.setattr(message_mod, "Message", _Boom)
 

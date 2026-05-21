@@ -25,8 +25,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from ee.agent.pocket_specialist.tools import make_persist_pocket_tool
+from pocketpaw_ee.agent.pocket_specialist.tools import make_persist_pocket_tool
 
 
 @pytest.mark.asyncio
@@ -35,7 +34,7 @@ async def test_persist_pocket_binds_session_when_contextvar_set(
 ) -> None:
     """Happy path: ContextVar is set → attach_pocket_to_session_doc is
     called with (session_mongo_id, user_id, new_pocket_id)."""
-    from ee.cloud.chat.agent_service import _active_session_mongo_id
+    from pocketpaw_ee.cloud.chat.agent_service import _active_session_mongo_id
 
     pocket_view: dict[str, Any] = {"id": "pid_abc", "name": "Demo"}
     new_pocket_id = "pid_abc"
@@ -49,10 +48,10 @@ async def test_persist_pocket_binds_session_when_contextvar_set(
     token = _active_session_mongo_id.set("session_mongo_xyz")
     try:
         with (
-            patch("ee.agent.pocket_specialist.tools._agent_create", fake_create),
-            patch("ee.agent.pocket_specialist.tools._get_manifest", fake_manifest),
+            patch("pocketpaw_ee.agent.pocket_specialist.tools._agent_create", fake_create),
+            patch("pocketpaw_ee.agent.pocket_specialist.tools._get_manifest", fake_manifest),
             patch(
-                "ee.cloud.sessions.service.attach_pocket_to_session_doc",
+                "pocketpaw_ee.cloud.sessions.service.attach_pocket_to_session_doc",
                 attach,
             ),
         ):
@@ -84,10 +83,10 @@ async def test_persist_pocket_skips_bind_when_no_session_context() -> None:
     attach = AsyncMock()
 
     with (
-        patch("ee.agent.pocket_specialist.tools._agent_create", fake_create),
-        patch("ee.agent.pocket_specialist.tools._get_manifest", fake_manifest),
+        patch("pocketpaw_ee.agent.pocket_specialist.tools._agent_create", fake_create),
+        patch("pocketpaw_ee.agent.pocket_specialist.tools._get_manifest", fake_manifest),
         patch(
-            "ee.cloud.sessions.service.attach_pocket_to_session_doc",
+            "pocketpaw_ee.cloud.sessions.service.attach_pocket_to_session_doc",
             attach,
         ),
     ):
@@ -113,7 +112,7 @@ async def test_persist_pocket_survives_bind_failure(
     """attach_pocket_to_session_doc returning None (owner mismatch,
     missing doc) must NOT break pocket creation — the pocket already
     exists, that's the primary contract."""
-    from ee.cloud.chat.agent_service import _active_session_mongo_id
+    from pocketpaw_ee.cloud.chat.agent_service import _active_session_mongo_id
 
     pocket_view: dict[str, Any] = {"id": "pid_q", "name": "Q"}
     fake_create = AsyncMock(return_value=(pocket_view, "pid_q", None))
@@ -125,10 +124,10 @@ async def test_persist_pocket_survives_bind_failure(
     token = _active_session_mongo_id.set("session_stale")
     try:
         with (
-            patch("ee.agent.pocket_specialist.tools._agent_create", fake_create),
-            patch("ee.agent.pocket_specialist.tools._get_manifest", fake_manifest),
+            patch("pocketpaw_ee.agent.pocket_specialist.tools._agent_create", fake_create),
+            patch("pocketpaw_ee.agent.pocket_specialist.tools._get_manifest", fake_manifest),
             patch(
-                "ee.cloud.sessions.service.attach_pocket_to_session_doc",
+                "pocketpaw_ee.cloud.sessions.service.attach_pocket_to_session_doc",
                 attach,
             ),
         ):

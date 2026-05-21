@@ -9,7 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from ee.cloud.pockets import service as pocket_service
+from pocketpaw_ee.cloud.pockets import service as pocket_service
 
 
 def _fake_doc(spec: dict) -> SimpleNamespace:
@@ -37,7 +37,7 @@ def _fake_doc(spec: dict) -> SimpleNamespace:
 
 async def test_get_resolves_workspace_pockets_marker():
     # Pre-import so the @register side-effects fire before we patch the registry.
-    import ee.cloud.ripple_sources  # noqa: F401
+    import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     spec = {
         "state": {
@@ -54,11 +54,11 @@ async def test_get_resolves_workspace_pockets_marker():
 
     with (
         patch(
-            "ee.cloud.pockets.service._fetch_pocket",
+            "pocketpaw_ee.cloud.pockets.service._fetch_pocket",
             new=AsyncMock(return_value=_fake_doc(spec)),
         ),
         patch.dict(
-            "ee.cloud.ripple_resolver._REGISTRY",
+            "pocketpaw_ee.cloud.ripple_resolver._REGISTRY",
             {"workspace.pockets": _fake_workspace_pockets},
         ),
     ):
@@ -77,7 +77,7 @@ async def test_get_passes_through_when_no_markers():
         "ui": {"type": "stat"},
     }
     with patch(
-        "ee.cloud.pockets.service._fetch_pocket",
+        "pocketpaw_ee.cloud.pockets.service._fetch_pocket",
         new=AsyncMock(return_value=_fake_doc(spec)),
     ):
         out = await pocket_service.get(pocket_id="pocket-1", user_id="u1")
@@ -88,7 +88,7 @@ async def test_get_passes_through_when_no_markers():
 async def test_get_with_no_ripple_spec_does_not_crash():
     """A pocket with rippleSpec=None must not break the resolver hookup."""
     with patch(
-        "ee.cloud.pockets.service._fetch_pocket",
+        "pocketpaw_ee.cloud.pockets.service._fetch_pocket",
         new=AsyncMock(return_value=_fake_doc(None)),
     ):
         out = await pocket_service.get(pocket_id="pocket-1", user_id="u1")
@@ -102,11 +102,11 @@ async def test_get_falls_back_to_raw_spec_when_resolver_raises():
 
     with (
         patch(
-            "ee.cloud.pockets.service._fetch_pocket",
+            "pocketpaw_ee.cloud.pockets.service._fetch_pocket",
             new=AsyncMock(return_value=_fake_doc(spec)),
         ),
         patch(
-            "ee.cloud.ripple_resolver.resolve_ripple_spec",
+            "pocketpaw_ee.cloud.ripple_resolver.resolve_ripple_spec",
             new=AsyncMock(side_effect=RuntimeError("walker exploded")),
         ),
     ):
@@ -120,7 +120,7 @@ async def test_get_falls_back_to_raw_spec_when_resolver_raises():
 async def test_resolved_wire_dict_resolves_for_given_viewer():
     """Other boundaries (create return, event payload) call _resolved_wire_dict
     directly. Verify it resolves with the supplied viewer's context."""
-    import ee.cloud.ripple_sources  # noqa: F401
+    import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     spec = {"state": {"all": {"$source": "workspace.pockets"}}}
     fake = [{"id": "p1", "name": "X", "type": "custom", "icon": "", "color": ""}]
@@ -131,7 +131,7 @@ async def test_resolved_wire_dict_resolves_for_given_viewer():
         captured_user_id.append(ctx.user_id)
         return fake
 
-    with patch.dict("ee.cloud.ripple_resolver._REGISTRY", {"workspace.pockets": _fake}):
+    with patch.dict("pocketpaw_ee.cloud.ripple_resolver._REGISTRY", {"workspace.pockets": _fake}):
         out = await pocket_service._resolved_wire_dict(_fake_doc(spec), "alice")
 
     assert out["rippleSpec"]["state"]["all"] == fake
@@ -141,7 +141,7 @@ async def test_resolved_wire_dict_resolves_for_given_viewer():
 async def test_event_payload_resolves_using_owner_as_viewer():
     """Multi-recipient broadcasts resolve against doc.owner — verifies the
     create/update WebSocket flow doesn't hand raw markers to the renderer."""
-    import ee.cloud.ripple_sources  # noqa: F401
+    import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     spec = {"state": {"all": {"$source": "workspace.pockets"}}}
     fake = [{"id": "p1", "name": "Owner-View", "type": "custom", "icon": "", "color": ""}]
@@ -153,7 +153,7 @@ async def test_event_payload_resolves_using_owner_as_viewer():
         return fake
 
     doc = _fake_doc(spec)  # owner="u1" per fixture
-    with patch.dict("ee.cloud.ripple_resolver._REGISTRY", {"workspace.pockets": _fake}):
+    with patch.dict("pocketpaw_ee.cloud.ripple_resolver._REGISTRY", {"workspace.pockets": _fake}):
         payload = await pocket_service._pocket_event_payload(doc)
 
     assert payload["pocket"]["rippleSpec"]["state"]["all"] == fake

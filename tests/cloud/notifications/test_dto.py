@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from ee.cloud.notifications.domain import Notification, NotificationSource
-from ee.cloud.notifications.dto import NotificationOut, notification_to_dto
+from pocketpaw_ee.cloud.notifications.domain import Notification, NotificationSource
+from pocketpaw_ee.cloud.notifications.dto import NotificationOut, notification_to_dto
 
 
 def _domain(**overrides) -> Notification:

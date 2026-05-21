@@ -27,13 +27,12 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.context import RequestContext, ScopeKind, request_context
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.cycles import service as cycles_service
-from ee.cloud.cycles.dto import CreateCycleRequest
-from ee.cloud.cycles.router import router as cycles_router
-from ee.cloud.license import require_license
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.cycles import service as cycles_service
+from pocketpaw_ee.cloud.cycles.dto import CreateCycleRequest
+from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+from pocketpaw_ee.cloud.license import require_license
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -50,9 +49,9 @@ def _install_fake_tasks(tasks_to_return: list[_FakeTask] | None = None) -> None:
     ``test_cycles_daily_snapshot.py`` so the snapshot path is
     deterministic without depending on the real Tasks Beanie writes.
     """
-    mod_tasks = types.ModuleType("ee.cloud.tasks")
-    mod_service = types.ModuleType("ee.cloud.tasks.service")
-    mod_dto = types.ModuleType("ee.cloud.tasks.dto")
+    mod_tasks = types.ModuleType("pocketpaw_ee.cloud.tasks")
+    mod_service = types.ModuleType("pocketpaw_ee.cloud.tasks.service")
+    mod_dto = types.ModuleType("pocketpaw_ee.cloud.tasks.dto")
 
     class _ListReq:
         def __init__(self, cycle_id: str | None = None, **_: object) -> None:
@@ -67,13 +66,17 @@ def _install_fake_tasks(tasks_to_return: list[_FakeTask] | None = None) -> None:
     mod_tasks.service = mod_service  # type: ignore[attr-defined]
     mod_tasks.dto = mod_dto  # type: ignore[attr-defined]
 
-    sys.modules["ee.cloud.tasks"] = mod_tasks
-    sys.modules["ee.cloud.tasks.service"] = mod_service
-    sys.modules["ee.cloud.tasks.dto"] = mod_dto
+    sys.modules["pocketpaw_ee.cloud.tasks"] = mod_tasks
+    sys.modules["pocketpaw_ee.cloud.tasks.service"] = mod_service
+    sys.modules["pocketpaw_ee.cloud.tasks.dto"] = mod_dto
 
 
 def _uninstall_fake_tasks() -> None:
-    for name in ("ee.cloud.tasks", "ee.cloud.tasks.service", "ee.cloud.tasks.dto"):
+    for name in (
+        "pocketpaw_ee.cloud.tasks",
+        "pocketpaw_ee.cloud.tasks.service",
+        "pocketpaw_ee.cloud.tasks.dto",
+    ):
         sys.modules.pop(name, None)
 
 
@@ -236,7 +239,7 @@ async def test_scheduler_start_and_stop_are_idempotent() -> None:
     """start → start → stop → stop should not raise. Verifies the
     app-state plumbing without exercising the 24h sleep loop itself."""
 
-    from ee.cloud.cycles import scheduler
+    from pocketpaw_ee.cloud.cycles import scheduler
 
     app = FastAPI()
     await scheduler.start_in_process_scheduler(app)

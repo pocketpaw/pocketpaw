@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.ripple_validator import (
+from pocketpaw_ee.cloud.ripple_validator import (
     ExpressionWarning,
     RippleSpecGrammarError,
     format_warnings_for_agent,

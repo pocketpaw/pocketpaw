@@ -10,9 +10,8 @@ from __future__ import annotations
 from datetime import datetime
 
 import pytest
-
-from ee.calendar.domain import Recurrence
-from ee.calendar.recurrence import expand_recurrence, parse_rrule
+from pocketpaw_ee.calendar.domain import Recurrence
+from pocketpaw_ee.calendar.recurrence import expand_recurrence, parse_rrule
 
 # ---------------------------------------------------------------------------
 # Daily

@@ -6,8 +6,7 @@ from __future__ import annotations
 import copy
 
 import pytest
-
-from ee.cloud.pockets import state_ops
+from pocketpaw_ee.cloud.pockets import state_ops
 
 
 def _state() -> dict:

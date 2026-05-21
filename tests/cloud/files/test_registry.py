@@ -1,8 +1,7 @@
 import pytest
-
-from ee.cloud.files.dto import MountConfig
-from ee.cloud.files.errors import MountNotFound
-from ee.cloud.files.registry import ProviderRegistry
+from pocketpaw_ee.cloud.files.dto import MountConfig
+from pocketpaw_ee.cloud.files.errors import MountNotFound
+from pocketpaw_ee.cloud.files.registry import ProviderRegistry
 
 
 def test_register_and_get(ctx):

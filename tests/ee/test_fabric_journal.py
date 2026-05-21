@@ -23,11 +23,11 @@ import pytest
 from soul_protocol.engine.journal import open_journal
 from soul_protocol.spec.journal import Actor
 
-from ee.fabric.events import ACTION_OBJECT_CREATED
-from ee.fabric.journal_store import FabricJournalStore
-from ee.fabric.models import FabricObject, FabricQuery
-from ee.fabric.policy import PolicyDecision, decide, filter_visible, visible
-from ee.fabric.projection import FabricProjection
+from pocketpaw.fabric.events import ACTION_OBJECT_CREATED
+from pocketpaw.fabric.journal_store import FabricJournalStore
+from pocketpaw.fabric.models import FabricObject, FabricQuery
+from pocketpaw.fabric.policy import PolicyDecision, decide, filter_visible, visible
+from pocketpaw.fabric.projection import FabricProjection
 
 
 @pytest.fixture

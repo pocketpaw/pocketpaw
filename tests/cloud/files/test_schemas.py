@@ -5,9 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
-
-from ee.cloud.files.dto import (
+from pocketpaw_ee.cloud.files.dto import (
     FileEntry,
     FolderNode,
     MountConfig,
@@ -15,6 +13,7 @@ from ee.cloud.files.dto import (
     Permission,
     RequestContext,
 )
+from pydantic import ValidationError
 
 
 def _entry(**overrides):

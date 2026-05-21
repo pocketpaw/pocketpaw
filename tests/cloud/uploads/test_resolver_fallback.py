@@ -52,8 +52,8 @@ async def test_fallback_resolves_from_ee_mongo_when_oss_misses(
     with (
         patch("pocketpaw.api.v1.uploads._ADAPTER", adapter),
         patch("pocketpaw.api.v1.uploads._META", oss_meta),
-        patch("ee.cloud.uploads.router._ADAPTER", adapter),
-        patch("ee.cloud.uploads.router._META", store),
+        patch("pocketpaw_ee.cloud.uploads.router._ADAPTER", adapter),
+        patch("pocketpaw_ee.cloud.uploads.router._META", store),
     ):
         result = await resolve_media_paths_any([f"/api/v1/uploads/{file_id}"])
 
@@ -70,8 +70,8 @@ async def test_fallback_returns_none_when_neither_store_has_id(
     with (
         patch("pocketpaw.api.v1.uploads._ADAPTER", adapter),
         patch("pocketpaw.api.v1.uploads._META", oss_meta),
-        patch("ee.cloud.uploads.router._ADAPTER", adapter),
-        patch("ee.cloud.uploads.router._META", store),
+        patch("pocketpaw_ee.cloud.uploads.router._ADAPTER", adapter),
+        patch("pocketpaw_ee.cloud.uploads.router._META", store),
     ):
         result = await resolve_media_paths_any([ghost_url])
 
@@ -107,8 +107,8 @@ async def test_fallback_ignores_soft_deleted_ee_record(
     with (
         patch("pocketpaw.api.v1.uploads._ADAPTER", adapter),
         patch("pocketpaw.api.v1.uploads._META", oss_meta),
-        patch("ee.cloud.uploads.router._ADAPTER", adapter),
-        patch("ee.cloud.uploads.router._META", store),
+        patch("pocketpaw_ee.cloud.uploads.router._ADAPTER", adapter),
+        patch("pocketpaw_ee.cloud.uploads.router._META", store),
     ):
         result = await resolve_media_paths_any([f"/api/v1/uploads/{file_id}"])
 

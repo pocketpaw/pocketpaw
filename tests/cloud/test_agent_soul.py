@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ee.cloud.agents.dto import CreateAgentRequest
-from ee.cloud.models.agent import AgentConfig
+from pocketpaw_ee.cloud.agents.dto import CreateAgentRequest
+from pocketpaw_ee.cloud.models.agent import AgentConfig
 
 
 def test_agent_config_soul_defaults():

@@ -20,7 +20,7 @@ def reset_kb_bin_env(monkeypatch):
 
 def test_explicit_env_var_wins(monkeypatch, reset_kb_bin_env):
     """POCKETPAW_KB_BIN, when set, is returned verbatim."""
-    from ee.cloud.agents.knowledge import _resolve_kb_bin
+    from pocketpaw_ee.cloud.agents.knowledge import _resolve_kb_bin
 
     monkeypatch.setenv("POCKETPAW_KB_BIN", "/custom/path/to/kb")
     assert _resolve_kb_bin() == "/custom/path/to/kb"
@@ -28,7 +28,7 @@ def test_explicit_env_var_wins(monkeypatch, reset_kb_bin_env):
 
 def test_falls_through_to_kb_go_on_path(monkeypatch, reset_kb_bin_env, tmp_path):
     """When env unset, prefer ``kb-go`` from PATH."""
-    from ee.cloud.agents import knowledge as kn
+    from pocketpaw_ee.cloud.agents import knowledge as kn
 
     fake_kb_go = tmp_path / "kb-go"
     fake_kb_go.write_text("#!/bin/sh\nexit 0\n")
@@ -44,7 +44,7 @@ def test_falls_through_to_kb_go_on_path(monkeypatch, reset_kb_bin_env, tmp_path)
 
 def test_falls_through_to_kb_on_path(monkeypatch, reset_kb_bin_env, tmp_path):
     """When ``kb-go`` is missing but ``kb`` is on PATH, use that."""
-    from ee.cloud.agents import knowledge as kn
+    from pocketpaw_ee.cloud.agents import knowledge as kn
 
     fake_kb = tmp_path / "kb"
     fake_kb.write_text("#!/bin/sh\nexit 0\n")
@@ -56,11 +56,11 @@ def test_falls_through_to_kb_on_path(monkeypatch, reset_kb_bin_env, tmp_path):
 
 def test_falls_through_to_workspace_checkout(monkeypatch, reset_kb_bin_env, tmp_path):
     """No PATH entry → walk parents looking for ``<ancestor>/kb-go/kb``."""
-    from ee.cloud.agents import knowledge as kn
+    from pocketpaw_ee.cloud.agents import knowledge as kn
 
-    # Stage a fake workspace layout: <root>/{ee/cloud/agents/file.py, kb-go/kb}.
+    # Stage a fake workspace layout: <root>/{ee/pocketpaw_ee/cloud/agents/file.py, kb-go/kb}.
     project = tmp_path / "fake-pocketpaw"
-    knowledge_file = project / "ee" / "cloud" / "agents" / "knowledge.py"
+    knowledge_file = project / "ee" / "pocketpaw_ee" / "cloud" / "agents" / "knowledge.py"
     knowledge_file.parent.mkdir(parents=True)
     knowledge_file.touch()
     kb_bin = tmp_path / "kb-go" / "kb"
@@ -80,7 +80,7 @@ def test_falls_through_to_workspace_checkout(monkeypatch, reset_kb_bin_env, tmp_
 def test_returns_default_string_when_nothing_found(monkeypatch, reset_kb_bin_env, tmp_path):
     """Last resort: literal ``"kb-go"`` so the FileNotFoundError message
     stays informative even when no binary is reachable."""
-    from ee.cloud.agents import knowledge as kn
+    from pocketpaw_ee.cloud.agents import knowledge as kn
 
     monkeypatch.setattr(kn.shutil, "which", lambda name: None)
     # Point __file__ at a tree that contains no kb-go anywhere.
@@ -97,7 +97,7 @@ def test_resolver_finds_workspace_checkout_in_real_repo():
     in. kb-go is a sibling of pocketpaw, so the resolver's parent walk
     must find ``<workspace>/kb-go/kb`` regardless of PATH state.
     """
-    from ee.cloud.agents.knowledge import KB_BIN
+    from pocketpaw_ee.cloud.agents.knowledge import KB_BIN
 
     # KB_BIN was resolved at import time. In CI without kb-go on PATH it
     # should fall through to the workspace-local kb. In a sandbox without

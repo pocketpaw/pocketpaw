@@ -48,7 +48,7 @@ def _upload(content: bytes, filename: str, mime: str) -> UploadFile:
 
 class TestEEUploadService:
     async def test_upload_stores_record_in_workspace(self, store, tmp_path: Path):
-        from ee.cloud.uploads.service import EEUploadService
+        from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
         svc = EEUploadService(
             adapter=_MemAdapter(),
@@ -63,7 +63,7 @@ class TestEEUploadService:
         assert got is not None
 
     async def test_stream_enforces_workspace(self, store, tmp_path: Path):
-        from ee.cloud.uploads.service import EEUploadService
+        from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
         svc = EEUploadService(
             adapter=_MemAdapter(),
@@ -77,7 +77,7 @@ class TestEEUploadService:
             await svc.stream(rec.id, requester_id="u1", workspace="w2")
 
     async def test_stream_happy_path(self, store, tmp_path: Path):
-        from ee.cloud.uploads.service import EEUploadService
+        from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
         adapter = _MemAdapter()
         svc = EEUploadService(
@@ -94,7 +94,7 @@ class TestEEUploadService:
         assert got_rec.id == rec.id
 
     async def test_delete_owner_in_workspace(self, store, tmp_path: Path):
-        from ee.cloud.uploads.service import EEUploadService
+        from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
         svc = EEUploadService(
             adapter=_MemAdapter(),
@@ -109,7 +109,7 @@ class TestEEUploadService:
             await svc.stream(rec.id, requester_id="u1", workspace="w1")
 
     async def test_bulk_upload(self, store, tmp_path: Path):
-        from ee.cloud.uploads.service import EEUploadService
+        from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
         svc = EEUploadService(
             adapter=_MemAdapter(),

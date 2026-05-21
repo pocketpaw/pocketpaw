@@ -13,8 +13,7 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
-
-from ee.cloud.chat import agent_router as mod
+from pocketpaw_ee.cloud.chat import agent_router as mod
 
 
 def _parse_sse(body: str) -> list[tuple[str, dict]]:

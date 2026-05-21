@@ -41,6 +41,14 @@ _DEFAULT_IDENTITY = (
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
 
+# Built-in in-process MCP servers that are opt-in, not ambient. A server
+# named here registers only when the agent's tool policy explicitly opts
+# in (``ToolPolicy.is_mcp_server_explicitly_allowed``); every other
+# in-process server stays allow-by-default. AgentPool turns a cloud
+# agent's ``tools`` entries into the policy's ``mcp_servers_allow`` set —
+# keep this consistent with ``pool._BUILTIN_MCP_SERVER_TOKENS``.
+_OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
+
 
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
@@ -515,87 +523,65 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
             servers[cfg.name] = entry
 
-        # In-process MCP server: exposes `get_pocket` so the agent can fetch
-        # the full pocket document on demand (rippleSpec.ui tree can be tens
-        # of KB, which would blow the Windows CLI limit if embedded in the
-        # system prompt).
+        # In-process MCP server: ripple widget-spec lookups (get_widget_spec,
+        # get_inline_widget_help). Pure core — the ripple manifest / inline
+        # catalog have no cloud dependency, so this server is always built
+        # locally. Why in-process MCP at all: the rippleSpec.ui tree can be
+        # tens of KB, which would blow the Windows CLI command-line limit if
+        # embedded in the system prompt.
         try:
-            from pocketpaw.agents.sdk_mcp_pocket import build_pocket_context_server
+            from pocketpaw.agents.sdk_mcp_widgets import build_widgets_context_server
 
-            pocket_server = build_pocket_context_server()
-            if pocket_server is not None:
-                name, cfg_entry = pocket_server
-                servers[name] = cfg_entry
+            widgets_server = build_widgets_context_server()
+            if widgets_server is not None:
+                name, cfg_entry = widgets_server
+                if self._policy.is_mcp_server_allowed(name):
+                    servers[name] = cfg_entry
+                else:
+                    logger.info("MCP server '%s' blocked by tool policy", name)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("pocket_context MCP server not registered: %s", exc)
+            logger.debug("pocketpaw_widgets MCP server not registered: %s", exc)
 
-        # In-process MCP server: exposes Mission Control Tasks tools
-        # (``list_my_tasks``, ``claim_task``, ``complete_task``) so an
-        # agent running inside a workspace can pick up work routed to
-        # it without an out-of-band HTTP client. Same lifecycle as the
-        # pocket-context server above.
-        try:
-            from pocketpaw.agents.sdk_mcp_tasks import build_tasks_context_server
-
-            tasks_server = build_tasks_context_server()
-            if tasks_server is not None:
-                name, cfg_entry = tasks_server
-                servers[name] = cfg_entry
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("pocketpaw_tasks MCP server not registered: %s", exc)
-
-        # In-process MCP server: exposes the cloud Planner as a single
-        # ``plan_project`` tool. The agent invokes it to run the full
-        # deep_work planner against a workspace Project and receive the
-        # materialized PRD / tasks / agent gaps.
+        # EE-provided in-process MCP servers — cloud pocket context, Mission
+        # Control tasks, the planner, and the pocket specialist. Discovered
+        # via the ``pocketpaw.mcp_servers`` entry-point (see
+        # pocketpaw_ee.extensions); an OSS install registers none and this
+        # loop is a no-op.
         #
-        # Unlike the pocket / tasks servers above, the planner is *opt-in,
-        # not ambient*. Most agent runs never plan a project, and carrying
-        # the ``plan_project`` schema in every context is dead weight. The
-        # default policy posture is allow-by-default for MCP servers, so a
-        # plain ``is_mcp_server_allowed`` check would still load it
-        # everywhere. ``is_mcp_server_explicitly_allowed`` registers it
-        # only when the policy's ``mcp_servers_allow`` set names the
-        # planner. AgentPool builds that set from the cloud agent's
+        # Most of these servers are ambient: allow-by-default policy lets
+        # them register on every agent run. The planner is the exception —
+        # it is *opt-in, not ambient*. Most agent runs never plan a
+        # project, and carrying the ``plan_project`` schema in every
+        # context is dead weight. For a server in ``_OPT_IN_MCP_SERVERS``
+        # the loop uses ``is_mcp_server_explicitly_allowed``, which
+        # registers it only when the policy's ``mcp_servers_allow`` set
+        # names it. AgentPool builds that set from the cloud agent's
         # ``tools`` field — an agent enables the planner by listing the
         # bare token ``pocketpaw_planner`` there. Deny still wins.
-        try:
-            from pocketpaw.agents.sdk_mcp_planner import (
-                SERVER_NAME as _PLANNER_SERVER_NAME,
-            )
-            from pocketpaw.agents.sdk_mcp_planner import build_planner_context_server
+        from pocketpaw._registry import providers as _ext_providers
 
-            if self._policy.is_mcp_server_explicitly_allowed(_PLANNER_SERVER_NAME):
-                planner_server = build_planner_context_server()
-                if planner_server is not None:
-                    name, cfg_entry = planner_server
-                    servers[name] = cfg_entry
-            else:
-                logger.debug(
-                    "pocketpaw_planner MCP server not registered — agent has "
-                    "not opted in (add 'pocketpaw_planner' to the agent's tools)"
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("pocketpaw_planner MCP server not registered: %s", exc)
-
-        # In-process MCP server: exposes ``pocket_specialist__create`` so the
-        # main agent can hand a brief to the specialist tool, which runs
-        # the full list/validate/persist workflow as an isolated specialist
-        # run without re-implementing it inline.
-        try:
-            from ee.agent.pocket_specialist.mcp_tool import (
-                SERVER_NAME as _PS_SERVER_NAME,
-            )
-            from ee.agent.pocket_specialist.mcp_tool import (
-                build_pocket_specialist_server,
-            )
-
-            if self._policy.is_mcp_server_allowed(_PS_SERVER_NAME):
-                servers[_PS_SERVER_NAME] = build_pocket_specialist_server()
-            else:
-                logger.info("pocket_specialist MCP server blocked by tool policy")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("pocket_specialist MCP server not registered: %s", exc)
+        for provider in _ext_providers("pocketpaw.mcp_servers"):
+            try:
+                built = provider.build_server()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("MCP server provider %r failed: %s", provider, exc)
+                continue
+            if built is None:
+                continue
+            name, cfg_entry = built
+            if name in _OPT_IN_MCP_SERVERS:
+                if not self._policy.is_mcp_server_explicitly_allowed(name):
+                    logger.debug(
+                        "MCP server '%s' not registered — agent has not opted "
+                        "in (add '%s' to the agent's tools)",
+                        name,
+                        name,
+                    )
+                    continue
+            elif not self._policy.is_mcp_server_allowed(name):
+                logger.info("MCP server '%s' blocked by tool policy", name)
+                continue
+            servers[name] = cfg_entry
 
         return servers
 
@@ -905,44 +891,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 blocked = set(all_sdk_tools) - set(allowed_tools)
                 logger.info("Tool policy blocked SDK tools: %s", blocked)
 
-            # In-process pocket-context tools — read-only surface only:
-            # ``get_pocket``, ``list_pockets``, ``get_widget_spec``,
-            # ``get_inline_widget_help``. Mutations flow through the
-            # ``pocket_specialist__create`` / ``__edit`` MCP tools below,
-            # which run an isolated specialist backend with its own
-            # ``StructuredTool`` wrappers — see
-            # ``ee/agent/pocket_specialist/tools.py``.
-            from pocketpaw.agents.sdk_mcp_pocket import POCKET_TOOL_IDS
+            # In-process MCP tool ids must be on the allowlist to be
+            # callable. The ripple widget-spec tools are core; the cloud
+            # pocket / Mission Control tasks / planner / pocket-specialist
+            # ids come from the ``pocketpaw.mcp_servers`` providers (none on
+            # an OSS install). Mutations are NOT here — pocket writes flow
+            # through the pocket_specialist create/edit tools.
+            from pocketpaw._registry import providers as _ext_providers
+            from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
-            allowed_tools.extend(POCKET_TOOL_IDS)
-
-            # Mission Control Tasks tools — agents need these to pull
-            # work from their queue and report completion. Surface is
-            # tiny (3 tools); allowlisting unconditionally keeps the
-            # claim flow available wherever the SDK backend runs.
-            try:
-                from pocketpaw.agents.sdk_mcp_tasks import TASK_TOOL_IDS
-
-                allowed_tools.extend(TASK_TOOL_IDS)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "pocketpaw_tasks tool ids not added to allowlist: %s", exc
-                )
-
-            # Pocket specialist — ``create`` / ``edit`` tools that run the
-            # full listing → validate → persist workflow as an isolated
-            # specialist backend.
-            try:
-                from ee.agent.pocket_specialist.mcp_tool import (
-                    POCKET_SPECIALIST_TOOL_IDS,
-                )
-
-                allowed_tools.extend(POCKET_SPECIALIST_TOOL_IDS)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "pocket_specialist tool ids not added to allowlist: %s",
-                    exc,
-                )
+            allowed_tools.extend(WIDGET_TOOL_IDS)
+            for provider in _ext_providers("pocketpaw.mcp_servers"):
+                try:
+                    allowed_tools.extend(provider.tool_ids())
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("MCP provider tool ids not added to allowlist: %s", exc)
 
             # Build hooks for security
             hooks = {

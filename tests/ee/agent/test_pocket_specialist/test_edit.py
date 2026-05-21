@@ -17,7 +17,7 @@ import pytest
 
 class TestEditMCPTool:
     def test_edit_tool_id_in_specialist_tool_ids(self) -> None:
-        from ee.agent.pocket_specialist.mcp_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
             EDIT_TOOL_ID,
             POCKET_SPECIALIST_TOOL_IDS,
         )
@@ -26,7 +26,7 @@ class TestEditMCPTool:
         assert EDIT_TOOL_ID in POCKET_SPECIALIST_TOOL_IDS
 
     def test_create_and_edit_both_registered(self) -> None:
-        from ee.agent.pocket_specialist.mcp_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
             CREATE_TOOL_ID,
             EDIT_TOOL_ID,
             POCKET_SPECIALIST_TOOL_IDS,
@@ -39,30 +39,28 @@ class TestEditMCPTool:
 
 class TestEditInputOutput:
     def test_input_validates_pocket_id_and_intent(self) -> None:
-        from ee.agent.pocket_specialist.runtime import PocketSpecialistEditInput
+        from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistEditInput
 
         ok = PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1")
         assert ok.pocket_id == "p1"
         assert ok.intent == "rename row 1"
 
     def test_input_rejects_blank_intent(self) -> None:
+        from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistEditInput
         from pydantic import ValidationError
-
-        from ee.agent.pocket_specialist.runtime import PocketSpecialistEditInput
 
         with pytest.raises(ValidationError):
             PocketSpecialistEditInput(pocket_id="p1", intent="hi")
 
     def test_input_rejects_empty_pocket_id(self) -> None:
+        from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistEditInput
         from pydantic import ValidationError
-
-        from ee.agent.pocket_specialist.runtime import PocketSpecialistEditInput
 
         with pytest.raises(ValidationError):
             PocketSpecialistEditInput(pocket_id="", intent="add a button")
 
     def test_output_shape(self) -> None:
-        from ee.agent.pocket_specialist.runtime import PocketSpecialistEditOutput
+        from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistEditOutput
 
         out = PocketSpecialistEditOutput(
             ok=True,
@@ -78,7 +76,7 @@ class TestEditInputOutput:
 
 class TestEditToolFactories:
     def test_make_edit_pocket_tools_returns_expected_tool_names(self) -> None:
-        from ee.agent.pocket_specialist.tools import make_edit_pocket_tools
+        from pocketpaw_ee.agent.pocket_specialist.tools import make_edit_pocket_tools
 
         tools = make_edit_pocket_tools(pocket_id="p1")
         names = [t.name for t in tools]
@@ -100,7 +98,7 @@ class TestEditToolFactories:
     def test_pocket_id_is_closed_over_not_exposed_to_llm(self) -> None:
         """The LLM should NEVER see pocket_id as an argument — it's
         baked into the closure. Verify by checking the args_schema."""
-        from ee.agent.pocket_specialist.tools import make_set_state_tool
+        from pocketpaw_ee.agent.pocket_specialist.tools import make_set_state_tool
 
         tool = make_set_state_tool(pocket_id="p1")
         schema_fields = tool.args_schema.model_fields  # type: ignore[union-attr]
@@ -114,8 +112,8 @@ class TestEditToolFactories:
         runtime can return them to the main agent."""
         import asyncio
 
-        from ee.agent.pocket_specialist import tools as tools_mod
-        from ee.agent.pocket_specialist.tools import make_set_state_tool
+        from pocketpaw_ee.agent.pocket_specialist import tools as tools_mod
+        from pocketpaw_ee.agent.pocket_specialist.tools import make_set_state_tool
 
         capture: dict = {}
         with patch.object(
@@ -125,7 +123,7 @@ class TestEditToolFactories:
         ) as wrapped:
             tool = make_set_state_tool(pocket_id="p1", capture=capture)
             with patch(
-                "ee.cloud.pockets.agent_context.set_state_for_agent",
+                "pocketpaw_ee.cloud.pockets.agent_context.set_state_for_agent",
                 new=AsyncMock(return_value={"ok": True}),
             ):
                 asyncio.run(tool.coroutine(path="filter", value="done"))
@@ -146,10 +144,11 @@ class TestRunEditSpecialistSuccessFlag:
     async def test_ok_true_when_stream_completes(self) -> None:
         from unittest.mock import MagicMock
 
-        from ee.agent.pocket_specialist.runtime import (
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistEditInput,
             run_edit_specialist,
         )
+
         from pocketpaw.agents.protocol import AgentEvent
         from pocketpaw.config import Settings
 
@@ -162,7 +161,7 @@ class TestRunEditSpecialistSuccessFlag:
         fake_backend.stop = AsyncMock()
 
         with patch(
-            "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
             return_value=fake_backend,
         ):
             out = await run_edit_specialist(
@@ -182,10 +181,11 @@ class TestRunEditSpecialistSuccessFlag:
         ``ok=True, ops=[]``."""
         from unittest.mock import MagicMock
 
-        from ee.agent.pocket_specialist.runtime import (
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistEditInput,
             run_edit_specialist,
         )
+
         from pocketpaw.agents.protocol import AgentEvent
         from pocketpaw.config import Settings
 
@@ -199,7 +199,7 @@ class TestRunEditSpecialistSuccessFlag:
         fake_backend.stop = AsyncMock()
 
         with patch(
-            "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
             return_value=fake_backend,
         ):
             out = await run_edit_specialist(
@@ -222,7 +222,7 @@ class TestPromptSeparation:
         """Main agent's prompt should be the delegation variant —
         scope + canvas + delegation + current-pocket. No design rules,
         no mutation-strategy block."""
-        from ee.ripple import POCKET_INTERACTION_PROMPT_MCP
+        from pocketpaw.ripple import POCKET_INTERACTION_PROMPT_MCP
 
         # Heavy blocks must be absent:
         assert "<mutation-strategy>" not in POCKET_INTERACTION_PROMPT_MCP
@@ -235,11 +235,11 @@ class TestPromptSeparation:
     def test_edit_specialist_prompt_is_heavy(self) -> None:
         """The specialist's prompt MUST carry the full mutation rules
         + design block — it's the agent actually doing edits."""
-        from ee.ripple import POCKET_EDIT_SPECIALIST_PROMPT_MCP
+        from pocketpaw.ripple import POCKET_EDIT_SPECIALIST_PROMPT_MCP
 
         assert "<mutation-strategy>" in POCKET_EDIT_SPECIALIST_PROMPT_MCP
         # Should be substantially larger than the main agent's prompt.
-        from ee.ripple import POCKET_INTERACTION_PROMPT_MCP
+        from pocketpaw.ripple import POCKET_INTERACTION_PROMPT_MCP
 
         assert len(POCKET_EDIT_SPECIALIST_PROMPT_MCP) > len(POCKET_INTERACTION_PROMPT_MCP) * 5, (
             "edit specialist prompt should dwarf the thin main-agent prompt"

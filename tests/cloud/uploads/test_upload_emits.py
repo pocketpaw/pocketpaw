@@ -11,9 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from pocketpaw_ee.cloud.realtime.events import FileDeleted, FileReady
+from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
-from ee.cloud.realtime.events import FileDeleted, FileReady
-from ee.cloud.uploads.service import EEUploadService
 from pocketpaw.uploads.service import BulkUploadResult
 
 
@@ -51,7 +51,7 @@ async def test_upload_many_emits_file_ready_when_chat_scoped(monkeypatch):
     svc._meta = SimpleNamespace(save_scoped=AsyncMock())
     svc._adapter = SimpleNamespace()
 
-    monkeypatch.setattr("ee.cloud.uploads.service.emit", fake_emit)
+    monkeypatch.setattr("pocketpaw_ee.cloud.uploads.service.emit", fake_emit)
 
     result = await svc.upload_many([], owner_id="u1", chat_id="g1", workspace="w1")
 
@@ -83,7 +83,7 @@ async def test_upload_many_emits_file_ready_for_workspace_only(monkeypatch):
     svc._meta = SimpleNamespace(save_scoped=AsyncMock())
     svc._adapter = SimpleNamespace()
 
-    monkeypatch.setattr("ee.cloud.uploads.service.emit", fake_emit)
+    monkeypatch.setattr("pocketpaw_ee.cloud.uploads.service.emit", fake_emit)
 
     await svc.upload_many([], owner_id="u1", chat_id=None, workspace="w1")
 
@@ -107,7 +107,7 @@ async def test_delete_emits_file_deleted_when_chat_scoped(monkeypatch):
     )
     svc._adapter = SimpleNamespace(delete=AsyncMock())
 
-    monkeypatch.setattr("ee.cloud.uploads.service.emit", fake_emit)
+    monkeypatch.setattr("pocketpaw_ee.cloud.uploads.service.emit", fake_emit)
 
     await svc.delete("f1", requester_id="u1", workspace="w1")
 
@@ -133,7 +133,7 @@ async def test_delete_emits_file_deleted_for_workspace_only(monkeypatch):
     )
     svc._adapter = SimpleNamespace(delete=AsyncMock())
 
-    monkeypatch.setattr("ee.cloud.uploads.service.emit", fake_emit)
+    monkeypatch.setattr("pocketpaw_ee.cloud.uploads.service.emit", fake_emit)
 
     await svc.delete("f1", requester_id="u1", workspace="w1")
 

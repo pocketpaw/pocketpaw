@@ -52,16 +52,15 @@ async def main() -> int:
     )
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
 
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
-    from ee.cloud.memory.bootstrap import register_default_backend
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud import mount_cloud
+    from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -131,7 +130,7 @@ async def main() -> int:
             print("   wrote 2 entries with bus_session_key")
 
             _banner("4. raw Mongo — messages normalized to UI key form")
-            from ee.cloud.models.message import Message
+            from pocketpaw_ee.cloud.models.message import Message
 
             by_ui_key = await Message.find({"session_key": ui_session_id}).to_list()
             by_bus_key = await Message.find({"session_key": bus_session_key}).to_list()

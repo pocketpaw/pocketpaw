@@ -12,9 +12,10 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"body"
 @pytest.fixture()
 def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
     """Build an app with the EE uploads router pointed at a tmp dir and fake deps."""
-    import ee.cloud.uploads.router as uploads_module
-    from ee.cloud.uploads.mongo_store import MongoFileStore
-    from ee.cloud.uploads.service import EEUploadService
+    import pocketpaw_ee.cloud.uploads.router as uploads_module
+    from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+    from pocketpaw_ee.cloud.uploads.service import EEUploadService
+
     from pocketpaw.uploads.config import UploadSettings
     from pocketpaw.uploads.local import LocalStorageAdapter
 
@@ -30,8 +31,8 @@ def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
 
     app = FastAPI()
     # Override the license + identity dependencies so tests don't need auth plumbing.
-    from ee.cloud.license import require_license
-    from ee.cloud.shared.deps import current_user_id, current_workspace_id
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
     app.dependency_overrides[require_license] = lambda: None
 
