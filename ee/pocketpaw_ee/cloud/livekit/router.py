@@ -23,6 +23,8 @@ from pocketpaw_ee.cloud.chat.group_service import (
 )
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.livekit import service as livekit_service
+from pocketpaw_ee.cloud.realtime.emit import emit
+from pocketpaw_ee.cloud.realtime.events import CallEnded, CallStarted
 from pocketpaw_ee.cloud.shared.deps import current_user, current_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,7 @@ class CreateRoomResponse(BaseModel):
     url: str
     bot_token: str
     created_at: str
+    is_new: bool = False
 
 
 class TokenRequest(BaseModel):
@@ -114,6 +117,26 @@ async def create_room(
     _require_domain_group_member(group, str(user.id))
 
     result = await livekit_service.create_room(body.group_id)
+
+    # Only emit call.started when the room was actually created (not when
+    # someone joins an existing room). The is_new flag is set atomically
+    # inside create_room to avoid race conditions.
+    if result.get("is_new"):
+        try:
+            await emit(
+                CallStarted(
+                    data={
+                        "group_id": body.group_id,
+                        "room_name": result["room_name"],
+                        "url": result["url"],
+                        "caller_id": str(user.id),
+                        "caller_name": getattr(user, "full_name", None) or str(user.id),
+                    }
+                )
+            )
+        except Exception:
+            logger.warning("Failed to emit CallStarted event for group %s", body.group_id)
+
     return CreateRoomResponse(**result)
 
 
@@ -203,4 +226,18 @@ async def end_call(
     _require_domain_group_member(group, str(user.id))
 
     result = await livekit_service.end_room(group_id)
+
+    # Emit realtime event so group members know the call ended
+    try:
+        await emit(
+            CallEnded(
+                data={
+                    "group_id": group_id,
+                    "room_name": result["room_name"],
+                }
+            )
+        )
+    except Exception:
+        logger.warning("Failed to emit CallEnded event for group %s", group_id)
+
     return EndCallResponse(**result)

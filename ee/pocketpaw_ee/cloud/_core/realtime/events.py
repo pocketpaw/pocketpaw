@@ -410,6 +410,17 @@ class PlanGapResolved(Event):
     EVENT_TYPE: ClassVar[str] = "plan.gap_resolved"
 
 
+# Calls — LiveKit group call lifecycle
+@dataclass
+class CallStarted(Event):
+    EVENT_TYPE: ClassVar[str] = "call.started"
+
+
+@dataclass
+class CallEnded(Event):
+    EVENT_TYPE: ClassVar[str] = "call.ended"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first

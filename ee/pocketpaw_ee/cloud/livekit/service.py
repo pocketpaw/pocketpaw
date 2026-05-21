@@ -186,13 +186,24 @@ async def create_room(group_id: str) -> dict[str, Any]:
     Returns room metadata including the room name and the admin token.
     The room is named ``group-call-{group_id}`` for deterministic lookup.
     Automatically starts the meeting notes agent for this room.
+
+    The returned dict includes an ``is_new`` boolean indicating whether
+    the room was just created or already existed.
     """
     _ensure_configured()
 
     room_name = room_name_for_group(group_id)
 
+    is_new = False
     async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
-        try:
+        # Check if the room already exists FIRST (LiveKit's CreateRoom may be
+        # idempotent — succeeding without error for existing rooms — so we
+        # cannot rely on catching "already exists" errors).
+        list_req = ListRoomsRequest(names=[room_name])
+        list_resp = await lk.room.list_rooms(list_req)
+        room_exists = len(list_resp.rooms) > 0
+
+        if not room_exists:
             req = CreateRoomRequest(
                 name=room_name,
                 empty_timeout=5 * 60,
@@ -200,14 +211,9 @@ async def create_room(group_id: str) -> dict[str, Any]:
             )
             await lk.room.create_room(req)
             logger.info("Created LiveKit room %s for group %s", room_name, group_id)
-        except Exception as exc:
-            msg = str(exc).lower()
-            # If room already exists, just return the existing one
-            if "already exists" in msg:
-                logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
-            else:
-                logger.error("Failed to create LiveKit room: %s", exc)
-                raise
+            is_new = True
+        else:
+            logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
 
     # Generate a subscriber-only token for the call bot (no agent flag
     # so it auto-subscribes to remote tracks for transcription).
@@ -242,12 +248,16 @@ async def create_room(group_id: str) -> dict[str, Any]:
 
         logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
 
+    # NOTE: call.started event is emitted by the router layer which has
+    # access to the current user context (caller_id, caller_name).
+
     return {
         "room_name": room_name,
         "group_id": group_id,
         "url": LIVEKIT_URL,
         "bot_token": bot_token,
         "created_at": datetime.now(UTC).isoformat(),
+        "is_new": is_new,
     }
 
 
@@ -315,6 +325,9 @@ async def end_room(group_id: str) -> dict[str, Any]:
             else:
                 logger.error("Failed to delete LiveKit room: %s", exc)
                 raise
+
+    # NOTE: call.ended event is emitted by the router layer which has
+    # access to the current user context.
 
     return {
         "room_name": room_name,
