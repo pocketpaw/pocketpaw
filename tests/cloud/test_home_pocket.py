@@ -11,14 +11,20 @@
 #   5. A ``type="native"`` widget round-trips through ``add_widget`` and
 #      ``agent_add_widget`` — persisted and read back without manifest
 #      rejection (native widgets carry no rippleSpec to validate).
+#   6. Concurrent first-login ``ensure_home_pocket`` calls resolve to a
+#      single home pocket — the atomic CAS closes the provision race.
 #
 # Updated: 2026-05-21 — ``ensure_home_pocket`` now returns a
 # ``(pocket_dict, created)`` tuple; tests unpack it and assert the flag.
+# Updated: 2026-05-21 — added the provision-race coverage; ``ensure_home_pocket``
+# persists the new id via an atomic compare-and-swap.
 #
 # Uses the shared ``mongo_db`` fixture so the service exercises real Beanie
 # reads/writes against an isolated mongomock-motor DB.
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 from pocketpaw_ee.cloud.auth import service as auth_service
@@ -182,3 +188,75 @@ async def test_native_widget_round_trips_through_agent_add_widget() -> None:
     native = fetched["widgets"][0]
     assert native["type"] == "native"
     assert native["name"] == "Mission · Agents in flight"
+
+
+# ---------------------------------------------------------------------------
+# claim_home_pocket_id — atomic compare-and-swap
+# ---------------------------------------------------------------------------
+
+
+async def test_claim_home_pocket_id_swaps_when_expected_matches() -> None:
+    user_id = await _seed_user()
+
+    # Fresh user: home_pocket_id is None — the None-expecting claim takes.
+    claimed = await auth_service.claim_home_pocket_id(user_id, "pkt-1", expected=None)
+    assert claimed is True
+    assert await auth_service.get_home_pocket_id(user_id) == "pkt-1"
+
+
+async def test_claim_home_pocket_id_rejects_when_expected_is_stale() -> None:
+    user_id = await _seed_user()
+    await auth_service.claim_home_pocket_id(user_id, "pkt-1", expected=None)
+
+    # A second claim that still expects None loses — the field already moved.
+    claimed = await auth_service.claim_home_pocket_id(user_id, "pkt-2", expected=None)
+    assert claimed is False
+    # The value of record is unchanged — no clobber.
+    assert await auth_service.get_home_pocket_id(user_id) == "pkt-1"
+
+
+# ---------------------------------------------------------------------------
+# first-login provision race — concurrent ensure_home_pocket calls
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_ensure_home_pocket_resolves_to_one_pocket() -> None:
+    user_id = await _seed_user()
+
+    # Two first-login /home calls race. Both read home_pocket_id == None,
+    # both insert a pocket; the atomic CAS lets exactly one commit its id.
+    (pocket_a, created_a), (pocket_b, created_b) = await asyncio.gather(
+        pockets_service.ensure_home_pocket(WORKSPACE, user_id),
+        pockets_service.ensure_home_pocket(WORKSPACE, user_id),
+    )
+
+    # Both callers see the same home pocket — the loser adopted the winner's.
+    assert pocket_a["_id"] == pocket_b["_id"]
+    # Exactly one call reports created=True; the loser reports False.
+    assert {created_a, created_b} == {True, False}
+
+    # The user setting points at that one pocket.
+    home_id = await auth_service.get_home_pocket_id(user_id)
+    assert home_id == pocket_a["_id"]
+
+    # No orphan: exactly one home pocket exists for the user.
+    pockets = await pockets_service.list_pockets(WORKSPACE, user_id)
+    home_pockets = [p for p in pockets if p["type"] == "home"]
+    assert len(home_pockets) == 1
+    assert home_pockets[0]["_id"] == home_id
+
+
+async def test_concurrent_ensure_home_pocket_many_callers_one_pocket() -> None:
+    # Stress the race a little harder — five concurrent first-login calls.
+    user_id = await _seed_user()
+
+    results = await asyncio.gather(
+        *(pockets_service.ensure_home_pocket(WORKSPACE, user_id) for _ in range(5))
+    )
+
+    ids = {pocket["_id"] for pocket, _ in results}
+    assert len(ids) == 1  # every caller converged on the same pocket
+
+    pockets = await pockets_service.list_pockets(WORKSPACE, user_id)
+    home_pockets = [p for p in pockets if p["type"] == "home"]
+    assert len(home_pockets) == 1

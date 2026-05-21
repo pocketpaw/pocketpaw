@@ -30,10 +30,12 @@ Changes: 2026-05-21 (#1172) — ``agent_view`` self-heals node ids via
 addressable by granular edit ops on first agent read.
 Changes: 2026-05-21 — added ``ensure_home_pocket`` (home-as-pocket
 foundation): idempotently resolves-or-provisions a per-user ``type="home"``
-pocket and persists its id onto the user's ``home_pocket_id`` setting.
-Native widgets (``type="native"``) ride the existing ``widgets[]`` paths
-unchanged — they carry no ``rippleSpec``, so manifest validation (which
-only walks ``rippleSpec`` trees) never touches them.
+pocket and persists its id onto the user's ``home_pocket_id`` setting via
+an atomic compare-and-swap, so a first-login provision race resolves to a
+single home pocket (the losing call deletes its orphan and adopts the
+winner's). Native widgets (``type="native"``) ride the existing
+``widgets[]`` paths unchanged — they carry no ``rippleSpec``, so manifest
+validation (which only walks ``rippleSpec`` trees) never touches them.
 """
 
 from __future__ import annotations
@@ -351,6 +353,13 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, boo
     A stale ``home_pocket_id`` — the pocket was deleted, or it now belongs
     to someone else — falls through to re-provisioning rather than raising.
 
+    **Concurrency.** Provisioning persists the new id with an atomic
+    compare-and-swap (``auth_service.claim_home_pocket_id``), not a plain
+    write. If two concurrent first-login calls both insert a pocket, only
+    one wins the swap; the loser deletes its own orphan pocket, adopts the
+    winner's, and returns it with ``created=False``. The home page is
+    therefore single-pocket even under a provision race.
+
     Provisioning is deliberately empty: the client owns the home page's
     default / seed widgets. This service only guarantees a backing pocket
     exists.
@@ -376,7 +385,26 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, boo
         widgets=[],
     )
     await doc.insert()
-    await auth_service.set_home_pocket_id(user_id, str(doc.id))
+
+    # Compare-and-swap the new id onto the user. ``expected`` is whatever we
+    # read above — None for a genuine first provision, the stale id when
+    # re-provisioning. If the swap fails another writer beat us here.
+    claimed = await auth_service.claim_home_pocket_id(user_id, str(doc.id), expected=existing_id)
+    if not claimed:
+        winner_id = await auth_service.get_home_pocket_id(user_id)
+        if winner_id and winner_id != str(doc.id):
+            try:
+                winner = await _fetch_pocket(winner_id)
+            except NotFound:
+                winner = None
+            if winner is not None and winner.owner == user_id:
+                # Adopt the winner's pocket and drop our orphan.
+                await doc.delete()
+                return await _resolved_wire_dict(winner, user_id), False
+        # The winner's pocket couldn't be resolved (deleted in the race
+        # window). Keep our own pocket rather than orphan the user — but it
+        # is not the id of record, so report created=True and move on.
+
     await emit(PocketCreated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id), True
 

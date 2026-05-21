@@ -13,6 +13,8 @@
 # Updated: 2026-05-21 — added the ``created`` flag to the response envelope so
 # the client can gate one-time widget seeding / localStorage migration; the
 # route now surfaces what path ``ensure_home_pocket`` took.
+# Updated: 2026-05-21 — route is typed with the ``HomePocketResponse`` DTO so
+# it has a real OpenAPI schema; added DTO + schema coverage.
 #
 # What this pins:
 #   1. GET /pockets/home returns 200 with {pocket_id, pocket, created}.
@@ -20,6 +22,7 @@
 #   3. ``created`` reflects whether ensure_home_pocket provisioned a new
 #      pocket (True) or returned an existing one (False).
 #   4. The static /home route is matched ahead of the /{pocket_id} route.
+#   5. The route has a non-empty OpenAPI schema (typed response model).
 
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.pockets import service as pockets_service
+from pocketpaw_ee.cloud.pockets.dto import HomePocketResponse
 from pocketpaw_ee.cloud.pockets.router import router
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
@@ -120,3 +124,45 @@ def test_get_home_route_matches_ahead_of_pocket_id_route(client: TestClient) -> 
     res = client.get("/pockets/home")
     assert res.status_code == 200, res.text
     assert set(res.json().keys()) == {"pocket_id", "pocket", "created"}
+
+
+# ---------------------------------------------------------------------------
+# HomePocketResponse DTO + OpenAPI schema
+# ---------------------------------------------------------------------------
+
+
+def test_home_pocket_response_dto_shape() -> None:
+    # The DTO carries the three contract fields with the right types and
+    # serializes byte-identically to the {pocket_id, pocket, created} wire
+    # shape the client builds against.
+    model = HomePocketResponse(
+        pocket_id="home-pocket-1",
+        pocket=dict(HOME_POCKET),
+        created=True,
+    )
+    dumped = model.model_dump()
+    assert set(dumped.keys()) == {"pocket_id", "pocket", "created"}
+    assert dumped["pocket_id"] == "home-pocket-1"
+    assert dumped["created"] is True
+    # The pocket dict passes through verbatim — no field renaming.
+    assert dumped["pocket"] == dict(HOME_POCKET)
+
+
+def test_home_pocket_response_dto_rejects_missing_fields() -> None:
+    from pydantic import ValidationError as PydanticValidationError
+
+    with pytest.raises(PydanticValidationError):
+        HomePocketResponse(pocket_id="x", pocket={})  # missing created
+
+
+def test_home_route_has_non_empty_openapi_schema(app: FastAPI) -> None:
+    # Before the typed response model the route's schema was an empty {} —
+    # the client had nothing to generate against. Pin that it now resolves
+    # to the HomePocketResponse component.
+    schema = app.openapi()
+    home = schema["paths"]["/pockets/home"]["get"]
+    content = home["responses"]["200"]["content"]["application/json"]["schema"]
+    ref = content.get("$ref", "")
+    assert ref.endswith("/HomePocketResponse"), content
+    props = schema["components"]["schemas"]["HomePocketResponse"]["properties"]
+    assert set(props.keys()) == {"pocket_id", "pocket", "created"}

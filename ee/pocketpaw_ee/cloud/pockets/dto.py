@@ -13,6 +13,9 @@ Updated: 2026-05-21 — documented the ``type="native"`` widget contract on
 ordinary widget entry whose ``type`` is ``"native"`` and whose ``name`` is
 the key the frontend uses to look up a built-in Svelte component — it
 carries no ``rippleSpec`` to render or validate.
+
+Updated: 2026-05-21 — added ``HomePocketResponse`` so ``GET /pockets/home``
+has a real OpenAPI schema instead of an empty ``dict``.
 """
 
 from __future__ import annotations
@@ -119,6 +122,23 @@ class PocketResponse(BaseModel):
     project_id: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class HomePocketResponse(BaseModel):
+    """Response for ``GET /pockets/home``.
+
+    ``pocket`` is the full pocket wire dict (camelCase keys, ``_id``,
+    ``rippleSpec`` — the legacy shape ``pocket_to_wire_dict`` emits), kept
+    as a free-form ``dict`` because it is not the snake_case
+    ``PocketResponse`` shape and the client builds against the wire dict
+    verbatim. ``created`` is ``True`` only when this call provisioned a
+    brand-new home pocket — the client gates one-time widget seeding /
+    localStorage migration on it.
+    """
+
+    pocket_id: str
+    pocket: dict[str, Any]
+    created: bool
 
 
 # ---------------------------------------------------------------------------
