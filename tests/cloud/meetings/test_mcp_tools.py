@@ -425,3 +425,33 @@ async def test_check_bot_happy_path(chat_identity, monkeypatch):
     assert payload["has_bot"] is True
     assert captured["workspace_id"] == "ws-alpha"
     assert captured["meeting_id"] == "m1"
+
+
+async def test_list_meetings_handler_tz_aware_bounds_no_crash(chat_identity):
+    """Regression: tz-aware since/until vs a naive stored scheduled_start.
+
+    The MCP tool parses since/until as tz-aware; Mongo hands back naive
+    datetimes. Comparing them used to raise 'can't compare offset-naive
+    and offset-aware datetimes' and fail list_meetings outright.
+    """
+    import json
+    from datetime import datetime
+
+    from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
+
+    await _MD(
+        workspace="ws-alpha",
+        provider="zoom",
+        provider_meeting_id="m1",
+        title="standup",
+        join_url="https://zoom.us/j/1",
+        scheduled_start=datetime(2026, 5, 20, 9, 0),  # naive, as Mongo returns
+    ).insert()
+
+    result = await _list_meetings_handler(
+        {"since": "2026-05-01T00:00:00Z", "until": "2026-06-01T00:00:00Z"}
+    )
+    assert result.get("is_error") is not True, result
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["count"] == 1
+    assert payload["meetings"][0]["title"] == "standup"

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from pocketpaw.clients.token_store import TokenStore
 from pocketpaw.connectors.protocol import ActionResult
@@ -92,6 +93,19 @@ def _doc_to_domain(doc: _MeetingDoc) -> MeetingDomain:
     )
 
 
+def _aware(dt: datetime | None) -> datetime | None:
+    """Coerce a datetime to timezone-aware UTC.
+
+    Mongo/Beanie hand back naive datetimes (stored as UTC), while request
+    DTOs and the MCP tools parse ISO strings as tz-aware. Normalize both
+    sides before comparing — otherwise Python raises "can't compare
+    offset-naive and offset-aware datetimes".
+    """
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
 # ---------------------------------------------------------------------------
 # Public API — meetings
 # ---------------------------------------------------------------------------
@@ -120,9 +134,11 @@ async def list_meetings(workspace_id: str, body: ListMeetingsRequest) -> list[Me
     # Filter date range in Python — index doesn't cover both, and date
     # filtering on top of the cursor keeps the query plan simple.
     if body.since:
-        docs = [d for d in docs if d.scheduled_start and d.scheduled_start >= body.since]
+        since = _aware(body.since)
+        docs = [d for d in docs if (sd := _aware(d.scheduled_start)) and sd >= since]
     if body.until:
-        docs = [d for d in docs if d.scheduled_start and d.scheduled_start <= body.until]
+        until = _aware(body.until)
+        docs = [d for d in docs if (sd := _aware(d.scheduled_start)) and sd <= until]
 
     if not docs:
         return []
@@ -386,11 +402,13 @@ async def search_meetings(
         .to_list()
     )
     q = query.lower()
+    since, until = _aware(since), _aware(until)
     matches: list[_MeetingDoc] = []
     for d in docs:
-        if since and d.scheduled_start and d.scheduled_start < since:
+        sd = _aware(d.scheduled_start)
+        if since and sd and sd < since:
             continue
-        if until and d.scheduled_start and d.scheduled_start > until:
+        if until and sd and sd > until:
             continue
         haystack_parts: list[str] = [d.title or "", d.organizer_email or ""]
         haystack_parts.extend(str(p.get("email", "")) for p in d.participants)
