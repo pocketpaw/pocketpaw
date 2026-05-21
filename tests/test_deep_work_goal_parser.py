@@ -1,12 +1,10 @@
 # Tests for Deep Work Goal Parser module.
 # Created: 2026-02-18
-#
-# Tests cover:
-#   - GoalAnalysis dataclass: from_dict, to_dict, defaults, properties
-#   - GoalParser.parse_raw(): valid JSON, fenced JSON, invalid input
-#   - GoalParser._strip_code_fences(): edge cases
-#   - Validation helpers: domain, complexity, research depth, clamp
-#   - GoalParser.parse(): full flow with mocked _run_prompt
+# Updated: 2026-05-21 (feat/deep-work-intake) — issue #1161: added the
+#   GoalIntake test suite — the interactive clarification loop with mocked
+#   answer providers. Covers the well-formed-goal fast path (intake
+#   skipped), the vague-goal path (questions asked, answers folded,
+#   goal re-parsed), blank-answer handling, and the round bound.
 
 import json
 from unittest.mock import MagicMock, patch
@@ -15,12 +13,17 @@ import pytest
 
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.deep_work.goal_parser import (
+    MAX_INTAKE_ROUNDS,
     VALID_COMPLEXITIES,
     VALID_DOMAINS,
     VALID_RESEARCH_DEPTHS,
     GoalAnalysis,
+    GoalIntake,
     GoalParser,
+    IntakeResult,
+    QAPair,
     _clamp,
+    _fold_transcript,
     _sanitize_str_list,
     _validate_complexity,
     _validate_domain,
@@ -708,3 +711,257 @@ class TestPromptInjection:
         # Malicious format string should not cause KeyError
         await parser.parse("Build {__class__.__mro__[1]}")
         assert captured_prompt is not None
+
+
+# ============================================================================
+# Interactive intake — GoalIntake (issue #1161)
+# ============================================================================
+
+# A goal the parser flags as vague — two clarification questions.
+VAGUE_GOAL_JSON = json.dumps(
+    {
+        "goal": "Chase down overdue invoices",
+        "domain": "business",
+        "complexity": "M",
+        "clarifications_needed": [
+            "How overdue must an invoice be before you chase it?",
+            "What channel should the reminders go out on?",
+        ],
+        "confidence": 0.55,
+    }
+)
+
+# The same goal after clarification — no questions left.
+WELL_FORMED_GOAL_JSON = json.dumps(
+    {
+        "goal": "Email a reminder for every invoice 30+ days overdue",
+        "domain": "business",
+        "complexity": "M",
+        "clarifications_needed": [],
+        "confidence": 0.9,
+    }
+)
+
+
+def _scripted_parser(*responses: str) -> GoalParser:
+    """A GoalParser whose ``parse`` calls return the scripted responses in
+    order. The first call returns ``responses[0]``, etc.; the last response
+    repeats once the script is exhausted."""
+    parser = GoalParser()
+    calls = {"n": 0}
+
+    async def mock_run_prompt(prompt: str) -> str:
+        idx = min(calls["n"], len(responses) - 1)
+        calls["n"] += 1
+        return responses[idx]
+
+    parser._run_prompt = mock_run_prompt
+    parser._scripted_calls = calls  # type: ignore[attr-defined]
+    return parser
+
+
+class TestFoldTranscript:
+    """_fold_transcript builds the enriched goal text."""
+
+    def test_empty_transcript_returns_original(self):
+        assert _fold_transcript("build a thing", []) == "build a thing"
+
+    def test_folds_questions_and_answers(self):
+        transcript = [
+            QAPair("Which framework?", "FastAPI"),
+            QAPair("Which database?", "Postgres"),
+        ]
+        result = _fold_transcript("build an API", transcript)
+        assert "build an API" in result
+        assert "Which framework? → FastAPI" in result
+        assert "Which database? → Postgres" in result
+
+    def test_strips_whitespace(self):
+        transcript = [QAPair("  Q?  ", "  A  ")]
+        result = _fold_transcript("  goal  ", transcript)
+        assert "Q? → A" in result
+        assert result.startswith("goal")
+
+
+class TestIntakeResult:
+    """IntakeResult serialization."""
+
+    def test_to_dict_round_trip(self):
+        result = IntakeResult(
+            original_input="vague",
+            enriched_goal="vague\n\nClarifications...",
+            transcript=[QAPair("Q?", "A")],
+            analysis=GoalAnalysis(goal="enriched"),
+            clarified=True,
+        )
+        d = result.to_dict()
+        assert d["original_input"] == "vague"
+        assert d["clarified"] is True
+        assert d["transcript"] == [{"question": "Q?", "answer": "A"}]
+        assert d["analysis"]["goal"] == "enriched"
+
+
+class TestGoalIntakeWellFormed:
+    """A well-formed goal skips the intake loop entirely (one-shot path)."""
+
+    @pytest.mark.asyncio
+    async def test_well_formed_goal_skips_intake(self):
+        parser = _scripted_parser(WELL_FORMED_GOAL_JSON)
+        intake = GoalIntake(parser=parser)
+
+        asked: list[str] = []
+
+        async def answer_provider(question: str) -> str:
+            asked.append(question)
+            return "should not be called"
+
+        result = await intake.run("A perfectly clear goal", answer_provider)
+
+        # No question was asked — the answer provider stayed untouched.
+        assert asked == []
+        assert result.clarified is False
+        assert result.transcript == []
+        # Enriched goal is the input unchanged.
+        assert result.enriched_goal == "A perfectly clear goal"
+        # Parser was called exactly once (the initial parse).
+        assert parser._scripted_calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_well_formed_result_carries_analysis(self):
+        parser = _scripted_parser(WELL_FORMED_GOAL_JSON)
+        intake = GoalIntake(parser=parser)
+
+        async def answer_provider(question: str) -> str:
+            return ""
+
+        result = await intake.run("Clear goal", answer_provider)
+        assert isinstance(result.analysis, GoalAnalysis)
+        assert result.analysis.needs_clarification is False
+
+
+class TestGoalIntakeClarificationLoop:
+    """A vague goal triggers the clarification loop — questions asked,
+    answers folded, goal re-parsed."""
+
+    @pytest.mark.asyncio
+    async def test_vague_goal_asks_clarifications(self):
+        # First parse: vague (2 questions). Second parse (after folding):
+        # well-formed, loop ends.
+        parser = _scripted_parser(VAGUE_GOAL_JSON, WELL_FORMED_GOAL_JSON)
+        intake = GoalIntake(parser=parser)
+
+        asked: list[str] = []
+
+        async def answer_provider(question: str) -> str:
+            asked.append(question)
+            return f"answer to: {question}"
+
+        result = await intake.run("Chase down overdue invoices", answer_provider)
+
+        # Both clarification questions were asked.
+        assert len(asked) == 2
+        assert "How overdue" in asked[0]
+        assert "channel" in asked[1]
+        # And the answers landed in the transcript.
+        assert len(result.transcript) == 2
+
+    @pytest.mark.asyncio
+    async def test_answers_folded_into_enriched_goal(self):
+        parser = _scripted_parser(VAGUE_GOAL_JSON, WELL_FORMED_GOAL_JSON)
+        intake = GoalIntake(parser=parser)
+
+        async def answer_provider(question: str) -> str:
+            if "overdue" in question:
+                return "30 days"
+            return "email"
+
+        result = await intake.run("Chase down overdue invoices", answer_provider)
+
+        assert result.clarified is True
+        # The enriched goal carries the original input plus the answers.
+        assert "Chase down overdue invoices" in result.enriched_goal
+        assert "30 days" in result.enriched_goal
+        assert "email" in result.enriched_goal
+        # Two Q&A pairs recorded.
+        assert len(result.transcript) == 2
+        assert result.transcript[0].answer == "30 days"
+
+    @pytest.mark.asyncio
+    async def test_enriched_goal_is_reparsed(self):
+        # The re-parse should be reflected in result.analysis — it should
+        # be the well-formed analysis, not the vague one.
+        parser = _scripted_parser(VAGUE_GOAL_JSON, WELL_FORMED_GOAL_JSON)
+        intake = GoalIntake(parser=parser)
+
+        async def answer_provider(question: str) -> str:
+            return "concrete answer"
+
+        result = await intake.run("Chase down overdue invoices", answer_provider)
+
+        # After folding + re-parse, the analysis has no clarifications left.
+        assert result.analysis.needs_clarification is False
+        assert result.analysis.confidence == 0.9
+        # Parser ran twice: initial parse + re-parse of enriched goal.
+        assert parser._scripted_calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_blank_answers_are_not_folded(self):
+        # If the human skips every question (blank answers), nothing is
+        # folded and the loop ends without claiming the goal was clarified.
+        parser = _scripted_parser(VAGUE_GOAL_JSON)
+        intake = GoalIntake(parser=parser)
+
+        async def answer_provider(question: str) -> str:
+            return "   "  # whitespace only = skipped
+
+        result = await intake.run("Chase down overdue invoices", answer_provider)
+
+        assert result.clarified is False
+        assert result.transcript == []
+        # Enriched goal stays as the original input.
+        assert result.enriched_goal == "Chase down overdue invoices"
+        # Only the initial parse ran — no re-parse, since nothing was folded.
+        assert parser._scripted_calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_answers_fold_only_answered(self):
+        # One answered, one skipped — only the answered one is folded.
+        parser = _scripted_parser(VAGUE_GOAL_JSON, WELL_FORMED_GOAL_JSON)
+        intake = GoalIntake(parser=parser)
+
+        async def answer_provider(question: str) -> str:
+            return "60 days" if "overdue" in question else ""
+
+        result = await intake.run("Chase down overdue invoices", answer_provider)
+
+        assert result.clarified is True
+        assert len(result.transcript) == 1
+        assert result.transcript[0].answer == "60 days"
+        assert "60 days" in result.enriched_goal
+
+    @pytest.mark.asyncio
+    async def test_intake_loop_is_bounded(self):
+        # A parser that NEVER stops surfacing clarifications must not loop
+        # forever — MAX_INTAKE_ROUNDS caps it.
+        parser = _scripted_parser(VAGUE_GOAL_JSON)  # always vague
+        intake = GoalIntake(parser=parser)
+
+        rounds_seen = {"n": 0}
+
+        async def answer_provider(question: str) -> str:
+            rounds_seen["n"] += 1
+            return "an answer"
+
+        result = await intake.run("Chase down overdue invoices", answer_provider)
+
+        # 2 questions per round, capped at MAX_INTAKE_ROUNDS rounds.
+        assert rounds_seen["n"] <= 2 * MAX_INTAKE_ROUNDS
+        # Loop terminated and produced a result rather than hanging.
+        assert isinstance(result, IntakeResult)
+        assert result.clarified is True
+
+    @pytest.mark.asyncio
+    async def test_default_parser_constructed_when_none(self):
+        # GoalIntake() with no parser still works.
+        intake = GoalIntake()
+        assert isinstance(intake.parser, GoalParser)
