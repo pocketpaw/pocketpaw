@@ -15,8 +15,10 @@ Changes: 2026-05-14 — added the Tier-2 prop-array item tool factories
 (set / append / remove ``_prop_array_item``), reworked onto the
 pocketpaw_ee layout from PR #1106.
 Changes: 2026-05-21 (#1163) — ``_capture_op`` now accepts the tool's
-result dict and logs a warning when a granular op was invoked but its
-service returned ``{ok: false}`` (the silent-rejection path).
+result dict. A service-rejected op (``{ok: false}``) is NO LONGER
+appended to ``capture['ops']`` — a rejected op is not an applied op.
+Instead it is recorded in ``capture['rejected']`` with its error so the
+runtime can fold the reason into the response ``warnings``.
 """
 
 from __future__ import annotations
@@ -351,19 +353,33 @@ def _capture_op(
     args: dict[str, Any],
     result: dict[str, Any] | None = None,
 ) -> None:
-    """Append an op record to ``capture['ops']`` for the runtime to inspect.
+    """Record a granular op for the runtime to inspect.
 
-    When ``result`` is supplied and reports ``{ok: false}``, log a warning
-    so an operator can see a granular tool WAS invoked but the underlying
-    service rejected it — distinct from the planner never calling a tool
-    at all (#1163 observability).
+    An op the service ACCEPTED lands in ``capture['ops']`` — that list is
+    the runtime's source of truth for "what changed."
+
+    An op the service REJECTED (``result`` reports ``{ok: false}``) is NOT
+    an applied op, so it must NOT land in ``capture['ops']`` — counting it
+    there would let a run whose only op was rejected return
+    ``ok=true, ops=[<rejected op>]``, the same silent-failure class as
+    #1163. A rejected op is logged and recorded in ``capture['rejected']``
+    with its error so ``run_edit_specialist`` can surface the reason in
+    the response ``warnings``.
     """
     if isinstance(result, dict) and result.get("ok") is False:
+        error = result.get("error") or result
         log.warning(
             "[pocket-specialist:edit] granular op %s rejected by service: %s",
             op,
-            result.get("error") or result,
+            error,
         )
+        if capture is not None:
+            rejected = capture.get("rejected")
+            if not isinstance(rejected, list):
+                rejected = []
+                capture["rejected"] = rejected
+            rejected.append({"op": op, "args": args, "error": str(error)})
+        return
     if capture is None:
         return
     ops = capture.get("ops")

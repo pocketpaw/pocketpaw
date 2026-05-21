@@ -13,6 +13,10 @@ Regression tests for #1163 (silent 0-ops edits):
   * Root cause B — edit specialist system prompt must name the granular edit
     tools it actually holds and must NOT advertise create_pocket / update_pocket
     / add_widget.
+  * Decline path — a 0-ops run with no error must surface the planner's
+    reply in ``warnings`` rather than a silent ok=True.
+  * Rejected op — a service-rejected granular op must not count as applied;
+    its error is folded into ``warnings`` (PR #1165 review finding #2).
 """
 
 from __future__ import annotations
@@ -390,6 +394,155 @@ class TestRunEditSpecialistSuccessFlag:
         # ops must be empty — no work was done.
         assert out.ops == []
         # backend.stop must still run regardless.
+        fake_backend.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_decline_run_surfaces_planner_reply_in_warnings(self) -> None:
+        """#1163 headline contract — the planner reads the pocket, decides
+        no granular op is warranted, and replies with plain text. NO
+        tool_use event is emitted, so ``ops`` is empty.
+
+        Before the fix this returned ``ok=True, ops=[], warnings=[]`` — a
+        silent success indistinguishable from a real edit. Post-fix the
+        run is still ``ok=True`` (nothing failed) but ``warnings`` carries
+        the planner's reply so the caller can tell the user WHY nothing
+        changed.
+        """
+        from unittest.mock import MagicMock
+
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        from pocketpaw.agents.protocol import AgentEvent
+        from pocketpaw.config import Settings
+
+        # deep_agents emits message events as token-level chunks — model
+        # that here so the test also pins the ""-join (no choppy prose).
+        async def _decline_stream(*args, **kwargs):
+            yield AgentEvent(type="message", content="The team member ")
+            yield AgentEvent(type="message", content="you named already ")
+            yield AgentEvent(type="message", content="matches the current value.")
+            yield AgentEvent(type="done", content="")
+
+        fake_backend = MagicMock()
+        fake_backend.run = _decline_stream
+        fake_backend.attach_specialist_tools = MagicMock()
+        fake_backend.stop = AsyncMock()
+
+        with patch(
+            "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            return_value=fake_backend,
+        ):
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(
+                    pocket_id="6a0eb47ac0dd58069139b985",
+                    intent="rename team member 4 to the name they already have",
+                ),
+                workspace_id="69e4f93b57ff64b3903868e3",
+                user_id="69d0f4d09dfb6ddfd8e2da84",
+                settings=Settings(),
+            )
+
+        # A decline is NOT a failure — the run completed cleanly.
+        assert out.ok is True
+        assert out.error is None
+        # No granular op ran.
+        assert out.ops == []
+        # The headline contract — the reason reaches the caller.
+        assert out.warnings, "a 0-ops run must surface a reason in warnings"
+        joined = " ".join(out.warnings)
+        assert "matches the current value" in joined, (
+            f"warnings must carry the planner's reply, got: {out.warnings!r}"
+        )
+        # Token chunks joined with "" — clean prose, no newline soup.
+        assert "The team member you named already matches the current value." in joined, (
+            f"message chunks must join cleanly, got: {out.warnings!r}"
+        )
+        fake_backend.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_service_rejected_op_not_counted_and_surfaced_in_warnings(self) -> None:
+        """#1165 review finding #2 — a granular op the service REJECTS
+        (``{ok: false}``) must not count as applied. Before the fix the op
+        still landed in ``ops``, so a run whose only op was rejected
+        returned ``ok=True, ops=[<rejected op>]`` — another silent failure
+        of the #1163 class.
+
+        Post-fix: the rejected op is absent from ``ops`` and its error is
+        surfaced in ``warnings``. The run is ``ok=True`` (nothing crashed)
+        but the caller can see the edit did not land.
+        """
+        from unittest.mock import MagicMock
+
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        from pocketpaw.agents.protocol import AgentEvent
+        from pocketpaw.config import Settings
+
+        captured_tools: dict = {}
+
+        def _grab_tools(tools):
+            captured_tools["tools"] = {t.name: t for t in tools}
+
+        # The fake backend invokes a real granular tool mid-stream — the
+        # same StructuredTool the runtime attached. The tool's wrapper hits
+        # set_state_for_agent, which we patch to reject the write.
+        async def _rejecting_stream(*args, **kwargs):
+            yield AgentEvent(type="message", content="applying the edit...")
+            tool = captured_tools["tools"]["set_state"]
+            yield AgentEvent(
+                type="tool_use",
+                content="Using set_state...",
+                metadata={"name": "set_state", "input": {}},
+            )
+            await tool.coroutine(path="filter", value="overdue")
+            yield AgentEvent(type="done", content="")
+
+        fake_backend = MagicMock()
+        fake_backend.run = _rejecting_stream
+        fake_backend.attach_specialist_tools = MagicMock(side_effect=_grab_tools)
+        fake_backend.stop = AsyncMock()
+
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+                return_value=fake_backend,
+            ),
+            patch(
+                "pocketpaw_ee.cloud.pockets.agent_context.set_state_for_agent",
+                new=AsyncMock(
+                    return_value={"ok": False, "error": "state path 'filter' does not exist"}
+                ),
+            ),
+        ):
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(
+                    pocket_id="6a0eb47ac0dd58069139b985",
+                    intent="filter to overdue only",
+                ),
+                workspace_id="69e4f93b57ff64b3903868e3",
+                user_id="69d0f4d09dfb6ddfd8e2da84",
+                settings=Settings(),
+            )
+
+        # The run completed — nothing raised.
+        assert out.ok is True
+        assert out.error is None
+        # A rejected op is NOT an applied op — it must not be in ops.
+        assert out.ops == [], (
+            f"a service-rejected op must not count as applied, got ops={out.ops!r}"
+        )
+        # The rejection reason must reach the caller.
+        assert out.warnings, "a rejected op must surface its reason in warnings"
+        joined = " ".join(out.warnings)
+        assert "set_state" in joined and "does not exist" in joined, (
+            f"warnings must name the rejected op and its error, got: {out.warnings!r}"
+        )
         fake_backend.stop.assert_awaited_once()
 
 
