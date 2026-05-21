@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
-from ee.cloud.auth.dto import (
+from pocketpaw_ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
+from pocketpaw_ee.cloud.auth.dto import (
     ProfileUpdateRequest,
     SetWorkspaceRequest,
     auth_user_to_profile_out,

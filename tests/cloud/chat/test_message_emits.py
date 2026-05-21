@@ -9,15 +9,14 @@ no fake repositories or seam-patching needed.
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.chat import message_service
-from ee.cloud.chat.schemas import (
+from pocketpaw_ee.cloud.chat import message_service
+from pocketpaw_ee.cloud.chat.schemas import (
     EditMessageRequest,
     SendMessageRequest,
 )
-from ee.cloud.models.group import Group as _GroupDoc
-from ee.cloud.models.message import Message as _MessageDoc
-from ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
+from pocketpaw_ee.cloud.realtime.events import (
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -134,7 +133,7 @@ def test_router_no_longer_broadcasts_message_events():
     """Regression guard: the four _ws_message_* handlers must not call manager.broadcast/send."""
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[3] / "ee/cloud/chat/router.py").read_text(
+    src = (Path(__file__).resolve().parents[3] / "ee/pocketpaw_ee/cloud/chat/router.py").read_text(
         encoding="utf-8"
     )
 
@@ -166,8 +165,12 @@ async def test_send_message_fans_out_everyone_mention_to_all_members(
     async def fake_bump(user_id, group_id):
         bumped.append((user_id, group_id))
 
-    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", fake_notif)
-    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.notifications_service.create", fake_notif
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
+    )
 
     body = SendMessageRequest(
         content="hello team",
@@ -195,8 +198,12 @@ async def test_send_message_user_and_broadcast_mention_dedupes(
     async def fake_bump(user_id, group_id):
         pass
 
-    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", fake_notif)
-    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.notifications_service.create", fake_notif
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
+    )
 
     body = SendMessageRequest(
         content="hi u2",
@@ -248,7 +255,7 @@ async def test_send_reply_does_not_bump_thread_count(mongo_db, recording_bus):
 @pytest.mark.asyncio
 async def test_send_reply_emits_message_new_not_thread_reply(mongo_db, recording_bus):
     """Inline replies fan out via MessageNew; no ThreadReply event fires."""
-    from ee.cloud.realtime.events import ThreadReply
+    from pocketpaw_ee.cloud.realtime.events import ThreadReply
 
     group = await _make_group(owner="sender", members=["sender"])
     parent = await _make_message(group_id=str(group.id), sender="u_other")

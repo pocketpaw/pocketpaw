@@ -12,13 +12,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud.auth import current_active_user
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.instinct.router import router
 
-from ee.cloud._core.deps import current_workspace_id
-from ee.cloud.auth import current_active_user
-from ee.cloud.license import require_license
-from ee.instinct.models import ActionStatus, ActionTrigger
-from ee.instinct.router import router
-from ee.instinct.store import InstinctStore
+from pocketpaw.instinct.models import ActionStatus, ActionTrigger
+from pocketpaw.instinct.store import InstinctStore
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -50,7 +50,7 @@ def store(tmp_path: Path) -> InstinctStore:
 @pytest.fixture
 def test_app(tmp_path: Path, monkeypatch):
     fake_user = _FakeUser()
-    import ee.cloud.workspace.service as ws_svc
+    import pocketpaw_ee.cloud.workspace.service as ws_svc
 
     monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))
 
@@ -69,7 +69,7 @@ def router_store(tmp_path: Path) -> InstinctStore:
 
 @pytest.fixture
 def client(test_app, router_store: InstinctStore):
-    with patch("ee.instinct.router._store", return_value=router_store):
+    with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
         yield TestClient(test_app)
 
 
@@ -122,9 +122,7 @@ class TestBulkApprove:
         assert missing == [a.id]
 
     @pytest.mark.asyncio
-    async def test_bulk_approve_records_missing_for_unknown_ids(
-        self, store: InstinctStore
-    ) -> None:
+    async def test_bulk_approve_records_missing_for_unknown_ids(self, store: InstinctStore) -> None:
         a = await store.propose("p1", "A", "", "", _trigger())
         approved, missing, _ = await store.bulk_approve([a.id, "act-does-not-exist"])
         assert [x.id for x in approved] == [a.id]
@@ -146,9 +144,7 @@ class TestBulkApprove:
 
 class TestBulkReject:
     @pytest.mark.asyncio
-    async def test_bulk_reject_requires_reason_at_call_site(
-        self, store: InstinctStore
-    ) -> None:
+    async def test_bulk_reject_requires_reason_at_call_site(self, store: InstinctStore) -> None:
         # The store doesn't enforce non-empty (the router does), so this
         # is a behavioural check that the empty reason still produces a
         # bulk_id and audit row with reason=''.

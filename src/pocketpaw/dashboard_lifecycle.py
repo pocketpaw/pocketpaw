@@ -173,39 +173,18 @@ async def startup_event(
     except ImportError:
         pass
 
-    # Initialize enterprise cloud DB (Beanie/MongoDB) — best-effort
-    try:
-        import os
+    # Run enterprise lifecycle startup hooks — best-effort. The cloud hook
+    # initializes the Beanie/MongoDB database, seeds the default admin +
+    # workspace, back-fills agents and registers the chat-title listener.
+    # Discovered via the `pocketpaw.lifecycle` entry-point; an OSS install
+    # has no provider and skips this entirely.
+    from pocketpaw._registry import providers as _ext_providers
 
-        from ee.cloud.db import init_cloud_db
-
-        mongo_uri = os.environ.get("CLOUD_MONGODB_URI", "mongodb://localhost:27017/paw-enterprise")
-        await init_cloud_db(mongo_uri)
-        # Seed default admin user and workspace
-        from ee.cloud.auth.core import (
-            ensure_default_agent_all_workspaces,
-            seed_admin,
-            seed_workspace,
-        )
-
-        admin = await seed_admin()
-        await seed_workspace(admin)
-        # Back-fill the pocketpaw agent for workspaces that predate agent seeding.
-        await ensure_default_agent_all_workspaces()
-
-        # Persist Haiku-generated chat titles into MongoDB. The pocketpaw bus
-        # emits ``session_titled`` after the first user message; this listener
-        # writes the title onto the Session document so it survives a refresh.
+    for _hook in _ext_providers("pocketpaw.lifecycle"):
         try:
-            from ee.cloud.sessions.title_listener import register as register_title_listener
-
-            register_title_listener()
+            await _hook.on_startup()
         except Exception as exc:
-            logger.warning("Cloud chat-title listener registration failed: %s", exc)
-    except ImportError:
-        logger.debug("Enterprise cloud module not available — skipping MongoDB init")
-    except Exception as exc:
-        logger.warning("Enterprise cloud DB init failed (cloud features disabled): %s", exc)
+            logger.warning("Lifecycle startup hook failed (cloud features disabled): %s", exc)
 
     # Start the cloud agent pool GC task. Previously registered via
     # ``@app.on_event("startup")`` inside ``mount_cloud()`` but that path is
@@ -348,8 +327,8 @@ async def startup_event(
     # bridged-from-EE entries whose Rule no longer exists don't keep
     # firing crons forever (test fixtures, deleted rules, manual edits).
     try:
+        from pocketpaw.automations.bridge import prune_orphan_auto_intentions
         from pocketpaw.daemon.intentions import get_intention_store
-        from pocketpaw.ee.automations.bridge import prune_orphan_auto_intentions
 
         prune_orphan_auto_intentions()
         # Single line that tells the truth at startup-completion. The
@@ -421,48 +400,69 @@ async def startup_event(
 # ---------------------------------------------------------------------------
 
 
+async def _bounded(label: str, coro, *, timeout: float = 5.0) -> None:
+    """Await *coro* but never let a wedged subsystem hang process shutdown.
+
+    A cleanup step that exceeds *timeout* is abandoned (cancelled) with a
+    warning so the rest of shutdown — and the process exit — still proceeds.
+    Without this, a stuck ``await`` here blocks uvicorn's lifespan shutdown,
+    which has no timeout of its own: Ctrl+C appears to do nothing and the
+    port stays bound until the terminal is killed.
+    """
+    try:
+        await asyncio.wait_for(coro, timeout=timeout)
+    except TimeoutError:
+        logger.warning("Shutdown step '%s' timed out after %.0fs — skipping", label, timeout)
+    except Exception:
+        logger.warning("Shutdown step '%s' failed", label, exc_info=True)
+
+
 async def shutdown_event(*, _stop_channel_adapter_fn=None):
     """Stop services on app shutdown.
+
+    Every async cleanup step is time-bounded via ``_bounded`` — a single
+    subsystem that fails to stop cleanly must not wedge the whole process.
 
     Parameters
     ----------
     _stop_channel_adapter_fn:
         Callable for stopping a channel adapter. Injected from dashboard.py.
     """
-    # Stop Agent Loop
-    await agent_loop.stop()
-    await ws_adapter.stop()
+    # Stop Agent Loop + WebSocket adapter
+    await _bounded("agent_loop", agent_loop.stop())
+    await _bounded("ws_adapter", ws_adapter.stop())
 
     # Stop the cloud agent pool (best-effort; may not have started if the
     # enterprise cloud module is not installed).
     try:
         from pocketpaw.agents.pool import get_agent_pool
 
-        await get_agent_pool().stop()
+        await _bounded("agent_pool", get_agent_pool().stop())
     except Exception as exc:
         logger.warning("Agent pool stop failed: %s", exc)
 
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):
-            try:
-                await _stop_channel_adapter_fn(channel)
-            except Exception as e:
-                logger.warning(f"Error stopping {channel} adapter: {e}")
+            await _bounded(f"channel:{channel}", _stop_channel_adapter_fn(channel))
 
-    # Stop proactive daemon
-    daemon = get_daemon()
-    daemon.stop()
+    # Stop proactive daemon (sync — scheduler.shutdown(wait=False), fast)
+    try:
+        get_daemon().stop()
+    except Exception:
+        logger.warning("Daemon stop failed", exc_info=True)
 
-    # Stop reminder scheduler
-    scheduler = get_scheduler()
-    scheduler.stop()
+    # Stop reminder scheduler (sync — scheduler.shutdown(wait=False), fast)
+    try:
+        get_scheduler().stop()
+    except Exception:
+        logger.warning("Scheduler stop failed", exc_info=True)
 
-    # Stop MCP servers
+    # Stop MCP servers — these own subprocesses, so give them a little longer
+    # but still bound it: an MCP child that ignores SIGTERM must not hang exit.
     try:
         from pocketpaw.mcp.manager import get_mcp_manager
 
-        mcp = get_mcp_manager()
-        await mcp.stop_all()
+        await _bounded("mcp_servers", get_mcp_manager().stop_all(), timeout=8.0)
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)

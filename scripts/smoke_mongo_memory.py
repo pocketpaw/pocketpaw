@@ -36,14 +36,15 @@ async def main() -> int:
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
 
     _banner("1. init_cloud_db flips backend")
-    from ee.cloud.shared.db import close_cloud_db, init_cloud_db
+    from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 
     await init_cloud_db(mongo_uri)
     assert os.environ["POCKETPAW_MEMORY_BACKEND"] == "mongodb", "env not flipped"
     print("   POCKETPAW_MEMORY_BACKEND =", os.environ["POCKETPAW_MEMORY_BACKEND"])
 
     _banner("2. memory manager is MongoMemoryStore")
-    from ee.cloud.memory.mongo_store import MongoMemoryStore
+    from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
+
     from pocketpaw.memory.manager import get_memory_manager
 
     manager = get_memory_manager()
@@ -69,7 +70,7 @@ async def main() -> int:
     ], "unexpected history shape"
 
     _banner("5. raw Mongo inspection — messages collection")
-    from ee.cloud.models.message import Message
+    from pocketpaw_ee.cloud.models.message import Message
 
     rows = await Message.find({"session_key": session_key}).to_list()
     assert len(rows) == 2, f"expected 2 rows, got {len(rows)}"
@@ -84,7 +85,7 @@ async def main() -> int:
     long_term_id = await manager.remember(
         "Smoke test user prefers concise replies", tags=["preferences"]
     )
-    from ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
 
     fact = await MemoryFactDoc.get(long_term_id) if long_term_id else None
     assert fact is not None, "memory_facts doc not found"

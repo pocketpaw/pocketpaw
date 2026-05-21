@@ -7,7 +7,7 @@ import pytest
 
 class TestPocketSpecialistMcpServer:
     def test_server_name_and_tool_id(self):
-        from ee.agent.pocket_specialist.mcp_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
             CREATE_TOOL_ID,
             POCKET_SPECIALIST_TOOL_IDS,
             SERVER_NAME,
@@ -18,7 +18,7 @@ class TestPocketSpecialistMcpServer:
         assert CREATE_TOOL_ID in POCKET_SPECIALIST_TOOL_IDS
 
     def test_build_server_returns_object(self):
-        from ee.agent.pocket_specialist.mcp_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
             build_pocket_specialist_server,
         )
 
@@ -31,8 +31,8 @@ class TestPocketSpecialistMcpServer:
 class TestCreateHandler:
     @pytest.mark.asyncio
     async def test_handler_calls_run_specialist_and_returns_text_payload(self):
-        from ee.agent.pocket_specialist.mcp_tool import _create_handler
-        from ee.agent.pocket_specialist.runtime import (
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistCreateOutput,
         )
 
@@ -46,15 +46,15 @@ class TestCreateHandler:
         )
         with (
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
                 return_value="ws-1",
             ),
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
                 return_value="user-A",
             ),
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_specialist",
                 new=AsyncMock(return_value=fake_out),
             ),
         ):
@@ -66,15 +66,15 @@ class TestCreateHandler:
 
     @pytest.mark.asyncio
     async def test_handler_returns_error_when_no_workspace_context(self):
-        from ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
 
         with (
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
                 return_value=None,
             ),
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
                 return_value=None,
             ),
         ):
@@ -85,19 +85,19 @@ class TestCreateHandler:
 
     @pytest.mark.asyncio
     async def test_handler_returns_error_when_run_specialist_raises(self):
-        from ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
 
         with (
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
                 return_value="ws-1",
             ),
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
                 return_value="user-A",
             ),
             patch(
-                "ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_specialist",
                 new=AsyncMock(side_effect=RuntimeError("backend exploded")),
             ),
         ):

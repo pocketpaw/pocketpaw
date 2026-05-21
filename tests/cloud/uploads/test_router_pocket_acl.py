@@ -18,9 +18,10 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"body"
 @pytest.fixture()
 def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
     """App with EE uploads router, fake auth, and patchable pocket ACL."""
-    import ee.cloud.uploads.router as uploads_module
-    from ee.cloud.uploads.mongo_store import MongoFileStore
-    from ee.cloud.uploads.service import EEUploadService
+    import pocketpaw_ee.cloud.uploads.router as uploads_module
+    from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+    from pocketpaw_ee.cloud.uploads.service import EEUploadService
+
     from pocketpaw.uploads.config import UploadSettings
     from pocketpaw.uploads.local import LocalStorageAdapter
 
@@ -35,8 +36,8 @@ def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
     monkeypatch.setattr(uploads_module, "_SVC", test_svc)
 
     app = FastAPI()
-    from ee.cloud.license import require_license
-    from ee.cloud.shared.deps import current_user_id, current_workspace_id
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
     app.dependency_overrides[require_license] = lambda: None
 
@@ -72,7 +73,7 @@ def test_pocket_owner_can_upload(monkeypatch, ee_client):
         # Stand-in for the real check: u1 owns pocket PA.
         return pocket_id == "PA" and user_id == "u1"
 
-    from ee.cloud.pockets import service as ps
+    from pocketpaw_ee.cloud.pockets import service as ps
 
     monkeypatch.setattr(ps, "has_edit_access", fake_has_edit_access)
 
@@ -88,7 +89,7 @@ def test_non_member_gets_403(monkeypatch, ee_client):
     async def fake_has_edit_access(**_kwargs):
         return False
 
-    from ee.cloud.pockets import service as ps
+    from pocketpaw_ee.cloud.pockets import service as ps
 
     monkeypatch.setattr(ps, "has_edit_access", fake_has_edit_access)
 
@@ -103,7 +104,7 @@ def test_acl_lookup_failure_treated_as_denial(monkeypatch, ee_client):
     async def fake_has_edit_access(**_kwargs):
         raise RuntimeError("Mongo unreachable")
 
-    from ee.cloud.pockets import service as ps
+    from pocketpaw_ee.cloud.pockets import service as ps
 
     monkeypatch.setattr(ps, "has_edit_access", fake_has_edit_access)
 

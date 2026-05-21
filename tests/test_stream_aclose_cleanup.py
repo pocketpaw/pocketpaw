@@ -21,7 +21,7 @@ machinery — the goal is the lifecycle contract.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -80,9 +80,7 @@ async def test_deep_agents_run_closes_astream_on_normal_completion(monkeypatch):
         return []
 
     monkeypatch.setattr(backend, "_build_mcp_tools", _empty_mcp_tools)
-    monkeypatch.setattr(
-        backend, "_get_or_create_agent", lambda *a, **kw: fake_agent
-    )
+    monkeypatch.setattr(backend, "_get_or_create_agent", lambda *a, **kw: fake_agent)
 
     events: list[AgentEvent] = []
     async for ev in backend.run("hi"):

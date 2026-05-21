@@ -12,12 +12,11 @@ from typing import Any
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.audit import service as audit_service
-from ee.cloud.audit.router import router as audit_router
-from ee.cloud.auth import current_active_user
-from ee.cloud.license import require_license
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.audit.router import router as audit_router
+from pocketpaw_ee.cloud.auth import current_active_user
+from pocketpaw_ee.cloud.license import require_license
 
 
 def _fake_user(user_id: str = "u1", workspace_id: str | None = "w1") -> SimpleNamespace:
@@ -30,9 +29,7 @@ def _fake_user(user_id: str = "u1", workspace_id: str | None = "w1") -> SimpleNa
     return SimpleNamespace(
         id=user_id,
         active_workspace=workspace_id,
-        workspaces=[SimpleNamespace(workspace=workspace_id, role="admin")]
-        if workspace_id
-        else [],
+        workspaces=[SimpleNamespace(workspace=workspace_id, role="admin")] if workspace_id else [],
     )
 
 
@@ -92,8 +89,8 @@ def _build_app(
             # already points at the original function. Patch the consumer
             # module's symbol directly so the guard's call site sees the
             # stub.
-            from ee.cloud._core import deps as core_deps
-            from pocketpaw.ee.guards.rbac import Forbidden as GuardForbidden
+            from pocketpaw_ee.cloud._core import deps as core_deps
+            from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
 
             if permission_denier:
 
@@ -105,9 +102,7 @@ def _build_app(
 
                 monkeypatch.setattr(core_deps, "check_workspace_action", _deny)
             else:
-                monkeypatch.setattr(
-                    core_deps, "check_workspace_action", lambda *a, **k: None
-                )
+                monkeypatch.setattr(core_deps, "check_workspace_action", lambda *a, **k: None)
 
     # Always inject the tmp store regardless of auth wiring.
     _install_service_seam(audit_store)
@@ -153,9 +148,7 @@ async def test_returns_empty_for_fresh_workspace(w1_client: AsyncClient) -> None
     assert body == {"entries": [], "total": 0}
 
 
-async def test_returns_workspace_entries_only(
-    w1_client: AsyncClient, make_audit_entry
-) -> None:
+async def test_returns_workspace_entries_only(w1_client: AsyncClient, make_audit_entry) -> None:
     await make_audit_entry("w1", description="w1-row")
     await make_audit_entry("w2", description="w2-row")
     r = await w1_client.get("/audit")
@@ -164,9 +157,7 @@ async def test_returns_workspace_entries_only(
     assert descriptions == {"w1-row"}
 
 
-async def test_w2_cannot_see_w1_rows(
-    w2_client: AsyncClient, make_audit_entry
-) -> None:
+async def test_w2_cannot_see_w1_rows(w2_client: AsyncClient, make_audit_entry) -> None:
     await make_audit_entry("w1", description="w1-secret")
     r = await w2_client.get("/audit")
     assert r.status_code == 200
@@ -178,9 +169,7 @@ async def test_w2_cannot_see_w1_rows(
 # ---------------------------------------------------------------------------
 
 
-async def test_rejects_workspace_id_query_param(
-    w1_client: AsyncClient, make_audit_entry
-) -> None:
+async def test_rejects_workspace_id_query_param(w1_client: AsyncClient, make_audit_entry) -> None:
     await make_audit_entry("w2", description="w2-row")
     r = await w1_client.get("/audit", params={"workspace_id": "w2"})
     assert r.status_code == 400, r.text
@@ -192,9 +181,7 @@ async def test_rejects_workspace_id_query_param(
 # ---------------------------------------------------------------------------
 
 
-async def test_q_param_forwards_to_search(
-    w1_client: AsyncClient, make_audit_entry
-) -> None:
+async def test_q_param_forwards_to_search(w1_client: AsyncClient, make_audit_entry) -> None:
     await make_audit_entry("w1", description="apple pie")
     await make_audit_entry("w1", description="banana split")
     r = await w1_client.get("/audit", params={"q": "apple"})
@@ -203,9 +190,7 @@ async def test_q_param_forwards_to_search(
     assert descriptions == {"apple pie"}
 
 
-async def test_category_filter_forwards(
-    w1_client: AsyncClient, make_audit_entry
-) -> None:
+async def test_category_filter_forwards(w1_client: AsyncClient, make_audit_entry) -> None:
     await make_audit_entry("w1", category="security", description="s-row")
     await make_audit_entry("w1", category="decision", description="d-row")
     r = await w1_client.get("/audit", params={"category": "security"})
@@ -224,9 +209,7 @@ async def test_limit_forwards(w1_client: AsyncClient, make_audit_entry) -> None:
     assert body["total"] == len(body["entries"])
 
 
-async def test_pocket_id_filter_forwards(
-    w1_client: AsyncClient, make_audit_entry
-) -> None:
+async def test_pocket_id_filter_forwards(w1_client: AsyncClient, make_audit_entry) -> None:
     await make_audit_entry("w1", pocket_id="p1", description="for-p1")
     await make_audit_entry("w1", pocket_id="p2", description="for-p2")
     r = await w1_client.get("/audit", params={"pocket_id": "p1"})
@@ -245,7 +228,8 @@ def test_envelope_field_parity_with_runtime() -> None:
     legacy runtime envelope so the desktop client's ``mapAuditEntry``
     keeps working when the audit screen swaps over to the new
     endpoint."""
-    from ee.cloud.audit.dto import AuditEntryDTO, AuditListResponse
+    from pocketpaw_ee.cloud.audit.dto import AuditEntryDTO, AuditListResponse
+
     from pocketpaw.audit.models import AuditEntry
     from pocketpaw.audit.runtime_router import RuntimeAuditResponse
 
@@ -276,9 +260,7 @@ async def test_missing_auth_returns_401(audit_store_tmp) -> None:
     """Without any ``current_active_user`` override the fastapi-users auth
     chain runs against a request with no Bearer/cookie — short-circuits
     to 401 before the handler runs."""
-    app = _build_app(
-        audit_store_tmp, workspace_id="w1", skip_auth_override=True
-    )
+    app = _build_app(audit_store_tmp, workspace_id="w1", skip_auth_override=True)
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url="http://t") as client:
@@ -288,9 +270,7 @@ async def test_missing_auth_returns_401(audit_store_tmp) -> None:
         _restore_service()
 
 
-async def test_missing_audit_read_permission_returns_403(
-    audit_store_tmp, monkeypatch
-) -> None:
+async def test_missing_audit_read_permission_returns_403(audit_store_tmp, monkeypatch) -> None:
     app = _build_app(
         audit_store_tmp,
         workspace_id="w1",
@@ -307,9 +287,7 @@ async def test_missing_audit_read_permission_returns_403(
         _restore_service()
 
 
-async def test_ctx_without_workspace_returns_empty(
-    audit_store_tmp, monkeypatch
-) -> None:
+async def test_ctx_without_workspace_returns_empty(audit_store_tmp, monkeypatch) -> None:
     """A user with no active workspace must not 500 and must not leak
     any rows. The workspace-scope dep guard fires first with a 400 for
     ``no active workspace``; the service-level invariant lives in the
@@ -319,9 +297,7 @@ async def test_ctx_without_workspace_returns_empty(
     # action guard) raises HTTPException(400) before the handler runs.
     # The service-level empty-response invariant is owned by
     # test_audit_service.py::test_ctx_without_workspace_returns_empty.
-    app = _build_app(
-        audit_store_tmp, workspace_id=None, monkeypatch=monkeypatch
-    )
+    app = _build_app(audit_store_tmp, workspace_id=None, monkeypatch=monkeypatch)
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url="http://t") as client:

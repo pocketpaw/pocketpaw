@@ -54,11 +54,19 @@ def create_memory_store(
         MemoryStoreProtocol implementation
     """
     if backend == "mongodb":
-        # Lazy import so OSS builds don't need motor/beanie loaded.
-        from ee.cloud.memory.mongo_store import MongoMemoryStore  # type: ignore[import-not-found]
+        # MongoDB is an enterprise memory backend, supplied via the
+        # `pocketpaw.memory_backends` entry-point. OSS builds have no
+        # provider and never reach this branch with backend="mongodb".
+        from pocketpaw._registry import providers
 
-        logger.info("Using MongoDB memory backend (ee)")
-        return MongoMemoryStore()
+        for provider in providers("pocketpaw.memory_backends"):
+            if getattr(provider, "name", None) == "mongodb":
+                logger.info("Using MongoDB memory backend (ee)")
+                return provider.build(None)
+        raise RuntimeError(
+            "memory backend 'mongodb' requested but no provider is registered "
+            "(install pocketpaw_ee for the cloud memory backend)"
+        )
     if backend == "mem0":
         try:
             # Check if mem0 is actually available before creating store

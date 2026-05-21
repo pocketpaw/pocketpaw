@@ -10,8 +10,8 @@ from __future__ import annotations
 
 
 def test_bus_module_identity() -> None:
-    from ee.cloud._core.realtime import bus as core_bus
-    from ee.cloud.realtime import bus as shim_bus
+    from pocketpaw_ee.cloud._core.realtime import bus as core_bus
+    from pocketpaw_ee.cloud.realtime import bus as shim_bus
 
     assert shim_bus.EventBus is core_bus.EventBus
     assert shim_bus.InProcessBus is core_bus.InProcessBus
@@ -22,22 +22,22 @@ def test_bus_module_identity() -> None:
 
 
 def test_emit_identity() -> None:
-    from ee.cloud._core.realtime.emit import emit as core_emit
-    from ee.cloud.realtime.emit import emit as shim_emit
+    from pocketpaw_ee.cloud._core.realtime.emit import emit as core_emit
+    from pocketpaw_ee.cloud.realtime.emit import emit as shim_emit
 
     assert shim_emit is core_emit
 
 
 def test_audience_identity() -> None:
-    from ee.cloud._core.realtime.audience import AudienceResolver as core_AR
-    from ee.cloud.realtime.audience import AudienceResolver as shim_AR
+    from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver as core_AR
+    from pocketpaw_ee.cloud.realtime.audience import AudienceResolver as shim_AR
 
     assert shim_AR is core_AR
 
 
 def test_events_identity() -> None:
-    from ee.cloud._core.realtime import events as core_events
-    from ee.cloud.realtime import events as shim_events
+    from pocketpaw_ee.cloud._core.realtime import events as core_events
+    from pocketpaw_ee.cloud.realtime import events as shim_events
 
     # Sample several event classes
     for name in (

@@ -11,11 +11,10 @@ from __future__ import annotations
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.models.notification import Notification as _NotificationDoc
-from ee.cloud.models.notification import NotificationSource as _NotificationSourceDoc
-from ee.cloud.notifications.router import router
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
+from pocketpaw_ee.cloud.models.notification import NotificationSource as _NotificationSourceDoc
+from pocketpaw_ee.cloud.notifications.router import router
 
 
 async def _seed(
@@ -43,7 +42,7 @@ async def _seed(
 
 @pytest_asyncio.fixture
 async def app_client(mongo_db) -> AsyncClient:
-    from ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.auth import current_active_user
 
     class _U:
         id = "user-1"

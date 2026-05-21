@@ -11,8 +11,7 @@ from __future__ import annotations
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.csrf import (
+from pocketpaw_ee.cloud._core.csrf import (
     AUTH_COOKIE_NAME,
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
@@ -207,7 +206,7 @@ def test_logout_clears_paw_csrf_cookie() -> None:
     # The response Set-Cookie should expire paw_csrf (Max-Age=0).
     set_cookie = res.headers.get("set-cookie", "")
     assert CSRF_COOKIE_NAME in set_cookie, set_cookie
-    assert "Max-Age=0" in set_cookie or 'expires=Thu, 01 Jan 1970' in set_cookie.lower()
+    assert "Max-Age=0" in set_cookie or "expires=Thu, 01 Jan 1970" in set_cookie.lower()
 
 
 def test_logout_failure_does_not_clear_paw_csrf() -> None:

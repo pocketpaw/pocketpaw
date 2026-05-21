@@ -5,10 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.sessions import service as sessions_service
-from ee.cloud.sessions.dto import CreateSessionRequest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.sessions import service as sessions_service
+from pocketpaw_ee.cloud.sessions.dto import CreateSessionRequest
 
 
 def _ctx(user_id: str = "u1", workspace_id: str | None = "w1") -> RequestContext:
@@ -47,7 +46,7 @@ async def test_create_session_with_pocket_id_keeps_pocket_type(mongo_db):
 
 def test_session_model_accepts_session_context_type():
     """Session model validator allows context_type='session' with no pocket/group."""
-    from ee.cloud.models.session import Session as SessionDoc
+    from pocketpaw_ee.cloud.models.session import Session as SessionDoc
 
     s = SessionDoc.model_construct(
         sessionId="ws_test",
@@ -63,7 +62,7 @@ def test_session_model_accepts_session_context_type():
 
 def test_session_model_session_type_rejects_pocket_field():
     """Session model validator rejects context_type='session' when pocket is set."""
-    from ee.cloud.models.session import Session as SessionDoc
+    from pocketpaw_ee.cloud.models.session import Session as SessionDoc
 
     s = SessionDoc.model_construct(
         sessionId="ws_test",
@@ -78,7 +77,7 @@ def test_session_model_session_type_rejects_pocket_field():
 
 def test_session_model_session_type_rejects_group_field():
     """Session model validator rejects context_type='session' when group is set."""
-    from ee.cloud.models.session import Session as SessionDoc
+    from pocketpaw_ee.cloud.models.session import Session as SessionDoc
 
     s = SessionDoc.model_construct(
         sessionId="ws_test",

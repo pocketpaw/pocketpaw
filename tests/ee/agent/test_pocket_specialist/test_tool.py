@@ -26,7 +26,7 @@ import pytest
 
 class TestPocketSpecialistTool:
     def test_name_and_description(self):
-        from ee.agent.pocket_specialist.tool import (
+        from pocketpaw_ee.agent.pocket_specialist.tool import (
             TOOL_DESCRIPTION,
             TOOL_NAME,
             PocketSpecialistTool,
@@ -37,7 +37,7 @@ class TestPocketSpecialistTool:
         assert tool.description == TOOL_DESCRIPTION
 
     def test_parameters_schema_carries_nested_hints(self):
-        from ee.agent.pocket_specialist.tool import PocketSpecialistTool
+        from pocketpaw_ee.agent.pocket_specialist.tool import PocketSpecialistTool
 
         params = PocketSpecialistTool().parameters
         assert params["type"] == "object"
@@ -48,12 +48,11 @@ class TestPocketSpecialistTool:
         assert params["required"] == ["brief"]
 
     def test_args_schema_is_pydantic_model(self):
-        from pydantic import BaseModel
-
-        from ee.agent.pocket_specialist.tool import (
+        from pocketpaw_ee.agent.pocket_specialist.tool import (
             PocketSpecialistArgs,
             PocketSpecialistTool,
         )
+        from pydantic import BaseModel
 
         tool = PocketSpecialistTool()
         assert tool.args_schema is PocketSpecialistArgs
@@ -67,23 +66,23 @@ class TestPocketSpecialistTool:
 
 class TestNormalizeHints:
     def test_none_stays_none(self):
-        from ee.agent.pocket_specialist.tool import _normalize_hints
+        from pocketpaw_ee.agent.pocket_specialist.tool import _normalize_hints
 
         assert _normalize_hints(None) is None
 
     def test_empty_string_returns_none(self):
-        from ee.agent.pocket_specialist.tool import _normalize_hints
+        from pocketpaw_ee.agent.pocket_specialist.tool import _normalize_hints
 
         assert _normalize_hints("") is None
         assert _normalize_hints("   ") is None
 
     def test_dict_passes_through(self):
-        from ee.agent.pocket_specialist.tool import _normalize_hints
+        from pocketpaw_ee.agent.pocket_specialist.tool import _normalize_hints
 
         assert _normalize_hints({"name": "Foo"}) == {"name": "Foo"}
 
     def test_pydantic_model_is_dumped(self):
-        from ee.agent.pocket_specialist.tool import (
+        from pocketpaw_ee.agent.pocket_specialist.tool import (
             PocketSpecialistHintsModel,
             _normalize_hints,
         )
@@ -93,12 +92,12 @@ class TestNormalizeHints:
         assert result == {"name": "Foo", "color": "#abc"}
 
     def test_json_string_is_parsed(self):
-        from ee.agent.pocket_specialist.tool import _normalize_hints
+        from pocketpaw_ee.agent.pocket_specialist.tool import _normalize_hints
 
         assert _normalize_hints('{"name": "Foo"}') == {"name": "Foo"}
 
     def test_unparseable_string_drops_to_none(self):
-        from ee.agent.pocket_specialist.tool import _normalize_hints
+        from pocketpaw_ee.agent.pocket_specialist.tool import _normalize_hints
 
         assert _normalize_hints("not json") is None
 
@@ -111,8 +110,8 @@ class TestNormalizeHints:
 class TestRunHandler:
     @pytest.mark.asyncio
     async def test_returns_serialized_output_on_success(self):
-        from ee.agent.pocket_specialist.runtime import PocketSpecialistCreateOutput
-        from ee.agent.pocket_specialist.tool import _run_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistCreateOutput
+        from pocketpaw_ee.agent.pocket_specialist.tool import _run_handler
 
         fake_out = PocketSpecialistCreateOutput(
             ok=True,
@@ -124,15 +123,15 @@ class TestRunHandler:
         )
         with (
             patch(
-                "ee.cloud.chat.agent_service.current_workspace_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
                 return_value="ws-1",
             ),
             patch(
-                "ee.cloud.chat.agent_service.current_user_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
                 return_value="user-A",
             ),
             patch(
-                "ee.agent.pocket_specialist.runtime.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.runtime.run_specialist",
                 new=AsyncMock(return_value=fake_out),
             ),
         ):
@@ -144,15 +143,15 @@ class TestRunHandler:
 
     @pytest.mark.asyncio
     async def test_missing_context_returns_error_envelope(self):
-        from ee.agent.pocket_specialist.tool import _run_handler
+        from pocketpaw_ee.agent.pocket_specialist.tool import _run_handler
 
         with (
             patch(
-                "ee.cloud.chat.agent_service.current_workspace_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
                 return_value=None,
             ),
             patch(
-                "ee.cloud.chat.agent_service.current_user_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
                 return_value=None,
             ),
         ):
@@ -164,19 +163,19 @@ class TestRunHandler:
 
     @pytest.mark.asyncio
     async def test_run_specialist_failure_returns_error_envelope(self):
-        from ee.agent.pocket_specialist.tool import _run_handler
+        from pocketpaw_ee.agent.pocket_specialist.tool import _run_handler
 
         with (
             patch(
-                "ee.cloud.chat.agent_service.current_workspace_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
                 return_value="ws-1",
             ),
             patch(
-                "ee.cloud.chat.agent_service.current_user_id",
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
                 return_value="user-A",
             ),
             patch(
-                "ee.agent.pocket_specialist.runtime.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.runtime.run_specialist",
                 new=AsyncMock(side_effect=RuntimeError("backend exploded")),
             ),
         ):

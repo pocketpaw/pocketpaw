@@ -11,9 +11,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-
-from ee.cloud._core.realtime.events import FileReady
-from ee.cloud.extraction.adapter import ExtractionResult
+from pocketpaw_ee.cloud._core.realtime.events import FileReady
+from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
 
 
 class _FakeChain:
@@ -27,9 +26,9 @@ class _FakeChain:
 
 
 def _patch(monkeypatch, *, chain, storage_path: Path, ingest):
-    from ee.cloud.uploads import listeners
+    from pocketpaw_ee.cloud.uploads import listeners
 
-    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: chain)
+    monkeypatch.setattr("pocketpaw_ee.cloud.extraction.build_chain", lambda settings: chain)
 
     class _Adapter:
         def local_path(self, _key: str) -> Path:
@@ -40,7 +39,7 @@ def _patch(monkeypatch, *, chain, storage_path: Path, ingest):
 
     monkeypatch.setattr(listeners, "_resolve_adapter", lambda: _Adapter())
 
-    from ee.cloud.agents import knowledge as kn
+    from pocketpaw_ee.cloud.agents import knowledge as kn
 
     monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)
 
@@ -48,7 +47,7 @@ def _patch(monkeypatch, *, chain, storage_path: Path, ingest):
 @pytest.mark.asyncio
 async def test_pocket_id_routes_to_pocket_scope(monkeypatch, tmp_path):
     """FileReady carries ``pocket_id`` → KB ingest scope is ``pocket:{id}``."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     fake_path = tmp_path / "deck.pdf"
     fake_path.write_bytes(b"unused; chain.run is mocked")
@@ -80,7 +79,7 @@ async def test_pocket_id_routes_to_pocket_scope(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_no_pocket_id_keeps_workspace_scope(monkeypatch, tmp_path):
     """Stage 1.B regression: no ``pocket_id`` → ``workspace:{wid}`` scope."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     fake_path = tmp_path / "doc.pdf"
     fake_path.write_bytes(b"unused")
@@ -111,7 +110,7 @@ async def test_no_pocket_id_keeps_workspace_scope(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_empty_pocket_id_falls_back_to_workspace(monkeypatch, tmp_path):
     """Defensive: ``pocket_id=""`` is treated as no pocket (truthy check)."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     fake_path = tmp_path / "doc.pdf"
     fake_path.write_bytes(b"unused")

@@ -32,21 +32,20 @@ from typing import Any
 
 import pytest
 from bson import ObjectId
-
-from ee.calendar import service as service_module
-from ee.calendar.dto import (
+from pocketpaw_ee.calendar import service as service_module
+from pocketpaw_ee.calendar.dto import (
     CreateEventRequest,
     FreeBusyRequest,
     ListEventsRequest,
     UpdateEventRequest,
 )
-from ee.calendar.events import (
+from pocketpaw_ee.calendar.events import (
     TOPIC_CONFLICT_DETECTED,
     TOPIC_EVENT_CREATED,
     TOPIC_EVENT_DELETED,
     TOPIC_EVENT_UPDATED,
 )
-from ee.cloud.shared.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud.shared.errors import NotFound, ValidationError
 
 # ---------------------------------------------------------------------------
 # Fake Beanie doc — minimum viable replacement.
@@ -391,12 +390,12 @@ async def test_get_freebusy_multi_attendee(ctx, fake_store, monkeypatch):
     real Mongo query uses. The H2 access-resolver is also patched so we
     bypass the unknown-attendee gate (separately covered in
     test_freebusy.py)."""
-    from ee.calendar import service as svc
+    from pocketpaw_ee.calendar import service as svc
 
     async def _fake_compute(
         workspace_id, attendee_emails, starts_at, ends_at, accessible_calendar_ids=None
     ):
-        from ee.calendar.domain import FreeBusy
+        from pocketpaw_ee.calendar.domain import FreeBusy
 
         return [FreeBusy(attendee_email=e, busy_periods=[]) for e in attendee_emails]
 
@@ -419,7 +418,7 @@ async def test_get_freebusy_multi_attendee(ctx, fake_store, monkeypatch):
 
 async def test_detect_conflicts_overlapping_events(ctx, fake_store, bus_spy, monkeypatch):
     """detect_conflicts emits TOPIC_CONFLICT_DETECTED when conflicts exist."""
-    from ee.calendar import service as svc
+    from pocketpaw_ee.calendar import service as svc
 
     target = _new_doc(
         fake_store,
@@ -438,7 +437,7 @@ async def test_detect_conflicts_overlapping_events(ctx, fake_store, bus_spy, mon
     )
 
     async def _fake_find_conflicts(workspace_id, event):
-        from ee.calendar.conflicts import _doc_to_event
+        from pocketpaw_ee.calendar.conflicts import _doc_to_event
 
         # mirror real find_conflicts: just return `other` mapped.
         return [_doc_to_event(other)]
@@ -465,8 +464,8 @@ async def test_detect_conflicts_overlapping_events(ctx, fake_store, bus_spy, mon
 async def test_update_event_non_creator_denied_synthetic_calendar(fake_store, bus_spy):
     """Bob (same workspace, NOT the event creator) cannot update Alice's event
     even though the parent Calendar is synthetic-default."""
-    from ee.calendar._context import RequestContext
-    from ee.cloud.shared.errors import Forbidden
+    from pocketpaw_ee.calendar._context import RequestContext
+    from pocketpaw_ee.cloud.shared.errors import Forbidden
 
     # Event was created by alice. Bob shares the workspace.
     doc = _new_doc(fake_store, workspace="ws-test", created_by_user_id="alice")
@@ -484,8 +483,8 @@ async def test_update_event_non_creator_denied_synthetic_calendar(fake_store, bu
 async def test_delete_event_non_creator_denied_synthetic_calendar(fake_store, bus_spy):
     """Same shape as the update test but for delete_event — bob can't drop
     alice's event on the synthetic-default Calendar."""
-    from ee.calendar._context import RequestContext
-    from ee.cloud.shared.errors import Forbidden
+    from pocketpaw_ee.calendar._context import RequestContext
+    from pocketpaw_ee.cloud.shared.errors import Forbidden
 
     doc = _new_doc(fake_store, workspace="ws-test", created_by_user_id="alice")
     bob_ctx = RequestContext(workspace_id="ws-test", user_id="bob")

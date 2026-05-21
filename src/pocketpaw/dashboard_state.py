@@ -67,11 +67,17 @@ async def get_agent_loop_for(agent_id: str) -> AgentLoop:
     """
     from beanie import PydanticObjectId
 
-    from ee.cloud.models.agent import Agent
+    from pocketpaw._registry import first
+
+    model_provider = first("pocketpaw.models")
+    agent_model = model_provider.get_model("Agent") if model_provider else None
+    if agent_model is None:
+        # OSS install — no cloud Agent documents exist; use the default loop.
+        return agent_loop
 
     async with _agent_loops_lock:
         try:
-            doc = await Agent.get(PydanticObjectId(agent_id))
+            doc = await agent_model.get(PydanticObjectId(agent_id))
         except Exception:
             # Transient DB error — don't poison the cache; use the default
             # loop for this request and retry lookup on the next one.

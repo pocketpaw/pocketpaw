@@ -278,7 +278,7 @@ class AgentContextBuilder:
         # The full pocket document is NOT embedded here — that would blow the
         # Windows CLI arg limit for large rippleSpec.ui trees. The agent
         # retrieves it on demand via the `mcp__pocketpaw_pocket__get_pocket`
-        # tool (in-process MCP server; see agents/sdk_mcp_pocket.py).
+        # tool (the EE in-process pocketpaw_pocket MCP server).
         if metadata and metadata.get("pocket_context"):
             import json
 
@@ -563,13 +563,14 @@ class AgentContextBuilder:
         if not getattr(settings, "kb_vectors_enabled", False):
             return None
 
-        try:
-            from ee.cloud.embeddings import build_embedder
-        except Exception:
-            logger.debug("embeddings package unavailable; falling back to BM25")
+        from pocketpaw._registry import first
+
+        provider = first("pocketpaw.embeddings")
+        if provider is None:
+            logger.debug("no embeddings provider registered; falling back to BM25")
             return None
 
-        embedder = build_embedder(settings)
+        embedder = provider.build_embedder(settings)
         if embedder is None or "image" not in embedder.supports_modalities:
             return None
 

@@ -275,9 +275,7 @@ def _patch_anthropic_message_serializer() -> None:
                 for b in system
                 if isinstance(b, dict) and b.get("type") == "text"
             )
-            already_cached = any(
-                isinstance(b, dict) and b.get("cache_control") for b in system
-            )
+            already_cached = any(isinstance(b, dict) and b.get("cache_control") for b in system)
             if total_chars >= _ANTHROPIC_CACHE_MIN_CHARS and not already_cached:
                 for block in reversed(system):
                     if isinstance(block, dict) and block.get("type") == "text":
@@ -288,8 +286,7 @@ def _patch_anthropic_message_serializer() -> None:
     _ac._format_messages = patched
     _ANTHROPIC_PATCHED = True
     logger.info(
-        "Patched langchain_anthropic._format_messages for prompt caching "
-        "(threshold=%d chars)",
+        "Patched langchain_anthropic._format_messages for prompt caching (threshold=%d chars)",
         _ANTHROPIC_CACHE_MIN_CHARS,
     )
 
@@ -696,6 +693,21 @@ class DeepAgentsBackend:
             return self._cached_agent
 
         all_tools = self._build_custom_tools() + (mcp_tools or [])
+
+        # Composio — per-stream integration tools (Gmail, Slack, …) via the
+        # langgraph provider, discovered through the ``pocketpaw.composio_tools``
+        # entry point. Skipped on pocket sessions: the pocket specialist runs
+        # on this backend and we keep its tool surface narrow + Composio-free
+        # (the parent agent fetches Composio data and passes it down in the
+        # brief).
+        if not is_pocket_session:
+            from pocketpaw.agents.tool_bridge import composio_tools_for
+
+            composio_tools = composio_tools_for("deep_agents", self.settings)
+            if composio_tools:
+                all_tools = all_tools + list(composio_tools)
+                logger.info("Composio: appended %d langgraph tools", len(composio_tools))
+
         if is_pocket_session:
             # Drop shell + filesystem tools — pocket flow has MCP tools
             # for everything it needs. Without this filter the agent has
@@ -964,9 +976,7 @@ class DeepAgentsBackend:
                     try:
                         await close()
                     except Exception as exc:  # noqa: BLE001
-                        logger.debug(
-                            "astream aclose error (non-fatal): %s", exc
-                        )
+                        logger.debug("astream aclose error (non-fatal): %s", exc)
 
     async def stop(self) -> None:
         self._stop_flag = True

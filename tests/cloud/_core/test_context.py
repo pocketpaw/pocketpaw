@@ -8,8 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
 
 
 class TestScopeKind:
@@ -81,7 +80,7 @@ def app_with_context_route() -> FastAPI:
     `Depends(current_active_user)` inside `request_context`. Patching
     the module attribute would not.
     """
-    from ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.auth import current_active_user
 
     fake_user = _FakeUser(id="user-1", active_workspace="ws-42")
 

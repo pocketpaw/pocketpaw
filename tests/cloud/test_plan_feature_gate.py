@@ -11,8 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.deps import current_workspace_id, require_plan_feature
+from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_plan_feature
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,7 +25,7 @@ def _build_app(feature: str, *, fixed_workspace_id: str = "ws-test") -> FastAPI:
     User model is involved. The workspace plan is controlled per-test by
     patching workspace_service.get_workspace_plan.
     """
-    from ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud._core.http import add_error_handler
 
     app = FastAPI()
     add_error_handler(app)
@@ -53,7 +52,7 @@ def patch_plan(monkeypatch: pytest.MonkeyPatch):
     """Return a setter that patches get_workspace_plan to return a fixed plan."""
 
     def _patch(plan: str) -> None:
-        import ee.cloud.workspace.service as ws_svc
+        import pocketpaw_ee.cloud.workspace.service as ws_svc
 
         monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value=plan))
 
@@ -153,7 +152,7 @@ class TestPlanFeatureGateEdgeCases:
     def test_workspace_not_found_denies_restricted_feature(self, monkeypatch):
         """When get_workspace_plan returns the 'team' fallback (workspace not found),
         a business+ feature is still denied rather than raising a 500."""
-        import ee.cloud.workspace.service as ws_svc
+        import pocketpaw_ee.cloud.workspace.service as ws_svc
 
         # Simulate the fallback: workspace missing, returns "team"
         monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="team"))

@@ -8,11 +8,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.audit.dto import ListAuditRequest
 from pydantic import ValidationError as PydanticValidationError
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.audit import service as audit_service
-from ee.cloud.audit.dto import ListAuditRequest
 
 
 def _ctx(workspace: str | None = "w1", user: str = "u1") -> RequestContext:

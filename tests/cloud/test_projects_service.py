@@ -14,17 +14,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.errors import NotFound, ValidationError
-from ee.cloud._core.realtime.events import (
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.events import (
     ProjectArchived,
     ProjectCreated,
     ProjectDeleted,
     ProjectUpdated,
 )
-from ee.cloud.projects import service as projects_service
-from ee.cloud.projects.dto import (
+from pocketpaw_ee.cloud.projects import service as projects_service
+from pocketpaw_ee.cloud.projects.dto import (
     CreateProjectRequest,
     ListProjectsRequest,
     UpdateProjectRequest,
@@ -171,12 +170,12 @@ async def test_delete_unassigns_pockets_tasks_cycles() -> None:
     themselves — historical pockets / tasks / cycles stay alive."""
     from datetime import date
 
-    from ee.cloud.cycles import service as cycles_service
-    from ee.cloud.cycles.dto import CreateCycleRequest
-    from ee.cloud.pockets import service as pockets_service
-    from ee.cloud.pockets.dto import CreatePocketRequest
-    from ee.cloud.tasks import service as tasks_service
-    from ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest
+    from pocketpaw_ee.cloud.cycles import service as cycles_service
+    from pocketpaw_ee.cloud.cycles.dto import CreateCycleRequest
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.cloud.pockets.dto import CreatePocketRequest
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest
 
     ctx = _ctx()
     project = await projects_service.agent_create(ctx, CreateProjectRequest(name="P"))
@@ -233,7 +232,7 @@ async def test_delete_aborts_if_cascade_unassign_fails(monkeypatch) -> None:
     deleted. Otherwise we'd leak orphaned ``project_id`` references on
     pockets/tasks/cycles. The whole operation is retry-safe only when
     the failure aborts the delete."""
-    from ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
 
     ctx = _ctx()
     project = await projects_service.agent_create(ctx, CreateProjectRequest(name="P"))

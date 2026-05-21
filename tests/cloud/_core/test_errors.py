@@ -3,24 +3,23 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud._core import errors as core_errors
-from ee.cloud.shared.errors import (
+from pocketpaw_ee.cloud._core import errors as core_errors
+from pocketpaw_ee.cloud.shared.errors import (
     CloudError as SharedCloudError,
 )
-from ee.cloud.shared.errors import (
+from pocketpaw_ee.cloud.shared.errors import (
     ConflictError as SharedConflictError,
 )
-from ee.cloud.shared.errors import (
+from pocketpaw_ee.cloud.shared.errors import (
     Forbidden as SharedForbidden,
 )
-from ee.cloud.shared.errors import (
+from pocketpaw_ee.cloud.shared.errors import (
     NotFound as SharedNotFound,
 )
-from ee.cloud.shared.errors import (
+from pocketpaw_ee.cloud.shared.errors import (
     SeatLimitError as SharedSeatLimit,
 )
-from ee.cloud.shared.errors import (
+from pocketpaw_ee.cloud.shared.errors import (
     ValidationError as SharedValidation,
 )
 

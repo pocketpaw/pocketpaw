@@ -13,18 +13,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.errors import NotFound
-from ee.cloud._core.realtime.events import PlanGapResolved
-from ee.cloud.agents import service as agents_service
-from ee.cloud.agents.dto import CreateAgentRequest
-from ee.cloud.planner import service as planner_service
-from ee.cloud.planner.dto import PlanProjectRequest, ResolveGapRequest
-from ee.cloud.projects import service as projects_service
-from ee.cloud.projects.dto import CreateProjectRequest
-from ee.cloud.tasks import service as tasks_service
-from ee.cloud.tasks.dto import ListTasksRequest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud._core.realtime.events import PlanGapResolved
+from pocketpaw_ee.cloud.agents import service as agents_service
+from pocketpaw_ee.cloud.agents.dto import CreateAgentRequest
+from pocketpaw_ee.cloud.planner import service as planner_service
+from pocketpaw_ee.cloud.planner.dto import PlanProjectRequest, ResolveGapRequest
+from pocketpaw_ee.cloud.projects import service as projects_service
+from pocketpaw_ee.cloud.projects.dto import CreateProjectRequest
+from pocketpaw_ee.cloud.tasks import service as tasks_service
+from pocketpaw_ee.cloud.tasks.dto import ListTasksRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 

@@ -28,12 +28,14 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        # --all-extras pulls every optional extra (enterprise, soul, vector, etc.)
-        # so ee/cloud tests can import beanie/motor/fastapi-users[beanie,oauth].
+        # --all-extras pulls every optional core extra (soul, vector, etc.).
+        # The enterprise layer is the separate `pocketpaw-ee` package since the
+        # OSS-EE split (Phase 4) — install it editable so tests/ee can import
+        # pocketpaw_ee (beanie / motor / fastapi-users ship as its deps).
         # Cold-start installs are heavier (~60 s on cache miss because chromadb
         # pulls onnxruntime, plus a few smaller wheels) but uv's cache keeps
         # subsequent runs fast.
-        run: uv sync --dev --all-extras
+        run: uv sync --dev --all-extras --group ee
 
       - name: Run pytest
         # No -x: this is a PR gate, surface ALL failures, not just the first.

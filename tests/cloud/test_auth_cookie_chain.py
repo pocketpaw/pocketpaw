@@ -15,10 +15,9 @@ from __future__ import annotations
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.csrf import AUTH_COOKIE_NAME, CSRFMiddleware
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.auth.core import (
+from pocketpaw_ee.cloud._core.csrf import AUTH_COOKIE_NAME, CSRFMiddleware
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.auth.core import (
     UserCreate,
     UserManager,
     bearer_backend,
@@ -27,7 +26,7 @@ from ee.cloud.auth.core import (
     fastapi_users,
     get_user_db,
 )
-from ee.cloud.auth.router import router as auth_router
+from pocketpaw_ee.cloud.auth.router import router as auth_router
 
 _TEST_EMAIL = "cookie-chain@example.com"
 _TEST_PASSWORD = "test-password-123"

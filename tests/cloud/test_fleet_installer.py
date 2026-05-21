@@ -17,8 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from ee.fleet import (
+from pocketpaw_ee.fleet import (
     FleetConnector,
     FleetInstallReport,
     FleetTemplate,
@@ -317,7 +316,7 @@ class TestInstallReport:
         assert report.succeeded()
 
     def test_failed_steps_filters(self) -> None:
-        from ee.fleet.models import FleetInstallStep
+        from pocketpaw_ee.fleet.models import FleetInstallStep
 
         report = FleetInstallReport(
             fleet="x",

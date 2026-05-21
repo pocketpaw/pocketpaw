@@ -14,15 +14,15 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.activity.buffer import ActivityEvent, get_buffer
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.mission_control import service as mc_service
+from pocketpaw_ee.cloud.mission_control.router import router as mc_router
 
-from ee.cloud._core.context import RequestContext, ScopeKind, request_context
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.activity.buffer import ActivityEvent, get_buffer
-from ee.cloud.license import require_license
-from ee.cloud.mission_control import service as mc_service
-from ee.cloud.mission_control.router import router as mc_router
-from ee.instinct.models import ActionTrigger
-from ee.instinct.store import InstinctStore
+from pocketpaw.instinct.models import ActionTrigger
+from pocketpaw.instinct.store import InstinctStore
 
 
 def _trigger(source: str = "claude") -> ActionTrigger:
@@ -43,7 +43,9 @@ def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
         "list_pockets",
         AsyncMock(return_value=[{"_id": "p1"}, {"_id": "p2"}]),
     )
-    monkeypatch.setattr("ee.cloud.tasks.service.agent_list_tasks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.tasks.service.agent_list_tasks", AsyncMock(return_value=[])
+    )
     yield
 
 

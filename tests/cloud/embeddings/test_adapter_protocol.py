@@ -11,8 +11,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-
-from ee.cloud.embeddings import EmbeddingAdapter, EmbeddingResult
+from pocketpaw_ee.cloud.embeddings import EmbeddingAdapter, EmbeddingResult
 
 
 def test_embedding_result_basic_shape() -> None:
@@ -36,7 +35,7 @@ def test_vertex_gemini2_satisfies_protocol(monkeypatch) -> None:
     fake_client = MagicMock()
     monkeypatch.setattr(genai, "Client", lambda api_key: fake_client)
 
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=512)
     assert isinstance(adapter, EmbeddingAdapter)
@@ -67,7 +66,7 @@ def test_vertex_mm001_satisfies_protocol(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
     monkeypatch.setitem(sys.modules, "vertexai.vision_models", fake_vision)
 
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     adapter = VertexMultimodal001(project_id="test-proj", location="us-central1", dim=512)
     assert isinstance(adapter, EmbeddingAdapter)

@@ -8,13 +8,12 @@ produced by ``_message_response`` / ``message_to_wire_dict``.
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.chat import message_service
-from ee.cloud.models.group import Group as _GroupDoc
-from ee.cloud.models.message import Attachment as _AttachmentDoc
-from ee.cloud.models.message import Mention as _MentionDoc
-from ee.cloud.models.message import Message as _MessageDoc
-from ee.cloud.models.message import Reaction as _ReactionDoc
+from pocketpaw_ee.cloud.chat import message_service
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.message import Attachment as _AttachmentDoc
+from pocketpaw_ee.cloud.models.message import Mention as _MentionDoc
+from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
+from pocketpaw_ee.cloud.models.message import Reaction as _ReactionDoc
 
 
 async def _make_group(*, type: str = "public", owner: str = "u1") -> _GroupDoc:
@@ -97,7 +96,7 @@ async def test_search_messages_wire_shape_matches_legacy(mongo_db):
 @pytest.mark.asyncio
 async def test_search_messages_private_group_requires_membership(mongo_db):
     """Auth check still fires before the search runs."""
-    from ee.cloud.shared.errors import Forbidden
+    from pocketpaw_ee.cloud.shared.errors import Forbidden
 
     group = await _make_group(type="private", owner="u_other")
     await _make_message(group_id=str(group.id), content="anything", sender="u_other")

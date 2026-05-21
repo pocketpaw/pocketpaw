@@ -46,7 +46,7 @@ def _connect():
 
 
 async def _audit() -> dict[str, Any]:
-    from ee.cloud.ripple_validator import validate_ripple_spec
+    from pocketpaw_ee.cloud.ripple_validator import validate_ripple_spec
 
     client, db = _connect()
     try:

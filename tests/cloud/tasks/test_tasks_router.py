@@ -10,14 +10,13 @@ from __future__ import annotations
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.tasks.router import router
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.tasks.router import router
 
 
 @pytest_asyncio.fixture
 async def app_client(mongo_db) -> AsyncClient:
-    from ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.auth import current_active_user
 
     class _U:
         id = "creator-1"

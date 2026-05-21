@@ -18,11 +18,10 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.connectors.router import router as connectors_router
-from ee.cloud.license import require_license
-from ee.cloud.shared.deps import current_user_id, current_workspace_id
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.connectors.router import router as connectors_router
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
 
 def _user() -> str:

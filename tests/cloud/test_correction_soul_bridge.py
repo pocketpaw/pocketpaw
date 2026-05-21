@@ -12,15 +12,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ee.instinct.correction import Correction, CorrectionPatch
-from ee.instinct.correction_soul_bridge import CorrectionSoulBridge
-from ee.instinct.models import (
+from pocketpaw.instinct.correction import Correction, CorrectionPatch
+from pocketpaw.instinct.correction_soul_bridge import CorrectionSoulBridge
+from pocketpaw.instinct.models import (
     Action,
     ActionCategory,
     ActionPriority,
     ActionTrigger,
 )
-from ee.instinct.store import InstinctStore
+from pocketpaw.instinct.store import InstinctStore
 
 
 @pytest.fixture(autouse=True)

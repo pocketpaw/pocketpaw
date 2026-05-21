@@ -27,23 +27,22 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.testclient import TestClient
-
-from ee.calendar.domain import Attendee, AttendeeResponse, ConflictSeverity
-from ee.calendar.dto import (
+from pocketpaw_ee.calendar.domain import Attendee, AttendeeResponse, ConflictSeverity
+from pocketpaw_ee.calendar.dto import (
     ConflictReport,
     EventListResponse,
     EventResponse,
     FreeBusyResponse,
 )
-from ee.cloud.shared.deps import current_user_id, current_workspace_id
-from ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
+from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+from starlette.testclient import TestClient
 
 # Use importlib so we get the submodule, not the `router` attr re-exported
 # by ee.calendar.__init__. Beware: ``import ee.calendar.router`` binds to
 # the re-exported APIRouter, not the module. Fixtures need the module so
 # they can monkeypatch the ``svc_*`` aliases.
-router_module = importlib.import_module("ee.calendar.router")
+router_module = importlib.import_module("pocketpaw_ee.calendar.router")
 router = router_module.router
 
 

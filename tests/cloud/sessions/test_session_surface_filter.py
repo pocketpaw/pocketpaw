@@ -18,10 +18,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.sessions import service as sessions_service
-from ee.cloud.sessions.dto import CreateSessionRequest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.sessions import service as sessions_service
+from pocketpaw_ee.cloud.sessions.dto import CreateSessionRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 

@@ -9,8 +9,7 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.agents.scope_rules import (
+from pocketpaw_ee.cloud.agents.scope_rules import (
     FORBIDDEN_SCOPES,
     ScopeValidationError,
     admin_can_assign_scopes,

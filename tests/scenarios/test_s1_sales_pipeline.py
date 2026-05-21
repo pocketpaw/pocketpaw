@@ -49,7 +49,6 @@ from typing import Any
 import httpx
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers — bearer login + workspace lookup, shaped to mirror S2.
 # ---------------------------------------------------------------------------
@@ -96,9 +95,7 @@ def _find_owner_workspace(api_url: str, token: str) -> str:
     for w in memberships:
         if w.get("role") == "owner":
             return w["workspace"]
-    raise AssertionError(
-        f"admin must own at least one workspace; got memberships={memberships!r}"
-    )
+    raise AssertionError(f"admin must own at least one workspace; got memberships={memberships!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -136,14 +133,10 @@ async def test_s1_admin_installs_sales_fleet_end_to_end(
         headers=_auth_headers(token),
         timeout=10.0,
     )
-    assert resp.status_code == 200, (
-        f"/fleet/templates returned {resp.status_code}: {resp.text}"
-    )
+    assert resp.status_code == 200, f"/fleet/templates returned {resp.status_code}: {resp.text}"
     payload = resp.json()
     names = [t.get("name") for t in payload.get("templates", [])]
-    assert "sales-fleet" in names, (
-        f"sales-fleet missing from bundled templates; got {names!r}"
-    )
+    assert "sales-fleet" in names, f"sales-fleet missing from bundled templates; got {names!r}"
 
     # ----- Phase C: install --------------------------------------------
     resp = httpx.post(
@@ -159,9 +152,7 @@ async def test_s1_admin_installs_sales_fleet_end_to_end(
         },
         timeout=30.0,
     )
-    assert resp.status_code == 200, (
-        f"/fleet/install returned {resp.status_code}: {resp.text}"
-    )
+    assert resp.status_code == 200, f"/fleet/install returned {resp.status_code}: {resp.text}"
     report: dict[str, Any] = resp.json()
     assert report.get("fleet") == "sales-fleet"
 
@@ -183,9 +174,7 @@ async def test_s1_admin_installs_sales_fleet_end_to_end(
     # gap, see the module docstring.
     soul_id = report.get("soul_id")
     assert soul_id, f"install report missing soul_id: {report!r}"
-    assert soul_id.startswith("did:soul:"), (
-        f"soul_id should be a did:soul URI; got {soul_id!r}"
-    )
+    assert soul_id.startswith("did:soul:"), f"soul_id should be a did:soul URI; got {soul_id!r}"
 
     # Soul step must be in a terminal-success state. The other steps
     # (pocket, connectors) may all be 'skipped' for now — see the
@@ -205,13 +194,9 @@ async def test_s1_admin_installs_sales_fleet_end_to_end(
         headers=_auth_headers(token),
         timeout=10.0,
     )
-    assert resp.status_code == 200, (
-        f"/soul/dashboard returned {resp.status_code}: {resp.text}"
-    )
+    assert resp.status_code == 200, f"/soul/dashboard returned {resp.status_code}: {resp.text}"
     soul = resp.json()
     # The endpoint returns {enabled: False} when soul-protocol isn't
     # wired at runtime — a degenerate environment for this scenario.
     # Surface clearly so the operator knows to enable soul.
-    assert soul.get("enabled") is not False, (
-        f"soul subsystem not enabled at runtime; got {soul!r}"
-    )
+    assert soul.get("enabled") is not False, f"soul subsystem not enabled at runtime; got {soul!r}"

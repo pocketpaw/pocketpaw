@@ -37,8 +37,7 @@ pytest.importorskip("mongomock_motor", reason="mongomock-motor is required for c
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.realtime.events import Event
+from pocketpaw_ee.cloud._core.realtime.events import Event
 
 
 class RecordingBus:
@@ -68,7 +67,7 @@ def recording_bus():
     Tests that don't care about events ignore the fixture; tests that
     do request it explicitly to inspect ``bus.events``.
     """
-    from ee.cloud._core.realtime import bus as bus_mod
+    from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
 
     rec = RecordingBus()
     prev = bus_mod._bus  # type: ignore[attr-defined]
@@ -88,9 +87,8 @@ async def mongo_db() -> Any:
     """
     from beanie import init_beanie
     from mongomock_motor import AsyncMongoMockClient
-
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     db_name = f"test_{uuid.uuid4().hex[:8]}"
     client = AsyncMongoMockClient()
@@ -121,10 +119,10 @@ def _no_op_license() -> None:
 
 @pytest_asyncio.fixture
 async def cloud_app_client() -> AsyncClient:
-    from ee.cloud._core.http import add_error_handler
-    from ee.cloud.chat.agent_router import router as agent_router
-    from ee.cloud.license import require_license
-    from ee.cloud.shared.deps import current_user_id, current_workspace_id
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.chat.agent_router import router as agent_router
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
     app = FastAPI()
     add_error_handler(app)
@@ -213,8 +211,8 @@ async def make_plan_session(mongo_db):  # noqa: ARG001 — fixture forces Beanie
     correlate the inserted doc with its display name.
     """
 
-    from ee.cloud.models.planner import PlanSession as _PlanSessionDoc
-    from ee.cloud.models.project import Project as _ProjectDoc
+    from pocketpaw_ee.cloud.models.planner import PlanSession as _PlanSessionDoc
+    from pocketpaw_ee.cloud.models.project import Project as _ProjectDoc
 
     async def _make(
         workspace_id: str,

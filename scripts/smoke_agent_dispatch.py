@@ -29,7 +29,7 @@ def _mention(agent_id: str) -> dict:
 
 
 async def main() -> int:
-    from ee.cloud.shared.agent_bridge import _should_agent_respond
+    from pocketpaw_ee.cloud.shared.agent_bridge import _should_agent_respond
 
     AX = FakeGroupAgent("agent-x", "auto")
     AY = FakeGroupAgent("agent-y", "auto")
