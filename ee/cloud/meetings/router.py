@@ -25,8 +25,8 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from ee.cloud.license import require_license
-from ee.cloud.meetings import bot_coordinator, oauth_flow
 from ee.cloud.meetings import credentials as creds_service
+from ee.cloud.meetings import oauth_flow, recall_client
 from ee.cloud.meetings import service as meetings_service
 from ee.cloud.meetings.domain import MeetingProvider
 from ee.cloud.meetings.dto import (
@@ -286,14 +286,14 @@ async def get_transcript(
 
 
 # ---------------------------------------------------------------------------
-# Vexa bot integration — request + stop. Transcripts arrive via the
-# on-demand polling path in ``meetings_service.fetch_and_store_transcript``;
-# Vexa does NOT push to us, so there is no callback endpoint.
+# Recall.ai bot integration — request + stop. The captured transcript is
+# pushed back via the Svix webhook (meetings/webhooks.py) and is also
+# fetchable on demand through ``GET /meetings/{id}/transcript``.
 # ---------------------------------------------------------------------------
 
 
 class RequestBotResponseDTO(BaseModel):
-    """Returned by POST /meetings/{id}/bot — Vexa bot identifier + status."""
+    """Returned by POST /meetings/{id}/bot — Recall.ai bot id + status."""
 
     bot_id: str
     meeting_id: str
@@ -309,14 +309,13 @@ async def request_bot(
     meeting_id: str,
     workspace_id: str = Depends(current_workspace_id),
 ) -> RequestBotResponseDTO:
-    """Ask Vexa to send a bot to this meeting to capture audio + transcript.
+    """Dispatch a Recall.ai bot to this meeting to record + transcribe it.
 
-    Vexa runs as a separate service stack — see
-    docs/plans/2026-05-19-meetings-integration-design.md (Phase B+ update).
-    Returns Vexa's bot identifier for tracking; the transcript becomes
-    available via ``GET /meetings/{id}/transcript`` once Vexa is done.
+    Recall.ai is a hosted meeting-bot service. Returns the bot identifier
+    for tracking; the transcript becomes available via
+    ``GET /meetings/{id}/transcript`` once Recall.ai finishes.
     """
-    payload = await bot_coordinator.request_bot_for_meeting(workspace_id, meeting_id)
+    payload = await recall_client.request_bot_for_meeting(workspace_id, meeting_id)
     return RequestBotResponseDTO(
         bot_id=payload.get("bot_id", ""),
         meeting_id=payload.get("meeting_id", meeting_id),
@@ -332,8 +331,8 @@ async def stop_bot(
     meeting_id: str,
     workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
-    """Stop an active Vexa bot for this meeting. Idempotent."""
-    return await bot_coordinator.stop_bot(workspace_id, meeting_id)
+    """Stop an active Recall.ai bot for this meeting. Idempotent."""
+    return await recall_client.stop_bot(workspace_id, meeting_id)
 
 
 # ---------------------------------------------------------------------------

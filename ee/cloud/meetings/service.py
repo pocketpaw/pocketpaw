@@ -440,13 +440,15 @@ async def get_transcript(workspace_id: str, meeting_id: str) -> TranscriptRespon
       1. **Useful cached row** — ``file_id`` set AND ``entry_count > 0``
          → return immediately (fast path).
       2. **Empty/stale cached row** — ``entry_count == 0`` → ignore the
-         cache and re-fetch. Auto-heals rows written by earlier buggy
-         code paths (e.g. before we corrected Vexa's transcript endpoint).
-      3. **No row at all** → fetch from Vexa / provider REST, store.
+         cache and re-fetch. Auto-heals rows written by an earlier pass
+         that ran before the bot had captured any audio.
+      3. **No row at all** → fetch from Recall.ai / provider REST, store.
       4. **Nothing yet from any source** → raise ``NotFound``; caller retries.
 
-    On-demand fetch replaces the webhook ingestion path. Trade-off:
-    first call pays ~5–30s latency; subsequent useful calls are instant.
+    On-demand fetch complements the Recall.ai webhook (webhooks.py):
+    whichever fires first wins, and both land here. Trade-off on the
+    on-demand path: the first call pays ~5–30s latency; subsequent
+    useful calls are instant.
     """
     # Tenant filter (§7).
     doc = await _TranscriptDoc.find_one(
@@ -485,11 +487,11 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
     """Fetch a transcript, persist the blob + row.
 
     Resolution order:
-      1. **Vexa bot recording** — if we sent a bot to this meeting, ask
-         Vexa's ``/recordings`` for the captured transcript.
+      1. **Recall.ai bot recording** — if we dispatched a bot to this
+         meeting, pull the captured transcript from Recall.ai.
       2. **Provider native REST fallback** — Zoom/Meet REST API, useful
          when the host enabled in-meeting transcription themselves and
-         no bot was needed (or as a fallback when Vexa is down).
+         no bot was needed (or as a fallback when Recall.ai is down).
 
     Returns the ``MeetingTranscript`` doc on success, ``None`` when
     no transcript exists yet from either source. Caller should retry.
@@ -516,22 +518,22 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
     if meeting is None:
         raise NotFound("meeting", meeting_id)
 
-    # Layer 1 — Vexa bot recording. Only attempt when we previously
-    # requested a bot for this meeting (raw_provider_payload has the
-    # ``vexa`` correlation block).
+    # Layer 1 — Recall.ai bot recording. Only attempt when we previously
+    # dispatched a bot for this meeting (raw_provider_payload has the
+    # ``recall`` correlation block).
     text = ""
     payload = meeting.raw_provider_payload or {}
-    if payload.get("vexa"):
+    if payload.get("recall"):
         try:
-            from ee.cloud.meetings import bot_coordinator
+            from ee.cloud.meetings import recall_client
 
-            vexa_vtt = await bot_coordinator.fetch_transcript_vtt(workspace_id, str(meeting.id))
-            if vexa_vtt:
-                text = vexa_vtt
-                logger.info("transcript source=vexa_bot for meeting=%s", meeting_id)
+            recall_vtt = await recall_client.fetch_transcript_vtt(workspace_id, str(meeting.id))
+            if recall_vtt:
+                text = recall_vtt
+                logger.info("transcript source=recall_bot for meeting=%s", meeting_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Vexa transcript fetch failed for meeting=%s — falling back to provider: %s",
+                "Recall transcript fetch failed for meeting=%s — falling back to provider: %s",
                 meeting_id,
                 exc,
             )
@@ -624,6 +626,27 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
         },
     )
     return transcript
+
+
+async def ingest_transcript_for_recall_bot(bot_id: str) -> bool:
+    """Webhook entry point — fetch + store the transcript for a Recall bot.
+
+    The inbound Recall.ai webhook (``webhooks.py``) has no workspace
+    context, so this resolves the meeting from the correlated ``bot_id``
+    and derives the workspace from the matched row. Idempotent: safe for
+    Recall to retry. Returns ``True`` when a transcript was stored,
+    ``False`` when the bot is unknown or the transcript isn't ready yet.
+    """
+    if not bot_id:
+        return False
+    # global-read: inbound webhook is cross-tenant; the workspace is
+    # derived from the matched meeting row, then enforced downstream.
+    doc = await _MeetingDoc.find_one({"raw_provider_payload.recall.bot_id": bot_id})
+    if doc is None:
+        logger.info("Recall webhook for unknown bot=%s — ignoring", bot_id)
+        return False
+    result = await fetch_and_store_transcript(doc.workspace, str(doc.id))
+    return result is not None
 
 
 # Tiny helper for cheap speaker-counting in VTT.

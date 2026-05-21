@@ -203,16 +203,15 @@ async def _search_meetings_handler(args: dict) -> dict:
 
 
 async def _send_bot_handler(args: dict) -> dict:
-    """Ask the bot service to join a meeting and capture audio + transcript.
+    """Dispatch a Recall.ai bot to a meeting to capture audio + transcript.
 
     Two-step flow that pairs with ``schedule_meeting``:
       1. Agent calls ``schedule_meeting`` → user gets the join URL.
-      2. Agent calls ``send_bot_to_meeting`` → the bot service spawns a
-         worker, which joins the meeting URL, streams audio to Deepgram,
-         and POSTs the assembled transcript back to the backend.
+      2. Agent calls ``send_bot_to_meeting`` → Recall.ai sends a bot to
+         the meeting URL; it records and transcribes the call.
 
-    The bot service must be reachable (``POCKETPAW_BOT_SERVICE_URL``)
-    and the shared HMAC secret must match on both sides.
+    Recall.ai must be configured (``RECALL_API_KEY``). The transcript is
+    pushed back via webhook and is also fetchable on demand.
     """
     workspace_id, _ = _identity()
     if not workspace_id:
@@ -223,10 +222,10 @@ async def _send_bot_handler(args: dict) -> dict:
         return _error_response("meeting_id is required (string)")
 
     from ee.cloud._core.errors import CloudError
-    from ee.cloud.meetings import bot_coordinator
+    from ee.cloud.meetings import recall_client
 
     try:
-        payload = await bot_coordinator.request_bot_for_meeting(workspace_id, meeting_id)
+        payload = await recall_client.request_bot_for_meeting(workspace_id, meeting_id)
     except CloudError as exc:
         return _error_response(f"{exc.code}: {exc.message}")
     except Exception as exc:  # noqa: BLE001
@@ -367,14 +366,14 @@ def build_meetings_context_server() -> tuple[str, Any] | None:
     @tool(
         "send_bot_to_meeting",
         (
-            "Send the PocketPaw bot to a meeting to capture audio and "
+            "Send a Recall.ai bot to a meeting to capture audio and "
             "produce a transcript. Use this AFTER ``schedule_meeting`` "
             "when the user wants the meeting recorded / transcribed — "
             "e.g. 'schedule a Zoom for 3pm AND record it', or 'send the "
-            "bot to my next meeting'. Bot joins the meeting URL, streams "
-            "audio to Deepgram, and the transcript becomes available via "
+            "bot to my next meeting'. The bot joins the meeting URL, "
+            "records the call, and the transcript becomes available via "
             "``find_meeting_transcript`` once the meeting ends. Returns "
-            "the ``bot_id`` for tracking and a ``status`` of 'queued'."
+            "the ``bot_id`` for tracking and the bot's current ``status``."
         ),
         {"meeting_id": str},
     )

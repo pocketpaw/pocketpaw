@@ -335,7 +335,7 @@ async def test_send_bot_requires_meeting_id(chat_identity):
 
 
 async def test_send_bot_happy_path(chat_identity, monkeypatch):
-    """Handler calls bot_coordinator and returns {ok, bot_id, status}."""
+    """Handler calls recall_client and returns {ok, bot_id, status}."""
     import json
 
     captured: dict = {}
@@ -346,7 +346,7 @@ async def test_send_bot_happy_path(chat_identity, monkeypatch):
         return {"bot_id": "bot-abc-123", "meeting_id": meeting_id, "status": "queued"}
 
     monkeypatch.setattr(
-        "ee.cloud.meetings.bot_coordinator.request_bot_for_meeting",
+        "ee.cloud.meetings.recall_client.request_bot_for_meeting",
         _fake_request_bot,
     )
 
@@ -362,13 +362,13 @@ async def test_send_bot_happy_path(chat_identity, monkeypatch):
 
 
 async def test_send_bot_surfaces_cloud_errors(chat_identity, monkeypatch):
-    """Coordinator failure (e.g. bot service down) surfaces as MCP error."""
+    """Recall.ai failure (e.g. missing API key) surfaces as MCP error."""
     from ee.cloud._core.errors import ValidationError
 
     async def _broken(workspace_id, meeting_id):
         raise ValidationError("meeting.bot_secret_missing", "bot service disabled")
 
-    monkeypatch.setattr("ee.cloud.meetings.bot_coordinator.request_bot_for_meeting", _broken)
+    monkeypatch.setattr("ee.cloud.meetings.recall_client.request_bot_for_meeting", _broken)
 
     result = await _send_bot_handler({"meeting_id": "m1"})
     assert result["is_error"] is True

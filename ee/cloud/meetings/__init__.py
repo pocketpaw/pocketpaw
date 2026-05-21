@@ -5,5 +5,6 @@
 from __future__ import annotations
 
 from ee.cloud.meetings.router import router
+from ee.cloud.meetings.webhooks import router as webhooks_router
 
-__all__ = ["router"]
+__all__ = ["router", "webhooks_router"]

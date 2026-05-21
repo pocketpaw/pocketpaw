@@ -6,13 +6,13 @@
 #   the blob, indexes into KB. Idempotent and cheap; safe to run on a
 #   nightly cron AND on first-of-day startup.
 #
-# Webhooks were considered and rejected (see
-# docs/plans/2026-05-19-meetings-integration-design.md §Section 5 update):
-# Meet's Pub/Sub setup is painful, Zoom transcripts have inherent latency
-# anyway, and the on-demand fetch path covers the agent's actual usage.
-# This batch only exists so cross-meeting search ('what did we discuss
-# with Acme last week?') hits cached/indexed transcripts instead of
-# fanning out per-meeting fetches on every query.
+# Recall.ai pushes `transcript.done` to our webhook (meetings/webhooks.py),
+# so in the common case transcripts land without this batch running. The
+# batch is the safety net: it catches webhooks missed during a deploy,
+# meetings transcribed by the provider with no bot dispatched, and keeps
+# cross-meeting search ('what did we discuss with Acme last week?')
+# hitting cached/indexed transcripts instead of fanning out per-meeting
+# fetches on every query.
 
 from __future__ import annotations
 

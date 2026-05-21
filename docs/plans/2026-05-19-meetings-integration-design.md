@@ -2,6 +2,18 @@
 
 **Status:** Draft — design session 2026-05-19 with @prakash. Phases 1–2 designed in full; phase 3 (live-tier) deferred.
 **Date:** 2026-05-19
+
+> **Update 2026-05-21 — meeting-bot pivoted to Recall.ai.** The in-meeting
+> recording/transcription tier no longer uses the short-lived Vexa
+> integration (or the earlier in-tree `meeting-bot/` service, both now
+> removed). It uses [Recall.ai](https://recall.ai), a hosted bot API, via
+> `ee/cloud/meetings/recall_client.py`. Transcripts are pushed back through
+> the Svix-signed webhook at `ee/cloud/meetings/webhooks.py` and remain
+> fetchable on demand. This supersedes the "Recall.ai rejected" row in
+> *Decisions locked* and the webhook-rejection note in Section 5; the rest
+> of the design (BYO Zoom/Meet creds for meeting *lifecycle*, the adapters,
+> the data model) is unchanged. The Recall API key is a single operator
+> credential, separate from the per-tenant BYO provider creds.
 **Branch:** `feat/meetings-integration` (off `ee`)
 **Scope:** `backend/` only. Adds Google Meet + Zoom as native integrations under `ee/cloud/meetings/` plus two connector adapters in `src/pocketpaw/connectors/adapters/`. Paw-enterprise gets a new Integrations → Meetings settings page.
 

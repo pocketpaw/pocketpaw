@@ -130,6 +130,7 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.cycles.router import router as cycles_router
     from ee.cloud.license import get_license_info
     from ee.cloud.meetings.router import router as meetings_router
+    from ee.cloud.meetings.webhooks import router as meetings_webhooks_router
     from ee.cloud.planner.router import router as planner_router
     from ee.cloud.pockets.router import router as pockets_router
     from ee.cloud.projects.router import router as projects_router
@@ -150,6 +151,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
+    # Inbound Recall.ai webhook — no auth dependency (Svix-signed instead).
+    app.include_router(meetings_webhooks_router, prefix="/api/v1")
 
     # Phase 1 PR-8: register the connector bus listener so local-mode
     # CLI actions (firebase, gcp, …) get picked up by the in-process
