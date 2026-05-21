@@ -44,7 +44,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # How long to wait (seconds) after the last participant leaves before ending
-_CALL_END_GRACE_SECONDS = 30
+_CALL_END_GRACE_SECONDS = 5
+
+# How often (seconds) to poll room state
+_MONITOR_POLL_INTERVAL = 5
 
 
 # ---------------------------------------------------------------------------
@@ -497,31 +500,46 @@ class CallMeetingAgent:
         while self._running:
             try:
                 info = await get_room_info(self.group_id)
-                participant_count = info["participant_count"] if info else 0
 
-                # Track participant identities from room info
+                # Count human participants only (exclude the call-bot agent
+                # itself, since the agent is always in the room as long as
+                # this subprocess is alive).
+                human_count = 0
                 if info and info.get("participants"):
                     for p in info["participants"]:
                         pid = p.get("identity", "")
                         if pid and pid != "call-bot":
+                            human_count += 1
                             self._participant_identities.add(pid)
 
-                if participant_count == 0:
+                if human_count == 0:
                     if empty_since is None:
                         empty_since = time.time()
                         logger.info(
-                            "Room %s is empty, will end in %ds",
+                            "Room %s has no human participants, will end in %ds",
                             self.room_name,
                             _CALL_END_GRACE_SECONDS,
                         )
                     elif time.time() - empty_since > _CALL_END_GRACE_SECONDS:
                         logger.info(
-                            "Room %s has been empty for %ds, ending call",
+                            "Room %s has been empty of humans for %ds, ending call",
                             self.room_name,
                             _CALL_END_GRACE_SECONDS,
                         )
-                        await self.stop()
-                        # Clean up the LiveKit room
+                        # Disconnect the agent from the room, then clean up.
+                        # NOTE: do NOT call self.stop() here — stop() cancels
+                        # _monitor_task, which is the current task, causing a
+                        # self-cancellation that prevents _cleanup_room() from
+                        # ever running.
+                        await self._disconnect_rtc()
+                        self._running = False
+                        if self._transcribe_task:
+                            self._transcribe_task.cancel()
+                            try:
+                                await self._transcribe_task
+                            except asyncio.CancelledError:
+                                pass
+                        await self._finalize_notes()
                         await self._cleanup_room()
                         return
                 else:
@@ -534,10 +552,10 @@ class CallMeetingAgent:
                     exc,
                 )
                 if "not found" in str(exc).lower() or "does not exist" in str(exc).lower():
-                    await self.stop()
+                    self._running = False
                     return
 
-            await asyncio.sleep(30)
+            await asyncio.sleep(_MONITOR_POLL_INTERVAL)
 
     async def _cleanup_room(self) -> None:
         """Delete the LiveKit room after a natural call end."""
