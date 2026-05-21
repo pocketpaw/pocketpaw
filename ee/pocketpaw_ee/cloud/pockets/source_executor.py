@@ -3,13 +3,17 @@
 #   pocket's `rippleSpec.sources` against the pocket's single configured
 #   backend and returns the JSON results. Read-only (GET) only — write
 #   bindings land in RFC 04 Milestone 2.
+# Updated: 2026-05-21 (PR #1177 security pass) — basic auth now base64-encodes
+#   the `user:pass` credential; the rate limiter is keyed per (pocket, user)
+#   and guarded by an asyncio.Lock; imports the public `host_is_internal`;
+#   `run_sources` writes an audit-log entry for every run.
 #
 # SSRF BOUNDARY. This module is the ONLY pocket-domain module that makes
 # outbound HTTP. Every defense from the locked security review is enforced
 # here: strict base-URL re-validation, path-traversal rejection, same-host
 # assertion after URL join, DNS rebinding check, no redirect following,
 # tight timeouts, a 512 KB response cap, error-message sanitization, and a
-# per-pocket rate limit.
+# per-(pocket, user) rate limit.
 #
 # IMPORT-LINTER: must NOT import `pocketpaw_ee.cloud.models.*`. The executor
 # receives base_url / auth / spec by parameter only — `pockets/service.py`
@@ -18,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import logging
 import socket
@@ -28,21 +33,26 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from pocketpaw.security.url_validators import _host_is_internal, validate_external_url_strict
+from pocketpaw.security.url_validators import host_is_internal, validate_external_url_strict
 
 logger = logging.getLogger(__name__)
 
 # --- limits / policy --------------------------------------------------------
 _PER_SOURCE_TIMEOUT_S = 10.0
 _MAX_RESPONSE_BYTES = 524_288  # 512 KB (D11)
-_RATE_LIMIT_MAX = 10  # runs per window per pocket (D16)
+_RATE_LIMIT_MAX = 10  # runs per window per (pocket, user) (D16)
 _RATE_LIMIT_WINDOW_S = 60.0
 _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)  # D10
 
-# Per-pocket run timestamps for the rate limiter. In-memory is fine for the
-# alpha — a single process owns the run endpoint. M3 moves this to a shared
-# store when refresh-cost controls land.
-_run_log: dict[str, list[float]] = {}
+# Per-(pocket, user) run timestamps for the rate limiter. Keyed on both so a
+# single member cannot exhaust another member's budget on a shared pocket.
+# In-memory is fine for the alpha — a single process owns the run endpoint.
+# M3 moves this to a shared store when refresh-cost controls land.
+_run_log: dict[tuple[str, str], list[float]] = {}
+
+# Guards the check-and-record on ``_run_log``. The read-filter-write is a
+# TOCTOU race under ``asyncio.gather``; the lock makes it atomic.
+_run_log_lock = asyncio.Lock()
 
 # Default refresh policy for a source that omits ``refresh``.
 _DEFAULT_REFRESH: list[Literal["pocket_open", "manual"]] = ["pocket_open"]
@@ -72,25 +82,60 @@ def _normalize_bind(bind: str) -> str:
     return bind[len("state.") :] if bind.startswith("state.") else bind
 
 
-def _rate_limited(pocket_id: str) -> bool:
-    """Return True when ``pocket_id`` has used its run budget for the window.
+async def _rate_limited(pocket_id: str, user_id: str) -> bool:
+    """Return True when ``(pocket_id, user_id)`` has used its run budget.
 
-    Records the call timestamp when it returns False (call permitted).
+    Records the call timestamp when it returns False (call permitted). The
+    check-and-record runs under ``_run_log_lock`` so concurrent runs cannot
+    race past the limit (TOCTOU under ``asyncio.gather``).
     """
+    key = (pocket_id, user_id)
     now = time.monotonic()
     window_start = now - _RATE_LIMIT_WINDOW_S
-    stamps = [t for t in _run_log.get(pocket_id, []) if t >= window_start]
-    if len(stamps) >= _RATE_LIMIT_MAX:
-        _run_log[pocket_id] = stamps
-        return True
-    stamps.append(now)
-    _run_log[pocket_id] = stamps
-    return False
+    async with _run_log_lock:
+        stamps = [t for t in _run_log.get(key, []) if t >= window_start]
+        if len(stamps) >= _RATE_LIMIT_MAX:
+            _run_log[key] = stamps
+            return True
+        stamps.append(now)
+        _run_log[key] = stamps
+        return False
 
 
 def _strip_query(url: str) -> str:
     """Return ``url`` with query string and fragment removed — safe to log."""
     return urllib.parse.urlsplit(url)._replace(query="", fragment="").geturl()
+
+
+def _audit_source_run(
+    *, actor: str, pocket_id: str, status: str, base_url: str, ran: int, errors: int
+) -> None:
+    """Write an audit-log entry for a source run.
+
+    Mirrors ``pockets/service.py:_audit_backend_config`` — same audit path,
+    category ``pocket_backend_config``, severity WARNING. The token is NEVER
+    passed; ``base_url`` is query-stripped before it is logged. Audit
+    failures must not break the run, so the call is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action="pocket.sources.run",
+                target=pocket_id,
+                status=status,
+                category="pocket_backend_config",
+                pocket_id=pocket_id,
+                base_url=_strip_query(base_url),
+                ran=ran,
+                errors=errors,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the run
+        logger.warning("pocket source-run audit-log write failed", exc_info=True)
 
 
 class _SourceError(Exception):
@@ -144,7 +189,7 @@ async def _assert_host_external(hostname: str) -> None:
         ip = str(info[4][0])
         # strip a zone id (fe80::1%eth0) before parsing
         ip = ip.split("%", 1)[0]
-        if _host_is_internal(ip):
+        if host_is_internal(ip):
             raise _SourceError("backend host resolves to an internal address", code="bad_host")
         try:
             addr = ipaddress.ip_address(ip)
@@ -159,13 +204,17 @@ def _auth_headers(auth_type: str, auth_header: str | None, token: str) -> dict[s
 
     ``none`` adds no header. Unknown types are treated as ``none`` —
     the DTO Literal already constrains the wire input.
+
+    For ``basic`` the stored token is the raw ``user:pass`` credential; it
+    is base64-encoded here to form a valid ``Authorization: Basic`` header.
     """
     if auth_type == "bearer":
         return {"Authorization": f"Bearer {token}"}
     if auth_type == "api_key":
         return {(auth_header or "X-Api-Key"): token}
     if auth_type == "basic":
-        return {"Authorization": f"Basic {token}"}
+        encoded = base64.b64encode(token.encode()).decode()
+        return {"Authorization": f"Basic {encoded}"}
     return {}
 
 
@@ -257,6 +306,7 @@ async def _run_one(
 async def run_sources(
     *,
     pocket_id: str,
+    user_id: str,
     ripple_spec: dict,
     base_url: str,
     auth_type: str,
@@ -275,12 +325,23 @@ async def run_sources(
     The executor is pure: it fetches and returns. It does NOT persist to the
     Pocket document and does NOT emit ``pocket_mutation`` — hydrated state is
     delivered in the HTTP response body of the calling route.
+
+    ``user_id`` keys the rate limiter (per pocket *and* per user) and is the
+    actor on the audit-log entry written for every run.
     """
-    # D16 — per-pocket rate limit. On breach, return a source-level error
-    # for every selected source without making any call.
-    if _rate_limited(pocket_id):
+    # D16 — per-(pocket, user) rate limit. On breach, return a source-level
+    # error for every selected source without making any call.
+    if await _rate_limited(pocket_id, user_id):
         bindings, parse_errors = _parse_bindings(ripple_spec)
         selected = _select_sources(bindings, trigger=trigger, only_source=only_source)
+        _audit_source_run(
+            actor=user_id,
+            pocket_id=pocket_id,
+            status="rate-limited",
+            base_url=base_url,
+            ran=0,
+            errors=len(parse_errors) + len(selected),
+        )
         return {
             "ran": [],
             "errors": parse_errors
@@ -292,7 +353,18 @@ async def run_sources(
 
     # D6/D15 — re-validate the base URL at call time even though config-time
     # validation already ran. Defense in depth against a tampered row.
-    validate_external_url_strict(base_url)
+    try:
+        validate_external_url_strict(base_url)
+    except ValueError:
+        _audit_source_run(
+            actor=user_id,
+            pocket_id=pocket_id,
+            status="rejected",
+            base_url=base_url,
+            ran=0,
+            errors=0,
+        )
+        raise
 
     bindings, parse_errors = _parse_bindings(ripple_spec)
     selected = _select_sources(bindings, trigger=trigger, only_source=only_source)
@@ -302,6 +374,14 @@ async def run_sources(
     errors: list[dict] = list(parse_errors)
 
     if not selected:
+        _audit_source_run(
+            actor=user_id,
+            pocket_id=pocket_id,
+            status="success",
+            base_url=base_url,
+            ran=0,
+            errors=len(errors),
+        )
         return {"ran": ran, "errors": errors}
 
     # D9 — redirects disabled. D10 — tight timeouts.
@@ -347,6 +427,14 @@ async def run_sources(
         else:
             ran.append(result)
 
+    _audit_source_run(
+        actor=user_id,
+        pocket_id=pocket_id,
+        status="success",
+        base_url=base_url,
+        ran=len(ran),
+        errors=len(errors),
+    )
     return {"ran": ran, "errors": errors}
 
 

@@ -1,4 +1,9 @@
-"""Cloud document models — re-exports for Beanie init."""
+"""Cloud document models — re-exports for Beanie init.
+
+Updated: 2026-05-21 (PR #1177 security pass) — dropped PocketBackendCredential
+from ``__all__`` so it cannot be star-imported into routers/DTOs/domains; it
+remains registered in ``get_all_documents()`` for Beanie init.
+"""
 
 from __future__ import annotations
 
@@ -62,7 +67,6 @@ __all__ = [
     "PlanSession",
     "PlanSessionAgentGap",
     "Pocket",
-    "PocketBackendCredential",
     "Project",
     "Reaction",
     "ReadState",

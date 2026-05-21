@@ -17,6 +17,12 @@ backend binding + read-only source-run feature:
     PUT  /pockets/{id}/backend       — bind a pocket to one backend
     GET  /pockets/{id}/backend       — read the binding summary (no token)
     POST /pockets/{id}/sources/run   — run the spec's read-only GET sources
+
+Updated: 2026-05-21 (PR #1177 security pass) — added the missing
+DELETE /pockets/{id}/backend route so a configured credential can be
+revoked; the GET route now requires pocket edit access (owner/editor),
+matching the PUT route; the source-run route threads user_id into the
+executor for per-user rate limiting + audit logging.
 """
 
 from __future__ import annotations
@@ -260,7 +266,7 @@ async def set_pocket_backend(
     return PocketBackendConfigResponse(**result)
 
 
-@router.get("/{pocket_id}/backend")
+@router.get("/{pocket_id}/backend", dependencies=[Depends(require_pocket_edit)])
 async def get_pocket_backend(
     pocket_id: str,
     workspace_id: str = Depends(current_workspace_id),
@@ -268,8 +274,8 @@ async def get_pocket_backend(
 ) -> PocketBackendConfigResponse:
     """Read this pocket's backend binding summary. Never returns the token.
 
-    Read access mirrors ``get_pocket`` — the service load 404s if the
-    pocket is missing or the caller cannot see it. A 404 here also means
+    Requires pocket **edit** access — backend config metadata is
+    owner/editor-facing, consistent with the PUT route. A 404 here means
     "no backend configured" for this pocket.
     """
     # Mirror get_pocket's access check before exposing the binding.
@@ -278,6 +284,25 @@ async def get_pocket_backend(
     if result is None:
         raise CloudError(404, "pocket_backend.not_found", "No backend configured for this pocket")
     return PocketBackendConfigResponse(**result)
+
+
+@router.delete(
+    "/{pocket_id}/backend",
+    status_code=204,
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def delete_pocket_backend(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Revoke this pocket's backend binding — deletes the stored credential.
+
+    Requires pocket **owner** access. Idempotent: a pocket with no backend
+    configured still returns 204.
+    """
+    await pockets_service.remove_pocket_backend(workspace_id, user_id, pocket_id)
+    return Response(status_code=204)
 
 
 @router.post("/{pocket_id}/sources/run")
@@ -289,9 +314,17 @@ async def run_pocket_sources(
 ) -> dict:
     """Run the pocket's read-only ``rippleSpec.sources`` against its backend.
 
-    Read access mirrors ``get_pocket``. The hydrated state is returned in
-    THIS response body — there is no ``pocket_mutation`` SSE emit, because
-    the run endpoint is a standalone REST call outside any SSE stream.
+    Read access mirrors ``get_pocket`` — deliberately NOT gated on edit
+    access. Any pocket reader may run already-authored sources: that is the
+    core shared-live-pocket UX, where a viewer triggers the ``pocket_open``
+    refresh of a shared dashboard. A viewer cannot change the backend or the
+    source paths (both are edit-only), so the SSRF hardening in
+    ``source_executor`` plus the immutable, edit-authored source list bound
+    the risk to "fetch the same GET bindings the editors already approved".
+
+    The hydrated state is returned in THIS response body — there is no
+    ``pocket_mutation`` SSE emit, because the run endpoint is a standalone
+    REST call outside any SSE stream.
     """
     pocket = await pockets_service.get(pocket_id, user_id)
     ripple_spec = pocket.get("rippleSpec") or {}
@@ -310,6 +343,7 @@ async def run_pocket_sources(
     # no-event: source hydration is response-body delivery, not persisted
     return await source_executor.run_sources(
         pocket_id=pocket_id,
+        user_id=user_id,
         ripple_spec=ripple_spec,
         base_url=base_url,
         auth_type=auth_type,

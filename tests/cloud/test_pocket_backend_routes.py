@@ -1,15 +1,20 @@
 # tests/cloud/test_pocket_backend_routes.py — RFC 04 alpha.
-# Created: 2026-05-21 — Integration coverage for the three pocket-backend
-# routes added to the pockets router:
+# Created: 2026-05-21 — Integration coverage for the pocket-backend routes
+# added to the pockets router:
 #
-#   PUT  /pockets/{id}/backend
-#   GET  /pockets/{id}/backend
-#   POST /pockets/{id}/sources/run
+#   PUT    /pockets/{id}/backend
+#   GET    /pockets/{id}/backend
+#   DELETE /pockets/{id}/backend
+#   POST   /pockets/{id}/sources/run
 #
 # The service functions and the source executor are monkeypatched so the
 # tests pin the route wiring (request body parsing, status codes, response
 # shape) without a Mongo connection or real outbound HTTP. Auth + license
 # guards are overridden — same pattern as test_pocket_layout_routes.py.
+#
+# Updated: 2026-05-21 (PR #1177 security pass) — added coverage for the
+# DELETE route, the edit-access guard on GET, and the user_id thread-through
+# on the source-run route.
 
 from __future__ import annotations
 
@@ -137,6 +142,66 @@ def test_get_backend_404_when_unconfigured(monkeypatch, client):
     assert res.status_code == 404
 
 
+def test_get_backend_forbidden_for_non_editor(monkeypatch):
+    """SHOULD-FIX-1 — a viewer (no edit access) gets 403, not the binding."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    a = FastAPI()
+    add_error_handler(a)
+    a.include_router(router)
+    a.dependency_overrides[require_license] = lambda: None
+    a.dependency_overrides[require_pocket_owner] = lambda: None
+    a.dependency_overrides[current_user_id] = lambda: FAKE_USER
+    a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
+
+    def _deny_edit():
+        raise Forbidden("pocket.forbidden", "edit access required")
+
+    a.dependency_overrides[require_pocket_edit] = _deny_edit
+
+    res = TestClient(a).get("/pockets/pocket-1/backend")
+    assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# DELETE /pockets/{id}/backend
+# ---------------------------------------------------------------------------
+
+
+def test_delete_backend_revokes(monkeypatch, client):
+    captured = {}
+
+    async def _remove(workspace_id, user_id, pocket_id):
+        captured.update(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+
+    monkeypatch.setattr(pockets_service, "remove_pocket_backend", _remove)
+
+    res = client.delete("/pockets/pocket-1/backend")
+    assert res.status_code == 204, res.text
+    assert res.content == b""
+    assert captured == {
+        "workspace_id": FAKE_WORKSPACE,
+        "user_id": FAKE_USER,
+        "pocket_id": "pocket-1",
+    }
+
+
+def test_delete_backend_idempotent_when_unconfigured(monkeypatch, client):
+    """remove_pocket_backend is a no-op on a pocket with no credential —
+    the route still returns 204."""
+
+    async def _remove(workspace_id, user_id, pocket_id):
+        return None  # service no-ops when there is no row
+
+    monkeypatch.setattr(pockets_service, "remove_pocket_backend", _remove)
+
+    res = client.delete("/pockets/pocket-with-no-backend/backend")
+    assert res.status_code == 204
+
+
 # ---------------------------------------------------------------------------
 # POST /pockets/{id}/sources/run
 # ---------------------------------------------------------------------------
@@ -169,11 +234,12 @@ def test_run_sources_happy_path(monkeypatch, client):
     body = res.json()
     assert body["ran"][0]["bind"] == "prs"
     assert body["errors"] == []
-    # The route passed the spec + creds + trigger through.
+    # The route passed the spec + creds + trigger + identity through.
     assert captured["ripple_spec"] == spec
     assert captured["base_url"] == "https://api.example.com"
     assert captured["token"] == "tok"
     assert captured["trigger"] == "manual"
+    assert captured["user_id"] == FAKE_USER
 
 
 def test_run_sources_400_when_no_backend(monkeypatch, client):

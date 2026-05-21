@@ -6,6 +6,10 @@ Created: 2026-05-21 (RFC 04 alpha) — documents the per-pocket backend
 binding + read-only source-run endpoints. The rest of the cloud pockets
 API is described in the auto-generated wiki article
 `ee/docs/wiki/pockets-router-*.md`.
+
+Updated: 2026-05-21 (PR #1177 security pass) — documented the new
+DELETE /pockets/{id}/backend endpoint and the edit-access requirement on
+GET /pockets/{id}/backend.
 -->
 
 # Cloud REST API Reference
@@ -46,10 +50,15 @@ Response `200`:
 The token is never echoed back. A non-https or internal `base_url` yields
 a `400`.
 
+For `basic` auth, send `auth_token` as the raw `user:pass` credential —
+the server base64-encodes it into the `Authorization: Basic` header. Do
+not pre-encode it yourself.
+
 ### `GET /pockets/{pocket_id}/backend`
 
-Read the pocket's backend binding summary. Read access mirrors
-`GET /pockets/{pocket_id}`.
+Read the pocket's backend binding summary. Requires pocket **edit** access
+(owner or editor) — backend config metadata is owner/editor-facing,
+consistent with the `PUT` route. Viewers receive a `403`.
 
 Response `200`:
 
@@ -60,10 +69,23 @@ Response `200`:
 Returns `404` when the pocket has no backend configured. The token is
 never included in the response.
 
+### `DELETE /pockets/{pocket_id}/backend`
+
+Revoke the pocket's backend binding — deletes the stored (encrypted)
+credential. Requires pocket **owner** access.
+
+Returns `204 No Content`. Idempotent: deleting when no backend is
+configured still returns `204`. The removal is written to the audit log.
+
 ### `POST /pockets/{pocket_id}/sources/run`
 
 Run the pocket's read-only `rippleSpec.sources` (GET bindings) against its
-configured backend. Read access mirrors `GET /pockets/{pocket_id}`.
+configured backend. Read access mirrors `GET /pockets/{pocket_id}` —
+deliberately **not** gated on edit access. Any pocket reader may run the
+already-authored sources: a viewer of a shared live pocket triggering the
+`pocket_open` refresh is the core shared-dashboard UX. A viewer cannot
+change the backend or the source paths (both are edit-only), so the SSRF
+hardening plus the immutable, edit-authored source list bound the risk.
 
 Request body (all fields optional):
 
@@ -99,4 +121,6 @@ Returns `400` when the pocket has no backend configured.
 the base URL, rejects absolute-URL paths / `..` traversal / cross-host
 joins, runs a DNS check against internal IPs, disables redirects, applies
 tight timeouts, caps response bodies at 512 KB, sanitizes error messages,
-and rate-limits to 10 runs per pocket per minute.
+and rate-limits to 10 runs per `(pocket, user)` pair per minute. Every run
+is written to the audit log (actor, pocket, status, query-stripped base
+URL) — the credential token is never logged.

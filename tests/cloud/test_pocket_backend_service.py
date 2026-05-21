@@ -3,6 +3,9 @@
 # binding: set / get / get-for-executor / remove. Exercises the real
 # Beanie path against the in-memory mongomock-motor DB (mongo_db fixture).
 #
+# Updated: 2026-05-21 (PR #1177 security pass) — added coverage that
+# remove_pocket_backend writes an audit-log entry.
+#
 # What this pins:
 #   - set_pocket_backend then get_pocket_backend returns configured:true
 #     and the right base_url/auth_type — never the token.
@@ -10,7 +13,7 @@
 #   - get_pocket_backend_for_executor decrypts the token round-trip.
 #   - set_pocket_backend upserts (a second call updates, not duplicates).
 #   - set_pocket_backend rejects a non-https / internal base URL.
-#   - remove_pocket_backend deletes the row and is idempotent.
+#   - remove_pocket_backend deletes the row, is idempotent, and audit-logs.
 
 from __future__ import annotations
 
@@ -189,3 +192,35 @@ async def test_remove_backend(mongo_db):
 
     # Idempotent — removing again does not raise.
     await pockets_service.remove_pocket_backend("w1", "u1", "pocket-1")
+
+
+async def test_remove_backend_audit_logs(mongo_db, monkeypatch):
+    """remove_pocket_backend writes an audit entry for the revocation."""
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="bearer",
+        auth_token="secret-token",
+    )
+
+    logged: list = []
+
+    class _FakeLogger:
+        def log(self, event):
+            logged.append(event)
+
+    import pocketpaw.security.audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "get_audit_logger", lambda: _FakeLogger())
+
+    await pockets_service.remove_pocket_backend("w1", "u1", "pocket-1")
+
+    assert len(logged) == 1
+    event = logged[0]
+    assert event.actor == "u1"
+    assert event.action == "pocket.backend.remove"
+    assert event.target == "pocket-1"
+    # The token is never part of the audit entry.
+    assert "secret-token" not in str(event.context)
