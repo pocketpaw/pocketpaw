@@ -30,7 +30,7 @@ from pocketpaw.agents.backend import BackendInfo, BaseAgentBackend, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.security.rails import is_substring_blocked
-from pocketpaw.tools.policy import ToolPolicy
+from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +40,6 @@ _DEFAULT_IDENTITY = (
 )
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
-
-# Built-in in-process MCP servers that are opt-in, not ambient. A server
-# named here registers only when the agent's tool policy explicitly opts
-# in (``ToolPolicy.is_mcp_server_explicitly_allowed``); every other
-# in-process server stays allow-by-default. AgentPool turns a cloud
-# agent's ``tools`` entries into the policy's ``mcp_servers_allow`` set —
-# keep this consistent with ``pool._BUILTIN_MCP_SERVER_TOKENS``.
-_OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
 
 
 class ClaudeSDKBackend(BaseAgentBackend):
@@ -552,7 +544,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # them register on every agent run. The planner is the exception —
         # it is *opt-in, not ambient*. Most agent runs never plan a
         # project, and carrying the ``plan_project`` schema in every
-        # context is dead weight. For a server in ``_OPT_IN_MCP_SERVERS``
+        # context is dead weight. For a server in ``OPT_IN_MCP_SERVERS``
         # the loop uses ``is_mcp_server_explicitly_allowed``, which
         # registers it only when the policy's ``mcp_servers_allow`` set
         # names it. AgentPool builds that set from the cloud agent's
@@ -569,7 +561,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             if built is None:
                 continue
             name, cfg_entry = built
-            if name in _OPT_IN_MCP_SERVERS:
+            if name in OPT_IN_MCP_SERVERS:
                 if not self._policy.is_mcp_server_explicitly_allowed(name):
                     logger.debug(
                         "MCP server '%s' not registered — agent has not opted "
@@ -918,7 +910,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 for tool_id in tool_ids:
                     parts = tool_id.split("__")
                     server = parts[1] if len(parts) >= 3 and parts[0] == "mcp" else ""
-                    if server in _OPT_IN_MCP_SERVERS and not (
+                    if server in OPT_IN_MCP_SERVERS and not (
                         self._policy.is_mcp_server_explicitly_allowed(server)
                     ):
                         continue

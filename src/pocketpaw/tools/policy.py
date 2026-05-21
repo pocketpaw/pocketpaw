@@ -13,7 +13,9 @@ Updated: 2026-05-21 — Added ``is_mcp_server_explicitly_allowed`` so built-in
   than ambient. The opt-in is driven by a dedicated ``mcp_servers_allow``
   frozenset, kept orthogonal to ``tools_allow``: putting an ``mcp:*`` entry
   in ``tools_allow`` would make ``_allowed_set`` non-empty and flip the
-  policy into allow-list mode, silently disabling every other tool.
+  policy into allow-list mode, silently disabling every other tool. Also
+  added ``OPT_IN_MCP_SERVERS`` — the single source of truth for which
+  in-process servers are opt-in, imported by AgentPool and ClaudeSDKBackend.
 
 Inspired by OpenClaw's tool-policy.ts.
 """
@@ -78,6 +80,20 @@ TOOL_PROFILES: dict[str, dict] = {
     },
     "full": {},  # No restrictions — everything allowed
 }
+
+# ---------------------------------------------------------------------------
+# Opt-in in-process MCP servers
+# ---------------------------------------------------------------------------
+# Built-in in-process MCP servers that are opt-in, not ambient. Every other
+# in-process server registers under allow-by-default policy; a server named
+# here registers only when the agent's tool policy explicitly opts in via
+# ``is_mcp_server_explicitly_allowed`` (backed by ``mcp_servers_allow``).
+#
+# Single source of truth for the opt-in set. ``AgentPool._build`` reads it to
+# turn a cloud agent's ``tools`` entries into ``mcp_servers_allow``, and
+# ``ClaudeSDKBackend`` reads it to gate both server registration and the tool
+# allowlist. A new opt-in server is added here once.
+OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
 
 
 class ToolPolicy:

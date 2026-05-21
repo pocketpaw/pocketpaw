@@ -4,10 +4,11 @@ Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
 Updated: 2026-05-21 — ``_build`` now translates an agent's ``config.tools``
-  entries that name a built-in in-process MCP server (currently just
-  ``pocketpaw_planner``) into a per-agent ``ToolPolicy.mcp_servers_allow``
-  frozenset, and passes the resulting policy to the Claude SDK backend.
-  This is how a cloud agent opts into the planner MCP server.
+  entries that name an opt-in in-process MCP server (see
+  ``pocketpaw.tools.policy.OPT_IN_MCP_SERVERS``) into a per-agent
+  ``ToolPolicy.mcp_servers_allow`` frozenset, and passes the resulting
+  policy to the Claude SDK backend. This is how a cloud agent opts into
+  the planner MCP server.
 """
 
 from __future__ import annotations
@@ -26,14 +27,6 @@ if TYPE_CHECKING:
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
-
-# Built-in in-process MCP servers a cloud agent can opt into by listing the
-# bare server token in its ``config.tools`` field. ``_build`` translates a
-# matching token into a ``ToolPolicy.mcp_servers_allow`` entry. Tokens are
-# the plain server name (e.g. ``pocketpaw_planner``), NOT the internal
-# ``mcp:<server>:*`` allowlist notation — ``_build`` is the only place that
-# translation happens.
-_BUILTIN_MCP_SERVER_TOKENS: frozenset[str] = frozenset({"pocketpaw_planner"})
 
 
 def _resolve_agent_model() -> Any:
@@ -282,7 +275,7 @@ class AgentPool:
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
         from pocketpaw.agents.registry import get_backend_class
         from pocketpaw.config import Settings
-        from pocketpaw.tools.policy import ToolPolicy
+        from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
         agent_id = str(agent_doc.id)
         config = agent_doc.config.model_dump()
@@ -303,14 +296,14 @@ class AgentPool:
 
         # Per-agent tool policy. The agent's ``tools`` list may name
         # built-in in-process MCP servers (e.g. ``pocketpaw_planner``); any
-        # recognised token becomes an ``mcp_servers_allow`` entry. Unknown
-        # tokens are dropped. Profile / allow / deny carry the same values
-        # as the process-wide policy — only ``mcp_servers_allow`` is
+        # token in ``OPT_IN_MCP_SERVERS`` becomes an ``mcp_servers_allow``
+        # entry. Tokens are the plain server name, not the internal
+        # ``mcp:<server>:*`` notation — this is the only translation point.
+        # Unknown tokens are dropped. Profile / allow / deny carry the same
+        # values as the process-wide policy — only ``mcp_servers_allow`` is
         # per-agent, so opting one agent into the planner never affects
         # any other tool or external MCP server (see ToolPolicy.__init__).
-        mcp_servers_allow = frozenset(
-            t for t in config.get("tools", []) if t in _BUILTIN_MCP_SERVER_TOKENS
-        )
+        mcp_servers_allow = frozenset(t for t in config.get("tools", []) if t in OPT_IN_MCP_SERVERS)
         agent_policy = ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
