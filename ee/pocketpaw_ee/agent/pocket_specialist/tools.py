@@ -565,18 +565,33 @@ class _AddNodeArgs(BaseModel):
     parent_id: str
     spec: dict[str, Any] = Field(..., description="UINode to insert.")
     after_id: str | None = Field(default=None, description="Insert after this sibling.")
+    index: int | None = Field(
+        default=None,
+        description=(
+            "Insert at this 0-based position among the parent's children. "
+            "Takes precedence over after_id; clamped to the child count."
+        ),
+    )
 
 
 def make_add_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None) -> StructuredTool:
     """Add a new widget under a parent."""
 
     async def _run(
-        parent_id: str, spec: dict[str, Any], after_id: str | None = None
+        parent_id: str,
+        spec: dict[str, Any],
+        after_id: str | None = None,
+        index: int | None = None,
     ) -> dict[str, Any]:
         from pocketpaw_ee.cloud.pockets.agent_context import add_node_for_agent
 
-        result = await add_node_for_agent(pocket_id, parent_id, spec, after_id)
-        _capture_op(capture, "add_node", {"parent_id": parent_id, "after_id": after_id}, result)
+        result = await add_node_for_agent(pocket_id, parent_id, spec, after_id, index)
+        _capture_op(
+            capture,
+            "add_node",
+            {"parent_id": parent_id, "after_id": after_id, "index": index},
+            result,
+        )
         return result
 
     return StructuredTool.from_function(
@@ -584,8 +599,9 @@ def make_add_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None)
         name="add_node",
         description=(
             "Insert a new widget as a child of `parent_id`. Pass `spec` as "
-            "a UINode object. Use `after_id` to position after a specific "
-            "sibling; omit to append. Returns the new node with id assigned."
+            "a UINode object. Position it with `index` (0-based slot) or "
+            "`after_id` (after a specific sibling); omit both to append. "
+            "Returns the new node with id assigned."
         ),
         args_schema=_AddNodeArgs,
     )
@@ -622,21 +638,23 @@ def make_replace_node_tool(
 
 class _MoveNodeArgs(BaseModel):
     node_id: str
-    new_parent_id: str
+    # `parent_id` for consistency with add_node — was `new_parent_id`, an
+    # asymmetry the chat agent kept tripping on.
+    parent_id: str
     after_id: str | None = None
 
 
 def make_move_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None) -> StructuredTool:
     """Move a subtree to a new parent / position."""
 
-    async def _run(node_id: str, new_parent_id: str, after_id: str | None = None) -> dict[str, Any]:
+    async def _run(node_id: str, parent_id: str, after_id: str | None = None) -> dict[str, Any]:
         from pocketpaw_ee.cloud.pockets.agent_context import move_node_for_agent
 
-        result = await move_node_for_agent(pocket_id, node_id, new_parent_id, after_id)
+        result = await move_node_for_agent(pocket_id, node_id, parent_id, after_id)
         _capture_op(
             capture,
             "move_node",
-            {"node_id": node_id, "new_parent_id": new_parent_id, "after_id": after_id},
+            {"node_id": node_id, "parent_id": parent_id, "after_id": after_id},
             result,
         )
         return result

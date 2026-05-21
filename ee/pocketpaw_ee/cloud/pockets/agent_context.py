@@ -440,10 +440,11 @@ async def add_node_for_agent(
     parent_id: str,
     spec: dict[str, Any],
     after_id: str | None = None,
+    index: int | None = None,
 ) -> dict[str, Any]:
     """Insert a new node into the pocket's UI tree."""
     result, err = await pockets_service.agent_add_node(
-        pocket_id, parent_id=parent_id, spec=spec, after_id=after_id
+        pocket_id, parent_id=parent_id, spec=spec, after_id=after_id, index=index
     )
     if err is not None or result is None:
         return {"ok": False, "error": err or "add_node failed"}
@@ -455,6 +456,7 @@ async def add_node_for_agent(
         {
             "parent_id": parent_id,
             "after_id": after_id,
+            "index": index,
             "subtree": subtree,
         },
     )

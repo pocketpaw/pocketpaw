@@ -1135,6 +1135,7 @@ async def agent_add_node(
     parent_id: str,
     spec: dict[str, Any],
     after_id: str | None = None,
+    index: int | None = None,
 ) -> tuple[dict | None, str | None]:
     """Insert ``spec`` as a child of ``parent_id`` (after ``after_id`` or
     appended). The new node's id is assigned if absent.
@@ -1159,7 +1160,7 @@ async def agent_add_node(
         # Make sure any nested children also have ids.
         spec_ops.ensure_ids(new_node)
         try:
-            spec_ops.insert_child(parent, new_node, after_id=after_id)
+            spec_ops.insert_child(parent, new_node, after_id=after_id, index=index)
         except ValueError as exc:
             return None, str(exc)
         if doc.rippleSpec is not None:

@@ -16,6 +16,11 @@
 # create does. Edit was previously asymmetric — it always spawned a
 # backend and ignored agent mode, crashing Claude Code deployments that
 # have no ANTHROPIC_API_KEY.
+# Modified: 2026-05-21 — ``_apply_ops`` no longer reports
+# ``ok=True, action="applied"`` when every supplied op was rejected /
+# unknown (zero ops actually applied). That silent-failure state — the
+# agent-mode root-replace symptom — now returns ``ok=False,
+# action="failed"`` with the reason in ``error`` + ``warnings``.
 """Mode-specific adapters for the pocket specialist's create + edit endpoints.
 
 The MCP tool handlers (``mcp_tool._create_handler`` / ``_edit_handler``)
@@ -619,10 +624,18 @@ def _edit_kit_response(input: Any, *, started: float) -> Any:
         "granular_ops": _GRANULAR_EDIT_OPS,
         "op_shape": (
             "Each op is ``{op: <name>, args: {...}}``. ``op`` is one of "
-            "``granular_ops`` above; ``args`` are that op's arguments "
-            "(e.g. set_state takes ``{path, value}``, set_node_prop takes "
-            "``{node_id, prop, value}``, add_node takes "
-            "``{parent_id, index, node}``). Apply the SMALLEST set of ops "
+            "``granular_ops`` above. Exact args per op: "
+            "set_state ``{path, value}``; "
+            "set_node_prop ``{node_id, prop, value}``; "
+            "add_node ``{parent_id, spec, after_id?, index?}`` — ``spec`` is "
+            "the new UINode object (NOT ``node``); position it with "
+            "``after_id`` (a sibling node id) or ``index`` (0-based slot), "
+            "else it appends; "
+            "replace_node ``{node_id, spec}``; "
+            "move_node ``{node_id, parent_id, after_id?}``; "
+            "remove_node ``{node_id}``; "
+            "the prop-array ops take ``{node_id, prop, match}`` (plus "
+            "``value`` for set / append). Apply the SMALLEST set of ops "
             "that satisfies the intent."
         ),
         "next_step": (
@@ -723,7 +736,23 @@ async def _apply_ops(input: Any, *, started: float) -> Any:
     for bad in unknown_ops:
         warnings.append(f"Edit op '{bad}' is not a supported granular op and was skipped.")
 
-    success = error_msg is None
+    # Success accounting. A raised exception (``error_msg``) is a hard
+    # failure. But a run can also "fail silently": every op the chat
+    # agent supplied got rejected by the service or was unknown, so
+    # ZERO ops actually applied. That state must NOT report
+    # ``ok=True, action="applied"`` — the canvas never changed, and the
+    # caller would believe the edit landed. This was the agent-mode
+    # root-replace symptom: ``replace_node`` on the root was rejected by
+    # the service, the rejection went into ``warnings``, but the run
+    # still claimed ``applied``. Mirrors the #1163 contract — a run that
+    # changed nothing is not a success.
+    nothing_applied = bool(input.ops) and not ops
+    success = error_msg is None and not nothing_applied
+    if nothing_applied and error_msg is None:
+        error_msg = (
+            "No edit ops were applied — every supplied op was rejected or "
+            "unsupported. See warnings for the per-op reasons."
+        )
     logger.info(
         "[pocket-specialist:edit] agent-mode apply complete: pocket_id=%s "
         "ops=%d rejected=%d unknown=%d success=%s duration=%dms",

@@ -183,10 +183,17 @@ def test_replace_node_keeps_explicit_id():
     assert spec_ops.find_by_id(tree, "n_newhead0") is not None
 
 
-def test_replace_root_raises():
+def test_replace_root_swaps_the_whole_tree():
+    """Root replacement is allowed: replace_node on the root id swaps the
+    entire ui tree in place (the wrap-the-root path — e.g. wrapping a
+    bare project-dashboard root in a flex). The root id is preserved and
+    the old root is returned for undo."""
     tree = _tree()
-    with pytest.raises(ValueError, match="root"):
-        spec_ops.replace_node(tree, "n_root0000", {"type": "flex"})
+    old = spec_ops.replace_node(tree, "n_root0000", {"type": "flex", "props": {"gap": 8}})
+    assert tree["type"] == "flex"
+    assert tree["props"] == {"gap": 8}
+    assert tree["id"] == "n_root0000"  # root id preserved
+    assert old["id"] == "n_root0000"  # old root returned for undo
 
 
 # ---------------------------------------------------------------------------
