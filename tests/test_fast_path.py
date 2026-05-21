@@ -698,3 +698,169 @@ async def test_stateless_fallback_error_path_does_not_clear_sibling_lease():
     assert not fake_sibling_client.disconnected, (
         "BUG: stateless-fallback error path called disconnect() on the sibling's client."
     )
+
+
+async def test_bun_crash_retry_starts_with_clean_lease_state():
+    """A persistent run that owns the lease and hits a Bun crash retries cleanly.
+
+    Scenario:
+      1. A run takes the persistent path — it acquires the lease
+         (acquired_lease=True, _client_in_use=True).
+      2. The persistent stream raises an "exit code" error and CLI stderr
+         carries a Bun-crash hint, so run()'s outer except handler classifies
+         it as a Bun crash and triggers the recursive self.run(...) retry.
+      3. Because this run owned the lease, the ownership gate already cleared
+         _client and set _client_in_use=False before the retry runs.
+
+    Invariants pinned:
+      - The retry sees a clean lease (_client_in_use=False on entry), so it
+        takes the persistent path itself rather than a stale stateless
+        fallback.
+      - The lease is neither leaked (stuck True with no owner) nor
+        double-released — after the whole run finishes it is False.
+      - The run ultimately completes (a "done" event is emitted).
+    """
+    sdk = _make_sdk()
+
+    # ── Real options factory so the crashing client can reach the stderr
+    # callback run() wires into options_kwargs["stderr"]. ────────────────────
+    class _Options:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+            self.model = kwargs.get("model", "")
+            self.allowed_tools = kwargs.get("allowed_tools", [])
+
+    sdk._ClaudeAgentOptions = _Options
+
+    class _ResultMsg:
+        """Minimal stand-in for the SDK ResultMessage type."""
+
+        def __init__(self):
+            self.is_error = False
+            self.result = "recovered after retry"
+            self.total_cost_usd = None
+            self.usage = {}
+
+    sdk._ResultMessage = _ResultMsg
+
+    class _BunCrashClient:
+        """Persistent client whose stream raises a Bun-style crash."""
+
+        def __init__(self, options=None, **_kw):
+            self.options = options
+            self.connected = False
+            self.disconnected = False
+            self.queries: list[str] = []
+
+        async def connect(self, prompt=None):
+            self.connected = True
+
+        async def query(self, prompt, session_id="default"):
+            self.queries.append(prompt)
+
+        async def receive_messages(self):
+            # Feed a Bun-crash hint through the same stderr callback the SDK
+            # would use, then raise an "exit code" error so run() classifies
+            # this as a Bun crash.
+            stderr_cb = getattr(self.options, "stderr", None)
+            if stderr_cb is not None:
+                stderr_cb("bun has crashed: switch on corrupt value")
+            raise RuntimeError("Claude CLI exited with exit code 3")
+            yield  # pragma: no cover — makes this an async generator
+
+        async def disconnect(self):
+            self.connected = False
+            self.disconnected = True
+
+        async def interrupt(self):
+            pass
+
+    class _CleanClient:
+        """Persistent client the retry uses — streams a ResultMessage."""
+
+        def __init__(self, options=None, **_kw):
+            self.options = options
+            self.connected = False
+            self.disconnected = False
+            self.queries: list[str] = []
+
+        async def connect(self, prompt=None):
+            self.connected = True
+
+        async def query(self, prompt, session_id="default"):
+            self.queries.append(prompt)
+
+        async def receive_messages(self):
+            yield _ResultMsg()
+
+    created: list[object] = []
+
+    def _client_factory(**kwargs):
+        # First persistent client crashes (Bun-style); the retry gets a
+        # clean client that streams a ResultMessage.
+        client = _BunCrashClient(**kwargs) if not created else _CleanClient(**kwargs)
+        created.append(client)
+        return client
+
+    sdk._ClaudeSDKClient = _client_factory
+
+    sdk._HookMatcher = MagicMock()
+    sdk._StreamEvent = None
+    sdk._AssistantMessage = None
+    sdk._SystemMessage = None
+    sdk._UserMessage = None
+
+    selection = ModelSelection(
+        complexity=TaskComplexity.MODERATE,
+        model="claude-sonnet-4-5-20250929",
+        reason="test",
+    )
+
+    with patch(_LLM_CLIENT) as mock_resolve:
+        mock_llm = MagicMock()
+        mock_llm.is_ollama = False
+        mock_llm.is_openai_compatible = False
+        mock_llm.is_gemini = False
+        mock_llm.is_litellm = False
+        mock_llm.is_openrouter = False
+        mock_llm.to_sdk_env.return_value = {"ANTHROPIC_API_KEY": "sk-test"}
+        mock_resolve.return_value = mock_llm
+
+        with patch(_MODEL_ROUTER) as MockRouter:
+            MockRouter.return_value.classify.return_value = selection
+            with patch.object(ClaudeAgentSDK, "_get_mcp_servers", return_value={}):
+                events = []
+                async for ev in sdk.run("crash then recover", system_prompt="identity"):
+                    events.append(ev)
+
+    # The Bun crash was detected — a "status" retry event was emitted.
+    assert any(e.type == "status" for e in events), (
+        "Expected a Bun-crash retry status event — the crash was not classified."
+    )
+
+    # The retry took the PERSISTENT path, not a stale stateless fallback.
+    # run() only builds a second ClaudeSDKClient if the retry's dispatch
+    # check saw _client_in_use=False. A leaked lease would have left the
+    # flag True, sending the retry through _resilient_query() instead — and
+    # _CleanClient would never be constructed. So a second created client
+    # is direct proof the owning run released its lease on the error path.
+    assert len(created) == 2, (
+        "BUG: the Bun-crash retry did not take the persistent path — the "
+        "owning run leaked its lease instead of releasing it on the error "
+        f"path. Clients created: {len(created)}."
+    )
+    assert isinstance(created[0], _BunCrashClient)
+    assert isinstance(created[1], _CleanClient)
+
+    # The retry actually sent the query on the fresh client.
+    assert created[1].queries == ["crash then recover"]
+
+    # The run ultimately completed.
+    assert any(e.type == "done" for e in events)
+
+    # Lease is not stuck after the whole run — neither leaked nor
+    # double-released. The retry acquired it, then released it on its own
+    # clean exit; nothing is left holding it.
+    assert sdk._client_in_use is False, (
+        "BUG: lease left True after the run finished — leaked or not released."
+    )
