@@ -24,6 +24,11 @@
 #   ee/cloud Rule 2 forbids any module other than planner.service from
 #   importing ``ee.cloud.models.planner`` — Mission Control consumes
 #   the typed summaries via the public API.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) —
+#   ``_materialize_tasks`` carries ``success_criteria`` and
+#   ``preconditions`` from each OSS TaskSpec onto the cloud Task it
+#   creates, so completion-time verification (pocketpaw#1162) can read
+#   machine-checkable criteria off the materialized Task.
 """Planner entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -720,6 +725,12 @@ async def _materialize_tasks(
                 metadata=source_metadata,
             ),
             blocked_by=[],
+            # Machine-verifiable criteria the planner emitted on the
+            # TaskSpec. Carried onto the cloud Task so completion-time
+            # verification (pocketpaw#1162) has them. ``getattr`` keeps
+            # the materializer tolerant of an older TaskSpec shape.
+            success_criteria=list(getattr(spec, "success_criteria", None) or []),
+            preconditions=list(getattr(spec, "preconditions", None) or []),
         )
 
         try:

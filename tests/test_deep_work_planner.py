@@ -3,6 +3,11 @@
 # Updated: 2026-02-16 — Added TestRunPromptErrorHandling to reproduce silent
 #   error swallowing in _run_prompt(). When the LLM returns only error events,
 #   _run_prompt should raise instead of returning an empty string.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) — added
+#   TestTaskSpecSuccessCriteria covering the new first-class TaskSpec
+#   fields: the planner parses success_criteria / preconditions from LLM
+#   JSON, omitting them defaults cleanly to [], and the prompt instructs
+#   the planner to emit them.
 #
 # Tests cover:
 #   - Prompt template placeholders
@@ -11,6 +16,7 @@
 #   - ensure_profile (mocked manager)
 #   - _broadcast_phase resilience
 #   - _run_prompt error event handling (bug reproduction)
+#   - TaskSpec success_criteria / preconditions parsing + defaults
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -204,6 +210,90 @@ class TestParseTasksInvalid:
     def test_json_with_non_dict_items(self):
         tasks = self.planner._parse_tasks('[1, 2, "string"]')
         assert tasks == []
+
+
+class TestTaskSpecSuccessCriteria:
+    """The planner parses success_criteria / preconditions off LLM JSON.
+
+    Promoted to first-class TaskSpec fields (feat/taskspec-success-criteria)
+    so a downstream verifier can check completion programmatically instead
+    of scraping the freeform description string.
+    """
+
+    def setup_method(self):
+        manager = MagicMock()
+        self.planner = PlannerAgent(manager)
+
+    def test_parses_success_criteria_and_preconditions(self):
+        """A task carrying both fields round-trips into the TaskSpec."""
+        raw = json.dumps(
+            [
+                {
+                    "key": "t1",
+                    "title": "Build the health endpoint",
+                    "description": "Add GET /health",
+                    "task_type": "agent",
+                    "success_criteria": [
+                        "GET /health returns HTTP 200",
+                        'the response body is {"status":"ok"}',
+                    ],
+                    "preconditions": ["the FastAPI app is scaffolded"],
+                }
+            ]
+        )
+        tasks = self.planner._parse_tasks(raw)
+        assert len(tasks) == 1
+        assert isinstance(tasks[0], TaskSpec)
+        assert tasks[0].success_criteria == [
+            "GET /health returns HTTP 200",
+            'the response body is {"status":"ok"}',
+        ]
+        assert tasks[0].preconditions == ["the FastAPI app is scaffolded"]
+
+    def test_absent_fields_default_to_empty_list(self):
+        """LLM output that omits the new fields must not hard-fail.
+
+        ``VALID_TASKS_JSON`` deliberately has no success_criteria /
+        preconditions keys — they should default cleanly to ``[]``.
+        """
+        tasks = self.planner._parse_tasks(VALID_TASKS_JSON)
+        assert len(tasks) == 2
+        for task in tasks:
+            assert task.success_criteria == []
+            assert task.preconditions == []
+
+    def test_taskspec_round_trips_new_fields(self):
+        """to_dict / from_dict preserve the new fields."""
+        original = TaskSpec(
+            key="t1",
+            title="Task",
+            success_criteria=["criterion A", "criterion B"],
+            preconditions=["state X holds"],
+        )
+        restored = TaskSpec.from_dict(original.to_dict())
+        assert restored.success_criteria == ["criterion A", "criterion B"]
+        assert restored.preconditions == ["state X holds"]
+
+    def test_from_dict_backward_compat_without_new_fields(self):
+        """A dict serialized before these fields existed still parses."""
+        old_data = {"key": "t1", "title": "Legacy task", "task_type": "agent"}
+        task = TaskSpec.from_dict(old_data)
+        assert task.success_criteria == []
+        assert task.preconditions == []
+
+    def test_default_taskspec_has_empty_criteria(self):
+        """A bare TaskSpec() defaults both fields to empty list."""
+        task = TaskSpec()
+        assert task.success_criteria == []
+        assert task.preconditions == []
+
+    def test_breakdown_prompt_instructs_emitting_the_fields(self):
+        """The prompt must tell the planner to emit the new fields and
+        ban vague criteria so the discipline is enforced upstream."""
+        assert "success_criteria" in TASK_BREAKDOWN_PROMPT
+        assert "preconditions" in TASK_BREAKDOWN_PROMPT
+        # Vague-criteria ban — Phalanx learning #4.
+        assert "works as expected" in TASK_BREAKDOWN_PROMPT
 
 
 class TestParseTeam:

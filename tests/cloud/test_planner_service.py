@@ -3,6 +3,10 @@
 #   *materialization* layer — the OSS planner itself has its own test
 #   suite under ``tests/test_deep_work_planner.py`` and we should not
 #   re-test it here.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) — ``_FakeTaskSpec``
+#   gained ``success_criteria`` / ``preconditions`` and a new test
+#   asserts ``_materialize_tasks`` carries them from the TaskSpec onto
+#   the materialized cloud Task (read back via the tasks service).
 """Tests for ``ee.cloud.planner.service`` — happy path + agent-gap +
 tenant guard.
 
@@ -61,6 +65,8 @@ class _FakeTaskSpec:
         task_type: str = "agent",
         priority: str = "high",
         required_specialties: list[str] | None = None,
+        success_criteria: list[str] | None = None,
+        preconditions: list[str] | None = None,
     ) -> None:
         self.key = key
         self.title = title
@@ -69,6 +75,8 @@ class _FakeTaskSpec:
         self.priority = priority
         self.required_specialties = required_specialties or []
         self.blocked_by_keys: list[str] = []
+        self.success_criteria = success_criteria or []
+        self.preconditions = preconditions or []
 
     def to_dict(self) -> dict:
         return {
@@ -207,6 +215,73 @@ async def test_plan_project_writes_files_and_creates_tasks(recording_bus) -> Non
     assert plan_events[0].data["project_id"] == project_id
     assert plan_events[0].data["task_count"] == 2
     assert plan_events[0].data["agent_gap_count"] == 1
+
+
+async def test_plan_project_carries_success_criteria_onto_cloud_tasks(
+    recording_bus,
+) -> None:
+    """Materialization threads TaskSpec success_criteria / preconditions
+    onto the cloud Task so completion-time verification (#1162) can read
+    them back."""
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import ListTasksRequest
+
+    project_id = await _make_project()
+    fake = _FakePlannerResult(
+        tasks=[
+            _FakeTaskSpec(
+                key="research",
+                title="Research vendors",
+                success_criteria=[
+                    "at least 3 vendors are shortlisted",
+                    "each vendor has a quoted price",
+                ],
+                preconditions=["the vendor category has been chosen"],
+            ),
+        ],
+    )
+
+    with _patched_planner(fake):
+        result = await planner_service.agent_plan_project(
+            _ctx(),
+            PlanProjectRequest(
+                project_id=project_id,
+                goal="Find catering vendors.",
+                deep_research=False,
+            ),
+        )
+
+    assert len(result.task_ids) == 1
+    tasks = await tasks_service.agent_list_tasks(_ctx(), ListTasksRequest(project_id=project_id))
+    assert len(tasks) == 1
+    assert tasks[0].success_criteria == [
+        "at least 3 vendors are shortlisted",
+        "each vendor has a quoted price",
+    ]
+    assert tasks[0].preconditions == ["the vendor category has been chosen"]
+
+
+async def test_plan_project_defaults_empty_criteria_when_planner_omits_them(
+    recording_bus,
+) -> None:
+    """A TaskSpec with no criteria materializes a Task with empty lists —
+    backward-compatible with planner output predating the fields."""
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import ListTasksRequest
+
+    project_id = await _make_project()
+    fake = _FakePlannerResult(tasks=[_FakeTaskSpec(key="t1", title="Bare task")])
+
+    with _patched_planner(fake):
+        await planner_service.agent_plan_project(
+            _ctx(),
+            PlanProjectRequest(project_id=project_id, goal="Do a thing.", deep_research=False),
+        )
+
+    tasks = await tasks_service.agent_list_tasks(_ctx(), ListTasksRequest(project_id=project_id))
+    assert len(tasks) == 1
+    assert tasks[0].success_criteria == []
+    assert tasks[0].preconditions == []
 
 
 async def test_plan_project_surfaces_agent_gaps(recording_bus) -> None:

@@ -85,6 +85,8 @@ Decomposes the PRD into atomic tasks. Each task includes:
 | `blocked_by_keys` | Dependencies on other tasks |
 | `max_retries` | How many times to auto-retry on failure (default: 1) |
 | `timeout_minutes` | Per-task execution time limit (optional) |
+| `success_criteria` | Objectively-verifiable conditions that must hold once the task is done — each a single concrete, checkable statement. Carried onto the materialized Mission Control Task so completion can be verified, not just marked finished. |
+| `preconditions` | State or environment conditions that must hold before the task starts (or conditions under which it should not run). Distinct from `blocked_by_keys`, which tracks dependencies on other tasks. |
 
 ### 4. Team Assembly
 

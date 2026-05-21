@@ -2,6 +2,13 @@
 # Created: 2026-02-12
 # Updated: 2026-02-26 — Deep Work v2: Added CANCELLED status to ProjectStatus.
 #   Added max_retries and timeout_minutes to TaskSpec for retry/timeout control.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) — promoted machine-
+#   verifiable criteria to first-class TaskSpec fields: success_criteria
+#   (objectively-verifiable conditions true at task completion) and
+#   preconditions (state/environment conditions that must hold before the
+#   task starts). Both default to empty list — to_dict/from_dict stay
+#   backward-compatible with TaskSpec data persisted before this change.
+#   Unblocks the Verification primitive (pocketpaw#1162).
 #
 # Defines data structures for:
 # - Project: top-level orchestration unit grouping tasks and agents
@@ -141,6 +148,16 @@ class TaskSpec:
         blocked_by_keys: Keys of other TaskSpecs this depends on
         max_retries: Maximum auto-retries for failed tasks (Deep Work v2)
         timeout_minutes: Per-task execution timeout in minutes (Deep Work v2)
+        success_criteria: Objectively-verifiable conditions that must be
+            true once the task is complete. Each entry is a single
+            concrete, checkable statement (not a vague "works as
+            expected"). Promoted from the freeform ``description`` so a
+            downstream verifier can check completion programmatically.
+        preconditions: State/environment conditions that must hold before
+            the task can start — including when NOT to act. Distinct from
+            ``blocked_by_keys``: that field is the inter-task dependency
+            graph (other TaskSpecs), whereas these are conditions about
+            the world (e.g. "a workspace API key is configured").
     """
 
     key: str = ""
@@ -154,6 +171,8 @@ class TaskSpec:
     blocked_by_keys: list[str] = field(default_factory=list)
     max_retries: int = 1
     timeout_minutes: int | None = None
+    success_criteria: list[str] = field(default_factory=list)
+    preconditions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -169,11 +188,18 @@ class TaskSpec:
             "blocked_by_keys": self.blocked_by_keys,
             "max_retries": self.max_retries,
             "timeout_minutes": self.timeout_minutes,
+            "success_criteria": self.success_criteria,
+            "preconditions": self.preconditions,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TaskSpec":
-        """Create from dictionary."""
+        """Create from dictionary.
+
+        ``success_criteria`` and ``preconditions`` default to ``[]`` when
+        absent, so TaskSpec data serialized before those fields existed
+        (and LLM output that omits them) deserializes without error.
+        """
         return cls(
             key=data.get("key", ""),
             title=data.get("title", ""),
@@ -186,6 +212,8 @@ class TaskSpec:
             blocked_by_keys=data.get("blocked_by_keys", []),
             max_retries=data.get("max_retries", 1),
             timeout_minutes=data.get("timeout_minutes"),
+            success_criteria=data.get("success_criteria", []),
+            preconditions=data.get("preconditions", []),
         )
 
 
