@@ -27,6 +27,11 @@ onto the pocketpaw_ee layout from PR #1106).
 Changes: 2026-05-21 (#1172) — ``agent_view`` self-heals node ids via
 ``_heal_node_ids`` so pockets persisted before node-id stamping became
 addressable by granular edit ops on first agent read.
+Changes: 2026-05-21 (RFC 04 alpha) — added the per-pocket backend
+binding API: ``set_pocket_backend``, ``get_pocket_backend``,
+``get_pocket_backend_for_executor``, ``remove_pocket_backend``. The
+credential lives in a SEPARATE collection (``PocketBackendCredential``);
+this service is the sole Beanie writer for it, same as for ``Pocket``.
 """
 
 from __future__ import annotations
@@ -48,7 +53,10 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 from pocketpaw_ee.cloud.models.pocket import Widget as _WidgetDoc
-from pocketpaw_ee.cloud.pockets import prop_arrays, spec_ops, state_ops
+from pocketpaw_ee.cloud.models.pocket_backend import (
+    PocketBackendCredential as _BackendCredentialDoc,
+)
+from pocketpaw_ee.cloud.pockets import backend_crypto, prop_arrays, spec_ops, state_ops
 from pocketpaw_ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
@@ -1912,6 +1920,181 @@ async def create_pocket_and_session(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Pocket backend binding (RFC 04 alpha)
+#
+# A pocket is bound to ONE external backend (base URL + auth credential).
+# The credential lives in the separate ``PocketBackendCredential``
+# collection — never on the Pocket document, never in ``rippleSpec``. This
+# service is the sole Beanie writer for that collection.
+# ---------------------------------------------------------------------------
+
+
+def _audit_backend_config(
+    *, actor: str, action: str, workspace_id: str, pocket_id: str, base_url: str, auth_type: str
+) -> None:
+    """Write an audit-log entry for a backend-config mutation.
+
+    Logs ``base_url`` / ``auth_type`` / ``pocket_id`` only — the token is
+    NEVER passed here. Category ``pocket_backend_config``, severity WARNING.
+    Audit failures must not break the config flow, so the call is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action=action,
+                target=pocket_id,
+                status="success",
+                category="pocket_backend_config",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                base_url=base_url,
+                auth_type=auth_type,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the mutation
+        logger.warning("pocket backend config audit-log write failed", exc_info=True)
+
+
+async def set_pocket_backend(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    base_url: str,
+    auth_type: str,
+    auth_token: str,
+    auth_header: str | None = None,
+) -> dict:
+    """Bind a pocket to one backend — upsert its credential row.
+
+    ``base_url`` is validated strictly (https-only, no internal hosts). The
+    token is encrypted via ``backend_crypto`` before it touches the DB; the
+    plaintext is never persisted or logged. Returns the non-secret summary.
+    """
+    from pocketpaw.security.url_validators import validate_external_url_strict
+
+    # Raises ValueError on a bad URL — surfaces as a 400 via the router.
+    try:
+        base_url = validate_external_url_strict(base_url)
+    except ValueError as exc:
+        raise ValidationError("pocket_backend.invalid_url", str(exc)) from exc
+
+    if auth_type != "none" and not auth_token:
+        raise ValidationError(
+            "pocket_backend.missing_token",
+            f"auth_type '{auth_type}' requires a non-empty auth_token",
+        )
+
+    encrypted_token: bytes | None = None
+    nonce: bytes | None = None
+    salt: bytes | None = None
+    if auth_type != "none":
+        encrypted_token, nonce, salt = backend_crypto.encrypt_token(auth_token)
+
+    existing = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if existing is not None:
+        existing.base_url = base_url
+        existing.auth_type = auth_type
+        existing.auth_header = auth_header
+        existing.encrypted_token = encrypted_token
+        existing.nonce = nonce
+        existing.salt = salt
+        await existing.save()
+    else:
+        await _BackendCredentialDoc(
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+            base_url=base_url,
+            auth_type=auth_type,
+            auth_header=auth_header,
+            encrypted_token=encrypted_token,
+            nonce=nonce,
+            salt=salt,
+        ).insert()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.configure",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=base_url,
+        auth_type=auth_type,
+    )
+    # no-event: backend credentials are a separate collection, not pocket
+    # state — no downstream handler keys off a PocketUpdated for them.
+    return {"base_url": base_url, "auth_type": auth_type, "configured": True}
+
+
+async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
+    """Return the pocket's backend binding summary, or ``None`` if unset.
+
+    NEVER returns the token — only ``base_url`` / ``auth_type`` /
+    ``configured``.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+    return {"base_url": doc.base_url, "auth_type": doc.auth_type, "configured": True}
+
+
+async def get_pocket_backend_for_executor(
+    workspace_id: str, pocket_id: str
+) -> tuple[str, str, str | None, str] | None:
+    """Internal — return ``(base_url, auth_type, auth_header, token)``.
+
+    Decrypts the stored token. Used ONLY by the run-sources route handler
+    to pass credentials to the source executor. Returns ``None`` when the
+    pocket has no backend configured. The plaintext token returned here
+    must never be logged or returned to a client.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+
+    token = ""
+    if doc.auth_type != "none" and doc.encrypted_token and doc.nonce and doc.salt:
+        token = backend_crypto.decrypt_token(doc.encrypted_token, doc.nonce, doc.salt)
+    return doc.base_url, doc.auth_type, doc.auth_header, token
+
+
+async def remove_pocket_backend(workspace_id: str, user_id: str, pocket_id: str) -> None:
+    """Delete a pocket's backend credential row. Idempotent.
+
+    Audit-logs the removal. A no-op (no row) still returns cleanly so the
+    route is idempotent.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return
+    base_url, auth_type = doc.base_url, doc.auth_type
+    await doc.delete()
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.remove",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=base_url,
+        auth_type=auth_type,
+    )
+    # no-event: see set_pocket_backend — credential rows aren't pocket state.
+
+
 __all__ = [
     "access_via_share_link",
     "add_agent",
@@ -1940,16 +2123,20 @@ __all__ = [
     "delete",
     "generate_share_link",
     "get",
+    "get_pocket_backend",
+    "get_pocket_backend_for_executor",
     "has_edit_access",
     "is_member",
     "is_owner",
     "list_pockets",
     "remove_agent",
     "remove_collaborator",
+    "remove_pocket_backend",
     "remove_team_member",
     "remove_widget",
     "reorder_widgets",
     "revoke_share_link",
+    "set_pocket_backend",
     "unassign_project_on_pockets",
     "update",
     "update_share_link",

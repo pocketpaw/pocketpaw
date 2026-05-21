@@ -1,5 +1,10 @@
 # URL validators for Settings fields — guards against SSRF via config.
 # Added: 2026-04-16 for security cluster E (#703).
+# Updated: 2026-05-21 (RFC 04 alpha) — added validate_external_url_strict():
+#   https-only, unconditionally blocks internal/loopback/RFC1918/link-local
+#   hosts (no POCKETPAW_ALLOW_INTERNAL_URLS escape hatch), rejects empty
+#   input. Used to validate pocket-backend base URLs, which are an SSRF
+#   boundary and must never be relaxed by an operator env flag.
 
 from __future__ import annotations
 
@@ -108,5 +113,38 @@ def validate_external_url(value: str) -> str:
         raise ValueError(
             f"URL host '{parts.hostname}' is internal/loopback/private and "
             f"POCKETPAW_ALLOW_INTERNAL_URLS is set to false"
+        )
+    return value
+
+
+def validate_external_url_strict(value: str) -> str:
+    """Strict external-URL validator for pocket backend base URLs.
+
+    Differs from :func:`validate_external_url` in three ways, because a
+    pocket-backend base URL is an SSRF boundary and must not be relaxed:
+
+    * ``https://`` ONLY — plain ``http://`` is rejected.
+    * Internal / loopback / RFC1918 / link-local / CGNAT hosts are blocked
+      UNCONDITIONALLY — there is no ``POCKETPAW_ALLOW_INTERNAL_URLS`` escape
+      hatch (this function never reads that flag).
+    * Empty / blank input raises ``ValueError`` instead of passing through.
+
+    Returns the URL unchanged when it passes; raises ``ValueError`` otherwise.
+    """
+    if value is None or not isinstance(value, str) or value.strip() == "":
+        raise ValueError("URL must be a non-empty string")
+
+    parts = urlsplit(value)
+    if parts.scheme != "https":
+        raise ValueError(
+            f"URL scheme '{parts.scheme or '(none)'}' not allowed — backend "
+            f"URLs must use https"
+        )
+    if not parts.hostname:
+        raise ValueError(f"URL has no host: {value!r}")
+    if _host_is_internal(parts.hostname):
+        raise ValueError(
+            f"URL host '{parts.hostname}' is internal/loopback/private — "
+            f"backend URLs must point to an external host"
         )
     return value

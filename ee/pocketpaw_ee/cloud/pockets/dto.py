@@ -7,12 +7,15 @@ separate follow-up calls.
 Updated: 2026-05-16 — added optional ``project_id`` (aliased as
 ``projectId`` on the wire) to CreatePocketRequest / UpdatePocketRequest /
 PocketResponse so pockets can be grouped under a Mission Control Project.
+Updated: 2026-05-21 (RFC 04 alpha) — added PocketBackendConfigRequest /
+PocketBackendConfigResponse / RunSourcesRequest for the per-pocket backend
+binding + read-only source-run endpoints.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +104,46 @@ class PocketResponse(BaseModel):
     project_id: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Pocket backend binding + source-run (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+class PocketBackendConfigRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend`` — bind a pocket to one backend.
+
+    ``auth_token`` carries the secret only on the way IN; it is encrypted
+    server-side and never returned. ``auth_header`` names the custom header
+    for the ``api_key`` auth type (defaults to ``X-Api-Key`` when omitted).
+    """
+
+    base_url: str
+    auth_type: Literal["bearer", "api_key", "basic", "none"]
+    auth_token: str = ""
+    auth_header: str | None = None
+
+
+class PocketBackendConfigResponse(BaseModel):
+    """Backend binding as returned to clients — never carries the token."""
+
+    base_url: str
+    auth_type: str
+    configured: bool
+
+
+class RunSourcesRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/sources/run``.
+
+    ``trigger`` selects sources by refresh policy (``pocket_open`` runs the
+    on-open set; ``manual`` runs the refresh-button set). ``source`` runs a
+    single named source regardless of policy. Both omitted runs every
+    source declared in the spec.
+    """
+
+    trigger: Literal["pocket_open", "manual"] | None = None
+    source: str | None = None
 
 
 # ---------------------------------------------------------------------------

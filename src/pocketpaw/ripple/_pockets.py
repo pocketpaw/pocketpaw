@@ -1,5 +1,10 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-21 (RFC 04 alpha) — added `_LIVE_DATA_SOURCES_BLOCK`,
+# spliced into the create specialist prompt. It teaches the agent to
+# declare a `sources` block (read-only GET bindings) and a `run_source`
+# refresh button when the user wants live data from a real backend.
+#
 # Changes: 2026-05-21 (#1163) — the edit-specialist prompt now splices in
 # `_EDIT_TOOLS_MCP`, a tools block naming the granular edit ops the
 # specialist ACTUALLY holds (get_pocket, the state/node/array-item ops),
@@ -439,6 +444,48 @@ the widget rather than fabricating rows.
 
 Unknown source names resolve to `null`. Stick to the allowlist above.
 </state-sources>
+"""
+
+
+_LIVE_DATA_SOURCES_BLOCK = """\
+<live-data-sources>
+When the user wants live data from THEIR OWN backend (a CRM, an internal
+API, a service with a base URL + token) — not the workspace `$source`
+markers above — declare a `sources` block in the rippleSpec. Alpha is
+READ-ONLY: GET bindings only.
+
+  "rippleSpec": {
+    "sources": {
+      "prs": {
+        "method": "GET",
+        "path": "/pulls?state=open",
+        "bind": "state.prs",
+        "refresh": ["pocket_open", "manual"]
+      }
+    },
+    "ui": [ ... ],
+    "state": { "prs": [] }
+  }
+
+Each source entry: `method` (always "GET"), `path` (a RELATIVE path
+against the pocket's backend — never an absolute URL), `bind` (a dotted
+`state.` path the result is written to), and `refresh` (when to run it —
+`pocket_open` on open, `manual` for a refresh button).
+
+For a manual refresh, add a button wired to the `run_source` action:
+
+  {"type": "button", "props": {"label": "Refresh"},
+   "on_click": {"action": "run_source", "source": "prs"}}
+
+Rules:
+- A pocket using `sources` MUST have a backend configured (base URL +
+  auth, set once via the pocket's backend settings — outside the spec).
+  If no backend is configured, the sources will not run.
+- Seed `state` with an empty list/value for each `bind` target so the
+  widget renders before the first fetch.
+- Use `sources` ONLY for the user's real backend. For workspace data use
+  the `$source` markers above; for canvas-local input use literal values.
+</live-data-sources>
 """
 
 
@@ -1473,6 +1520,7 @@ def _assemble_specialist() -> str:
         _SPECIALIST_WORKFLOW,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
+        _LIVE_DATA_SOURCES_BLOCK,
         _CREATION_EXAMPLES_MCP,
         _RESEARCH_PROTOCOL,
         _RIPPLE_DESIGN_ESSENTIALS,

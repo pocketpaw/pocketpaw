@@ -10,6 +10,13 @@ close UI-TESTING-GUIDE §11 gap B5 (no widget layout save/share):
 The YAML + in-process store live in ee.cloud.pockets.layouts. Export is
 pure. Template storage is workspace-scoped and in-process for now; the
 REST contract matches the MongoDB-backed version that Wave 4 will ship.
+
+Updated: 2026-05-21 (RFC 04 alpha) — Added three routes for the per-pocket
+backend binding + read-only source-run feature:
+
+    PUT  /pockets/{id}/backend       — bind a pocket to one backend
+    GET  /pockets/{id}/backend       — read the binding summary (no token)
+    POST /pockets/{id}/sources/run   — run the spec's read-only GET sources
 """
 
 from __future__ import annotations
@@ -27,7 +34,10 @@ from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
     CreatePocketRequest,
+    PocketBackendConfigRequest,
+    PocketBackendConfigResponse,
     ReorderWidgetsRequest,
+    RunSourcesRequest,
     ShareLinkRequest,
     UpdatePocketRequest,
     UpdateWidgetRequest,
@@ -219,6 +229,95 @@ async def delete_pocket(
 ) -> Response:
     await pockets_service.delete(pocket_id, user_id)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Backend binding + read-only source run (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+@router.put("/{pocket_id}/backend", dependencies=[Depends(require_pocket_edit)])
+async def set_pocket_backend(
+    pocket_id: str,
+    body: PocketBackendConfigRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Bind this pocket to one external backend (base URL + auth credential).
+
+    The token is encrypted server-side; the response never echoes it back.
+    A bad base URL (non-https, internal host) yields a 400.
+    """
+    result = await pockets_service.set_pocket_backend(
+        workspace_id,
+        user_id,
+        pocket_id,
+        body.base_url,
+        body.auth_type,
+        body.auth_token,
+        body.auth_header,
+    )
+    return PocketBackendConfigResponse(**result)
+
+
+@router.get("/{pocket_id}/backend")
+async def get_pocket_backend(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Read this pocket's backend binding summary. Never returns the token.
+
+    Read access mirrors ``get_pocket`` — the service load 404s if the
+    pocket is missing or the caller cannot see it. A 404 here also means
+    "no backend configured" for this pocket.
+    """
+    # Mirror get_pocket's access check before exposing the binding.
+    await pockets_service.get(pocket_id, user_id)
+    result = await pockets_service.get_pocket_backend(workspace_id, pocket_id)
+    if result is None:
+        raise CloudError(404, "pocket_backend.not_found", "No backend configured for this pocket")
+    return PocketBackendConfigResponse(**result)
+
+
+@router.post("/{pocket_id}/sources/run")
+async def run_pocket_sources(
+    pocket_id: str,
+    body: RunSourcesRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Run the pocket's read-only ``rippleSpec.sources`` against its backend.
+
+    Read access mirrors ``get_pocket``. The hydrated state is returned in
+    THIS response body — there is no ``pocket_mutation`` SSE emit, because
+    the run endpoint is a standalone REST call outside any SSE stream.
+    """
+    pocket = await pockets_service.get(pocket_id, user_id)
+    ripple_spec = pocket.get("rippleSpec") or {}
+
+    creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
+    if creds is None:
+        raise CloudError(
+            400,
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
+        )
+    base_url, auth_type, auth_header, token = creds
+
+    from pocketpaw_ee.cloud.pockets import source_executor
+
+    # no-event: source hydration is response-body delivery, not persisted
+    return await source_executor.run_sources(
+        pocket_id=pocket_id,
+        ripple_spec=ripple_spec,
+        base_url=base_url,
+        auth_type=auth_type,
+        auth_header=auth_header,
+        token=token,
+        trigger=body.trigger,
+        only_source=body.source,
+    )
 
 
 # ---------------------------------------------------------------------------
