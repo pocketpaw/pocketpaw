@@ -1354,6 +1354,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     content="Runtime crashed, retrying with a fresh process...",
                 )
                 await asyncio.sleep(1)
+                # Lease state is consistent before the recursive retry, on
+                # both branches of the ownership gate above:
+                #  - acquired_lease True  → this run owned the persistent
+                #    client; the gate already cleared _client and set
+                #    _client_in_use=False, so the retry starts on a clean
+                #    lease and may take the persistent path itself.
+                #  - acquired_lease False → this run never owned the lease
+                #    (stateless fallback, or a failure before acquisition);
+                #    the gate left _client_in_use untouched, so a sibling
+                #    persistent run still holds it. The recursive run() will
+                #    correctly see _client_in_use=True and fall back to
+                #    stateless again — it cannot steal or double-release the
+                #    sibling's lease.
                 try:
                     async for retry_event in self.run(
                         message,
