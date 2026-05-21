@@ -292,3 +292,75 @@ def test_move_root_raises():
     tree = _tree()
     with pytest.raises(ValueError, match="root"):
         spec_ops.move_node(tree, "n_root0000", "n_table000")
+
+
+# ---------------------------------------------------------------------------
+# Prop-array item matching
+# ---------------------------------------------------------------------------
+
+
+def _sample_array() -> list[dict]:
+    return [
+        {"id": "b1", "label": "Online Store", "value": 62},
+        {"id": "b2", "label": "POS", "value": 18},
+        {"id": "b3", "label": "Social", "value": 12},
+        {"id": "b4", "label": "Other", "value": 8},
+    ]
+
+
+def test_match_by_index_returns_position():
+    idx = spec_ops.match_array_item(_sample_array(), {"index": 0})
+    assert idx == 0
+
+
+def test_match_by_index_negative_rejected():
+    with pytest.raises(ValueError, match="index"):
+        spec_ops.match_array_item(_sample_array(), {"index": -1})
+
+
+def test_match_by_index_out_of_range_rejected():
+    with pytest.raises(ValueError, match="index"):
+        spec_ops.match_array_item(_sample_array(), {"index": 99})
+
+
+def test_match_by_field_equals_finds_first():
+    idx = spec_ops.match_array_item(_sample_array(), {"by_field": "label", "equals": "Other"})
+    assert idx == 3
+
+
+def test_match_by_field_missing_returns_none():
+    idx = spec_ops.match_array_item(_sample_array(), {"by_field": "label", "equals": "Nope"})
+    assert idx is None
+
+
+def test_match_by_key_requires_all_pairs():
+    arr = [
+        {"orderId": "#1039", "channel": "Online"},
+        {"orderId": "#1039", "channel": "POS"},
+    ]
+    idx = spec_ops.match_array_item(arr, {"by_key": {"orderId": "#1039", "channel": "POS"}})
+    assert idx == 1
+
+
+def test_match_id_shortcut_equivalent_to_by_key_id():
+    idx = spec_ops.match_array_item(_sample_array(), {"id": "b3"})
+    assert idx == 2
+
+
+def test_match_ambiguous_returns_candidates_indices():
+    arr = [
+        {"label": "Other", "value": 1},
+        {"label": "Other", "value": 2},
+    ]
+    candidates = spec_ops.match_array_item_candidates(arr, {"by_field": "label", "equals": "Other"})
+    assert candidates == [0, 1]
+
+
+def test_match_rejects_unknown_match_form():
+    with pytest.raises(ValueError, match="unknown match form"):
+        spec_ops.match_array_item(_sample_array(), {"weird": "shape"})
+
+
+def test_match_rejects_empty_match():
+    with pytest.raises(ValueError, match="empty"):
+        spec_ops.match_array_item(_sample_array(), {})

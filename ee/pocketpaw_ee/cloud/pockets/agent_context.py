@@ -503,6 +503,109 @@ async def set_node_prop_for_agent(
     return {"ok": True, "subtree": subtree, "old_value": old_value}
 
 
+async def set_prop_array_item_for_agent(
+    pocket_id: str,
+    node_id: str,
+    prop: str,
+    match: dict[str, Any],
+    partial: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge ``partial`` into one matched item inside a node prop-array
+    (chart.data, table.rows, …) without forcing the agent to re-ship the
+    whole array. Locked to the ``prop_arrays`` allowlist at the service
+    layer."""
+    result, err = await pockets_service.agent_set_prop_array_item(
+        pocket_id, node_id=node_id, prop=prop, match=match, partial=partial
+    )
+    if err is not None or result is None:
+        return {"ok": False, "error": err or "set_prop_array_item failed"}
+    pocket_view = result.get("pocket") or {}
+    item_index = result.get("item_index")
+    item = result.get("item")
+    old_item = result.get("old_item")
+    await _push_node_op(
+        "node_prop_array_item_set",
+        pocket_view,
+        {
+            "node_id": node_id,
+            "prop": prop,
+            "item_index": item_index,
+            "item": item,
+        },
+    )
+    return {
+        "ok": True,
+        "item_index": item_index,
+        "item": item,
+        "old_item": old_item,
+    }
+
+
+async def append_prop_array_item_for_agent(
+    pocket_id: str,
+    node_id: str,
+    prop: str,
+    value: Any,
+    after: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append ``value`` to a node prop-array, or insert immediately after
+    a matched item when ``after`` is given. Creates the array if missing.
+    Locked to the ``prop_arrays`` allowlist at the service layer."""
+    result, err = await pockets_service.agent_append_prop_array_item(
+        pocket_id, node_id=node_id, prop=prop, value=value, after=after
+    )
+    if err is not None or result is None:
+        return {"ok": False, "error": err or "append_prop_array_item failed"}
+    pocket_view = result.get("pocket") or {}
+    item_index = result.get("item_index")
+    item = result.get("item")
+    await _push_node_op(
+        "node_prop_array_item_appended",
+        pocket_view,
+        {
+            "node_id": node_id,
+            "prop": prop,
+            "item_index": item_index,
+            "item": item,
+        },
+    )
+    return {"ok": True, "item_index": item_index, "item": item}
+
+
+async def remove_prop_array_item_for_agent(
+    pocket_id: str,
+    node_id: str,
+    prop: str,
+    match: dict[str, Any],
+) -> dict[str, Any]:
+    """Remove the matched item from a node prop-array. Refuses ambiguous
+    matches (the agent must disambiguate). Locked to the ``prop_arrays``
+    allowlist at the service layer."""
+    result, err = await pockets_service.agent_remove_prop_array_item(
+        pocket_id, node_id=node_id, prop=prop, match=match
+    )
+    if err is not None or result is None:
+        return {"ok": False, "error": err or "remove_prop_array_item failed"}
+    pocket_view = result.get("pocket") or {}
+    removed_index = result.get("removed_index")
+    removed_item = result.get("removed_item")
+    await _push_node_op(
+        "node_prop_array_item_removed",
+        pocket_view,
+        {
+            "node_id": node_id,
+            "prop": prop,
+            "removed_index": removed_index,
+            "removed_item": removed_item,
+        },
+    )
+    return {
+        "ok": True,
+        "removed_index": removed_index,
+        "removed_item": removed_item,
+    }
+
+
 async def move_node_for_agent(
     pocket_id: str,
     node_id: str,
@@ -633,6 +736,7 @@ async def patch_state_for_agent(pocket_id: str, partial: dict[str, Any]) -> dict
 __all__ = [
     "add_node_for_agent",
     "add_widget_for_agent",
+    "append_prop_array_item_for_agent",
     "append_state_for_agent",
     "create_pocket_for_agent",
     "fetch_pocket_for_agent",
@@ -640,10 +744,12 @@ __all__ = [
     "move_node_for_agent",
     "patch_state_for_agent",
     "remove_node_for_agent",
+    "remove_prop_array_item_for_agent",
     "remove_state_for_agent",
     "remove_widget_for_agent",
     "replace_node_for_agent",
     "set_node_prop_for_agent",
+    "set_prop_array_item_for_agent",
     "set_state_for_agent",
     "update_pocket_for_agent",
     "update_widget_for_agent",

@@ -8,8 +8,12 @@ hallucinates argument names.
 
 The thunk indirections (``_agent_list_pockets``, ``_agent_create``,
 ``_agent_update``, ``_get_manifest``) are bound at module level so
-tests can patch ``ee.agent.pocket_specialist.tools.<name>`` without
-reaching into ``ee.cloud`` internals.
+tests can patch ``pocketpaw_ee.agent.pocket_specialist.tools.<name>``
+without reaching into ``pocketpaw_ee.cloud`` internals.
+
+Changes: 2026-05-14 — added the Tier-2 prop-array item tool factories
+(set / append / remove ``_prop_array_item``), reworked onto the
+pocketpaw_ee layout from PR #1106.
 """
 
 from __future__ import annotations
@@ -633,6 +637,140 @@ def make_remove_node_tool(
     )
 
 
+class _SetPropArrayItemArgs(BaseModel):
+    node_id: str
+    prop: str
+    match: dict[str, Any] = Field(
+        ...,
+        description=(
+            "How to locate the item. One of: {index:0}, {id:'...'},"
+            " {by_field:'label', equals:'X'}, {by_key:{k:v,...}}."
+        ),
+    )
+    partial: dict[str, Any] = Field(
+        ...,
+        description="Fields to merge into the matched item (shallow merge).",
+    )
+
+
+def make_set_prop_array_item_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Edit ONE item inside a widget's prop-array — surgical alternative
+    to set_node_prop for chart.data / table.rows / etc."""
+
+    async def _run(
+        node_id: str,
+        prop: str,
+        match: dict[str, Any],
+        partial: dict[str, Any],
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_prop_array_item_for_agent
+
+        result = await set_prop_array_item_for_agent(pocket_id, node_id, prop, match, partial)
+        _capture_op(
+            capture,
+            "set_prop_array_item",
+            {"node_id": node_id, "prop": prop, "match": match},
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_prop_array_item",
+        description=(
+            "Surgically edit ONE item in a widget's prop-array (chart.data, "
+            "table.rows, calendar.events, kanban.columns, feed.items, "
+            "tabs.items, nav.items, select.options, form-layout.fields). "
+            "Cheaper and safer than set_node_prop when you only need to "
+            "change one row/slice — you never copy the unchanged items, "
+            "so they can't drift. `match` picks the item: "
+            "{index:N} | {id:'...'} | {by_field:'label', equals:'X'} | "
+            "{by_key:{k:v}}. `partial` is shallow-merged into that item."
+        ),
+        args_schema=_SetPropArrayItemArgs,
+    )
+
+
+class _AppendPropArrayItemArgs(BaseModel):
+    node_id: str
+    prop: str
+    value: Any
+    after: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional ItemMatch — insert after the matching item; omit to append.",
+    )
+
+
+def make_append_prop_array_item_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    async def _run(
+        node_id: str,
+        prop: str,
+        value: Any,
+        after: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import append_prop_array_item_for_agent
+
+        result = await append_prop_array_item_for_agent(pocket_id, node_id, prop, value, after)
+        _capture_op(
+            capture,
+            "append_prop_array_item",
+            {"node_id": node_id, "prop": prop, "after": after},
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="append_prop_array_item",
+        description=(
+            "Append (or insert-after) ONE item into a widget's prop-array. "
+            "Same allowed widgets as set_prop_array_item. If `after` is "
+            "given it must be an ItemMatch — the new item is inserted right "
+            "after the matched item; otherwise appended. Creates the array "
+            "if it does not yet exist on the node."
+        ),
+        args_schema=_AppendPropArrayItemArgs,
+    )
+
+
+class _RemovePropArrayItemArgs(BaseModel):
+    node_id: str
+    prop: str
+    match: dict[str, Any]
+
+
+def make_remove_prop_array_item_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    async def _run(
+        node_id: str,
+        prop: str,
+        match: dict[str, Any],
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_prop_array_item_for_agent
+
+        result = await remove_prop_array_item_for_agent(pocket_id, node_id, prop, match)
+        _capture_op(
+            capture,
+            "remove_prop_array_item",
+            {"node_id": node_id, "prop": prop, "match": match},
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_prop_array_item",
+        description=(
+            "Remove ONE matched item from a widget's prop-array. Same "
+            "allowed widgets and match grammar as set_prop_array_item. "
+            "Refuses ambiguous matches — disambiguate with by_key or index."
+        ),
+        args_schema=_RemovePropArrayItemArgs,
+    )
+
+
 def make_edit_pocket_tools(
     *, pocket_id: str, capture: dict[str, Any] | None = None
 ) -> list[StructuredTool]:
@@ -640,7 +778,8 @@ def make_edit_pocket_tools(
 
     Order is the order the LLM sees them; we lead with the read tool
     so the agent is prompted toward "get then mutate" rather than
-    blind writes.
+    blind writes. The Tier-2 ``*_prop_array_item`` ops sit next to
+    ``set_node_prop`` — they are the surgical alternative to it.
     """
     return [
         make_get_pocket_tool(pocket_id=pocket_id),
@@ -649,6 +788,9 @@ def make_edit_pocket_tools(
         make_remove_state_tool(pocket_id=pocket_id, capture=capture),
         make_patch_state_tool(pocket_id=pocket_id, capture=capture),
         make_set_node_prop_tool(pocket_id=pocket_id, capture=capture),
+        make_set_prop_array_item_tool(pocket_id=pocket_id, capture=capture),
+        make_append_prop_array_item_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_prop_array_item_tool(pocket_id=pocket_id, capture=capture),
         make_add_node_tool(pocket_id=pocket_id, capture=capture),
         make_replace_node_tool(pocket_id=pocket_id, capture=capture),
         make_move_node_tool(pocket_id=pocket_id, capture=capture),

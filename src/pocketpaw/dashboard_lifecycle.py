@@ -5,6 +5,13 @@ Extracted from dashboard.py — contains:
 - ``_broadcast_audit_entry()`` / ``_broadcast_health_update()`` — WS-only broadcasts
 - ``startup_event()`` — initializes bus, agent loop, channels, MCP, health, scheduler, daemon
 - ``shutdown_event()`` — tears down all services
+
+Changes:
+- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files and
+  pre-compiled kb-go scopes into the user's home dir at boot via the
+  ``bundled_skills`` / ``bundled_kb`` installers. Best-effort, gated on
+  the ``auto_install_bundled_*`` settings; reuses the already-loaded
+  ``settings`` object.
 """
 
 import asyncio
@@ -20,6 +27,7 @@ from pocketpaw.dashboard_state import (
     _channel_autostart_enabled,
     active_connections,
     agent_loop,
+    trace_collector,
     ws_adapter,
 )
 from pocketpaw.scheduler import get_scheduler
@@ -203,6 +211,64 @@ async def startup_event(
     # Auto-start configured channel adapters (respects per-channel autostart setting)
     settings = Settings.load()
 
+    # Mirror PocketPaw's bundled AgentSkills-format SKILL.md files into
+    # ``~/.claude/skills/<name>/`` so PocketPaw's own ``SkillLoader``
+    # (and Claude Code's native discovery, for claude_agent_sdk users)
+    # picks them up. Skills loaded from there work across every chat
+    # backend via PocketPaw's slash-command dispatcher; claude_agent_sdk
+    # additionally auto-discovers them on natural-language intent.
+    # Best-effort — a failure here just means the chat agent won't have
+    # the ``pocketpaw-create-pocket`` / ``pocketpaw-edit-pocket`` skills;
+    # the MCP tool surface still works. Opt-out:
+    # ``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false``.
+    if settings.auto_install_bundled_skills:
+        try:
+            from pocketpaw.bundled_skills import install_bundled_skills
+
+            results = install_bundled_skills()
+            installed = sum(1 for r in results if r.status == "installed")
+            updated = sum(1 for r in results if r.status == "updated")
+            skipped = sum(1 for r in results if r.status == "skipped")
+            failed = [r for r in results if r.status == "failed"]
+            logger.info(
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("Skill %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled-skills install failed (non-fatal): %s", exc)
+
+    # Mirror PocketPaw's pre-compiled kb-go scopes into
+    # ``~/.knowledge-base/`` so the existing ``_get_kb_context``
+    # injection can retrieve recipes at pocket-creation time.
+    # Best-effort — a failure here just means the agent loses the
+    # recipe-retrieval boost; the MCP tool + skill flow still works.
+    # Opt-out: ``POCKETPAW_AUTO_INSTALL_BUNDLED_KB_SCOPES=false``.
+    if settings.auto_install_bundled_kb_scopes:
+        try:
+            from pocketpaw.bundled_kb import install_bundled_kb_scopes
+
+            kb_results = install_bundled_kb_scopes()
+            installed = sum(1 for r in kb_results if r.status == "installed")
+            updated = sum(1 for r in kb_results if r.status == "updated")
+            skipped = sum(1 for r in kb_results if r.status == "skipped")
+            failed = [r for r in kb_results if r.status == "failed"]
+            logger.info(
+                "Bundled kb-go scopes sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("KB scope %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled kb-go scopes install failed (non-fatal): %s", exc)
+
     # Start StatusTracker (agent state for external integrations)
     from pocketpaw.dashboard_state import status_tracker
     from pocketpaw.lifecycle import register as _register_lifecycle
@@ -210,6 +276,38 @@ async def startup_event(
     status_tracker._max_concurrent = settings.max_concurrent_conversations
     await status_tracker.subscribe()
     _register_lifecycle("status_tracker", shutdown=status_tracker.unsubscribe)
+
+    await trace_collector.subscribe()
+    _register_lifecycle("trace_collector", shutdown=trace_collector.unsubscribe)
+    try:
+        removed = await trace_collector.cleanup_retention(settings.trace_retention_days)
+        if removed:
+            logger.info("Trace retention cleanup removed %d file(s)", removed)
+    except Exception:
+        logger.debug("Trace retention cleanup failed", exc_info=True)
+
+    # Start AlertManager (periodic threshold checks + bus subscriptions)
+    try:
+        from pocketpaw.alert_manager import get_alert_manager
+
+        alert_manager = get_alert_manager()
+        await alert_manager.start()
+        _register_lifecycle("alert_manager", shutdown=alert_manager.stop)
+        logger.info("AlertManager started")
+    except Exception as e:
+        logger.warning("Failed to start AlertManager: %s", e)
+
+    # Start ChannelHealthStore (connects/disconnects uptime tracking)
+    try:
+        from pocketpaw.channel_health_store import get_channel_health_store
+
+        channel_health_store = get_channel_health_store()
+        await channel_health_store.subscribe()
+        _register_lifecycle("channel_health_store", shutdown=channel_health_store.unsubscribe)
+        logger.info("ChannelHealthStore subscribed")
+    except Exception as e:
+        logger.warning("Failed to subscribe ChannelHealthStore: %s", e)
+
     if _start_channel_adapter_fn:
         for ch in (
             "discord",
@@ -387,6 +485,21 @@ async def startup_event(
                 logger.debug("Rate limiter cleanup: removed %d stale entries", removed)
 
     asyncio.create_task(_rate_limit_cleanup_loop())
+
+    async def _trace_retention_cleanup_loop():
+        while True:
+            await asyncio.sleep(21600)
+            try:
+                current_settings = Settings.load()
+                removed = await trace_collector.cleanup_retention(
+                    current_settings.trace_retention_days
+                )
+                if removed:
+                    logger.debug("Trace retention cleanup removed %d stale file(s)", removed)
+            except Exception:
+                logger.debug("Trace retention cleanup loop failed", exc_info=True)
+
+    asyncio.create_task(_trace_retention_cleanup_loop())
 
     # Open browser now that the server is actually listening
     if _state._open_browser_url:

@@ -23,6 +23,7 @@ from pocketpaw.agents.backend import (
 )
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,11 @@ class CopilotSDKBackend(BaseAgentBackend):
         self._sdk_available = False
         self._client: Any = None
         self._sessions: dict[str, Any] = {}
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
 
         try:
             import copilot  # noqa: F401
@@ -84,6 +90,15 @@ class CopilotSDKBackend(BaseAgentBackend):
             )
         elif not self._sdk_available:
             logger.warning("Copilot SDK not found — install with: pip install github-copilot-sdk")
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        # Policy is stored but never enforced — Copilot runs tools inside an
+        # external CLI process that has no awareness of this policy.
+        logger.debug("set_tool_policy on CopilotSDKBackend: stored but not enforced (external CLI)")
+        self._policy = policy
 
     @staticmethod
     def _inject_history(instruction: str, history: list[dict]) -> str:

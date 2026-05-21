@@ -61,6 +61,7 @@ from pocketpaw.agents.backend import (
 )
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,11 @@ class CodexCLIBackend(BaseAgentBackend):
         # (e.g. CommandExecutionItem.status='declined' which the SDK schema
         # doesn't list). One-shot patch; safe to call repeatedly.
         _patch_codex_parser()
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         if self._cli_available:
             logger.info("Codex CLI binary: %s", self._codex_path)
         else:
@@ -311,6 +317,15 @@ class CodexCLIBackend(BaseAgentBackend):
                 "Codex CLI binary not found — install with: "
                 "npm install -g @openai/codex (or call Codex.install(version=...))"
             )
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        # Policy is stored but never enforced — Codex runs tools inside an
+        # external CLI process that has no awareness of this policy.
+        logger.debug("set_tool_policy on CodexCLIBackend: stored but not enforced (external CLI)")
+        self._policy = policy
 
     @staticmethod
     def _inject_history(instruction: str, history: list[dict]) -> str:

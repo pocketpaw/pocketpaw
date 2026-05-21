@@ -1,7 +1,7 @@
-# Updated: 2026-04-09 — Release 0.4.16: security rollup (CredentialStore v2, WS auth, dangerous-cmd hardening, OWASP fixes), discli 0.7, soul 0.2.9, Python 3.14 warning, fast-chat disabled for CLI compaction.
+# Updated: 2026-04-29 — Release 0.4.18: dev → main sync (PR #1015) — file jail OCR/STT, scope enforcement + fail-closed require_scope, SSRF guard scaffolding, PII tightening, rate-limiter race fix + ReDoS bounds, audit-log scrubbing, dynamic cookie Secure flag, nonce-based CSP, plus bus mutation leakage and token-usage propagation fixes.
 [project]
 name = "pocketpaw"
-version = "0.4.16"
+version = "0.4.18"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"

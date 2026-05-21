@@ -68,7 +68,19 @@ class GoogleADKBackend(BaseAgentBackend):
         self._runner: Any = None
         self._sessions: dict[str, str] = {}  # session_key -> session_id
         self._custom_tools: list | None = None
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         self._initialize()
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        self._policy = policy
+        self._custom_tools = None
 
     def _initialize(self) -> None:
         try:
@@ -120,7 +132,9 @@ class GoogleADKBackend(BaseAgentBackend):
             from pocketpaw.agents.tool_bridge import build_adk_function_tools
 
             # Cache tools at init; the tool set doesn't change at runtime.
-            self._custom_tools = build_adk_function_tools(self.settings, backend="google_adk")
+            self._custom_tools = build_adk_function_tools(
+                self.settings, backend="google_adk", policy=self._policy
+            )
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -148,11 +162,7 @@ class GoogleADKBackend(BaseAgentBackend):
         if not configs:
             return []
 
-        policy = ToolPolicy(
-            profile=self.settings.tool_profile,
-            allow=self.settings.tools_allow,
-            deny=self.settings.tools_deny,
-        )
+        policy = self._policy
 
         toolsets: list = []
         for cfg in configs:

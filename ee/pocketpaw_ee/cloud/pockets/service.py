@@ -18,11 +18,18 @@ Agent-facing granular ``rippleSpec.ui`` mutations (called from the
 ``pocket_specialist`` subagent via the in-process MCP server):
 - ``agent_add_node``, ``agent_replace_node``, ``agent_set_node_prop``,
   ``agent_move_node``, ``agent_remove_node``
+- ``agent_set_prop_array_item``, ``agent_append_prop_array_item``,
+  ``agent_remove_prop_array_item`` — Tier-2 surgical edits on a single
+  item inside a widget prop-array (chart.data, table.rows, …)
+
+Changes: 2026-05-14 — added the Tier-2 prop-array item ops (reworked
+onto the pocketpaw_ee layout from PR #1106).
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import secrets
 from collections import OrderedDict
@@ -38,7 +45,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 from pocketpaw_ee.cloud.models.pocket import Widget as _WidgetDoc
-from pocketpaw_ee.cloud.pockets import spec_ops, state_ops
+from pocketpaw_ee.cloud.pockets import prop_arrays, spec_ops, state_ops
 from pocketpaw_ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
@@ -1210,6 +1217,252 @@ async def agent_set_node_prop(
                 "subtree": node,
                 "old_value": old,
                 "prop": prop,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_set_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    match: dict[str, Any],
+    partial: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Merge ``partial`` into the first item of ``node.props[prop]`` that
+    matches ``match``. Surgical alternative to ``set_node_prop`` when the
+    agent only wants to change one row/slice in a chart/table/etc.
+
+    Merge is SHALLOW: top-level keys in ``partial`` overwrite the matched
+    item's keys, but nested dicts/lists are replaced wholesale rather
+    than deep-merged. Matches ``patch_state`` semantics; if the agent
+    needs to preserve nested structure, fetch the item first and pass a
+    fully-built nested dict in ``partial``. Non-dict matched items are
+    replaced wholesale by ``partial`` (rare — most prop-array items are
+    dicts).
+
+    Returns ``({"item_index": int, "item": <new item>, "old_item": <prev>,
+    "pocket": <view>}, None)``.
+
+    Error codes (returned as the error string):
+      * ``"unsupported_prop_array: <type>.<prop>"``
+      * ``"no node with id 'n_xxx'"``
+      * ``"prop {prop!r} is not an array on node {node_id!r}"``
+      * ``"not_found: no item matched"``
+      * ``"ambiguous: N items matched; candidates=[idx, ...]"``
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+    if not isinstance(partial, dict):
+        return None, "partial must be a dict"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        props = node.get("props")
+        if props is None:
+            return None, f"node {node_id!r} has no props"
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
+        arr = props.get(prop)
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        try:
+            candidates = spec_ops.match_array_item_candidates(arr, match)
+        except ValueError as exc:
+            return None, str(exc)
+        if len(candidates) == 0:
+            return None, "not_found: no item matched"
+        if len(candidates) > 1:
+            preview = candidates[:5]
+            return None, f"ambiguous: {len(candidates)} items matched; candidates={preview}"
+
+        idx = candidates[0]
+        old_item = copy.deepcopy(arr[idx])
+        if isinstance(arr[idx], dict):
+            arr[idx] = {**arr[idx], **partial}
+        else:
+            arr[idx] = partial  # non-dict element: replace wholesale
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "item_index": idx,
+                "item": arr[idx],
+                "old_item": old_item,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_append_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    value: Any,
+    after: dict[str, Any] | None = None,
+) -> tuple[dict | None, str | None]:
+    """Append ``value`` to ``node.props[prop]``. If ``after`` is given,
+    insert immediately AFTER the first item matching that ItemMatch.
+
+    Returns ``({"item_index": int, "item": <inserted>, "pocket": <view>}, None)``.
+
+    Errors: see ``agent_set_prop_array_item``. ``after`` resolution uses
+    the same match grammar; ``not_found`` / ``ambiguous`` propagate.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        # Append intentionally creates props and the array on demand —
+        # set/remove bail when either is missing because there is no
+        # item to address, but append's whole job is to add the first
+        # one. Asymmetry is by design.
+        props = node.setdefault("props", {})
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
+        arr = props.get(prop)
+        if arr is None:
+            arr = []
+            props[prop] = arr
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        if after is None:
+            arr.append(value)
+            idx = len(arr) - 1
+        else:
+            try:
+                candidates = spec_ops.match_array_item_candidates(arr, after)
+            except ValueError as exc:
+                return None, str(exc)
+            if len(candidates) == 0:
+                return None, "not_found: after target did not match"
+            if len(candidates) > 1:
+                return (
+                    None,
+                    f"ambiguous: after matched {len(candidates)} items; "
+                    f"candidates={candidates[:5]}",
+                )
+            arr.insert(candidates[0] + 1, value)
+            idx = candidates[0] + 1
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "item_index": idx,
+                "item": value,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    match: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Remove the first item in ``node.props[prop]`` matching ``match``.
+
+    Returns ``({"removed_index": int, "removed_item": Any, "pocket": <view>},
+    None)``.
+
+    Errors: see ``agent_set_prop_array_item``. Refuses ambiguous matches —
+    the agent must disambiguate.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        props = node.get("props")
+        if props is None:
+            return None, f"node {node_id!r} has no props"
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
+        arr = props.get(prop)
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        try:
+            candidates = spec_ops.match_array_item_candidates(arr, match)
+        except ValueError as exc:
+            return None, str(exc)
+        if len(candidates) == 0:
+            return None, "not_found: no item matched"
+        if len(candidates) > 1:
+            return None, f"ambiguous: {len(candidates)} items matched; candidates={candidates[:5]}"
+
+        idx = candidates[0]
+        removed = arr.pop(idx)
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "removed_index": idx,
+                "removed_item": removed,
                 "pocket": _agent_view_dict(doc),
             },
             None,

@@ -1,10 +1,15 @@
-# ee/agent/pocket_specialist/adapters.py
+# ee/pocketpaw_ee/agent/pocket_specialist/adapters.py
 # Created: 2026-05-14 — split the ``pocket_specialist__create`` dispatch
 # into two mode-specific adapters. Bumps the historical subagent flow
 # into ``SubagentAdapter`` and introduces ``AgentModeAdapter`` for the
 # new two-call protocol where the calling chat agent drafts the
 # rippleSpec inline using its own LLM and the specialist only runs
 # validate-and-persist on the returned draft.
+# Modified: 2026-05-21 — added full-fledged-app chrome widgets
+# (app-shell, sidebar, breadcrumb, sheet, modal, confirm-dialog,
+# dropdown-menu, command-palette, coachmark) to the starter list and
+# the ``app`` pattern bucket so "build me an app for X" briefs land on
+# real chrome instead of composing it from primitives.
 """Mode-specific adapters for the pocket specialist's create endpoint.
 
 The MCP tool handler (``mcp_tool._create_handler``) doesn't know — and
@@ -49,6 +54,10 @@ _STARTER_WIDGET_KINDS: tuple[str, ...] = (
     "section",
     "page-header",
     "hero",
+    # full-fledged app shell (use when the brief is "an app for X")
+    "app-shell",
+    "sidebar",
+    "breadcrumb",
     # display
     "text",
     "heading",
@@ -99,6 +108,13 @@ _STARTER_WIDGET_KINDS: tuple[str, ...] = (
     "date-picker",
     "location-picker",
     "search",
+    # overlays + chrome (UX building blocks for apps)
+    "sheet",
+    "modal",
+    "confirm-dialog",
+    "dropdown-menu",
+    "command-palette",
+    "coachmark",
     # enterprise / advanced
     "comment-thread",
     "tree-table",
@@ -246,6 +262,18 @@ def _draft_kit_response(input: Any, *, started: float) -> Any:
                 "comparison-layout",
             ],
             "app": [
+                # Shell — the chrome of a full-fledged app. Reach for
+                # these when the brief is "an app for X" (not just a
+                # single-widget tool).
+                "app-shell",
+                "sidebar",
+                "tabs",
+                "breadcrumb",
+                "sheet",
+                "modal",
+                "command-palette",
+                "coachmark",
+                # Focal widgets — the WORK happens inside one of these.
                 "kanban",
                 "calendar",
                 "gantt",

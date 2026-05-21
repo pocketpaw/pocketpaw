@@ -18,14 +18,18 @@ import json
 import logging
 import re
 import time
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pocketpaw.bus.queue import MessageBus
 
+from pocketpaw import usage_tracker as usage_tracker_module
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
+from pocketpaw.budget import BudgetSnapshot, get_budget_snapshot
 from pocketpaw.bus import InboundMessage, OutboundMessage, SystemEvent, get_message_bus
 from pocketpaw.bus.commands import get_command_handler
 from pocketpaw.bus.events import Channel
@@ -135,6 +139,7 @@ async def _publish_pocket_event(
     content: str,
     session_key: str,
     metadata: dict | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """Detect pocket event JSON in tool output and publish a dedicated SystemEvent.
 
@@ -222,21 +227,27 @@ async def _publish_pocket_event(
             user_id=cloud_user_id,
             workspace_id=cloud_workspace_id,
         )
+        payload = {
+            "spec": spec,
+            "session_key": session_key,
+            "pocket_cloud_id": pocket_cloud_id,
+        }
+        if trace_id:
+            payload["trace_id"] = trace_id
         await bus.publish_system(
             SystemEvent(
                 event_type="pocket_created",
-                data={
-                    "spec": spec,
-                    "session_key": session_key,
-                    "pocket_cloud_id": pocket_cloud_id,
-                },
+                data=payload,
             )
         )
     elif evt_type == "mutation":
+        payload = {"mutation": data.get("mutation", {}), "session_key": session_key}
+        if trace_id:
+            payload["trace_id"] = trace_id
         await bus.publish_system(
             SystemEvent(
                 event_type="pocket_mutation",
-                data={"mutation": data.get("mutation", {}), "session_key": session_key},
+                data=payload,
             )
         )
 
@@ -368,6 +379,7 @@ class AgentLoop:
         self._global_semaphore = asyncio.Semaphore(self.settings.max_concurrent_conversations)
         self._background_tasks: set[asyncio.Task] = set()
         self._active_tasks: dict[str, asyncio.Task] = {}  # session_key -> processing task
+        self._budget_level_by_window: dict[str, str] = {}
 
         # Soul Protocol (optional)
         self._soul_manager: Any = None  # SoulManager | None
@@ -488,6 +500,76 @@ class AgentLoop:
                 self._active_tasks.pop(key, None)
 
         task.add_done_callback(_on_done)
+
+    def _set_budget_level(self, window_key: str, level: str) -> bool:
+        """Update in-memory budget level and return True when it changed."""
+        previous = self._budget_level_by_window.get(window_key)
+        if previous == level:
+            return False
+        self._budget_level_by_window[window_key] = level
+        return True
+
+    @staticmethod
+    def _budget_warning_message(snapshot: BudgetSnapshot) -> str:
+        """Human-readable warning when spend crosses warning threshold."""
+        cap = snapshot.effective_cap_usd or 0.0
+        return (
+            "Budget warning: "
+            f"{snapshot.percent_used:.2f}% used (${snapshot.spent_usd:.4f} / ${cap:.4f})."
+        )
+
+    @staticmethod
+    def _budget_exhausted_message(snapshot: BudgetSnapshot) -> str:
+        """Human-readable message for exhausted budget state."""
+        cap = snapshot.effective_cap_usd or 0.0
+        return (
+            "Budget exhausted: "
+            f"${snapshot.spent_usd:.4f} spent against a ${cap:.4f} cap. "
+            "New LLM calls are blocked until reset day or a temporary override is set."
+        )
+
+    async def _emit_budget_event(
+        self,
+        *,
+        event_type: str,
+        session_key: str,
+        channel: Channel,
+        snapshot: BudgetSnapshot,
+        message: str,
+        trace_id: str,
+    ) -> None:
+        """Publish structured budget events for dashboard/API consumers."""
+        await self.bus.publish_system(
+            SystemEvent(
+                event_type=event_type,
+                data={
+                    "session_key": session_key,
+                    "trace_id": trace_id,
+                    "channel": channel.value,
+                    "window_start": snapshot.window_start,
+                    "window_end": snapshot.window_end,
+                    "window_key": snapshot.window_key,
+                    "configured_cap_usd": snapshot.configured_cap_usd,
+                    "effective_cap_usd": snapshot.effective_cap_usd,
+                    "override_active": snapshot.override_active,
+                    "warning_threshold": snapshot.warning_threshold,
+                    "spent_usd": snapshot.spent_usd,
+                    "remaining_usd": snapshot.remaining_usd,
+                    "percent_used": snapshot.percent_used,
+                    "level": snapshot.level,
+                    "message": message,
+                },
+            )
+        )
+
+    async def _notify_budget_channels(self, message: str) -> None:
+        """Send budget notifications to configured notification channels."""
+        try:
+            from pocketpaw.bus.notifier import notify
+
+            await notify(message)
+        except Exception:
+            logger.debug("Budget notification fanout failed", exc_info=True)
 
     async def start(self) -> None:
         """Start the agent loop."""
@@ -744,42 +826,110 @@ class AgentLoop:
         if self.context_builder.memory is not self.memory:
             self.context_builder.memory = self.memory
 
-        # Command interception — handle /new, /sessions, /resume, /help
-        # before any agent processing or memory storage
-        cmd_handler = get_command_handler()
-        if cmd_handler._on_settings_changed is None:
-            cmd_handler.set_on_settings_changed(self.reset_router)
-        if cmd_handler.is_command(message.content):
-            response = await cmd_handler.handle(message)
-            if response is not None:
-                await self.bus.publish_outbound(response)
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=message.channel,
-                        chat_id=message.chat_id,
-                        content="",
-                        is_stream_end=True,
-                    )
-                )
-                return
-
-        # Welcome hint — one-time message on first interaction in a channel
-        if self.settings.welcome_hint_enabled and message.channel not in self._WELCOME_EXCLUDED:
-            existing = await self.memory.get_session_history(session_key, limit=1)
-            if not existing:
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=message.channel,
-                        chat_id=message.chat_id,
-                        content=(
-                            "Welcome to PocketPaw! Type /help (or !help) to see available commands."
-                        ),
-                    )
-                )
-
         router = None
         agent_started = False
+        usage_tracker = None
+        trace_id = uuid.uuid4().hex
+        trace_started_at = datetime.now(tz=UTC).isoformat()
+        stream_chunk_count = 0
+        trace_outbound_timestamp = ""
+        trace_closed = False
+        cancelled = False
+        tool_call_seq = 0
+        pending_tool_calls: list[dict[str, str]] = []
+
+        def _trace_payload(**extra: Any) -> dict[str, Any]:
+            payload: dict[str, Any] = {"session_key": session_key, "trace_id": trace_id}
+            payload.update(extra)
+            return payload
+
+        async def _emit_trace_end(
+            *,
+            status: str,
+            reason: str,
+            error_message: str = "",
+        ) -> None:
+            nonlocal trace_closed
+            if trace_closed:
+                return
+            trace_closed = True
+
+            ended_at = datetime.now(tz=UTC).isoformat()
+            outbound_timestamp = trace_outbound_timestamp or ended_at
+            await self.bus.publish_system(
+                SystemEvent(
+                    event_type="trace_end",
+                    data=_trace_payload(
+                        started_at=trace_started_at,
+                        ended_at=ended_at,
+                        status=status,
+                        reason=reason,
+                        cancelled=cancelled,
+                        error_message=error_message,
+                        outbound={
+                            "channel": message.channel.value,
+                            "timestamp": outbound_timestamp,
+                            "chunks_count": stream_chunk_count,
+                        },
+                    ),
+                )
+            )
+
         try:
+            await self.bus.publish_system(
+                SystemEvent(
+                    event_type="trace_start",
+                    data=_trace_payload(
+                        started_at=trace_started_at,
+                        inbound={
+                            "channel": message.channel.value,
+                            "chat_id": message.chat_id,
+                            "sender_id": message.sender_id,
+                            "timestamp": message.timestamp.isoformat(),
+                        },
+                    ),
+                )
+            )
+
+            # Command interception — handle /new, /sessions, /resume, /help
+            # before any agent processing or memory storage.
+            cmd_handler = get_command_handler()
+            if cmd_handler._on_settings_changed is None:
+                cmd_handler.set_on_settings_changed(self.reset_router)
+            if cmd_handler.is_command(message.content):
+                response = await cmd_handler.handle(message)
+                if response is not None:
+                    response.metadata = {**(response.metadata or {}), "trace_id": trace_id}
+                    await self.bus.publish_outbound(response)
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=message.channel,
+                            chat_id=message.chat_id,
+                            content="",
+                            metadata={"trace_id": trace_id},
+                            is_stream_end=True,
+                        )
+                    )
+                    trace_outbound_timestamp = datetime.now(tz=UTC).isoformat()
+                    await _emit_trace_end(status="command", reason="command_handled")
+                    return
+
+            # Welcome hint — one-time message on first interaction in a channel.
+            if self.settings.welcome_hint_enabled and message.channel not in self._WELCOME_EXCLUDED:
+                existing = await self.memory.get_session_history(session_key, limit=1)
+                if not existing:
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=message.channel,
+                            chat_id=message.chat_id,
+                            content=(
+                                "Welcome to PocketPaw! Type /help (or !help) "
+                                "to see available commands."
+                            ),
+                            metadata={"trace_id": trace_id},
+                        )
+                    )
+
             # 0. Injection scan for non-owner sources
             content = message.content
             if self.settings.injection_scan_enabled:
@@ -804,6 +954,7 @@ class AgentLoop:
                                     "message": "Message blocked by injection scanner",
                                     "patterns": scan_result.matched_patterns,
                                     "session_key": session_key,
+                                    "trace_id": trace_id,
                                 },
                             )
                         )
@@ -814,8 +965,11 @@ class AgentLoop:
                                 content=(
                                     "Your message was flagged by the security scanner and blocked."
                                 ),
+                                metadata={"trace_id": trace_id},
                             )
                         )
+                        trace_outbound_timestamp = datetime.now(tz=UTC).isoformat()
+                        await _emit_trace_end(status="blocked", reason="injection_blocked")
                         return
 
                 # Wrap suspicious (non-blocked) content with sanitization markers
@@ -834,6 +988,62 @@ class AgentLoop:
                         [t.value for t in pii_result.pii_types_found],
                     )
                     content = pii_result.sanitized_text
+
+            # Budget pre-flight: block new model calls if this budget window is exhausted.
+            # Uses the cached settings (get_settings()) to avoid per-message disk I/O and
+            # races with the API layer's _budget_lock.  Persistence of budget_paused is
+            # handled exclusively by the budget API endpoints under _budget_lock.
+            try:
+                if usage_tracker is None:
+                    usage_tracker = usage_tracker_module.get_usage_tracker()
+
+                # Read-only snapshot — no setattr, no save(), no lock needed.
+                # sync_budget_state() mutates settings (pause flag, override expiry)
+                # without _budget_lock; that must only happen in the API layer.
+                budget_snapshot = get_budget_snapshot(
+                    get_settings(),
+                    tracker=usage_tracker,
+                )
+
+                level_changed = self._set_budget_level(
+                    budget_snapshot.window_key,
+                    budget_snapshot.level,
+                )
+                if budget_snapshot.exhausted:
+                    exhausted_message = self._budget_exhausted_message(budget_snapshot)
+                    if level_changed:
+                        await self._emit_budget_event(
+                            event_type="budget_exhausted",
+                            session_key=session_key,
+                            channel=message.channel,
+                            snapshot=budget_snapshot,
+                            message=exhausted_message,
+                            trace_id=trace_id,
+                        )
+                        await self._notify_budget_channels(exhausted_message)
+
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=message.channel,
+                            chat_id=message.chat_id,
+                            content=exhausted_message,
+                            metadata={"trace_id": trace_id},
+                        )
+                    )
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=message.channel,
+                            chat_id=message.chat_id,
+                            content="",
+                            metadata={"trace_id": trace_id},
+                            is_stream_end=True,
+                        )
+                    )
+                    trace_outbound_timestamp = datetime.now(tz=UTC).isoformat()
+                    await _emit_trace_end(status="budget_exhausted", reason="budget_preflight")
+                    return
+            except Exception:
+                logger.debug("Failed to evaluate budget state", exc_info=True)
 
             # 1. Store User Message (strip bulky transient context from stored metadata)
             store_meta = {
@@ -935,6 +1145,7 @@ class AgentLoop:
                                 "path": str(agents_md.path),
                                 "preview": agents_md.preview,
                                 "session_key": session_key,
+                                "trace_id": trace_id,
                             },
                         )
                     )
@@ -961,11 +1172,35 @@ class AgentLoop:
 
             # 2c. Emit agent_start + thinking events
             agent_started = True
+            # Resolve the active model name for trace fidelity.  The router may
+            # not be initialised yet if this is the very first message; fall back
+            # to the configured model setting so the trace always has a value.
+            _active_model = ""
+            try:
+                _active_model = str(
+                    getattr(self._router._backend if self._router else None, "model", "")
+                    or getattr(self.settings, "anthropic_model", "")
+                    or getattr(self.settings, "openai_model", "")
+                    or ""
+                )
+            except Exception:
+                pass
             await self.bus.publish_system(
-                SystemEvent(event_type="agent_start", data={"session_key": session_key})
+                SystemEvent(
+                    event_type="agent_start",
+                    data={
+                        "session_key": session_key,
+                        "trace_id": trace_id,
+                        "backend": self.settings.agent_backend,
+                        "model": _active_model,
+                    },
+                )
             )
             await self.bus.publish_system(
-                SystemEvent(event_type="thinking", data={"session_key": session_key})
+                SystemEvent(
+                    event_type="thinking",
+                    data={"session_key": session_key, "trace_id": trace_id},
+                )
             )
 
             # Per-pocket tool policy — deny tools from disabled categories
@@ -986,29 +1221,32 @@ class AgentLoop:
 
             # 3. Run through AgentRouter (handles all backends)
             router = self._get_router()
-            _saved_policy = None
-            if pocket_deny_tools and hasattr(router, "_registry") and router._registry:
+            if pocket_deny_tools and router._backend is not None:
                 from pocketpaw.tools.policy import ToolPolicy
 
-                _saved_policy = router._registry._policy  # Save to restore after request
-                scoped_policy = ToolPolicy(
-                    profile=self.settings.tool_profile or "full",
-                    deny=pocket_deny_tools,
+                _policy_ctx = router.scoped_tool_policy(
+                    ToolPolicy(
+                        profile=self.settings.tool_profile or "full",
+                        deny=pocket_deny_tools,
+                    )
                 )
-                router._registry.set_policy(scoped_policy)
+            else:
+                from contextlib import nullcontext
+
+                _policy_ctx = nullcontext()
 
             full_response = ""
             media_paths: list[str] = []
             cancelled = False
             # Most recent token_usage payload from the backend, attached to the
             # final OutboundMessage so chat API / SSE / WebSocket clients get it.
-            last_usage: dict[str, Any] = {}
             # Streaming redaction: accumulate raw content and track what has
             # already been sent (redacted) so secrets split across chunk
             # boundaries are still caught.
             stream_buffer = ""
             safe_sent = ""
 
+            await _policy_ctx.__aenter__()
             run_iter = router.run(
                 content, system_prompt=system_prompt, history=history, session_key=session_key
             )
@@ -1039,20 +1277,33 @@ class AgentLoop:
                         # Send only the newly safe portion (delta from last publish).
                         safe_chunk = safe_buffer[len(safe_sent) :]
                         safe_sent = safe_buffer
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=safe_chunk,
-                                is_stream_chunk=True,
+                        if safe_chunk:
+                            stream_chunk_count += 1
+                            await self.bus.publish_outbound(
+                                OutboundMessage(
+                                    channel=message.channel,
+                                    chat_id=message.chat_id,
+                                    content=safe_chunk,
+                                    metadata={"trace_id": trace_id},
+                                    is_stream_chunk=True,
+                                )
                             )
-                        )
+                            await self.bus.publish_system(
+                                SystemEvent(
+                                    event_type="trace_chunk",
+                                    data=_trace_payload(count=1),
+                                )
+                            )
 
                     elif etype == "thinking":
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="thinking",
-                                data={"content": econtent, "session_key": session_key},
+                                data={
+                                    "content": econtent,
+                                    "session_key": session_key,
+                                    "trace_id": trace_id,
+                                },
                             )
                         )
 
@@ -1060,28 +1311,44 @@ class AgentLoop:
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="thinking_done",
-                                data={"session_key": session_key},
+                                data={"session_key": session_key, "trace_id": trace_id},
                             )
                         )
 
                     elif etype == "token_usage":
-                        last_usage = dict(meta)
+                        input_tokens = meta.get("input_tokens", meta.get("input", 0))
+                        output_tokens = meta.get("output_tokens", meta.get("output", 0))
+                        cached_input_tokens = meta.get(
+                            "cached_input_tokens",
+                            meta.get("cached_tokens", 0),
+                        )
+                        token_data = {
+                            **meta,
+                            "session_key": session_key,
+                            "trace_id": trace_id,
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "cached_input_tokens": cached_input_tokens,
+                            "input": input_tokens,
+                            "output": output_tokens,
+                        }
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="token_usage",
-                                data={**meta, "session_key": session_key},
+                                data=token_data,
                             )
                         )
                         # Persist to usage tracker
                         try:
-                            from pocketpaw.usage_tracker import get_usage_tracker
+                            if usage_tracker is None:
+                                usage_tracker = usage_tracker_module.get_usage_tracker()
 
-                            get_usage_tracker().record(
+                            usage_tracker.record(
                                 backend=meta.get("backend", "unknown"),
                                 model=meta.get("model", ""),
-                                input_tokens=meta.get("input_tokens", 0),
-                                output_tokens=meta.get("output_tokens", 0),
-                                cached_input_tokens=meta.get("cached_input_tokens", 0),
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                cached_input_tokens=cached_input_tokens,
                                 session_id=session_key or "",
                                 total_cost_usd=meta.get("total_cost_usd"),
                             )
@@ -1090,10 +1357,54 @@ class AgentLoop:
                                 "Failed to persist token usage metrics",
                                 exc_info=True,
                             )
+                        else:
+                            try:
+                                # Read-only snapshot — no setattr, no save(), no lock needed.
+                                # sync_budget_state() mutates settings (budget_paused, override
+                                # expiry) and must only run under _budget_lock in the API layer.
+                                # This path only needs the level to emit warning/exhausted events.
+                                budget_snapshot = get_budget_snapshot(
+                                    get_settings(),
+                                    tracker=usage_tracker,
+                                )
+
+                                level_changed = self._set_budget_level(
+                                    budget_snapshot.window_key,
+                                    budget_snapshot.level,
+                                )
+                                if level_changed and budget_snapshot.level in {
+                                    "warning",
+                                    "exhausted",
+                                }:
+                                    if budget_snapshot.level == "warning":
+                                        budget_message = self._budget_warning_message(
+                                            budget_snapshot
+                                        )
+                                        event_type = "budget_warning"
+                                    else:
+                                        budget_message = self._budget_exhausted_message(
+                                            budget_snapshot
+                                        )
+                                        event_type = "budget_exhausted"
+
+                                    await self._emit_budget_event(
+                                        event_type=event_type,
+                                        session_key=session_key,
+                                        channel=message.channel,
+                                        snapshot=budget_snapshot,
+                                        message=budget_message,
+                                        trace_id=trace_id,
+                                    )
+                                    await self._notify_budget_channels(budget_message)
+                            except Exception:
+                                logger.debug("Failed to evaluate budget state", exc_info=True)
 
                     elif etype == "tool_use":
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
                         tool_input = meta.get("input") or meta
+                        tool_call_seq += 1
+                        tool_call_id = f"{trace_id}:{tool_call_seq}"
+                        pending_tool_calls.append({"id": tool_call_id, "name": tool_name})
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_start",
@@ -1101,6 +1412,8 @@ class AgentLoop:
                                     "name": tool_name,
                                     "params": tool_input,
                                     "session_key": session_key,
+                                    "trace_id": trace_id,
+                                    "tool_call_id": tool_call_id,
                                 },
                             )
                         )
@@ -1129,12 +1442,22 @@ class AgentLoop:
                                         "question": question,
                                         "options": options,
                                         "session_key": session_key,
+                                        "trace_id": trace_id,
                                     },
                                 )
                             )
 
                     elif etype == "tool_result":
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
+                        tool_call_id = ""
+                        for idx, pending in enumerate(pending_tool_calls):
+                            if pending.get("name") == tool_name:
+                                tool_call_id = pending.get("id", "")
+                                pending_tool_calls.pop(idx)
+                                break
+                        if not tool_call_id and pending_tool_calls:
+                            tool_call_id = pending_tool_calls.pop(0).get("id", "")
+
                         await self.bus.publish_system(
                             SystemEvent(
                                 event_type="tool_result",
@@ -1143,6 +1466,8 @@ class AgentLoop:
                                     "result": econtent[:200],
                                     "status": "success",
                                     "session_key": session_key,
+                                    "trace_id": trace_id,
+                                    "tool_call_id": tool_call_id,
                                 },
                             )
                         )
@@ -1152,7 +1477,11 @@ class AgentLoop:
                         # cloud_workspace_id (threaded in from the chat
                         # endpoint) reach the pocket creator.
                         await _publish_pocket_event(
-                            self.bus, econtent, session_key, message.metadata
+                            self.bus,
+                            econtent,
+                            session_key,
+                            metadata=message.metadata,
+                            trace_id=trace_id,
                         )
                         media_paths.extend(_extract_media_paths(econtent))
 
@@ -1165,19 +1494,29 @@ class AgentLoop:
                                     "result": econtent,
                                     "status": "error",
                                     "session_key": session_key,
+                                    "trace_id": trace_id,
                                 },
                             )
                         )
                         # Apply output redaction to error messages too
                         redacted_content = redact_output(econtent)
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=message.channel,
-                                chat_id=message.chat_id,
-                                content=redacted_content,
-                                is_stream_chunk=True,
+                        if redacted_content:
+                            stream_chunk_count += 1
+                            await self.bus.publish_outbound(
+                                OutboundMessage(
+                                    channel=message.channel,
+                                    chat_id=message.chat_id,
+                                    content=redacted_content,
+                                    metadata={"trace_id": trace_id},
+                                    is_stream_chunk=True,
+                                )
                             )
-                        )
+                            await self.bus.publish_system(
+                                SystemEvent(
+                                    event_type="trace_chunk",
+                                    data=_trace_payload(count=1),
+                                )
+                            )
 
                     elif etype == "done":
                         pass
@@ -1186,9 +1525,7 @@ class AgentLoop:
                 logger.info("Stream cancelled for session %s", session_key)
             finally:
                 await run_iter.aclose()
-                # Restore global tool policy after per-pocket scoped request
-                if _saved_policy is not None and hasattr(router, "_registry") and router._registry:
-                    router._registry.set_policy(_saved_policy)
+                await _policy_ctx.__aexit__(None, None, None)
 
             # 4. Send stream end marker (with any media files detected)
             # Fallback: if no media tags found in tool_result chunks,
@@ -1224,16 +1561,7 @@ class AgentLoop:
             # Deduplicate while preserving order
             seen: set[str] = set()
             media_paths = [p for p in media_paths if not (p in seen or seen.add(p))]
-            metadata_out: dict[str, Any] = {}
-            if last_usage:
-                metadata_out["usage"] = {
-                    "input_tokens": last_usage.get("input_tokens", 0),
-                    "output_tokens": last_usage.get("output_tokens", 0),
-                    "cached_input_tokens": last_usage.get("cached_input_tokens", 0),
-                    "total_cost_usd": last_usage.get("total_cost_usd"),
-                    "model": last_usage.get("model"),
-                    "backend": last_usage.get("backend"),
-                }
+            metadata_out: dict[str, Any] = {"trace_id": trace_id}
             if voice_media_paths:
                 metadata_out["voice_media_paths"] = voice_media_paths
             await self.bus.publish_outbound(
@@ -1246,6 +1574,7 @@ class AgentLoop:
                     metadata=metadata_out,
                 )
             )
+            trace_outbound_timestamp = datetime.now(tz=UTC).isoformat()
 
             # 5. Store assistant response in memory
             # Strip TTS links from full_response before storing (keep memory clean)
@@ -1307,8 +1636,15 @@ class AgentLoop:
             # Signal agent processing complete
             if agent_started:
                 await self.bus.publish_system(
-                    SystemEvent(event_type="agent_end", data={"session_key": session_key})
+                    SystemEvent(
+                        event_type="agent_end",
+                        data={"session_key": session_key, "trace_id": trace_id},
+                    )
                 )
+            await _emit_trace_end(
+                status="cancelled" if cancelled else "ok",
+                reason="completed",
+            )
 
         except Exception as e:
             logger.exception(f"❌ Error processing message: {e}")
@@ -1347,6 +1683,7 @@ class AgentLoop:
                     channel=message.channel,
                     chat_id=message.chat_id,
                     content=error_msg,
+                    metadata={"trace_id": trace_id},
                 )
             )
             await self.bus.publish_outbound(
@@ -1354,14 +1691,37 @@ class AgentLoop:
                     channel=message.channel,
                     chat_id=message.chat_id,
                     content="",
+                    metadata={"trace_id": trace_id},
                     is_stream_end=True,
                 )
             )
+            trace_outbound_timestamp = datetime.now(tz=UTC).isoformat()
             # Signal agent processing complete even on error
             if agent_started:
                 await self.bus.publish_system(
-                    SystemEvent(event_type="agent_end", data={"session_key": session_key})
+                    SystemEvent(
+                        event_type="agent_end",
+                        data={"session_key": session_key, "trace_id": trace_id},
+                    )
                 )
+            await _emit_trace_end(
+                status="error",
+                reason="exception",
+                error_message=str(e),
+            )
+
+        finally:
+            # Guard: if the task was cancelled before _emit_trace_end ran
+            # (CancelledError is not caught by except Exception), close the
+            # trace here so TraceCollector._active never leaks.
+            if not trace_closed:
+                try:
+                    await _emit_trace_end(
+                        status="cancelled",
+                        reason="task_cancelled",
+                    )
+                except Exception:
+                    pass
 
     async def _send_response(self, original: InboundMessage, content: str) -> None:
         """Helper to send a simple text response."""
