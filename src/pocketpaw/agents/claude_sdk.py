@@ -4,7 +4,9 @@ Updated: 2026-05-21 — Gate the ``pocketpaw_planner`` in-process MCP server
   behind an explicit policy opt-in (``is_mcp_server_explicitly_allowed``).
   It was the only in-process MCP server with no gate, so the
   ``plan_project`` tool schema loaded into every agent run. It now
-  registers only when ``tools_allow`` explicitly opts it in.
+  registers only when the agent opts in. ``__init__`` accepts an optional
+  ``policy`` so AgentPool can inject a per-agent ToolPolicy carrying that
+  opt-in; when omitted the policy is built from settings as before.
 Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
   tool calls (like memory save via Bash) hang on messaging channels (Telegram,
   Discord, Slack) because there's no terminal to approve permission prompts.
@@ -106,13 +108,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
             ],
         )
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, policy: ToolPolicy | None = None):
         self.settings = settings
         self._stop_flag = False
         self._sdk_available = False
         self._cli_available = False  # Whether the `claude` CLI binary is installed
         self._cwd = settings.file_jail_path  # Default working directory
-        self._policy = ToolPolicy(
+        # ``policy`` lets a caller (AgentPool) inject a per-agent
+        # ToolPolicy — e.g. one that opts the agent into the planner MCP
+        # server. When omitted, build the process-wide policy from
+        # settings, which is the behaviour every other caller relies on.
+        self._policy = policy or ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
             deny=settings.tools_deny,
@@ -548,10 +554,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # the ``plan_project`` schema in every context is dead weight. The
         # default policy posture is allow-by-default for MCP servers, so a
         # plain ``is_mcp_server_allowed`` check would still load it
-        # everywhere. ``is_mcp_server_explicitly_allowed`` registers it only
-        # when the tool policy *explicitly* opts in via ``tools_allow``
-        # (``mcp:pocketpaw_planner:*`` / ``mcp:pocketpaw_planner:plan_project``
-        # / ``group:mcp``). Deny still wins.
+        # everywhere. ``is_mcp_server_explicitly_allowed`` registers it
+        # only when the policy's ``mcp_servers_allow`` set names the
+        # planner. AgentPool builds that set from the cloud agent's
+        # ``tools`` field — an agent enables the planner by listing the
+        # bare token ``pocketpaw_planner`` there. Deny still wins.
         try:
             from pocketpaw.agents.sdk_mcp_planner import (
                 SERVER_NAME as _PLANNER_SERVER_NAME,
@@ -565,8 +572,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     servers[name] = cfg_entry
             else:
                 logger.debug(
-                    "pocketpaw_planner MCP server not registered — not opted in "
-                    "via tool policy (add 'mcp:pocketpaw_planner:*' to tools_allow)"
+                    "pocketpaw_planner MCP server not registered — agent has "
+                    "not opted in (add 'pocketpaw_planner' to the agent's tools)"
                 )
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocketpaw_planner MCP server not registered: %s", exc)

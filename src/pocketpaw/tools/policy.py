@@ -10,8 +10,10 @@ Precedence (highest to lowest):
 
 Updated: 2026-05-21 — Added ``is_mcp_server_explicitly_allowed`` so built-in
   in-process MCP servers (e.g. the planner) can be gated as opt-in rather
-  than ambient. Unlike ``is_mcp_server_allowed``, it does not treat the
-  allow-by-default fallthrough as permission.
+  than ambient. The opt-in is driven by a dedicated ``mcp_servers_allow``
+  frozenset, kept orthogonal to ``tools_allow``: putting an ``mcp:*`` entry
+  in ``tools_allow`` would make ``_allowed_set`` non-empty and flip the
+  policy into allow-list mode, silently disabling every other tool.
 
 Inspired by OpenClaw's tool-policy.ts.
 """
@@ -86,10 +88,18 @@ class ToolPolicy:
         profile: str = "full",
         allow: Sequence[str] | None = None,
         deny: Sequence[str] | None = None,
+        mcp_servers_allow: frozenset[str] | None = None,
     ):
         self.profile = profile
         self._allow_raw = list(allow) if allow else []
         self._deny_raw = list(deny) if deny else []
+
+        # Built-in in-process MCP servers opted in for this policy. Kept
+        # separate from ``allow`` on purpose: an ``mcp:*`` entry in
+        # ``allow`` makes ``_allowed_set`` non-empty and flips the policy
+        # into allow-list mode, silently disabling every other tool. This
+        # frozenset is read only by ``is_mcp_server_explicitly_allowed``.
+        self._mcp_servers_allow: frozenset[str] = mcp_servers_allow or frozenset()
 
         # Pre-resolve for fast lookups
         self._allowed_set = self._resolve()
@@ -148,10 +158,11 @@ class ToolPolicy:
         """Return True only when an MCP server is *explicitly* opted in.
 
         Unlike :meth:`is_mcp_server_allowed`, this does NOT treat the
-        allow-by-default fallthrough (``full`` profile, empty allow list) as
-        permission. It returns True only when ``mcp:<server>:*``,
-        ``mcp:<server>:<tool>``, or ``group:mcp`` appears in the explicit
-        allow set (profile allow + ``tools_allow``). Deny still wins.
+        allow-by-default fallthrough as permission. It returns True only
+        when ``server_name`` is in the dedicated ``mcp_servers_allow``
+        frozenset passed to the constructor. ``tools_allow`` is never
+        consulted here — see ``__init__`` for why the two are orthogonal.
+        Deny still wins.
 
         Use this to gate built-in in-process MCP servers that must be
         opt-in rather than ambient on every agent run (e.g. the planner).
@@ -160,12 +171,7 @@ class ToolPolicy:
         # Deny always wins.
         if wildcard in self._denied_set or "group:mcp" in self._denied_set:
             return False
-        # Explicit opt-in: server wildcard, the dynamic mcp group, or any
-        # specific ``mcp:<server>:<tool>`` entry for this server.
-        if wildcard in self._allowed_set or "group:mcp" in self._allowed_set:
-            return True
-        prefix = f"mcp:{server_name}:"
-        return any(name.startswith(prefix) for name in self._allowed_set)
+        return server_name in self._mcp_servers_allow
 
     def is_mcp_tool_allowed(self, server_name: str, tool_name: str) -> bool:
         """Return True if a specific MCP tool is allowed.
