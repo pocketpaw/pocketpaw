@@ -897,15 +897,32 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # ids come from the ``pocketpaw.mcp_servers`` providers (none on
             # an OSS install). Mutations are NOT here — pocket writes flow
             # through the pocket_specialist create/edit tools.
+            #
+            # Opt-in servers (the planner) are skipped here unless the
+            # policy opts them in, mirroring the registration gate in
+            # ``_get_mcp_servers``. An allowlist id without a registered
+            # server is harmless, but keeping the two gates consistent
+            # avoids a misleading entry. Tool ids follow the
+            # ``mcp__<server>__<tool>`` convention, so the server name is
+            # the segment between the first and second ``__``.
             from pocketpaw._registry import providers as _ext_providers
             from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
             allowed_tools.extend(WIDGET_TOOL_IDS)
             for provider in _ext_providers("pocketpaw.mcp_servers"):
                 try:
-                    allowed_tools.extend(provider.tool_ids())
+                    tool_ids = list(provider.tool_ids())
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("MCP provider tool ids not added to allowlist: %s", exc)
+                    continue
+                for tool_id in tool_ids:
+                    parts = tool_id.split("__")
+                    server = parts[1] if len(parts) >= 3 and parts[0] == "mcp" else ""
+                    if server in _OPT_IN_MCP_SERVERS and not (
+                        self._policy.is_mcp_server_explicitly_allowed(server)
+                    ):
+                        continue
+                    allowed_tools.append(tool_id)
 
             # Build hooks for security
             hooks = {
