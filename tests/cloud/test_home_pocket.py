@@ -1,14 +1,19 @@
 # tests/cloud/test_home_pocket.py — Home-as-Pocket backend foundation.
 # Created: 2026-05-21 — TDD coverage for the home-pocket migration:
-#   1. ``ensure_home_pocket`` provisions an empty ``type="home"`` pocket and
-#      persists its id onto the user's ``home_pocket_id`` setting.
+#   1. ``ensure_home_pocket`` provisions an empty ``type="home"`` pocket,
+#      persists its id onto the user's ``home_pocket_id`` setting, and
+#      reports ``created=True``.
 #   2. ``ensure_home_pocket`` is idempotent — a second call returns the same
-#      pocket, never double-provisions.
-#   3. A stale ``home_pocket_id`` (pocket deleted) re-provisions cleanly.
+#      pocket with ``created=False``, never double-provisions.
+#   3. A stale ``home_pocket_id`` (pocket deleted) re-provisions cleanly and
+#      reports ``created=True`` again.
 #   4. The ``"home"`` pocket type round-trips through create + read.
 #   5. A ``type="native"`` widget round-trips through ``add_widget`` and
 #      ``agent_add_widget`` — persisted and read back without manifest
 #      rejection (native widgets carry no rippleSpec to validate).
+#
+# Updated: 2026-05-21 — ``ensure_home_pocket`` now returns a
+# ``(pocket_dict, created)`` tuple; tests unpack it and assert the flag.
 #
 # Uses the shared ``mongo_db`` fixture so the service exercises real Beanie
 # reads/writes against an isolated mongomock-motor DB.
@@ -48,8 +53,10 @@ async def _seed_user(email: str = "owner@home.test") -> str:
 async def test_ensure_home_pocket_provisions_empty_home_pocket() -> None:
     user_id = await _seed_user()
 
-    pocket = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    pocket, created = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
 
+    # First call on a fresh user provisions a brand-new home pocket.
+    assert created is True
     assert pocket["name"] == "Home"
     assert pocket["type"] == "home"
     assert pocket["visibility"] == "private"
@@ -63,10 +70,13 @@ async def test_ensure_home_pocket_provisions_empty_home_pocket() -> None:
 async def test_ensure_home_pocket_is_idempotent() -> None:
     user_id = await _seed_user()
 
-    first = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
-    second = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    first, first_created = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    second, second_created = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
 
     assert first["_id"] == second["_id"]
+    # Only the first call provisioned — the second returned the existing one.
+    assert first_created is True
+    assert second_created is False
     # Exactly one home pocket exists for the user — no double-provision.
     pockets = await pockets_service.list_pockets(WORKSPACE, user_id)
     home_pockets = [p for p in pockets if p["type"] == "home"]
@@ -76,14 +86,17 @@ async def test_ensure_home_pocket_is_idempotent() -> None:
 async def test_ensure_home_pocket_reprovisions_when_setting_is_stale() -> None:
     user_id = await _seed_user()
 
-    first = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    first, first_created = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
     # Pocket is deleted out from under the user, setting now dangles.
     await pockets_service.delete(first["_id"], user_id)
 
-    second = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    second, second_created = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
 
     assert second["_id"] != first["_id"]
     assert second["type"] == "home"
+    # A stale setting re-provisions — created is True on both genuine creates.
+    assert first_created is True
+    assert second_created is True
     assert await auth_service.get_home_pocket_id(user_id) == second["_id"]
 
 
@@ -94,7 +107,7 @@ async def test_ensure_home_pocket_reprovisions_when_setting_is_stale() -> None:
 
 async def test_home_type_pocket_round_trips() -> None:
     user_id = await _seed_user()
-    pocket = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    pocket, _ = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
 
     fetched = await pockets_service.get(pocket["_id"], user_id)
     assert fetched["type"] == "home"
@@ -108,7 +121,7 @@ async def test_home_type_pocket_round_trips() -> None:
 
 async def test_native_widget_round_trips_through_add_widget() -> None:
     user_id = await _seed_user()
-    pocket = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    pocket, _ = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
 
     result = await pockets_service.add_widget(
         pocket["_id"],
@@ -143,7 +156,7 @@ async def test_native_widget_round_trips_through_agent_add_widget() -> None:
     )
 
     user_id = await _seed_user()
-    pocket = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    pocket, _ = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
 
     # agent_add_widget reads workspace/user from the per-stream ContextVars
     # the cloud SSE chat path sets; bind them so the agent path resolves.

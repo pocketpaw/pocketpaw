@@ -13,9 +13,11 @@ REST contract matches the MongoDB-backed version that Wave 4 will ship.
 
 Updated: 2026-05-21 — added ``GET /pockets/home``, the home-as-pocket
 foundation. It resolves-or-provisions the caller's home pocket via
-``pockets_service.ensure_home_pocket`` and returns ``{pocket_id, pocket}``.
-Declared ahead of ``GET /{pocket_id}`` so the static ``/home`` segment
-wins the route match.
+``pockets_service.ensure_home_pocket`` and returns
+``{pocket_id, pocket, created}`` — ``created`` is True only when the call
+just provisioned a brand-new home pocket, so the client can gate one-time
+seeding/migration on it. Declared ahead of ``GET /{pocket_id}`` so the
+static ``/home`` segment wins the route match.
 """
 
 from __future__ import annotations
@@ -209,11 +211,15 @@ async def get_home_pocket(
     """Resolve-or-provision the caller's home pocket.
 
     Declared ahead of ``GET /{pocket_id}`` so the static ``/home`` segment
-    is matched before the pocket-id wildcard. Returns ``{pocket_id, pocket}``
-    where ``pocket`` is the full wire dict (rippleSpec + widgets).
+    is matched before the pocket-id wildcard. Returns
+    ``{pocket_id, pocket, created}`` where ``pocket`` is the full wire dict
+    (rippleSpec + widgets) and ``created`` is ``True`` only when this call
+    just provisioned a brand-new home pocket. The client gates one-time
+    work — seeding default widgets, migrating legacy localStorage widgets —
+    on ``created``.
     """
-    pocket = await pockets_service.ensure_home_pocket(workspace_id, user_id)
-    return {"pocket_id": pocket["_id"], "pocket": pocket}
+    pocket, created = await pockets_service.ensure_home_pocket(workspace_id, user_id)
+    return {"pocket_id": pocket["_id"], "pocket": pocket, "created": created}
 
 
 @router.get("/{pocket_id}")

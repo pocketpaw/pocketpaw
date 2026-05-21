@@ -331,14 +331,22 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     return await _resolved_wire_dict(doc, user_id)
 
 
-async def ensure_home_pocket(workspace_id: str, user_id: str) -> dict:
-    """Resolve-or-provision the caller's home pocket; return its wire dict.
+async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, bool]:
+    """Resolve-or-provision the caller's home pocket.
+
+    Returns ``(pocket_wire_dict, created)``. ``created`` is ``True`` only
+    when this call provisioned a brand-new home pocket, ``False`` when it
+    returned an existing one. The home route surfaces ``created`` so the
+    client can gate one-time work — seeding default widgets, migrating
+    legacy ``localStorage`` widgets — on a genuinely fresh pocket and
+    never re-seed a returning user who deliberately cleared their grid.
 
     Idempotent. If the user's ``home_pocket_id`` setting points at a pocket
     that still exists and is owned by the user, that pocket is returned
-    unchanged. Otherwise a fresh ``type="home"`` pocket is created
-    (``name="Home"``, ``visibility="private"``, no widgets), its id is
-    persisted back onto the user setting, and the new pocket is returned.
+    unchanged with ``created=False``. Otherwise a fresh ``type="home"``
+    pocket is created (``name="Home"``, ``visibility="private"``, no
+    widgets), its id is persisted back onto the user setting, and it is
+    returned with ``created=True``.
 
     A stale ``home_pocket_id`` — the pocket was deleted, or it now belongs
     to someone else — falls through to re-provisioning rather than raising.
@@ -356,7 +364,7 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> dict:
         except NotFound:
             doc = None
         if doc is not None and doc.owner == user_id:
-            return await _resolved_wire_dict(doc, user_id)
+            return await _resolved_wire_dict(doc, user_id), False
 
     doc = _PocketDoc(
         workspace=workspace_id,
@@ -370,7 +378,7 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> dict:
     await doc.insert()
     await auth_service.set_home_pocket_id(user_id, str(doc.id))
     await emit(PocketCreated(data=await _pocket_event_payload(doc)))
-    return await _resolved_wire_dict(doc, user_id)
+    return await _resolved_wire_dict(doc, user_id), True
 
 
 async def list_pockets(
