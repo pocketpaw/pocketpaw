@@ -1,5 +1,10 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-05-21 — Gate the ``pocketpaw_planner`` in-process MCP server
+  behind an explicit policy opt-in (``is_mcp_server_explicitly_allowed``).
+  It was the only in-process MCP server with no gate, so the
+  ``plan_project`` tool schema loaded into every agent run. It now
+  registers only when ``tools_allow`` explicitly opts it in.
 Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
   tool calls (like memory save via Bash) hang on messaging channels (Telegram,
   Discord, Slack) because there's no terminal to approve permission prompts.
@@ -536,15 +541,33 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # In-process MCP server: exposes the cloud Planner as a single
         # ``plan_project`` tool. The agent invokes it to run the full
         # deep_work planner against a workspace Project and receive the
-        # materialized PRD / tasks / agent gaps. Same lifecycle as the
-        # other in-process MCP servers above.
+        # materialized PRD / tasks / agent gaps.
+        #
+        # Unlike the pocket / tasks servers above, the planner is *opt-in,
+        # not ambient*. Most agent runs never plan a project, and carrying
+        # the ``plan_project`` schema in every context is dead weight. The
+        # default policy posture is allow-by-default for MCP servers, so a
+        # plain ``is_mcp_server_allowed`` check would still load it
+        # everywhere. ``is_mcp_server_explicitly_allowed`` registers it only
+        # when the tool policy *explicitly* opts in via ``tools_allow``
+        # (``mcp:pocketpaw_planner:*`` / ``mcp:pocketpaw_planner:plan_project``
+        # / ``group:mcp``). Deny still wins.
         try:
+            from pocketpaw.agents.sdk_mcp_planner import (
+                SERVER_NAME as _PLANNER_SERVER_NAME,
+            )
             from pocketpaw.agents.sdk_mcp_planner import build_planner_context_server
 
-            planner_server = build_planner_context_server()
-            if planner_server is not None:
-                name, cfg_entry = planner_server
-                servers[name] = cfg_entry
+            if self._policy.is_mcp_server_explicitly_allowed(_PLANNER_SERVER_NAME):
+                planner_server = build_planner_context_server()
+                if planner_server is not None:
+                    name, cfg_entry = planner_server
+                    servers[name] = cfg_entry
+            else:
+                logger.debug(
+                    "pocketpaw_planner MCP server not registered — not opted in "
+                    "via tool policy (add 'mcp:pocketpaw_planner:*' to tools_allow)"
+                )
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocketpaw_planner MCP server not registered: %s", exc)
 

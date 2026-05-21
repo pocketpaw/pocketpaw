@@ -8,6 +8,11 @@ Precedence (highest to lowest):
   2. tools_allow — if non-empty, only these tools are available (union with profile)
   3. tool_profile — baseline set of allowed tools
 
+Updated: 2026-05-21 — Added ``is_mcp_server_explicitly_allowed`` so built-in
+  in-process MCP servers (e.g. the planner) can be gated as opt-in rather
+  than ambient. Unlike ``is_mcp_server_allowed``, it does not treat the
+  allow-by-default fallthrough as permission.
+
 Inspired by OpenClaw's tool-policy.ts.
 """
 
@@ -138,6 +143,29 @@ class ToolPolicy:
             return True
         logger.debug("MCP server '%s' not in allowed set", server_name)
         return False
+
+    def is_mcp_server_explicitly_allowed(self, server_name: str) -> bool:
+        """Return True only when an MCP server is *explicitly* opted in.
+
+        Unlike :meth:`is_mcp_server_allowed`, this does NOT treat the
+        allow-by-default fallthrough (``full`` profile, empty allow list) as
+        permission. It returns True only when ``mcp:<server>:*``,
+        ``mcp:<server>:<tool>``, or ``group:mcp`` appears in the explicit
+        allow set (profile allow + ``tools_allow``). Deny still wins.
+
+        Use this to gate built-in in-process MCP servers that must be
+        opt-in rather than ambient on every agent run (e.g. the planner).
+        """
+        wildcard = f"mcp:{server_name}:*"
+        # Deny always wins.
+        if wildcard in self._denied_set or "group:mcp" in self._denied_set:
+            return False
+        # Explicit opt-in: server wildcard, the dynamic mcp group, or any
+        # specific ``mcp:<server>:<tool>`` entry for this server.
+        if wildcard in self._allowed_set or "group:mcp" in self._allowed_set:
+            return True
+        prefix = f"mcp:{server_name}:"
+        return any(name.startswith(prefix) for name in self._allowed_set)
 
     def is_mcp_tool_allowed(self, server_name: str, tool_name: str) -> bool:
         """Return True if a specific MCP tool is allowed.
