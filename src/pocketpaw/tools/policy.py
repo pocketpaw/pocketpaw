@@ -8,6 +8,15 @@ Precedence (highest to lowest):
   2. tools_allow — if non-empty, only these tools are available (union with profile)
   3. tool_profile — baseline set of allowed tools
 
+Updated: 2026-05-21 — Added ``is_mcp_server_explicitly_allowed`` so built-in
+  in-process MCP servers (e.g. the planner) can be gated as opt-in rather
+  than ambient. The opt-in is driven by a dedicated ``mcp_servers_allow``
+  frozenset, kept orthogonal to ``tools_allow``: putting an ``mcp:*`` entry
+  in ``tools_allow`` would make ``_allowed_set`` non-empty and flip the
+  policy into allow-list mode, silently disabling every other tool. Also
+  added ``OPT_IN_MCP_SERVERS`` — the single source of truth for which
+  in-process servers are opt-in, imported by AgentPool and ClaudeSDKBackend.
+
 Inspired by OpenClaw's tool-policy.ts.
 """
 
@@ -72,6 +81,20 @@ TOOL_PROFILES: dict[str, dict] = {
     "full": {},  # No restrictions — everything allowed
 }
 
+# ---------------------------------------------------------------------------
+# Opt-in in-process MCP servers
+# ---------------------------------------------------------------------------
+# Built-in in-process MCP servers that are opt-in, not ambient. Every other
+# in-process server registers under allow-by-default policy; a server named
+# here registers only when the agent's tool policy explicitly opts in via
+# ``is_mcp_server_explicitly_allowed`` (backed by ``mcp_servers_allow``).
+#
+# Single source of truth for the opt-in set. ``AgentPool._build`` reads it to
+# turn a cloud agent's ``tools`` entries into ``mcp_servers_allow``, and
+# ``ClaudeSDKBackend`` reads it to gate both server registration and the tool
+# allowlist. A new opt-in server is added here once.
+OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
+
 
 class ToolPolicy:
     """Evaluates whether a tool is allowed based on profile + allow/deny lists."""
@@ -81,10 +104,18 @@ class ToolPolicy:
         profile: str = "full",
         allow: Sequence[str] | None = None,
         deny: Sequence[str] | None = None,
+        mcp_servers_allow: frozenset[str] | None = None,
     ):
         self.profile = profile
         self._allow_raw = list(allow) if allow else []
         self._deny_raw = list(deny) if deny else []
+
+        # Built-in in-process MCP servers opted in for this policy. Kept
+        # separate from ``allow`` on purpose: an ``mcp:*`` entry in
+        # ``allow`` makes ``_allowed_set`` non-empty and flips the policy
+        # into allow-list mode, silently disabling every other tool. This
+        # frozenset is read only by ``is_mcp_server_explicitly_allowed``.
+        self._mcp_servers_allow: frozenset[str] = mcp_servers_allow or frozenset()
 
         # Pre-resolve for fast lookups
         self._allowed_set = self._resolve()
@@ -138,6 +169,25 @@ class ToolPolicy:
             return True
         logger.debug("MCP server '%s' not in allowed set", server_name)
         return False
+
+    def is_mcp_server_explicitly_allowed(self, server_name: str) -> bool:
+        """Return True only when an MCP server is *explicitly* opted in.
+
+        Unlike :meth:`is_mcp_server_allowed`, this does NOT treat the
+        allow-by-default fallthrough as permission. It returns True only
+        when ``server_name`` is in the dedicated ``mcp_servers_allow``
+        frozenset passed to the constructor. ``tools_allow`` is never
+        consulted here — see ``__init__`` for why the two are orthogonal.
+        Deny still wins.
+
+        Use this to gate built-in in-process MCP servers that must be
+        opt-in rather than ambient on every agent run (e.g. the planner).
+        """
+        wildcard = f"mcp:{server_name}:*"
+        # Deny always wins.
+        if wildcard in self._denied_set or "group:mcp" in self._denied_set:
+            return False
+        return server_name in self._mcp_servers_allow
 
     def is_mcp_tool_allowed(self, server_name: str, tool_name: str) -> bool:
         """Return True if a specific MCP tool is allowed.

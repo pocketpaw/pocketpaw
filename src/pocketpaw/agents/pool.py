@@ -2,6 +2,13 @@
 
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
+
+Updated: 2026-05-21 — ``_build`` now translates an agent's ``config.tools``
+  entries that name an opt-in in-process MCP server (see
+  ``pocketpaw.tools.policy.OPT_IN_MCP_SERVERS``) into a per-agent
+  ``ToolPolicy.mcp_servers_allow`` frozenset, and passes the resulting
+  policy to the Claude SDK backend. This is how a cloud agent opts into
+  the planner MCP server.
 """
 
 from __future__ import annotations
@@ -265,8 +272,10 @@ class AgentPool:
 
     async def _build(self, agent_doc: Any) -> AgentInstance:
         """Build a new AgentInstance from an Agent document."""
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
         from pocketpaw.agents.registry import get_backend_class
         from pocketpaw.config import Settings
+        from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
         agent_id = str(agent_doc.id)
         config = agent_doc.config.model_dump()
@@ -289,7 +298,35 @@ class AgentPool:
         backend_cls = get_backend_class(settings.agent_backend)
         if not backend_cls:
             raise AgentBackendUnavailable(settings.agent_backend)
-        backend = backend_cls(settings)
+        # Only the Claude SDK backend reads an injected policy. Branch on
+        # the resolved class (not ``settings.agent_backend``) so legacy
+        # backend names that remap to ClaudeSDKBackend are handled too;
+        # every other backend's ``__init__`` accepts only ``settings``, so
+        # passing ``policy=`` to one would raise TypeError.
+        if backend_cls is ClaudeSDKBackend:
+            # Per-agent tool policy. The agent's ``tools`` list may name
+            # built-in in-process MCP servers (e.g. ``pocketpaw_planner``);
+            # any token in ``OPT_IN_MCP_SERVERS`` becomes an
+            # ``mcp_servers_allow`` entry. Tokens are the plain server name,
+            # not the internal ``mcp:<server>:*`` notation — this is the
+            # only translation point. Unknown tokens are dropped. Profile /
+            # allow / deny carry the same values as the process-wide policy
+            # — only ``mcp_servers_allow`` is per-agent, so opting one agent
+            # into the planner never affects any other tool or external MCP
+            # server (see ToolPolicy.__init__). Built only here because no
+            # other backend reads an injected policy.
+            mcp_servers_allow = frozenset(
+                t for t in config.get("tools", []) if t in OPT_IN_MCP_SERVERS
+            )
+            agent_policy = ToolPolicy(
+                profile=settings.tool_profile,
+                allow=settings.tools_allow,
+                deny=settings.tools_deny,
+                mcp_servers_allow=mcp_servers_allow,
+            )
+            backend = backend_cls(settings, policy=agent_policy)
+        else:
+            backend = backend_cls(settings)
 
         # Initialize soul if enabled
         soul_manager = None
