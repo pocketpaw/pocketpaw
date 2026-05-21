@@ -46,16 +46,9 @@ async def test_run_transcript_sync_pass_fetches_recent_meetings(
     """Recent ``ended`` meetings without transcripts get fetched + reported."""
     from pocketpaw_ee.cloud.meetings import jobs
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
-    from pocketpaw_ee.cloud.models.meeting import MeetingProviderCredentials as _CD
 
-    # Workspace with a Zoom row → batch picks it up.
-    await _CD(
-        workspace="ws-alpha",
-        provider="zoom",
-        credentials_ref="workspace-ws-alpha-zoom.json",
-        enabled=True,
-    ).insert()
-
+    # ws-alpha is discovered from its meeting docs — env-based single-account
+    # creds mean there is no per-workspace credentials row.
     # Two recent ended meetings + one older one outside the lookback.
     now = datetime.now(UTC)
     await _MD(
@@ -102,9 +95,9 @@ async def test_run_transcript_sync_pass_caps_at_retention_floor() -> None:
     """lookback_days > 28 is clamped — protects against Meet's 30-day window."""
     from pocketpaw_ee.cloud.meetings import jobs
 
-    # Even with absurdly large lookback, only workspaces with creds are scanned.
+    # No meetings exist, so no workspaces are discovered.
     reports = await jobs.run_transcript_sync_pass(lookback_days=9999)
-    assert reports == []  # no workspace credentials yet
+    assert reports == []
 
 
 @pytest.mark.usefixtures("mongo_db")
@@ -114,15 +107,7 @@ async def test_run_transcript_sync_pass_skips_meetings_with_transcripts(
     """A meeting that already has a transcript file_id is not re-fetched."""
     from pocketpaw_ee.cloud.meetings import jobs
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
-    from pocketpaw_ee.cloud.models.meeting import MeetingProviderCredentials as _CD
     from pocketpaw_ee.cloud.models.meeting import MeetingTranscript as _TD
-
-    await _CD(
-        workspace="ws-alpha",
-        provider="zoom",
-        credentials_ref="x",
-        enabled=True,
-    ).insert()
 
     meeting = _MD(
         workspace="ws-alpha",

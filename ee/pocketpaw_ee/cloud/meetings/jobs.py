@@ -22,7 +22,6 @@ from datetime import UTC, datetime, timedelta
 
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
-from pocketpaw_ee.cloud.models.meeting import MeetingProviderCredentials as _CredsDoc
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +67,10 @@ async def run_transcript_sync_pass(
     cutoff = datetime.now(UTC) - timedelta(days=effective_lookback)
 
     if workspace_ids is None:
-        # Discover workspaces that have any meetings provider configured.
-        creds = await _CredsDoc.find(_CredsDoc.enabled == True).to_list()  # noqa: E712
-        workspace_ids = sorted({c.workspace for c in creds})
+        # Single-account env creds — any workspace can hold meetings.
+        # Discover the active set from the Meeting collection itself.
+        meetings = await _MeetingDoc.find_all().to_list()
+        workspace_ids = sorted({m.workspace for m in meetings})
 
     reports: list[TranscriptSyncReport] = []
     for ws_id in workspace_ids:

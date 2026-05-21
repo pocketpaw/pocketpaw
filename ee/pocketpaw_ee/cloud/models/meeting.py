@@ -1,14 +1,15 @@
-# Meeting Beanie documents — per-workspace meeting state, transcripts, and BYO provider creds.
+# Meeting Beanie documents — per-workspace meeting state + transcripts.
 # Created: 2026-05-19 — Native meetings integration (Google Meet + Zoom).
 # See docs/plans/2026-05-19-meetings-integration-design.md.
 #
-# Three documents:
-#   * MeetingProviderCredentials — per-workspace BYO creds + webhook secret.
-#     Token bytes themselves stay in src/pocketpaw/clients/token_store.py;
-#     only the *reference* + webhook config + validation state live here.
+# Two documents:
 #   * Meeting — one row per provider meeting we know about.
 #   * MeetingTranscript — one row per transcript session. Transcript entries
 #     live in the .vtt/.txt blob (referenced via file_id), NOT here.
+#
+# Provider credentials are NOT modeled — the deployment configures one
+# Zoom S2S app + one Google OAuth client via environment variables
+# (single-account model); there is no per-workspace BYO credential doc.
 
 from __future__ import annotations
 
@@ -19,39 +20,6 @@ from beanie import Indexed
 from pydantic import Field
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
-
-# ---------------------------------------------------------------------------
-# Per-workspace per-provider BYO credentials
-# ---------------------------------------------------------------------------
-
-
-class MeetingProviderCredentials(TimestampedDocument):
-    """BYO credentials for one provider in one workspace.
-
-    Tenancy: ``workspace`` + ``provider`` are uniquely paired (enforced
-    at the service layer). ``credentials_ref`` is the filename of the
-    on-disk token blob managed by ``TokenStore`` — Mongo never holds
-    secret bytes.
-
-    Phase 2 dropped webhook ingestion in favor of on-demand fetch +
-    nightly batch (see ``ee/cloud/meetings/jobs.py`` and the Phase 2
-    update in docs/plans/2026-05-19-meetings-integration-design.md).
-    No webhook secret or Pub/Sub subscription is stored.
-    """
-
-    workspace: Indexed(str)  # type: ignore[valid-type]
-    provider: Literal["google_meet", "zoom"]
-    credentials_ref: str
-    enabled: bool = True
-    last_validated_at: datetime | None = None
-    last_error: str = ""
-
-    class Settings(TimestampedDocument.Settings):
-        name = "meeting_provider_credentials"
-        indexes = [
-            [("workspace", 1), ("provider", 1)],
-        ]
-
 
 # ---------------------------------------------------------------------------
 # Meeting

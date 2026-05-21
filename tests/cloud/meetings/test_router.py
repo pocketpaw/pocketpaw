@@ -1,7 +1,7 @@
-# Integration tests for /api/v1/meetings — Phase 1.3 scaffold.
+# Integration tests for /api/v1/meetings.
 # Verifies routes register, tenancy filters apply, CloudError mapping
-# produces the right JSON envelope, and the credentials happy path
-# round-trips through Mongo with a mocked Zoom token exchange.
+# produces the right JSON envelope, and create/cancel round-trip through
+# Mongo via an injected fake provider adapter.
 # See docs/plans/2026-05-19-meetings-integration-design.md.
 
 from __future__ import annotations
@@ -17,16 +17,10 @@ from pocketpaw_ee.cloud.license import require_license
 
 
 @pytest_asyncio.fixture
-async def meetings_client(monkeypatch, mongo_db, tmp_path):  # noqa: ARG001 — mongo_db forces Beanie init
-    """FastAPI app with /api/v1/meetings mounted + RBAC + auth + token store stubbed."""
+async def meetings_client(monkeypatch, mongo_db):  # noqa: ARG001 — mongo_db forces Beanie init
+    """FastAPI app with /api/v1/meetings mounted + RBAC + auth stubbed."""
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.meetings.router import router as meetings_router
-
-    # Redirect on-disk token store to a per-test tmp dir.
-    monkeypatch.setattr(
-        "pocketpaw.clients.token_store._get_oauth_dir",
-        lambda: tmp_path,
-    )
 
     # Pass RBAC checks.
     from pocketpaw_ee.guards import deps as guards_deps
@@ -41,35 +35,6 @@ async def meetings_client(monkeypatch, mongo_db, tmp_path):  # noqa: ARG001 — 
 
     async def fake_current_active_user():
         return fake_user
-
-    # Mock the Zoom S2S token exchange (Phase 1.1 plumbing). We don't
-    # exercise the real Zoom network from a unit test.
-    from unittest.mock import MagicMock
-
-    class _FakeClient:
-        def __init__(self, *a, **kw):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, url, headers=None, data=None):  # noqa: ARG002
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json = MagicMock(
-                return_value={
-                    "access_token": "zoom_tok_xyz",
-                    "token_type": "bearer",
-                    "expires_in": 3600,
-                    "scope": "meeting:write recording:read",
-                }
-            )
-            return resp
-
-    monkeypatch.setattr("pocketpaw.clients.oauth.httpx.AsyncClient", _FakeClient)
 
     app = FastAPI()
     add_error_handler(app)
@@ -96,106 +61,29 @@ async def test_routes_register(meetings_client: AsyncClient) -> None:
     assert body["error"]["code"] == "meeting.not_found"
 
 
-async def test_list_credentials_empty(meetings_client: AsyncClient) -> None:
-    """Fresh workspace has no provider creds configured."""
-    resp = await meetings_client.get("/api/v1/meetings/credentials")
+async def test_list_meetings_empty(meetings_client: AsyncClient) -> None:
+    """A workspace with no meetings returns an empty list, not 404."""
+    resp = await meetings_client.get("/api/v1/meetings")
     assert resp.status_code == 200
     assert resp.json() == []
 
 
-async def test_get_unknown_provider_credentials(meetings_client: AsyncClient) -> None:
-    """Requesting a provider that's never been configured returns 404."""
-    resp = await meetings_client.get("/api/v1/meetings/credentials/zoom")
-    assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "meeting_credentials.not_found"
-
-
-# ---------------------------------------------------------------------------
-# Credentials happy path
-# ---------------------------------------------------------------------------
-
-
-async def test_store_zoom_credentials_happy_path(meetings_client: AsyncClient) -> None:
-    """POST /credentials/zoom validates via Zoom + persists state."""
-    resp = await meetings_client.post(
-        "/api/v1/meetings/credentials/zoom",
-        json={
-            "account_id": "acct-abc",
-            "client_id": "cid",
-            "client_secret": "csec",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["provider"] == "zoom"
-    assert body["enabled"] is True
-    assert body["has_credentials"] is True
-    assert body["last_validated_at"] is not None
-    # No webhook_url — Phase 2 dropped webhook ingestion.
-    assert "webhook_url" not in body
-
-    # The credentials list now contains exactly this one row.
-    list_resp = await meetings_client.get("/api/v1/meetings/credentials")
-    assert list_resp.status_code == 200
-    providers = [c["provider"] for c in list_resp.json()]
-    assert providers == ["zoom"]
-
-
-async def test_zoom_credentials_invalid_provider_rejection(
+async def test_create_meeting_without_provider_env_errors(
     meetings_client: AsyncClient, monkeypatch
 ) -> None:
-    """If Zoom rejects the creds, we surface 422 ``meetings.zoom_credentials_invalid``."""
-
-    async def _raise(*a, **kw):
-        raise RuntimeError("invalid_client")
-
-    from pocketpaw.clients.oauth import OAuthManager
-
-    monkeypatch.setattr(OAuthManager, "exchange_account_credentials", _raise)
-
-    resp = await meetings_client.post(
-        "/api/v1/meetings/credentials/zoom",
-        json={"account_id": "x", "client_id": "x", "client_secret": "x"},
-    )
-    assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "meetings.zoom_credentials_invalid"
-
-
-async def test_disconnect_zoom(meetings_client: AsyncClient) -> None:
-    """Configure → disconnect → state is gone."""
-    await meetings_client.post(
-        "/api/v1/meetings/credentials/zoom",
-        json={"account_id": "a", "client_id": "c", "client_secret": "s"},
-    )
-    del_resp = await meetings_client.delete("/api/v1/meetings/credentials/zoom")
-    assert del_resp.status_code == 200
-    assert del_resp.json() == {"provider": "zoom", "disconnected": True}
-
-    # Subsequent GET returns 404.
-    g = await meetings_client.get("/api/v1/meetings/credentials/zoom")
-    assert g.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# Stub semantics — proves the scaffold is in place but explicit about
-# adapter wiring landing in Phase 1.5.
-# ---------------------------------------------------------------------------
-
-
-async def test_create_meeting_without_credentials_returns_404(
-    meetings_client: AsyncClient,
-) -> None:
-    """Workspace with no Zoom creds gets a clear 404, not a 500."""
+    """With the provider's env vars unset, create_meeting fails clearly."""
+    for var in ("ZOOM_ACCOUNT_ID", "ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET"):
+        monkeypatch.delenv(var, raising=False)
     resp = await meetings_client.post(
         "/api/v1/meetings",
         json={"provider": "zoom", "title": "test", "duration_minutes": 30},
     )
-    assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "meeting_credentials.not_found"
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "meeting.zoom_not_configured"
 
 
 async def test_create_meeting_rejects_empty_title(meetings_client: AsyncClient) -> None:
-    """Whitespace-only title is rejected before reaching the adapter stub."""
+    """Whitespace-only title is rejected before reaching the adapter."""
     resp = await meetings_client.post(
         "/api/v1/meetings",
         json={"provider": "zoom", "title": "   ", "duration_minutes": 30},
@@ -204,20 +92,8 @@ async def test_create_meeting_rejects_empty_title(meetings_client: AsyncClient) 
     assert resp.json()["error"]["code"] == "meeting.empty_title"
 
 
-async def test_list_meetings_empty(meetings_client: AsyncClient) -> None:
-    """A workspace with no meetings returns an empty list, not 404."""
-    resp = await meetings_client.get("/api/v1/meetings")
-    assert resp.status_code == 200
-    assert resp.json() == []
-
-
 # ---------------------------------------------------------------------------
-# Tenancy — directly tests service.list_meetings filters by workspace
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Phase 1.5 — end-to-end create/cancel via injected fake adapter
+# End-to-end create/cancel via an injected fake adapter
 # ---------------------------------------------------------------------------
 
 
@@ -346,7 +222,7 @@ async def test_cancel_meeting_end_to_end(with_fake_adapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.7 — cross-provider aggregation (search + list_recent)
+# Cross-provider aggregation (search + list_recent)
 # ---------------------------------------------------------------------------
 
 

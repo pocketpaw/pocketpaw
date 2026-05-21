@@ -1,9 +1,7 @@
 # Zoom Client — HTTP client for the Zoom REST API using Server-to-Server OAuth.
-# Created: 2026-05-19 — phase 1.4 of the meetings integration. Follows the
-# CalendarClient pattern (clients/gcalendar.py) but uses the Zoom S2S
-# OAuth grant (account_credentials) and is constructed per-workspace
-# rather than as a single global instance — every enterprise tenant
-# brings their own Zoom Marketplace app + account_id.
+# Created: 2026-05-19 — meetings integration. Uses the Zoom S2S OAuth grant
+# (account_credentials); constructed from the deployment's single Zoom app
+# credentials (account_id + client_id + client_secret) read from env.
 #
 # Surface:
 #   create_meeting       — POST   /users/me/meetings  (or /users/{userId}/meetings)
@@ -17,14 +15,13 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
 import httpx
-
-from pocketpaw.clients.oauth import OAuthManager
-from pocketpaw.clients.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
 
@@ -48,51 +45,44 @@ class ZoomAPIError(RuntimeError):
 
 
 class ZoomClient:
-    """Per-workspace Zoom REST client.
+    """Zoom REST client.
 
-    Pattern: each workspace owns one S2S OAuth app in their Zoom account.
-    The client is constructed with the workspace's ``service_name``
-    (e.g. ``"workspace-w1-zoom"``) plus the ``client_id`` / ``client_secret``
-    of that app; on demand it pulls the cached access token, refreshing
-    via the S2S ``account_credentials`` grant when expired.
-
-    Not thread-safe across workspaces — instantiate a fresh client per
-    workspace per request rather than caching globally.
+    Constructed from the deployment's single Zoom S2S OAuth app
+    (``account_id`` + ``client_id`` + ``client_secret``). Mints a
+    short-lived access token via the ``account_credentials`` grant on
+    demand and caches it in-memory until expiry.
     """
 
-    def __init__(
-        self,
-        service_name: str,
-        client_id: str,
-        client_secret: str,
-        *,
-        token_store: TokenStore | None = None,
-        oauth_manager: OAuthManager | None = None,
-    ) -> None:
-        self._service = service_name
+    def __init__(self, account_id: str, client_id: str, client_secret: str) -> None:
+        self._account_id = account_id
         self._client_id = client_id
         self._client_secret = client_secret
-        self._store = token_store or TokenStore()
-        self._oauth = oauth_manager or OAuthManager(self._store)
+        self._token: str = ""
+        self._token_expiry: float = 0.0  # time.monotonic() deadline
 
     async def _get_token(self) -> str:
-        """Return a valid access token, refreshing via S2S grant if expired.
+        """Return a valid access token, minting one via the S2S grant if needed.
 
-        Raises ``RuntimeError`` when no token has ever been provisioned
-        for this workspace (admin hasn't completed the Zoom setup yet).
+        Server-to-Server OAuth ``account_credentials`` grant — tokens are
+        short-lived (~1h), cached in-memory and re-minted on expiry. No
+        browser flow, no stored refresh token.
         """
-        token = await self._oauth.get_valid_token(
-            service=self._service,
-            client_id=self._client_id,
-            client_secret=self._client_secret,
-            provider="zoom",
-        )
-        if not token:
-            raise RuntimeError(
-                f"Zoom credentials missing for {self._service}. "
-                "Configure Zoom in Settings → Integrations → Meetings."
+        if self._token and time.monotonic() < self._token_expiry:
+            return self._token
+        basic = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode()).decode()
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
+            resp = await client.post(
+                "https://zoom.us/oauth/token",
+                data={"grant_type": "account_credentials", "account_id": self._account_id},
+                headers={"Authorization": f"Basic {basic}"},
             )
-        return token
+        if resp.status_code != 200:
+            raise ZoomAPIError(resp.status_code, f"S2S token request failed: {resp.text[:200]}")
+        payload = resp.json()
+        self._token = payload["access_token"]
+        # Refresh ~60s early to avoid edge-of-expiry 401s.
+        self._token_expiry = time.monotonic() + max(0, int(payload.get("expires_in", 3600)) - 60)
+        return self._token
 
     async def _request(
         self,

@@ -20,12 +20,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import httpx
-
-from pocketpaw.clients.oauth import OAuthManager
-from pocketpaw.clients.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
 
@@ -43,42 +41,45 @@ class GoogleMeetAPIError(RuntimeError):
 
 
 class GoogleMeetClient:
-    """Per-workspace Google Meet REST client.
+    """Google Meet REST client.
 
-    Construction shape mirrors :class:`ZoomClient`. The workspace's BYO
-    OAuth client_id/client_secret are passed in by the cloud-side
-    factory; the refresh_token lives in the on-disk token blob keyed by
-    ``service_name`` (e.g. ``"workspace-w1-google_meet"``).
+    Constructed from the deployment's single Google OAuth client
+    (``client_id`` + ``client_secret``) and a long-lived ``refresh_token``.
+    Mints short-lived access tokens via the refresh-token grant on demand
+    and caches them in-memory until expiry.
     """
 
-    def __init__(
-        self,
-        service_name: str,
-        client_id: str,
-        client_secret: str,
-        *,
-        token_store: TokenStore | None = None,
-        oauth_manager: OAuthManager | None = None,
-    ) -> None:
-        self._service = service_name
+    def __init__(self, client_id: str, client_secret: str, refresh_token: str) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
-        self._store = token_store or TokenStore()
-        self._oauth = oauth_manager or OAuthManager(self._store)
+        self._refresh_token = refresh_token
+        self._token: str = ""
+        self._token_expiry: float = 0.0  # time.monotonic() deadline
 
     async def _get_token(self) -> str:
-        token = await self._oauth.get_valid_token(
-            service=self._service,
-            client_id=self._client_id,
-            client_secret=self._client_secret,
-            provider="google_meet",
-        )
-        if not token:
-            raise RuntimeError(
-                f"Google Meet credentials missing for {self._service}. "
-                "Complete the Settings → Integrations → Meetings → Connect flow."
+        """Return a valid access token via the refresh-token grant.
+
+        The long-lived refresh token comes from env; access tokens are
+        short-lived and cached in-memory until ~60s before expiry.
+        """
+        if self._token and time.monotonic() < self._token_expiry:
+            return self._token
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
+            resp = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self._refresh_token,
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                },
             )
-        return token
+        if resp.status_code != 200:
+            raise GoogleMeetAPIError(resp.status_code, f"token refresh failed: {resp.text[:200]}")
+        payload = resp.json()
+        self._token = payload["access_token"]
+        self._token_expiry = time.monotonic() + max(0, int(payload.get("expires_in", 3600)) - 60)
+        return self._token
 
     async def _request(
         self,

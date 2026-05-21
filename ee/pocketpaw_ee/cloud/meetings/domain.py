@@ -68,20 +68,3 @@ class MeetingTranscript:
     language: str | None
     fetched_at: datetime | None
     indexed_in_kb: bool
-
-
-@dataclass(frozen=True)
-class ProviderCredentialsSnapshot:
-    """Sanitized view of credentials state — never includes secret bytes.
-
-    Returned to the desktop client's settings page so the admin can see
-    "configured / connected / errored" without us exposing the on-disk
-    token blob.
-    """
-
-    workspace_id: str
-    provider: MeetingProvider
-    enabled: bool
-    last_validated_at: datetime | None
-    last_error: str
-    has_credentials: bool  # whether credentials_ref points at an existing file

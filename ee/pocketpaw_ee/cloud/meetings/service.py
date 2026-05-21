@@ -14,9 +14,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 
-from pocketpaw.clients.token_store import TokenStore
 from pocketpaw.connectors.protocol import ActionResult
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud.meetings.domain import Meeting as MeetingDomain
@@ -28,7 +28,6 @@ from pocketpaw_ee.cloud.meetings.dto import (
     TranscriptResponse,
 )
 from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
-from pocketpaw_ee.cloud.models.meeting import MeetingProviderCredentials as _CredsDoc
 from pocketpaw_ee.cloud.models.meeting import MeetingTranscript as _TranscriptDoc
 from pocketpaw_ee.cloud.shared.events import event_bus
 
@@ -183,51 +182,49 @@ async def get_meeting(workspace_id: str, meeting_id: str) -> MeetingDetailRespon
 
 
 # ---------------------------------------------------------------------------
-# Adapter factory — constructs a per-workspace ConnectorProtocol instance.
-# Tests replace this via ``_set_adapter_factory`` to inject fakes without
-# touching the token store / Zoom REST surface.
+# Adapter factory — constructs a ConnectorProtocol instance from env creds.
+# Single-account model: the deployment configures ONE Zoom S2S app and ONE
+# Google Cloud OAuth client via environment variables. Tests replace this
+# via ``_set_adapter_factory`` to inject fakes.
 # ---------------------------------------------------------------------------
 
 
 async def _build_adapter_default(workspace_id: str, provider: str):
-    """Default factory: read creds from token blob, return native adapter.
+    """Default factory: construct a native provider adapter from env creds.
 
-    Raises ``NotFound`` when the workspace has not configured the
-    provider, ``ValidationError`` when the on-disk token blob is missing
-    or malformed (which means setup partially failed and the admin must
-    re-paste).
+    ``workspace_id`` is accepted for signature compatibility but unused —
+    the meeting-provider credentials are deployment-wide, not per-tenant.
+    Raises ``ValidationError`` when the provider's env vars are unset.
     """
-    creds_doc = await _CredsDoc.find_one(
-        _CredsDoc.workspace == workspace_id,
-        _CredsDoc.provider == provider,
-    )
-    if creds_doc is None or not creds_doc.enabled:
-        raise NotFound("meeting_credentials", provider)
-
-    service_name = f"workspace-{workspace_id}-{provider}"
-    tokens = TokenStore().load(service_name)
-    if tokens is None or not tokens.extra.get("client_id"):
-        raise ValidationError(
-            "meeting.credentials_incomplete",
-            f"Token blob for {provider} is missing — re-run Settings → Integrations → Meetings.",
-        )
-
     if provider == "zoom":
+        account_id = os.environ.get("ZOOM_ACCOUNT_ID", "").strip()
+        client_id = os.environ.get("ZOOM_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("ZOOM_CLIENT_SECRET", "").strip()
+        if not (account_id and client_id and client_secret):
+            raise ValidationError(
+                "meeting.zoom_not_configured",
+                "Zoom is not configured — set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID "
+                "and ZOOM_CLIENT_SECRET in the environment.",
+            )
         from pocketpaw_ee.cloud.meetings.adapters.zoom import ZoomConnector
 
-        return ZoomConnector(
-            service_name=service_name,
-            client_id=tokens.extra["client_id"],
-            client_secret=tokens.extra["client_secret"],
-        )
+        return ZoomConnector(account_id, client_id, client_secret)
+
     if provider == "google_meet":
+        client_id = os.environ.get("GOOGLE_MEET_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("GOOGLE_MEET_CLIENT_SECRET", "").strip()
+        refresh_token = os.environ.get("GOOGLE_MEET_REFRESH_TOKEN", "").strip()
+        if not (client_id and client_secret and refresh_token):
+            raise ValidationError(
+                "meeting.google_meet_not_configured",
+                "Google Meet is not configured — set GOOGLE_MEET_CLIENT_ID, "
+                "GOOGLE_MEET_CLIENT_SECRET and GOOGLE_MEET_REFRESH_TOKEN in "
+                "the environment.",
+            )
         from pocketpaw_ee.cloud.meetings.adapters.google_meet import GoogleMeetConnector
 
-        return GoogleMeetConnector(
-            service_name=service_name,
-            client_id=tokens.extra["client_id"],
-            client_secret=tokens.extra["client_secret"],
-        )
+        return GoogleMeetConnector(client_id, client_secret, refresh_token)
+
     raise ValidationError("meeting.unknown_provider", f"Unsupported meetings provider: {provider}")
 
 

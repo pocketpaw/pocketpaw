@@ -41,14 +41,11 @@ logger = logging.getLogger(__name__)
 class ZoomConnector:
     """Native Zoom connector implementing ConnectorProtocol.
 
-    Constructed per-workspace per-request. The ``service_name`` keys
-    into the per-tenant token blob; ``client_id``/``client_secret``
-    are the workspace's S2S OAuth app credentials. The cloud-side
-    factory in ``ee/cloud/meetings/service.py`` is responsible for
-    looking these up and constructing one instance per request.
-
-    The legacy single-tenant CLI path does NOT instantiate this
-    connector — Zoom is an enterprise feature requiring BYO creds.
+    Single-account: constructed from the deployment's Zoom Server-to-Server
+    OAuth credentials (``ZOOM_ACCOUNT_ID`` / ``ZOOM_CLIENT_ID`` /
+    ``ZOOM_CLIENT_SECRET``). The factory in
+    ``pocketpaw_ee/cloud/meetings/service.py`` reads those env vars and
+    constructs one instance per request.
     """
 
     @property
@@ -69,14 +66,13 @@ class ZoomConnector:
 
     def __init__(
         self,
-        service_name: str,
+        account_id: str,
         client_id: str,
         client_secret: str,
         *,
         client: ZoomClient | None = None,
     ) -> None:
-        self._service = service_name
-        self._client = client or ZoomClient(service_name, client_id, client_secret)
+        self._client = client or ZoomClient(account_id, client_id, client_secret)
 
     # -----------------------------------------------------------------------
     # Protocol surface

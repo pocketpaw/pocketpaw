@@ -41,10 +41,10 @@ logger = logging.getLogger(__name__)
 class GoogleMeetConnector:
     """Native Google Meet connector implementing ConnectorProtocol.
 
-    Per-workspace per-request like :class:`ZoomConnector`. OAuth
-    provisioning happens server-side via the 3-leg callback flow in
-    ``ee/cloud/meetings/oauth_flow.py``; this adapter only ever uses
-    cached + refreshable tokens.
+    Single-account: constructed from the deployment's Google OAuth
+    credentials (``GOOGLE_MEET_CLIENT_ID`` / ``GOOGLE_MEET_CLIENT_SECRET``
+    / ``GOOGLE_MEET_REFRESH_TOKEN``). Access tokens are minted from the
+    long-lived refresh token on demand.
     """
 
     @property
@@ -65,14 +65,13 @@ class GoogleMeetConnector:
 
     def __init__(
         self,
-        service_name: str,
         client_id: str,
         client_secret: str,
+        refresh_token: str,
         *,
         client: GoogleMeetClient | None = None,
     ) -> None:
-        self._service = service_name
-        self._client = client or GoogleMeetClient(service_name, client_id, client_secret)
+        self._client = client or GoogleMeetClient(client_id, client_secret, refresh_token)
 
     # -----------------------------------------------------------------------
     # Protocol surface

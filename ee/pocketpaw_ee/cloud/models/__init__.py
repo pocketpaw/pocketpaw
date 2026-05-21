@@ -10,7 +10,7 @@ from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.invite import Invite
-from pocketpaw_ee.cloud.models.meeting import Meeting, MeetingProviderCredentials, MeetingTranscript
+from pocketpaw_ee.cloud.models.meeting import Meeting, MeetingTranscript
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -55,7 +55,6 @@ __all__ = [
     "GroupAgent",
     "Invite",
     "Meeting",
-    "MeetingProviderCredentials",
     "MeetingTranscript",
     "Mention",
     "Message",
@@ -107,7 +106,6 @@ def get_all_documents():
         Project,
         PlanSession,
         Meeting,
-        MeetingProviderCredentials,
         MeetingTranscript,
     ]
 

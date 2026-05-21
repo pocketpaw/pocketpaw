@@ -13,57 +13,6 @@ MeetingProviderName = Literal["google_meet", "zoom"]
 
 
 # ---------------------------------------------------------------------------
-# Credentials
-# ---------------------------------------------------------------------------
-
-
-class StoreZoomCredentialsRequest(BaseModel):
-    """POST /meetings/credentials/zoom body.
-
-    Server-to-Server OAuth app credentials, pasted by the workspace
-    admin from the Zoom Marketplace developer console.
-    """
-
-    account_id: str = Field(min_length=1)
-    client_id: str = Field(min_length=1)
-    client_secret: str = Field(min_length=1)
-
-
-class StoreGoogleMeetCredentialsRequest(BaseModel):
-    """POST /meetings/credentials/google_meet body.
-
-    The OAuth app's ``client_id`` and ``client_secret`` only. The
-    refresh token is obtained later via the consent callback flow at
-    ``POST /meetings/credentials/google_meet/callback``.
-    """
-
-    client_id: str = Field(min_length=1)
-    client_secret: str = Field(min_length=1)
-
-
-class CompleteGoogleMeetOAuthRequest(BaseModel):
-    """POST /meetings/credentials/google_meet/callback body.
-
-    Posted by the desktop client after Google redirects the browser
-    back to our callback URL with ``?code=...&state=...``. The state
-    parameter encodes ``workspace_id`` so we know whose creds to write.
-    """
-
-    code: str = Field(min_length=1)
-    state: str = Field(min_length=1)
-
-
-class CredentialsResponse(BaseModel):
-    """One provider's configured state — safe to send to the frontend."""
-
-    provider: MeetingProviderName
-    enabled: bool
-    has_credentials: bool
-    last_validated_at: datetime | None
-    last_error: str = ""
-
-
-# ---------------------------------------------------------------------------
 # Meetings
 # ---------------------------------------------------------------------------
 
