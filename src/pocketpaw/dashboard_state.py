@@ -13,6 +13,7 @@ from pocketpaw.bus.adapters.websocket_adapter import WebSocketAdapter
 from pocketpaw.bus.commands import get_command_handler as _get_cmd_handler
 from pocketpaw.config import Settings
 from pocketpaw.status import StatusTracker
+from pocketpaw.trace_collector import TraceCollector
 
 try:
     from fastapi import WebSocket
@@ -25,6 +26,7 @@ except ImportError:
 ws_adapter = WebSocketAdapter()
 agent_loop = AgentLoop()
 status_tracker = StatusTracker()
+trace_collector = TraceCollector()
 
 # Wire up the agent loop so /kill can cancel in-flight sessions
 _get_cmd_handler().set_agent_loop(agent_loop)

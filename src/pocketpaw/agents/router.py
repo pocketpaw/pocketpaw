@@ -5,8 +5,10 @@ configured agent backend. Supports optional user-configured fallback
 backends if the primary backend fails.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from pocketpaw.agents.backend import BackendInfo
@@ -32,6 +34,7 @@ class AgentRouter:
 
         # Optional fallback backends
         self._fallback_backends: list[str] = settings.fallback_backends
+        self._policy_lock = asyncio.Lock()  # serializes per-pocket policy
 
         self._initialize_backend()
 
@@ -113,6 +116,29 @@ class AgentRouter:
             effective = settings
 
         return backend_cls(effective)
+
+    @asynccontextmanager
+    async def scoped_tool_policy(self, policy: "ToolPolicy"):  # noqa: F821
+        """Scope a ToolPolicy for one request across primary + all fallback backends.
+
+        Acquires a lock so concurrent pocket requests cannot clobber each other's
+        policy mid-request. Restores the original policy in the finally block.
+        """
+        async with self._policy_lock:
+            backends = [self._backend] + list(self._fallback_instances.values())
+            active = [
+                b
+                for b in backends
+                if b is not None and hasattr(b, "get_tool_policy") and hasattr(b, "set_tool_policy")
+            ]
+            saved = [b.get_tool_policy() for b in active]
+            try:
+                for b in active:
+                    b.set_tool_policy(policy)
+                yield
+            finally:
+                for b, original in zip(active, saved):
+                    b.set_tool_policy(original)
 
     async def run(
         self,

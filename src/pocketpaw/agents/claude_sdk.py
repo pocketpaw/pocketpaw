@@ -158,6 +158,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         self._initialize()
 
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        self._policy = policy
+
     def _initialize(self) -> None:
         """Initialize the Claude Agent SDK with all imports."""
         try:

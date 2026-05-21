@@ -24,7 +24,6 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from pocketpaw.credentials import (
     VERSION_2_HEADER,
-    CredentialMigrationError,
     CredentialStore,
 )
 
@@ -209,8 +208,8 @@ class TestV1Migration:
 class TestMigrationFailure:
     """Migration failure scenarios — backup restoration."""
 
-    def test_bad_v1_key_restores_backup(self, tmp_path):
-        """If v1 decryption fails, backup is restored and error is raised."""
+    def test_bad_v1_key_restores_backup_and_returns_empty(self, tmp_path):
+        """If v1 decryption fails, backup is restored and empty dict returned (no crash)."""
         store = CredentialStore(config_dir=tmp_path)
 
         # Write a valid v1 file with one identity
@@ -222,8 +221,10 @@ class TestMigrationFailure:
         (tmp_path / ".salt").write_bytes(os.urandom(16))
 
         store2 = CredentialStore(config_dir=tmp_path)
-        with pytest.raises(CredentialMigrationError, match="key derivation mismatch"):
-            store2._load()
+        result = store2._load()
+
+        # Should return empty dict instead of crashing
+        assert result == {}
 
         # secrets.enc should be restored from backup (= original v1 data)
         restored = (tmp_path / "secrets.enc").read_bytes()

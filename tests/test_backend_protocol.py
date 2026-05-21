@@ -2,6 +2,8 @@
 
 import inspect
 
+import pytest
+
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, AgentBackend, BackendInfo, Capability
 
 
@@ -97,3 +99,86 @@ class TestAgentBackendProtocol:
         param = sig.parameters["session_key"]
         assert param.default is None
         assert param.kind == inspect.Parameter.KEYWORD_ONLY
+
+
+class TestToolPolicyProtocol:
+    """get_tool_policy / set_tool_policy are present on every backend class."""
+
+    BACKEND_CLASSES = [
+        "pocketpaw.agents.claude_sdk.ClaudeSDKBackend",
+        "pocketpaw.agents.openai_agents.OpenAIAgentsBackend",
+        "pocketpaw.agents.google_adk.GoogleADKBackend",
+        "pocketpaw.agents.codex_cli.CodexCLIBackend",
+        "pocketpaw.agents.opencode.OpenCodeBackend",
+        "pocketpaw.agents.copilot_sdk.CopilotSDKBackend",
+        "pocketpaw.agents.deep_agents.DeepAgentsBackend",
+    ]
+
+    @pytest.mark.parametrize("dotted_path", BACKEND_CLASSES)
+    def test_has_get_tool_policy(self, dotted_path):
+        import importlib
+
+        module_path, cls_name = dotted_path.rsplit(".", 1)
+        mod = importlib.import_module(module_path)
+        cls = getattr(mod, cls_name)
+        assert callable(getattr(cls, "get_tool_policy", None)), (
+            f"{cls_name} missing get_tool_policy()"
+        )
+
+    @pytest.mark.parametrize("dotted_path", BACKEND_CLASSES)
+    def test_has_set_tool_policy(self, dotted_path):
+        import importlib
+
+        module_path, cls_name = dotted_path.rsplit(".", 1)
+        mod = importlib.import_module(module_path)
+        cls = getattr(mod, cls_name)
+        assert callable(getattr(cls, "set_tool_policy", None)), (
+            f"{cls_name} missing set_tool_policy()"
+        )
+
+    @pytest.mark.parametrize("dotted_path", BACKEND_CLASSES)
+    def test_round_trip(self, dotted_path):
+        """set_tool_policy(p) then get_tool_policy() must return the exact same object."""
+        import importlib
+
+        from pocketpaw.tools.policy import ToolPolicy
+
+        module_path, cls_name = dotted_path.rsplit(".", 1)
+        mod = importlib.import_module(module_path)
+        cls = getattr(mod, cls_name)
+
+        instance = cls.__new__(cls)
+        policy = ToolPolicy(profile="full", deny=["group:shell"])
+        instance.set_tool_policy(policy)
+        assert instance.get_tool_policy() is policy, (
+            f"{cls_name}.get_tool_policy() did not return the policy passed to set_tool_policy()"
+        )
+
+    @pytest.mark.parametrize(
+        "dotted_path,extra_cache_attrs",
+        [
+            ("pocketpaw.agents.openai_agents.OpenAIAgentsBackend", ["_custom_tools"]),
+            ("pocketpaw.agents.google_adk.GoogleADKBackend", ["_custom_tools"]),
+            ("pocketpaw.agents.deep_agents.DeepAgentsBackend", ["_custom_tools", "_mcp_tools"]),
+        ],
+    )
+    def test_cache_invalidation_on_set(self, dotted_path, extra_cache_attrs):
+        """set_tool_policy must clear tool caches so the next build picks up the new policy."""
+        import importlib
+
+        from pocketpaw.tools.policy import ToolPolicy
+
+        module_path, cls_name = dotted_path.rsplit(".", 1)
+        mod = importlib.import_module(module_path)
+        cls = getattr(mod, cls_name)
+
+        instance = cls.__new__(cls)
+        for attr in extra_cache_attrs:
+            setattr(instance, attr, ["cached_tool"])
+
+        instance.set_tool_policy(ToolPolicy(profile="full", deny=["group:shell"]))
+
+        for attr in extra_cache_attrs:
+            assert getattr(instance, attr) is None, (
+                f"{cls_name}.set_tool_policy() did not clear {attr}"
+            )

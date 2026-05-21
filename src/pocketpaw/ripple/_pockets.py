@@ -1,5 +1,13 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-21 (#1163) — the edit-specialist prompt now splices in
+# `_EDIT_TOOLS_MCP`, a tools block naming the granular edit ops the
+# specialist ACTUALLY holds (get_pocket, the state/node/array-item ops),
+# instead of `_TOOLS_MCP` which advertised creation tools (create_pocket,
+# update_pocket, add_widget) the specialist does not hold. The
+# `<mutation-strategy>` block gained the Tier-2 prop-array item ops from
+# PR #1159 with guidance on when to use them.
+#
 # Canonical source for every pocket-mode system prompt the agent ever sees.
 # Four strings are exported, one per (action × backend) cell:
 #
@@ -36,10 +44,53 @@
 # Both rules show up in every variant below; the design block (widget
 # catalog, full-pane rule, theme, design-quality bar) lives in
 # ``pocketpaw.ripple._design`` and is spliced in once at the bottom of each prompt.
+#
+# Modified: 2026-05-21 — added a SKILL AVAILABILITY note (the bundled
+# ``pocketpaw-create-pocket`` skill), a HARD RULE recipe-preflight block,
+# and a STEP 0 recipe-library check pointing at the bundled
+# ``ripple-recipes`` kb-go scope.
+# Modified: 2026-05-21 — the create specialist's prompt now splices in
+# the slim ``_RIPPLE_DESIGN_ESSENTIALS`` instead of the full
+# ``RIPPLE_DESIGN_RULES`` superblock. Reworked from PR #1106.
 
 from __future__ import annotations
 
-from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
+from pocketpaw.ripple._design import (
+    CANONICAL_SHAPES,
+    INTERACTIVE_STATE_RULE,
+    RIPPLE_DESIGN_RULES,
+    THEME_RULE,
+    USE_THE_WIDGET_RULE,
+    VISUAL_VARIATION_RULE,
+    WIDGET_CATALOG,
+)
+
+# Slim subset of RIPPLE_DESIGN_RULES for the create specialist. The
+# full RIPPLE_DESIGN_RULES superblock is ~47k chars (~12k tokens) —
+# well past the 3k-token point where attention degrades. The blocks
+# below are the load-bearing ones: widget vocabulary so the model
+# names widgets correctly, canonical prop shapes so persist_pocket's
+# validator doesn't have to bounce every spec, and the interactive
+# state pattern so pockets aren't dead read-only canvases.
+#
+# VISUAL_VARIATION_RULE is included even on a one-brief-at-a-time path:
+# the pattern-first / anti-dashboard rebalance (which lives in that
+# block) corrects a per-brief bias, not a cross-brief one. Dropped:
+# COMPOSITION_COOKBOOK (parent decides composition via hints),
+# TABULAR/ACTIVITY_PICKER_RULE (niche), DESIGN_QUALITY (aspirational),
+# NO_INVENTED_WIDGETS_RULE / WIDGET_SPEC_TOOL_RULE (overlap with
+# WIDGET_CATALOG + manifest validator). LOGO_RULE is small but
+# entirely cosmetic; left out to keep the prompt tight.
+_RIPPLE_DESIGN_ESSENTIALS = "\n".join(
+    [
+        USE_THE_WIDGET_RULE,
+        WIDGET_CATALOG,
+        CANONICAL_SHAPES,
+        INTERACTIVE_STATE_RULE,
+        VISUAL_VARIATION_RULE,
+        THEME_RULE,
+    ]
+)
 
 POCKET_ID_TOKEN = "__POCKET_ID__"
 
@@ -174,6 +225,51 @@ Concrete shape of the assistant turn for a create:
   2. `pocket_specialist__create({ brief, hints? })` tool call.
   3. (After tool returns) one-to-two-sentence confirmation or failure
      message — see rules below.
+
+## HARD RULE — RECIPE PREFLIGHT before every create
+
+Before EVERY `pocket_specialist__create` call, run a recipe-library
+search via your Bash tool. PocketPaw ships pre-compiled pattern
+recipes (sales-pipeline dashboard, customer-support app, recipe/how-to
+viewer, etc.) in the ``ripple-recipes`` kb-go scope. Each recipe has
+the showcase-quality composition for that pattern + adjacent-domain
+variations. Anchoring the brief on a matching recipe is the single
+biggest quality lever for the resulting pocket.
+
+The exact preflight (run this verbatim, substitute the user's intent):
+
+```
+kb search "<one-line summary of the user's intent>" \\
+   --scope ripple-recipes --context --limit 1
+```
+
+The ``--context`` flag returns prompt-shaped markdown. Read what it
+returns:
+
+- **Match found** (a recipe with "When to use" / "Composition" / "Variations"
+  sections): fold the recipe's composition + the relevant variation
+  into your `brief` argument to `pocket_specialist__create`. Mention
+  the recipe name in your preface line ("Spinning up your trust &
+  safety queue using the moderation variation of the
+  customer-support recipe — ...").
+
+- **No match** (kb returns empty or "no results"): proceed with the
+  brief as-is, no recipe context.
+
+- **kb errors** (binary missing / scope missing / non-zero exit):
+  proceed without recipe; do NOT block the user on infrastructure
+  issues. Note the error in your preface ONLY if it might be
+  user-actionable (e.g. "kb binary not on PATH — drafting without
+  recipe context, install kb-go to get richer drafts").
+
+This preflight is a HARD pre-step for every create turn. The Bash
+call comes BEFORE the plain-text preface only when its result
+changes the preface content; otherwise emit the preface first, then
+Bash, then create — same turn, all three calls visible to the user.
+
+The same preflight applies to `pocket_specialist__edit` when the
+user asks for a STRUCTURAL change ("rebuild as a kanban", "switch to
+a master-detail") — those benefit from a recipe anchor too.
 
 ## When to call
 
@@ -403,6 +499,79 @@ render. Don't use them for visible changes.)
 """
 
 
+# ---------------------------------------------------------------------------
+# Edit-specialist tool surface. Splices into the EDIT SPECIALIST prompt
+# only — see _assemble_interaction. This is the granular-op toolset that
+# `make_edit_pocket_tools` (ee/pocketpaw_ee/agent/pocket_specialist/tools.py)
+# actually attaches to the specialist's backend. It deliberately does NOT
+# name create_pocket / update_pocket / add_widget — the specialist does
+# not hold those, and advertising them made the planner pick a tool that
+# does not exist and silently emit zero ops (#1163 root cause B).
+# ---------------------------------------------------------------------------
+_EDIT_TOOLS_MCP = """\
+<pocket-tools>
+You hold the GRANULAR EDIT toolset — and only this toolset. Every tool
+below mutates `rippleSpec` directly and persists as it runs; there is no
+separate save step. You never pass pocket_id, workspace_id, or owner_id —
+they are bound for you.
+
+READ
+
+  get_pocket()
+    → {"ok": true, "pocket": {...full document including rippleSpec...}}
+    Call ONCE at the start to see the existing widget tree and state —
+    unless the parent already handed you the pocket payload.
+
+STATE OPS — data the widgets bind to
+
+  set_state(path, value)        write one value at a dotted path
+                                (e.g. `tasks[0].status`)
+  append_state(path, item)      push an element onto a state array
+  remove_state(path)            delete a key or array element
+  patch_state(partial)          shallow-merge a dict into the top of state
+
+NODE OPS — the widget tree itself
+
+  set_node_prop(node_id, prop, value)
+                                change ONE prop on a widget
+  add_node(parent_id, spec, after_id?)
+                                insert a new widget under a parent
+  replace_node(node_id, spec)   swap one subtree for another
+  move_node(node_id, new_parent_id, after_id?)
+                                relocate / reorder a subtree
+  remove_node(node_id)          delete a subtree
+
+PROP-ARRAY ITEM OPS — surgical single-item edits inside a widget's
+prop-array (chart.data, table.rows, calendar.events, kanban.columns,
+project-dashboard.team, feed.items, select.options, form-layout.fields…)
+
+  set_prop_array_item(node_id, prop, match, partial)
+                                shallow-merge `partial` into ONE matched
+                                item
+  append_prop_array_item(node_id, prop, value, after?)
+                                add ONE item to the array (insert after a
+                                matched item, or append)
+  remove_prop_array_item(node_id, prop, match)
+                                delete ONE matched item
+
+`match` (and `after`) is an ItemMatch: {index:N} | {id:"..."} |
+{by_field:"label", equals:"X"} | {by_key:{k:v}}.
+
+The toolset above is the WHOLE interface. Apply the smallest granular op
+that satisfies the intent.
+</pocket-tools>
+
+<edit-specialist-scope>
+You do NOT hold a pocket-creation tool, a whole-canvas-replace tool, or
+the legacy embedded-widget tools. The pocket already exists — never try
+to spawn another one or rewrite the canvas wholesale. Every change goes
+through a granular op from the `<pocket-tools>` block above. For a
+full-canvas redesign, `replace_node` against the root node is your
+equivalent of a whole-tree swap.
+</edit-specialist-scope>
+"""
+
+
 _TOOLS_CLI = """\
 <pocket-cli>
 Pocket reads/writes happen through `python -m pocketpaw.tools.cli
@@ -570,6 +739,14 @@ Three layers, pick the right tool for the edit:
                                  (label, show, on_click, color…)
     replace_node(node_id, spec)  swap one subtree for another
 
+  LAYER 2.5 — ONE ITEM INSIDE A WIDGET'S PROP-ARRAY
+    set_prop_array_item(node_id, prop, match, partial)
+                                 surgically merge into ONE item
+    append_prop_array_item(node_id, prop, value, after?)
+                                 add ONE item to the array
+    remove_prop_array_item(node_id, prop, match)
+                                 delete ONE matched item
+
   LAYER 3 — STRUCTURE
     add_node(parent_id, spec, after_id?)
     move_node(node_id, new_parent_id, after_id?)
@@ -584,9 +761,30 @@ ALWAYS reach for the LOWEST applicable layer:
 - "change the button label to Save"     → set_node_prop(button_id, "label", "Save")
 - "hide the chart"                      → set_node_prop(chart_id, "show", "false")
 - "make the button red"                 → set_node_prop(button_id, "class", "bg-red-500")
+- "fix team member 4's name"            → set_prop_array_item(dashboard_id, "team",
+                                          {index:3}, {name:"Gaurav Dewani"})
+- "add a row to the PR table"           → append_prop_array_item(table_id, "rows", {...})
+- "drop the cancelled chart bar"        → remove_prop_array_item(chart_id, "data",
+                                          {by_field:"label", equals:"Cancelled"})
 - "add a stat widget for revenue"       → add_node(parent_id, {type:"stat",…})
 - "move the chart below the table"      → move_node(chart_id, root_id, after_id=table_id)
 - "remove the old metric card"          → remove_node(metric_id)
+
+When to use the LAYER 2.5 prop-array item ops — and when NOT to:
+
+- Use them for a SURGICAL edit of ONE item in a widget prop that holds
+  an array: a single chart bar, one table row, one calendar event, one
+  `team` entry of a project-dashboard. They touch only the matched item;
+  every other item stays byte-identical, so nothing can drift.
+- This is the right tool the moment the intent is "change/add/remove
+  ONE of N" inside a widget — e.g. "update team[3] of the dashboard".
+  Do NOT re-ship the whole `team` array via set_node_prop just to change
+  one entry: copying the unchanged items risks silent drift and is far
+  more tokens. set_node_prop is for SCALAR props (label, color, show) or
+  for genuinely replacing an entire array wholesale.
+- `match` selects the item by {index:N}, {id:"..."}, {by_field, equals},
+  or {by_key:{...}}. Prefer a stable field over a raw index when one
+  exists.
 
 Why this matters: every widget bound to `{state.x}` re-renders
 automatically when state changes — set_state is the cheapest possible
@@ -597,13 +795,14 @@ the shape actually needs to change.
 Rule of thumb: if widgets bind to it, edit state. If it's the widget
 itself, edit the node. If it's a new widget, add a node.
 
-Reach for `update_pocket(ripple_spec=...)` only when:
-- You're rewriting the entire canvas (the user said "redesign this"
-  or asked for a structural shift touching >30% of the tree).
-- The initial creation of a brand-new sub-area replaces the whole UI.
+For a full-canvas rewrite (the user said "redesign this" or asked for a
+structural shift touching >30% of the tree), `replace_node` on the ROOT
+node swaps the whole subtree in one op. You do NOT have `update_pocket`
+— `replace_node` against the root is the equivalent.
 
-Never use `update_pocket` to change one row, one prop, one widget, or
-to nudge an existing node. The granular ops exist for exactly that.
+Never reach for a whole-tree replace to change one row, one prop, one
+widget, or to nudge an existing node. The granular ops above — down to
+the LAYER 2.5 prop-array item ops — exist for exactly that.
 </mutation-strategy>
 
 Step 2 — when building a new subtree (for add_node / replace_node):
@@ -709,6 +908,60 @@ Pocket creation is a two-agent flow: you (the parent agent) do the
 specialist is fast and accurate at translating a clear plan into a
 rippleSpec, but is NOT the best agent for open-ended interpretation.
 That's your job. Play to the strengths.
+
+### SKILL AVAILABILITY
+
+If PocketPaw auto-installed its bundled skills on boot (default), the
+``pocketpaw-create-pocket`` skill is available in
+``~/.claude/skills/pocketpaw-create-pocket/SKILL.md``. It bundles the
+full design rules, widget catalog, pattern-first logic, and invocation
+flow — load it on demand when the user explicitly asks to create /
+build / make a pocket. The skill body sits OUTSIDE your system prompt
+until invoked, so your always-on context stays small.
+
+The skill is **AgentSkills-format** and works for every chat backend:
+
+- **claude_agent_sdk**: auto-discovered by Claude Code's native skill
+  loader; the agent invokes it on natural-language intent.
+- **codex_cli / openai_agents / deep_agents / langchain_react**:
+  invoked via the ``/pocketpaw-create-pocket "<brief>"`` slash command
+  through PocketPaw's chat UI (handled by ``dashboard_ws.py`` →
+  ``SkillExecutor``).
+
+The MCP tool ``mcp__pocketpaw_pocket_specialist__create`` remains the
+underlying primitive that actually persists. The skill is the
+preferred entry point when available; the tool is what the skill
+ultimately calls.
+
+### STEP 0 — CHECK THE RECIPE LIBRARY FIRST
+
+Before any design work, query PocketPaw's bundled recipe library for
+a polished example matching the user's intent. PocketPaw ships
+``ripple-recipes`` — a kb-go scope of hand-authored pattern recipes
+(sales pipeline, customer support app, recipe/how-to viewer, …) —
+auto-installed at ``~/.knowledge-base/ripple-recipes/``.
+
+Run via your Bash tool:
+
+```
+kb search "<one-line summary of the user's brief>" \\
+   --scope ripple-recipes --context --limit 1
+```
+
+The ``--context`` flag returns prompt-shaped markdown ready to anchor
+your draft on. If a recipe matches, follow its composition (focal
+widget, layout, prop shapes, mock-data shape) — the recipe encodes
+the showcase-quality version of that pocket pattern. Adapt content
+to the user's specific domain; keep the structural skeleton.
+
+If ``kb search`` returns no matches, continue with first-principles
+drafting using STEP 1-3 below. The recipe library covers high-
+leverage shapes but does NOT cover every brief.
+
+Why kb-go (not an MCP wrapper): kb-go ships its own SKILL.md with
+the canonical CLI surface, and the ``--context`` flag was designed
+for exactly this prompt-injection use case. A wrapper would drift
+from the upstream contract — use the CLI directly.
 
 ### STEP 1 — UNDERSTAND THE BRIEF
 
@@ -1206,6 +1459,12 @@ def _assemble_specialist() -> str:
     they document the rippleSpec shape, not the tool surface; the
     specialist calls ``persist_pocket`` instead but the spec body is
     identical.
+
+    Design rules are spliced in via the slim ``_RIPPLE_DESIGN_ESSENTIALS``
+    (widget vocab + canonical shapes + interactive-state pattern +
+    visual-variation + theme) rather than the full ~47k-char
+    ``RIPPLE_DESIGN_RULES`` — the dropped sub-blocks are either covered
+    by the parent's structural plan or by the runtime manifest validator.
     """
     parts = [
         _SCOPE_BLOCK,
@@ -1216,7 +1475,7 @@ def _assemble_specialist() -> str:
         _STATE_SOURCES_BLOCK,
         _CREATION_EXAMPLES_MCP,
         _RESEARCH_PROTOCOL,
-        RIPPLE_DESIGN_RULES,
+        _RIPPLE_DESIGN_ESSENTIALS,
     ]
     return "\n".join(parts) + "\n"
 
@@ -1240,11 +1499,18 @@ set_state, set_node_prop, add_node, etc.).
 def _assemble_interaction(*, mcp: bool) -> str:
     """Heavy interaction prompt — owned by the EDIT SPECIALIST. Contains
     the full mutation-strategy / design-rules block the specialist needs
-    to perform granular edits. Not for the main chat agent."""
+    to perform granular edits. Not for the main chat agent.
+
+    The MCP variant splices in ``_EDIT_TOOLS_MCP`` — the granular edit
+    toolset the specialist actually holds. It must NOT use ``_TOOLS_MCP``
+    (the creation toolset): advertising create_pocket / update_pocket /
+    add_widget to a specialist that only holds set_node_prop / add_node /
+    *_prop_array_item made the planner pick a non-existent tool and emit
+    zero ops with no error (#1163 root cause B)."""
     parts = [
         _SCOPE_BLOCK,
         _CANVAS_BLOCK,
-        _TOOLS_MCP if mcp else _TOOLS_CLI,
+        _EDIT_TOOLS_MCP if mcp else _TOOLS_CLI,
         _WORKFLOW_INTERACTION_MCP if mcp else _WORKFLOW_INTERACTION_CLI,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,

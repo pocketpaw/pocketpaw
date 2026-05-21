@@ -14,6 +14,9 @@ Backend-aware exclusion:
 
 Changes:
 - 2026-03-12: Added EditFileTool to _CLAUDE_SDK_EXCLUDED (has native Edit)
+- 2026-05-21 (#1160): _scan_tool_output now also caps oversized results via
+  cap_tool_output(), so tool blobs returned through the OpenAI / ADK /
+  LangChain wrappers can't flood agent context.
 """
 
 from __future__ import annotations
@@ -196,7 +199,9 @@ def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
     return tools
 
 
-def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -> list:
+def build_openai_function_tools(
+    settings: Any, backend: str = "openai_agents", policy: ToolPolicy | None = None
+) -> list:
     """Build a list of OpenAI Agents SDK ``FunctionTool`` wrappers for PocketPaw tools.
 
     Each tool is wrapped in a FunctionTool whose ``on_invoke_tool`` callback
@@ -216,11 +221,12 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
         logger.debug("OpenAI Agents SDK not installed — returning empty tools list")
         return []
 
-    policy = ToolPolicy(
-        profile=settings.tool_profile,
-        allow=settings.tools_allow,
-        deny=settings.tools_deny,
-    )
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
 
     registry = ToolRegistry(policy=policy)
     for tool in _instantiate_all_tools(backend=backend):
@@ -256,7 +262,20 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
 
 
 def _scan_tool_output(result: str, tool_name: str) -> str:
-    """Scan tool output for injection attacks, return sanitized content if needed."""
+    """Post-process a tool result before it reaches agent context.
+
+    Two steps, both best-effort (an error in either leaves the result
+    unchanged rather than breaking tool execution):
+
+    1. Injection scan — sanitise content that trips the prompt-injection
+       scanner (e.g. hostile web pages).
+    2. Output budget — cap an oversized blob (a long test run, a build log,
+       a big HTTP body) via ``cap_tool_output`` so it can't flood the
+       context window. Normal-sized output passes through untouched.
+
+    This runs inside the OpenAI / ADK / LangChain tool wrappers, which call
+    ``tool.execute`` directly rather than through ``ToolRegistry.execute``.
+    """
     try:
         from pocketpaw.config import get_settings
         from pocketpaw.security.injection_scanner import get_injection_scanner
@@ -266,9 +285,22 @@ def _scan_tool_output(result: str, tool_name: str) -> str:
             scanner = get_injection_scanner()
             scan = scanner.scan(result, source=f"tool:{tool_name}")
             if scan.threat_level.value != "none":
-                return scan.sanitized_content
+                result = scan.sanitized_content
     except Exception:
         pass  # Don't let scanner errors break tool execution
+
+    # Output budget — cap a noisy blob. Idempotent, so a result already
+    # capped inside BaseTool._success passes through unchanged.
+    if result:
+        try:
+            from pocketpaw.config import get_settings
+            from pocketpaw.tools.output_budget import cap_tool_output
+
+            cap = getattr(get_settings(), "tool_output_char_cap", None)
+            result = cap_tool_output(result, cap=cap, tool_name=tool_name)
+        except Exception:
+            logger.debug("Tool output cap failed for %s", tool_name, exc_info=True)
+
     return result
 
 
@@ -294,7 +326,9 @@ def _make_invoke_callback(tool: Any):
     return callback
 
 
-def build_adk_function_tools(settings: Any, backend: str = "google_adk") -> list:
+def build_adk_function_tools(
+    settings: Any, backend: str = "google_adk", policy: ToolPolicy | None = None
+) -> list:
     """Build a list of Google ADK ``FunctionTool`` wrappers for PocketPaw tools.
 
     ADK accepts plain Python callables as tools via ``FunctionTool(func=...)``.
@@ -315,11 +349,12 @@ def build_adk_function_tools(settings: Any, backend: str = "google_adk") -> list
         logger.debug("Google ADK not installed — returning empty tools list")
         return []
 
-    policy = ToolPolicy(
-        profile=settings.tool_profile,
-        allow=settings.tools_allow,
-        deny=settings.tools_deny,
-    )
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
 
     registry = ToolRegistry(policy=policy)
     for tool in _instantiate_all_tools(backend=backend):
@@ -383,7 +418,9 @@ def _make_adk_wrapper(tool: Any):
     return _adk_tool_wrapper
 
 
-def build_deep_agents_tools(settings: Any, backend: str = "deep_agents") -> list:
+def build_deep_agents_tools(
+    settings: Any, backend: str = "deep_agents", policy: ToolPolicy | None = None
+) -> list:
     """Build a list of LangChain ``StructuredTool`` wrappers for PocketPaw tools.
 
     Deep Agents accepts LangChain tools, plain callables, or dicts. We use
@@ -403,11 +440,12 @@ def build_deep_agents_tools(settings: Any, backend: str = "deep_agents") -> list
         logger.debug("langchain-core not installed — returning empty tools list")
         return []
 
-    policy = ToolPolicy(
-        profile=settings.tool_profile,
-        allow=settings.tools_allow,
-        deny=settings.tools_deny,
-    )
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
 
     registry = ToolRegistry(policy=policy)
     for tool in _instantiate_all_tools(backend=backend):

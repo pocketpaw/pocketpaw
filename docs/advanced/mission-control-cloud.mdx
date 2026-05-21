@@ -29,6 +29,7 @@ Mission Control (Cloud) is the operator console for the PocketPaw enterprise clo
 | **Project** | A workspace-scoped grouping of pockets, tasks, and cycles. Optional reference everywhere. |
 | **Pocket** | The canvas / workspace surface. Pockets live inside a workspace and optionally inside a Project. |
 | **Nudge** | A pending action proposed by Instinct, surfaced in the Tray for human approval. |
+| **Outcome verdict** | A checked answer to "did this action solve the problem" — `solved` / `partial` / `not_solved` / `unknown` — recorded on an Instinct action after it executes. See [Outcome verification](#outcome-verification). |
 
 ## Hierarchy
 
@@ -63,6 +64,35 @@ Every level except the workspace is optional. A task created without a `project_
 | `priority` | string | `low` / `normal` / `high` / `urgent` (Tasks) or `low` / `medium` / `high` / `critical` (Instinct). |
 | `created_at`, `updated_at` | datetime | UTC ISO-8601. |
 | `fabric_refs` | string[] | Fabric object ids linked from the source. |
+
+## Outcome verification
+
+A completed action is an *output*. Whether it solved the problem the operator cared about is an *outcome*, and the two are not the same thing. Instinct's `Action` carries an `outcome` field that `mark_executed()` writes when an action runs.
+
+That field used to hold a free-text "what happened" string. It can now also hold a structured **`OutcomeVerdict`**: a checked answer to "did this solve the problem." The plain string still works, so older executed actions and any caller passing a string keep behaving as before.
+
+An `OutcomeVerdict` has:
+
+| Field | Meaning |
+|-------|---------|
+| `status` | `solved` (every criterion met), `partial` (some met), `not_solved` (none met), or `unknown` (no criteria captured, so nothing to check). |
+| `criteria_results` | Per-criterion breakdown — each `success_criteria` entry plus whether it was met and a short detail. |
+| `summary` | A one-line human-readable roll-up, e.g. `2/3 success criteria met`. |
+
+The verdict is produced by a **deterministic verifier** (`pocketpaw.instinct.verification.verify_outcome`). It checks an action's result text against the `success_criteria` captured at task creation — these are the verifiable "this is done when…" checks the planning intake records (see [Deep Work](/advanced/deep-work#success-criteria-and-preconditions)). The cloud `Task` model carries the same `success_criteria` field so the criteria survive from planning through to verification.
+
+"Deterministic" means the verifier uses plain keyword matching, with no model call, so the same result and criteria always produce the same verdict. It catches whether the result clearly mentions what each criterion asked for. Subtler judgement — soft or subjective criteria, results phrased in synonyms — is out of scope for this foundation and is tracked as separate follow-up work on LLM-as-judge scoring.
+
+```python
+from pocketpaw.instinct import verify_outcome
+
+verdict = verify_outcome(
+    action_result_text,
+    success_criteria=["A reminder email is sent to each overdue customer"],
+)
+# verdict.status -> OutcomeStatus.SOLVED / PARTIAL / NOT_SOLVED / UNKNOWN
+await store.mark_executed(action_id, verdict)
+```
 
 ## REST endpoints
 

@@ -16,6 +16,7 @@ from typing import Any
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -394,10 +395,23 @@ class DeepAgentsBackend:
         self._sdk_available = False
         self._custom_tools: list | None = None
         self._mcp_tools: list | None = None
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         self._mcp_client: Any = None
         self._cached_agent: Any = None
         self._cached_model_key: Any = None
         self._initialize()
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        self._policy = policy
+        self._custom_tools = None
+        self._mcp_tools = None
 
     def _initialize(self) -> None:
         try:
@@ -424,7 +438,9 @@ class DeepAgentsBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_deep_agents_tools
 
-            self._custom_tools = build_deep_agents_tools(self.settings, backend="deep_agents")
+            self._custom_tools = build_deep_agents_tools(
+                self.settings, backend="deep_agents", policy=self._policy
+            )
         except Exception as exc:
             logger.info("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -453,18 +469,12 @@ class DeepAgentsBackend:
             self._mcp_tools = []
             return self._mcp_tools
 
-        from pocketpaw.tools.policy import ToolPolicy
-
         configs = load_mcp_config()
         if not configs:
             self._mcp_tools = []
             return self._mcp_tools
 
-        policy = ToolPolicy(
-            profile=self.settings.tool_profile,
-            allow=self.settings.tools_allow,
-            deny=self.settings.tools_deny,
-        )
+        policy = self._policy
 
         # Build MultiServerMCPClient config from PocketPaw MCP configs
         client_config: dict[str, dict] = {}
