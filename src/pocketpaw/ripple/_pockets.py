@@ -36,10 +36,53 @@
 # Both rules show up in every variant below; the design block (widget
 # catalog, full-pane rule, theme, design-quality bar) lives in
 # ``pocketpaw.ripple._design`` and is spliced in once at the bottom of each prompt.
+#
+# Modified: 2026-05-21 — added a SKILL AVAILABILITY note (the bundled
+# ``pocketpaw-create-pocket`` skill), a HARD RULE recipe-preflight block,
+# and a STEP 0 recipe-library check pointing at the bundled
+# ``ripple-recipes`` kb-go scope.
+# Modified: 2026-05-21 — the create specialist's prompt now splices in
+# the slim ``_RIPPLE_DESIGN_ESSENTIALS`` instead of the full
+# ``RIPPLE_DESIGN_RULES`` superblock. Reworked from PR #1106.
 
 from __future__ import annotations
 
-from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
+from pocketpaw.ripple._design import (
+    CANONICAL_SHAPES,
+    INTERACTIVE_STATE_RULE,
+    RIPPLE_DESIGN_RULES,
+    THEME_RULE,
+    USE_THE_WIDGET_RULE,
+    VISUAL_VARIATION_RULE,
+    WIDGET_CATALOG,
+)
+
+# Slim subset of RIPPLE_DESIGN_RULES for the create specialist. The
+# full RIPPLE_DESIGN_RULES superblock is ~47k chars (~12k tokens) —
+# well past the 3k-token point where attention degrades. The blocks
+# below are the load-bearing ones: widget vocabulary so the model
+# names widgets correctly, canonical prop shapes so persist_pocket's
+# validator doesn't have to bounce every spec, and the interactive
+# state pattern so pockets aren't dead read-only canvases.
+#
+# VISUAL_VARIATION_RULE is included even on a one-brief-at-a-time path:
+# the pattern-first / anti-dashboard rebalance (which lives in that
+# block) corrects a per-brief bias, not a cross-brief one. Dropped:
+# COMPOSITION_COOKBOOK (parent decides composition via hints),
+# TABULAR/ACTIVITY_PICKER_RULE (niche), DESIGN_QUALITY (aspirational),
+# NO_INVENTED_WIDGETS_RULE / WIDGET_SPEC_TOOL_RULE (overlap with
+# WIDGET_CATALOG + manifest validator). LOGO_RULE is small but
+# entirely cosmetic; left out to keep the prompt tight.
+_RIPPLE_DESIGN_ESSENTIALS = "\n".join(
+    [
+        USE_THE_WIDGET_RULE,
+        WIDGET_CATALOG,
+        CANONICAL_SHAPES,
+        INTERACTIVE_STATE_RULE,
+        VISUAL_VARIATION_RULE,
+        THEME_RULE,
+    ]
+)
 
 POCKET_ID_TOKEN = "__POCKET_ID__"
 
@@ -174,6 +217,51 @@ Concrete shape of the assistant turn for a create:
   2. `pocket_specialist__create({ brief, hints? })` tool call.
   3. (After tool returns) one-to-two-sentence confirmation or failure
      message — see rules below.
+
+## HARD RULE — RECIPE PREFLIGHT before every create
+
+Before EVERY `pocket_specialist__create` call, run a recipe-library
+search via your Bash tool. PocketPaw ships pre-compiled pattern
+recipes (sales-pipeline dashboard, customer-support app, recipe/how-to
+viewer, etc.) in the ``ripple-recipes`` kb-go scope. Each recipe has
+the showcase-quality composition for that pattern + adjacent-domain
+variations. Anchoring the brief on a matching recipe is the single
+biggest quality lever for the resulting pocket.
+
+The exact preflight (run this verbatim, substitute the user's intent):
+
+```
+kb search "<one-line summary of the user's intent>" \\
+   --scope ripple-recipes --context --limit 1
+```
+
+The ``--context`` flag returns prompt-shaped markdown. Read what it
+returns:
+
+- **Match found** (a recipe with "When to use" / "Composition" / "Variations"
+  sections): fold the recipe's composition + the relevant variation
+  into your `brief` argument to `pocket_specialist__create`. Mention
+  the recipe name in your preface line ("Spinning up your trust &
+  safety queue using the moderation variation of the
+  customer-support recipe — ...").
+
+- **No match** (kb returns empty or "no results"): proceed with the
+  brief as-is, no recipe context.
+
+- **kb errors** (binary missing / scope missing / non-zero exit):
+  proceed without recipe; do NOT block the user on infrastructure
+  issues. Note the error in your preface ONLY if it might be
+  user-actionable (e.g. "kb binary not on PATH — drafting without
+  recipe context, install kb-go to get richer drafts").
+
+This preflight is a HARD pre-step for every create turn. The Bash
+call comes BEFORE the plain-text preface only when its result
+changes the preface content; otherwise emit the preface first, then
+Bash, then create — same turn, all three calls visible to the user.
+
+The same preflight applies to `pocket_specialist__edit` when the
+user asks for a STRUCTURAL change ("rebuild as a kanban", "switch to
+a master-detail") — those benefit from a recipe anchor too.
 
 ## When to call
 
@@ -710,6 +798,60 @@ specialist is fast and accurate at translating a clear plan into a
 rippleSpec, but is NOT the best agent for open-ended interpretation.
 That's your job. Play to the strengths.
 
+### SKILL AVAILABILITY
+
+If PocketPaw auto-installed its bundled skills on boot (default), the
+``pocketpaw-create-pocket`` skill is available in
+``~/.claude/skills/pocketpaw-create-pocket/SKILL.md``. It bundles the
+full design rules, widget catalog, pattern-first logic, and invocation
+flow — load it on demand when the user explicitly asks to create /
+build / make a pocket. The skill body sits OUTSIDE your system prompt
+until invoked, so your always-on context stays small.
+
+The skill is **AgentSkills-format** and works for every chat backend:
+
+- **claude_agent_sdk**: auto-discovered by Claude Code's native skill
+  loader; the agent invokes it on natural-language intent.
+- **codex_cli / openai_agents / deep_agents / langchain_react**:
+  invoked via the ``/pocketpaw-create-pocket "<brief>"`` slash command
+  through PocketPaw's chat UI (handled by ``dashboard_ws.py`` →
+  ``SkillExecutor``).
+
+The MCP tool ``mcp__pocketpaw_pocket_specialist__create`` remains the
+underlying primitive that actually persists. The skill is the
+preferred entry point when available; the tool is what the skill
+ultimately calls.
+
+### STEP 0 — CHECK THE RECIPE LIBRARY FIRST
+
+Before any design work, query PocketPaw's bundled recipe library for
+a polished example matching the user's intent. PocketPaw ships
+``ripple-recipes`` — a kb-go scope of hand-authored pattern recipes
+(sales pipeline, customer support app, recipe/how-to viewer, …) —
+auto-installed at ``~/.knowledge-base/ripple-recipes/``.
+
+Run via your Bash tool:
+
+```
+kb search "<one-line summary of the user's brief>" \\
+   --scope ripple-recipes --context --limit 1
+```
+
+The ``--context`` flag returns prompt-shaped markdown ready to anchor
+your draft on. If a recipe matches, follow its composition (focal
+widget, layout, prop shapes, mock-data shape) — the recipe encodes
+the showcase-quality version of that pocket pattern. Adapt content
+to the user's specific domain; keep the structural skeleton.
+
+If ``kb search`` returns no matches, continue with first-principles
+drafting using STEP 1-3 below. The recipe library covers high-
+leverage shapes but does NOT cover every brief.
+
+Why kb-go (not an MCP wrapper): kb-go ships its own SKILL.md with
+the canonical CLI surface, and the ``--context`` flag was designed
+for exactly this prompt-injection use case. A wrapper would drift
+from the upstream contract — use the CLI directly.
+
 ### STEP 1 — UNDERSTAND THE BRIEF
 
 You need TWO things before you can plan: structure (what kind of
@@ -1206,6 +1348,12 @@ def _assemble_specialist() -> str:
     they document the rippleSpec shape, not the tool surface; the
     specialist calls ``persist_pocket`` instead but the spec body is
     identical.
+
+    Design rules are spliced in via the slim ``_RIPPLE_DESIGN_ESSENTIALS``
+    (widget vocab + canonical shapes + interactive-state pattern +
+    visual-variation + theme) rather than the full ~47k-char
+    ``RIPPLE_DESIGN_RULES`` — the dropped sub-blocks are either covered
+    by the parent's structural plan or by the runtime manifest validator.
     """
     parts = [
         _SCOPE_BLOCK,
@@ -1216,7 +1364,7 @@ def _assemble_specialist() -> str:
         _STATE_SOURCES_BLOCK,
         _CREATION_EXAMPLES_MCP,
         _RESEARCH_PROTOCOL,
-        RIPPLE_DESIGN_RULES,
+        _RIPPLE_DESIGN_ESSENTIALS,
     ]
     return "\n".join(parts) + "\n"
 

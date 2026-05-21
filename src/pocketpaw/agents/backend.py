@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from pocketpaw.config import Settings
+    from pocketpaw.tools.policy import ToolPolicy
 
 from pocketpaw.agents.protocol import AgentEvent  # re-export for convenience
 
@@ -70,6 +71,10 @@ class AgentBackend(Protocol):
     async def stop(self) -> None: ...
 
     async def get_status(self) -> dict[str, Any]: ...
+
+    def get_tool_policy(self) -> ToolPolicy: ...
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None: ...
 
     def attach_specialist_tools(self, tools: list[Any]) -> None:
         """Attach pocket-specialist-internal tools to this backend instance.

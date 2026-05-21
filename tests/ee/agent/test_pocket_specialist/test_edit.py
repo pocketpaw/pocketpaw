@@ -80,7 +80,8 @@ class TestEditToolFactories:
 
         tools = make_edit_pocket_tools(pocket_id="p1")
         names = [t.name for t in tools]
-        # The 10 granular ops the edit specialist gets.
+        # The granular ops the edit specialist gets — including the
+        # Tier-2 surgical prop-array item ops.
         for expected in (
             "get_pocket",
             "set_state",
@@ -88,6 +89,9 @@ class TestEditToolFactories:
             "remove_state",
             "patch_state",
             "set_node_prop",
+            "set_prop_array_item",
+            "append_prop_array_item",
+            "remove_prop_array_item",
             "add_node",
             "replace_node",
             "move_node",
@@ -131,6 +135,103 @@ class TestEditToolFactories:
         assert capture.get("ops") == [
             {"op": "set_state", "args": {"path": "filter", "value": "done"}}
         ]
+
+
+class TestPropArrayItemToolFactories:
+    async def test_set_prop_array_item_tool_invokes_wrapper(self) -> None:
+        from pocketpaw_ee.agent.pocket_specialist import tools
+
+        capture: dict = {}
+        tool = tools.make_set_prop_array_item_tool(pocket_id="p1", capture=capture)
+        with patch(
+            "pocketpaw_ee.cloud.pockets.agent_context.set_prop_array_item_for_agent",
+            new_callable=AsyncMock,
+        ) as wrapper:
+            wrapper.return_value = {
+                "ok": True,
+                "item_index": 0,
+                "item": {"x": 1},
+                "old_item": {"x": 0},
+            }
+            result = await tool.coroutine(
+                node_id="n_chart000",
+                prop="data",
+                match={"index": 0},
+                partial={"x": 1},
+            )
+        wrapper.assert_awaited_once_with("p1", "n_chart000", "data", {"index": 0}, {"x": 1})
+        assert result["ok"] is True
+        assert capture["ops"] == [
+            {
+                "op": "set_prop_array_item",
+                "args": {"node_id": "n_chart000", "prop": "data", "match": {"index": 0}},
+            }
+        ]
+
+    async def test_append_prop_array_item_tool_invokes_wrapper(self) -> None:
+        from pocketpaw_ee.agent.pocket_specialist import tools
+
+        capture: dict = {}
+        tool = tools.make_append_prop_array_item_tool(pocket_id="p1", capture=capture)
+        with patch(
+            "pocketpaw_ee.cloud.pockets.agent_context.append_prop_array_item_for_agent",
+            new_callable=AsyncMock,
+        ) as wrapper:
+            wrapper.return_value = {"ok": True, "item_index": 3, "item": {"x": 9}}
+            result = await tool.coroutine(
+                node_id="n_chart000",
+                prop="data",
+                value={"x": 9},
+                after={"id": "row_b"},
+            )
+        wrapper.assert_awaited_once_with("p1", "n_chart000", "data", {"x": 9}, {"id": "row_b"})
+        assert result["ok"] is True
+        assert capture["ops"] == [
+            {
+                "op": "append_prop_array_item",
+                "args": {"node_id": "n_chart000", "prop": "data", "after": {"id": "row_b"}},
+            }
+        ]
+
+    async def test_remove_prop_array_item_tool_invokes_wrapper(self) -> None:
+        from pocketpaw_ee.agent.pocket_specialist import tools
+
+        capture: dict = {}
+        tool = tools.make_remove_prop_array_item_tool(pocket_id="p1", capture=capture)
+        with patch(
+            "pocketpaw_ee.cloud.pockets.agent_context.remove_prop_array_item_for_agent",
+            new_callable=AsyncMock,
+        ) as wrapper:
+            wrapper.return_value = {"ok": True, "item_index": 2, "old_item": {"x": 5}}
+            result = await tool.coroutine(
+                node_id="n_chart000",
+                prop="data",
+                match={"by_field": "label", "equals": "X"},
+            )
+        wrapper.assert_awaited_once_with(
+            "p1", "n_chart000", "data", {"by_field": "label", "equals": "X"}
+        )
+        assert result["ok"] is True
+        assert capture["ops"] == [
+            {
+                "op": "remove_prop_array_item",
+                "args": {
+                    "node_id": "n_chart000",
+                    "prop": "data",
+                    "match": {"by_field": "label", "equals": "X"},
+                },
+            }
+        ]
+
+
+def test_edit_tool_bundle_includes_prop_array_item_tools():
+    from pocketpaw_ee.agent.pocket_specialist import tools
+
+    bundle = tools.make_edit_pocket_tools(pocket_id="p1")
+    names = {t.name for t in bundle}
+    assert "set_prop_array_item" in names
+    assert "append_prop_array_item" in names
+    assert "remove_prop_array_item" in names
 
 
 class TestRunEditSpecialistSuccessFlag:

@@ -159,7 +159,7 @@ def test_get_dms_list(auth_client: httpx.Client) -> None:
     assert resp.status_code == 200
     data = resp.json()
     # Accept list or paginated response
-    assert isinstance(data, (list, dict)), f"Unexpected DMs response type: {type(data)}"
+    assert isinstance(data, list | dict), f"Unexpected DMs response type: {type(data)}"
 
 
 @skip_if_no_backend
