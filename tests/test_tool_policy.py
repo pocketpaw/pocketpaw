@@ -299,42 +299,49 @@ class TestMCPPolicy:
 class TestMCPExplicitAllow:
     """Test ``is_mcp_server_explicitly_allowed`` — opt-in gating for
     in-process built-in servers that must not be ambient on every agent run.
+
+    The opt-in is driven by the dedicated ``mcp_servers_allow`` constructor
+    argument, kept orthogonal to ``tools_allow``. Putting an ``mcp:*`` entry
+    in ``tools_allow`` would flip the policy into allow-list mode and
+    silently disable every other tool — ``mcp_servers_allow`` avoids that.
     """
 
-    def test_full_profile_does_not_explicitly_allow(self):
-        """The allow-by-default fallthrough is NOT an explicit opt-in."""
+    def test_empty_mcp_servers_allow_is_not_opt_in(self):
+        """No ``mcp_servers_allow`` entry means the server stays off."""
         policy = ToolPolicy(profile="full")
         assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is False
 
-    def test_wildcard_in_allow_list_is_explicit(self):
+    def test_full_profile_allow_list_does_not_opt_in(self):
+        """A populated ``tools_allow`` does not leak into the MCP opt-in."""
         policy = ToolPolicy(profile="full", allow=["mcp:pocketpaw_planner:*"])
+        assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is False
+
+    def test_server_in_mcp_servers_allow_is_opt_in(self):
+        policy = ToolPolicy(profile="full", mcp_servers_allow=frozenset({"pocketpaw_planner"}))
         assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is True
 
-    def test_specific_tool_in_allow_list_is_explicit(self):
-        policy = ToolPolicy(profile="full", allow=["mcp:pocketpaw_planner:plan_project"])
-        assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is True
-
-    def test_group_mcp_in_allow_list_is_explicit(self):
-        policy = ToolPolicy(profile="full", allow=["group:mcp"])
-        assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is True
-
-    def test_deny_overrides_explicit_allow(self):
-        """Deny always wins, even over an explicit allow entry."""
+    def test_deny_overrides_mcp_servers_allow(self):
+        """Deny always wins, even over an explicit ``mcp_servers_allow`` entry."""
         policy = ToolPolicy(
             profile="full",
-            allow=["mcp:pocketpaw_planner:*"],
             deny=["mcp:pocketpaw_planner:*"],
+            mcp_servers_allow=frozenset({"pocketpaw_planner"}),
         )
         assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is False
 
-    def test_group_mcp_deny_overrides_explicit_allow(self):
+    def test_group_mcp_deny_overrides_mcp_servers_allow(self):
         policy = ToolPolicy(
             profile="full",
-            allow=["mcp:pocketpaw_planner:*"],
             deny=["group:mcp"],
+            mcp_servers_allow=frozenset({"pocketpaw_planner"}),
         )
         assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is False
 
-    def test_unrelated_allow_entry_does_not_leak(self):
-        policy = ToolPolicy(profile="full", allow=["mcp:fs:*"])
+    def test_unrelated_mcp_servers_allow_entry_does_not_leak(self):
+        policy = ToolPolicy(profile="full", mcp_servers_allow=frozenset({"some_other_server"}))
         assert policy.is_mcp_server_explicitly_allowed("pocketpaw_planner") is False
+
+    def test_mcp_servers_allow_defaults_to_empty(self):
+        """Omitting the argument is equivalent to an empty frozenset."""
+        policy = ToolPolicy(profile="full")
+        assert policy.is_mcp_server_explicitly_allowed("anything") is False
