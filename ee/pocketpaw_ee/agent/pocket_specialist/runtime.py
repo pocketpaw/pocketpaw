@@ -15,6 +15,15 @@ into ``warnings`` whether or not other ops landed. The 0-ops reason is
 joined with "" because deep_agents emits message events as token-level
 chunks. Added targeted observability logging for error events and
 tool_use / applied / rejected counts.
+Changes: 2026-05-21 (#1170) — ``run_edit_specialist`` now dispatches
+through ``pick_edit_adapter`` so it honors ``pocket_specialist_mode``,
+mirroring how ``run_specialist`` (create) routes through ``pick_adapter``.
+In ``agent`` mode the edit path no longer spawns a sub-agent backend —
+the chat agent computes the granular ops inline and the new
+``EditAgentModeAdapter`` applies them deterministically. The historical
+backend-spawn flow moved into the private ``_run_edit_subagent_pipeline``.
+A new ``PocketSpecialistEditInput.ops`` field carries the chat agent's
+pre-computed ops on the agent-mode second call.
 """
 
 from __future__ import annotations
@@ -504,6 +513,22 @@ class PocketSpecialistEditInput(BaseModel):
         ),
     )
 
+    # ---- agent-mode second-call payload ----
+    ops: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Pre-computed granular ops for agent-mode's second call. Each "
+            "op is ``{op: <tool name>, args: {...}}`` where ``op`` is one "
+            "of the granular edit tools (set_state, append_state, "
+            "remove_state, patch_state, set_node_prop, set_prop_array_item, "
+            "append_prop_array_item, remove_prop_array_item, add_node, "
+            "replace_node, move_node, remove_node) and ``args`` are that "
+            "tool's arguments. When set, the specialist skips its own LLM "
+            "planning phase and applies the ops directly. Ignored in "
+            "subagent mode — the spawned specialist plans its own ops."
+        ),
+    )
+
 
 class PocketSpecialistEditOutput(BaseModel):
     ok: bool
@@ -511,6 +536,16 @@ class PocketSpecialistEditOutput(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     duration_ms: int
     backend_used: str
+    action: Literal["applied", "failed", "draft_kit"] = Field(
+        default="applied",
+        description=(
+            "What the run did. ``applied`` — ops ran (subagent mode, or "
+            "agent-mode second call). ``failed`` — the run errored. "
+            "``draft_kit`` — agent-mode first call: no ops were supplied, "
+            "so the response carries a ``draft_kit`` telling the chat agent "
+            "how to compute ops and call back with ``ops=<list>``."
+        ),
+    )
     error: str | None = Field(
         default=None,
         description=(
@@ -529,6 +564,15 @@ class PocketSpecialistEditOutput(BaseModel):
             "``ok=True, ops=[]`` with no explanation is the #1163 bug."
         ),
     )
+    draft_kit: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Agent-mode first-call payload: the granular-op vocabulary, "
+            "the current pocket echo, and instructions for the calling "
+            "chat agent to compute the granular ops and call back with "
+            "``ops=<list>``. None in subagent mode and on the second call."
+        ),
+    )
 
 
 async def run_edit_specialist(
@@ -538,12 +582,41 @@ async def run_edit_specialist(
     user_id: str,
     settings: Settings,
 ) -> PocketSpecialistEditOutput:
-    """Run the pocket edit specialist end-to-end.
+    """Entry point — pick the edit adapter for ``settings.pocket_specialist_mode``
+    and delegate.
+
+    Mirrors ``run_specialist`` (create). The default ``subagent`` mode
+    runs ``_run_edit_subagent_pipeline`` below — an isolated backend
+    running the specialist's own model. The ``agent`` mode short-circuits
+    the backend spawn: the calling chat agent computes the granular ops
+    inline using its own LLM and hands them back for deterministic apply.
+
+    Signature is the public contract — ``mcp_tool``, ``cli_tool``, and
+    ``tool`` call sites rely on it being adapter-agnostic.
+    """
+    from pocketpaw_ee.agent.pocket_specialist.adapters import pick_edit_adapter
+
+    adapter = pick_edit_adapter(settings.pocket_specialist_mode)
+    return await adapter.edit(input, workspace_id=workspace_id, user_id=user_id, settings=settings)
+
+
+async def _run_edit_subagent_pipeline(
+    input: PocketSpecialistEditInput,
+    *,
+    workspace_id: str,
+    user_id: str,
+    settings: Settings,
+) -> PocketSpecialistEditOutput:
+    """Subagent-mode edit pipeline (historical flow).
 
     Spawns an isolated backend with the interaction prompt + granular
     mutation tools. The granular ops persist as they go (no
     persist_pocket needed); each op also emits its own SSE event so
     the canvas updates in place.
+
+    Invoked by ``EditSubagentAdapter.edit`` — kept private so the only
+    entry point remains ``run_edit_specialist`` (which dispatches via
+    ``pick_edit_adapter``).
     """
     started = time.monotonic()
     backend_name = settings.pocket_specialist_backend

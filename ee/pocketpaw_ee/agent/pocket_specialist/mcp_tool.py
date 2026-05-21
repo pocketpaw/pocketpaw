@@ -11,6 +11,10 @@ scope.
 Changes: 2026-05-21 (#1163) — updated the ``edit`` tool description to
 document the full response shape, including the new ``warnings`` field
 that carries the specialist's reason when it declines to act.
+Changes: 2026-05-21 (#1170) — the ``edit`` tool now accepts an optional
+``ops`` argument: the agent-mode second-call payload. In agent mode the
+first ``edit`` call returns ``action='draft_kit'`` and the chat agent
+calls back with ``ops=<granular op list>``. Subagent mode ignores it.
 """
 
 from __future__ import annotations
@@ -120,11 +124,13 @@ async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
 
+    raw_ops = args.get("ops")
     payload = PocketSpecialistEditInput(
         pocket_id=args.get("pocket_id", ""),
         intent=args.get("intent", ""),
         pocket=args.get("pocket"),
         target_node_ids=args.get("target_node_ids"),
+        ops=raw_ops if isinstance(raw_ops, list) else None,
     )
 
     try:
@@ -281,12 +287,15 @@ def build_pocket_specialist_server() -> Any:
             "widget appearance, add/move/remove_node for structure), and "
             "applies them. Each op persists and pushes its own SSE event "
             "so the canvas updates in place. Returns "
-            "{ok, pocket_id, ops, duration_ms, backend_used, error, "
-            "warnings}. ok=false with a populated error means the run "
-            "failed — relay the error. ok=true with an empty ops list and "
-            "a populated warnings list means the specialist declined to "
-            "act — relay the warning so the user learns why nothing "
-            "changed; do NOT report success."
+            "{ok, pocket_id, ops, action, duration_ms, backend_used, "
+            "error, warnings, draft_kit}. ok=false with a populated error "
+            "means the run failed — relay the error. ok=true with an empty "
+            "ops list and a populated warnings list means the specialist "
+            "declined to act — relay the warning so the user learns why "
+            "nothing changed; do NOT report success. In agent mode the "
+            "first call returns action='draft_kit' with a draft_kit — "
+            "compute the granular ops it describes and call again with "
+            "the same pocket_id + intent AND ops=<your op list>."
         ),
         {
             "type": "object",
@@ -326,6 +335,31 @@ def build_pocket_specialist_server() -> Any:
                         "and does not search. Best practice for any "
                         "edit that needs disambiguation (the user said "
                         "'the chart' and there are three)."
+                    ),
+                },
+                "ops": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string"},
+                            "args": {"type": "object", "additionalProperties": True},
+                        },
+                        "required": ["op", "args"],
+                        "additionalProperties": False,
+                    },
+                    "description": (
+                        "Agent-mode second call: the granular ops you "
+                        "computed for the intent. Each op is "
+                        "{op: <name>, args: {...}} — op is one of "
+                        "set_state / append_state / remove_state / "
+                        "patch_state / set_node_prop / set_prop_array_item "
+                        "/ append_prop_array_item / remove_prop_array_item "
+                        "/ add_node / replace_node / move_node / "
+                        "remove_node. Omit on the first call (in agent "
+                        "mode you'll get back action='draft_kit' with "
+                        "instructions). In subagent mode this argument is "
+                        "ignored — the spawned specialist plans its own ops."
                     ),
                 },
             },

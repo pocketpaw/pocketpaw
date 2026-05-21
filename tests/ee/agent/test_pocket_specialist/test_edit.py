@@ -18,7 +18,7 @@ Regression tests for #1163 (silent 0-ops edits):
   * Rejected op — a service-rejected granular op must not count as applied;
     its error is folded into ``warnings`` (PR #1165 review finding #2).
 
-Regression test for edit-ignores-agent-mode bug:
+Regression test for edit-ignores-agent-mode bug (#1170):
   * In agent mode (POCKETPAW_POCKET_SPECIALIST_MODE=agent), pocket CREATE goes
     through AgentModeAdapter which never spawns a sub-agent backend.  Pocket
     EDIT ignores the mode setting entirely and always calls
@@ -28,6 +28,10 @@ Regression test for edit-ignores-agent-mode bug:
     deployments.
   * Post-fix contract: run_edit_specialist in agent mode MUST NOT call
     create_isolated_backend.
+  * Agent-mode two-call protocol coverage: the first call (no ``ops``)
+    returns a draft kit; the second call (``ops`` populated) applies the
+    chat agent's granular ops through the real edit tools — rejected and
+    unknown ops fold into ``warnings`` like the subagent path.
 """
 
 from __future__ import annotations
@@ -261,7 +265,13 @@ class TestRunEditSpecialistSuccessFlag:
     completed. Before this guard, ``run_edit_specialist`` returned
     ``ok=True`` even when the inner backend errored mid-stream — the
     caller had no way to tell "no work needed" from "specialist
-    crashed"."""
+    crashed".
+
+    These tests exercise the SUBAGENT pipeline (the backend-spawn path),
+    so they pin ``pocket_specialist_mode="subagent"`` explicitly rather
+    than relying on the ambient ``Settings()`` default — that default is
+    overridable by env / ``.env`` (#1170 added the ``agent`` mode edit
+    path, which never spawns a backend)."""
 
     @pytest.mark.asyncio
     async def test_ok_true_when_stream_completes(self) -> None:
@@ -291,7 +301,7 @@ class TestRunEditSpecialistSuccessFlag:
                 PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1"),
                 workspace_id="w1",
                 user_id="u1",
-                settings=Settings(),
+                settings=Settings(pocket_specialist_mode="subagent"),
             )
 
         assert out.ok is True
@@ -329,7 +339,7 @@ class TestRunEditSpecialistSuccessFlag:
                 PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1"),
                 workspace_id="w1",
                 user_id="u1",
-                settings=Settings(),
+                settings=Settings(pocket_specialist_mode="subagent"),
             )
 
         assert out.ok is False
@@ -390,7 +400,7 @@ class TestRunEditSpecialistSuccessFlag:
                 ),
                 workspace_id="69e4f93b57ff64b3903868e3",
                 user_id="69d0f4d09dfb6ddfd8e2da84",
-                settings=Settings(),
+                settings=Settings(pocket_specialist_mode="subagent"),
             )
 
         # POST-FIX expectation (fails today — current code returns ok=True):
@@ -453,7 +463,7 @@ class TestRunEditSpecialistSuccessFlag:
                 ),
                 workspace_id="69e4f93b57ff64b3903868e3",
                 user_id="69d0f4d09dfb6ddfd8e2da84",
-                settings=Settings(),
+                settings=Settings(pocket_specialist_mode="subagent"),
             )
 
         # A decline is NOT a failure — the run completed cleanly.
@@ -538,7 +548,7 @@ class TestRunEditSpecialistSuccessFlag:
                 ),
                 workspace_id="69e4f93b57ff64b3903868e3",
                 user_id="69d0f4d09dfb6ddfd8e2da84",
-                settings=Settings(),
+                settings=Settings(pocket_specialist_mode="subagent"),
             )
 
         # The run completed — nothing raised.
@@ -689,13 +699,13 @@ class TestAgentModeEditDispatch:
         This test FAILS today because create_isolated_backend is called unconditionally
         in run_edit_specialist regardless of pocket_specialist_mode.
         """
-        from unittest.mock import MagicMock
 
-        from pocketpaw.config import Settings
         from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistEditInput,
             run_edit_specialist,
         )
+
+        from pocketpaw.config import Settings
 
         settings = Settings(pocket_specialist_mode="agent")
         # Confirm the setting is actually agent mode (belt-and-suspenders)
@@ -726,14 +736,17 @@ class TestAgentModeEditDispatch:
                 # acceptable is reaching create_isolated_backend at all.
                 pass
 
-        mock_create_backend.assert_not_called(), (
-            "run_edit_specialist called AgentRouter.create_isolated_backend even though "
-            "pocket_specialist_mode='agent'. In agent mode the edit path must NOT spawn "
-            "a sub-agent backend — doing so triggers "
-            "TypeError: Could not resolve authentication method when ANTHROPIC_API_KEY "
-            "is absent (the bug on Claude Code deployments). "
-            "Fix: add mode-dispatch to run_edit_specialist mirroring run_specialist's "
-            "pick_adapter call so agent mode takes an adapter path that skips the backend."
+        (
+            mock_create_backend.assert_not_called(),
+            (
+                "run_edit_specialist called AgentRouter.create_isolated_backend even though "
+                "pocket_specialist_mode='agent'. In agent mode the edit path must NOT spawn "
+                "a sub-agent backend — doing so triggers "
+                "TypeError: Could not resolve authentication method when ANTHROPIC_API_KEY "
+                "is absent (the bug on Claude Code deployments). "
+                "Fix: add mode-dispatch to run_edit_specialist mirroring run_specialist's "
+                "pick_adapter call so agent mode takes an adapter path that skips the backend."
+            ),
         )
 
     @pytest.mark.asyncio
@@ -746,12 +759,13 @@ class TestAgentModeEditDispatch:
         """
         from unittest.mock import MagicMock
 
-        from pocketpaw.agents.protocol import AgentEvent
-        from pocketpaw.config import Settings
         from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistEditInput,
             run_edit_specialist,
         )
+
+        from pocketpaw.agents.protocol import AgentEvent
+        from pocketpaw.config import Settings
 
         settings = Settings(pocket_specialist_mode="subagent")
 
@@ -777,7 +791,153 @@ class TestAgentModeEditDispatch:
                 settings=settings,
             )
 
-        mock_create_backend.assert_called_once(), (
-            "subagent mode must still call create_isolated_backend — "
-            "the agent-mode fix must not break the existing subagent path."
+        (
+            mock_create_backend.assert_called_once(),
+            (
+                "subagent mode must still call create_isolated_backend — "
+                "the agent-mode fix must not break the existing subagent path."
+            ),
         )
+
+    @pytest.mark.asyncio
+    async def test_agent_mode_first_call_returns_draft_kit(self) -> None:
+        """Agent-mode first call (no ``ops``) must return a draft kit so
+        the chat agent knows how to compute the granular ops — mirroring
+        create's ``action='draft_kit'`` first call. No backend spawned."""
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        from pocketpaw.config import Settings
+
+        with patch(
+            "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+        ) as mock_create_backend:
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(pocket_id="p1", intent="rename the first row"),
+                workspace_id="w1",
+                user_id="u1",
+                settings=Settings(pocket_specialist_mode="agent"),
+            )
+
+        mock_create_backend.assert_not_called()
+        assert out.action == "draft_kit"
+        assert out.ok is False
+        assert out.backend_used == "agent_mode"
+        assert out.draft_kit is not None
+        # The kit must name the granular op vocabulary.
+        assert "set_state" in out.draft_kit["granular_ops"]
+        assert "add_node" in out.draft_kit["granular_ops"]
+        assert out.ops == []
+
+    @pytest.mark.asyncio
+    async def test_agent_mode_second_call_applies_ops_without_backend(self) -> None:
+        """Agent-mode second call (``ops`` populated) must apply the chat
+        agent's granular ops through the real edit tools — no backend
+        spawned, no LLM. Mirrors create's validate-and-persist second call."""
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        from pocketpaw.config import Settings
+
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            ) as mock_create_backend,
+            patch(
+                "pocketpaw_ee.cloud.pockets.agent_context.set_state_for_agent",
+                new=AsyncMock(return_value={"ok": True}),
+            ),
+        ):
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(
+                    pocket_id="p1",
+                    intent="filter to overdue",
+                    ops=[{"op": "set_state", "args": {"path": "filter", "value": "overdue"}}],
+                ),
+                workspace_id="w1",
+                user_id="u1",
+                settings=Settings(pocket_specialist_mode="agent"),
+            )
+
+        mock_create_backend.assert_not_called()
+        assert out.ok is True
+        assert out.action == "applied"
+        assert out.backend_used == "agent_mode"
+        assert out.ops == [{"op": "set_state", "args": {"path": "filter", "value": "overdue"}}]
+        assert out.error is None
+
+    @pytest.mark.asyncio
+    async def test_agent_mode_rejected_op_surfaces_in_warnings(self) -> None:
+        """A service-rejected op in agent mode must NOT count as applied —
+        its reason folds into ``warnings``, same contract as subagent mode
+        (#1163 class). The run stays ``ok=True`` (nothing crashed)."""
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        from pocketpaw.config import Settings
+
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            ) as mock_create_backend,
+            patch(
+                "pocketpaw_ee.cloud.pockets.agent_context.set_state_for_agent",
+                new=AsyncMock(
+                    return_value={"ok": False, "error": "state path 'filter' does not exist"}
+                ),
+            ),
+        ):
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(
+                    pocket_id="p1",
+                    intent="filter to overdue",
+                    ops=[{"op": "set_state", "args": {"path": "filter", "value": "overdue"}}],
+                ),
+                workspace_id="w1",
+                user_id="u1",
+                settings=Settings(pocket_specialist_mode="agent"),
+            )
+
+        mock_create_backend.assert_not_called()
+        assert out.ok is True
+        assert out.ops == []
+        assert out.warnings, "a rejected op must surface its reason in warnings"
+        joined = " ".join(out.warnings)
+        assert "set_state" in joined and "does not exist" in joined
+
+    @pytest.mark.asyncio
+    async def test_agent_mode_unknown_op_surfaces_in_warnings(self) -> None:
+        """An op naming a tool the specialist does not hold must be skipped
+        and reported in ``warnings`` — not crash the run."""
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        from pocketpaw.config import Settings
+
+        with patch(
+            "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+        ) as mock_create_backend:
+            out = await run_edit_specialist(
+                PocketSpecialistEditInput(
+                    pocket_id="p1",
+                    intent="do something unsupported",
+                    ops=[{"op": "create_pocket", "args": {}}],
+                ),
+                workspace_id="w1",
+                user_id="u1",
+                settings=Settings(pocket_specialist_mode="agent"),
+            )
+
+        mock_create_backend.assert_not_called()
+        assert out.ok is True
+        assert out.ops == []
+        assert out.warnings
+        assert "create_pocket" in " ".join(out.warnings)
