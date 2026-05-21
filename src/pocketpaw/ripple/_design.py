@@ -716,7 +716,8 @@ of actions run in order.
   flow     — sequence with on_error rescue
   confirm  — prompt the user, then run on_confirm / on_cancel
   api      — call backend; chain on_success / on_error
-  navigate / toast / emit / pin / unpin — host-handled events
+  navigate / toast / emit / pin / unpin — host-handled events.
+             Field: `navigate` uses `url`; `emit`/`pin`/`unpin` use `target`.
 
 ## Toolkit — the expression language
 

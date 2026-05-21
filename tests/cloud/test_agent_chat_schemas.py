@@ -33,9 +33,33 @@ def test_request_accepts_full_body():
         mentions=[{"type": "agent", "id": "a1"}],
         agent_id="a1",
         client_message_id="client_42",
+        intent="skill:summarize",
+        skill_args="last 7 days",
     )
     assert req.agent_id == "a1"
     assert req.client_message_id == "client_42"
+    assert req.intent == "skill:summarize"
+    assert req.skill_args == "last 7 days"
+
+
+def test_intent_defaults_to_none():
+    req = CloudAgentChatRequest(content="hello")
+    assert req.intent is None
+    assert req.skill_args is None
+
+
+@pytest.mark.parametrize("value", ["pocket_create", "skill:foo", "skill:", None])
+def test_intent_accepts_known_values(value):
+    """``pocket_create``, any ``skill:<name>``, and null are valid."""
+    req = CloudAgentChatRequest(content="hi", intent=value)
+    assert req.intent == value
+
+
+@pytest.mark.parametrize("value", ["pocket-create", "Pocket_Create", "skill", "", "create"])
+def test_intent_rejects_unknown_values(value):
+    """A typo of a known intent must 422, not be silently ignored."""
+    with pytest.raises(ValidationError):
+        CloudAgentChatRequest(content="hi", intent=value)
 
 
 def test_event_names_cover_spec():

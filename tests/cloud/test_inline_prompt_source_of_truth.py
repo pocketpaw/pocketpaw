@@ -37,3 +37,25 @@ def test_inline_prompt_does_not_forbid_buttons():
     p = INLINE_RIPPLE_SYSTEM_PROMPT.lower()
     assert "do not include `button`" not in p
     assert "do not include button" not in p
+
+
+def test_inline_prompt_composes_shared_design_language():
+    """The inline prompt splices in the shared widget catalog and
+    use-the-widget rule from ``pocketpaw.ripple._design`` rather than a
+    hand-maintained subset. A regression here (e.g. a broken ``_design``
+    import) would otherwise only surface as a runtime ImportError."""
+    from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
+
+    p = INLINE_RIPPLE_SYSTEM_PROMPT
+    assert "# WIDGET CATALOG" in p
+    assert "# USE-THE-WIDGET RULE" in p
+    assert WIDGET_CATALOG in p
+    assert USE_THE_WIDGET_RULE in p
+
+
+def test_inline_prompt_requires_widget_help_before_emit():
+    """Non-core widgets must be looked up via get_inline_widget_help
+    before they land in a spec — guessed prop names ship empty rows."""
+    p = INLINE_RIPPLE_SYSTEM_PROMPT
+    assert "get_inline_widget_help" in p
+    assert "MUST CALL BEFORE EMIT" in p
