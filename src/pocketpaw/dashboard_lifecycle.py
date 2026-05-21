@@ -5,6 +5,13 @@ Extracted from dashboard.py — contains:
 - ``_broadcast_audit_entry()`` / ``_broadcast_health_update()`` — WS-only broadcasts
 - ``startup_event()`` — initializes bus, agent loop, channels, MCP, health, scheduler, daemon
 - ``shutdown_event()`` — tears down all services
+
+Changes:
+- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files and
+  pre-compiled kb-go scopes into the user's home dir at boot via the
+  ``bundled_skills`` / ``bundled_kb`` installers. Best-effort, gated on
+  the ``auto_install_bundled_*`` settings; reuses the already-loaded
+  ``settings`` object.
 """
 
 import asyncio
@@ -203,6 +210,64 @@ async def startup_event(
 
     # Auto-start configured channel adapters (respects per-channel autostart setting)
     settings = Settings.load()
+
+    # Mirror PocketPaw's bundled AgentSkills-format SKILL.md files into
+    # ``~/.claude/skills/<name>/`` so PocketPaw's own ``SkillLoader``
+    # (and Claude Code's native discovery, for claude_agent_sdk users)
+    # picks them up. Skills loaded from there work across every chat
+    # backend via PocketPaw's slash-command dispatcher; claude_agent_sdk
+    # additionally auto-discovers them on natural-language intent.
+    # Best-effort — a failure here just means the chat agent won't have
+    # the ``pocketpaw-create-pocket`` / ``pocketpaw-edit-pocket`` skills;
+    # the MCP tool surface still works. Opt-out:
+    # ``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false``.
+    if settings.auto_install_bundled_skills:
+        try:
+            from pocketpaw.bundled_skills import install_bundled_skills
+
+            results = install_bundled_skills()
+            installed = sum(1 for r in results if r.status == "installed")
+            updated = sum(1 for r in results if r.status == "updated")
+            skipped = sum(1 for r in results if r.status == "skipped")
+            failed = [r for r in results if r.status == "failed"]
+            logger.info(
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("Skill %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled-skills install failed (non-fatal): %s", exc)
+
+    # Mirror PocketPaw's pre-compiled kb-go scopes into
+    # ``~/.knowledge-base/`` so the existing ``_get_kb_context``
+    # injection can retrieve recipes at pocket-creation time.
+    # Best-effort — a failure here just means the agent loses the
+    # recipe-retrieval boost; the MCP tool + skill flow still works.
+    # Opt-out: ``POCKETPAW_AUTO_INSTALL_BUNDLED_KB_SCOPES=false``.
+    if settings.auto_install_bundled_kb_scopes:
+        try:
+            from pocketpaw.bundled_kb import install_bundled_kb_scopes
+
+            kb_results = install_bundled_kb_scopes()
+            installed = sum(1 for r in kb_results if r.status == "installed")
+            updated = sum(1 for r in kb_results if r.status == "updated")
+            skipped = sum(1 for r in kb_results if r.status == "skipped")
+            failed = [r for r in kb_results if r.status == "failed"]
+            logger.info(
+                "Bundled kb-go scopes sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("KB scope %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled kb-go scopes install failed (non-fatal): %s", exc)
 
     # Start StatusTracker (agent state for external integrations)
     from pocketpaw.dashboard_state import status_tracker

@@ -1,6 +1,9 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-05-21: Added ``auto_install_bundled_skills`` and
+    ``auto_install_bundled_kb_scopes`` — toggle the boot-time mirror of
+    bundled SKILL.md files and pre-compiled kb-go scopes.
   - 2026-04-30: Added pluggable embedding adapter settings — ``kb_vectors_enabled``,
     ``embedding_adapter``, ``embedding_dim``, ``embedding_monthly_cap_usd``,
     ``vertex_project_id``, ``vertex_location``. Stage 2.D of "Files as Knowledge".
@@ -364,6 +367,40 @@ class Settings(BaseSettings):
             "with ``spec=<draft>`` for validate-and-persist. ``agent`` mode "
             "ignores ``pocket_specialist_backend`` and ``pocket_specialist_model`` "
             "entirely — the chat agent's runtime is the LLM."
+        ),
+    )
+    auto_install_bundled_skills: bool = Field(
+        default=True,
+        description=(
+            "On dashboard startup, mirror bundled AgentSkills-format "
+            "SKILL.md files from ``pocketpaw/bundled_skills/_bundled/`` "
+            "into ``~/.claude/skills/<name>/SKILL.md``. That destination "
+            "is covered by both Claude Code's native skill discovery AND "
+            "PocketPaw's ``SkillLoader.SKILL_PATHS`` — so the skill works "
+            "for all chat backends (claude_agent_sdk via natural-language "
+            "invocation, codex_cli / openai_agents / deep_agents via the "
+            "``/<skill-name>`` slash command). Idempotent — SHA-256 hash "
+            "compare per file. Set ``false`` to freeze a manually-customized "
+            "copy or disable bundled skills entirely. Skill installation "
+            "is best-effort: pocket creation still works via the MCP tool "
+            "surface even when no skill is installed."
+        ),
+    )
+    auto_install_bundled_kb_scopes: bool = Field(
+        default=True,
+        description=(
+            "On dashboard startup, mirror PocketPaw's pre-compiled kb-go "
+            "scopes from ``pocketpaw/bundled_kb/_bundled/<scope>/`` into "
+            "``~/.knowledge-base/<scope>/``. The bundle ships "
+            "``ripple-recipes`` — pattern recipes (sales-pipeline, "
+            "customer-support-app, recipe/how-to viewer) that the chat "
+            "agent retrieves at pocket-creation time via the existing "
+            "``_get_kb_context`` injection in bootstrap.context_builder. "
+            "Idempotent — SHA-256 hash compare per file, no-op when the "
+            "destination already matches. Set ``false`` to freeze a "
+            "hand-customised scope or disable bundled KB entirely. KB "
+            "retrieval is a non-critical enhancement: pocket creation "
+            "still works via the MCP tool surface + the bundled skill."
         ),
     )
     deep_agents_skills: list[str] = Field(
