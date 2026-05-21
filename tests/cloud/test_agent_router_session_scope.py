@@ -13,10 +13,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
-
-from ee.cloud.chat import agent_router as mod
-from ee.cloud.chat.agent_router import _ensure_scope_session
-from ee.cloud.chat.agent_service import ScopeContext, ScopeKind
+from pocketpaw_ee.cloud.chat import agent_router as mod
+from pocketpaw_ee.cloud.chat.agent_router import _ensure_scope_session
+from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
 
 
 def _ctx():
@@ -33,7 +32,7 @@ def _ctx():
 
 @pytest.mark.asyncio
 async def test_ensure_scope_session_returns_existing_session_id():
-    from ee.cloud.models.session import Session
+    from pocketpaw_ee.cloud.models.session import Session
 
     fake = Session.model_construct(sessionId="websocket_abc123")
     with patch.object(Session, "get", AsyncMock(return_value=fake)):
@@ -43,7 +42,7 @@ async def test_ensure_scope_session_returns_existing_session_id():
 
 @pytest.mark.asyncio
 async def test_ensure_scope_session_returns_none_when_missing():
-    from ee.cloud.models.session import Session
+    from pocketpaw_ee.cloud.models.session import Session
 
     with patch.object(Session, "get", AsyncMock(return_value=None)):
         sid = await _ensure_scope_session(_ctx())

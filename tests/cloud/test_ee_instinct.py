@@ -15,19 +15,19 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud.auth import current_active_user
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.instinct.router import router
 
-from ee.cloud._core.deps import current_workspace_id
-from ee.cloud.auth import current_active_user
-from ee.cloud.license import require_license
-from ee.instinct.models import (
+from pocketpaw.instinct.models import (
     ActionCategory,
     ActionPriority,
     ActionStatus,
     ActionTrigger,
     AuditCategory,
 )
-from ee.instinct.router import router
-from ee.instinct.store import InstinctStore
+from pocketpaw.instinct.store import InstinctStore
 
 
 class _FakeMembership:
@@ -89,7 +89,7 @@ def test_app(tmp_path: Path, monkeypatch):
     # only passes at enterprise. Mirror the AsyncMock pattern from
     # tests/cloud/test_plan_feature_gate.py so the patch reaches the same
     # module attribute the guard reads from.
-    import ee.cloud.workspace.service as ws_svc
+    import pocketpaw_ee.cloud.workspace.service as ws_svc
 
     monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))
 
@@ -110,7 +110,7 @@ def router_store(tmp_path: Path) -> InstinctStore:
 @pytest.fixture
 def client(test_app, router_store: InstinctStore):
     """TestClient with _store patched to return the isolated router_store."""
-    with patch("ee.instinct.router._store", return_value=router_store):
+    with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
         yield TestClient(test_app)
 
 

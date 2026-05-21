@@ -24,19 +24,24 @@ from fastapi.responses import StreamingResponse
 from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.chat import ChatRequest, ChatResponse
 
-# ── Optional ee.cloud auth wiring ──────────────────────────────────────
-# When the enterprise cloud module is mounted, we want to read the caller's
-# authenticated user + active workspace off the JWT so agent-created pockets
-# route to the right tenant. When it isn't mounted (self-hosted OSS, CLI,
-# Telegram), we fall back to a no-op dep that yields ``(None, None)`` — the
-# downstream pocket creator keeps its current first-user heuristic.
+# ── Optional enterprise auth wiring ────────────────────────────────────
+# When an enterprise auth provider is registered (entry-point group
+# ``pocketpaw.auth``), we read the caller's authenticated user + active
+# workspace off the JWT so agent-created pockets route to the right tenant.
+# In an OSS install with no provider we fall back to a no-op dep that
+# yields ``None`` — the downstream pocket creator keeps its first-user
+# heuristic. Core never imports ``pocketpaw_ee`` directly.
+_cloud_optional_user = None
 try:
-    from ee.cloud.auth.core import current_optional_user as _cloud_optional_user
+    from pocketpaw._registry import first as _first_provider
 
-    _CLOUD_AUTH_AVAILABLE = True
+    _auth_provider = _first_provider("pocketpaw.auth")
+    if _auth_provider is not None:
+        _cloud_optional_user = _auth_provider.current_optional_user()
 except Exception:  # noqa: BLE001
-    _cloud_optional_user = None  # type: ignore[assignment]
-    _CLOUD_AUTH_AVAILABLE = False
+    _cloud_optional_user = None
+
+_CLOUD_AUTH_AVAILABLE = _cloud_optional_user is not None
 
 
 def _noop_user_dep() -> None:

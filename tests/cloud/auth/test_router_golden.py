@@ -12,10 +12,9 @@ from datetime import UTC, datetime
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.models.user import User as _UserDoc
-from ee.cloud.models.user import WorkspaceMembership
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.models.user import User as _UserDoc
+from pocketpaw_ee.cloud.models.user import WorkspaceMembership
 
 
 async def _seed_user() -> _UserDoc:
@@ -41,8 +40,8 @@ async def _seed_user() -> _UserDoc:
 
 @pytest_asyncio.fixture
 async def app_client(mongo_db) -> tuple[AsyncClient, _UserDoc]:
-    from ee.cloud.auth import current_active_user
-    from ee.cloud.auth.router import router
+    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.auth.router import router
 
     user_doc = await _seed_user()
 

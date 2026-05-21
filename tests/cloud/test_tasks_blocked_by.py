@@ -10,10 +10,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.tasks import service as tasks_service
-from ee.cloud.tasks.dto import (
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.tasks import service as tasks_service
+from pocketpaw_ee.cloud.tasks.dto import (
     AssigneeDTO,
     CreateTaskRequest,
     UpdateTaskRequest,

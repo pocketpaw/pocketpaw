@@ -6,8 +6,7 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud.notifications.domain import Notification, NotificationSource
+from pocketpaw_ee.cloud.notifications.domain import Notification, NotificationSource
 
 
 def test_notification_source_is_frozen() -> None:

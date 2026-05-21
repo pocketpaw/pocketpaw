@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.errors import (
+from pocketpaw_ee.cloud._core.errors import (
     CloudError,
     Forbidden,
     Internal,
     NotFound,
     RateLimited,
 )
-from ee.cloud._core.http import add_error_handler, cloud_error_handler
+from pocketpaw_ee.cloud._core.http import add_error_handler, cloud_error_handler
 
 
 def _build_app() -> FastAPI:

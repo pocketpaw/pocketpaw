@@ -79,16 +79,15 @@ async def main() -> int:
     )
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
 
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
-    from ee.cloud.memory.bootstrap import register_default_backend
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud import mount_cloud
+    from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -233,7 +232,7 @@ async def main() -> int:
             print(f"   alice sees both: {contents}")
 
             _banner("6. raw Mongo — DM messages stored as context_type='group'")
-            from ee.cloud.models.message import Message
+            from pocketpaw_ee.cloud.models.message import Message
 
             rows = await Message.find({"group": dm["_id"]}).to_list()
             for m in rows:

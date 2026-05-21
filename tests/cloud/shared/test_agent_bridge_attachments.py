@@ -49,7 +49,7 @@ async def test_run_agent_response_forwards_attachments_to_pool_run():
     shared in a channel. After the fix, the attachments travel through to the
     prompt using the same shape the DM path uses.
     """
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     # Stub agent instance returned by pool.get
     instance = SimpleNamespace(agent_name="Test Agent")
@@ -84,7 +84,7 @@ async def test_run_agent_response_forwards_attachments_to_pool_run():
     find_mock = MagicMock()
     find_mock.sort = MagicMock(return_value=sort_mock)
 
-    from ee.cloud.models.message import Message as _RealMessage
+    from pocketpaw_ee.cloud.models.message import Message as _RealMessage
 
     # Beanie isn't initialized in unit tests, so ``Message.group`` / etc. raise
     # AttributeError. Stamp the class attributes Beanie would otherwise provide
@@ -103,7 +103,7 @@ async def test_run_agent_response_forwards_attachments_to_pool_run():
     ]
 
     with (
-        patch("ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
         patch.multiple(_RealMessage, create=True, **_patched_attrs),
         patch.object(_RealMessage, "find", MagicMock(return_value=find_mock)),
         patch.object(_RealMessage, "insert", new=AsyncMock(return_value=None)),
@@ -112,7 +112,7 @@ async def test_run_agent_response_forwards_attachments_to_pool_run():
             return_value=pool,
         ),
         patch(
-            "ee.cloud.agents.knowledge.KnowledgeService.search_context",
+            "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context",
             new=AsyncMock(return_value=""),
         ),
     ):
@@ -143,7 +143,7 @@ async def test_run_agent_response_forwards_attachments_to_pool_run():
 @pytest.mark.asyncio
 async def test_run_agent_response_surfaces_error_only_stream_as_message():
     """When backend emits error+done with no text, bridge should still return a fallback."""
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     instance = SimpleNamespace(agent_name="Test Agent")
     pool = MagicMock()
@@ -156,7 +156,7 @@ async def test_run_agent_response_surfaces_error_only_stream_as_message():
 
     pool.run = fake_run
 
-    from ee.cloud.models.message import Message as _RealMessage
+    from pocketpaw_ee.cloud.models.message import Message as _RealMessage
 
     to_list_mock = AsyncMock(return_value=[])
     limit_mock = MagicMock()
@@ -176,7 +176,7 @@ async def test_run_agent_response_surfaces_error_only_stream_as_message():
         return SimpleNamespace(id="msg-1")
 
     with (
-        patch("ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
         patch.multiple(
             _RealMessage,
             create=True,
@@ -187,11 +187,11 @@ async def test_run_agent_response_surfaces_error_only_stream_as_message():
         patch.object(_RealMessage, "find", MagicMock(return_value=find_mock)),
         patch("pocketpaw.agents.pool.get_agent_pool", return_value=pool),
         patch(
-            "ee.cloud.chat.message_service.create_agent_message",
+            "pocketpaw_ee.cloud.chat.message_service.create_agent_message",
             new=AsyncMock(side_effect=fake_create_agent_message),
         ),
         patch(
-            "ee.cloud.agents.knowledge.KnowledgeService.search_context",
+            "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context",
             new=AsyncMock(return_value=""),
         ),
     ):
@@ -212,7 +212,7 @@ async def test_run_agent_response_surfaces_error_only_stream_as_message():
 @pytest.mark.asyncio
 async def test_run_agent_response_applies_response_label_prefix() -> None:
     """Final collaborative responses should be clearly prefixed for users."""
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     instance = SimpleNamespace(agent_name="Test Agent")
     pool = MagicMock()
@@ -225,7 +225,7 @@ async def test_run_agent_response_applies_response_label_prefix() -> None:
 
     pool.run = fake_run
 
-    from ee.cloud.models.message import Message as _RealMessage
+    from pocketpaw_ee.cloud.models.message import Message as _RealMessage
 
     to_list_mock = AsyncMock(return_value=[])
     limit_mock = MagicMock()
@@ -245,7 +245,7 @@ async def test_run_agent_response_applies_response_label_prefix() -> None:
         return SimpleNamespace(id="msg-2")
 
     with (
-        patch("ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
         patch.multiple(
             _RealMessage,
             create=True,
@@ -256,11 +256,11 @@ async def test_run_agent_response_applies_response_label_prefix() -> None:
         patch.object(_RealMessage, "find", MagicMock(return_value=find_mock)),
         patch("pocketpaw.agents.pool.get_agent_pool", return_value=pool),
         patch(
-            "ee.cloud.chat.message_service.create_agent_message",
+            "pocketpaw_ee.cloud.chat.message_service.create_agent_message",
             new=AsyncMock(side_effect=fake_create_agent_message),
         ),
         patch(
-            "ee.cloud.agents.knowledge.KnowledgeService.search_context",
+            "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context",
             new=AsyncMock(return_value=""),
         ),
     ):

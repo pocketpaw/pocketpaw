@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
-
-from ee.cloud.chat.agent_schemas import (
+from pocketpaw_ee.cloud.chat.agent_schemas import (
     CloudAgentChatRequest,
     SseEventName,
 )
+from pydantic import ValidationError
 
 
 def test_request_requires_content():

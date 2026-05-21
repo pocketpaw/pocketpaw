@@ -1,9 +1,8 @@
 from pathlib import Path
 
 import pytest
-
-from ee.cloud.files.dto import MountConfig
-from ee.cloud.files.mounts_config import load_mounts, resolve_template
+from pocketpaw_ee.cloud.files.dto import MountConfig
+from pocketpaw_ee.cloud.files.mounts_config import load_mounts, resolve_template
 
 
 def test_load_mounts_returns_ordered_list(tmp_path: Path):

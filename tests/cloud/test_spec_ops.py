@@ -10,8 +10,7 @@ from __future__ import annotations
 import copy
 
 import pytest
-
-from ee.cloud.pockets import spec_ops
+from pocketpaw_ee.cloud.pockets import spec_ops
 
 
 def _tree() -> dict:

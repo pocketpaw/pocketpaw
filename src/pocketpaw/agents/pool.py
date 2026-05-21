@@ -13,11 +13,27 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from pocketpaw.agents.errors import AgentBackendUnavailable, AgentNotFound
+
 if TYPE_CHECKING:
     from pocketpaw.agents.backend import AgentBackend
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_agent_model() -> Any:
+    """Resolve the cloud ``Agent`` Beanie document class via the model registry.
+
+    Returns the document class (a Beanie ``Document`` subclass — typed ``Any``
+    here since core never imports the concrete EE type), or ``None`` on an OSS
+    install with no ``pocketpaw.models`` provider registered. The agent pool is
+    a cloud-only feature, so callers treat a missing model as "no such agent".
+    """
+    from pocketpaw._registry import first
+
+    provider = first("pocketpaw.models")
+    return provider.get_model("Agent") if provider else None
 
 
 @dataclass
@@ -83,10 +99,11 @@ class AgentPool:
             # Check config staleness
             from beanie import PydanticObjectId
 
-            from ee.cloud.models.agent import Agent
-
+            agent_model = _resolve_agent_model()
             try:
-                agent_doc = await Agent.get(PydanticObjectId(agent_id))
+                agent_doc = (
+                    await agent_model.get(PydanticObjectId(agent_id)) if agent_model else None
+                )
                 if (
                     agent_doc
                     and agent_doc.updatedAt
@@ -115,13 +132,10 @@ class AgentPool:
         # Build new instance
         from beanie import PydanticObjectId
 
-        from ee.cloud.models.agent import Agent
-
-        agent_doc = await Agent.get(PydanticObjectId(agent_id))
+        agent_model = _resolve_agent_model()
+        agent_doc = await agent_model.get(PydanticObjectId(agent_id)) if agent_model else None
         if not agent_doc:
-            from ee.cloud.shared.errors import NotFound
-
-            raise NotFound("agent", agent_id)
+            raise AgentNotFound(agent_id)
 
         async with self._build_lock:
             # Double-check after acquiring lock
@@ -274,12 +288,7 @@ class AgentPool:
         # Instantiate backend
         backend_cls = get_backend_class(settings.agent_backend)
         if not backend_cls:
-            from ee.cloud.shared.errors import ValidationError
-
-            raise ValidationError(
-                "agent.invalid_backend",
-                f"Backend '{settings.agent_backend}' not available",
-            )
+            raise AgentBackendUnavailable(settings.agent_backend)
         backend = backend_cls(settings)
 
         # Initialize soul if enabled

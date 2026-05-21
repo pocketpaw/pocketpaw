@@ -9,9 +9,13 @@ from __future__ import annotations
 import time
 
 import pytest
-
-from ee.cloud._core.realtime.events import AgentThinking, AgentToolUse
-from ee.cloud.activity.buffer import ActivityEvent, Buffer, _handle_agent_event, get_buffer
+from pocketpaw_ee.cloud._core.realtime.events import AgentThinking, AgentToolUse
+from pocketpaw_ee.cloud.activity.buffer import (
+    ActivityEvent,
+    Buffer,
+    _handle_agent_event,
+    get_buffer,
+)
 
 
 def _ev(

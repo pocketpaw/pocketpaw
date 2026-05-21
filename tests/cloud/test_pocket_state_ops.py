@@ -17,9 +17,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from ee.cloud.pockets import agent_context
-from ee.cloud.pockets import service as pocket_service
+from pocketpaw_ee.cloud.pockets import agent_context
+from pocketpaw_ee.cloud.pockets import service as pocket_service
 
 
 class _FakeDoc:
@@ -95,32 +94,32 @@ def _patches(doc: _FakeDoc):
     stack = ExitStack()
     stack.enter_context(
         patch(
-            "ee.cloud.pockets.service._PocketDoc.get",
+            "pocketpaw_ee.cloud.pockets.service._PocketDoc.get",
             new=AsyncMock(return_value=doc),
         )
     )
-    stack.enter_context(patch("ee.cloud.pockets.service.emit", new=AsyncMock()))
+    stack.enter_context(patch("pocketpaw_ee.cloud.pockets.service.emit", new=AsyncMock()))
     stack.enter_context(
         patch(
-            "ee.cloud.pockets.service._pocket_event_payload",
+            "pocketpaw_ee.cloud.pockets.service._pocket_event_payload",
             new=AsyncMock(return_value={"pocket_id": doc.id}),
         )
     )
     stack.enter_context(
         patch(
-            "ee.cloud.chat.agent_service.push_pocket_mutation",
+            "pocketpaw_ee.cloud.chat.agent_service.push_pocket_mutation",
             new=MagicMock(side_effect=_capture),
         )
     )
     stack.enter_context(
         patch(
-            "ee.cloud.chat.agent_service.current_workspace_id",
+            "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
             new=MagicMock(return_value=doc.workspace),
         )
     )
     stack.enter_context(
         patch(
-            "ee.cloud.chat.agent_service.current_user_id",
+            "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
             new=MagicMock(return_value=doc.owner),
         )
     )

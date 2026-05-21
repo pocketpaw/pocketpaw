@@ -22,18 +22,17 @@ from typing import Any
 
 import pytest
 from bson import ObjectId
-
-from ee.calendar import policy
-from ee.calendar import service as service_module
-from ee.calendar._context import RequestContext
-from ee.calendar.domain import Calendar, CalendarVisibility
-from ee.calendar.dto import (
+from pocketpaw_ee.calendar import policy
+from pocketpaw_ee.calendar import service as service_module
+from pocketpaw_ee.calendar._context import RequestContext
+from pocketpaw_ee.calendar.domain import Calendar, CalendarVisibility
+from pocketpaw_ee.calendar.dto import (
     CreateEventRequest,
     FreeBusyRequest,
     ListEventsRequest,
     UpdateEventRequest,
 )
-from ee.cloud.shared.errors import Forbidden
+from pocketpaw_ee.cloud.shared.errors import Forbidden
 
 # ---------------------------------------------------------------------------
 # Helpers — minimal Calendar + RequestContext factories.
@@ -357,7 +356,7 @@ def patch_stores(monkeypatch) -> tuple[_PolicyFakeCalStore, _PolicyFakeEventStor
 @pytest.fixture
 def bus_spy(monkeypatch):
     """No-op bus so emits don't blow up."""
-    from ee.cloud.shared.events import event_bus
+    from pocketpaw_ee.cloud.shared.events import event_bus
 
     async def _spy(topic: str, data: dict) -> None:
         pass
@@ -642,7 +641,7 @@ async def test_freebusy_succeeds_for_emails_on_accessible_calendar(patch_stores,
 
     # compute_freebusy issues its own _EventDoc.find call; patch the
     # symbol the freebusy module sees so we don't need Beanie.
-    from ee.calendar import freebusy as fb_module
+    from pocketpaw_ee.calendar import freebusy as fb_module
 
     monkeypatch.setattr(fb_module, "_EventDoc", event_store)
 

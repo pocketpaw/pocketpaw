@@ -26,10 +26,10 @@ async def main() -> int:
 
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.memory.mongo_store import MongoMemoryStore
-    from ee.cloud.models import ALL_DOCUMENTS
     from pocketpaw.memory.file_store import FileMemoryStore
     from pocketpaw.memory.manager import get_memory_manager
 
@@ -51,7 +51,7 @@ async def main() -> int:
         document_models=[*ALL_DOCUMENTS, MemoryFactDoc],
     )
 
-    from ee.cloud.memory.bootstrap import register_default_backend
+    from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
 
     register_default_backend()
 
@@ -65,7 +65,7 @@ async def main() -> int:
     key = f"smoke-{uuid.uuid4().hex[:8]}"
     await agent_cached_memory.add_to_session(key, "user", "agent-loop path works")
 
-    from ee.cloud.models.message import Message
+    from pocketpaw_ee.cloud.models.message import Message
 
     rows = await Message.find({"session_key": key}).to_list()
     print(f"   {len(rows)} messages with session_key={key!r}")

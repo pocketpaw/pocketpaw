@@ -5,15 +5,15 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from ee.cloud.chat.agent_service import (
+from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
     assemble_toolset,
     build_context_block,
     build_knowledge_context,
 )
-from ee.ripple._design import RIPPLE_DESIGN_RULES
+
+from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
 
 
 def _pocket_ctx(specs: list[dict]) -> ScopeContext:
@@ -155,7 +155,7 @@ def test_build_context_block_has_stable_static_prefix():
 
 
 def test_inline_widget_help_returns_catalog_for_known_types():
-    from ee.ripple._inline_core import widget_help
+    from pocketpaw.ripple._inline_core import widget_help
 
     out = widget_help(["chart"])
     # Some chart specifics must appear when 'chart' is asked for.
@@ -178,7 +178,7 @@ def test_inline_widget_help_returns_catalog_for_known_types():
 
 
 def test_inline_widget_help_no_args_returns_full_catalog():
-    from ee.ripple._inline_core import widget_help
+    from pocketpaw.ripple._inline_core import widget_help
 
     assert widget_help() == RIPPLE_DESIGN_RULES
     assert widget_help([]) == RIPPLE_DESIGN_RULES
@@ -215,7 +215,7 @@ def test_pocket_delegation_rule_points_at_specialist_mcp_tool():
     """The delegation rule must teach the agent to call the
     ``pocket_specialist__create`` MCP tool. The legacy native-subagent
     Agent-tool path has been removed."""
-    from ee.ripple._pockets import POCKET_DELEGATION_RULE
+    from pocketpaw.ripple._pockets import POCKET_DELEGATION_RULE
 
     assert "pocket_specialist__create" in POCKET_DELEGATION_RULE
     # Legacy native-subagent kwarg shape must be gone.
@@ -351,7 +351,7 @@ async def test_build_knowledge_context_includes_workspace_kb_hits_and_file_refs(
         return ""
 
     with patch(
-        "ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
+        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
         AsyncMock(side_effect=_fake_search),
     ):
         out = await build_knowledge_context(
@@ -386,7 +386,7 @@ async def test_build_knowledge_context_falls_back_to_scope_block_on_kb_failure()
     )
 
     with patch(
-        "ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
+        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
         AsyncMock(side_effect=RuntimeError("kb down")),
     ):
         out = await build_knowledge_context(ctx, user_message="hello")

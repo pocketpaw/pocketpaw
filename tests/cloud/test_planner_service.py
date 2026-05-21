@@ -19,18 +19,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.errors import NotFound, ValidationError
-from ee.cloud._core.realtime.events import (
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.events import (
     FileReady,
     PlanGenerated,
     TaskProposed,
 )
-from ee.cloud.planner import service as planner_service
-from ee.cloud.planner.dto import PlanProjectRequest
-from ee.cloud.projects import service as projects_service
-from ee.cloud.projects.dto import CreateProjectRequest
+from pocketpaw_ee.cloud.planner import service as planner_service
+from pocketpaw_ee.cloud.planner.dto import PlanProjectRequest
+from pocketpaw_ee.cloud.projects import service as projects_service
+from pocketpaw_ee.cloud.projects.dto import CreateProjectRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 

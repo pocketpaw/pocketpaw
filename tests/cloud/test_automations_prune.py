@@ -10,10 +10,10 @@ from unittest.mock import patch
 
 import pytest
 
+from pocketpaw.automations.bridge import prune_orphan_auto_intentions
+from pocketpaw.automations.models import CreateRuleRequest, RuleType
+from pocketpaw.automations.store import AutomationStore
 from pocketpaw.daemon.intentions import IntentionStore
-from pocketpaw.ee.automations.bridge import prune_orphan_auto_intentions
-from pocketpaw.ee.automations.models import CreateRuleRequest, RuleType
-from pocketpaw.ee.automations.store import AutomationStore
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def isolated_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             return_value=intention_store,
         ),
         patch(
-            "pocketpaw.ee.automations.store.get_automation_store",
+            "pocketpaw.automations.store.get_automation_store",
             return_value=automation_store,
         ),
     ):
@@ -139,9 +139,7 @@ class TestPruneOrphanAutoIntentions:
         assert pruned == 5
         delete_lines = [r for r in caplog.records if "Deleted intention" in r.message]
         summary_lines = [
-            r
-            for r in caplog.records
-            if "Pruned" in r.message and "orphan" in r.message
+            r for r in caplog.records if "Pruned" in r.message and "orphan" in r.message
         ]
         assert delete_lines == [], "per-item delete log must be suppressed during prune"
         assert len(summary_lines) == 1, "expected exactly one summary line"

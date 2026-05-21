@@ -6,8 +6,7 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
+from pocketpaw_ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
 
 
 def test_workspace_membership_ref_is_frozen() -> None:

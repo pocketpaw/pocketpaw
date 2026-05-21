@@ -23,8 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-
-from ee.calendar import freebusy as fb_module
+from pocketpaw_ee.calendar import freebusy as fb_module
 
 
 class _FakeDoc:

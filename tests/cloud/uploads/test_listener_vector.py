@@ -13,10 +13,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from ee.cloud._core.realtime.events import FileReady
-from ee.cloud.embeddings import EmbeddingResult
-from ee.cloud.extraction.adapter import ExtractionResult
+from pocketpaw_ee.cloud._core.realtime.events import FileReady
+from pocketpaw_ee.cloud.embeddings import EmbeddingResult
+from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
 
 
 class _FakeChain:
@@ -109,12 +108,12 @@ def _patch_pipeline(
     subprocess_returncode: int = 0,
     subprocess_calls: list | None = None,
 ):
-    from ee.cloud.uploads import listeners
+    from pocketpaw_ee.cloud.uploads import listeners
 
-    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: chain)
+    monkeypatch.setattr("pocketpaw_ee.cloud.extraction.build_chain", lambda settings: chain)
     monkeypatch.setattr(listeners, "_resolve_adapter", lambda: adapter)
 
-    from ee.cloud.agents import knowledge as kn
+    from pocketpaw_ee.cloud.agents import knowledge as kn
 
     monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)
 
@@ -123,11 +122,11 @@ def _patch_pipeline(
         lambda force_reload=False: settings,
     )
     monkeypatch.setattr(
-        "ee.cloud.embeddings.build_embedder",
+        "pocketpaw_ee.cloud.embeddings.build_embedder",
         lambda s: embedder,
     )
     monkeypatch.setattr(
-        "ee.cloud.embeddings.get_cost_tracker",
+        "pocketpaw_ee.cloud.embeddings.get_cost_tracker",
         lambda s: cost_tracker,
     )
 
@@ -150,7 +149,7 @@ def _patch_pipeline(
 @pytest.mark.asyncio
 async def test_vector_path_runs_when_enabled(monkeypatch, tmp_path):
     """Vectors enabled → embedder called → kb subprocess invoked with --vec."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "diagram.png"
     direct.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -213,7 +212,7 @@ async def test_vector_path_runs_when_enabled(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_cap_hit_skips_vector_but_keeps_text_ingest(monkeypatch, tmp_path):
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.png"
     direct.write_bytes(b"\x89PNG")
@@ -255,7 +254,7 @@ async def test_cap_hit_skips_vector_but_keeps_text_ingest(monkeypatch, tmp_path)
 
 @pytest.mark.asyncio
 async def test_vectors_disabled_skips_embed(monkeypatch, tmp_path):
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.png"
     direct.write_bytes(b"\x89PNG")
@@ -295,7 +294,7 @@ async def test_vectors_disabled_skips_embed(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_no_embedder_returned_skips_quietly(monkeypatch, tmp_path):
     """build_embedder → None → vector path is a no-op (logged at INFO)."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.png"
     direct.write_bytes(b"\x89PNG")
@@ -333,7 +332,7 @@ async def test_no_embedder_returned_skips_quietly(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_modality_mismatch_skips_vector(monkeypatch, tmp_path):
     """Audio file but text+image-only embedder → vector path skipped."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.wav"
     direct.write_bytes(b"RIFF...")
@@ -373,7 +372,7 @@ async def test_modality_mismatch_skips_vector(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_embed_failure_does_not_break_text_path(monkeypatch, tmp_path):
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.png"
     direct.write_bytes(b"\x89PNG")
@@ -415,7 +414,7 @@ async def test_embed_failure_does_not_break_text_path(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_kb_subprocess_failure_does_not_break_text_path(monkeypatch, tmp_path):
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.png"
     direct.write_bytes(b"\x89PNG")
@@ -457,7 +456,7 @@ async def test_kb_subprocess_failure_does_not_break_text_path(monkeypatch, tmp_p
 @pytest.mark.asyncio
 async def test_no_article_id_skips_vector(monkeypatch, tmp_path):
     """When kb-go ingest returns no id (legacy build), the vector path skips."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.png"
     direct.write_bytes(b"\x89PNG")
@@ -496,7 +495,7 @@ async def test_no_article_id_skips_vector(monkeypatch, tmp_path):
 
 def test_extract_article_id_helper():
     """Spot-check the parser used to read kb's ingest response."""
-    from ee.cloud.uploads.listeners import _extract_article_id
+    from pocketpaw_ee.cloud.uploads.listeners import _extract_article_id
 
     assert _extract_article_id({"id": "abc"}) == "abc"
     assert _extract_article_id({"article_id": "xyz"}) == "xyz"
@@ -506,7 +505,7 @@ def test_extract_article_id_helper():
 
 
 def test_modality_for_mime_helper():
-    from ee.cloud.uploads.listeners import _modality_for_mime
+    from pocketpaw_ee.cloud.uploads.listeners import _modality_for_mime
 
     assert _modality_for_mime("image/png") == "image"
     assert _modality_for_mime("application/pdf") == "pdf"

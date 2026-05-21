@@ -6,8 +6,7 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud.chat.domain import (
+from pocketpaw_ee.cloud.chat.domain import (
     Attachment,
     Group,
     GroupAgent,

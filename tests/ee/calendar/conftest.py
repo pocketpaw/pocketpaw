@@ -20,9 +20,8 @@ from datetime import datetime
 from typing import Any
 
 import pytest
-
-from ee.calendar._context import RequestContext
-from ee.calendar.domain import Event
+from pocketpaw_ee.calendar._context import RequestContext
+from pocketpaw_ee.calendar.domain import Event
 
 
 @pytest.fixture
@@ -85,7 +84,7 @@ async def bus_spy() -> AsyncIterator[list[tuple[str, dict]]]:
     Returns a list of (topic, payload) tuples in emission order. Cleanly
     restores the bus on teardown.
     """
-    from ee.cloud.shared.events import event_bus
+    from pocketpaw_ee.cloud.shared.events import event_bus
 
     captured: list[tuple[str, dict]] = []
     original_emit = event_bus.emit

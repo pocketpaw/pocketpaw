@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.files.abac_config import AbacRuleSet
-from ee.cloud.files.dto import (
+from pocketpaw_ee.cloud.files.abac_config import AbacRuleSet
+from pocketpaw_ee.cloud.files.dto import (
     FileEntry,
     MountConfig,
     Page,
@@ -13,8 +12,8 @@ from ee.cloud.files.dto import (
     RequestContext,
     ResolvedMount,
 )
-from ee.cloud.files.registry import ProviderRegistry
-from ee.cloud.files.tree import CachedTreeBuilder, invalidate_tree_cache
+from pocketpaw_ee.cloud.files.registry import ProviderRegistry
+from pocketpaw_ee.cloud.files.tree import CachedTreeBuilder, invalidate_tree_cache
 
 
 class CountingProvider:

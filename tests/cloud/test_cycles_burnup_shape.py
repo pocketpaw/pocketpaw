@@ -21,10 +21,9 @@ import types
 from datetime import UTC, date, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.cycles import service as cycles_service
-from ee.cloud.cycles.dto import CreateCycleRequest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.cycles import service as cycles_service
+from pocketpaw_ee.cloud.cycles.dto import CreateCycleRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -50,9 +49,9 @@ def _install_dynamic_tasks(get_tasks_callable) -> None:
     latest result from ``get_tasks_callable``. Lets the test simulate a
     cycle's task progression day by day without rebuilding the module.
     """
-    mod_tasks = types.ModuleType("ee.cloud.tasks")
-    mod_service = types.ModuleType("ee.cloud.tasks.service")
-    mod_dto = types.ModuleType("ee.cloud.tasks.dto")
+    mod_tasks = types.ModuleType("pocketpaw_ee.cloud.tasks")
+    mod_service = types.ModuleType("pocketpaw_ee.cloud.tasks.service")
+    mod_dto = types.ModuleType("pocketpaw_ee.cloud.tasks.dto")
 
     class _ListReq:
         def __init__(self, cycle_id: str | None = None, **_: object) -> None:
@@ -67,13 +66,17 @@ def _install_dynamic_tasks(get_tasks_callable) -> None:
     mod_tasks.service = mod_service  # type: ignore[attr-defined]
     mod_tasks.dto = mod_dto  # type: ignore[attr-defined]
 
-    sys.modules["ee.cloud.tasks"] = mod_tasks
-    sys.modules["ee.cloud.tasks.service"] = mod_service
-    sys.modules["ee.cloud.tasks.dto"] = mod_dto
+    sys.modules["pocketpaw_ee.cloud.tasks"] = mod_tasks
+    sys.modules["pocketpaw_ee.cloud.tasks.service"] = mod_service
+    sys.modules["pocketpaw_ee.cloud.tasks.dto"] = mod_dto
 
 
 def _uninstall() -> None:
-    for name in ("ee.cloud.tasks", "ee.cloud.tasks.service", "ee.cloud.tasks.dto"):
+    for name in (
+        "pocketpaw_ee.cloud.tasks",
+        "pocketpaw_ee.cloud.tasks.service",
+        "pocketpaw_ee.cloud.tasks.dto",
+    ):
         sys.modules.pop(name, None)
 
 

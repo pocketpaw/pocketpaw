@@ -23,9 +23,10 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from ee.cloud.models.meeting import Meeting as _MD
-from ee.cloud.models.meeting import MeetingProviderCredentials as _CD
-from pocketpaw.clients.google_meet import GoogleMeetAPIError, GoogleMeetClient
+from pocketpaw_ee.cloud.meetings.clients.google_meet import GoogleMeetAPIError, GoogleMeetClient
+from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
+from pocketpaw_ee.cloud.models.meeting import MeetingProviderCredentials as _CD
+
 from pocketpaw.clients.token_store import TokenStore
 
 

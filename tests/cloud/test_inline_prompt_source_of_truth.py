@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import ee.cloud.chat.agent_service as agent_service
-from ee.ripple import INLINE_RIPPLE_SYSTEM_PROMPT
+import pocketpaw_ee.cloud.chat.agent_service as agent_service
+
+from pocketpaw.ripple import INLINE_RIPPLE_SYSTEM_PROMPT
 
 
 def test_agent_service_does_not_define_ripple_hint_literal():

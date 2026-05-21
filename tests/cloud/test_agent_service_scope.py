@@ -10,13 +10,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from ee.cloud.chat.agent_service import (
+from pocketpaw_ee.cloud.chat.agent_service import (
     InvalidScope,
     ScopeKind,
     resolve_scope_context,
 )
-from ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
 
 
 @pytest.mark.asyncio
@@ -29,7 +28,7 @@ async def test_resolve_dm_with_agent_peer_picks_that_agent():
         archived=False,
         workspace="w1",
     )
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
         ctx = await resolve_scope_context(
             scope="dm", scope_id="g1", user_id="u_caller", agent_id_hint=None
         )
@@ -53,7 +52,7 @@ async def test_resolve_group_requires_agent_id_when_multiple_agents():
         archived=False,
         workspace="w1",
     )
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
         with pytest.raises(CloudError):
             await resolve_scope_context(
                 scope="group", scope_id="g1", user_id="u_caller", agent_id_hint=None
@@ -70,7 +69,7 @@ async def test_resolve_group_defaults_to_sole_agent():
         archived=False,
         workspace="w1",
     )
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
         ctx = await resolve_scope_context(
             scope="group", scope_id="g1", user_id="u_caller", agent_id_hint=None
         )
@@ -87,7 +86,7 @@ async def test_resolve_rejects_non_member():
         archived=False,
         workspace="w1",
     )
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
         with pytest.raises(CloudError):
             await resolve_scope_context(
                 scope="group", scope_id="g1", user_id="u_caller", agent_id_hint=None
@@ -106,7 +105,7 @@ async def test_resolve_pocket_uses_first_agent_when_no_hint():
         visibility="workspace",
         shared_with=[],
     )
-    with patch("ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)):
         ctx = await resolve_scope_context(
             scope="pocket", scope_id="p1", user_id="u_caller", agent_id_hint=None
         )
@@ -123,7 +122,7 @@ async def test_resolve_unknown_scope_raises():
 
 @pytest.mark.asyncio
 async def test_resolve_group_not_found_raises_notfound():
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=None)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=None)):
         with pytest.raises(NotFound):
             await resolve_scope_context(
                 scope="group", scope_id="missing", user_id="u", agent_id_hint=None
@@ -140,7 +139,7 @@ async def test_resolve_rejects_dm_route_for_non_dm_group():
         archived=False,
         workspace="w1",
     )
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
         with pytest.raises(CloudError):
             await resolve_scope_context(
                 scope="dm", scope_id="g1", user_id="u_caller", agent_id_hint=None
@@ -157,7 +156,7 @@ async def test_resolve_rejects_group_route_for_dm_group():
         archived=False,
         workspace="w1",
     )
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
         with pytest.raises(CloudError):
             await resolve_scope_context(
                 scope="group", scope_id="g1", user_id="u_caller", agent_id_hint=None
@@ -174,7 +173,7 @@ async def test_resolve_rejects_archived_group():
         archived=True,
         workspace="w1",
     )
-    with patch("ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
         with pytest.raises(CloudError):
             await resolve_scope_context(
                 scope="group", scope_id="g1", user_id="u_caller", agent_id_hint=None
@@ -194,9 +193,9 @@ async def test_resolve_pocket_falls_back_to_workspace_default_agent():
         shared_with=[],
     )
     with (
-        patch("ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
         patch(
-            "ee.cloud.chat.agent_service._get_default_workspace_agent_id",
+            "pocketpaw_ee.cloud.chat.agent_service._get_default_workspace_agent_id",
             AsyncMock(return_value="agent_default_pp"),
         ),
     ):
@@ -220,9 +219,9 @@ async def test_resolve_pocket_no_agents_and_no_default_raises():
         shared_with=[],
     )
     with (
-        patch("ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
         patch(
-            "ee.cloud.chat.agent_service._get_default_workspace_agent_id",
+            "pocketpaw_ee.cloud.chat.agent_service._get_default_workspace_agent_id",
             AsyncMock(return_value=None),
         ),
     ):
@@ -244,7 +243,7 @@ async def test_resolve_pocket_dedupes_members_across_team_and_shared():
         tool_specs=[],
         visibility="workspace",
     )
-    with patch("ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)):
         ctx = await resolve_scope_context(
             scope="pocket", scope_id="p1", user_id="u_owner", agent_id_hint=None
         )
@@ -261,7 +260,7 @@ def test_scopekind_accepts_session_string():
 
 @pytest.mark.asyncio
 async def test_session_scope_happy_path():
-    from ee.cloud.models.session import Session
+    from pocketpaw_ee.cloud.models.session import Session
 
     fake = Session.model_construct(
         id="s1",
@@ -272,7 +271,7 @@ async def test_session_scope_happy_path():
         pocket=None,
         deleted_at=None,
     )
-    with patch("ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
         ctx = await resolve_scope_context(
             scope="session", scope_id="s1", user_id="u1", agent_id_hint=None
         )
@@ -285,7 +284,7 @@ async def test_session_scope_happy_path():
 
 @pytest.mark.asyncio
 async def test_session_scope_not_found():
-    with patch("ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=None)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=None)):
         with pytest.raises(NotFound):
             await resolve_scope_context(
                 scope="session", scope_id="missing", user_id="u1", agent_id_hint=None
@@ -296,7 +295,7 @@ async def test_session_scope_not_found():
 async def test_session_scope_deleted_treated_as_not_found():
     from datetime import UTC, datetime
 
-    from ee.cloud.models.session import Session
+    from pocketpaw_ee.cloud.models.session import Session
 
     fake = Session.model_construct(
         id="s1",
@@ -307,7 +306,7 @@ async def test_session_scope_deleted_treated_as_not_found():
         pocket=None,
         deleted_at=datetime.now(UTC),
     )
-    with patch("ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
         with pytest.raises(NotFound):
             await resolve_scope_context(
                 scope="session", scope_id="s1", user_id="u1", agent_id_hint=None
@@ -316,7 +315,7 @@ async def test_session_scope_deleted_treated_as_not_found():
 
 @pytest.mark.asyncio
 async def test_session_scope_wrong_owner_forbidden():
-    from ee.cloud.models.session import Session
+    from pocketpaw_ee.cloud.models.session import Session
 
     fake = Session.model_construct(
         id="s1",
@@ -327,7 +326,7 @@ async def test_session_scope_wrong_owner_forbidden():
         pocket=None,
         deleted_at=None,
     )
-    with patch("ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
         with pytest.raises(CloudError) as exc:
             await resolve_scope_context(
                 scope="session", scope_id="s1", user_id="u1", agent_id_hint=None
@@ -337,7 +336,7 @@ async def test_session_scope_wrong_owner_forbidden():
 
 @pytest.mark.asyncio
 async def test_session_scope_agent_id_hint_overrides():
-    from ee.cloud.models.session import Session
+    from pocketpaw_ee.cloud.models.session import Session
 
     fake = Session.model_construct(
         id="s1",
@@ -348,7 +347,7 @@ async def test_session_scope_agent_id_hint_overrides():
         pocket=None,
         deleted_at=None,
     )
-    with patch("ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
         ctx = await resolve_scope_context(
             scope="session", scope_id="s1", user_id="u1", agent_id_hint="a2"
         )
@@ -357,7 +356,7 @@ async def test_session_scope_agent_id_hint_overrides():
 
 @pytest.mark.asyncio
 async def test_session_scope_no_agent_errors():
-    from ee.cloud.models.session import Session
+    from pocketpaw_ee.cloud.models.session import Session
 
     fake = Session.model_construct(
         id="s1",
@@ -368,7 +367,7 @@ async def test_session_scope_no_agent_errors():
         pocket=None,
         deleted_at=None,
     )
-    with patch("ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)):
         with pytest.raises(CloudError) as exc:
             await resolve_scope_context(
                 scope="session", scope_id="s1", user_id="u1", agent_id_hint=None

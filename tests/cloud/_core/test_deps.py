@@ -5,8 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.deps import (
+from pocketpaw_ee.cloud._core.deps import (
     current_user,
     current_user_id,
     current_workspace_id,
@@ -40,7 +39,7 @@ class _FakeUser:
 @pytest.fixture
 def make_app():
     """Factory for a FastAPI app with the auth dep overridden to a fake user."""
-    from ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.auth import current_active_user
 
     def _builder(user: _FakeUser) -> FastAPI:
         app = FastAPI()
@@ -121,7 +120,7 @@ def test_require_membership_403_for_non_member(make_app) -> None:
     )
     app = make_app(user)
     # Add the cloud error handler so Forbidden -> 403 envelope
-    from ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud._core.http import add_error_handler
 
     add_error_handler(app)
 

@@ -177,7 +177,7 @@ _TOOLS = {
 async def _ensure_cloud_runtime_initialized() -> None:
     import os
 
-    from ee.cloud.shared.db import get_client, init_cloud_db
+    from pocketpaw_ee.cloud.shared.db import get_client, init_cloud_db
 
     if get_client() is None:
         mongo_uri = os.environ.get("POCKETPAW_MONGO_URI") or os.environ.get("CLOUD_MONGODB_URI")
@@ -189,7 +189,7 @@ async def _ensure_cloud_runtime_initialized() -> None:
         await init_cloud_db(mongo_uri)
 
     # init_realtime is idempotent; safe to call after every Beanie boot.
-    from ee.cloud import init_realtime
+    from pocketpaw_ee.cloud import init_realtime
 
     init_realtime()
 
@@ -201,7 +201,7 @@ _ensure_cloud_db_initialized = _ensure_cloud_runtime_initialized
 async def _cloud_get_pocket(args: dict) -> dict:
     import os
 
-    from ee.cloud.pockets.agent_context import fetch_pocket_for_agent
+    from pocketpaw_ee.cloud.pockets.agent_context import fetch_pocket_for_agent
 
     pocket_id = args.get("pocket_id") or os.environ.get("POCKETPAW_POCKET_ID", "")
     return await fetch_pocket_for_agent(pocket_id)
@@ -210,7 +210,7 @@ async def _cloud_get_pocket(args: dict) -> dict:
 async def _cloud_add_widget(args: dict) -> dict:
     import os
 
-    from ee.cloud.pockets.agent_context import add_widget_for_agent
+    from pocketpaw_ee.cloud.pockets.agent_context import add_widget_for_agent
 
     pocket_id = args.get("pocket_id") or os.environ.get("POCKETPAW_POCKET_ID", "")
     return await add_widget_for_agent(pocket_id, args.get("widget", {}))
@@ -219,7 +219,7 @@ async def _cloud_add_widget(args: dict) -> dict:
 async def _cloud_update_widget(args: dict) -> dict:
     import os
 
-    from ee.cloud.pockets.agent_context import update_widget_for_agent
+    from pocketpaw_ee.cloud.pockets.agent_context import update_widget_for_agent
 
     pocket_id = args.get("pocket_id") or os.environ.get("POCKETPAW_POCKET_ID", "")
     return await update_widget_for_agent(
@@ -230,7 +230,7 @@ async def _cloud_update_widget(args: dict) -> dict:
 async def _cloud_remove_widget(args: dict) -> dict:
     import os
 
-    from ee.cloud.pockets.agent_context import remove_widget_for_agent
+    from pocketpaw_ee.cloud.pockets.agent_context import remove_widget_for_agent
 
     pocket_id = args.get("pocket_id") or os.environ.get("POCKETPAW_POCKET_ID", "")
     return await remove_widget_for_agent(pocket_id, args.get("widget_id", ""))
@@ -239,7 +239,7 @@ async def _cloud_remove_widget(args: dict) -> dict:
 async def _cloud_list_pockets(args: dict) -> dict:
     import os
 
-    from ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     workspace_id = args.get("workspace_id") or os.environ.get("POCKETPAW_WORKSPACE_ID", "")
     user_id = args.get("user_id") or os.environ.get("POCKETPAW_USER_ID", "")
@@ -259,7 +259,7 @@ async def _cloud_pocket_specialist_create_wrapper(args: dict) -> dict:
     """Lazy-import wrapper so importing the CLI module doesn't pull in the
     pocket-specialist runtime (and its deep_agents/claude_agent_sdk
     dependencies) unless the command is actually called."""
-    from ee.agent.pocket_specialist.cli_tool import _cloud_pocket_specialist_create
+    from pocketpaw_ee.agent.pocket_specialist.cli_tool import _cloud_pocket_specialist_create
 
     return await _cloud_pocket_specialist_create(args)
 

@@ -62,15 +62,14 @@ async def main() -> int:
     os.environ.update(env)
 
     # --- Set up FastAPI app with cloud routes mounted --------------------
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud import mount_cloud
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -83,7 +82,7 @@ async def main() -> int:
 
     # Flip memory backend default (normally done by init_cloud_db but we
     # init Beanie directly so drop the DB at the end)
-    from ee.cloud.memory.bootstrap import register_default_backend
+    from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
 
     register_default_backend()
 
@@ -145,14 +144,14 @@ async def main() -> int:
 
             # --- 3. Send a chat message tagged with that session_id -------
             _banner("3. simulate chat with save_user_message(session_id, ...)")
-            from ee.cloud.shared.chat_persistence import save_user_message
+            from pocketpaw_ee.cloud.shared.chat_persistence import save_user_message
 
             await save_user_message(session_id, "hello from smoke — user msg")
             print("   called save_user_message OK")
 
             # --- 4. Raw Mongo: find message by session_key=session_id ----
             _banner("4. raw Mongo — messages where session_key == sessionId")
-            from ee.cloud.models.message import Message
+            from pocketpaw_ee.cloud.models.message import Message
 
             rows = await Message.find({"session_key": session_id}).to_list()
             print(f"   found {len(rows)} messages with session_key={session_id!r}")

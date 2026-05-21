@@ -252,8 +252,16 @@ class GoogleADKBackend(BaseAgentBackend):
 
             instruction = system_prompt or _DEFAULT_IDENTITY
 
-            # Build tools: custom PocketPaw tools + MCP toolsets
+            # Build tools: custom PocketPaw tools + MCP toolsets + Composio
+            # (per-stream via the documented composio_google_adk provider,
+            # discovered through the ``pocketpaw.composio_tools`` entry point).
             tools = self._build_custom_tools() + self._build_mcp_toolsets()
+            from pocketpaw.agents.tool_bridge import composio_tools_for
+
+            composio_tools = composio_tools_for("google_adk", self.settings)
+            if composio_tools:
+                tools = tools + list(composio_tools)
+                logger.info("Composio: appended %d ADK tools", len(composio_tools))
 
             # Session management: reuse sessions for multi-turn, seed history on first call
             user_id = "pocketpaw_user"

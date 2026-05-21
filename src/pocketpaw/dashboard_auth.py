@@ -366,9 +366,10 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/ws/cloud",
     ]
 
-    # Shared-prefix routes — ee.cloud mounts JWT-authed routers at these paths,
-    # but the non-ee v1 routers (pocketpaw.api.v1.chat/pockets/sessions) also
-    # mount there and rely on require_scope() reading request.state.full_access.
+    # Shared-prefix routes — pocketpaw_ee.cloud mounts JWT-authed routers at
+    # these paths, but the non-ee v1 routers (pocketpaw.api.v1.chat/sessions)
+    # also mount there and rely on require_scope() reading
+    # request.state.full_access.
     # We must run the token-verification cascade so dashboard session cookies
     # populate state, but skip the final 401 — ee routes authenticate at the
     # route level via fastapi-users (#888 follow-up).

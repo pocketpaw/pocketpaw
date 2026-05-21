@@ -21,13 +21,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-from ee.cloud.extraction import (
+from pocketpaw_ee.cloud.extraction import (
     ExtractionChain,
     ExtractionResult,
     build_chain,
 )
-from ee.cloud.extraction import chain as chain_mod
+from pocketpaw_ee.cloud.extraction import chain as chain_mod
 
 
 class _StubAdapter:
@@ -200,7 +199,7 @@ def test_build_chain_includes_gemini_with_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Patch GeminiFlashExtractor so we don't need a real google.genai Client.
-    from ee.cloud.extraction import gemini_flash as gem_mod
+    from pocketpaw_ee.cloud.extraction import gemini_flash as gem_mod
 
     sentinel = _StubAdapter("gemini-flash", {"image/png"}, requires_network=True)
     monkeypatch.setattr(gem_mod, "GeminiFlashExtractor", lambda api_key, **kw: sentinel)

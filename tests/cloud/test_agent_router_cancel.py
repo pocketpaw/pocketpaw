@@ -8,8 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
-
-from ee.cloud.chat import agent_router as mod
+from pocketpaw_ee.cloud.chat import agent_router as mod
 
 
 @pytest.mark.asyncio

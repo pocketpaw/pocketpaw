@@ -134,11 +134,10 @@ def license_env():
 
 @pytest.fixture()
 async def beanie_db():
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    import ee.cloud.license as lic_mod
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -153,8 +152,8 @@ async def beanie_db():
 
 @pytest.fixture()
 async def app(license_env, beanie_db) -> FastAPI:
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
+    import pocketpaw_ee.cloud.license as lic_mod
+    from pocketpaw_ee.cloud import mount_cloud
 
     lic_mod._cached_license = None
 

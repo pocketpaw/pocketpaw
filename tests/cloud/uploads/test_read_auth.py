@@ -87,7 +87,7 @@ async def test_read_gate_allows_owner_member_admin_denies_others(
     admins: set[str],
     expect_ok: bool,
 ):
-    from ee.cloud.uploads.service import EEUploadService
+    from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
     is_chat_member, is_workspace_admin = _make_checkers(chat_members=chat_members, admins=admins)
     svc = EEUploadService(
@@ -124,7 +124,7 @@ async def test_read_gate_without_checkers_is_owner_only(store, tmp_path: Path):
     """When no collaborator checkers are wired, behaviour is unchanged —
     only the owner can read. Preserves the pre-fix contract that existing
     tests (and any callers that don't wire checkers) depend on."""
-    from ee.cloud.uploads.service import EEUploadService
+    from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
     svc = EEUploadService(
         adapter=_MemAdapter(),
@@ -147,7 +147,7 @@ async def test_chat_member_branch_skipped_when_no_chat_id(store, tmp_path: Path)
     """A file with no ``chat_id`` (e.g. avatar / KB upload) must not fall
     through the chat-member branch — otherwise a shared chat would leak
     access to private uploads. Only owner/admin should pass."""
-    from ee.cloud.uploads.service import EEUploadService
+    from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
     # Chat-member check would return True, but chat_id is None so the
     # branch must be skipped entirely.

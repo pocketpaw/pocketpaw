@@ -35,7 +35,7 @@ def tmp_image(tmp_path: Path) -> Path:
 
 
 def test_dim_out_of_range_raises(monkeypatch, mock_genai) -> None:
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     with pytest.raises(ValueError, match="out of range"):
         VertexGeminiEmbedding2(api_key="fake", dim=4096)
@@ -46,7 +46,7 @@ def test_dim_out_of_range_raises(monkeypatch, mock_genai) -> None:
 @pytest.mark.asyncio
 async def test_embed_file_image_calls_with_part(mock_genai, tmp_image) -> None:
     """Image file → contents=[Part(image bytes, mime)] sent to embed_content."""
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     client, _ = mock_genai
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=1024)
@@ -71,7 +71,7 @@ async def test_embed_file_image_calls_with_part(mock_genai, tmp_image) -> None:
 @pytest.mark.asyncio
 async def test_embed_file_text_skips_part_path(mock_genai, tmp_path) -> None:
     """text/plain files go through embed_query, not the inline-Part path."""
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     client, _ = mock_genai
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=512)
@@ -87,7 +87,7 @@ async def test_embed_file_text_skips_part_path(mock_genai, tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_matryoshka_truncates_when_dim_smaller_than_native(mock_genai, tmp_image) -> None:
     """When dim < 3072 the result vector is the first dim values."""
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     _, response = mock_genai
     response.embedding.values = list(range(3072))  # 0..3071
@@ -101,7 +101,7 @@ async def test_matryoshka_truncates_when_dim_smaller_than_native(mock_genai, tmp
 
 @pytest.mark.asyncio
 async def test_embed_query_text_only(mock_genai) -> None:
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     client, _ = mock_genai
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=64)
@@ -114,7 +114,7 @@ async def test_embed_query_text_only(mock_genai) -> None:
 
 @pytest.mark.asyncio
 async def test_embed_query_with_image_bytes(mock_genai) -> None:
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     client, _ = mock_genai
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=64)
@@ -132,7 +132,7 @@ async def test_embed_query_with_image_bytes(mock_genai) -> None:
 
 @pytest.mark.asyncio
 async def test_embed_query_with_jpeg_bytes_picks_jpeg_mime(mock_genai) -> None:
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     client, _ = mock_genai
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=32)
@@ -149,7 +149,7 @@ async def test_embed_query_with_jpeg_bytes_picks_jpeg_mime(mock_genai) -> None:
 @pytest.mark.asyncio
 async def test_unwrap_handles_embeddings_list_shape(mock_genai, tmp_image) -> None:
     """Newer google-genai versions return response.embeddings[0].values."""
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     client, response = mock_genai
     # Drop the singular .embedding shape, expose the plural.
@@ -165,7 +165,7 @@ async def test_unwrap_handles_embeddings_list_shape(mock_genai, tmp_image) -> No
 
 @pytest.mark.asyncio
 async def test_unwrap_raises_on_unknown_shape(mock_genai, tmp_image) -> None:
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     _, response = mock_genai
     # Strip every shape we know how to unwrap.
@@ -184,14 +184,14 @@ async def test_unwrap_raises_on_unknown_shape(mock_genai, tmp_image) -> None:
 
 
 def test_estimate_cost_handles_missing_path(mock_genai) -> None:
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=64)
     assert adapter.estimate_cost(None, None) == 0.0
 
 
 def test_estimate_cost_uses_file_size(mock_genai, tmp_image) -> None:
-    from ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
+    from pocketpaw_ee.cloud.embeddings.vertex_gemini2 import VertexGeminiEmbedding2
 
     adapter = VertexGeminiEmbedding2(api_key="fake", dim=64)
     cost = adapter.estimate_cost(tmp_image, "image/png")

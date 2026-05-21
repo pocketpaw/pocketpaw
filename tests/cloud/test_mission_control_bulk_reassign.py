@@ -16,13 +16,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.mission_control import service as mc_service
+from pocketpaw_ee.cloud.mission_control.dto import BulkReassignRequest
+from pocketpaw_ee.cloud.tasks import service as tasks_service
+from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest
 
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.mission_control import service as mc_service
-from ee.cloud.mission_control.dto import BulkReassignRequest
-from ee.cloud.tasks import service as tasks_service
-from ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest
-from ee.instinct.store import InstinctStore
+from pocketpaw.instinct.store import InstinctStore
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -80,9 +80,7 @@ async def test_reassigns_tasks_emitting_per_row_event(recording_bus) -> None:
     recording_bus.events.clear()
     result = await mc_service.agent_bulk_reassign(
         ctx,
-        BulkReassignRequest(
-            ids=[f"task:{a.id}", f"task:{b.id}"], to=_to()
-        ),
+        BulkReassignRequest(ids=[f"task:{a.id}", f"task:{b.id}"], to=_to()),
     )
     assert set(result["affected"]) == {f"task:{a.id}", f"task:{b.id}"}
     assert result["skipped"] == []
@@ -90,7 +88,7 @@ async def test_reassigns_tasks_emitting_per_row_event(recording_bus) -> None:
 
     # Tasks service emits TaskUpdated per row; the bulk path doesn't add
     # its own event on top.
-    from ee.cloud._core.realtime.events import TaskUpdated
+    from pocketpaw_ee.cloud._core.realtime.events import TaskUpdated
 
     updates = [e for e in recording_bus.events if isinstance(e, TaskUpdated)]
     assert len(updates) == 2
