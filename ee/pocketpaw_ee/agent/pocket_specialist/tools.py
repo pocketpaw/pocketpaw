@@ -14,10 +14,14 @@ without reaching into ``pocketpaw_ee.cloud`` internals.
 Changes: 2026-05-14 — added the Tier-2 prop-array item tool factories
 (set / append / remove ``_prop_array_item``), reworked onto the
 pocketpaw_ee layout from PR #1106.
+Changes: 2026-05-21 (#1163) — ``_capture_op`` now accepts the tool's
+result dict and logs a warning when a granular op was invoked but its
+service returned ``{ok: false}`` (the silent-rejection path).
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -28,6 +32,8 @@ from pocketpaw.ripple.manifest import validate_against_manifest
 from pocketpaw_ee.cloud.pockets.service import agent_create as _agent_create
 from pocketpaw_ee.cloud.pockets.service import agent_list as _agent_list_pockets
 from pocketpaw_ee.cloud.pockets.service import agent_update as _agent_update
+
+log = logging.getLogger(__name__)
 
 
 class _ListPocketsArgs(BaseModel):
@@ -339,8 +345,25 @@ def make_persist_pocket_tool(
 # ---------------------------------------------------------------------------
 
 
-def _capture_op(capture: dict[str, Any] | None, op: str, args: dict[str, Any]) -> None:
-    """Append an op record to ``capture['ops']`` for the runtime to inspect."""
+def _capture_op(
+    capture: dict[str, Any] | None,
+    op: str,
+    args: dict[str, Any],
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Append an op record to ``capture['ops']`` for the runtime to inspect.
+
+    When ``result`` is supplied and reports ``{ok: false}``, log a warning
+    so an operator can see a granular tool WAS invoked but the underlying
+    service rejected it — distinct from the planner never calling a tool
+    at all (#1163 observability).
+    """
+    if isinstance(result, dict) and result.get("ok") is False:
+        log.warning(
+            "[pocket-specialist:edit] granular op %s rejected by service: %s",
+            op,
+            result.get("error") or result,
+        )
     if capture is None:
         return
     ops = capture.get("ops")
@@ -388,7 +411,7 @@ def make_set_state_tool(*, pocket_id: str, capture: dict[str, Any] | None = None
         from pocketpaw_ee.cloud.pockets.agent_context import set_state_for_agent
 
         result = await set_state_for_agent(pocket_id, path, value)
-        _capture_op(capture, "set_state", {"path": path, "value": value})
+        _capture_op(capture, "set_state", {"path": path, "value": value}, result)
         return result
 
     return StructuredTool.from_function(
@@ -419,7 +442,7 @@ def make_append_state_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import append_state_for_agent
 
         result = await append_state_for_agent(pocket_id, path, item)
-        _capture_op(capture, "append_state", {"path": path, "item": item})
+        _capture_op(capture, "append_state", {"path": path, "item": item}, result)
         return result
 
     return StructuredTool.from_function(
@@ -447,7 +470,7 @@ def make_remove_state_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import remove_state_for_agent
 
         result = await remove_state_for_agent(pocket_id, path)
-        _capture_op(capture, "remove_state", {"path": path})
+        _capture_op(capture, "remove_state", {"path": path}, result)
         return result
 
     return StructuredTool.from_function(
@@ -475,7 +498,7 @@ def make_patch_state_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import patch_state_for_agent
 
         result = await patch_state_for_agent(pocket_id, partial)
-        _capture_op(capture, "patch_state", {"partial": partial})
+        _capture_op(capture, "patch_state", {"partial": partial}, result)
         return result
 
     return StructuredTool.from_function(
@@ -505,7 +528,7 @@ def make_set_node_prop_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import set_node_prop_for_agent
 
         result = await set_node_prop_for_agent(pocket_id, node_id, prop, value)
-        _capture_op(capture, "set_node_prop", {"node_id": node_id, "prop": prop})
+        _capture_op(capture, "set_node_prop", {"node_id": node_id, "prop": prop}, result)
         return result
 
     return StructuredTool.from_function(
@@ -537,7 +560,7 @@ def make_add_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None)
         from pocketpaw_ee.cloud.pockets.agent_context import add_node_for_agent
 
         result = await add_node_for_agent(pocket_id, parent_id, spec, after_id)
-        _capture_op(capture, "add_node", {"parent_id": parent_id, "after_id": after_id})
+        _capture_op(capture, "add_node", {"parent_id": parent_id, "after_id": after_id}, result)
         return result
 
     return StructuredTool.from_function(
@@ -566,7 +589,7 @@ def make_replace_node_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import replace_node_for_agent
 
         result = await replace_node_for_agent(pocket_id, node_id, spec)
-        _capture_op(capture, "replace_node", {"node_id": node_id})
+        _capture_op(capture, "replace_node", {"node_id": node_id}, result)
         return result
 
     return StructuredTool.from_function(
@@ -598,6 +621,7 @@ def make_move_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None
             capture,
             "move_node",
             {"node_id": node_id, "new_parent_id": new_parent_id, "after_id": after_id},
+            result,
         )
         return result
 
@@ -626,7 +650,7 @@ def make_remove_node_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import remove_node_for_agent
 
         result = await remove_node_for_agent(pocket_id, node_id)
-        _capture_op(capture, "remove_node", {"node_id": node_id})
+        _capture_op(capture, "remove_node", {"node_id": node_id}, result)
         return result
 
     return StructuredTool.from_function(
@@ -672,6 +696,7 @@ def make_set_prop_array_item_tool(
             capture,
             "set_prop_array_item",
             {"node_id": node_id, "prop": prop, "match": match},
+            result,
         )
         return result
 
@@ -718,6 +743,7 @@ def make_append_prop_array_item_tool(
             capture,
             "append_prop_array_item",
             {"node_id": node_id, "prop": prop, "after": after},
+            result,
         )
         return result
 
@@ -756,6 +782,7 @@ def make_remove_prop_array_item_tool(
             capture,
             "remove_prop_array_item",
             {"node_id": node_id, "prop": prop, "match": match},
+            result,
         )
         return result
 

@@ -1,5 +1,13 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-21 (#1163) — the edit-specialist prompt now splices in
+# `_EDIT_TOOLS_MCP`, a tools block naming the granular edit ops the
+# specialist ACTUALLY holds (get_pocket, the state/node/array-item ops),
+# instead of `_TOOLS_MCP` which advertised creation tools (create_pocket,
+# update_pocket, add_widget) the specialist does not hold. The
+# `<mutation-strategy>` block gained the Tier-2 prop-array item ops from
+# PR #1159 with guidance on when to use them.
+#
 # Canonical source for every pocket-mode system prompt the agent ever sees.
 # Four strings are exported, one per (action × backend) cell:
 #
@@ -491,6 +499,79 @@ render. Don't use them for visible changes.)
 """
 
 
+# ---------------------------------------------------------------------------
+# Edit-specialist tool surface. Splices into the EDIT SPECIALIST prompt
+# only — see _assemble_interaction. This is the granular-op toolset that
+# `make_edit_pocket_tools` (ee/pocketpaw_ee/agent/pocket_specialist/tools.py)
+# actually attaches to the specialist's backend. It deliberately does NOT
+# name create_pocket / update_pocket / add_widget — the specialist does
+# not hold those, and advertising them made the planner pick a tool that
+# does not exist and silently emit zero ops (#1163 root cause B).
+# ---------------------------------------------------------------------------
+_EDIT_TOOLS_MCP = """\
+<pocket-tools>
+You hold the GRANULAR EDIT toolset — and only this toolset. Every tool
+below mutates `rippleSpec` directly and persists as it runs; there is no
+separate save step. You never pass pocket_id, workspace_id, or owner_id —
+they are bound for you.
+
+READ
+
+  get_pocket()
+    → {"ok": true, "pocket": {...full document including rippleSpec...}}
+    Call ONCE at the start to see the existing widget tree and state —
+    unless the parent already handed you the pocket payload.
+
+STATE OPS — data the widgets bind to
+
+  set_state(path, value)        write one value at a dotted path
+                                (e.g. `tasks[0].status`)
+  append_state(path, item)      push an element onto a state array
+  remove_state(path)            delete a key or array element
+  patch_state(partial)          shallow-merge a dict into the top of state
+
+NODE OPS — the widget tree itself
+
+  set_node_prop(node_id, prop, value)
+                                change ONE prop on a widget
+  add_node(parent_id, spec, after_id?)
+                                insert a new widget under a parent
+  replace_node(node_id, spec)   swap one subtree for another
+  move_node(node_id, new_parent_id, after_id?)
+                                relocate / reorder a subtree
+  remove_node(node_id)          delete a subtree
+
+PROP-ARRAY ITEM OPS — surgical single-item edits inside a widget's
+prop-array (chart.data, table.rows, calendar.events, kanban.columns,
+project-dashboard.team, feed.items, select.options, form-layout.fields…)
+
+  set_prop_array_item(node_id, prop, match, partial)
+                                shallow-merge `partial` into ONE matched
+                                item
+  append_prop_array_item(node_id, prop, value, after?)
+                                add ONE item to the array (insert after a
+                                matched item, or append)
+  remove_prop_array_item(node_id, prop, match)
+                                delete ONE matched item
+
+`match` (and `after`) is an ItemMatch: {index:N} | {id:"..."} |
+{by_field:"label", equals:"X"} | {by_key:{k:v}}.
+
+The toolset above is the WHOLE interface. Apply the smallest granular op
+that satisfies the intent.
+</pocket-tools>
+
+<edit-specialist-scope>
+You do NOT hold a pocket-creation tool, a whole-canvas-replace tool, or
+the legacy embedded-widget tools. The pocket already exists — never try
+to spawn another one or rewrite the canvas wholesale. Every change goes
+through a granular op from the `<pocket-tools>` block above. For a
+full-canvas redesign, `replace_node` against the root node is your
+equivalent of a whole-tree swap.
+</edit-specialist-scope>
+"""
+
+
 _TOOLS_CLI = """\
 <pocket-cli>
 Pocket reads/writes happen through `python -m pocketpaw.tools.cli
@@ -658,6 +739,14 @@ Three layers, pick the right tool for the edit:
                                  (label, show, on_click, color…)
     replace_node(node_id, spec)  swap one subtree for another
 
+  LAYER 2.5 — ONE ITEM INSIDE A WIDGET'S PROP-ARRAY
+    set_prop_array_item(node_id, prop, match, partial)
+                                 surgically merge into ONE item
+    append_prop_array_item(node_id, prop, value, after?)
+                                 add ONE item to the array
+    remove_prop_array_item(node_id, prop, match)
+                                 delete ONE matched item
+
   LAYER 3 — STRUCTURE
     add_node(parent_id, spec, after_id?)
     move_node(node_id, new_parent_id, after_id?)
@@ -672,9 +761,30 @@ ALWAYS reach for the LOWEST applicable layer:
 - "change the button label to Save"     → set_node_prop(button_id, "label", "Save")
 - "hide the chart"                      → set_node_prop(chart_id, "show", "false")
 - "make the button red"                 → set_node_prop(button_id, "class", "bg-red-500")
+- "fix team member 4's name"            → set_prop_array_item(dashboard_id, "team",
+                                          {index:3}, {name:"Gaurav Dewani"})
+- "add a row to the PR table"           → append_prop_array_item(table_id, "rows", {...})
+- "drop the cancelled chart bar"        → remove_prop_array_item(chart_id, "data",
+                                          {by_field:"label", equals:"Cancelled"})
 - "add a stat widget for revenue"       → add_node(parent_id, {type:"stat",…})
 - "move the chart below the table"      → move_node(chart_id, root_id, after_id=table_id)
 - "remove the old metric card"          → remove_node(metric_id)
+
+When to use the LAYER 2.5 prop-array item ops — and when NOT to:
+
+- Use them for a SURGICAL edit of ONE item in a widget prop that holds
+  an array: a single chart bar, one table row, one calendar event, one
+  `team` entry of a project-dashboard. They touch only the matched item;
+  every other item stays byte-identical, so nothing can drift.
+- This is the right tool the moment the intent is "change/add/remove
+  ONE of N" inside a widget — e.g. "update team[3] of the dashboard".
+  Do NOT re-ship the whole `team` array via set_node_prop just to change
+  one entry: copying the unchanged items risks silent drift and is far
+  more tokens. set_node_prop is for SCALAR props (label, color, show) or
+  for genuinely replacing an entire array wholesale.
+- `match` selects the item by {index:N}, {id:"..."}, {by_field, equals},
+  or {by_key:{...}}. Prefer a stable field over a raw index when one
+  exists.
 
 Why this matters: every widget bound to `{state.x}` re-renders
 automatically when state changes — set_state is the cheapest possible
@@ -685,13 +795,14 @@ the shape actually needs to change.
 Rule of thumb: if widgets bind to it, edit state. If it's the widget
 itself, edit the node. If it's a new widget, add a node.
 
-Reach for `update_pocket(ripple_spec=...)` only when:
-- You're rewriting the entire canvas (the user said "redesign this"
-  or asked for a structural shift touching >30% of the tree).
-- The initial creation of a brand-new sub-area replaces the whole UI.
+For a full-canvas rewrite (the user said "redesign this" or asked for a
+structural shift touching >30% of the tree), `replace_node` on the ROOT
+node swaps the whole subtree in one op. You do NOT have `update_pocket`
+— `replace_node` against the root is the equivalent.
 
-Never use `update_pocket` to change one row, one prop, one widget, or
-to nudge an existing node. The granular ops exist for exactly that.
+Never reach for a whole-tree replace to change one row, one prop, one
+widget, or to nudge an existing node. The granular ops above — down to
+the LAYER 2.5 prop-array item ops — exist for exactly that.
 </mutation-strategy>
 
 Step 2 — when building a new subtree (for add_node / replace_node):
@@ -1388,11 +1499,18 @@ set_state, set_node_prop, add_node, etc.).
 def _assemble_interaction(*, mcp: bool) -> str:
     """Heavy interaction prompt — owned by the EDIT SPECIALIST. Contains
     the full mutation-strategy / design-rules block the specialist needs
-    to perform granular edits. Not for the main chat agent."""
+    to perform granular edits. Not for the main chat agent.
+
+    The MCP variant splices in ``_EDIT_TOOLS_MCP`` — the granular edit
+    toolset the specialist actually holds. It must NOT use ``_TOOLS_MCP``
+    (the creation toolset): advertising create_pocket / update_pocket /
+    add_widget to a specialist that only holds set_node_prop / add_node /
+    *_prop_array_item made the planner pick a non-existent tool and emit
+    zero ops with no error (#1163 root cause B)."""
     parts = [
         _SCOPE_BLOCK,
         _CANVAS_BLOCK,
-        _TOOLS_MCP if mcp else _TOOLS_CLI,
+        _EDIT_TOOLS_MCP if mcp else _TOOLS_CLI,
         _WORKFLOW_INTERACTION_MCP if mcp else _WORKFLOW_INTERACTION_CLI,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,

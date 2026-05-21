@@ -2,6 +2,15 @@
 
 Orchestrates backend selection, tool wiring, event emission, and result
 assembly. Always persists a pocket - see feedback_pocket_always_ships.md.
+
+Changes: 2026-05-21 (#1163) — the edit-specialist stream loop now inspects
+``event.type == "error"`` (the deep_agents backend yields error events
+instead of raising), so a backend failure surfaces as ``ok=False`` with a
+populated ``error`` field instead of a silent ``ok=True, ops=[]``. A
+genuine 0-ops outcome with no error now surfaces the planner's final text
+reply via the new ``PocketSpecialistEditOutput.warnings`` field so the
+caller learns WHY the specialist declined. Added targeted observability
+logging for error events and tool_use-vs-ops counts.
 """
 
 from __future__ import annotations
@@ -498,7 +507,24 @@ class PocketSpecialistEditOutput(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     duration_ms: int
     backend_used: str
-    error: str | None = None
+    error: str | None = Field(
+        default=None,
+        description=(
+            "Set when the specialist run FAILED — backend raised, or the "
+            "deep_agents backend yielded an error event. ``ok`` is False "
+            "whenever this is populated. Distinct from ``warnings``."
+        ),
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Set when the run SUCCEEDED but applied zero ops — the planner "
+            "declined to act (target not found, intent ambiguous, no change "
+            "needed). Carries the planner's final text reply so the caller "
+            "knows WHY. ``ok`` stays True; this is not a failure. A silent "
+            "``ok=True, ops=[]`` with no explanation is the #1163 bug."
+        ),
+    )
 
 
 async def run_edit_specialist(
@@ -575,21 +601,44 @@ async def run_edit_specialist(
         "patch_",
     )
     # success starts False and flips True only after the backend.run
-    # loop completes without exception. Catches the silent-failure mode
-    # where the inner backend errors mid-stream (transport drop, model
-    # 400, etc.) and the caller previously saw ok=True with ops=[].
+    # loop completes without exception AND without an error event.
+    # Catches two silent-failure modes the caller previously saw as
+    # ok=True with ops=[]:
+    #   1. the inner backend raises mid-stream (transport drop, 400)
+    #   2. the deep_agents backend yields AgentEvent(type="error")
+    #      instead of raising — see deep_agents.py:974-977.
     success = False
     error_msg: str | None = None
+    tool_use_count = 0
+    # The planner's running text — used to explain a genuine 0-ops run.
+    final_text_parts: list[str] = []
     try:
         async for event in backend.run(user_message, system_prompt=system_prompt):
+            if event.type == "error":
+                # #1163 root cause A — deep_agents converts internal
+                # failures into error events rather than raising. Capture
+                # the message, mark the run failed, and stop trusting the
+                # clean loop exit.
+                error_msg = str(event.content or "backend emitted an error event")
+                log.warning(
+                    "[pocket-specialist:edit] backend emitted error event: %s",
+                    error_msg,
+                )
+                continue
             if event.type == "tool_use":
+                tool_use_count += 1
                 tool_name = (event.metadata or {}).get("name", "")
                 if tool_name.startswith(_GRANULAR_OP_PREFIXES):
                     # Forward each inner op to the outer chat SSE stream so
                     # the desktop client renders per-op progress (matches
                     # TOOL_LABELS entries in paw-enterprise chat/service.ts).
                     _push_chat_status(tool_name, event.metadata.get("input") or {})
-        success = True
+            elif event.type == "message" and event.content:
+                # Keep the planner's text — it explains a no-op decline.
+                final_text_parts.append(str(event.content))
+        # A clean loop exit only counts as success when no error event
+        # passed through. error_msg is set above for the error-event path.
+        success = error_msg is None
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "[pocket-specialist:edit] backend stream errored: %s: %s",
@@ -598,11 +647,41 @@ async def run_edit_specialist(
             exc_info=True,
         )
         error_msg = f"{type(exc).__name__}: {exc}"
+        success = False
     finally:
         await backend.stop()
 
     duration_ms = int((time.monotonic() - started) * 1000)
     ops = list(ops_capture.get("ops", []))
+
+    # Observability — distinguish "planner declined to act" (tool_use=0)
+    # from "tool called but the service rejected it" (tool_use>0, ops=0).
+    log.info(
+        "[pocket-specialist:edit] planner emitted %d tool_use events, %d granular ops captured",
+        tool_use_count,
+        len(ops),
+    )
+
+    # A successful run that applied zero ops must NOT be a silent ok=True
+    # with no explanation (#1163). Surface the planner's final text reply
+    # in warnings so the caller can tell the user WHY nothing changed.
+    warnings: list[str] = []
+    if success and not ops:
+        reason = "\n".join(p for p in final_text_parts if p.strip()).strip()
+        warnings.append(
+            reason
+            or (
+                "The edit specialist applied no changes and gave no "
+                "reason. The target may not have been found, or the "
+                "intent may not have mapped to a supported edit."
+            )
+        )
+        log.warning(
+            "[pocket-specialist:edit] 0-ops run — surfacing planner reply "
+            "as a warning (pocket_id=%s tool_use=%d)",
+            input.pocket_id,
+            tool_use_count,
+        )
 
     log.info(
         "[pocket-specialist:edit] complete: pocket_id=%s ops=%d success=%s "
@@ -621,4 +700,5 @@ async def run_edit_specialist(
         duration_ms=duration_ms,
         backend_used=backend_name,
         error=error_msg,
+        warnings=warnings,
     )

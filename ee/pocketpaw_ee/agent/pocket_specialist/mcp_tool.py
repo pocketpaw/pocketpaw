@@ -7,6 +7,10 @@ single tool ``create`` accepts ``{brief, hints?}`` and hands off to
 per-stream ``ContextVar`` accessors in ``ee.cloud.chat.agent_service``
 because the in-process MCP channel doesn't reach the FastAPI request
 scope.
+
+Changes: 2026-05-21 (#1163) — updated the ``edit`` tool description to
+document the full response shape, including the new ``warnings`` field
+that carries the specialist's reason when it declines to act.
 """
 
 from __future__ import annotations
@@ -277,7 +281,12 @@ def build_pocket_specialist_server() -> Any:
             "widget appearance, add/move/remove_node for structure), and "
             "applies them. Each op persists and pushes its own SSE event "
             "so the canvas updates in place. Returns "
-            "{ok, pocket_id, ops, duration_ms}."
+            "{ok, pocket_id, ops, duration_ms, backend_used, error, "
+            "warnings}. ok=false with a populated error means the run "
+            "failed — relay the error. ok=true with an empty ops list and "
+            "a populated warnings list means the specialist declined to "
+            "act — relay the warning so the user learns why nothing "
+            "changed; do NOT report success."
         ),
         {
             "type": "object",
