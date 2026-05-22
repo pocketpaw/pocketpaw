@@ -21,6 +21,12 @@
 #   `mode="owner"` (the default when `approval_route` is None) routes to
 #   the pocket owner; `mode="user"` routes to a named workspace member.
 #   It lives HERE alongside the credential — owner-set, outside the spec.
+# Updated: 2026-05-22 (RFC 04 M3) — added `webhook_secret`. A pocket source
+#   binding may declare a `"webhook"` refresh trigger; the inbound endpoint
+#   `POST /pockets/{id}/sources/{source}/refresh` authenticates the caller
+#   against this secret. It lives HERE — generated server-side, on the
+#   credential row, NEVER in the agent-authored spec — so the spec stays
+#   shareable and secret-free. `None` until an owner generates / rotates it.
 
 from __future__ import annotations
 
@@ -87,6 +93,13 @@ class PocketBackendCredential(TimestampedDocument):
     # writes route to the pocket owner. An owner sets a named approver via
     # `PUT /pockets/{id}/backend/approval-route`.
     approval_route: ApprovalRoute | None = None
+    # RFC 04 M3 webhook secret. The shared secret an inbound
+    # `POST /pockets/{id}/sources/{source}/refresh` must present to trigger
+    # a `"webhook"`-refresh source. None until an owner generates one via
+    # `POST /pockets/{id}/backend/webhook/rotate`. Stored in plaintext
+    # (it IS the credential the caller echoes back, like an API key) — a
+    # rotate replaces it, invalidating the previous value.
+    webhook_secret: str | None = None
 
     class Settings:
         name = "pocket_backend_credentials"

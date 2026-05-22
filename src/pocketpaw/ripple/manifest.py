@@ -9,18 +9,46 @@ formats it as a markdown block suitable for system-prompt injection.
 On any failure (network, timeout, parse, schema), get_manifest()
 returns None — the caller is expected to fall back to a different
 source (today: kb scope search).
+
+Changes:
+  - 2026-05-22 (Increment 5): added ``validate_against_catalog`` — a
+    catalog-as-allowlist ingest gate that flags any node whose ``type``
+    is not in the widget manifest (sibling to ``validate_against_manifest``,
+    which only checks prop drift). Plus ``check_embed_node`` /
+    ``check_embed_nodes_in_spec`` — an https-only, host-allowlisted URL
+    policy for the sanctioned ``embed`` escape-hatch widget, with
+    loopback / private / link-local hosts hard-blocked unconditionally.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Control-flow node types that are always allowed alongside catalog
+# widgets — they carry no widget ``type`` from the renderer's closed
+# registry, they're spec grammar (``each`` loops, ``if`` gates).
+_CONTROL_FLOW_TYPES: frozenset[str] = frozenset({"if", "each"})
+
+# Curated default host allow-list for the ``embed`` widget's ``url`` mode.
+# These providers ship sandbox-friendly iframe-embeddable pages. The
+# operator can widen this via ``POCKETPAW_RIPPLE_EMBED_ALLOWED_HOSTS``.
+DEFAULT_EMBED_ALLOWED_HOSTS: tuple[str, ...] = (
+    "youtube-nocookie.com",
+    "player.vimeo.com",
+    "codepen.io",
+    "codesandbox.io",
+    "observablehq.com",
+    "www.figma.com",
+)
 
 _FETCH_TIMEOUT_SECONDS = 5.0
 _SCHEMA = "ripple.manifest/v1"
@@ -203,6 +231,255 @@ def _walk_validate(
     if isinstance(children, list):
         for i, child in enumerate(children):
             _walk_validate(child, f"{path}.children[{i}]", by_type, apply_aliases, issues)
+
+
+# ---------------------------------------------------------------------------
+# Catalog-as-allowlist ingest gate (Increment 5).
+#
+# Where ``validate_against_manifest`` checks per-widget *prop* drift, this
+# gate checks the ``type`` itself: a node whose ``type`` is not a known
+# catalog widget renders as a red "Unknown widget type" box. Catching it
+# at ingest time lets the agent-generation path retry with a corrective
+# prompt instead of shipping the broken box to the user.
+# ---------------------------------------------------------------------------
+
+
+def allowed_types_from_manifest(manifest: dict[str, Any]) -> list[str]:
+    """Extract the widget ``type`` list from a parsed manifest.
+
+    The widget-manifest's ``widgets`` array is the catalog allow-list.
+    Returns a sorted list of unique string types; ``[]`` when the
+    manifest has no widgets.
+    """
+    widgets = manifest.get("widgets") or []
+    types: set[str] = set()
+    for w in widgets:
+        t = w.get("type")
+        if isinstance(t, str) and t:
+            types.add(t)
+    return sorted(types)
+
+
+def validate_against_catalog(
+    spec: dict[str, Any] | None,
+    allowed_types: list[str] | set[str],
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag every node whose ``type`` is not in
+    the catalog allow-list.
+
+    ``allowed_types`` is the widget-manifest type list (the renderer's
+    closed widget registry). The control-flow types ``if`` and ``each``
+    are always allowed on top of it — they're spec grammar, not widgets.
+
+    Returns one issue dict per offending node; ``[]`` when ``spec`` is not
+    a dict or every node's type is known. Issue shape::
+
+        {
+          "path": "ui.children[2]",
+          "type": "revenue-card",
+          "suggestion": "card",      # nearest catalog match, or None
+        }
+
+    ``suggestion`` is the closest catalog widget by edit distance
+    (``difflib.get_close_matches``) so a corrective prompt can point the
+    agent at the right name. It is ``None`` when nothing is close.
+    """
+    if not isinstance(spec, dict):
+        return []
+    allowed: set[str] = set(allowed_types) | _CONTROL_FLOW_TYPES
+    # Suggestion pool excludes the control-flow types — suggesting `if`
+    # / `each` for a mistyped widget name is never the right fix.
+    pool = sorted(set(allowed_types))
+
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_catalog(root, "ui", allowed, pool, issues)
+    return issues
+
+
+def _walk_catalog(
+    node: Any,
+    path: str,
+    allowed: set[str],
+    pool: list[str],
+    issues: list[dict[str, Any]],
+) -> None:
+    if not isinstance(node, dict):
+        return
+
+    wtype = node.get("type")
+    if isinstance(wtype, str) and wtype and wtype not in allowed:
+        matches = difflib.get_close_matches(wtype, pool, n=1, cutoff=0.6)
+        issues.append(
+            {
+                "path": path,
+                "type": wtype,
+                "suggestion": matches[0] if matches else None,
+            }
+        )
+
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for i, child in enumerate(kids):
+                _walk_catalog(child, f"{path}.{key}[{i}]", allowed, pool, issues)
+
+
+# ---------------------------------------------------------------------------
+# Embed URL / host policy (Increment 5).
+#
+# The `embed` widget is the sanctioned escape hatch for content the widget
+# catalog can't express (a CodePen, a Figma frame, a self-contained viz).
+# Its `mode: "url"` form points an iframe at a third-party page, so the URL
+# is an SSRF / clickjacking boundary: https-only, host must be allow-listed,
+# and loopback / private / link-local / cloud-metadata hosts are blocked
+# UNCONDITIONALLY — even if the allow-list is widened to ``["*"]``.
+# ---------------------------------------------------------------------------
+
+
+def _host_allowed(host: str, allowed_hosts: list[str] | set[str]) -> bool:
+    """Return True when ``host`` is permitted by the allow-list.
+
+    A literal ``"*"`` entry widens the allow-list to every host (the
+    operator's explicit opt-in). Otherwise a host matches when it equals
+    an allow-list entry exactly, or is a sub-domain of one.
+    """
+    host = host.lower().rstrip(".")
+    for entry in allowed_hosts:
+        if not isinstance(entry, str) or not entry:
+            continue
+        if entry == "*":
+            return True
+        e = entry.lower().rstrip(".")
+        if host == e or host.endswith("." + e):
+            return True
+    return False
+
+
+def check_embed_url(url: Any, allowed_hosts: list[str] | set[str]) -> str | None:
+    """Validate one ``embed`` node ``url`` against the embed policy.
+
+    Returns ``None`` when the URL passes. Returns a human-readable reason
+    string when it fails. The policy, in order:
+
+    * ``url`` must be a non-empty string.
+    * scheme must be ``https`` — plain ``http`` is rejected.
+    * host must be present.
+    * loopback / RFC1918 / link-local / carrier-grade-NAT / cloud-metadata
+      hosts are hard-blocked **unconditionally** — this survives an
+      ``allowed_hosts`` widened to ``["*"]``.
+    * host must be in ``allowed_hosts`` (or ``allowed_hosts`` contains
+      ``"*"``).
+    """
+    # Imported here, not at module top, to keep the OSS-core import graph
+    # of this module light — the SSRF host classifier lives in security/.
+    from pocketpaw.security.url_validators import host_is_internal
+
+    if not isinstance(url, str) or not url.strip():
+        return "embed url must be a non-empty string"
+    parts = urlsplit(url.strip())
+    if parts.scheme != "https":
+        return f"embed url scheme '{parts.scheme or '(none)'}' not allowed — must be https"
+    if not parts.hostname:
+        return f"embed url has no host: {url!r}"
+    host = parts.hostname
+    # Hard block runs BEFORE the allow-list check so a `["*"]` allow-list
+    # can never re-enable an internal target.
+    if host_is_internal(host):
+        return (
+            f"embed url host '{host}' is loopback/private/link-local — "
+            f"blocked unconditionally (SSRF / metadata-endpoint protection)"
+        )
+    if not _host_allowed(host, allowed_hosts):
+        return f"embed url host '{host}' is not in the embed allow-list"
+    return None
+
+
+def check_embed_node(
+    node: dict[str, Any],
+    allowed_hosts: list[str] | set[str],
+) -> str | None:
+    """Validate a single ``embed`` node's policy.
+
+    Only ``mode: "url"`` embeds carry a URL boundary — a ``mode:
+    "srcdoc"`` embed is self-contained HTML and is not checked here.
+    Returns ``None`` when the node passes (or is not a URL-mode embed);
+    a reason string otherwise.
+    """
+    if not isinstance(node, dict) or node.get("type") != "embed":
+        return None
+    props = node.get("props")
+    if not isinstance(props, dict):
+        return None
+    if props.get("mode") != "url":
+        return None
+    return check_embed_url(props.get("url"), allowed_hosts)
+
+
+def find_embed_nodes(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and return every ``embed`` node found.
+
+    Used by the ingest pipeline to decide whether a spec needs an
+    embed-policy check and an audit-log entry.
+    """
+    if not isinstance(spec, dict):
+        return []
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    found: list[dict[str, Any]] = []
+    _walk_collect_embeds(root, found)
+    return found
+
+
+def _walk_collect_embeds(node: Any, found: list[dict[str, Any]]) -> None:
+    if not isinstance(node, dict):
+        return
+    if node.get("type") == "embed":
+        found.append(node)
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for child in kids:
+                _walk_collect_embeds(child, found)
+
+
+def check_embed_nodes_in_spec(
+    spec: dict[str, Any] | None,
+    allowed_hosts: list[str] | set[str],
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag every ``embed`` node that violates
+    the URL/host policy.
+
+    Returns one issue dict per offending node; ``[]`` when the spec has no
+    policy-violating embeds. Issue shape::
+
+        { "path": "ui.children[1]", "url": "http://...", "reason": "..." }
+    """
+    if not isinstance(spec, dict):
+        return []
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_embed_policy(root, "ui", allowed_hosts, issues)
+    return issues
+
+
+def _walk_embed_policy(
+    node: Any,
+    path: str,
+    allowed_hosts: list[str] | set[str],
+    issues: list[dict[str, Any]],
+) -> None:
+    if not isinstance(node, dict):
+        return
+    reason = check_embed_node(node, allowed_hosts)
+    if reason is not None:
+        props = node.get("props")
+        url = props.get("url") if isinstance(props, dict) else None
+        issues.append({"path": path, "url": url, "reason": reason})
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for i, child in enumerate(kids):
+                _walk_embed_policy(child, f"{path}.{key}[{i}]", allowed_hosts, issues)
 
 
 def format_for_prompt(manifest: dict[str, Any]) -> str:

@@ -62,6 +62,14 @@ workspace-visible). ``get_pocket_backend`` /
 ``get_pocket_backend_for_executor`` / ``_agent_backend_summary`` now
 carry ``allowed_writes`` so the executor and the edit specialist can see
 the write policy.
+Changes: 2026-05-22 (RFC 04 M3) — added the data-source refresh half:
+``list_interval_source_pockets`` (the scan the interval scheduler
+iterates), ``get_pocket_ripple_spec`` (raw-spec read for an internal,
+already-authenticated refresh caller), and the webhook-secret trio
+``resolve_webhook_pocket`` (constant-time secret auth — returns ``None``
+for every failure so the endpoint is not a pocket-existence oracle),
+``get_webhook_secret`` / ``rotate_webhook_secret`` (owner-only). The
+secret lives on the ``PocketBackendCredential`` row — never in the spec.
 Changes: 2026-05-22 (#1174) — widgets carry an optional ``spec`` field (a
 per-tile rippleSpec subtree the home grid renders). ``_build_widget_doc``,
 ``_widget_to_domain``, the REST ``add_widget``, and ``agent_update_widget``
@@ -111,7 +119,13 @@ from pocketpaw_ee.cloud.pockets.dto import (
     pocket_to_wire_dict,
 )
 from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
-from pocketpaw_ee.cloud.ripple_validator import validate_ripple_spec_logged
+from pocketpaw_ee.cloud.ripple_validator import (
+    CatalogViolationError,
+    format_violations_for_agent,
+    validate_against_catalog_logged,
+    validate_against_catalog_strict,
+    validate_ripple_spec_logged,
+)
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.shared.events import event_bus
 
@@ -333,6 +347,139 @@ async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str
 
 
 # ---------------------------------------------------------------------------
+# Catalog-as-allowlist ingest gate (Increment 5)
+# ---------------------------------------------------------------------------
+
+
+async def _catalog_allowed_types() -> list[str] | None:
+    """Resolve the widget-catalog allow-list from the Ripple manifest.
+
+    The manifest's ``widgets`` array is the renderer's closed registry.
+    Returns the type list, or ``None`` when the manifest is unavailable
+    (network failure, dev server down) — the caller skips the catalog
+    gate in that case, best-effort like the manifest-drift validator.
+    """
+    try:
+        from pocketpaw.config import get_settings
+        from pocketpaw.ripple.manifest import allowed_types_from_manifest, get_manifest
+
+        settings = get_settings()
+        manifest = await get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        if manifest is None:
+            return None
+        types = allowed_types_from_manifest(manifest)
+        return types or None
+    except Exception:
+        logger.debug("ripple catalog allow-list lookup skipped (non-fatal)", exc_info=True)
+        return None
+
+
+def _embed_allowed_hosts() -> list[str]:
+    """Return the configured ``embed`` host allow-list."""
+    try:
+        from pocketpaw.config import get_settings
+
+        return list(get_settings().ripple_embed_allowed_hosts or [])
+    except Exception:
+        logger.debug("ripple embed allow-list lookup skipped (non-fatal)", exc_info=True)
+        return []
+
+
+def _audit_embed_ingest(
+    spec: dict[str, Any] | None,
+    *,
+    actor: str,
+    workspace_id: str | None,
+    pocket_id: str | None,
+) -> None:
+    """Write an audit-log entry when an ingested spec contains an ``embed``
+    node.
+
+    The ``embed`` widget points an iframe at third-party content; an
+    audit trail of every embed-bearing spec that is published lets a
+    security review reconstruct what external surfaces a pocket exposed.
+    Audit failures must never break the ingest flow — the call is wrapped.
+    """
+    try:
+        from pocketpaw.ripple.manifest import find_embed_nodes
+
+        embeds = find_embed_nodes(spec)
+        if not embeds:
+            return
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        urls: list[str] = []
+        for node in embeds:
+            props = node.get("props")
+            if isinstance(props, dict):
+                url = props.get("url")
+                if isinstance(url, str) and url:
+                    urls.append(url)
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action="pocket.embed_ingest",
+                target=pocket_id or "(new)",
+                status="success",
+                category="pocket_embed",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                embed_count=len(embeds),
+                embed_urls=urls,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the ingest
+        logger.warning("pocket embed-ingest audit-log write failed", exc_info=True)
+
+
+async def _gate_catalog(
+    spec: dict[str, Any] | None,
+    *,
+    strict: bool,
+    actor: str,
+    workspace_id: str | None = None,
+    pocket_id: str | None = None,
+) -> None:
+    """Run the catalog-as-allowlist gate over a normalized rippleSpec.
+
+    ``strict=True`` (agent-generation path) raises ``CatalogViolationError``
+    on the first violation so the caller can retry the LLM. ``strict=False``
+    (human / import path) logs a structured warning per violation and does
+    not block. Either way, an embed-bearing spec is audit-logged.
+
+    Best-effort: when the widget manifest can't be fetched the gate is
+    skipped (same posture as the manifest-drift validator).
+    """
+    if not isinstance(spec, dict):
+        return
+    _audit_embed_ingest(spec, actor=actor, workspace_id=workspace_id, pocket_id=pocket_id)
+    allowed_types = await _catalog_allowed_types()
+    if allowed_types is None:
+        return
+    embed_hosts = _embed_allowed_hosts()
+    if strict:
+        validate_against_catalog_strict(
+            spec,
+            allowed_types,
+            embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+    else:
+        validate_against_catalog_logged(
+            spec,
+            allowed_types,
+            embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
 
@@ -351,6 +498,8 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
     if normalized_spec:
         validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
+        # Human/import path — catalog drift is logged for triage, not blocked.
+        await _gate_catalog(normalized_spec, strict=False, actor=user_id, workspace_id=workspace_id)
     widget_docs = [_build_widget_doc(w) for w in (body.widgets or [])]
 
     if body.project_id:
@@ -521,6 +670,14 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
         validate_ripple_spec_logged(
             normalized_spec, pocket_id=str(doc.id), workspace_id=doc.workspace
         )
+        # Human/import path — catalog drift is logged for triage, not blocked.
+        await _gate_catalog(
+            normalized_spec,
+            strict=False,
+            actor=user_id,
+            workspace_id=doc.workspace,
+            pocket_id=str(doc.id),
+        )
 
     if body.name is not None:
         doc.name = body.name
@@ -621,12 +778,25 @@ async def create_from_ripple_spec(
     description: str = "",
 ) -> str | None:
     """Auto-create a pocket from an agent-generated ripple spec.
-    Returns the pocket id on success, None on failure."""
+    Returns the pocket id on success, None on failure.
+
+    This is the agent-generation path, so the catalog gate runs in
+    STRICT mode — a spec with a node outside the widget catalog (or an
+    ``embed`` URL violating the host policy) is BLOCKED: the function
+    returns ``None`` rather than persist a pocket the renderer would
+    draw as a red "Unknown widget type" box. The inline chat path has
+    no LLM-retry loop, so blocking + logging is the strict behavior here
+    (the specialist edit tools, which can retry, surface the corrective
+    message instead).
+    """
     try:
         normalized = normalize_ripple_spec(ripple_spec)
         if not normalized:
             return None
         validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
+        # Strict catalog gate — CatalogViolationError is caught by the
+        # catch-all below, blocking the create and logging the reason.
+        await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
 
         name = (
             normalized.get("lifecycle", {}).get("name")
@@ -1208,6 +1378,18 @@ async def agent_update(
             validate_ripple_spec_logged(
                 doc.rippleSpec, pocket_id=str(doc.id), workspace_id=doc.workspace
             )
+            # Agent-generation path — strict catalog gate. Surface a
+            # violation as the error string so the specialist can retry.
+            try:
+                await _gate_catalog(
+                    doc.rippleSpec,
+                    strict=True,
+                    actor="agent",
+                    workspace_id=doc.workspace,
+                    pocket_id=str(doc.id),
+                )
+            except CatalogViolationError as exc:
+                return None, format_violations_for_agent(exc.violations)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
@@ -2213,6 +2395,14 @@ async def agent_create(
     normalized = normalize_ripple_spec(ripple_spec) if ripple_spec else None
     if normalized:
         validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
+        # Agent-generation path — strict catalog gate. A violation is
+        # returned as the error string so the specialist sees the
+        # corrective detail and can retry, instead of persisting a spec
+        # the renderer would draw as a red "Unknown widget type" box.
+        try:
+            await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
+        except CatalogViolationError as exc:
+            return None, None, format_violations_for_agent(exc.violations)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,
@@ -2683,6 +2873,184 @@ async def remove_pocket_backend(workspace_id: str, user_id: str, pocket_id: str)
     # no-event: see set_pocket_backend — credential rows aren't pocket state.
 
 
+# ---------------------------------------------------------------------------
+# Pocket data-source refresh — interval scan + webhook secret (RFC 04 M3)
+#
+# Interval refresh: the in-process scheduler (``pockets/refresh_scheduler.py``)
+# needs the set of pockets that carry at least one ``"interval"``-refresh
+# source. ``list_interval_source_pockets`` is the scan helper — it stays in
+# the service so the Pocket Beanie read obeys the 4-file rule.
+#
+# Webhook refresh: a ``"webhook"``-refresh source is re-run by an inbound
+# authenticated POST. The shared secret lives on the backend-credential row
+# (NEVER in the spec). The helpers below generate / rotate / resolve it.
+# ---------------------------------------------------------------------------
+
+
+async def list_interval_source_pockets() -> list[dict]:
+    """Return every pocket that declares at least one interval-refresh source.
+
+    Shape per row: ``{pocket_id, workspace_id, sources}`` where ``sources``
+    is the raw ``rippleSpec.sources`` dict. The interval scheduler iterates
+    this set, picks the ``"interval"`` sources, and re-runs each when due.
+
+    Global read (no workspace filter) — the scheduler is a process-wide
+    background loop with no tenant context; it serves every workspace. The
+    Mongo ``$elemMatch`` narrows to sources whose ``refresh`` array contains
+    ``"interval"`` so the loop only loads pockets it can act on.
+    """
+    # global-read: the interval scheduler is a process-wide background loop
+    # with no per-tenant request context; it scans across all workspaces.
+    query: dict[str, Any] = {
+        "rippleSpec.sources": {"$exists": True},
+    }
+    docs = await _PocketDoc.find(query).to_list()
+    out: list[dict] = []
+    for d in docs:
+        spec = d.rippleSpec
+        if not isinstance(spec, dict):
+            continue
+        sources = spec.get("sources")
+        if not isinstance(sources, dict) or not sources:
+            continue
+        has_interval = any(
+            isinstance(b, dict) and "interval" in (b.get("refresh") or []) for b in sources.values()
+        )
+        if not has_interval:
+            continue
+        out.append(
+            {
+                "pocket_id": str(d.id),
+                "workspace_id": d.workspace,
+                "sources": sources,
+            }
+        )
+    return out
+
+
+async def get_pocket_ripple_spec(workspace_id: str, pocket_id: str) -> dict | None:
+    """Return a pocket's raw ``rippleSpec`` for an internal refresh caller.
+
+    Used by the webhook-refresh route — it has already authenticated via
+    the per-pocket webhook secret, so this skips the user-facing access
+    checks in ``get``. Returns ``None`` when the pocket is missing or
+    belongs to a different workspace. ``$source`` markers are NOT resolved
+    — the source executor only reads ``rippleSpec.sources``.
+    """
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001
+        return None
+    if doc is None or doc.workspace != workspace_id:
+        return None
+    spec = doc.rippleSpec
+    return spec if isinstance(spec, dict) else {}
+
+
+async def resolve_webhook_pocket(pocket_id: str, presented_secret: str) -> tuple | None:
+    """Authenticate an inbound webhook-refresh request by its secret.
+
+    Returns the executor-creds tuple ``(base_url, auth_type, auth_header,
+    token, allowed_writes, approval_route, workspace_id)`` ONLY when the
+    pocket has a backend with a webhook secret AND ``presented_secret``
+    matches it (constant-time compare). Returns ``None`` for EVERY failure
+    — wrong secret, no secret set, no backend, missing pocket — so the
+    caller raises one identical error and the endpoint is not a
+    pocket-existence oracle.
+
+    The comparison uses ``secrets.compare_digest`` so a timing side channel
+    cannot leak the secret. An empty presented secret short-circuits to
+    ``None`` without a DB read.
+    """
+    if not pocket_id or not presented_secret:
+        return None
+    # No workspace filter: the inbound webhook carries no tenant context.
+    # The pocket_id + secret pair IS the credential; the secret compare
+    # below is the gate. The credential row carries its own workspace_id.
+    # global-read: webhook callers present no tenant context — the secret is the gate.
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+    )
+    if doc is None:
+        return None
+    stored = getattr(doc, "webhook_secret", None)
+    if not stored:
+        return None
+    if not secrets.compare_digest(stored, presented_secret):
+        return None
+
+    token = ""
+    if doc.auth_type != "none" and doc.encrypted_token and doc.nonce and doc.salt:
+        token = backend_crypto.decrypt_token(doc.encrypted_token, doc.nonce, doc.salt)
+    return (
+        doc.base_url,
+        doc.auth_type,
+        doc.auth_header,
+        token,
+        _allowed_writes_wire(doc),
+        _approval_route_wire(doc),
+        doc.workspace_id,
+    )
+
+
+def _new_webhook_secret() -> str:
+    """Mint a fresh URL-safe webhook secret (32 bytes of entropy)."""
+    return secrets.token_urlsafe(32)
+
+
+async def get_webhook_secret(workspace_id: str, pocket_id: str) -> str | None:
+    """Return the pocket's webhook secret, or ``None`` if none is set.
+
+    Owner-only at the route layer. The secret is the credential a webhook
+    caller echoes back, so the owner must be able to read it once to
+    configure the upstream. Raises ``pocket_backend.not_configured`` when
+    the pocket has no backend — a webhook secret with no backend to refresh
+    against is meaningless.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a webhook secret",
+        )
+    return getattr(doc, "webhook_secret", None)
+
+
+async def rotate_webhook_secret(workspace_id: str, user_id: str, pocket_id: str) -> str:
+    """Generate a fresh webhook secret for the pocket, replacing any prior.
+
+    Owner-only. Rotating invalidates the previous secret immediately — any
+    upstream still using the old value gets a 403 until reconfigured.
+    Returns the new secret (the ONLY time it is handed back outside the
+    owner-only GET). Audit-logged. Rejects with
+    ``pocket_backend.not_configured`` when no backend is set.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a webhook secret",
+        )
+    doc.webhook_secret = _new_webhook_secret()
+    await doc.save()
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.webhook_rotate",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: see set_pocket_backend — credential rows aren't pocket state.
+    return doc.webhook_secret
+
+
 __all__ = [
     "access_via_share_link",
     "add_agent",
@@ -2717,10 +3085,13 @@ __all__ = [
     "get",
     "get_pocket_backend",
     "get_pocket_backend_for_executor",
+    "get_pocket_ripple_spec",
+    "get_webhook_secret",
     "has_action_run_access",
     "has_edit_access",
     "is_member",
     "is_owner",
+    "list_interval_source_pockets",
     "list_pockets",
     "remove_agent",
     "remove_collaborator",
@@ -2728,7 +3099,9 @@ __all__ = [
     "remove_team_member",
     "remove_widget",
     "reorder_widgets",
+    "resolve_webhook_pocket",
     "revoke_share_link",
+    "rotate_webhook_secret",
     "set_pocket_approval_route",
     "set_pocket_backend",
     "set_pocket_write_policy",

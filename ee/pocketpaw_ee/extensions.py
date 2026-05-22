@@ -9,6 +9,13 @@ point at these classes are declared in `pyproject.toml` (and will migrate to
 Each provider does its heavy `pocketpaw_ee` imports lazily inside methods so
 that merely loading this module — which the registry does on first access —
 stays cheap and free of import cycles.
+
+Updated: 2026-05-22 (RFC 04 M3) — ``CloudLifecycleHook`` now starts the
+pocket interval-refresh scheduler in ``on_startup`` and cancels it in
+``on_shutdown``. The scheduler is a single asyncio task owned at module
+scope inside ``cloud.pockets.refresh_scheduler``; it is self-gated on
+``POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED`` so the start call is a
+no-op unless a deployment opts in.
 """
 
 from __future__ import annotations
@@ -108,8 +115,34 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cloud chat-title listener registration failed: %s", exc)
 
+        # Pocket interval-refresh scheduler (RFC 04 M3). A single asyncio
+        # task that periodically re-runs pocket data sources whose refresh
+        # policy includes `"interval"`. Self-gated on
+        # POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED (default OFF — a
+        # pytest run never spawns it; a multi-replica deploy runs it on
+        # exactly one replica). The task lives at module scope inside the
+        # scheduler so this no-`app` lifecycle hook can still own it.
+        try:
+            from pocketpaw_ee.cloud.pockets.refresh_scheduler import start_scheduler
+
+            await start_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pocket interval-refresh scheduler start failed: %s", exc)
+
     async def on_shutdown(self) -> None:
-        # Cloud teardown is handled inside mount_cloud's own shutdown hook.
+        # Most cloud teardown is handled inside mount_cloud's own shutdown
+        # hook. The interval-refresh scheduler is owned by this lifecycle
+        # hook (it was started in on_startup), so it is cancelled here so
+        # the background task does not outlive the process.
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            from pocketpaw_ee.cloud.pockets.refresh_scheduler import stop_scheduler
+
+            await stop_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pocket interval-refresh scheduler stop failed: %s", exc)
         return None
 
 

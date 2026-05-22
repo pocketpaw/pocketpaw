@@ -31,6 +31,14 @@ third-party endpoint) and is left as ``api`` — never redirected onto the
 pocket's credentialed backend. ``call_binding`` handlers wired with the
 wrong binding-name field (``action_id`` / ``name``) are repaired to
 ``binding``.
+
+Changes: 2026-05-22 (RFC 04 M3) — ``_lifted_source_entry`` now carries an
+interval through. The authoring agent declares "poll every N seconds"
+under any of several invented keys (``interval`` / ``interval_seconds``
+/ ``poll_seconds`` / …); ``_coerce_interval`` picks the first that parses
+to a positive int, writes it as ``refresh_interval_seconds`` on the
+lifted source, and appends ``"interval"`` to its refresh policy. The
+interval scheduler floors a sub-minimum value at run time.
 """
 
 from __future__ import annotations
@@ -122,12 +130,51 @@ def _lifted_source_entry(entry: dict[str, Any], key: str) -> dict[str, Any] | No
     else:
         resolved_refresh = ["manual"]
 
-    return {
+    lifted: dict[str, Any] = {
         "method": "GET",
         "path": _relative_path(raw_path),
         "bind": resolved_bind,
         "refresh": resolved_refresh,
     }
+
+    # RFC 04 M3 — carry an interval through. The agent emits the interval
+    # under any of several invented keys; pick the first that parses to a
+    # positive int. The interval scheduler floors a too-small value, so we
+    # only need it to be >= 1 here (a sub-floor value is corrected later).
+    interval = _coerce_interval(entry)
+    if interval is not None:
+        lifted["refresh_interval_seconds"] = interval
+        if "interval" not in resolved_refresh:
+            resolved_refresh.append("interval")
+    return lifted
+
+
+def _coerce_interval(entry: dict[str, Any]) -> int | None:
+    """Pull a refresh interval (seconds) out of a hallucinated REST entry.
+
+    The authoring agent has no single canonical key for "poll every N
+    seconds" — it invents ``refresh_interval_seconds`` / ``interval`` /
+    ``interval_seconds`` / ``poll_seconds`` / ``poll_interval``. The first
+    one that coerces to a positive int wins. Returns ``None`` when none is
+    present or usable, in which case the source has no interval trigger.
+    """
+    for key in (
+        "refresh_interval_seconds",
+        "interval_seconds",
+        "interval",
+        "poll_seconds",
+        "poll_interval",
+    ):
+        raw = entry.get(key)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value >= 1:
+            return value
+    return None
 
 
 def _repair_run_source_handler(handler: Any, sources: dict[str, Any]) -> Any:
