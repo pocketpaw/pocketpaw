@@ -769,9 +769,7 @@ async def set_source_for_agent(
 
 async def remove_source_for_agent(pocket_id: str, source_key: str) -> dict[str, Any]:
     """Remove a read-only data source declaration from the pocket."""
-    result, err = await pockets_service.agent_remove_source(
-        pocket_id, source_key=source_key
-    )
+    result, err = await pockets_service.agent_remove_source(pocket_id, source_key=source_key)
     if err is not None or result is None:
         return {"ok": False, "error": err or "remove_source failed"}
     pocket_view: dict[str, Any] = result.get("pocket") or {}

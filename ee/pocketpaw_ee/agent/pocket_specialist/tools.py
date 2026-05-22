@@ -861,7 +861,7 @@ class _SetSourceArgs(BaseModel):
         default=None,
         description=(
             "When to run the source: `pocket_open` (on open) and/or `manual` "
-            "(refresh button). Defaults to `[\"pocket_open\"]` when omitted."
+            '(refresh button). Defaults to `["pocket_open"]` when omitted.'
         ),
     )
 

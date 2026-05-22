@@ -72,9 +72,7 @@ def _looks_like_rest_source(entry: dict[str, Any]) -> bool:
     return has_endpoint and has_target
 
 
-def _lifted_source_entry(
-    entry: dict[str, Any], key: str
-) -> dict[str, Any] | None:
+def _lifted_source_entry(entry: dict[str, Any], key: str) -> dict[str, Any] | None:
     """Translate one hallucinated REST ``tool_specs`` entry into a canonical
     ``rippleSpec.sources`` entry. Returns ``None`` when the entry cannot be
     represented as an alpha source (non-GET method — alpha is GET-only).
@@ -91,9 +89,7 @@ def _lifted_source_entry(
 
     raw_path = entry.get("path") or entry.get("url")
     if not isinstance(raw_path, str) or not raw_path:
-        log.warning(
-            "ripple_normalizer: skipped tool_specs entry %r — no path/url", key
-        )
+        log.warning("ripple_normalizer: skipped tool_specs entry %r — no path/url", key)
         return None
 
     into = entry.get("into")
@@ -196,9 +192,9 @@ def _lift_rest_sources(spec: dict[str, Any]) -> dict[str, Any]:
     passes through structurally unchanged.
     """
     result = spec
-    sources: dict[str, Any] = dict(spec.get("sources") or {}) if isinstance(
-        spec.get("sources"), dict
-    ) else {}
+    sources: dict[str, Any] = (
+        dict(spec.get("sources") or {}) if isinstance(spec.get("sources"), dict) else {}
+    )
 
     raw_tool_specs = spec.get("tool_specs")
     if isinstance(raw_tool_specs, list) and raw_tool_specs:
@@ -237,9 +233,7 @@ def _lift_rest_sources(spec: dict[str, Any]) -> dict[str, Any]:
     if isinstance(result.get("panes"), dict):
         result = {
             **result,
-            "panes": {
-                k: _walk_repair_handlers(v, sources) for k, v in result["panes"].items()
-            },
+            "panes": {k: _walk_repair_handlers(v, sources) for k, v in result["panes"].items()},
         }
     return result
 

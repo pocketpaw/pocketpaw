@@ -672,9 +672,7 @@ async def _run_edit_subagent_pipeline(
     try:
         from pocketpaw_ee.cloud.pockets import service as _pockets_service
 
-        backend_summary = await _pockets_service.get_pocket_backend(
-            workspace_id, input.pocket_id
-        )
+        backend_summary = await _pockets_service.get_pocket_backend(workspace_id, input.pocket_id)
     except Exception:  # noqa: BLE001 — a missing backend summary must not block the edit
         log.debug("[pocket-specialist:edit] backend summary fetch failed", exc_info=True)
     system_prompt = fill_current_pocket(

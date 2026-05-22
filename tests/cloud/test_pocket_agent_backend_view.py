@@ -210,9 +210,7 @@ def test_fill_current_pocket_renders_not_configured():
     from pocketpaw.ripple import fill_current_pocket
     from pocketpaw.ripple._pockets import _CURRENT_POCKET_BLOCK_TEMPLATE
 
-    out = fill_current_pocket(
-        _CURRENT_POCKET_BLOCK_TEMPLATE, "pkt-123", {"configured": False}
-    )
+    out = fill_current_pocket(_CURRENT_POCKET_BLOCK_TEMPLATE, "pkt-123", {"configured": False})
     assert "__BACKEND_SUMMARY__" not in out
     assert "Backend: not configured" in out
 

@@ -42,9 +42,7 @@ def set_source(spec: dict[str, Any], key: str, binding: dict[str, Any]) -> dict[
         sources = {}
         spec["sources"] = sources
     if not isinstance(sources, dict):
-        raise ValueError(
-            f"rippleSpec.sources is a {type(sources).__name__}, expected an object"
-        )
+        raise ValueError(f"rippleSpec.sources is a {type(sources).__name__}, expected an object")
     sources[key] = binding
     return spec
 

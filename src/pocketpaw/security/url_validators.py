@@ -150,8 +150,7 @@ def validate_external_url_strict(value: str) -> str:
     parts = urlsplit(value)
     if parts.scheme != "https":
         raise ValueError(
-            f"URL scheme '{parts.scheme or '(none)'}' not allowed — backend "
-            f"URLs must use https"
+            f"URL scheme '{parts.scheme or '(none)'}' not allowed — backend URLs must use https"
         )
     if not parts.hostname:
         raise ValueError(f"URL has no host: {value!r}")

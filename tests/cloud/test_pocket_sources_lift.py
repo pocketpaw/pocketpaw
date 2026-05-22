@@ -194,9 +194,7 @@ def test_lift_heuristic_without_kind_field():
     spec = {
         "title": "No Kind",
         "version": "1.0",
-        "tool_specs": [
-            {"id": "src_todos", "method": "GET", "url": "/todos", "into": "todos"}
-        ],
+        "tool_specs": [{"id": "src_todos", "method": "GET", "url": "/todos", "into": "todos"}],
         "state": {"todos": []},
         "ui": {"type": "flex", "children": []},
     }

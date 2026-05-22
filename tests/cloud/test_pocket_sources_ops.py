@@ -313,9 +313,7 @@ async def test_agent_remove_source_noop_when_absent(fake_doc):
 async def test_set_source_for_agent_returns_ok_shape(fake_doc):
     ctx, push_calls = _patches(fake_doc)
     with ctx:
-        result = await agent_context.set_source_for_agent(
-            fake_doc.id, "prs", dict(_VALID_BINDING)
-        )
+        result = await agent_context.set_source_for_agent(fake_doc.id, "prs", dict(_VALID_BINDING))
     assert result["ok"] is True
     assert fake_doc.rippleSpec["sources"]["prs"]["bind"] == "state.prs"
     assert push_calls[0]["action"] == "replace"

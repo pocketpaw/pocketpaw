@@ -73,8 +73,7 @@ def test_missing_auth_secret_raises(monkeypatch):
 def test_strict_url_accepts_normal_https():
     assert validate_external_url_strict("https://api.example.com") == "https://api.example.com"
     assert (
-        validate_external_url_strict("https://api.example.com/v1")
-        == "https://api.example.com/v1"
+        validate_external_url_strict("https://api.example.com/v1") == "https://api.example.com/v1"
     )
 
 
