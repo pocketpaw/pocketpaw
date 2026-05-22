@@ -288,6 +288,7 @@ def test_build_system_prompt_includes_template_block_when_template_id_set(
 ) -> None:
     """``_build_system_prompt`` splices the template skeleton + the
     customization rules in when ``hints.template_id`` is set."""
+    pytest.importorskip("pocketpaw_ee")  # EE-only: skips on an OSS-only install
     _install_to_default(tmp_path, monkeypatch)
 
     from pocketpaw_ee.agent.pocket_specialist.runtime import (
@@ -310,6 +311,7 @@ def test_build_system_prompt_excludes_template_block_without_template_id(
 ) -> None:
     """Without a ``template_id`` hint the template block is absent —
     the specialist cold-generates as before."""
+    pytest.importorskip("pocketpaw_ee")  # EE-only: skips on an OSS-only install
     _install_to_default(tmp_path, monkeypatch)
 
     from pocketpaw_ee.agent.pocket_specialist.runtime import (
@@ -331,6 +333,7 @@ def test_build_system_prompt_excludes_template_block_without_template_id(
 def test_build_system_prompt_ignores_unknown_template_id(tmp_path: Path, monkeypatch) -> None:
     """An unknown ``template_id`` slug is ignored — no template block,
     no crash. The specialist falls back to cold generation."""
+    pytest.importorskip("pocketpaw_ee")  # EE-only: skips on an OSS-only install
     _install_to_default(tmp_path, monkeypatch)
 
     from pocketpaw_ee.agent.pocket_specialist.runtime import (
@@ -353,6 +356,7 @@ async def test_agent_mode_skips_draft_kit_when_template_id_set(tmp_path: Path, m
     """``AgentModeAdapter.create`` short-circuits a ``template_id`` hint:
     it loads the template and goes straight to validate-and-persist,
     SKIPPING the draft-kit round-trip."""
+    pytest.importorskip("pocketpaw_ee")  # EE-only: skips on an OSS-only install
     _install_to_default(tmp_path, monkeypatch)
 
     import pocketpaw_ee.agent.pocket_specialist.adapters as adapters_mod
@@ -404,6 +408,7 @@ async def test_agent_mode_falls_back_to_draft_kit_on_unknown_slug(
 ) -> None:
     """An unknown ``template_id`` slug falls back to the normal draft-kit
     flow — never persists, never crashes."""
+    pytest.importorskip("pocketpaw_ee")  # EE-only: skips on an OSS-only install
     _install_to_default(tmp_path, monkeypatch)
 
     import pocketpaw_ee.agent.pocket_specialist.adapters as adapters_mod
