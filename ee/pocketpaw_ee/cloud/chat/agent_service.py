@@ -8,6 +8,12 @@ handles *what the agent sees*:
   pocket-scoped tool specs where applicable.
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
+
+Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — ``build_behavior_instructions``
+fills the interaction prompt's current-pocket block via ``fill_current_pocket``
+(both the pocket-id and backend-summary tokens) instead of a bare
+``POCKET_ID_TOKEN`` replace, so the new ``__BACKEND_SUMMARY__`` token never
+leaks as literal text.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from typing import Any
 from pocketpaw.ripple import (
     INLINE_RIPPLE_SYSTEM_PROMPT,
     POCKET_DELEGATION_RULE,
-    POCKET_ID_TOKEN,
+    fill_current_pocket,
     get_pocket_prompts,
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
@@ -492,7 +498,12 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         if ctx.intent == "pocket_create":
             parts.append(creation_prompt)
         elif ctx.pocket_id:
-            parts.append(interaction_prompt.replace(POCKET_ID_TOKEN, ctx.pocket_id))
+            # build_behavior_instructions is sync — it cannot await the
+            # backend-summary read. The main chat agent delegates edits
+            # to the specialist anyway, so pass None: the prompt renders
+            # "configured state unknown — call get_pocket to check",
+            # and get_pocket now carries the real backend summary.
+            parts.append(fill_current_pocket(interaction_prompt, ctx.pocket_id, None))
         else:
             parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
     return "\n".join(parts)

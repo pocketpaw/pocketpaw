@@ -7,6 +7,11 @@
 #   added the ``blocked_by`` field carrying cloud Task ids this task
 #   depends on. Tuple stays read-only on the frozen dataclass; the
 #   service writes it via ``agent_create_task`` + ``agent_update_task``.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) — added
+#   ``success_criteria`` and ``preconditions`` tuples carrying the
+#   machine-verifiable criteria the planner emits on each TaskSpec.
+#   Read-only on the frozen dataclass; the service maps them from the
+#   Beanie doc. Unblocks completion-time verification (pocketpaw#1162).
 """Domain value objects for the Tasks entity.
 
 Pure-Python frozen dataclasses. ``tasks/service.py`` owns the
@@ -97,6 +102,8 @@ class Task:
     cycle_id: str | None = None
     project_id: str | None = None
     blocked_by: tuple[str, ...] = ()
+    success_criteria: tuple[str, ...] = ()
+    preconditions: tuple[str, ...] = ()
     due_at: datetime | None = None
     blocked_reason: str | None = None
     created_at: datetime | None = None

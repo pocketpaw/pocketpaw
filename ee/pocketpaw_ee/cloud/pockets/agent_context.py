@@ -7,6 +7,13 @@ workspace/user/session identity from the per-stream ``ContextVar``s,
 and pushes ``pocket_mutation`` / ``pocket_created`` events onto the
 active SSE stream's queue. All Beanie reads/writes live in the
 service modules.
+
+Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the
+``set_source_for_agent`` / ``remove_source_for_agent`` wrappers so the
+edit specialist can author the pocket's ``rippleSpec.sources`` block.
+They emit a full-document ``replace`` ``pocket_mutation`` (the
+frontend's ``applyMutation`` already understands ``replace``) so no
+paw-enterprise change is needed.
 """
 
 from __future__ import annotations
@@ -440,10 +447,11 @@ async def add_node_for_agent(
     parent_id: str,
     spec: dict[str, Any],
     after_id: str | None = None,
+    index: int | None = None,
 ) -> dict[str, Any]:
     """Insert a new node into the pocket's UI tree."""
     result, err = await pockets_service.agent_add_node(
-        pocket_id, parent_id=parent_id, spec=spec, after_id=after_id
+        pocket_id, parent_id=parent_id, spec=spec, after_id=after_id, index=index
     )
     if err is not None or result is None:
         return {"ok": False, "error": err or "add_node failed"}
@@ -455,6 +463,7 @@ async def add_node_for_agent(
         {
             "parent_id": parent_id,
             "after_id": after_id,
+            "index": index,
             "subtree": subtree,
         },
     )
@@ -733,6 +742,41 @@ async def patch_state_for_agent(pocket_id: str, partial: dict[str, Any]) -> dict
     return {"ok": True, "previous": result.get("previous")}
 
 
+# ---------------------------------------------------------------------------
+# rippleSpec.sources mutations — the read-only data-binding surface (RFC 04)
+# ---------------------------------------------------------------------------
+#
+# A ``sources`` declaration is part of the persisted pocket document, so
+# unlike the granular node / state ops there is no in-place frontend op for
+# it — these wrappers push a full-document ``replace`` ``pocket_mutation``
+# via ``_push_replace``. The frontend's ``applyMutation`` already handles
+# ``replace``; no paw-enterprise change is needed for this fix.
+
+
+async def set_source_for_agent(
+    pocket_id: str, source_key: str, binding: dict[str, Any]
+) -> dict[str, Any]:
+    """Declare (or replace) a read-only data source on the pocket."""
+    result, err = await pockets_service.agent_set_source(
+        pocket_id, source_key=source_key, binding=binding
+    )
+    if err is not None or result is None:
+        return {"ok": False, "error": err or "set_source failed"}
+    pocket_view: dict[str, Any] = result.get("pocket") or {}
+    await _push_replace(pocket_view)
+    return {"ok": True, "source_key": source_key, "binding": result.get("binding")}
+
+
+async def remove_source_for_agent(pocket_id: str, source_key: str) -> dict[str, Any]:
+    """Remove a read-only data source declaration from the pocket."""
+    result, err = await pockets_service.agent_remove_source(pocket_id, source_key=source_key)
+    if err is not None or result is None:
+        return {"ok": False, "error": err or "remove_source failed"}
+    pocket_view: dict[str, Any] = result.get("pocket") or {}
+    await _push_replace(pocket_view)
+    return {"ok": True, "source_key": source_key}
+
+
 __all__ = [
     "add_node_for_agent",
     "add_widget_for_agent",
@@ -745,11 +789,13 @@ __all__ = [
     "patch_state_for_agent",
     "remove_node_for_agent",
     "remove_prop_array_item_for_agent",
+    "remove_source_for_agent",
     "remove_state_for_agent",
     "remove_widget_for_agent",
     "replace_node_for_agent",
     "set_node_prop_for_agent",
     "set_prop_array_item_for_agent",
+    "set_source_for_agent",
     "set_state_for_agent",
     "update_pocket_for_agent",
     "update_widget_for_agent",

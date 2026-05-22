@@ -10,6 +10,19 @@ close UI-TESTING-GUIDE §11 gap B5 (no widget layout save/share):
 The YAML + in-process store live in ee.cloud.pockets.layouts. Export is
 pure. Template storage is workspace-scoped and in-process for now; the
 REST contract matches the MongoDB-backed version that Wave 4 will ship.
+
+Updated: 2026-05-21 (RFC 04 alpha) — Added three routes for the per-pocket
+backend binding + read-only source-run feature:
+
+    PUT  /pockets/{id}/backend       — bind a pocket to one backend
+    GET  /pockets/{id}/backend       — read the binding summary (no token)
+    POST /pockets/{id}/sources/run   — run the spec's read-only GET sources
+
+Updated: 2026-05-21 (PR #1177 security pass) — added the missing
+DELETE /pockets/{id}/backend route so a configured credential can be
+revoked; the GET route now requires pocket edit access (owner/editor),
+matching the PUT route; the source-run route threads user_id into the
+executor for per-user rate limiting + audit logging.
 """
 
 from __future__ import annotations
@@ -27,7 +40,10 @@ from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
     CreatePocketRequest,
+    PocketBackendConfigRequest,
+    PocketBackendConfigResponse,
     ReorderWidgetsRequest,
+    RunSourcesRequest,
     ShareLinkRequest,
     UpdatePocketRequest,
     UpdateWidgetRequest,
@@ -219,6 +235,123 @@ async def delete_pocket(
 ) -> Response:
     await pockets_service.delete(pocket_id, user_id)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Backend binding + read-only source run (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+@router.put("/{pocket_id}/backend", dependencies=[Depends(require_pocket_edit)])
+async def set_pocket_backend(
+    pocket_id: str,
+    body: PocketBackendConfigRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Bind this pocket to one external backend (base URL + auth credential).
+
+    The token is encrypted server-side; the response never echoes it back.
+    A bad base URL (non-https, internal host) yields a 400.
+    """
+    result = await pockets_service.set_pocket_backend(
+        workspace_id,
+        user_id,
+        pocket_id,
+        body.base_url,
+        body.auth_type,
+        body.auth_token,
+        body.auth_header,
+    )
+    return PocketBackendConfigResponse(**result)
+
+
+@router.get("/{pocket_id}/backend", dependencies=[Depends(require_pocket_edit)])
+async def get_pocket_backend(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Read this pocket's backend binding summary. Never returns the token.
+
+    Requires pocket **edit** access — backend config metadata is
+    owner/editor-facing, consistent with the PUT route. A 404 here means
+    "no backend configured" for this pocket.
+    """
+    # Mirror get_pocket's access check before exposing the binding.
+    await pockets_service.get(pocket_id, user_id)
+    result = await pockets_service.get_pocket_backend(workspace_id, pocket_id)
+    if result is None:
+        raise CloudError(404, "pocket_backend.not_found", "No backend configured for this pocket")
+    return PocketBackendConfigResponse(**result)
+
+
+@router.delete(
+    "/{pocket_id}/backend",
+    status_code=204,
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def delete_pocket_backend(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Revoke this pocket's backend binding — deletes the stored credential.
+
+    Requires pocket **owner** access. Idempotent: a pocket with no backend
+    configured still returns 204.
+    """
+    await pockets_service.remove_pocket_backend(workspace_id, user_id, pocket_id)
+    return Response(status_code=204)
+
+
+@router.post("/{pocket_id}/sources/run")
+async def run_pocket_sources(
+    pocket_id: str,
+    body: RunSourcesRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Run the pocket's read-only ``rippleSpec.sources`` against its backend.
+
+    Read access mirrors ``get_pocket`` — deliberately NOT gated on edit
+    access. Any pocket reader may run already-authored sources: that is the
+    core shared-live-pocket UX, where a viewer triggers the ``pocket_open``
+    refresh of a shared dashboard. A viewer cannot change the backend or the
+    source paths (both are edit-only), so the SSRF hardening in
+    ``source_executor`` plus the immutable, edit-authored source list bound
+    the risk to "fetch the same GET bindings the editors already approved".
+
+    The hydrated state is returned in THIS response body — there is no
+    ``pocket_mutation`` SSE emit, because the run endpoint is a standalone
+    REST call outside any SSE stream.
+    """
+    pocket = await pockets_service.get(pocket_id, user_id)
+    ripple_spec = pocket.get("rippleSpec") or {}
+
+    creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
+    if creds is None:
+        raise CloudError(
+            400,
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
+        )
+    base_url, auth_type, auth_header, token = creds
+
+    from pocketpaw_ee.cloud.pockets import source_executor
+
+    # no-event: source hydration is response-body delivery, not persisted
+    return await source_executor.run_sources(
+        pocket_id=pocket_id,
+        user_id=user_id,
+        ripple_spec=ripple_spec,
+        base_url=base_url,
+        auth_type=auth_type,
+        auth_header=auth_header,
+        token=token,
+        trigger=body.trigger,
+        only_source=body.source,
+    )
 
 
 # ---------------------------------------------------------------------------

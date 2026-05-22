@@ -4,6 +4,14 @@
 #   (domain detection, complexity estimation, clarification questions).
 # Updated: 2026-02-12 — Added RESEARCH_PROMPT_QUICK and RESEARCH_PROMPT_DEEP
 #   for configurable research depth.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) — TASK_BREAKDOWN_PROMPT
+#   now instructs the planner to emit machine-verifiable success_criteria
+#   and preconditions per task, with explicit discipline: criteria must be
+#   objectively checkable (no "works as expected" / "should work
+#   correctly"). Feeds the new first-class TaskSpec fields.
+# Updated: 2026-05-21 (PR #1164 review) — TASK_BREAKDOWN_PROMPT JSON
+#   example no longer says the description holds "acceptance criteria";
+#   criteria belong in the dedicated success_criteria array.
 #
 # Prompt templates:
 #   GOAL_PARSE_PROMPT — structured goal analysis (domain, complexity, roles)
@@ -169,6 +177,26 @@ or access to external systems that an AI agent cannot reach
 - Use short keys like "t1", "t2", etc.
 - Keep estimated_minutes realistic (15-120 range for most tasks)
 
+SUCCESS CRITERIA — every task MUST have a "success_criteria" array:
+- Each entry is ONE concrete, objectively-verifiable statement that is true \
+once the task is done. Someone who did not do the work must be able to check \
+it without judgement calls.
+- BANNED — never write vague criteria like "works as expected", "should work \
+correctly", "is high quality", "looks good", or "is done properly". These \
+cannot be verified and will be rejected.
+- GOOD examples: "GET /health returns HTTP 200 with body {{\\"status\\":\\"ok\\"}}", \
+"the invoice CSV has one row per overdue account", "pytest tests/ exits 0".
+- Give 1-4 criteria per task — enough to confirm the deliverable, no filler.
+
+PRECONDITIONS — every task MUST have a "preconditions" array:
+- Each entry is ONE state/environment condition that must hold BEFORE the task \
+can start, OR a condition under which the task should NOT run.
+- These are conditions about the world — NOT dependencies on other tasks \
+(those go in blocked_by_keys). Example preconditions: "a Postgres database \
+is reachable", "the customer list has been uploaded to the workspace", \
+"do not run if no invoices are overdue".
+- Use an empty array [] when a task genuinely has no preconditions.
+
 Output ONLY a valid JSON array. No markdown code fences. No commentary. \
 Just the raw JSON array:
 
@@ -176,13 +204,15 @@ Just the raw JSON array:
   {{
     "key": "t1",
     "title": "...",
-    "description": "... with acceptance criteria",
+    "description": "freeform context and approach for this task",
     "task_type": "agent",
     "priority": "medium",
     "tags": ["..."],
     "estimated_minutes": 30,
     "required_specialties": ["..."],
-    "blocked_by_keys": []
+    "blocked_by_keys": [],
+    "success_criteria": ["concrete verifiable statement", "..."],
+    "preconditions": ["concrete state condition", "..."]
   }}
 ]
 """

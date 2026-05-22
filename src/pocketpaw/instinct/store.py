@@ -1,5 +1,11 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
+#   mark_executed() now accepts a structured OutcomeVerdict as well as a
+#   plain string. A verdict is stored as JSON in the existing ``outcome``
+#   TEXT column; _row_to_action() detects JSON-encoded verdicts on read and
+#   rebuilds them, falling back to a plain string for legacy free-text rows.
+#   No schema migration — the column type is unchanged.
 # Updated: 2026-03-30 — Added limit param to _query_actions, list_actions() public method.
 # Updated: 2026-04-12 (Move 1 PR-A) — Corrections table + record_correction() and
 #   get_corrections*() methods for the correction loop. Human edits between
@@ -35,8 +41,24 @@ from pocketpaw.instinct.models import (
     ActionTrigger,
     AuditCategory,
     AuditEntry,
+    OutcomeVerdict,
 )
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
+
+
+def _serialize_outcome(outcome: str | OutcomeVerdict | None) -> str | None:
+    """Serialize an Action outcome for the ``outcome`` TEXT column.
+
+    A structured :class:`OutcomeVerdict` is stored as its JSON dump; a plain
+    string is stored as-is (the legacy free-text form). ``None`` stays
+    ``None``. The matching read-side decode lives in
+    :meth:`InstinctStore._deserialize_outcome`.
+    """
+    if outcome is None:
+        return None
+    if isinstance(outcome, OutcomeVerdict):
+        return outcome.model_dump_json()
+    return outcome
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -334,11 +356,25 @@ class InstinctStore:
                 rejected.append(action)
         return rejected, missing, bulk
 
-    async def mark_executed(self, action_id: str, outcome: str | None = None) -> Action | None:
+    async def mark_executed(
+        self, action_id: str, outcome: str | OutcomeVerdict | None = None
+    ) -> Action | None:
+        """Mark an approved action as executed and record its outcome.
+
+        Args:
+            action_id: The action to mark executed.
+            outcome: What happened. Either a structured
+                :class:`OutcomeVerdict` (a checked "did this solve the
+                problem" verdict — see issue #1162) or a plain free-text
+                string (the legacy form). Both persist to the same column.
+
+        Returns:
+            The updated Action, or ``None`` if no such action exists.
+        """
         return await self._update_status(
             action_id,
             ActionStatus.EXECUTED,
-            outcome=outcome,
+            outcome=_serialize_outcome(outcome),
             executed_at=datetime.now().isoformat(),
             event="action_executed",
             actor="system",
@@ -691,6 +727,37 @@ class InstinctStore:
 
     # --- Helpers ---
 
+    @staticmethod
+    def _deserialize_outcome(raw: Any) -> str | OutcomeVerdict | None:
+        """Decode the ``outcome`` column back into a string or OutcomeVerdict.
+
+        Issue #1162 lets ``outcome`` hold a structured verdict, stored as
+        JSON. A row written before #1162 (or by a caller passing a string)
+        holds plain free text. We try to parse the column as a verdict;
+        anything that isn't a verdict-shaped JSON object is returned as the
+        original string, so legacy rows keep working unchanged.
+        """
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            return raw
+        text = raw.strip()
+        # A structured verdict is always a JSON object. Cheap prefix check
+        # avoids a json.loads attempt on every plain-text outcome.
+        if not text.startswith("{"):
+            return raw
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return raw
+        if not isinstance(data, dict) or "status" not in data:
+            # Valid JSON but not a verdict — treat as legacy free text.
+            return raw
+        try:
+            return OutcomeVerdict.model_validate(data)
+        except Exception:  # noqa: BLE001 — malformed verdict, fall back to raw text
+            return raw
+
     def _row_to_action(self, row: Any) -> Action:
         # ``assignee`` landed in 2026-05-13 (Mission Control). Old DBs may
         # still surface a row missing the column despite the migration in
@@ -717,7 +784,7 @@ class InstinctStore:
             context=ActionContext.model_validate_json(row["context"])
             if row["context"]
             else ActionContext(),
-            outcome=row["outcome"],
+            outcome=self._deserialize_outcome(row["outcome"]),
             error=row["error"],
             approved_by=row["approved_by"],
             rejected_reason=row["rejected_reason"],

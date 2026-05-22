@@ -608,6 +608,15 @@ class Settings(BaseSettings):
     tools_deny: list[str] = Field(
         default_factory=list, description="Explicit tool deny list (highest priority)"
     )
+    tool_output_char_cap: int = Field(
+        default=12000,
+        gt=0,
+        description=(
+            "Max characters a single tool result may add to agent context. "
+            "Oversized results are truncated (head+tail, or a salient-lines "
+            "extract for test/lint output) before reaching the LLM."
+        ),
+    )
 
     # Discord
     discord_bot_token: str | None = Field(default=None, description="Discord bot token")

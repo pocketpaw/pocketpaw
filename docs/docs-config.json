@@ -756,7 +756,9 @@
           {
             "label": "Deep Work",
             "items": [
+              { "label": "Clarify Goal", "href": "/api/post-deep-work-intake-clarify", "method": "POST" },
               { "label": "Start Project", "href": "/api/post-deep-work-start", "method": "POST" },
+              { "label": "Start with Intake", "href": "/api/post-deep-work-start-with-intake", "method": "POST" },
               { "label": "Get Plan", "href": "/api/get-deep-work-plan", "method": "GET" },
               { "label": "Approve Plan", "href": "/api/post-deep-work-approve", "method": "POST" },
               { "label": "Pause Project", "href": "/api/post-deep-work-pause", "method": "POST" },

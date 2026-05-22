@@ -147,13 +147,27 @@ mcp__pocketpaw_pocket_specialist__edit({
 The tool schema validates all four fields. Backwards-compatible with
 intent-only calls (Type A).
 
-After the call returns, give the user a **one-line summary** drawn
-from the specialist's ``ops`` array in the return. Don't re-list
-every op — the canvas already shows the result.
+## Reading the response
 
-  ✓ "Marked task 1 as done."
-  ✓ "Added a revenue chart below the KPI strip."
-  ✓ "Rebuilt as a kanban with three columns."
+``pocket_specialist__edit`` returns
+``{ok, pocket_id, ops, duration_ms, backend_used, error, warnings}``.
+Three outcomes:
+
+- **Applied** — ``ok: true`` and ``ops`` is non-empty. Give the user a
+  **one-line summary** drawn from the ``ops`` array. Don't re-list every
+  op — the canvas already shows the result.
+
+    ✓ "Marked task 1 as done."
+    ✓ "Added a revenue chart below the KPI strip."
+    ✓ "Rebuilt as a kanban with three columns."
+
+- **Declined** — ``ok: true`` but ``ops`` is empty and ``warnings`` is
+  populated. The specialist looked at the request and chose not to act
+  (target not found, intent ambiguous, nothing to change). Relay the
+  ``warnings`` text to the user — do NOT claim the edit succeeded.
+
+- **Failed** — ``ok: false`` with ``error`` populated. The run errored.
+  Surface the ``error`` and stop.
 
 ## Hard rules
 

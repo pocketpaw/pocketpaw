@@ -24,6 +24,24 @@ Agent-facing granular ``rippleSpec.ui`` mutations (called from the
 
 Changes: 2026-05-14 — added the Tier-2 prop-array item ops (reworked
 onto the pocketpaw_ee layout from PR #1106).
+Changes: 2026-05-21 (#1172) — ``agent_view`` self-heals node ids via
+``_heal_node_ids`` so pockets persisted before node-id stamping became
+addressable by granular edit ops on first agent read.
+Changes: 2026-05-21 (RFC 04 alpha) — added the per-pocket backend
+binding API: ``set_pocket_backend``, ``get_pocket_backend``,
+``get_pocket_backend_for_executor``, ``remove_pocket_backend``. The
+credential lives in a SEPARATE collection (``PocketBackendCredential``);
+this service is the sole Beanie writer for it, same as for ``Pocket``.
+Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the agent-facing
+``rippleSpec.sources`` ops ``agent_set_source`` / ``agent_remove_source``
+so the pocket EDIT specialist (not just the create flow) can author the
+top-level read-only data-source block. Bindings are validated through
+the ``SourceBinding`` model before persistence.
+Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — ``agent_view`` now
+attaches a non-secret ``backend`` summary (``{base_url, auth_type,
+configured}``) so the edit specialist knows whether a backend is already
+configured before it authors a ``sources`` block. The token is NEVER
+included — the summary comes from ``get_pocket_backend``.
 """
 
 from __future__ import annotations
@@ -36,6 +54,7 @@ from collections import OrderedDict
 from typing import Any
 
 from beanie import PydanticObjectId
+from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
@@ -45,7 +64,16 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 from pocketpaw_ee.cloud.models.pocket import Widget as _WidgetDoc
-from pocketpaw_ee.cloud.pockets import prop_arrays, spec_ops, state_ops
+from pocketpaw_ee.cloud.models.pocket_backend import (
+    PocketBackendCredential as _BackendCredentialDoc,
+)
+from pocketpaw_ee.cloud.pockets import (
+    backend_crypto,
+    prop_arrays,
+    sources_ops,
+    spec_ops,
+    state_ops,
+)
 from pocketpaw_ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
@@ -876,9 +904,79 @@ async def is_member(pocket_id: str, user_id: str) -> bool:
     return getattr(doc, "visibility", "workspace") == "workspace"
 
 
+async def _heal_node_ids(doc: _PocketDoc) -> None:
+    """Defense-in-depth: stamp ``n_xxxxxxxx`` ids on a pocket's UISpec
+    tree(s) if any node lacks one, persisting the heal.
+
+    Pockets created or persisted after #1172 always carry node ids
+    (``normalize_ripple_spec`` stamps them). This heals pockets written
+    before the fix so they become editable on first agent read without
+    a separate DB migration. Idempotent — a no-op when ids are already
+    present.
+    """
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        return
+    changed = False
+    ui = spec.get("ui")
+    if isinstance(ui, dict) and spec_ops.ensure_ids(ui):
+        changed = True
+    panes = spec.get("panes")
+    if isinstance(panes, dict):
+        for pane in panes.values():
+            if isinstance(pane, dict) and spec_ops.ensure_ids(pane):
+                changed = True
+    if changed:
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pocket %s node-id heal save failed: %s", doc.id, exc)
+
+
+async def _agent_backend_summary(doc: _PocketDoc) -> dict[str, Any]:
+    """Return the NON-SECRET backend summary for a pocket, agent-safe.
+
+    Shape: ``{base_url, auth_type, configured}`` — the same shape
+    ``get_pocket_backend`` returns, never the token. When the pocket
+    has no backend configured, returns ``{"configured": False}``.
+
+    The backend credential lives in a separate collection (security
+    design D1), so nothing surfaces it to the edit specialist by
+    default. This makes ``get_pocket`` / ``agent_view`` carry the
+    summary so the specialist knows whether a backend exists and what
+    its base URL is — without ever seeing the token.
+    """
+    try:
+        summary = await get_pocket_backend(doc.workspace, str(doc.id))
+    except Exception:  # noqa: BLE001 — a backend-read failure must not break the view
+        logger.warning(
+            "agent_view: backend summary fetch failed for pocket %s", str(doc.id), exc_info=True
+        )
+        return {"configured": False}
+    if summary is None:
+        return {"configured": False}
+    # get_pocket_backend already excludes the token — assert the shape
+    # and never pass anything else through.
+    return {
+        "base_url": summary.get("base_url"),
+        "auth_type": summary.get("auth_type"),
+        "configured": True,
+    }
+
+
 async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     """Read-only fetch — returns ``(view_dict, None)`` on success or
     ``(None, error)`` on failure.
+
+    Self-heals node ids: a legacy pocket persisted before #1172 has an
+    id-less ``ui`` tree, so the chat agent would have no ``n_xxxxxxxx``
+    id to address with granular edit ops. ``_heal_node_ids`` stamps and
+    persists them on first read.
+
+    The returned view carries a non-secret ``backend`` summary
+    (``{base_url, auth_type, configured}``) so the edit specialist can
+    see whether the pocket already has a backend configured before it
+    authors a ``sources`` block. The token is NEVER included.
 
     Note: $source markers in rippleSpec are intentionally NOT resolved
     here. The agent must see raw markers so that on edit it preserves
@@ -886,9 +984,12 @@ async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     into the spec, defeating the marker mechanism. Resolution happens
     only in ``service.get`` (the user-facing read path)."""
     doc, err = await _agent_load_doc(pocket_id)
-    if err:
+    if err or doc is None:
         return None, err
-    return _agent_view_dict(doc), None
+    await _heal_node_ids(doc)
+    view = _agent_view_dict(doc)
+    view["backend"] = await _agent_backend_summary(doc)
+    return view, None
 
 
 async def agent_list(workspace_id: str, user_id: str) -> list[dict]:
@@ -1097,6 +1198,7 @@ async def agent_add_node(
     parent_id: str,
     spec: dict[str, Any],
     after_id: str | None = None,
+    index: int | None = None,
 ) -> tuple[dict | None, str | None]:
     """Insert ``spec`` as a child of ``parent_id`` (after ``after_id`` or
     appended). The new node's id is assigned if absent.
@@ -1121,7 +1223,7 @@ async def agent_add_node(
         # Make sure any nested children also have ids.
         spec_ops.ensure_ids(new_node)
         try:
-            spec_ops.insert_child(parent, new_node, after_id=after_id)
+            spec_ops.insert_child(parent, new_node, after_id=after_id, index=index)
         except ValueError as exc:
             return None, str(exc)
         if doc.rippleSpec is not None:
@@ -1728,6 +1830,115 @@ async def agent_patch_state(
         )
 
 
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.sources mutations — agent-facing (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+#
+# The third top-level rippleSpec key, alongside ``ui`` (node ops) and
+# ``state`` (state ops). ``sources`` declares read-only GET data bindings
+# the ``source_executor`` runs against the pocket's configured backend.
+#
+# Unlike hydrated state — which is response-body only and never persisted —
+# a ``sources`` declaration IS part of the pocket document, so these ops
+# call ``doc.save()``. The create flow already accepts ``sources`` in the
+# rippleSpec it persists; these ops give the EDIT specialist the same
+# reach on an existing pocket.
+#
+# Each binding is validated through ``SourceBinding`` (source_executor.py)
+# before it is written — an invalid binding is rejected, never stored.
+
+
+def _sources_root(doc: _PocketDoc) -> dict[str, Any]:
+    """Return the mutable ``rippleSpec`` dict for a doc, creating it if
+    absent. ``sources_ops`` materialises the ``sources`` key on demand."""
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        spec = {}
+        doc.rippleSpec = spec
+    return spec
+
+
+async def agent_set_source(
+    pocket_id: str,
+    *,
+    source_key: str,
+    binding: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Declare (or replace) a read-only data source on the pocket.
+
+    ``binding`` is validated through the ``SourceBinding`` model — an
+    entry missing ``path`` / ``bind``, or carrying a write verb, is
+    rejected before any write. The validated, normalized binding (with
+    ``refresh`` defaulted) is what gets persisted.
+
+    Returns ``({"source_key": ..., "binding": ..., "pocket": <view>},
+    None)`` on success.
+    """
+    from pocketpaw_ee.cloud.pockets.source_executor import SourceBinding
+
+    if not source_key:
+        return None, "source_key is required"
+    if not isinstance(binding, dict):
+        return None, "binding must be an object"
+    try:
+        validated = SourceBinding.model_validate(binding)
+    except PydanticValidationError as exc:
+        return None, f"invalid source binding: {exc.errors()[0].get('msg', exc)}"
+
+    normalized = validated.model_dump(mode="json")
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        try:
+            sources_ops.set_source(spec, source_key, normalized)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "source_key": source_key,
+                "binding": normalized,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_source(
+    pocket_id: str,
+    *,
+    source_key: str,
+) -> tuple[dict | None, str | None]:
+    """Remove a read-only data source declaration from the pocket.
+
+    Idempotent — removing a source that was never declared still
+    succeeds. Returns ``({"source_key": ..., "pocket": <view>}, None)``.
+    """
+    if not source_key:
+        return None, "source_key is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        sources_ops.remove_source(spec, source_key)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"source_key": source_key, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
 async def agent_create(
     *,
     workspace_id: str,
@@ -1873,6 +2084,181 @@ async def create_pocket_and_session(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Pocket backend binding (RFC 04 alpha)
+#
+# A pocket is bound to ONE external backend (base URL + auth credential).
+# The credential lives in the separate ``PocketBackendCredential``
+# collection — never on the Pocket document, never in ``rippleSpec``. This
+# service is the sole Beanie writer for that collection.
+# ---------------------------------------------------------------------------
+
+
+def _audit_backend_config(
+    *, actor: str, action: str, workspace_id: str, pocket_id: str, base_url: str, auth_type: str
+) -> None:
+    """Write an audit-log entry for a backend-config mutation.
+
+    Logs ``base_url`` / ``auth_type`` / ``pocket_id`` only — the token is
+    NEVER passed here. Category ``pocket_backend_config``, severity WARNING.
+    Audit failures must not break the config flow, so the call is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action=action,
+                target=pocket_id,
+                status="success",
+                category="pocket_backend_config",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                base_url=base_url,
+                auth_type=auth_type,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the mutation
+        logger.warning("pocket backend config audit-log write failed", exc_info=True)
+
+
+async def set_pocket_backend(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    base_url: str,
+    auth_type: str,
+    auth_token: str,
+    auth_header: str | None = None,
+) -> dict:
+    """Bind a pocket to one backend — upsert its credential row.
+
+    ``base_url`` is validated strictly (https-only, no internal hosts). The
+    token is encrypted via ``backend_crypto`` before it touches the DB; the
+    plaintext is never persisted or logged. Returns the non-secret summary.
+    """
+    from pocketpaw.security.url_validators import validate_external_url_strict
+
+    # Raises ValueError on a bad URL — surfaces as a 400 via the router.
+    try:
+        base_url = validate_external_url_strict(base_url)
+    except ValueError as exc:
+        raise ValidationError("pocket_backend.invalid_url", str(exc)) from exc
+
+    if auth_type != "none" and not auth_token:
+        raise ValidationError(
+            "pocket_backend.missing_token",
+            f"auth_type '{auth_type}' requires a non-empty auth_token",
+        )
+
+    encrypted_token: bytes | None = None
+    nonce: bytes | None = None
+    salt: bytes | None = None
+    if auth_type != "none":
+        encrypted_token, nonce, salt = backend_crypto.encrypt_token(auth_token)
+
+    existing = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if existing is not None:
+        existing.base_url = base_url
+        existing.auth_type = auth_type
+        existing.auth_header = auth_header
+        existing.encrypted_token = encrypted_token
+        existing.nonce = nonce
+        existing.salt = salt
+        await existing.save()
+    else:
+        await _BackendCredentialDoc(
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+            base_url=base_url,
+            auth_type=auth_type,
+            auth_header=auth_header,
+            encrypted_token=encrypted_token,
+            nonce=nonce,
+            salt=salt,
+        ).insert()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.configure",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=base_url,
+        auth_type=auth_type,
+    )
+    # no-event: backend credentials are a separate collection, not pocket
+    # state — no downstream handler keys off a PocketUpdated for them.
+    return {"base_url": base_url, "auth_type": auth_type, "configured": True}
+
+
+async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
+    """Return the pocket's backend binding summary, or ``None`` if unset.
+
+    NEVER returns the token — only ``base_url`` / ``auth_type`` /
+    ``configured``.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+    return {"base_url": doc.base_url, "auth_type": doc.auth_type, "configured": True}
+
+
+async def get_pocket_backend_for_executor(
+    workspace_id: str, pocket_id: str
+) -> tuple[str, str, str | None, str] | None:
+    """Internal — return ``(base_url, auth_type, auth_header, token)``.
+
+    Decrypts the stored token. Used ONLY by the run-sources route handler
+    to pass credentials to the source executor. Returns ``None`` when the
+    pocket has no backend configured. The plaintext token returned here
+    must never be logged or returned to a client.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+
+    token = ""
+    if doc.auth_type != "none" and doc.encrypted_token and doc.nonce and doc.salt:
+        token = backend_crypto.decrypt_token(doc.encrypted_token, doc.nonce, doc.salt)
+    return doc.base_url, doc.auth_type, doc.auth_header, token
+
+
+async def remove_pocket_backend(workspace_id: str, user_id: str, pocket_id: str) -> None:
+    """Delete a pocket's backend credential row. Idempotent.
+
+    Audit-logs the removal. A no-op (no row) still returns cleanly so the
+    route is idempotent.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return
+    base_url, auth_type = doc.base_url, doc.auth_type
+    await doc.delete()
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.remove",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=base_url,
+        auth_type=auth_type,
+    )
+    # no-event: see set_pocket_backend — credential rows aren't pocket state.
+
+
 __all__ = [
     "access_via_share_link",
     "add_agent",
@@ -1887,10 +2273,12 @@ __all__ = [
     "agent_move_node",
     "agent_patch_state",
     "agent_remove_node",
+    "agent_remove_source",
     "agent_remove_state",
     "agent_remove_widget",
     "agent_replace_node",
     "agent_set_node_prop",
+    "agent_set_source",
     "agent_set_state",
     "agent_update",
     "agent_update_widget",
@@ -1901,16 +2289,20 @@ __all__ = [
     "delete",
     "generate_share_link",
     "get",
+    "get_pocket_backend",
+    "get_pocket_backend_for_executor",
     "has_edit_access",
     "is_member",
     "is_owner",
     "list_pockets",
     "remove_agent",
     "remove_collaborator",
+    "remove_pocket_backend",
     "remove_team_member",
     "remove_widget",
     "reorder_widgets",
     "revoke_share_link",
+    "set_pocket_backend",
     "unassign_project_on_pockets",
     "update",
     "update_share_link",

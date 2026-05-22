@@ -8,6 +8,14 @@
 #   TaskResponse. Update semantics distinguish None (no change) from
 #   an explicit empty list (clear dependencies). Domain ↔ wire mapper
 #   threads the field through ``task_to_dto``.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) — added
+#   ``success_criteria`` and ``preconditions`` (list[str], default empty)
+#   to CreateTaskRequest and TaskResponse. The planner's materializer
+#   carries them from the OSS TaskSpec so completion-time verification
+#   (pocketpaw#1162) can read machine-checkable criteria off the Task.
+# Updated: 2026-05-21 (PR #1164 review) — bounded the CreateTaskRequest
+#   success_criteria / preconditions lists at max_length=20 so a
+#   hallucinating planner LLM can't write a runaway list.
 """Tasks entity — request/response DTOs."""
 
 from __future__ import annotations
@@ -57,6 +65,12 @@ class CreateTaskRequest(BaseModel):
     planner's two-pass materializer uses it to wire up TaskSpec
     ``blocked_by_keys`` after both endpoints exist; manual callers may
     pass it directly to register a dependency edge at create time.
+
+    ``success_criteria`` and ``preconditions`` are machine-verifiable
+    criteria carried from the OSS planner's TaskSpec — objectively
+    checkable conditions for, respectively, task completion and task
+    start. Both default to an empty list so existing callers are
+    unaffected.
     """
 
     title: str = Field(min_length=1, max_length=200)
@@ -66,6 +80,8 @@ class CreateTaskRequest(BaseModel):
     cycle_id: str | None = None
     project_id: str | None = None
     blocked_by: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list, max_length=20)
+    preconditions: list[str] = Field(default_factory=list, max_length=20)
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
     kind: Literal["task", "nudge", "projection", "automation"] = "task"
     source: SourceDTO = Field(default_factory=SourceDTO)
@@ -181,6 +197,8 @@ class TaskResponse(BaseModel):
     cycle_id: str | None = None
     project_id: str | None = None
     blocked_by: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
     due_at: str | None = None
     blocked_reason: str | None = None
     created_at: str | None = None
@@ -218,6 +236,8 @@ def task_to_dto(task: Task) -> TaskResponse:
         cycle_id=task.cycle_id,
         project_id=task.project_id,
         blocked_by=list(task.blocked_by),
+        success_criteria=list(task.success_criteria),
+        preconditions=list(task.preconditions),
         due_at=iso_utc(task.due_at),
         blocked_reason=task.blocked_reason,
         created_at=iso_utc(task.created_at),

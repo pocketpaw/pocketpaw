@@ -82,7 +82,14 @@ async def test_get_passes_through_when_no_markers():
     ):
         out = await pocket_service.get(pocket_id="pocket-1", user_id="u1")
     assert out["rippleSpec"]["state"] == spec["state"]
-    assert out["rippleSpec"]["ui"] == spec["ui"]
+    # The resolver leaves a marker-free spec untouched, but read-time
+    # normalization (#1172) stamps an n_xxxxxxxx id on every ui node so
+    # the spec is addressable by granular edit ops. Type is preserved.
+    ui = out["rippleSpec"]["ui"]
+    assert ui["type"] == "stat"
+    from pocketpaw_ee.cloud.pockets import spec_ops
+
+    assert spec_ops.is_valid_id(ui.get("id"))
 
 
 async def test_get_with_no_ripple_spec_does_not_crash():

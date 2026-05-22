@@ -10,6 +10,11 @@
 #   added ``blocked_by: list[str]`` carrying cloud Task ids this task
 #   depends on. No migration script — Mongo absorbs the new field on
 #   next write; reads of old docs default to ``[]``.
+# Updated: 2026-05-21 (feat/taskspec-success-criteria) — added
+#   ``success_criteria`` and ``preconditions`` (list[str], default
+#   empty) carrying the planner's machine-verifiable criteria. No
+#   migration — Mongo absorbs them on next write; old docs read back as
+#   ``[]``. Unblocks completion-time verification (pocketpaw#1162).
 """Task document — Mission Control work-item primitive.
 
 Embedded sub-documents:
@@ -103,6 +108,15 @@ class Task(TimestampedDocument):
     # workspace ids are already filtered out by the tenant guard on every
     # service write.
     blocked_by: list[str] = Field(default_factory=list)
+
+    # Machine-verifiable criteria carried from the planner's TaskSpec.
+    # ``success_criteria`` — objectively-checkable conditions true once
+    # the task is done; ``preconditions`` — state/environment conditions
+    # that must hold before it starts. Distinct from ``blocked_by``,
+    # which is the inter-task dependency graph. Read by completion-time
+    # verification (pocketpaw#1162). Old docs read back as ``[]``.
+    success_criteria: list[str] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
 
     due_at: datetime | None = None
     blocked_reason: str | None = None

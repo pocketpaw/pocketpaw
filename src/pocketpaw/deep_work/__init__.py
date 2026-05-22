@@ -1,5 +1,8 @@
 # Deep Work — AI project orchestration layer for PocketPaw.
 # Created: 2026-02-12
+# Updated: 2026-05-21 (feat/deep-work-intake) — issue #1161: exported the
+#   interactive intake primitives (GoalIntake, IntakeResult, QAPair) and
+#   added the start_deep_work_with_intake() convenience function.
 # Updated: 2026-02-26 — Deep Work v2: Added cancel_project() for project cancellation.
 #   Added PawKitConfig export. Retry/timeout/output fields propagated through.
 # Updated: 2026-02-18 — Added GoalParser and GoalAnalysis exports.
@@ -14,6 +17,7 @@
 #   reset_deep_work_session() -> None
 #   parse_goal(user_input) -> GoalAnalysis
 #   start_deep_work(user_input) -> Project
+#   start_deep_work_with_intake(user_input, answer_provider) -> Project
 #   approve_project(project_id) -> Project
 #   pause_project(project_id) -> Project
 #   resume_project(project_id) -> Project
@@ -22,7 +26,13 @@
 import logging
 
 from pocketpaw.deep_work.clock import SimulationClock, TickSnapshot
-from pocketpaw.deep_work.goal_parser import GoalAnalysis, GoalParser
+from pocketpaw.deep_work.goal_parser import (
+    GoalAnalysis,
+    GoalIntake,
+    GoalParser,
+    IntakeResult,
+    QAPair,
+)
 from pocketpaw.deep_work.models import (
     AgentSpec,
     PlannerResult,
@@ -36,10 +46,13 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "AgentSpec",
     "GoalAnalysis",
+    "GoalIntake",
     "GoalParser",
+    "IntakeResult",
     "PlannerResult",
     "Project",
     "ProjectStatus",
+    "QAPair",
     "SimulationClock",
     "TaskSpec",
     "TickSnapshot",
@@ -47,6 +60,7 @@ __all__ = [
     "reset_deep_work_session",
     "parse_goal",
     "start_deep_work",
+    "start_deep_work_with_intake",
     "approve_project",
     "pause_project",
     "resume_project",
@@ -104,6 +118,10 @@ async def parse_goal(user_input: str) -> GoalAnalysis:
 async def start_deep_work(user_input: str, research_depth: str = "standard") -> Project:
     """Submit a new project for Deep Work planning.
 
+    This is the one-shot path: the goal goes straight to the planner. For
+    a vague goal that needs clarification first, use
+    :func:`start_deep_work_with_intake`.
+
     Args:
         user_input: Natural language project description.
         research_depth: "none" (skip), "quick", "standard", or "deep".
@@ -113,6 +131,33 @@ async def start_deep_work(user_input: str, research_depth: str = "standard") -> 
     """
     session = get_deep_work_session()
     return await session.start(user_input, research_depth=research_depth)
+
+
+async def start_deep_work_with_intake(
+    user_input: str,
+    answer_provider,
+    research_depth: str = "auto",
+) -> Project:
+    """Submit a project through the interactive intake mode (issue #1161).
+
+    Runs a clarification conversation for a vague goal before planning. A
+    well-formed goal skips the conversation and behaves like
+    :func:`start_deep_work`.
+
+    Args:
+        user_input: Natural language project description (may be vague).
+        answer_provider: Async callable ``(question: str) -> str`` that
+            answers each clarification question.
+        research_depth: "auto" (goal-parser suggestion), "none", "quick",
+            "standard", or "deep".
+
+    Returns:
+        The created Project (status=AWAITING_APPROVAL after planning).
+    """
+    session = get_deep_work_session()
+    return await session.start_with_intake(
+        user_input, answer_provider, research_depth=research_depth
+    )
 
 
 async def approve_project(project_id: str) -> Project:
