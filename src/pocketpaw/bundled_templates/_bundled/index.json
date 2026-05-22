@@ -1,0 +1,53 @@
+{
+  "_note": "Registry of built-in pocket templates. The chat agent's STEP 0 template-library check reads this file, keyword-matches the brief (case-insensitive substring) against each row's `keywords`, and on a match sets the `template_id` hint. RFC 03's registry linter must ignore the sibling `ripple_spec.json` files — they are local runtime artifacts, not schema fields. See _bundled/README.md.",
+  "templates": [
+    {
+      "slug": "todo-task-tracker",
+      "title": "Task Tracker",
+      "shape": "data-grid",
+      "pattern": "app",
+      "keywords": ["todo", "to-do", "to do", "task", "tasks", "task list", "checklist", "task tracker", "task manager", "things to do", "action items"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "kanban-board",
+      "title": "Kanban Board",
+      "shape": "kanban",
+      "pattern": "app",
+      "keywords": ["kanban", "board", "sprint board", "task board", "workflow", "swimlane", "swimlanes", "drag and drop board", "trello", "lanes"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "metrics-dashboard",
+      "title": "Metrics Dashboard",
+      "shape": "data-grid",
+      "pattern": "dashboard",
+      "keywords": ["dashboard", "metrics", "kpi", "kpis", "analytics", "overview", "scorecard", "performance", "stats dashboard", "metrics dashboard"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "crm-record-list",
+      "title": "CRM Record List",
+      "shape": "custom",
+      "pattern": "browser",
+      "keywords": ["crm", "contacts", "contact list", "leads", "customers", "accounts", "pipeline", "record list", "directory", "people list"],
+      "connectors_hint": ["rest"]
+    },
+    {
+      "slug": "calendar-planner",
+      "title": "Calendar Planner",
+      "shape": "calendar",
+      "pattern": "app",
+      "keywords": ["calendar", "planner", "schedule", "month view", "events calendar", "agenda", "appointments", "bookings calendar"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "activity-feed",
+      "title": "Activity Feed",
+      "shape": "timeline",
+      "pattern": "feed",
+      "keywords": ["activity feed", "feed", "timeline", "changelog", "release notes", "history", "audit log", "activity log", "event stream", "milestones"],
+      "connectors_hint": []
+    }
+  ]
+}

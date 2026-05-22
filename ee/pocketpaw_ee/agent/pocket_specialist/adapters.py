@@ -5,6 +5,13 @@
 # new two-call protocol where the calling chat agent drafts the
 # rippleSpec inline using its own LLM and the specialist only runs
 # validate-and-persist on the returned draft.
+# Modified: 2026-05-22 (feat/bundled-templates, Increment 2a) —
+# ``AgentModeAdapter.create`` short-circuits on a ``hints.template_id``:
+# it loads the built-in template, passes its ``ripple_spec`` straight to
+# ``_validate_and_persist``, and SKIPS the ``_draft_kit`` round-trip. An
+# unknown slug falls back to the normal draft-kit flow. Without the
+# short-circuit, agent-mode pays two LLM round-trips for a one-shot
+# template customization.
 # Modified: 2026-05-21 — added full-fledged-app chrome widgets
 # (app-shell, sidebar, breadcrumb, sheet, modal, confirm-dialog,
 # dropdown-menu, command-palette, coachmark) to the starter list and
@@ -209,20 +216,95 @@ class AgentModeAdapter:
         settings: Settings,
     ) -> Any:
         started = time.monotonic()
-        if input.spec is None:
-            return _draft_kit_response(input, started=started)
-        return await _validate_and_persist(
-            input,
-            workspace_id=workspace_id,
-            user_id=user_id,
-            settings=settings,
-            started=started,
-        )
+        if input.spec is not None:
+            # Second call — the chat agent already drafted a spec.
+            return await _validate_and_persist(
+                input,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                settings=settings,
+                started=started,
+            )
+
+        # First call. When the chat agent matched a built-in template,
+        # short-circuit: load the template skeleton and persist it
+        # directly — no draft-kit round-trip. Agent-mode would otherwise
+        # pay two LLM hops for a one-shot template customization.
+        template_id = getattr(input.hints, "template_id", None) if input.hints else None
+        if template_id:
+            template_input = _input_with_template_spec(input, template_id)
+            if template_input is not None:
+                logger.info(
+                    "[pocket-specialist] agent-mode template short-circuit "
+                    "(template_id=%s) — skipping draft kit",
+                    template_id,
+                )
+                return await _validate_and_persist(
+                    template_input,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    settings=settings,
+                    started=started,
+                )
+            # Unknown slug / load failure — fall through to the draft kit.
+            logger.info(
+                "[pocket-specialist] agent-mode template_id=%s did not load "
+                "— falling back to draft kit",
+                template_id,
+            )
+
+        return _draft_kit_response(input, started=started)
 
 
 # ---------------------------------------------------------------------------
 # Agent-mode internals
 # ---------------------------------------------------------------------------
+
+
+def _input_with_template_spec(input: Any, template_id: str) -> Any | None:
+    """Load a built-in template and return a copy of ``input`` with the
+    template's ``ripple_spec`` set as ``spec``.
+
+    Agent mode persists ``input.spec`` directly. By loading the
+    template skeleton into ``spec`` here, the create flow takes the
+    same validate-and-persist path the second call uses — no LLM round
+    trip, no draft kit.
+
+    Returns ``None`` when the slug is unknown or the template files are
+    missing / corrupt; the caller then falls back to the draft kit.
+    The lazy import keeps ``bundled_templates`` off the hot path for the
+    common (no-template) create.
+    """
+    try:
+        from pocketpaw.bundled_templates.loader import load_template
+    except Exception:  # noqa: BLE001 — defensive: bundled_templates is OSS core
+        logger.warning("[pocket-specialist] bundled_templates.loader import failed", exc_info=True)
+        return None
+
+    template = load_template(template_id)
+    if template is None:
+        return None
+
+    ripple_spec = template.get("ripple_spec")
+    if not isinstance(ripple_spec, dict) or not ripple_spec:
+        logger.warning(
+            "[pocket-specialist] template %r loaded but ripple_spec is empty/invalid",
+            template_id,
+        )
+        return None
+
+    # Strip authoring-only keys (``_placeholder_note`` and any other
+    # ``_``-prefixed top-level key) — they are template-author notes,
+    # not rippleSpec fields, and must not land in the user's pocket.
+    clean_spec = {k: v for k, v in ripple_spec.items() if not k.startswith("_")}
+
+    try:
+        return input.model_copy(update={"spec": clean_spec})
+    except Exception:  # noqa: BLE001 — model_copy on a non-pydantic input
+        logger.warning(
+            "[pocket-specialist] could not copy input for template %r", template_id, exc_info=True
+        )
+        return None
 
 
 def _draft_kit_response(input: Any, *, started: float) -> Any:

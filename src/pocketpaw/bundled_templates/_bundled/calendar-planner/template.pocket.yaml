@@ -1,0 +1,21 @@
+# src/pocketpaw/bundled_templates/_bundled/calendar-planner/template.pocket.yaml
+# Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
+# Pocket Template Schema metadata for the built-in calendar planner.
+name: calendar-planner
+version: 1.0.0
+vertical: productivity
+shape: calendar
+description: |
+  A month-view calendar planner. Each entry is a dated event with a
+  category. Add an event from the composer row — pick a date, a title,
+  a category — and it lands on the calendar. Events live in pocket
+  state bound to the calendar widget so the view stays reactive.
+state:
+  entity_type: Event
+  columns:
+    - { field: title, widget: text }
+    - { field: start, widget: date }
+    - { field: category, widget: badge }
+actions: []
+connectors: []
+skills: []

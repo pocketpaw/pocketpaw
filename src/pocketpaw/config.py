@@ -1,6 +1,9 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-05-22: Added ``auto_install_bundled_templates`` — toggles the
+    boot-time mirror of built-in pocket templates into
+    ``~/.pocketpaw/templates/`` (feat/bundled-templates, Increment 2a).
   - 2026-05-21: Added ``auto_install_bundled_skills`` and
     ``auto_install_bundled_kb_scopes`` — toggle the boot-time mirror of
     bundled SKILL.md files and pre-compiled kb-go scopes.
@@ -401,6 +404,23 @@ class Settings(BaseSettings):
             "hand-customised scope or disable bundled KB entirely. KB "
             "retrieval is a non-critical enhancement: pocket creation "
             "still works via the MCP tool surface + the bundled skill."
+        ),
+    )
+    auto_install_bundled_templates: bool = Field(
+        default=True,
+        description=(
+            "On dashboard startup, mirror PocketPaw's built-in pocket "
+            "templates from ``pocketpaw/bundled_templates/_bundled/<slug>/`` "
+            "into ``~/.pocketpaw/templates/<slug>/``. Each template ships a "
+            "``template.pocket.yaml`` (RFC 03 schema metadata) and a "
+            "hand-authored ``ripple_spec.json`` skeleton. The create "
+            "specialist instantiates-and-customizes a matching template "
+            "instead of cold-generating a pocket — the fix for the 2-3 "
+            "iteration authoring pain. Idempotent — SHA-256 hash compare "
+            "per file. Set ``false`` to freeze a hand-customised template "
+            "or disable the template library entirely. Template install is "
+            "best-effort: pocket creation still works (the specialist "
+            "cold-generates) even when no template is installed."
         ),
     )
     deep_agents_skills: list[str] = Field(

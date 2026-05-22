@@ -78,6 +78,12 @@
 # Modified: 2026-05-21 — the create specialist's prompt now splices in
 # the slim ``_RIPPLE_DESIGN_ESSENTIALS`` instead of the full
 # ``RIPPLE_DESIGN_RULES`` superblock. Reworked from PR #1106.
+# Modified: 2026-05-22 (feat/bundled-templates, Increment 2a) —
+# ``_CREATION_OVERVIEW_MCP`` gains a new "STEP 0 — CHECK BUILT-IN TEMPLATE
+# LIBRARY FIRST": the chat agent reads ``~/.pocketpaw/templates/index.json``,
+# keyword-matches the brief, and on a match sets ``hints.template_id`` and
+# skips the recipe search. The former recipe-library STEP 0 is renumbered
+# to STEP 1; the brief / structure / delegate steps shift to STEP 2-4.
 
 from __future__ import annotations
 
@@ -1280,13 +1286,52 @@ underlying primitive that actually persists. The skill is the
 preferred entry point when available; the tool is what the skill
 ultimately calls.
 
-### STEP 0 — CHECK THE RECIPE LIBRARY FIRST
+### STEP 0 — CHECK THE BUILT-IN TEMPLATE LIBRARY FIRST
 
-Before any design work, query PocketPaw's bundled recipe library for
-a polished example matching the user's intent. PocketPaw ships
-``ripple-recipes`` — a kb-go scope of hand-authored pattern recipes
-(sales pipeline, customer support app, recipe/how-to viewer, …) —
-auto-installed at ``~/.knowledge-base/ripple-recipes/``.
+Before anything else — before the recipe search in STEP 1 — check
+whether the brief matches one of PocketPaw's built-in pocket
+templates. A built-in template is a hand-authored, production-quality
+pocket skeleton; instantiating one is faster and higher-quality than
+generating from scratch or even anchoring on a recipe. The templates
+are auto-installed at ``~/.pocketpaw/templates/``.
+
+Run via your Bash tool:
+
+```
+cat ~/.pocketpaw/templates/index.json
+```
+
+The file is ``{"templates": [{slug, title, shape, pattern, keywords,
+connectors_hint}, ...]}``. Lower-case the brief and, for each template,
+check whether ANY of its ``keywords`` appears as a case-insensitive
+SUBSTRING of the brief.
+
+- **Match found** — set ``hints.template_id`` to the matched
+  template's ``slug`` when you call ``pocket_specialist__create``.
+  Announce it in your preface line: "Using the built-in <title>
+  template — customizing it for <the user's domain>." Then SKIP the
+  recipe search in STEP 1 (the template already encodes the polished
+  composition). Still do STEP 2 (understand the brief) so the
+  specialist gets the user's real content to customize the template
+  with.
+
+- **No match** — proceed to STEP 1 (the recipe-library search). The
+  template library covers the most common shapes; many briefs won't
+  match one.
+
+- **``index.json`` missing / cat errors** — proceed to STEP 1. Do not
+  block the user on infrastructure issues.
+
+The first match wins — do not agonize over picking the "best" of two
+candidate templates; pick the first whose keyword matched.
+
+### STEP 1 — CHECK THE RECIPE LIBRARY
+
+If STEP 0 did NOT match a built-in template, query PocketPaw's bundled
+recipe library for a polished example matching the user's intent.
+PocketPaw ships ``ripple-recipes`` — a kb-go scope of hand-authored
+pattern recipes (sales pipeline, customer support app, recipe/how-to
+viewer, …) — auto-installed at ``~/.knowledge-base/ripple-recipes/``.
 
 Run via your Bash tool:
 
@@ -1302,7 +1347,7 @@ the showcase-quality version of that pocket pattern. Adapt content
 to the user's specific domain; keep the structural skeleton.
 
 If ``kb search`` returns no matches, continue with first-principles
-drafting using STEP 1-3 below. The recipe library covers high-
+drafting using STEP 2-4 below. The recipe library covers high-
 leverage shapes but does NOT cover every brief.
 
 Why kb-go (not an MCP wrapper): kb-go ships its own SKILL.md with
@@ -1310,7 +1355,7 @@ the canonical CLI surface, and the ``--context`` flag was designed
 for exactly this prompt-injection use case. A wrapper would drift
 from the upstream contract — use the CLI directly.
 
-### STEP 1 — UNDERSTAND THE BRIEF
+### STEP 2 — UNDERSTAND THE BRIEF
 
 You need TWO things before you can plan: structure (what kind of
 pocket) and content seeds (concrete values to populate it).
@@ -1359,10 +1404,13 @@ If the user says "you decide", proceed with your best guess.
 - If the user is annoyed by questions, build with `<placeholder
   values clearly labeled>` and tell them they can edit.
 
-### STEP 2 — PICK THE STRUCTURE
+### STEP 3 — PICK THE STRUCTURE
 
 Decide these BEFORE calling the specialist. Don't make the
-specialist re-derive them from a vague brief:
+specialist re-derive them from a vague brief. (When STEP 0 matched a
+built-in template, the template already encodes layout + focal
+widget — you only need ``data_shape`` + ``key_interactions`` so the
+specialist customizes it with the user's real content.):
 
   • **layout**: one of (in rough order of frequency — hero+grid LAST
     on purpose; only pick it when the pattern is `dashboard`)
@@ -1391,7 +1439,7 @@ specialist re-derive them from a vague brief:
   • **key_interactions**: the verbs the user should be able to do.
     Example: ["add task", "mark done", "filter by status"]
 
-### STEP 3 — DELEGATE WITH A RICH PLAN
+### STEP 4 — DELEGATE WITH A RICH PLAN
 
     pocket_specialist__create({
         "brief": "<1-sentence summary of what the user wants>",
@@ -1400,6 +1448,10 @@ specialist re-derive them from a vague brief:
             "name": "Sales Command Center",
             "color": "#4f46e5",
             "icon": "BarChart3",
+
+            // built-in template — set ONLY when STEP 0 matched one.
+            // It is the highest-authority structural plan.
+            "template_id": "metrics-dashboard",
 
             // structural plan — YOU decide these
             "purpose": "Track quarterly sales pipeline at a glance",
