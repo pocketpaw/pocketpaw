@@ -12,10 +12,14 @@
 #
 #   * POCKET_INTERACTION_PROMPT_{MCP,CLI} — when the conversation is anchored
 #     to an existing pocket. Read/write/chat intent flow with `get_pocket`
-#     first. Contains a literal ``__POCKET_ID__`` token (POCKET_ID_TOKEN) the
-#     caller replaces before injection.
+#     first. Contains literal ``__POCKET_ID__`` (POCKET_ID_TOKEN) and
+#     ``__BACKEND_SUMMARY__`` (BACKEND_SUMMARY_TOKEN) tokens — fill BOTH
+#     via ``fill_current_pocket`` before injection.
 #
 # Use ``get_pocket_prompts(backend_name=...)`` to pick the right pair.
+#
+# Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — re-export the new
+# ``fill_current_pocket`` helper + ``BACKEND_SUMMARY_TOKEN``.
 #
 # Model selection, sampling parameters, and prompt caching are decided by
 # the agent backend — this module exports prompt strings only.
@@ -25,6 +29,7 @@ from __future__ import annotations
 from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
 from pocketpaw.ripple._inline import INLINE_RIPPLE_SYSTEM_PROMPT
 from pocketpaw.ripple._pockets import (
+    BACKEND_SUMMARY_TOKEN,
     POCKET_CREATION_PROMPT,
     POCKET_CREATION_PROMPT_CLI,
     POCKET_CREATION_PROMPT_MCP,
@@ -36,10 +41,12 @@ from pocketpaw.ripple._pockets import (
     POCKET_INTERACTION_PROMPT_CLI,
     POCKET_INTERACTION_PROMPT_MCP,
     POCKET_SPECIALIST_PROMPT,
+    fill_current_pocket,
     get_pocket_prompts,
 )
 
 __all__ = [
+    "BACKEND_SUMMARY_TOKEN",
     "INLINE_RIPPLE_SYSTEM_PROMPT",
     "POCKET_CREATION_PROMPT",
     "POCKET_CREATION_PROMPT_CLI",
@@ -53,5 +60,6 @@ __all__ = [
     "POCKET_INTERACTION_PROMPT_MCP",
     "POCKET_SPECIALIST_PROMPT",
     "RIPPLE_DESIGN_RULES",
+    "fill_current_pocket",
     "get_pocket_prompts",
 ]

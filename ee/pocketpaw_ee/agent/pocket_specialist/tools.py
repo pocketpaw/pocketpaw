@@ -14,10 +14,20 @@ without reaching into ``pocketpaw_ee.cloud`` internals.
 Changes: 2026-05-14 — added the Tier-2 prop-array item tool factories
 (set / append / remove ``_prop_array_item``), reworked onto the
 pocketpaw_ee layout from PR #1106.
+Changes: 2026-05-21 (#1163) — ``_capture_op`` now accepts the tool's
+result dict. A service-rejected op (``{ok: false}``) is NO LONGER
+appended to ``capture['ops']`` — a rejected op is not an applied op.
+Instead it is recorded in ``capture['rejected']`` with its error so the
+runtime can fold the reason into the response ``warnings``.
+Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the ``set_source``
+/ ``remove_source`` edit-tool factories so the specialist can author the
+pocket's top-level ``rippleSpec.sources`` block (read-only GET data
+bindings). Registered in ``make_edit_pocket_tools``.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -28,6 +38,8 @@ from pocketpaw.ripple.manifest import validate_against_manifest
 from pocketpaw_ee.cloud.pockets.service import agent_create as _agent_create
 from pocketpaw_ee.cloud.pockets.service import agent_list as _agent_list_pockets
 from pocketpaw_ee.cloud.pockets.service import agent_update as _agent_update
+
+log = logging.getLogger(__name__)
 
 
 class _ListPocketsArgs(BaseModel):
@@ -339,8 +351,39 @@ def make_persist_pocket_tool(
 # ---------------------------------------------------------------------------
 
 
-def _capture_op(capture: dict[str, Any] | None, op: str, args: dict[str, Any]) -> None:
-    """Append an op record to ``capture['ops']`` for the runtime to inspect."""
+def _capture_op(
+    capture: dict[str, Any] | None,
+    op: str,
+    args: dict[str, Any],
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Record a granular op for the runtime to inspect.
+
+    An op the service ACCEPTED lands in ``capture['ops']`` — that list is
+    the runtime's source of truth for "what changed."
+
+    An op the service REJECTED (``result`` reports ``{ok: false}``) is NOT
+    an applied op, so it must NOT land in ``capture['ops']`` — counting it
+    there would let a run whose only op was rejected return
+    ``ok=true, ops=[<rejected op>]``, the same silent-failure class as
+    #1163. A rejected op is logged and recorded in ``capture['rejected']``
+    with its error so ``run_edit_specialist`` can surface the reason in
+    the response ``warnings``.
+    """
+    if isinstance(result, dict) and result.get("ok") is False:
+        error = result.get("error") or result
+        log.warning(
+            "[pocket-specialist:edit] granular op %s rejected by service: %s",
+            op,
+            error,
+        )
+        if capture is not None:
+            rejected = capture.get("rejected")
+            if not isinstance(rejected, list):
+                rejected = []
+                capture["rejected"] = rejected
+            rejected.append({"op": op, "args": args, "error": str(error)})
+        return
     if capture is None:
         return
     ops = capture.get("ops")
@@ -388,7 +431,7 @@ def make_set_state_tool(*, pocket_id: str, capture: dict[str, Any] | None = None
         from pocketpaw_ee.cloud.pockets.agent_context import set_state_for_agent
 
         result = await set_state_for_agent(pocket_id, path, value)
-        _capture_op(capture, "set_state", {"path": path, "value": value})
+        _capture_op(capture, "set_state", {"path": path, "value": value}, result)
         return result
 
     return StructuredTool.from_function(
@@ -419,7 +462,7 @@ def make_append_state_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import append_state_for_agent
 
         result = await append_state_for_agent(pocket_id, path, item)
-        _capture_op(capture, "append_state", {"path": path, "item": item})
+        _capture_op(capture, "append_state", {"path": path, "item": item}, result)
         return result
 
     return StructuredTool.from_function(
@@ -447,7 +490,7 @@ def make_remove_state_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import remove_state_for_agent
 
         result = await remove_state_for_agent(pocket_id, path)
-        _capture_op(capture, "remove_state", {"path": path})
+        _capture_op(capture, "remove_state", {"path": path}, result)
         return result
 
     return StructuredTool.from_function(
@@ -475,7 +518,7 @@ def make_patch_state_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import patch_state_for_agent
 
         result = await patch_state_for_agent(pocket_id, partial)
-        _capture_op(capture, "patch_state", {"partial": partial})
+        _capture_op(capture, "patch_state", {"partial": partial}, result)
         return result
 
     return StructuredTool.from_function(
@@ -505,7 +548,7 @@ def make_set_node_prop_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import set_node_prop_for_agent
 
         result = await set_node_prop_for_agent(pocket_id, node_id, prop, value)
-        _capture_op(capture, "set_node_prop", {"node_id": node_id, "prop": prop})
+        _capture_op(capture, "set_node_prop", {"node_id": node_id, "prop": prop}, result)
         return result
 
     return StructuredTool.from_function(
@@ -526,18 +569,33 @@ class _AddNodeArgs(BaseModel):
     parent_id: str
     spec: dict[str, Any] = Field(..., description="UINode to insert.")
     after_id: str | None = Field(default=None, description="Insert after this sibling.")
+    index: int | None = Field(
+        default=None,
+        description=(
+            "Insert at this 0-based position among the parent's children. "
+            "Takes precedence over after_id; clamped to the child count."
+        ),
+    )
 
 
 def make_add_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None) -> StructuredTool:
     """Add a new widget under a parent."""
 
     async def _run(
-        parent_id: str, spec: dict[str, Any], after_id: str | None = None
+        parent_id: str,
+        spec: dict[str, Any],
+        after_id: str | None = None,
+        index: int | None = None,
     ) -> dict[str, Any]:
         from pocketpaw_ee.cloud.pockets.agent_context import add_node_for_agent
 
-        result = await add_node_for_agent(pocket_id, parent_id, spec, after_id)
-        _capture_op(capture, "add_node", {"parent_id": parent_id, "after_id": after_id})
+        result = await add_node_for_agent(pocket_id, parent_id, spec, after_id, index)
+        _capture_op(
+            capture,
+            "add_node",
+            {"parent_id": parent_id, "after_id": after_id, "index": index},
+            result,
+        )
         return result
 
     return StructuredTool.from_function(
@@ -545,8 +603,9 @@ def make_add_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None)
         name="add_node",
         description=(
             "Insert a new widget as a child of `parent_id`. Pass `spec` as "
-            "a UINode object. Use `after_id` to position after a specific "
-            "sibling; omit to append. Returns the new node with id assigned."
+            "a UINode object. Position it with `index` (0-based slot) or "
+            "`after_id` (after a specific sibling); omit both to append. "
+            "Returns the new node with id assigned."
         ),
         args_schema=_AddNodeArgs,
     )
@@ -566,7 +625,7 @@ def make_replace_node_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import replace_node_for_agent
 
         result = await replace_node_for_agent(pocket_id, node_id, spec)
-        _capture_op(capture, "replace_node", {"node_id": node_id})
+        _capture_op(capture, "replace_node", {"node_id": node_id}, result)
         return result
 
     return StructuredTool.from_function(
@@ -583,21 +642,24 @@ def make_replace_node_tool(
 
 class _MoveNodeArgs(BaseModel):
     node_id: str
-    new_parent_id: str
+    # `parent_id` for consistency with add_node — was `new_parent_id`, an
+    # asymmetry the chat agent kept tripping on.
+    parent_id: str
     after_id: str | None = None
 
 
 def make_move_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None) -> StructuredTool:
     """Move a subtree to a new parent / position."""
 
-    async def _run(node_id: str, new_parent_id: str, after_id: str | None = None) -> dict[str, Any]:
+    async def _run(node_id: str, parent_id: str, after_id: str | None = None) -> dict[str, Any]:
         from pocketpaw_ee.cloud.pockets.agent_context import move_node_for_agent
 
-        result = await move_node_for_agent(pocket_id, node_id, new_parent_id, after_id)
+        result = await move_node_for_agent(pocket_id, node_id, parent_id, after_id)
         _capture_op(
             capture,
             "move_node",
-            {"node_id": node_id, "new_parent_id": new_parent_id, "after_id": after_id},
+            {"node_id": node_id, "parent_id": parent_id, "after_id": after_id},
+            result,
         )
         return result
 
@@ -626,7 +688,7 @@ def make_remove_node_tool(
         from pocketpaw_ee.cloud.pockets.agent_context import remove_node_for_agent
 
         result = await remove_node_for_agent(pocket_id, node_id)
-        _capture_op(capture, "remove_node", {"node_id": node_id})
+        _capture_op(capture, "remove_node", {"node_id": node_id}, result)
         return result
 
     return StructuredTool.from_function(
@@ -672,6 +734,7 @@ def make_set_prop_array_item_tool(
             capture,
             "set_prop_array_item",
             {"node_id": node_id, "prop": prop, "match": match},
+            result,
         )
         return result
 
@@ -718,6 +781,7 @@ def make_append_prop_array_item_tool(
             capture,
             "append_prop_array_item",
             {"node_id": node_id, "prop": prop, "after": after},
+            result,
         )
         return result
 
@@ -756,6 +820,7 @@ def make_remove_prop_array_item_tool(
             capture,
             "remove_prop_array_item",
             {"node_id": node_id, "prop": prop, "match": match},
+            result,
         )
         return result
 
@@ -771,6 +836,103 @@ def make_remove_prop_array_item_tool(
     )
 
 
+# ---------------------------------------------------------------------------
+# rippleSpec.sources ops — read-only data bindings (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+class _SetSourceArgs(BaseModel):
+    source_key: str = Field(
+        ..., description="Short name for the source — also the `sources` map key."
+    )
+    path: str = Field(
+        ...,
+        description=(
+            "RELATIVE path against the pocket's configured backend "
+            "(e.g. `/pulls?state=open`). Never an absolute URL."
+        ),
+    )
+    bind: str = Field(
+        ...,
+        description="Dotted `state.` path the fetched JSON is written to (e.g. `state.prs`).",
+    )
+    method: str = Field(default="GET", description='Always "GET" — alpha is read-only.')
+    refresh: list[str] | None = Field(
+        default=None,
+        description=(
+            "When to run the source: `pocket_open` (on open) and/or `manual` "
+            '(refresh button). Defaults to `["pocket_open"]` when omitted.'
+        ),
+    )
+
+
+def make_set_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Declare (or replace) a read-only data source on the pocket."""
+
+    async def _run(
+        source_key: str,
+        path: str,
+        bind: str,
+        method: str = "GET",
+        refresh: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_source_for_agent
+
+        binding: dict[str, Any] = {"method": method, "path": path, "bind": bind}
+        if refresh is not None:
+            binding["refresh"] = refresh
+        result = await set_source_for_agent(pocket_id, source_key, binding)
+        _capture_op(capture, "set_source", {"source_key": source_key, "path": path}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_source",
+        description=(
+            "Declare a READ-ONLY live data source in rippleSpec.sources — a "
+            "GET binding that fetches from the pocket's own configured "
+            "backend (a CRM, an internal API) and writes the JSON into "
+            "state at `bind`. Use this when the user wants live data from "
+            "THEIR backend. The pocket must have a backend configured "
+            "(base URL + auth, set in backend settings). Seed state at the "
+            "`bind` target with an empty value so the widget renders before "
+            "the first fetch. For a manual refresh, add a button with "
+            "on_click {action: 'run_source', source: '<source_key>'}."
+        ),
+        args_schema=_SetSourceArgs,
+    )
+
+
+class _RemoveSourceArgs(BaseModel):
+    source_key: str = Field(..., description="The `sources` map key to remove.")
+
+
+def make_remove_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a read-only data source declaration from the pocket."""
+
+    async def _run(source_key: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_source_for_agent
+
+        result = await remove_source_for_agent(pocket_id, source_key)
+        _capture_op(capture, "remove_source", {"source_key": source_key}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_source",
+        description=(
+            "Remove a read-only data source from rippleSpec.sources by its "
+            "key. Idempotent — removing a source that was never declared "
+            "still succeeds. The state the source bound to is left alone."
+        ),
+        args_schema=_RemoveSourceArgs,
+    )
+
+
 def make_edit_pocket_tools(
     *, pocket_id: str, capture: dict[str, Any] | None = None
 ) -> list[StructuredTool]:
@@ -779,7 +941,9 @@ def make_edit_pocket_tools(
     Order is the order the LLM sees them; we lead with the read tool
     so the agent is prompted toward "get then mutate" rather than
     blind writes. The Tier-2 ``*_prop_array_item`` ops sit next to
-    ``set_node_prop`` — they are the surgical alternative to it.
+    ``set_node_prop`` — they are the surgical alternative to it. The
+    ``*_source`` ops sit last — they write the top-level
+    ``rippleSpec.sources`` block, not the ui tree or state.
     """
     return [
         make_get_pocket_tool(pocket_id=pocket_id),
@@ -795,4 +959,6 @@ def make_edit_pocket_tools(
         make_replace_node_tool(pocket_id=pocket_id, capture=capture),
         make_move_node_tool(pocket_id=pocket_id, capture=capture),
         make_remove_node_tool(pocket_id=pocket_id, capture=capture),
+        make_set_source_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_source_tool(pocket_id=pocket_id, capture=capture),
     ]

@@ -1,10 +1,14 @@
 # tests/test_ee_instinct.py — Comprehensive tests for ee/instinct (store + router).
 # Created: 2026-03-28 — Initial store tests.
-# Updated: 2026-03-30 — Full store unit tests + FastAPI router integration tests added.
+# Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
+#   added the outcome-verification e2e — an Action runs, the deterministic
+#   verifier checks the result against captured success_criteria, and the
+#   structured OutcomeVerdict is recorded on the Action via mark_executed.
 # Updated: 2026-05-07 (fix/test-fixtures-auth-context) — seed auth context in
 #   the test_app fixture so route tests pass against the workspace RBAC guards
 #   added in #1059 and the plan-feature gate added in #1060. Pattern mirrors
 #   tests/cloud/test_rbac_routes.py (the #1061 reference).
+# Updated: 2026-03-30 — Full store unit tests + FastAPI router integration tests added.
 
 from __future__ import annotations
 
@@ -26,8 +30,11 @@ from pocketpaw.instinct.models import (
     ActionStatus,
     ActionTrigger,
     AuditCategory,
+    OutcomeStatus,
+    OutcomeVerdict,
 )
 from pocketpaw.instinct.store import InstinctStore
+from pocketpaw.instinct.verification import verify_outcome
 
 
 class _FakeMembership:
@@ -1173,3 +1180,128 @@ class TestFullLifecycle:
         # Total in store is 3
         all_actions = client.get("/instinct/actions").json()
         assert all_actions["total"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Outcome verification e2e (issue #1162)
+# ---------------------------------------------------------------------------
+
+
+class TestOutcomeVerificationE2E:
+    """End-to-end: an Action executes, the deterministic verifier checks the
+    result against captured success_criteria, and the structured verdict
+    lands on the Action via mark_executed.
+
+    This is the loop issue #1162 makes concrete — a completed action is an
+    output; the verdict says whether it was an outcome."""
+
+    @pytest.mark.asyncio
+    async def test_executed_action_records_verified_outcome(self, store: InstinctStore) -> None:
+        # 1. An agent proposes an action. The task it came from carried
+        #    success_criteria captured at planning intake (issue #1161).
+        success_criteria = [
+            "An overdue invoice list is generated",
+            "A reminder email is sent to each customer",
+        ]
+        action = await store.propose(
+            pocket_id="pocket-invoices",
+            title="Chase overdue invoices",
+            description="Pull overdue invoices and email reminders",
+            recommendation="Email every customer 30+ days overdue",
+            trigger=make_trigger(),
+        )
+
+        # 2. A human approves it.
+        approved = await store.approve(action.id, approver="user:owner")
+        assert approved is not None
+        assert approved.status == ActionStatus.APPROVED
+
+        # 3. The action executes and produces a result. The deterministic
+        #    verifier checks that result against the captured criteria.
+        execution_result = (
+            "Generated the overdue invoice list and sent a reminder email to each customer on it."
+        )
+        verdict = verify_outcome(execution_result, success_criteria)
+
+        # 4. The structured verdict is recorded on the Action.
+        executed = await store.mark_executed(action.id, verdict)
+
+        assert executed is not None
+        assert executed.status == ActionStatus.EXECUTED
+        # The outcome is a checked verdict, not a bare "what happened" string.
+        assert isinstance(executed.outcome, OutcomeVerdict)
+        assert executed.outcome.status == OutcomeStatus.SOLVED
+        assert executed.outcome.met_count == 2
+        assert executed.outcome.total_count == 2
+
+    @pytest.mark.asyncio
+    async def test_executed_action_records_partial_verdict(self, store: InstinctStore) -> None:
+        # An action whose result only satisfies some of its success
+        # criteria gets a PARTIAL verdict — finishing is not solving.
+        success_criteria = [
+            "Reminder emails are sent",
+            "Customers flagged do-not-contact are skipped",
+        ]
+        action = await store.propose(
+            pocket_id="pocket-invoices",
+            title="Chase overdue invoices",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+        )
+        await store.approve(action.id)
+
+        # The result mentions sending emails but says nothing about the
+        # do-not-contact skip — one criterion met, one not.
+        verdict = verify_outcome("Sent the reminder emails", success_criteria)
+        executed = await store.mark_executed(action.id, verdict)
+
+        assert executed is not None
+        assert isinstance(executed.outcome, OutcomeVerdict)
+        assert executed.outcome.status == OutcomeStatus.PARTIAL
+        assert executed.outcome.met_count == 1
+
+    @pytest.mark.asyncio
+    async def test_verified_outcome_survives_store_reload(self, store: InstinctStore) -> None:
+        # The structured verdict must rebuild intact when the Action is
+        # reloaded from SQLite — it is stored as JSON in the outcome column.
+        action = await store.propose(
+            pocket_id="pocket-1",
+            title="Verifiable task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+        )
+        await store.approve(action.id)
+        verdict = verify_outcome(
+            "The report was generated",
+            ["A report is generated"],
+        )
+        await store.mark_executed(action.id, verdict)
+
+        reloaded = await store.get_action(action.id)
+        assert reloaded is not None
+        assert isinstance(reloaded.outcome, OutcomeVerdict)
+        assert reloaded.outcome.status == OutcomeStatus.SOLVED
+        assert reloaded.outcome.criteria_results[0].criterion == "A report is generated"
+
+    @pytest.mark.asyncio
+    async def test_executed_action_audit_trail_intact(self, store: InstinctStore) -> None:
+        # Recording a structured verdict must not disturb the audit log —
+        # the action_executed entry is still written.
+        action = await store.propose(
+            pocket_id="pocket-audit",
+            title="Audited verification task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+        )
+        await store.approve(action.id)
+        verdict = verify_outcome("the email was sent", ["An email is sent"])
+        await store.mark_executed(action.id, verdict)
+
+        entries = await store.query_audit(pocket_id="pocket-audit")
+        events = {e.event for e in entries}
+        assert "action_proposed" in events
+        assert "action_approved" in events
+        assert "action_executed" in events

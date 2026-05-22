@@ -14,6 +14,9 @@ Backend-aware exclusion:
 
 Changes:
 - 2026-03-12: Added EditFileTool to _CLAUDE_SDK_EXCLUDED (has native Edit)
+- 2026-05-21 (#1160): _scan_tool_output now also caps oversized results via
+  cap_tool_output(), so tool blobs returned through the OpenAI / ADK /
+  LangChain wrappers can't flood agent context.
 """
 
 from __future__ import annotations
@@ -259,7 +262,20 @@ def build_openai_function_tools(
 
 
 def _scan_tool_output(result: str, tool_name: str) -> str:
-    """Scan tool output for injection attacks, return sanitized content if needed."""
+    """Post-process a tool result before it reaches agent context.
+
+    Two steps, both best-effort (an error in either leaves the result
+    unchanged rather than breaking tool execution):
+
+    1. Injection scan — sanitise content that trips the prompt-injection
+       scanner (e.g. hostile web pages).
+    2. Output budget — cap an oversized blob (a long test run, a build log,
+       a big HTTP body) via ``cap_tool_output`` so it can't flood the
+       context window. Normal-sized output passes through untouched.
+
+    This runs inside the OpenAI / ADK / LangChain tool wrappers, which call
+    ``tool.execute`` directly rather than through ``ToolRegistry.execute``.
+    """
     try:
         from pocketpaw.config import get_settings
         from pocketpaw.security.injection_scanner import get_injection_scanner
@@ -269,9 +285,22 @@ def _scan_tool_output(result: str, tool_name: str) -> str:
             scanner = get_injection_scanner()
             scan = scanner.scan(result, source=f"tool:{tool_name}")
             if scan.threat_level.value != "none":
-                return scan.sanitized_content
+                result = scan.sanitized_content
     except Exception:
         pass  # Don't let scanner errors break tool execution
+
+    # Output budget — cap a noisy blob. Idempotent, so a result already
+    # capped inside BaseTool._success passes through unchanged.
+    if result:
+        try:
+            from pocketpaw.config import get_settings
+            from pocketpaw.tools.output_budget import cap_tool_output
+
+            cap = getattr(get_settings(), "tool_output_char_cap", None)
+            result = cap_tool_output(result, cap=cap, tool_name=tool_name)
+        except Exception:
+            logger.debug("Tool output cap failed for %s", tool_name, exc_info=True)
+
     return result
 
 

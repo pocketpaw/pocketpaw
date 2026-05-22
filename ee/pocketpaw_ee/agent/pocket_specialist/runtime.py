@@ -2,6 +2,33 @@
 
 Orchestrates backend selection, tool wiring, event emission, and result
 assembly. Always persists a pocket - see feedback_pocket_always_ships.md.
+
+Changes: 2026-05-21 (#1163) — the edit-specialist stream loop now inspects
+``event.type == "error"`` (the deep_agents backend yields error events
+instead of raising), so a backend failure surfaces as ``ok=False`` with a
+populated ``error`` field instead of a silent ``ok=True, ops=[]``. A
+genuine 0-ops outcome with no error now surfaces the planner's final text
+reply via the new ``PocketSpecialistEditOutput.warnings`` field so the
+caller learns WHY the specialist declined. Service-rejected granular ops
+are no longer counted as applied — their rejection reasons are folded
+into ``warnings`` whether or not other ops landed. The 0-ops reason is
+joined with "" because deep_agents emits message events as token-level
+chunks. Added targeted observability logging for error events and
+tool_use / applied / rejected counts.
+Changes: 2026-05-21 (#1170) — ``run_edit_specialist`` now dispatches
+through ``pick_edit_adapter`` so it honors ``pocket_specialist_mode``,
+mirroring how ``run_specialist`` (create) routes through ``pick_adapter``.
+In ``agent`` mode the edit path no longer spawns a sub-agent backend —
+the chat agent computes the granular ops inline and the new
+``EditAgentModeAdapter`` applies them deterministically. The historical
+backend-spawn flow moved into the private ``_run_edit_subagent_pipeline``.
+A new ``PocketSpecialistEditInput.ops`` field carries the chat agent's
+pre-computed ops on the agent-mode second call.
+Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — the subagent-mode edit
+pipeline now fetches the pocket's non-secret backend summary and fills it
+into the ``<current-pocket>`` block via ``fill_current_pocket`` so the
+specialist sees whether a backend is configured before authoring a
+``sources`` block. The token is never surfaced.
 """
 
 from __future__ import annotations
@@ -18,6 +45,7 @@ from pocketpaw.ripple._pockets import (
     POCKET_EDIT_SPECIALIST_PROMPT_MCP,
     POCKET_ID_TOKEN,
     POCKET_SPECIALIST_PROMPT,
+    fill_current_pocket,
 )
 from pocketpaw_ee.agent.pocket_specialist.settings import (
     _BACKEND_MODEL_FIELD,
@@ -491,6 +519,22 @@ class PocketSpecialistEditInput(BaseModel):
         ),
     )
 
+    # ---- agent-mode second-call payload ----
+    ops: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Pre-computed granular ops for agent-mode's second call. Each "
+            "op is ``{op: <tool name>, args: {...}}`` where ``op`` is one "
+            "of the granular edit tools (set_state, append_state, "
+            "remove_state, patch_state, set_node_prop, set_prop_array_item, "
+            "append_prop_array_item, remove_prop_array_item, add_node, "
+            "replace_node, move_node, remove_node) and ``args`` are that "
+            "tool's arguments. When set, the specialist skips its own LLM "
+            "planning phase and applies the ops directly. Ignored in "
+            "subagent mode — the spawned specialist plans its own ops."
+        ),
+    )
+
 
 class PocketSpecialistEditOutput(BaseModel):
     ok: bool
@@ -498,7 +542,43 @@ class PocketSpecialistEditOutput(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     duration_ms: int
     backend_used: str
-    error: str | None = None
+    action: Literal["applied", "failed", "draft_kit"] = Field(
+        default="applied",
+        description=(
+            "What the run did. ``applied`` — ops ran (subagent mode, or "
+            "agent-mode second call). ``failed`` — the run errored. "
+            "``draft_kit`` — agent-mode first call: no ops were supplied, "
+            "so the response carries a ``draft_kit`` telling the chat agent "
+            "how to compute ops and call back with ``ops=<list>``."
+        ),
+    )
+    error: str | None = Field(
+        default=None,
+        description=(
+            "Set when the specialist run FAILED — backend raised, or the "
+            "deep_agents backend yielded an error event. ``ok`` is False "
+            "whenever this is populated. Distinct from ``warnings``."
+        ),
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Set when the run SUCCEEDED but applied zero ops — the planner "
+            "declined to act (target not found, intent ambiguous, no change "
+            "needed). Carries the planner's final text reply so the caller "
+            "knows WHY. ``ok`` stays True; this is not a failure. A silent "
+            "``ok=True, ops=[]`` with no explanation is the #1163 bug."
+        ),
+    )
+    draft_kit: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Agent-mode first-call payload: the granular-op vocabulary, "
+            "the current pocket echo, and instructions for the calling "
+            "chat agent to compute the granular ops and call back with "
+            "``ops=<list>``. None in subagent mode and on the second call."
+        ),
+    )
 
 
 async def run_edit_specialist(
@@ -508,12 +588,41 @@ async def run_edit_specialist(
     user_id: str,
     settings: Settings,
 ) -> PocketSpecialistEditOutput:
-    """Run the pocket edit specialist end-to-end.
+    """Entry point — pick the edit adapter for ``settings.pocket_specialist_mode``
+    and delegate.
+
+    Mirrors ``run_specialist`` (create). The default ``subagent`` mode
+    runs ``_run_edit_subagent_pipeline`` below — an isolated backend
+    running the specialist's own model. The ``agent`` mode short-circuits
+    the backend spawn: the calling chat agent computes the granular ops
+    inline using its own LLM and hands them back for deterministic apply.
+
+    Signature is the public contract — ``mcp_tool``, ``cli_tool``, and
+    ``tool`` call sites rely on it being adapter-agnostic.
+    """
+    from pocketpaw_ee.agent.pocket_specialist.adapters import pick_edit_adapter
+
+    adapter = pick_edit_adapter(settings.pocket_specialist_mode)
+    return await adapter.edit(input, workspace_id=workspace_id, user_id=user_id, settings=settings)
+
+
+async def _run_edit_subagent_pipeline(
+    input: PocketSpecialistEditInput,
+    *,
+    workspace_id: str,
+    user_id: str,
+    settings: Settings,
+) -> PocketSpecialistEditOutput:
+    """Subagent-mode edit pipeline (historical flow).
 
     Spawns an isolated backend with the interaction prompt + granular
     mutation tools. The granular ops persist as they go (no
     persist_pocket needed); each op also emits its own SSE event so
     the canvas updates in place.
+
+    Invoked by ``EditSubagentAdapter.edit`` — kept private so the only
+    entry point remains ``run_edit_specialist`` (which dispatches via
+    ``pick_edit_adapter``).
     """
     started = time.monotonic()
     backend_name = settings.pocket_specialist_backend
@@ -556,7 +665,19 @@ async def run_edit_specialist(
         make_edit_pocket_tools(pocket_id=input.pocket_id, capture=ops_capture)
     )
 
-    system_prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP.replace(POCKET_ID_TOKEN, input.pocket_id)
+    # Surface the NON-SECRET backend summary so the specialist knows
+    # whether a backend is already configured before it authors a
+    # ``sources`` block. ``get_pocket_backend`` never returns the token.
+    backend_summary: dict[str, Any] | None = None
+    try:
+        from pocketpaw_ee.cloud.pockets import service as _pockets_service
+
+        backend_summary = await _pockets_service.get_pocket_backend(workspace_id, input.pocket_id)
+    except Exception:  # noqa: BLE001 — a missing backend summary must not block the edit
+        log.debug("[pocket-specialist:edit] backend summary fetch failed", exc_info=True)
+    system_prompt = fill_current_pocket(
+        POCKET_EDIT_SPECIALIST_PROMPT_MCP, input.pocket_id, backend_summary
+    )
     user_message = _build_edit_user_message(input)
 
     log.info(
@@ -575,21 +696,49 @@ async def run_edit_specialist(
         "patch_",
     )
     # success starts False and flips True only after the backend.run
-    # loop completes without exception. Catches the silent-failure mode
-    # where the inner backend errors mid-stream (transport drop, model
-    # 400, etc.) and the caller previously saw ok=True with ops=[].
+    # loop completes without exception AND without an error event.
+    # Catches two silent-failure modes the caller previously saw as
+    # ok=True with ops=[]:
+    #   1. the inner backend raises mid-stream (transport drop, 400)
+    #   2. the deep_agents backend yields AgentEvent(type="error")
+    #      instead of raising — see deep_agents.py:974-977.
     success = False
     error_msg: str | None = None
+    tool_use_count = 0
+    # The planner's running text — used to explain a genuine 0-ops run.
+    final_text_parts: list[str] = []
     try:
         async for event in backend.run(user_message, system_prompt=system_prompt):
+            if event.type == "error":
+                # #1163 root cause A — deep_agents converts internal
+                # failures into error events rather than raising. Capture
+                # the message, mark the run failed, and stop trusting the
+                # clean loop exit.
+                error_msg = str(event.content or "backend emitted an error event")
+                log.warning(
+                    "[pocket-specialist:edit] backend emitted error event: %s",
+                    error_msg,
+                )
+                continue
             if event.type == "tool_use":
+                tool_use_count += 1
                 tool_name = (event.metadata or {}).get("name", "")
                 if tool_name.startswith(_GRANULAR_OP_PREFIXES):
                     # Forward each inner op to the outer chat SSE stream so
                     # the desktop client renders per-op progress (matches
                     # TOOL_LABELS entries in paw-enterprise chat/service.ts).
                     _push_chat_status(tool_name, event.metadata.get("input") or {})
-        success = True
+            elif event.type == "message" and event.content:
+                # Keep the planner's text — it explains a no-op decline.
+                # The deep_agents backend yields message events as
+                # TOKEN-LEVEL chunks (deep_agents.py:897, inside the v2
+                # "messages" stream path), so these parts are fragments of
+                # one reply, not whole messages. They are joined with ""
+                # below — joining with "\n" would chop the prose.
+                final_text_parts.append(str(event.content))
+        # A clean loop exit only counts as success when no error event
+        # passed through. error_msg is set above for the error-event path.
+        success = error_msg is None
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "[pocket-specialist:edit] backend stream errored: %s: %s",
@@ -598,11 +747,62 @@ async def run_edit_specialist(
             exc_info=True,
         )
         error_msg = f"{type(exc).__name__}: {exc}"
+        success = False
     finally:
         await backend.stop()
 
     duration_ms = int((time.monotonic() - started) * 1000)
     ops = list(ops_capture.get("ops", []))
+    rejected = list(ops_capture.get("rejected", []))
+
+    # Observability — distinguish "planner declined to act" (tool_use=0)
+    # from "tool called but the service rejected it" (tool_use>0, ops=0).
+    log.info(
+        "[pocket-specialist:edit] planner emitted %d tool_use events, "
+        "%d granular ops applied, %d rejected by the service",
+        tool_use_count,
+        len(ops),
+        len(rejected),
+    )
+
+    # Build the warnings list. ``warnings`` is the channel for "the run
+    # succeeded but the caller should know something" — never a failure
+    # (that is ``error``). Two sources feed it:
+    #
+    #   1. Service-rejected ops. A granular op the planner attempted but
+    #      the service refused. Surfaced WHETHER OR NOT other ops applied
+    #      — a partial-apply still owes the caller the rejection reason.
+    #      A run where every op was rejected ends up ok=true, ops=[], with
+    #      the reasons in warnings — not a silent success (#1163 class).
+    #
+    #   2. A genuine 0-ops decline. The planner emitted no granular tool
+    #      call at all and ops/rejected are both empty — surface its
+    #      final text reply so the caller can tell the user WHY.
+    warnings: list[str] = []
+    for rej in rejected:
+        op_name = rej.get("op", "edit op")
+        reason = rej.get("error", "rejected by the service")
+        warnings.append(f"Edit op '{op_name}' could not be applied: {reason}")
+
+    if success and not ops and not rejected:
+        # deep_agents yields message events as token-level chunks — join
+        # with "" so the surfaced reason reads as clean prose, not a
+        # newline-chopped fragment soup.
+        reason = "".join(final_text_parts).strip()
+        warnings.append(
+            reason
+            or (
+                "The edit specialist applied no changes and gave no "
+                "reason. The target may not have been found, or the "
+                "intent may not have mapped to a supported edit."
+            )
+        )
+        log.warning(
+            "[pocket-specialist:edit] 0-ops run — surfacing planner reply "
+            "as a warning (pocket_id=%s tool_use=%d)",
+            input.pocket_id,
+            tool_use_count,
+        )
 
     log.info(
         "[pocket-specialist:edit] complete: pocket_id=%s ops=%d success=%s "
@@ -621,4 +821,5 @@ async def run_edit_specialist(
         duration_ms=duration_ms,
         backend_used=backend_name,
         error=error_msg,
+        warnings=warnings,
     )

@@ -24,16 +24,16 @@ def test_calendar_events_allowed():
     assert prop_arrays.is_allowed("calendar", "events")
 
 
-def test_feed_items_allowed():
-    assert prop_arrays.is_allowed("feed", "items")
+def test_checklist_layout_items_allowed():
+    assert prop_arrays.is_allowed("checklist-layout", "items")
 
 
 def test_select_options_allowed():
     assert prop_arrays.is_allowed("select", "options")
 
 
-def test_form_layout_fields_allowed():
-    assert prop_arrays.is_allowed("form-layout", "fields")
+def test_form_layout_sections_allowed():
+    assert prop_arrays.is_allowed("form-layout", "sections")
 
 
 def test_random_prop_rejected():

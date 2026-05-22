@@ -733,18 +733,18 @@ class TestAppendPropArrayItem:
 
     @pytest.mark.asyncio
     async def test_creates_empty_array_if_missing(self, fake_doc):
-        feed = {"id": "n_feed0001", "type": "feed", "props": {}}
-        fake_doc.rippleSpec["ui"]["children"].append(feed)
+        node = {"id": "n_node0001", "type": "checklist-layout", "props": {}}
+        fake_doc.rippleSpec["ui"]["children"].append(node)
         ctx, _ = _patches(fake_doc)
         with ctx:
             result, err = await pocket_service.agent_append_prop_array_item(
                 fake_doc.id,
-                node_id="n_feed0001",
+                node_id="n_node0001",
                 prop="items",
                 value={"text": "Hi"},
             )
         assert err is None
-        assert feed["props"]["items"] == [{"text": "Hi"}]
+        assert node["props"]["items"] == [{"text": "Hi"}]
         assert result["item_index"] == 0
 
     @pytest.mark.asyncio
