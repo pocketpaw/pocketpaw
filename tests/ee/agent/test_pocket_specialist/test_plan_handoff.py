@@ -163,9 +163,19 @@ class TestParentPromptTeachesTwoPhase:
 
         # Pre-delegation thinking block is the marquee change.
         assert "TWO-PHASE DELEGATION" in POCKET_CREATION_PROMPT_MCP
-        assert "STEP 1 — UNDERSTAND THE BRIEF" in POCKET_CREATION_PROMPT_MCP
-        assert "STEP 2 — PICK THE STRUCTURE" in POCKET_CREATION_PROMPT_MCP
-        assert "STEP 3 — DELEGATE WITH A RICH PLAN" in POCKET_CREATION_PROMPT_MCP
+        # Assert on the step CONTENT, not the literal step number — the
+        # prompt's STEP numbering shifts whenever a new step is inserted
+        # (e.g. the built-in-template check became STEP 0). The intent
+        # we care about is that the parent is taught the understand →
+        # structure → delegate progression, in that order.
+        understand_at = POCKET_CREATION_PROMPT_MCP.find("UNDERSTAND THE BRIEF")
+        structure_at = POCKET_CREATION_PROMPT_MCP.find("PICK THE STRUCTURE")
+        delegate_at = POCKET_CREATION_PROMPT_MCP.find("DELEGATE WITH A RICH PLAN")
+        assert understand_at != -1, "prompt missing the 'understand the brief' step"
+        assert structure_at != -1, "prompt missing the 'pick the structure' step"
+        assert delegate_at != -1, "prompt missing the 'delegate with a rich plan' step"
+        # The three phases must appear in the taught order.
+        assert understand_at < structure_at < delegate_at
 
     def test_creation_prompt_lists_layout_menu(self) -> None:
         """The parent must see the layout menu so it can pick."""
