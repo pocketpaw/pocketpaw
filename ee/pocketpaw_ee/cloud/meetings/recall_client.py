@@ -20,6 +20,8 @@
 #   request_bot_for_meeting(workspace_id, meeting_id) — POST /api/v1/bot/
 #   stop_bot(workspace_id, meeting_id)                — POST .../leave_call/
 #   fetch_transcript_vtt(workspace_id, meeting_id)    — GET bot → transcript
+#   create_async_transcript(recording_id)            — POST .../create_transcript/
+#   fetch_async_transcript_vtt(transcript_id)        — GET transcript → VTT
 
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from typing import Any
 import httpx
 
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud.meetings import settings as meetings_settings
 from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
 
 logger = logging.getLogger(__name__)
@@ -87,23 +90,6 @@ def _recall_headers() -> dict[str, str]:
     }
 
 
-def _transcript_provider() -> str:
-    """Transcription provider configured on the bot at creation.
-
-    Recall's ``recording_config.transcript.provider`` only accepts
-    *streaming* providers — transcription runs while the bot records and
-    the full transcript is finalized after the call. ``recallai_async``
-    is NOT valid here (that name is only for the post-call
-    ``create_transcript`` endpoint).
-
-    Defaults to ``meeting_captions`` — the meeting platform's own
-    captions, which cost nothing extra and work for Meet/Zoom/Teams.
-    Override with RECALL_TRANSCRIPT_PROVIDER for a paid STT engine
-    (e.g. ``recallai_streaming``, ``deepgram_streaming``).
-    """
-    return os.environ.get("RECALL_TRANSCRIPT_PROVIDER", "meeting_captions").strip()
-
-
 # ---------------------------------------------------------------------------
 # Bot lifecycle
 # ---------------------------------------------------------------------------
@@ -129,13 +115,18 @@ async def request_bot_for_meeting(workspace_id: str, meeting_id: str) -> dict[st
     body: dict[str, Any] = {
         "meeting_url": meeting.join_url,
         "bot_name": os.environ.get("POCKETPAW_BOT_DISPLAY_NAME", "PocketPaw Bot"),
-        # Transcript provider runs streaming while the bot records; Recall
-        # finalizes the transcript after the call and fires `transcript.done`.
-        "recording_config": {"transcript": {"provider": {_transcript_provider(): {}}}},
         # Echoed back on every webhook for this bot — lets the webhook
         # cross-check the workspace without a DB round-trip.
         "metadata": {"workspace_id": workspace_id, "meeting_id": str(meeting.id)},
     }
+    # Realtime providers are configured on the bot here and transcribe
+    # live. Async providers (`*_async`) are NOT valid in recording_config
+    # — the bot just records, and transcription is kicked off post-call
+    # against the finished recording (create_async_transcript, driven by
+    # the `recording.done` webhook).
+    transcript_cfg = await meetings_settings.resolve()
+    if not meetings_settings.is_async_provider(transcript_cfg["provider"]):
+        body["recording_config"] = {"transcript": {"provider": {transcript_cfg["provider"]: {}}}}
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -279,6 +270,75 @@ async def fetch_transcript_vtt_for_bot(bot_id: str) -> str | None:
         segments = dl.json()
     except ValueError:
         logger.warning("Recall transcript download was not JSON for bot=%s", bot_id)
+        return None
+    return _segments_to_vtt(segments) or None
+
+
+async def create_async_transcript(recording_id: str) -> str:
+    """Kick off async transcription for a finished recording.
+
+    POSTs to ``/api/v1/recording/{id}/create_transcript/`` with the
+    deployment's configured async provider + model (e.g. Deepgram
+    ``nova-3``). Returns the Recall transcript id. Driven by the
+    ``recording.done`` webhook — see service.start_async_transcript.
+    """
+    resolved = await meetings_settings.resolve()
+    options: dict[str, Any] = {"language_code": "en"}
+    if resolved["model"]:
+        options["model"] = resolved["model"]
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{_recall_base_url()}/api/v1/recording/{recording_id}/create_transcript/",
+            json={"provider": {resolved["provider"]: options}},
+            headers=_recall_headers(),
+        )
+    if resp.status_code >= 400:
+        raise ValidationError(
+            "meeting.transcript_service_error",
+            f"Recall.ai rejected create_transcript: {resp.status_code} {resp.text[:300]}",
+        )
+    transcript_id = str((resp.json() or {}).get("id") or "")
+    if not transcript_id:
+        raise ValidationError(
+            "meeting.transcript_service_error", "Recall.ai create_transcript returned no id."
+        )
+    return transcript_id
+
+
+async def fetch_async_transcript_vtt(transcript_id: str) -> str | None:
+    """Fetch a completed async transcript by Recall transcript id, as VTT.
+
+    ``GET /api/v1/transcript/{id}/`` → ``data.download_url`` → the
+    speaker-turn JSON, run through the shared VTT assembler. Returns
+    ``None`` when Recall has no ready transcript yet (no download URL).
+    """
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{_recall_base_url()}/api/v1/transcript/{transcript_id}/",
+            headers=_recall_headers(),
+        )
+    if resp.status_code == 404:
+        return None
+    if resp.status_code >= 400:
+        raise ValidationError(
+            "meeting.transcript_service_error",
+            f"Recall.ai GET transcript failed: {resp.status_code} {resp.text[:200]}",
+        )
+    download_url = ((resp.json() or {}).get("data") or {}).get("download_url")
+    if not isinstance(download_url, str) or not download_url:
+        return None
+
+    # Pre-signed storage link — no auth header (must NOT carry our token).
+    async with httpx.AsyncClient(timeout=60) as client:
+        dl = await client.get(download_url)
+    if dl.status_code >= 400:
+        logger.warning("Recall async transcript download failed: %s", dl.status_code)
+        return None
+    try:
+        segments = dl.json()
+    except ValueError:
+        logger.warning("Recall async transcript was not JSON for transcript=%s", transcript_id)
         return None
     return _segments_to_vtt(segments) or None
 

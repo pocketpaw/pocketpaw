@@ -18,6 +18,8 @@
 #   GET    /meetings/credentials/google_meet/auth-url — Meet consent URL
 #   POST   /meetings/credentials/google_meet/callback — finish Meet OAuth
 #   DELETE /meetings/credentials/{provider}   — disconnect a provider
+#   GET    /meetings/settings                 — transcription provider + model
+#   PUT    /meetings/settings                 — set transcription provider
 #
 # Provider credentials (Zoom S2S + Google Meet OAuth) — one deployment-
 # global account per provider, configured via the /meetings/credentials/*
@@ -36,6 +38,7 @@ from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.meetings import credentials as credentials_service
 from pocketpaw_ee.cloud.meetings import recall_client
 from pocketpaw_ee.cloud.meetings import service as meetings_service
+from pocketpaw_ee.cloud.meetings import settings as meetings_settings
 from pocketpaw_ee.cloud.meetings.dto import (
     CompleteGoogleMeetOAuthRequest,
     CreateMeetingRequest,
@@ -46,9 +49,11 @@ from pocketpaw_ee.cloud.meetings.dto import (
     ListMeetingsRequest,
     MeetingDetailResponse,
     MeetingResponse,
+    MeetingsSettingsResponse,
     StoreGoogleMeetCredentialsRequest,
     StoreZoomCredentialsRequest,
     TranscriptResponse,
+    UpdateMeetingsSettingsRequest,
 )
 from pocketpaw_ee.cloud.shared.deps import (
     current_user_id,
@@ -163,6 +168,27 @@ async def get_credentials(provider: str) -> CredentialsResponse:
 async def disconnect_provider(provider: str) -> DisconnectResponse:
     """Remove a provider's stored credentials."""
     return await credentials_service.disconnect(provider)
+
+
+# ---------------------------------------------------------------------------
+# Transcription settings — realtime vs async + provider / model. Admin-gated.
+# Declared before /{meeting_id} so the literal /settings segment isn't
+# captured as a meeting id.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/settings", response_model=MeetingsSettingsResponse, dependencies=[_require_admin])
+async def get_meetings_settings() -> MeetingsSettingsResponse:
+    """The deployment's transcription provider + model + derived mode."""
+    return await meetings_settings.get_settings()
+
+
+@router.put("/settings", response_model=MeetingsSettingsResponse, dependencies=[_require_admin])
+async def update_meetings_settings(
+    body: UpdateMeetingsSettingsRequest,
+) -> MeetingsSettingsResponse:
+    """Set the transcription provider + model (realtime or async)."""
+    return await meetings_settings.update_settings(body)
 
 
 @router.get("/{meeting_id}", response_model=MeetingDetailResponse)

@@ -142,3 +142,23 @@ class DisconnectResponse(BaseModel):
 
     provider: MeetingProviderName
     disconnected: bool
+
+
+# ---------------------------------------------------------------------------
+# Transcription settings
+# ---------------------------------------------------------------------------
+
+
+class MeetingsSettingsResponse(BaseModel):
+    """GET / PUT /meetings/settings — the deployment transcription config."""
+
+    transcript_provider: str
+    transcript_model: str
+    mode: Literal["realtime", "async"]
+
+
+class UpdateMeetingsSettingsRequest(BaseModel):
+    """PUT /meetings/settings body."""
+
+    transcript_provider: str = Field(min_length=1, max_length=80)
+    transcript_model: str = Field(default="", max_length=80)

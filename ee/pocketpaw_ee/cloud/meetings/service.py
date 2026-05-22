@@ -558,7 +558,22 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
     # ``recall`` correlation block).
     text = ""
     payload = meeting.raw_provider_payload or {}
-    if payload.get("recall"):
+    recall_block = payload.get("recall") or {}
+    transcript_id = recall_block.get("transcript_id")
+    if transcript_id:
+        # Async path — transcription was kicked off post-recording; the
+        # transcript lives at Recall's /transcript/{id} endpoint.
+        try:
+            from pocketpaw_ee.cloud.meetings import recall_client
+
+            async_vtt = await recall_client.fetch_async_transcript_vtt(str(transcript_id))
+            if async_vtt:
+                text = async_vtt
+                logger.info("transcript source=recall_async for meeting=%s", meeting_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("async transcript fetch failed for meeting=%s: %s", meeting_id, exc)
+    if not text and recall_block:
+        # Realtime path — the transcript lives on the bot recording.
         try:
             from pocketpaw_ee.cloud.meetings import recall_client
 
@@ -682,6 +697,47 @@ async def ingest_transcript_for_recall_bot(bot_id: str) -> bool:
         return False
     result = await fetch_and_store_transcript(doc.workspace, str(doc.id))
     return result is not None
+
+
+async def start_async_transcript(bot_id: str, recording_id: str) -> bool:
+    """Webhook entry — kick off async transcription for a finished recording.
+
+    Fired by the Recall ``recording.done`` webhook. A no-op unless the
+    deployment is in async transcription mode. Resolves the meeting from
+    the correlated ``bot_id``, calls Recall's ``create_transcript``, and
+    stores the returned transcript id on the meeting so ``transcript.done``
+    (and the on-demand path) can fetch it. Returns ``True`` when started.
+    """
+    if not bot_id or not recording_id:
+        return False
+    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings import settings as meetings_settings
+
+    resolved = await meetings_settings.resolve()
+    if not meetings_settings.is_async_provider(resolved["provider"]):
+        # Realtime mode — the transcript is produced on the bot itself,
+        # not via create_transcript. recording.done is not our trigger.
+        return False
+
+    # global-read: inbound webhook is cross-tenant; resolved via bot_id.
+    doc = await _MeetingDoc.find_one({"raw_provider_payload.recall.bot_id": bot_id})
+    if doc is None:
+        logger.info("Recall recording.done for unknown bot=%s — ignoring", bot_id)
+        return False
+
+    transcript_id = await recall_client.create_async_transcript(recording_id)
+    recall_block = dict((doc.raw_provider_payload or {}).get("recall") or {})
+    recall_block.update({"recording_id": recording_id, "transcript_id": transcript_id})
+    doc.raw_provider_payload = {**(doc.raw_provider_payload or {}), "recall": recall_block}
+    # no-event: provider-side correlation ids; the transcript itself emits later.
+    await doc.save()
+    logger.info(
+        "started async transcript meeting=%s recording=%s transcript=%s",
+        doc.id,
+        recording_id,
+        transcript_id,
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------

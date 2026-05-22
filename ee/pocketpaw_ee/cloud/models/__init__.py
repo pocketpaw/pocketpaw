@@ -13,6 +13,7 @@ from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
     MeetingProviderCredentials,
+    MeetingsSettings,
     MeetingTranscript,
 )
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
@@ -60,6 +61,7 @@ __all__ = [
     "Invite",
     "Meeting",
     "MeetingProviderCredentials",
+    "MeetingsSettings",
     "MeetingTranscript",
     "Mention",
     "Message",
@@ -113,6 +115,7 @@ def get_all_documents():
         Meeting,
         MeetingTranscript,
         MeetingProviderCredentials,
+        MeetingsSettings,
     ]
 
 

@@ -3,6 +3,7 @@
 # Recall.ai pushes bot lifecycle + transcript events to a single endpoint
 # configured in the Recall dashboard, delivered through Svix. We handle:
 #   * `bot.*` lifecycle events       → persist the bot's status on the meeting
+#   * `recording.done`               → kick off async transcription (async mode)
 #   * `transcript.done` / `bot.done` → fetch + store the transcript
 #
 # This router carries NO auth dependency — Recall is the caller. Trust is
@@ -89,13 +90,31 @@ async def recall_webhook(request: Request) -> dict:
             matched,
         )
 
+    # recording.done → in async mode, kick off transcription against the
+    # finished recording. A no-op in realtime mode (guarded service-side).
+    if event_type == "recording.done":
+        recording_id = _extract_recording_id(event)
+        if recording_id:
+            started = await meetings_service.start_async_transcript(bot_id, recording_id)
+            result["transcript_started"] = started
+            logger.info(
+                "Recall webhook recording.done bot=%s recording=%s started=%s",
+                bot_id,
+                recording_id,
+                started,
+            )
+
     # transcript.done is the real transcript signal; bot.done is a backstop.
     if event_type in _TRANSCRIPT_EVENTS:
         stored = await meetings_service.ingest_transcript_for_recall_bot(bot_id)
         result["transcript_stored"] = stored
         logger.info("Recall webhook %s bot=%s transcript_stored=%s", event_type, bot_id, stored)
 
-    if "bot_status" not in result and "transcript_stored" not in result:
+    if (
+        "bot_status" not in result
+        and "transcript_stored" not in result
+        and "transcript_started" not in result
+    ):
         return {"ok": True, "ignored": event_type or "unknown"}
     return result
 
@@ -170,6 +189,20 @@ def _extract_bot_id(event: dict) -> str:
     bot = data.get("bot")
     if isinstance(bot, dict):
         return str(bot.get("id") or "")
+    return ""
+
+
+def _extract_recording_id(event: dict) -> str:
+    """Pull the Recall ``recording.id`` out of a ``recording.done`` payload.
+
+    Recall nests it at ``data.recording.id``.
+    """
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return ""
+    rec = data.get("recording")
+    if isinstance(rec, dict):
+        return str(rec.get("id") or "")
     return ""
 
 

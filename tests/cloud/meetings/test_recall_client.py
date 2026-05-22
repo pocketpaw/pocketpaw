@@ -445,11 +445,38 @@ async def test_webhook_ignores_unrelated_events(monkeypatch):
     from pocketpaw_ee.cloud.meetings import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
-    body = json.dumps({"event": "recording.done", "data": {"bot": {"id": "bot-x"}}}).encode()
+    body = json.dumps({"event": "recording.processing", "data": {"bot": {"id": "bot-x"}}}).encode()
     request = _make_request(body, _svix_headers(_WEBHOOK_SECRET, body))
 
     result = await webhooks.recall_webhook(request)
-    assert result == {"ok": True, "ignored": "recording.done"}
+    assert result == {"ok": True, "ignored": "recording.processing"}
+
+
+async def test_webhook_recording_done_starts_async_transcript(monkeypatch):
+    """recording.done routes to start_async_transcript with the recording id."""
+    from pocketpaw_ee.cloud.meetings import webhooks
+
+    monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
+    captured: dict = {}
+
+    async def _fake_start(bot_id, recording_id):
+        captured.update(bot_id=bot_id, recording_id=recording_id)
+        return True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.meetings.service.start_async_transcript", _fake_start)
+
+    body = json.dumps(
+        {
+            "event": "recording.done",
+            "data": {"recording": {"id": "rec-99"}, "bot": {"id": "bot-99"}},
+        }
+    ).encode()
+    request = _make_request(body, _svix_headers(_WEBHOOK_SECRET, body))
+
+    result = await webhooks.recall_webhook(request)
+    assert result["ok"] is True
+    assert result["transcript_started"] is True
+    assert captured == {"bot_id": "bot-99", "recording_id": "rec-99"}
 
 
 async def test_webhook_bot_status_event_persists_status(monkeypatch):

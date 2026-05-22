@@ -162,3 +162,31 @@ class MeetingProviderCredentials(TimestampedDocument):
 
     class Settings(TimestampedDocument.Settings):
         name = "meeting_provider_credentials"
+
+
+# ---------------------------------------------------------------------------
+# Deployment settings
+# ---------------------------------------------------------------------------
+
+
+class MeetingsSettings(TimestampedDocument):
+    """Deployment-global meetings configuration — a singleton row.
+
+    Holds the Recall.ai bot transcription choice. The service
+    (meetings/settings.py) reads and upserts the single row; the
+    ``RECALL_TRANSCRIPT_PROVIDER`` / ``RECALL_TRANSCRIPT_MODEL``
+    environment variables are the fallback when no row exists.
+
+    ``transcript_provider`` selects the path: a ``meeting_captions`` /
+    ``*_streaming`` value transcribes live on the bot; an ``*_async``
+    value records only, then transcribes post-call via Recall's
+    ``create_transcript`` endpoint. ``transcript_model`` is the provider
+    model name (e.g. Deepgram ``nova-3``) — used only by async providers
+    that accept one.
+    """
+
+    transcript_provider: str = "meeting_captions"
+    transcript_model: str = ""
+
+    class Settings(TimestampedDocument.Settings):
+        name = "meetings_settings"
