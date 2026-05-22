@@ -136,10 +136,13 @@ def insert_child(
     child: dict[str, Any],
     *,
     after_id: str | None = None,
+    index: int | None = None,
     child_key: str = "children",
 ) -> None:
-    """Insert ``child`` into ``parent[child_key]``. If ``after_id`` is
-    given, insert immediately after that sibling; otherwise append.
+    """Insert ``child`` into ``parent[child_key]``. If ``index`` is given,
+    insert at that 0-based position (clamped to the list bounds). Else if
+    ``after_id`` is given, insert immediately after that sibling.
+    Otherwise append.
 
     Raises ``ValueError`` if ``after_id`` is given but not found among
     siblings, or if ``parent`` is not a container (i.e. its existing
@@ -150,6 +153,12 @@ def insert_child(
         existing = parent[child_key]
     if not isinstance(existing, list):
         raise ValueError(f"parent {parent.get('id', '<?>')} has non-list '{child_key}'")
+
+    if index is not None:
+        # Clamp — an out-of-range index from the agent lands at the
+        # nearest valid slot rather than raising.
+        existing.insert(max(0, min(index, len(existing))), child)
+        return
 
     if after_id is None:
         existing.append(child)
@@ -170,11 +179,24 @@ def replace_node(
     id. Returns the OLD subtree (the caller stores it as the inverse for
     undo).
 
-    Raises ``ValueError`` if ``target_id`` isn't found or if it points
-    at the root (replacing the root is conceptually ``update_pocket``).
+    When ``target_id`` is the root node, the whole tree is swapped:
+    ``root`` is mutated in place to become ``replacement``. This is how a
+    single-widget pocket gains a container at the root — e.g. wrapping a
+    bare ``project-dashboard`` root in a ``flex`` so a sibling section can
+    be added next to it.
+
+    Raises ``ValueError`` only if ``target_id`` isn't found.
     """
     if root.get("id") == target_id:
-        raise ValueError("cannot replace the root via replace_node; use update_pocket")
+        # Root replacement — there is no parent. Mutate the root dict in
+        # place so callers holding a reference to it (doc.rippleSpec.ui)
+        # see the swap. Preserve the root id when the replacement omits one.
+        old = dict(root)
+        if not is_valid_id(replacement.get("id")):
+            replacement["id"] = old.get("id") or new_node_id()
+        root.clear()
+        root.update(replacement)
+        return old
     loc = find_parent(root, target_id)
     if loc is None:
         raise ValueError(f"no node with id {target_id!r}")

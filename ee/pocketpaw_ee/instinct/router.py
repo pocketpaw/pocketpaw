@@ -28,6 +28,30 @@
 #   POST /instinct/actions/bulk-reject. Bulk endpoints write N audit rows with
 #   a shared ``bulk_id`` UUID so the bulk transaction is replay-able per item
 #   and query-able as a unit.
+# Updated: 2026-05-22 (RFC 05 M2b.1) — ``approve_action`` now fires a parked
+#   pocket write. When the approved Action's ``parameters`` carries a
+#   ``_pocket_write`` blob, the route lazy-imports
+#   ``ee.cloud.pockets.instinct_bridge`` and calls ``execute_approved_write``
+#   — best-effort, failures recorded on the Action, never breaking the
+#   approve response. A lazy import avoids an instinct→pockets module-top
+#   dependency.
+# Updated: 2026-05-22 (security-review fixes for PR #1183) —
+#   * BLOCKER 1: ``approve_action`` and ``bulk_approve_actions`` now
+#     verify a parked ``_pocket_write`` belongs to the approver's active
+#     workspace. ``require_action_any_workspace`` only checks the caller
+#     holds the role somewhere; it does NOT bind the action to a
+#     workspace. ``_assert_pocket_write_workspace`` raises ``Forbidden``
+#     (403) when ``blob["workspace_id"]`` differs from the caller's
+#     active workspace, closing a cross-tenant approval-escalation gap.
+#   * BLOCKER 2: ``bulk_approve_actions`` now mirrors the single-approve
+#     hook — every bulk-approved Action carrying a ``_pocket_write`` blob
+#     fires ``execute_approved_write`` best-effort, so bulk-approved
+#     pocket writes actually execute instead of silently stalling at
+#     ``approved``.
+#   * SHOULD-FIX 1: the audit ``approved_by``/``actor`` and the outcome
+#     actor are now the AUTHENTICATED user id, not the free-text
+#     ``approver`` request field — a caller can no longer forge the
+#     audit actor. The request field stays for display only.
 
 from __future__ import annotations
 
@@ -52,11 +76,58 @@ from pocketpaw.instinct.models import (
     AuditEntry,
 )
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
-from pocketpaw_ee.cloud._core.deps import require_plan_feature
+from pocketpaw_ee.cloud._core.deps import (
+    current_user,
+    current_workspace_id,
+    require_plan_feature,
+)
+from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _pocket_write_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_pocket_write`` blob on an Action, or ``None``.
+
+    The blob is the parked-write payload ``instinct_bridge`` stores under
+    ``Action.parameters._pocket_write`` (method/path/params/idempotency/
+    outcome + the originating ``workspace_id``). Anything that is not a
+    dict-of-dict shape is treated as "no parked write".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_pocket_write")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving a parked pocket write from another workspace.
+
+    ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds ``instinct.approve`` in SOME workspace — it does not bind
+    the Action being approved to that workspace, and the
+    ``instinct_actions`` table has no ``workspace_id`` column. Without this
+    check a caller with ``instinct.approve`` in workspace A could approve
+    a workspace-B parked write and trigger a cross-tenant backend write.
+
+    When the Action carries a ``_pocket_write`` blob whose ``workspace_id``
+    differs from the caller's active workspace, raise ``Forbidden`` (403).
+    A non-pocket-write Action (no blob) is unaffected — instinct's other
+    Action kinds are not tenant-bound by this column.
+    """
+    blob = _pocket_write_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This action's pocket write belongs to a different workspace",
+        )
+
 
 router = APIRouter(
     tags=["Instinct"],
@@ -283,7 +354,11 @@ async def list_actions(
     response_model=BulkActionResponse,
     dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
 )
-async def bulk_approve_actions(req: BulkApproveRequest) -> BulkActionResponse:
+async def bulk_approve_actions(
+    req: BulkApproveRequest,
+    user: Any = Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> BulkActionResponse:
     """Approve N pending actions in one call.
 
     Each item is flipped individually (so per-item audit replay still
@@ -293,10 +368,52 @@ async def bulk_approve_actions(req: BulkApproveRequest) -> BulkActionResponse:
     are missing or already resolved come back in ``missing`` rather than
     raising — a partial-success surface beats a single all-or-nothing
     failure on the operator console.
+
+    Security (PR #1183):
+      * BLOCKER 1 — before flipping anything, every requested Action is
+        loaded and any parked ``_pocket_write`` is checked against the
+        caller's active workspace. A single cross-workspace item fails
+        the whole call with 403 — a partial bulk that silently dropped
+        the foreign item would hide the escalation attempt.
+      * BLOCKER 2 — after the flip, each approved Action carrying a
+        ``_pocket_write`` blob fires ``execute_approved_write`` so
+        bulk-approved pocket writes actually execute (the single-approve
+        hook is the template).
+      * SHOULD-FIX 1 — the audit actor is the authenticated user id, not
+        the free-text ``req.approver`` field.
     """
-    approved, missing, bulk_id = await _store().bulk_approve(
-        list(req.ids), approver=req.approver, note=req.note
+    store = _store()
+    approver_id = str(user.id)
+
+    # BLOCKER 1 — verify tenancy on every requested action up front. A
+    # missing id simply has no blob to check; it falls through to
+    # ``bulk_approve`` and lands in ``missing``.
+    for action_id in req.ids:
+        action = await store.get_action(action_id)
+        if action is not None:
+            _assert_pocket_write_workspace(action, workspace_id)
+
+    approved, missing, bulk_id = await store.bulk_approve(
+        list(req.ids), approver=approver_id, note=req.note
     )
+
+    # BLOCKER 2 — bulk-approved pocket writes must fire, exactly like the
+    # single-approve hook. Best-effort per item: a lazy import keeps the
+    # instinct package free of a module-top dependency on ee.cloud.pockets,
+    # and any failure is recorded on the Action by the bridge — it must
+    # never break the bulk response.
+    for action in approved:
+        if _pocket_write_blob(action) is not None:
+            try:
+                from pocketpaw_ee.cloud.pockets import instinct_bridge
+
+                await instinct_bridge.execute_approved_write(action)
+            except Exception:
+                logger.exception(
+                    "bulk-approve pocket-write execution failed for %s (non-fatal)",
+                    action.id,
+                )
+
     return BulkActionResponse(bulk_id=bulk_id, affected=approved, missing=missing)
 
 
@@ -325,19 +442,40 @@ async def bulk_reject_actions(req: BulkRejectRequest) -> BulkActionResponse:
     response_model=ApproveResponse,
     dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
 )
-async def approve_action(action_id: str, req: ApproveRequest | None = None):
+async def approve_action(
+    action_id: str,
+    req: ApproveRequest | None = None,
+    user: Any = Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
     """Approve a pending action, optionally with edits.
 
     If the request body carries edits, the server diffs the stored proposal
     against the incoming shape and persists a Correction alongside the
     approval. Callers that want to approve unchanged can POST with no body.
+
+    Security (PR #1183):
+      * BLOCKER 1 — a parked ``_pocket_write`` must belong to the
+        approver's active workspace, else 403.
+      * SHOULD-FIX 1 — the audit actor + outcome actor are the
+        authenticated user id, never the free-text ``req.approver``.
     """
     store = _store()
     before = await store.get_action(action_id)
     if not before:
         raise HTTPException(404, "Action not found")
 
+    # BLOCKER 1 — reject a cross-workspace parked-write approval before
+    # any state mutation. ``require_action_any_workspace`` only proved the
+    # caller holds ``instinct.approve`` somewhere; this binds the Action
+    # to the caller's workspace.
+    _assert_pocket_write_workspace(before, workspace_id)
+
     req = req or ApproveRequest()
+    # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
+    # the request body's free-text ``approver``. The body field may still
+    # carry a display label, but it can never forge the audit trail.
+    approver_id = str(user.id)
     after, edited_fields = _apply_edits(before, req)
 
     correction: Correction | None = None
@@ -347,7 +485,7 @@ async def approve_action(action_id: str, req: ApproveRequest | None = None):
             correction = Correction(
                 action_id=before.id,
                 pocket_id=before.pocket_id,
-                actor=req.approver,
+                actor=approver_id,
                 patches=patches,
                 context_summary=summarize_correction(before, patches),
                 action_title=before.title,
@@ -356,9 +494,24 @@ async def approve_action(action_id: str, req: ApproveRequest | None = None):
             await _persist_edits(store, after, edited_fields)
             await _forward_to_soul(correction, after)
 
-    approved = await store.approve(action_id, approver=req.approver)
+    approved = await store.approve(action_id, approver=approver_id)
     if not approved:
         raise HTTPException(404, "Action not found")
+
+    # RFC 05 M2b.1 — when the approved Action carries a parked pocket
+    # write (``parameters._pocket_write``), fire it. Best-effort: a
+    # lazy import keeps the instinct package free of a module-top
+    # dependency on ee.cloud.pockets, and any failure is recorded on the
+    # Action by the bridge itself — it must NEVER break this approve
+    # response. A non-pocket-write Action (the common case) skips this.
+    if _pocket_write_blob(approved) is not None:
+        try:
+            from pocketpaw_ee.cloud.pockets import instinct_bridge
+
+            await instinct_bridge.execute_approved_write(approved)
+        except Exception:
+            logger.exception("pocket-write execution after approval failed (non-fatal)")
+
     return ApproveResponse(action=approved, correction=correction)
 
 

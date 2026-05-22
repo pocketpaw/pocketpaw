@@ -7,6 +7,11 @@ Extracted from dashboard.py — contains:
 - ``shutdown_event()`` — tears down all services
 
 Changes:
+- 2026-05-22: ``startup_event`` also mirrors the built-in pocket
+  templates into ``~/.pocketpaw/templates/`` via the
+  ``bundled_templates`` installer — same best-effort, catch-and-log
+  pattern as the skills / kb installers, gated on
+  ``auto_install_bundled_templates`` (feat/bundled-templates, 2a).
 - 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files and
   pre-compiled kb-go scopes into the user's home dir at boot via the
   ``bundled_skills`` / ``bundled_kb`` installers. Best-effort, gated on
@@ -268,6 +273,34 @@ async def startup_event(
                 logger.warning("KB scope %s failed to install: %s", r.name, r.error)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Bundled kb-go scopes install failed (non-fatal): %s", exc)
+
+    # Mirror PocketPaw's built-in pocket templates into
+    # ``~/.pocketpaw/templates/`` so the create specialist can
+    # instantiate-and-customize a matching template instead of
+    # cold-generating a pocket from scratch. Best-effort — a failure
+    # here just means the specialist falls back to cold generation;
+    # pocket creation still works. Opt-out:
+    # ``POCKETPAW_AUTO_INSTALL_BUNDLED_TEMPLATES=false``.
+    if settings.auto_install_bundled_templates:
+        try:
+            from pocketpaw.bundled_templates import install_bundled_templates
+
+            tpl_results = install_bundled_templates()
+            installed = sum(1 for r in tpl_results if r.status == "installed")
+            updated = sum(1 for r in tpl_results if r.status == "updated")
+            skipped = sum(1 for r in tpl_results if r.status == "skipped")
+            failed = [r for r in tpl_results if r.status == "failed"]
+            logger.info(
+                "Bundled pocket templates sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("Pocket template %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled pocket templates install failed (non-fatal): %s", exc)
 
     # Start StatusTracker (agent state for external integrations)
     from pocketpaw.dashboard_state import status_tracker

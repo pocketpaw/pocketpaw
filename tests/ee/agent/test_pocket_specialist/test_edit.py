@@ -874,7 +874,13 @@ class TestAgentModeEditDispatch:
     async def test_agent_mode_rejected_op_surfaces_in_warnings(self) -> None:
         """A service-rejected op in agent mode must NOT count as applied —
         its reason folds into ``warnings``, same contract as subagent mode
-        (#1163 class). The run stays ``ok=True`` (nothing crashed)."""
+        (#1163 class).
+
+        When the rejected op was the ONLY op, zero ops applied — the run
+        reports ``ok=False, action="failed"`` so the caller can't mistake
+        a no-change run for a successful edit (the agent-mode root-replace
+        silent-failure class). ``warnings`` still carries the per-op
+        reason; ``error`` explains nothing applied."""
         from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistEditInput,
             run_edit_specialist,
@@ -905,8 +911,10 @@ class TestAgentModeEditDispatch:
             )
 
         mock_create_backend.assert_not_called()
-        assert out.ok is True
+        assert out.ok is False, "a run that applied zero ops is not a success"
+        assert out.action == "failed"
         assert out.ops == []
+        assert out.error, "a no-op-applied run must explain why in error"
         assert out.warnings, "a rejected op must surface its reason in warnings"
         joined = " ".join(out.warnings)
         assert "set_state" in joined and "does not exist" in joined
@@ -914,7 +922,11 @@ class TestAgentModeEditDispatch:
     @pytest.mark.asyncio
     async def test_agent_mode_unknown_op_surfaces_in_warnings(self) -> None:
         """An op naming a tool the specialist does not hold must be skipped
-        and reported in ``warnings`` — not crash the run."""
+        and reported in ``warnings`` — not crash the run.
+
+        When the unknown op was the ONLY op, zero ops applied — the run
+        reports ``ok=False, action="failed"`` (zero-ops-applied is not a
+        success). ``warnings`` still names the skipped op."""
         from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistEditInput,
             run_edit_specialist,
@@ -937,7 +949,9 @@ class TestAgentModeEditDispatch:
             )
 
         mock_create_backend.assert_not_called()
-        assert out.ok is True
+        assert out.ok is False, "a run that applied zero ops is not a success"
+        assert out.action == "failed"
         assert out.ops == []
+        assert out.error
         assert out.warnings
         assert "create_pocket" in " ".join(out.warnings)

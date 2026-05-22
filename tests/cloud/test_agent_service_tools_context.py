@@ -324,9 +324,14 @@ def test_non_subagent_backend_pocket_id_inlines_interaction_prompt():
     block = build_context_block(ctx_edit, backend_name="codex_cli")
     # The pocket id was substituted into the interaction prompt.
     assert "pocket-abc" in block
-    # Heavy interaction guidance IS present.
-    assert "<pocket-workflow>" in block
-    # Delegation rule is NOT.
+    # The interaction prompt IS inlined — post-#1163 the calling-agent
+    # interaction prompt is the slim delegation flow (<pocket-interaction>),
+    # while the heavy <pocket-workflow> block lives on the edit specialist
+    # only (see test_subagent_backend... above, line ~275).
+    assert "<pocket-interaction>" in block
+    assert "<pocket-workflow>" not in block
+    # The subagent-style delegation rule is NOT (codex_cli has no
+    # native subagent concept).
     assert "<pocket-delegation>" not in block
 
 

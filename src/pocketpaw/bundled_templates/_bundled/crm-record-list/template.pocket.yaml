@@ -1,0 +1,25 @@
+# src/pocketpaw/bundled_templates/_bundled/crm-record-list/template.pocket.yaml
+# Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
+# Pocket Template Schema metadata for the built-in CRM record list.
+# ``shape`` is ``custom`` because RFC 03's shape enum does not carry a
+# ``master-detail`` value; the master-detail *pattern* is in index.json.
+name: crm-record-list
+version: 1.0.0
+vertical: sales
+shape: custom
+description: |
+  A CRM record browser. A searchable list of contacts on the left, the
+  full detail of the selected contact on the right — the classic
+  master-detail pattern. Ships a placeholder live-data source so a
+  connected backend hydrates the list from a real /contacts endpoint;
+  without a backend it renders the seeded sample records.
+state:
+  entity_type: Contact
+  columns:
+    - { field: name, widget: text }
+    - { field: company, widget: text }
+    - { field: stage, widget: badge }
+    - { field: email, widget: text }
+actions: []
+connectors: []
+skills: []

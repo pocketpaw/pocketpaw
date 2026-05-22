@@ -1,0 +1,23 @@
+# src/pocketpaw/bundled_templates/_bundled/activity-feed/template.pocket.yaml
+# Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
+# Pocket Template Schema metadata for the built-in activity feed.
+name: activity-feed
+version: 1.0.0
+vertical: productivity
+shape: timeline
+description: |
+  A reverse-chronological activity feed. Each entry is a dated event
+  with a title and a short detail line — release notes, a project
+  history, a changelog, a milestone tracker. Rendered as a vertical
+  timeline; entries live in pocket state and can be appended from the
+  composer row.
+state:
+  entity_type: ActivityEntry
+  columns:
+    - { field: title, widget: text }
+    - { field: date, widget: date }
+    - { field: detail, widget: text }
+    - { field: type, widget: badge }
+actions: []
+connectors: []
+skills: []

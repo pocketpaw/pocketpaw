@@ -1,3 +1,9 @@
+# events.py — Realtime Event dataclass registry for the cloud bus.
+# Each subclass pins an EVENT_TYPE literal that routes both the WebSocket
+# fan-out and any in-process bus subscribers.
+# Updated: 2026-05-22 (RFC 05 M2b.2) — added PocketOutcomeEvent
+#   (type="pocket.outcome"), emitted after a successful write action whose
+#   binding declared a named `outcome`. Feeds the outcomes JSONL ledger.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -297,6 +303,30 @@ class PocketUpdated(Event):
 @dataclass
 class PocketDeleted(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.deleted"
+
+
+# Pocket outcomes — RFC 05 M2b.2. Emitted AFTER a write action's
+# `run_action` returns `ok:true` AND the binding declared a non-null
+# `outcome`. A write completing is an *output*; a named `outcome` is the
+# business event the operator cares about ("renewal_completed"). The
+# outcomes ledger subscriber appends each event to a workspace-scoped
+# JSONL file so `GET /outcomes` can count them.
+#
+# Payload (`data`):
+#   outcome             — the binding's `outcome` name (str)
+#   pocket_id           — the pocket the write ran on
+#   workspace_id        — tenancy
+#   action              — the action name from `rippleSpec.actions`
+#   actor               — the user who triggered (direct) or approved
+#                          (gated) the write
+#   via_instinct        — True when the write was routed through Instinct
+#   instinct_action_id  — the Instinct Action id, or None for a direct write
+#   occurred_at         — ISO-8601 UTC timestamp
+#   outcome_value       — reserved for Layer 4 billing; always None here
+#   outcome_unit        — reserved for Layer 4 billing; always None here
+@dataclass
+class PocketOutcomeEvent(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.outcome"
 
 
 # Tasks (Mission Control work-item primitive)

@@ -1,5 +1,10 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-21 (RFC 04 alpha) — added `_LIVE_DATA_SOURCES_BLOCK`,
+# spliced into the create specialist prompt. It teaches the agent to
+# declare a `sources` block (read-only GET bindings) and a `run_source`
+# refresh button when the user wants live data from a real backend.
+#
 # Changes: 2026-05-21 (#1163) — the edit-specialist prompt now splices in
 # `_EDIT_TOOLS_MCP`, a tools block naming the granular edit ops the
 # specialist ACTUALLY holds (get_pocket, the state/node/array-item ops),
@@ -7,6 +12,34 @@
 # update_pocket, add_widget) the specialist does not hold. The
 # `<mutation-strategy>` block gained the Tier-2 prop-array item ops from
 # PR #1159 with guidance on when to use them.
+#
+# Changes: 2026-05-22 (RFC 04 alpha follow-up) — the edit-specialist prompt
+# now also carries RFC 04 `sources` guidance: `_EDIT_TOOLS_MCP` lists the
+# new `set_source` / `remove_source` ops, and `_assemble_interaction()`
+# splices in `_LIVE_DATA_SOURCES_EDIT_BLOCK` so the EDIT specialist (not
+# just the create flow) knows it can author a `rippleSpec.sources` block.
+#
+# Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — `_CURRENT_POCKET_BLOCK`
+# now carries a `Backend:` line (the non-secret {base_url, auth_type,
+# configured} summary), filled via the new `fill_current_pocket` helper +
+# `BACKEND_SUMMARY_TOKEN`. The sources prompt blocks tell the specialist
+# to read that line instead of asking the user for a backend URL it can
+# already see.
+#
+# Changes: 2026-05-22 (RFC 05 M2a) — added `_WRITE_ACTIONS_BLOCK` (create)
+# and `_WRITE_ACTIONS_EDIT_BLOCK` (edit), spliced in after the
+# `_LIVE_DATA_SOURCES_*` blocks. They teach the agent the `rippleSpec.actions`
+# write-binding block — a sibling of `sources` — the `call_binding` action,
+# `confirm` for destructive writes, `on_success` reconcile, and that a write
+# fires only if the human owner allow-listed the method+path.
+# `_EDIT_TOOLS_MCP` now also lists `set_action` / `remove_action`.
+#
+# Changes: 2026-05-22 (feat/api-skills, Increment 2b) — both
+# `_LIVE_DATA_SOURCES_BLOCK` (create) and `_LIVE_DATA_SOURCES_EDIT_BLOCK`
+# (edit) gain a rule pointing the specialist at the `<backend-api>` block:
+# when an installed per-backend API skill is spliced into the prompt, the
+# agent must author `path` values from its real endpoint references rather
+# than guessing.
 #
 # Canonical source for every pocket-mode system prompt the agent ever sees.
 # Four strings are exported, one per (action × backend) cell:
@@ -52,6 +85,12 @@
 # Modified: 2026-05-21 — the create specialist's prompt now splices in
 # the slim ``_RIPPLE_DESIGN_ESSENTIALS`` instead of the full
 # ``RIPPLE_DESIGN_RULES`` superblock. Reworked from PR #1106.
+# Modified: 2026-05-22 (feat/bundled-templates, Increment 2a) —
+# ``_CREATION_OVERVIEW_MCP`` gains a new "STEP 0 — CHECK BUILT-IN TEMPLATE
+# LIBRARY FIRST": the chat agent reads ``~/.pocketpaw/templates/index.json``,
+# keyword-matches the brief, and on a match sets ``hints.template_id`` and
+# skips the recipe search. The former recipe-library STEP 0 is renumbered
+# to STEP 1; the brief / structure / delegate steps shift to STEP 2-4.
 
 from __future__ import annotations
 
@@ -93,6 +132,10 @@ _RIPPLE_DESIGN_ESSENTIALS = "\n".join(
 )
 
 POCKET_ID_TOKEN = "__POCKET_ID__"
+# Placeholder in _CURRENT_POCKET_BLOCK_TEMPLATE for the non-secret backend
+# summary line. Filled by ``fill_current_pocket`` — callers that only have
+# the pocket id pass ``backend_summary=None`` and the line reads "unknown".
+BACKEND_SUMMARY_TOKEN = "__BACKEND_SUMMARY__"
 
 # ---------------------------------------------------------------------------
 # Backends that delegate pocket creation/editing to the specialist via a
@@ -442,6 +485,311 @@ Unknown source names resolve to `null`. Stick to the allowlist above.
 """
 
 
+_LIVE_DATA_SOURCES_BLOCK = """\
+<live-data-sources>
+When the user wants live data from THEIR OWN backend (a CRM, an internal
+API, a service with a base URL + token) — not the workspace `$source`
+markers above — declare a `sources` block in the rippleSpec. Alpha is
+READ-ONLY: GET bindings only.
+
+  "rippleSpec": {
+    "sources": {
+      "prs": {
+        "method": "GET",
+        "path": "/pulls?state=open",
+        "bind": "state.prs",
+        "refresh": ["pocket_open", "manual"]
+      }
+    },
+    "ui": [ ... ],
+    "state": { "prs": [] }
+  }
+
+Each source entry: `method` (always "GET"), `path` (a RELATIVE path
+against the pocket's backend — never an absolute URL), `bind` (a dotted
+`state.` path the result is written to), and `refresh` (when to run it —
+`pocket_open` on open, `manual` for a refresh button).
+
+For a manual refresh, add a button wired to the `run_source` action:
+
+  {"type": "button", "props": {"label": "Refresh"},
+   "on_click": {"action": "run_source", "source": "prs"}}
+
+Rules:
+- A pocket using `sources` MUST have a backend configured (base URL +
+  auth, set once via the pocket's backend settings — outside the spec).
+  If no backend is configured, the sources will not run.
+- If a `<backend-api>` block is present in this prompt, use its endpoint
+  references to author `path` values — never guess a path when the
+  reference is available.
+- A source `path` is ALWAYS relative to the configured backend base URL
+  — never put an absolute URL in `path`. You only ever author the
+  relative path. If you are extending an existing pocket, `get_pocket`
+  returns a non-secret `backend` field ({base_url, auth_type,
+  configured}) so you can see whether a backend is already set and what
+  its base URL is — do not ask the user for a URL you can already see.
+- Seed `state` with an empty list/value for each `bind` target so the
+  widget renders before the first fetch.
+- Use `sources` ONLY for the user's real backend. For workspace data use
+  the `$source` markers above; for canvas-local input use literal values.
+
+DO NOT GET THIS WRONG — the runtime reads `rippleSpec.sources` and
+nothing else:
+- Data sources go in `rippleSpec.sources` ONLY. NEVER put them in
+  `tool_specs` — `tool_specs` is for LLM tools, not data, and a
+  `tool_specs` entry inside the rippleSpec is silently inert.
+- A source entry has EXACTLY four fields: `method`, `path`, `bind`,
+  `refresh`. Do NOT invent `kind`, `url`, `auto_fetch`, `into`, or `id` —
+  none of those exist and the source will not run.
+- The refresh button targets the source by `source` (the sources-map
+  key). NEVER use `source_id`.
+
+  WRONG — inert, the runtime ignores all of this:
+    "tool_specs": [{"id": "src_todos", "kind": "rest", "method": "GET",
+                    "url": "/todos", "auto_fetch": true, "into": "todos"}]
+    {"action": "run_source", "source_id": "src_todos"}
+
+  RIGHT:
+    "sources": {"todos": {"method": "GET", "path": "/todos",
+                          "bind": "state.todos",
+                          "refresh": ["pocket_open", "manual"]}}
+    {"action": "run_source", "source": "todos"}
+</live-data-sources>
+"""
+
+
+# Edit-specialist variant of the live-data-sources guidance. The create
+# block above describes authoring the `sources` JSON directly inside the
+# rippleSpec; the EDIT specialist never authors whole-spec JSON — it works
+# through granular ops, so it gets the `set_source` / `remove_source`
+# instructions instead. Spliced into _assemble_interaction.
+_LIVE_DATA_SOURCES_EDIT_BLOCK = """\
+<live-data-sources>
+When the user asks for live data from THEIR OWN backend (a CRM, an
+internal API, a service with a base URL + token) — not the workspace
+`$source` markers — use the `set_source` / `remove_source` ops. Alpha is
+READ-ONLY: GET bindings only. These write the pocket's top-level
+`rippleSpec.sources` block; the state/node ops cannot.
+
+  set_source(
+    source_key="prs",            # the sources map key
+    path="/pulls?state=open",    # RELATIVE path on the backend, never a URL
+    bind="state.prs",            # dotted state path the JSON is written to
+    method="GET",                # always GET
+    refresh=["pocket_open", "manual"],   # when to run it
+  )
+
+  remove_source(source_key="prs")
+
+After `set_source`, do the wiring with the normal ops:
+- `set_state` the `bind` target to an empty list/value so the bound
+  widget renders before the first fetch (e.g. set_state("prs", [])).
+- For a manual refresh, `add_node` a button whose on_click is
+  {"action": "run_source", "source": "prs"} — `run_source` is a
+  client-side action, NOT a chat round-trip.
+
+THE BACKEND IS ALREADY KNOWN — DO NOT ASK FOR IT.
+The `<current-pocket>` block above has a `Backend:` line telling you
+whether this pocket already has a backend configured and its base URL:
+- "Backend: configured — https://api.example.com (auth: bearer)" — a
+  backend EXISTS. Author the source against it directly. A source `path`
+  is ALWAYS relative to that base URL, so you only ever need the
+  relative path — never ask the user for the backend URL, you can see it.
+- "Backend: not configured" — the pocket has no backend. The source
+  cannot run until one is set in the pocket's backend settings. Tell the
+  user to configure a backend first (it's outside the spec — the
+  "Configure Backend" modal), then you can add the source.
+- "Backend: configured state unknown ..." — call `get_pocket`; its
+  result carries a `backend` field with the same summary.
+
+If the backend is configured but you cannot infer the relative path for
+the data the user wants, ask ONLY for the relative path (e.g. "which
+endpoint — /pulls? /issues?"), NOT for the whole backend URL.
+
+Rules:
+- A pocket using sources MUST have a backend configured (base URL + auth,
+  set once in the pocket's backend settings — outside the spec). Without
+  a backend the sources will not run.
+- If a `<backend-api>` block is present in this prompt, use its endpoint
+  references to author `path` values — never guess a path when the
+  reference is available.
+- Do NOT stash a fake source descriptor in `state`, and do NOT build a
+  refresh button that sends a chat message — use `set_source` + the
+  `run_source` action.
+- Use sources ONLY for the user's real backend. For workspace data use
+  the `$source` markers; for canvas-local input use literal values.
+
+DO NOT GET THIS WRONG — the runtime reads `rippleSpec.sources` and
+nothing else:
+- Live data sources go in `rippleSpec.sources` ONLY, written via
+  `set_source`. NEVER author a `tool_specs` entry for data — `tool_specs`
+  is for LLM tools, not data, and is silently inert as a data source.
+- A source is EXACTLY `{method, path, bind, refresh}`. Do NOT invent
+  `kind`, `url`, `auto_fetch`, `into`, or `id` — they do not exist.
+- The refresh button targets the source by `source` (the source key),
+  NEVER `source_id`.
+
+  WRONG — inert, the runtime ignores it:
+    {"action": "run_source", "source_id": "todos"}
+
+  RIGHT:
+    {"action": "run_source", "source": "todos"}
+</live-data-sources>
+"""
+
+
+# Create-specialist write-actions guidance. `sources` (reads) and `actions`
+# (writes) are two sibling rippleSpec blocks; this teaches the second.
+_WRITE_ACTIONS_BLOCK = """\
+<write-actions>
+A `sources` binding READS the backend; a `actions` binding WRITES to it.
+When the user wants a widget that DOES something to their backend — submit
+a form, mark a row done, advance a card, delete a record — declare a
+`actions` block in the rippleSpec. `actions` is a SIBLING of `sources`.
+
+  "rippleSpec": {
+    "sources": { "leases": {"method": "GET", "path": "/leases?expiring=90d",
+                            "bind": "state.leases", "refresh": ["pocket_open"]} },
+    "actions": {
+      "mark_renewed": {
+        "kind": "write_binding",
+        "method": "POST",
+        "path": "/leases/{item.id}/renew",
+        "params": { "proposed_rent": "{state.form.rent}" },
+        "confirm": false,
+        "on_success": [{ "action": "run_source", "source": "leases" }],
+        "on_error":   [{ "action": "toast", "variant": "error" }]
+      }
+    },
+    "ui": [ ... ],
+    "state": { "leases": [], "form": { "rent": "" } }
+  }
+
+An action entry has EXACTLY these fields (M2a):
+- `kind`     — always the string `"write_binding"`.
+- `method`   — `POST`, `PUT`, `PATCH`, or `DELETE`. (GET is a `source`, not
+  an action.)
+- `path`     — a RELATIVE path on the pocket's backend, never an absolute
+  URL. May carry `{...}` expressions (`{item.id}`, `{state.form.x}`) — they
+  resolve client-side at click time, the SAME resolver `sources` and binds
+  use. No new syntax.
+- `params`   — the request body, a map; values may be `{...}` expressions.
+- `confirm`  — `true` puts a confirm step in front of the write. See below.
+- `on_success` / `on_error` — handler lists run after the write resolves.
+
+A widget triggers an action BY NAME with the `call_binding` action:
+
+  {"type": "button", "props": {"label": "Renew"},
+   "on_click": {"action": "call_binding", "binding": "mark_renewed"}}
+
+DESTRUCTIVE WRITES NEED A CONFIRM. `DELETE` and a full-resource `PUT` are
+destructive. Set `confirm: true` on the action AND author the click as a
+`[confirm, call_binding]` flow so the user sees a speed bump:
+
+  "on_click": {"action": "flow", "steps": [
+    {"action": "confirm", "message": "Delete this lease? This cannot be undone."},
+    {"action": "call_binding", "binding": "delete_lease"}
+  ]}
+
+`POST` / `PATCH` are additive — no confirm needed by default.
+
+RECONCILE WITH on_success. After a write succeeds the UI must catch up:
+- Single-record write → `on_success` a `set` mutate plus the `{event}`
+  response, or just re-run the one source.
+- List-changing write (added/removed a row) → `on_success` a `run_source`
+  that re-fetches the list.
+
+OPTIMISTIC UPDATE is just a flow, not a new feature. For a snappy toggle,
+`mutate_state` first, then `call_binding`, with an `on_error` that reverses
+the mutate:
+
+  "on_click": {"action": "flow", "steps": [
+    {"action": "mutate_state", "op": "set", "path": "row.{item.id}.status",
+     "value": "renewed"},
+    {"action": "call_binding", "binding": "mark_renewed", "on_error": [
+       {"action": "mutate_state", "op": "set", "path": "row.{item.id}.status",
+        "value": "active"}]}
+  ]}
+
+THE WRITE ONLY FIRES IF THE OWNER ALLOW-LISTED IT. Authoring an action does
+NOT authorize the write. The pocket's human owner sets a write allowlist
+(method + path pattern) in the backend settings — OUTSIDE the spec. A write
+whose method+path is not allow-listed is rejected server-side and never
+leaves PocketPaw. Author the action the user asked for; if no backend or no
+allowlist entry exists, tell the user to configure it in backend settings.
+
+DO NOT GET THIS WRONG:
+- Writes go in `rippleSpec.actions` ONLY, triggered by `call_binding`.
+  NEVER inline an `{action: "api", method: "POST", url: ...}` handler — that
+  is the read-source mistake's write twin and is normalized away.
+- `path` is RELATIVE. An absolute URL is a different (third-party) intent
+  and must not be authored as a pocket action.
+</write-actions>
+"""
+
+
+# Edit-specialist variant — the EDIT specialist authors actions through the
+# `set_action` / `remove_action` granular ops, not whole-spec JSON.
+_WRITE_ACTIONS_EDIT_BLOCK = """\
+<write-actions>
+A `sources` binding READS the backend; a `actions` binding WRITES to it.
+When the user wants a widget that DOES something to their backend — submit
+a form, mark a row done, delete a record — use the `set_action` /
+`remove_action` ops. They write the pocket's top-level `rippleSpec.actions`
+block (a SIBLING of `sources`); the state/node ops cannot.
+
+  set_action(
+    action_key="mark_renewed",
+    method="POST",                 # POST | PUT | PATCH | DELETE
+    path="/leases/{item.id}/renew",  # RELATIVE path, never an absolute URL
+    params={"proposed_rent": "{state.form.rent}"},
+    confirm=False,
+    on_success=[{"action": "run_source", "source": "leases"}],
+  )
+
+  remove_action(action_key="mark_renewed")
+
+An action is EXACTLY `{kind:"write_binding", method, path, params, confirm,
+on_success?, on_error?}` (M2a). `method` is a write verb — GET is a
+`source`, not an action. `path` is RELATIVE and may carry `{...}`
+expressions (`{item.id}`, `{state.form.x}`) resolved client-side at click
+time — no new syntax.
+
+After `set_action`, wire the trigger with the normal node ops — a widget
+fires the action BY NAME via `call_binding`:
+
+  add_node(... a button whose on_click is
+           {"action": "call_binding", "binding": "mark_renewed"})
+
+DESTRUCTIVE WRITES NEED A CONFIRM. For `DELETE` / full-resource `PUT`, pass
+`confirm=true` to `set_action` AND author the on_click as a
+`[confirm, call_binding]` flow so the user sees a speed bump. `POST` /
+`PATCH` are additive — no confirm by default.
+
+RECONCILE WITH on_success. After a write succeeds the UI must catch up: for
+a single-record write `set` the changed state from the response; for a
+list-changing write `run_source` to refetch the list. For an optimistic
+toggle, author the on_click as a flow — `mutate_state` then `call_binding`
+with an `on_error` that reverses the mutate.
+
+THE WRITE ONLY FIRES IF THE OWNER ALLOW-LISTED IT. Authoring an action does
+NOT authorize the write. The pocket's human owner sets a write allowlist
+(method + path pattern) in the pocket's backend settings — OUTSIDE the
+spec. A write whose method+path is not allow-listed is rejected server-side.
+The `Backend:` line in `<current-pocket>` tells you whether a backend
+exists. If there is no backend, tell the user to configure one (and the
+write allowlist) in backend settings before the action can fire.
+
+DO NOT GET THIS WRONG:
+- Writes go in `rippleSpec.actions` ONLY, via `set_action`, triggered by a
+  `call_binding` handler. NEVER stash a write in `state` and never build a
+  chat-round-trip button for it.
+- `path` is RELATIVE. An absolute URL is a third-party intent — not a
+  pocket action.
+</write-actions>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Tool surface — MCP variant (claude_agent_sdk).
 # Identity (workspace, user, session) is bound from the active SSE
@@ -556,6 +904,24 @@ project-dashboard.team, feed.items, select.options, form-layout.fields…)
 
 `match` (and `after`) is an ItemMatch: {index:N} | {id:"..."} |
 {by_field:"label", equals:"X"} | {by_key:{k:v}}.
+
+DATA-SOURCE OPS — read-only live data bindings (rippleSpec.sources)
+
+  set_source(source_key, path, bind, method?, refresh?)
+                                declare a GET binding that fetches from the
+                                pocket's configured backend into state
+  remove_source(source_key)     delete a data-source declaration
+
+WRITE-ACTION OPS — write bindings (rippleSpec.actions)
+
+  set_action(action_key, method, path, params?, confirm?,
+             on_success?, on_error?)
+                                declare a POST/PUT/PATCH/DELETE binding the
+                                backend; a widget fires it via call_binding
+  remove_action(action_key)     delete a write-action declaration
+
+Use these only for the user's OWN backend (a CRM, an internal API). See
+the `<live-data-sources>` and `<write-actions>` blocks for when and how.
 
 The toolset above is the WHOLE interface. Apply the smallest granular op
 that satisfies the intent.
@@ -933,13 +1299,52 @@ underlying primitive that actually persists. The skill is the
 preferred entry point when available; the tool is what the skill
 ultimately calls.
 
-### STEP 0 — CHECK THE RECIPE LIBRARY FIRST
+### STEP 0 — CHECK THE BUILT-IN TEMPLATE LIBRARY FIRST
 
-Before any design work, query PocketPaw's bundled recipe library for
-a polished example matching the user's intent. PocketPaw ships
-``ripple-recipes`` — a kb-go scope of hand-authored pattern recipes
-(sales pipeline, customer support app, recipe/how-to viewer, …) —
-auto-installed at ``~/.knowledge-base/ripple-recipes/``.
+Before anything else — before the recipe search in STEP 1 — check
+whether the brief matches one of PocketPaw's built-in pocket
+templates. A built-in template is a hand-authored, production-quality
+pocket skeleton; instantiating one is faster and higher-quality than
+generating from scratch or even anchoring on a recipe. The templates
+are auto-installed at ``~/.pocketpaw/templates/``.
+
+Run via your Bash tool:
+
+```
+cat ~/.pocketpaw/templates/index.json
+```
+
+The file is ``{"templates": [{slug, title, shape, pattern, keywords,
+connectors_hint}, ...]}``. Lower-case the brief and, for each template,
+check whether ANY of its ``keywords`` appears as a case-insensitive
+SUBSTRING of the brief.
+
+- **Match found** — set ``hints.template_id`` to the matched
+  template's ``slug`` when you call ``pocket_specialist__create``.
+  Announce it in your preface line: "Using the built-in <title>
+  template — customizing it for <the user's domain>." Then SKIP the
+  recipe search in STEP 1 (the template already encodes the polished
+  composition). Still do STEP 2 (understand the brief) so the
+  specialist gets the user's real content to customize the template
+  with.
+
+- **No match** — proceed to STEP 1 (the recipe-library search). The
+  template library covers the most common shapes; many briefs won't
+  match one.
+
+- **``index.json`` missing / cat errors** — proceed to STEP 1. Do not
+  block the user on infrastructure issues.
+
+The first match wins — do not agonize over picking the "best" of two
+candidate templates; pick the first whose keyword matched.
+
+### STEP 1 — CHECK THE RECIPE LIBRARY
+
+If STEP 0 did NOT match a built-in template, query PocketPaw's bundled
+recipe library for a polished example matching the user's intent.
+PocketPaw ships ``ripple-recipes`` — a kb-go scope of hand-authored
+pattern recipes (sales pipeline, customer support app, recipe/how-to
+viewer, …) — auto-installed at ``~/.knowledge-base/ripple-recipes/``.
 
 Run via your Bash tool:
 
@@ -955,7 +1360,7 @@ the showcase-quality version of that pocket pattern. Adapt content
 to the user's specific domain; keep the structural skeleton.
 
 If ``kb search`` returns no matches, continue with first-principles
-drafting using STEP 1-3 below. The recipe library covers high-
+drafting using STEP 2-4 below. The recipe library covers high-
 leverage shapes but does NOT cover every brief.
 
 Why kb-go (not an MCP wrapper): kb-go ships its own SKILL.md with
@@ -963,7 +1368,7 @@ the canonical CLI surface, and the ``--context`` flag was designed
 for exactly this prompt-injection use case. A wrapper would drift
 from the upstream contract — use the CLI directly.
 
-### STEP 1 — UNDERSTAND THE BRIEF
+### STEP 2 — UNDERSTAND THE BRIEF
 
 You need TWO things before you can plan: structure (what kind of
 pocket) and content seeds (concrete values to populate it).
@@ -1012,10 +1417,13 @@ If the user says "you decide", proceed with your best guess.
 - If the user is annoyed by questions, build with `<placeholder
   values clearly labeled>` and tell them they can edit.
 
-### STEP 2 — PICK THE STRUCTURE
+### STEP 3 — PICK THE STRUCTURE
 
 Decide these BEFORE calling the specialist. Don't make the
-specialist re-derive them from a vague brief:
+specialist re-derive them from a vague brief. (When STEP 0 matched a
+built-in template, the template already encodes layout + focal
+widget — you only need ``data_shape`` + ``key_interactions`` so the
+specialist customizes it with the user's real content.):
 
   • **layout**: one of (in rough order of frequency — hero+grid LAST
     on purpose; only pick it when the pattern is `dashboard`)
@@ -1044,7 +1452,7 @@ specialist re-derive them from a vague brief:
   • **key_interactions**: the verbs the user should be able to do.
     Example: ["add task", "mark done", "filter by status"]
 
-### STEP 3 — DELEGATE WITH A RICH PLAN
+### STEP 4 — DELEGATE WITH A RICH PLAN
 
     pocket_specialist__create({
         "brief": "<1-sentence summary of what the user wants>",
@@ -1053,6 +1461,10 @@ specialist re-derive them from a vague brief:
             "name": "Sales Command Center",
             "color": "#4f46e5",
             "icon": "BarChart3",
+
+            // built-in template — set ONLY when STEP 0 matched one.
+            // It is the highest-authority structural plan.
+            "template_id": "metrics-dashboard",
 
             // structural plan — YOU decide these
             "purpose": "Track quarterly sales pipeline at a glance",
@@ -1473,6 +1885,8 @@ def _assemble_specialist() -> str:
         _SPECIALIST_WORKFLOW,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
+        _LIVE_DATA_SOURCES_BLOCK,
+        _WRITE_ACTIONS_BLOCK,
         _CREATION_EXAMPLES_MCP,
         _RESEARCH_PROTOCOL,
         _RIPPLE_DESIGN_ESSENTIALS,
@@ -1492,8 +1906,45 @@ _CURRENT_POCKET_BLOCK_TEMPLATE = """\
 You are inside pocket id: `__POCKET_ID__`. Pass this id verbatim as the
 ``pocket_id`` argument to every pocket tool call (get_pocket,
 set_state, set_node_prop, add_node, etc.).
+Backend: __BACKEND_SUMMARY__
 </current-pocket>
 """
+
+
+def fill_current_pocket(prompt: str, pocket_id: str, backend_summary: dict | None) -> str:
+    """Fill the `__POCKET_ID__` and `__BACKEND_SUMMARY__` tokens in a
+    prompt that carries ``_CURRENT_POCKET_BLOCK_TEMPLATE``.
+
+    ``backend_summary`` is the non-secret ``{base_url, auth_type,
+    configured}`` dict from ``pockets.service.get_pocket_backend`` (it
+    never carries the token). ``None`` — or a summary without
+    ``configured`` — renders as "configured state unknown" so the agent
+    falls back to ``get_pocket`` rather than assuming there is no
+    backend.
+
+    Always replace BOTH tokens: a prompt that fills only `__POCKET_ID__`
+    would leak the literal `__BACKEND_SUMMARY__` text to the model.
+    """
+    return prompt.replace(POCKET_ID_TOKEN, pocket_id).replace(
+        BACKEND_SUMMARY_TOKEN, _render_backend_summary(backend_summary)
+    )
+
+
+def _render_backend_summary(summary: dict | None) -> str:
+    """One-line human-readable rendering of the non-secret backend
+    summary for the `<current-pocket>` block.
+
+    "configured — <base_url> (auth: <type>)" when a backend exists,
+    "not configured" when it explicitly does not, "configured state
+    unknown — call get_pocket to check" when the caller had no summary.
+    """
+    if not summary or "configured" not in summary:
+        return "configured state unknown — call get_pocket to check"
+    if not summary.get("configured"):
+        return "not configured"
+    base_url = summary.get("base_url") or "(unknown URL)"
+    auth_type = summary.get("auth_type") or "none"
+    return f"configured — {base_url} (auth: {auth_type})"
 
 
 def _assemble_interaction(*, mcp: bool) -> str:
@@ -1506,7 +1957,18 @@ def _assemble_interaction(*, mcp: bool) -> str:
     (the creation toolset): advertising create_pocket / update_pocket /
     add_widget to a specialist that only holds set_node_prop / add_node /
     *_prop_array_item made the planner pick a non-existent tool and emit
-    zero ops with no error (#1163 root cause B)."""
+    zero ops with no error (#1163 root cause B).
+
+    ``_LIVE_DATA_SOURCES_EDIT_BLOCK`` is spliced in so the edit specialist
+    knows it can author a ``rippleSpec.sources`` block via the
+    ``set_source`` / ``remove_source`` ops (RFC 04 alpha follow-up) —
+    without it, the specialist stashed fake source descriptors in state
+    and built chat-round-trip refresh buttons.
+
+    ``_WRITE_ACTIONS_EDIT_BLOCK`` is spliced in next (RFC 05 M2a) so the
+    specialist knows it can author a ``rippleSpec.actions`` write-binding
+    block via the ``set_action`` / ``remove_action`` ops, triggered by a
+    ``call_binding`` handler."""
     parts = [
         _SCOPE_BLOCK,
         _CANVAS_BLOCK,
@@ -1514,6 +1976,8 @@ def _assemble_interaction(*, mcp: bool) -> str:
         _WORKFLOW_INTERACTION_MCP if mcp else _WORKFLOW_INTERACTION_CLI,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
+        _LIVE_DATA_SOURCES_EDIT_BLOCK,
+        _WRITE_ACTIONS_EDIT_BLOCK,
         RIPPLE_DESIGN_RULES,
         # MUST be last — see _CURRENT_POCKET_BLOCK_TEMPLATE rationale.
         _CURRENT_POCKET_BLOCK_TEMPLATE,
@@ -1701,6 +2165,7 @@ def get_pocket_prompts(*, backend_name: str | None = None) -> tuple[str, str]:
 
 
 __all__ = [
+    "BACKEND_SUMMARY_TOKEN",
     "POCKET_CREATION_PROMPT",
     "POCKET_CREATION_PROMPT_CLI",
     "POCKET_CREATION_PROMPT_MCP",
@@ -1712,5 +2177,6 @@ __all__ = [
     "POCKET_INTERACTION_PROMPT_CLI",
     "POCKET_INTERACTION_PROMPT_MCP",
     "POCKET_SPECIALIST_PROMPT",
+    "fill_current_pocket",
     "get_pocket_prompts",
 ]

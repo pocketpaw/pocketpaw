@@ -5,6 +5,13 @@
 # new two-call protocol where the calling chat agent drafts the
 # rippleSpec inline using its own LLM and the specialist only runs
 # validate-and-persist on the returned draft.
+# Modified: 2026-05-22 (feat/bundled-templates, Increment 2a) —
+# ``AgentModeAdapter.create`` short-circuits on a ``hints.template_id``:
+# it loads the built-in template, passes its ``ripple_spec`` straight to
+# ``_validate_and_persist``, and SKIPS the ``_draft_kit`` round-trip. An
+# unknown slug falls back to the normal draft-kit flow. Without the
+# short-circuit, agent-mode pays two LLM round-trips for a one-shot
+# template customization.
 # Modified: 2026-05-21 — added full-fledged-app chrome widgets
 # (app-shell, sidebar, breadcrumb, sheet, modal, confirm-dialog,
 # dropdown-menu, command-palette, coachmark) to the starter list and
@@ -16,6 +23,11 @@
 # create does. Edit was previously asymmetric — it always spawned a
 # backend and ignored agent mode, crashing Claude Code deployments that
 # have no ANTHROPIC_API_KEY.
+# Modified: 2026-05-21 — ``_apply_ops`` no longer reports
+# ``ok=True, action="applied"`` when every supplied op was rejected /
+# unknown (zero ops actually applied). That silent-failure state — the
+# agent-mode root-replace symptom — now returns ``ok=False,
+# action="failed"`` with the reason in ``error`` + ``warnings``.
 """Mode-specific adapters for the pocket specialist's create + edit endpoints.
 
 The MCP tool handlers (``mcp_tool._create_handler`` / ``_edit_handler``)
@@ -204,20 +216,95 @@ class AgentModeAdapter:
         settings: Settings,
     ) -> Any:
         started = time.monotonic()
-        if input.spec is None:
-            return _draft_kit_response(input, started=started)
-        return await _validate_and_persist(
-            input,
-            workspace_id=workspace_id,
-            user_id=user_id,
-            settings=settings,
-            started=started,
-        )
+        if input.spec is not None:
+            # Second call — the chat agent already drafted a spec.
+            return await _validate_and_persist(
+                input,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                settings=settings,
+                started=started,
+            )
+
+        # First call. When the chat agent matched a built-in template,
+        # short-circuit: load the template skeleton and persist it
+        # directly — no draft-kit round-trip. Agent-mode would otherwise
+        # pay two LLM hops for a one-shot template customization.
+        template_id = getattr(input.hints, "template_id", None) if input.hints else None
+        if template_id:
+            template_input = _input_with_template_spec(input, template_id)
+            if template_input is not None:
+                logger.info(
+                    "[pocket-specialist] agent-mode template short-circuit "
+                    "(template_id=%s) — skipping draft kit",
+                    template_id,
+                )
+                return await _validate_and_persist(
+                    template_input,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    settings=settings,
+                    started=started,
+                )
+            # Unknown slug / load failure — fall through to the draft kit.
+            logger.info(
+                "[pocket-specialist] agent-mode template_id=%s did not load "
+                "— falling back to draft kit",
+                template_id,
+            )
+
+        return _draft_kit_response(input, started=started)
 
 
 # ---------------------------------------------------------------------------
 # Agent-mode internals
 # ---------------------------------------------------------------------------
+
+
+def _input_with_template_spec(input: Any, template_id: str) -> Any | None:
+    """Load a built-in template and return a copy of ``input`` with the
+    template's ``ripple_spec`` set as ``spec``.
+
+    Agent mode persists ``input.spec`` directly. By loading the
+    template skeleton into ``spec`` here, the create flow takes the
+    same validate-and-persist path the second call uses — no LLM round
+    trip, no draft kit.
+
+    Returns ``None`` when the slug is unknown or the template files are
+    missing / corrupt; the caller then falls back to the draft kit.
+    The lazy import keeps ``bundled_templates`` off the hot path for the
+    common (no-template) create.
+    """
+    try:
+        from pocketpaw.bundled_templates.loader import load_template
+    except Exception:  # noqa: BLE001 — defensive: bundled_templates is OSS core
+        logger.warning("[pocket-specialist] bundled_templates.loader import failed", exc_info=True)
+        return None
+
+    template = load_template(template_id)
+    if template is None:
+        return None
+
+    ripple_spec = template.get("ripple_spec")
+    if not isinstance(ripple_spec, dict) or not ripple_spec:
+        logger.warning(
+            "[pocket-specialist] template %r loaded but ripple_spec is empty/invalid",
+            template_id,
+        )
+        return None
+
+    # Strip authoring-only keys (``_placeholder_note`` and any other
+    # ``_``-prefixed top-level key) — they are template-author notes,
+    # not rippleSpec fields, and must not land in the user's pocket.
+    clean_spec = {k: v for k, v in ripple_spec.items() if not k.startswith("_")}
+
+    try:
+        return input.model_copy(update={"spec": clean_spec})
+    except Exception:  # noqa: BLE001 — model_copy on a non-pydantic input
+        logger.warning(
+            "[pocket-specialist] could not copy input for template %r", template_id, exc_info=True
+        )
+        return None
 
 
 def _draft_kit_response(input: Any, *, started: float) -> Any:
@@ -619,10 +706,18 @@ def _edit_kit_response(input: Any, *, started: float) -> Any:
         "granular_ops": _GRANULAR_EDIT_OPS,
         "op_shape": (
             "Each op is ``{op: <name>, args: {...}}``. ``op`` is one of "
-            "``granular_ops`` above; ``args`` are that op's arguments "
-            "(e.g. set_state takes ``{path, value}``, set_node_prop takes "
-            "``{node_id, prop, value}``, add_node takes "
-            "``{parent_id, index, node}``). Apply the SMALLEST set of ops "
+            "``granular_ops`` above. Exact args per op: "
+            "set_state ``{path, value}``; "
+            "set_node_prop ``{node_id, prop, value}``; "
+            "add_node ``{parent_id, spec, after_id?, index?}`` — ``spec`` is "
+            "the new UINode object (NOT ``node``); position it with "
+            "``after_id`` (a sibling node id) or ``index`` (0-based slot), "
+            "else it appends; "
+            "replace_node ``{node_id, spec}``; "
+            "move_node ``{node_id, parent_id, after_id?}``; "
+            "remove_node ``{node_id}``; "
+            "the prop-array ops take ``{node_id, prop, match}`` (plus "
+            "``value`` for set / append). Apply the SMALLEST set of ops "
             "that satisfies the intent."
         ),
         "next_step": (
@@ -723,7 +818,23 @@ async def _apply_ops(input: Any, *, started: float) -> Any:
     for bad in unknown_ops:
         warnings.append(f"Edit op '{bad}' is not a supported granular op and was skipped.")
 
-    success = error_msg is None
+    # Success accounting. A raised exception (``error_msg``) is a hard
+    # failure. But a run can also "fail silently": every op the chat
+    # agent supplied got rejected by the service or was unknown, so
+    # ZERO ops actually applied. That state must NOT report
+    # ``ok=True, action="applied"`` — the canvas never changed, and the
+    # caller would believe the edit landed. This was the agent-mode
+    # root-replace symptom: ``replace_node`` on the root was rejected by
+    # the service, the rejection went into ``warnings``, but the run
+    # still claimed ``applied``. Mirrors the #1163 contract — a run that
+    # changed nothing is not a success.
+    nothing_applied = bool(input.ops) and not ops
+    success = error_msg is None and not nothing_applied
+    if nothing_applied and error_msg is None:
+        error_msg = (
+            "No edit ops were applied — every supplied op was rejected or "
+            "unsupported. See warnings for the per-op reasons."
+        )
     logger.info(
         "[pocket-specialist:edit] agent-mode apply complete: pocket_id=%s "
         "ops=%d rejected=%d unknown=%d success=%s duration=%dms",

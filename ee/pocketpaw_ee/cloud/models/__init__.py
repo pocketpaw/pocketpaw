@@ -1,4 +1,9 @@
-"""Cloud document models — re-exports for Beanie init."""
+"""Cloud document models — re-exports for Beanie init.
+
+Updated: 2026-05-21 (PR #1177 security pass) — dropped PocketBackendCredential
+from ``__all__`` so it cannot be star-imported into routers/DTOs/domains; it
+remains registered in ``get_all_documents()`` for Beanie init.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
+from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
@@ -85,6 +91,7 @@ def get_all_documents():
         User,
         Agent,
         Pocket,
+        PocketBackendCredential,
         Session,
         Comment,
         Notification,

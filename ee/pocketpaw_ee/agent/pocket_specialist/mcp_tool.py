@@ -15,6 +15,19 @@ Changes: 2026-05-21 (#1170) — the ``edit`` tool now accepts an optional
 ``ops`` argument: the agent-mode second-call payload. In agent mode the
 first ``edit`` call returns ``action='draft_kit'`` and the chat agent
 calls back with ``ops=<granular op list>``. Subagent mode ignores it.
+Changes: 2026-05-22 (Increment 3) — ``_edit_handler`` now calls the
+execution router (``pocket_router.classify_and_route``) FIRST. The
+router routes the request to the cheapest capable tier (Tier 0
+declarative / Tier 1 deterministic op); only on an *escalate* verdict
+does the handler fall through to ``run_edit_specialist`` (the existing
+flow, unchanged). ``create`` is out of scope — a new pocket has nothing
+to classify against, so it always goes straight to ``run_specialist``.
+Changes: 2026-05-22 (feat/bundled-templates, Increment 2a) — the
+``create`` tool's ``hints`` object accepts ``template_id`` (a built-in
+pocket-template slug) and the tool gains a top-level optional
+``backend_summary`` (a non-secret ``{base_url, auth_type, configured}``
+summary — unused in 2a, declared now so 2b's API-skill loading does not
+re-touch the schema).
 """
 
 from __future__ import annotations
@@ -74,10 +87,12 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
     raw_hints = args.get("hints")
     hints = PocketSpecialistHints(**raw_hints) if raw_hints else None
     raw_spec = args.get("spec")
+    raw_backend_summary = args.get("backend_summary")
     payload = PocketSpecialistCreateInput(
         brief=args.get("brief", ""),
         hints=hints,
         spec=raw_spec if isinstance(raw_spec, dict) else None,
+        backend_summary=(raw_backend_summary if isinstance(raw_backend_summary, dict) else None),
     )
 
     try:
@@ -133,13 +148,48 @@ async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
         ops=raw_ops if isinstance(raw_ops, list) else None,
     )
 
+    settings = get_settings()
     try:
-        out = await run_edit_specialist(
-            payload,
-            workspace_id=workspace_id,
-            user_id=user_id,
-            settings=get_settings(),
-        )
+        # Increment 3 — the execution router runs FIRST. It classifies the
+        # intent and, when HIGH-confidence, routes to a cheap tier (Tier 0
+        # declarative / Tier 1 deterministic op) without ever invoking the
+        # LLM specialist. Only on an *escalate* verdict (``handled`` is
+        # False) does control fall through to ``run_edit_specialist`` — the
+        # existing flow, unchanged. The router's kill-switch
+        # (``pocket_router_enabled=false``) makes every request escalate,
+        # restoring the pre-router behaviour exactly.
+        #
+        # The router only applies to a *second-call* edit (``ops is None``):
+        # the chat agent's first call is the draft-kit handshake, which the
+        # router has nothing to classify against — let it reach the
+        # specialist's agent-mode adapter unchanged.
+        if payload.ops is None:
+            from pocketpaw_ee.agent.pocket_router.router import classify_and_route
+
+            handled, routed = await classify_and_route(
+                payload,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                settings=settings,
+            )
+            if handled:
+                out = routed
+            else:
+                out = await run_edit_specialist(
+                    payload,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    settings=settings,
+                )
+        else:
+            # An explicit op list — the chat agent already computed the
+            # ops; route straight to the deterministic apply path.
+            out = await run_edit_specialist(
+                payload,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                settings=settings,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("pocket specialist edit run failed")
         return {
@@ -254,8 +304,34 @@ def build_pocket_specialist_server() -> Any:
                                 "done', 'filter by status']."
                             ),
                         },
+                        "template_id": {
+                            "type": "string",
+                            "description": (
+                                "Slug of a built-in pocket template to "
+                                "instantiate and customize (e.g. "
+                                "'todo-task-tracker', 'kanban-board', "
+                                "'metrics-dashboard', 'crm-record-list', "
+                                "'calendar-planner', 'activity-feed'). Set "
+                                "this when the brief matched a built-in "
+                                "template in ~/.pocketpaw/templates/index.json. "
+                                "It is the HIGHEST-AUTHORITY structural plan — "
+                                "the specialist starts from the template's "
+                                "hand-authored skeleton instead of "
+                                "cold-generating. An unknown slug is ignored."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
+                },
+                "backend_summary": {
+                    "type": "object",
+                    "description": (
+                        "Optional non-secret backend summary "
+                        "{base_url, auth_type, configured} — NEVER include "
+                        "auth_token. Unused in 2a; declared for 2b's "
+                        "per-backend API-skill loading."
+                    ),
+                    "additionalProperties": True,
                 },
                 "spec": {
                     "type": "object",

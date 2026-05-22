@@ -1,3 +1,14 @@
+# agent_schemas.py — Request and SSE-event payload schemas for the
+#   enterprise agent chat endpoint.
+# Changes: 2026-05-22 (Increment 3) — RFC-06 structure/data split:
+#   added ``PocketMutationFrame``, the discriminated ``pocket_mutation``
+#   SSE frame the granular ``agent_*`` edit ops emit. Its ``family``
+#   discriminant ("updateComponents" for node/structure ops,
+#   "updateDataModel" for state/data ops) lets the canvas re-render only
+#   the structure layer or only the data layer instead of rebuilding the
+#   whole pocket from the coarse ``PocketUpdated`` realtime event. Also
+#   added the ``POCKET_EXECUTION`` SSE event name for the execution
+#   router's per-request observability frame.
 """Request and SSE-event payload schemas for the enterprise agent chat endpoint.
 
 The endpoint lives at ``POST /cloud/chat/{scope}/{scope_id}/agent`` and streams
@@ -9,7 +20,7 @@ for the full protocol.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -77,6 +88,108 @@ class SseEventName(StrEnum):
     RIPPLE = "ripple"
     POCKET_CREATED = "pocket_created"
     POCKET_MUTATION = "pocket_mutation"
+    POCKET_EXECUTION = "pocket_execution"
     ASK_USER_QUESTION = "ask_user_question"
     STREAM_END = "stream_end"
     ERROR = "error"
+
+
+# Map of the granular ``agent_*`` op identifier -> mutation ``family``.
+# Structure ops touch ``rippleSpec.ui`` (the component tree); data ops
+# touch ``rippleSpec.state`` (the data model). The split is the cheap
+# RFC-06 win — a data-only change need not re-run layout.
+_STRUCTURE_OPS: frozenset[str] = frozenset(
+    {
+        "node_added",
+        "node_replaced",
+        "node_prop_set",
+        "node_moved",
+        "node_removed",
+        "node_prop_array_item_set",
+        "node_prop_array_item_appended",
+        "node_prop_array_item_removed",
+    }
+)
+_DATA_OPS: frozenset[str] = frozenset(
+    {
+        "state_set",
+        "state_appended",
+        "state_removed",
+        "state_patched",
+    }
+)
+
+
+def family_for_op(op: str) -> Literal["updateComponents", "updateDataModel"] | None:
+    """Resolve a granular op identifier to its mutation ``family``.
+
+    ``updateComponents`` for a structure (node) op, ``updateDataModel``
+    for a data (state) op, ``None`` for anything else (the caller should
+    not emit a discriminated frame — the coarse ``PocketUpdated`` event
+    still covers it).
+    """
+    if op in _STRUCTURE_OPS:
+        return "updateComponents"
+    if op in _DATA_OPS:
+        return "updateDataModel"
+    return None
+
+
+class PocketMutationFrame(BaseModel):
+    """A narrow, discriminated ``pocket_mutation`` SSE frame.
+
+    Emitted by the granular ``agent_*`` edit ops in
+    ``pockets/agent_context.py`` alongside the coarse ``PocketUpdated``
+    realtime event. The coarse event tells a client "this pocket
+    changed, refetch"; this frame tells it *what kind* of change so the
+    canvas can patch in place rather than rebuild.
+
+    The ``family`` discriminant is the RFC-06 structure/data split:
+
+    * ``updateComponents`` — a node op mutated ``rippleSpec.ui`` (the
+      component tree). The renderer re-runs layout for the touched
+      subtree.
+    * ``updateDataModel`` — a state op mutated ``rippleSpec.state`` (the
+      data model). No layout work needed — only data-bound widgets
+      re-render.
+
+    ``op`` is the granular op identifier (``state_set``, ``node_added``,
+    …); ``payload`` is that op's narrow change descriptor (subtree,
+    path, value, …) — the same fields the historical un-discriminated
+    frame carried at the top level.
+
+    Wire shape: the frame is emitted FLAT — ``family``, ``op``,
+    ``pocket_id`` and every ``payload`` key sit at the top level of the
+    SSE ``data`` object, next to the legacy ``action`` key. This keeps
+    the historical un-discriminated consumers working byte-for-byte
+    (they read ``action`` + flat payload) while new consumers branch on
+    ``family``. ``to_wire()`` produces that flat dict. Older clients
+    that ignore ``family`` still get the coarse ``PocketUpdated`` event,
+    so the frame is purely additive — no client is forced to upgrade.
+    """
+
+    family: Literal["updateComponents", "updateDataModel"]
+    op: str = Field(min_length=1, description="Granular op identifier, e.g. 'state_set'.")
+    pocket_id: str = Field(description="Id of the mutated pocket.")
+    payload: dict[str, Any] = Field(
+        default_factory=dict,
+        description="The op's narrow change descriptor (subtree, path, value, …).",
+    )
+
+    def to_wire(self) -> dict[str, Any]:
+        """Flatten to the wire dict pushed via ``push_pocket_mutation``.
+
+        ``payload`` keys are spread to the top level (next to ``family`` /
+        ``op`` / ``pocket_id``) and the legacy ``action`` alias is added
+        so un-discriminated consumers keep working. A ``payload`` key
+        never collides with ``family`` / ``op`` / ``action`` / ``pocket_id``
+        — the granular ops only put change descriptors there.
+        """
+        wire: dict[str, Any] = {
+            "action": self.op,
+            "op": self.op,
+            "family": self.family,
+            "pocket_id": self.pocket_id,
+        }
+        wire.update(self.payload)
+        return wire
