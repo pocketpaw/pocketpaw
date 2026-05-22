@@ -37,6 +37,11 @@ Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the agent-facing
 so the pocket EDIT specialist (not just the create flow) can author the
 top-level read-only data-source block. Bindings are validated through
 the ``SourceBinding`` model before persistence.
+Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — ``agent_view`` now
+attaches a non-secret ``backend`` summary (``{base_url, auth_type,
+configured}``) so the edit specialist knows whether a backend is already
+configured before it authors a ``sources`` block. The token is NEVER
+included — the summary comes from ``get_pocket_backend``.
 """
 
 from __future__ import annotations
@@ -928,6 +933,37 @@ async def _heal_node_ids(doc: _PocketDoc) -> None:
             logger.warning("pocket %s node-id heal save failed: %s", doc.id, exc)
 
 
+async def _agent_backend_summary(doc: _PocketDoc) -> dict[str, Any]:
+    """Return the NON-SECRET backend summary for a pocket, agent-safe.
+
+    Shape: ``{base_url, auth_type, configured}`` — the same shape
+    ``get_pocket_backend`` returns, never the token. When the pocket
+    has no backend configured, returns ``{"configured": False}``.
+
+    The backend credential lives in a separate collection (security
+    design D1), so nothing surfaces it to the edit specialist by
+    default. This makes ``get_pocket`` / ``agent_view`` carry the
+    summary so the specialist knows whether a backend exists and what
+    its base URL is — without ever seeing the token.
+    """
+    try:
+        summary = await get_pocket_backend(doc.workspace, str(doc.id))
+    except Exception:  # noqa: BLE001 — a backend-read failure must not break the view
+        logger.warning(
+            "agent_view: backend summary fetch failed for pocket %s", str(doc.id), exc_info=True
+        )
+        return {"configured": False}
+    if summary is None:
+        return {"configured": False}
+    # get_pocket_backend already excludes the token — assert the shape
+    # and never pass anything else through.
+    return {
+        "base_url": summary.get("base_url"),
+        "auth_type": summary.get("auth_type"),
+        "configured": True,
+    }
+
+
 async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     """Read-only fetch — returns ``(view_dict, None)`` on success or
     ``(None, error)`` on failure.
@@ -937,16 +973,23 @@ async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
     id to address with granular edit ops. ``_heal_node_ids`` stamps and
     persists them on first read.
 
+    The returned view carries a non-secret ``backend`` summary
+    (``{base_url, auth_type, configured}``) so the edit specialist can
+    see whether the pocket already has a backend configured before it
+    authors a ``sources`` block. The token is NEVER included.
+
     Note: $source markers in rippleSpec are intentionally NOT resolved
     here. The agent must see raw markers so that on edit it preserves
     them; resolving would let the agent bake a snapshot of live data
     into the spec, defeating the marker mechanism. Resolution happens
     only in ``service.get`` (the user-facing read path)."""
     doc, err = await _agent_load_doc(pocket_id)
-    if err:
+    if err or doc is None:
         return None, err
     await _heal_node_ids(doc)
-    return _agent_view_dict(doc), None
+    view = _agent_view_dict(doc)
+    view["backend"] = await _agent_backend_summary(doc)
+    return view, None
 
 
 async def agent_list(workspace_id: str, user_id: str) -> list[dict]:

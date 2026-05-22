@@ -24,6 +24,11 @@ the chat agent computes the granular ops inline and the new
 backend-spawn flow moved into the private ``_run_edit_subagent_pipeline``.
 A new ``PocketSpecialistEditInput.ops`` field carries the chat agent's
 pre-computed ops on the agent-mode second call.
+Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — the subagent-mode edit
+pipeline now fetches the pocket's non-secret backend summary and fills it
+into the ``<current-pocket>`` block via ``fill_current_pocket`` so the
+specialist sees whether a backend is configured before authoring a
+``sources`` block. The token is never surfaced.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from pocketpaw.ripple._pockets import (
     POCKET_EDIT_SPECIALIST_PROMPT_MCP,
     POCKET_ID_TOKEN,
     POCKET_SPECIALIST_PROMPT,
+    fill_current_pocket,
 )
 from pocketpaw_ee.agent.pocket_specialist.settings import (
     _BACKEND_MODEL_FIELD,
@@ -659,7 +665,21 @@ async def _run_edit_subagent_pipeline(
         make_edit_pocket_tools(pocket_id=input.pocket_id, capture=ops_capture)
     )
 
-    system_prompt = POCKET_EDIT_SPECIALIST_PROMPT_MCP.replace(POCKET_ID_TOKEN, input.pocket_id)
+    # Surface the NON-SECRET backend summary so the specialist knows
+    # whether a backend is already configured before it authors a
+    # ``sources`` block. ``get_pocket_backend`` never returns the token.
+    backend_summary: dict[str, Any] | None = None
+    try:
+        from pocketpaw_ee.cloud.pockets import service as _pockets_service
+
+        backend_summary = await _pockets_service.get_pocket_backend(
+            workspace_id, input.pocket_id
+        )
+    except Exception:  # noqa: BLE001 — a missing backend summary must not block the edit
+        log.debug("[pocket-specialist:edit] backend summary fetch failed", exc_info=True)
+    system_prompt = fill_current_pocket(
+        POCKET_EDIT_SPECIALIST_PROMPT_MCP, input.pocket_id, backend_summary
+    )
     user_message = _build_edit_user_message(input)
 
     log.info(

@@ -19,6 +19,13 @@
 # splices in `_LIVE_DATA_SOURCES_EDIT_BLOCK` so the EDIT specialist (not
 # just the create flow) knows it can author a `rippleSpec.sources` block.
 #
+# Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — `_CURRENT_POCKET_BLOCK`
+# now carries a `Backend:` line (the non-secret {base_url, auth_type,
+# configured} summary), filled via the new `fill_current_pocket` helper +
+# `BACKEND_SUMMARY_TOKEN`. The sources prompt blocks tell the specialist
+# to read that line instead of asking the user for a backend URL it can
+# already see.
+#
 # Canonical source for every pocket-mode system prompt the agent ever sees.
 # Four strings are exported, one per (action × backend) cell:
 #
@@ -104,6 +111,10 @@ _RIPPLE_DESIGN_ESSENTIALS = "\n".join(
 )
 
 POCKET_ID_TOKEN = "__POCKET_ID__"
+# Placeholder in _CURRENT_POCKET_BLOCK_TEMPLATE for the non-secret backend
+# summary line. Filled by ``fill_current_pocket`` — callers that only have
+# the pocket id pass ``backend_summary=None`` and the line reads "unknown".
+BACKEND_SUMMARY_TOKEN = "__BACKEND_SUMMARY__"
 
 # ---------------------------------------------------------------------------
 # Backends that delegate pocket creation/editing to the specialist via a
@@ -487,6 +498,12 @@ Rules:
 - A pocket using `sources` MUST have a backend configured (base URL +
   auth, set once via the pocket's backend settings — outside the spec).
   If no backend is configured, the sources will not run.
+- A source `path` is ALWAYS relative to the configured backend base URL
+  — never put an absolute URL in `path`. You only ever author the
+  relative path. If you are extending an existing pocket, `get_pocket`
+  returns a non-secret `backend` field ({base_url, auth_type,
+  configured}) so you can see whether a backend is already set and what
+  its base URL is — do not ask the user for a URL you can already see.
 - Seed `state` with an empty list/value for each `bind` target so the
   widget renders before the first fetch.
 - Use `sources` ONLY for the user's real backend. For workspace data use
@@ -524,6 +541,24 @@ After `set_source`, do the wiring with the normal ops:
 - For a manual refresh, `add_node` a button whose on_click is
   {"action": "run_source", "source": "prs"} — `run_source` is a
   client-side action, NOT a chat round-trip.
+
+THE BACKEND IS ALREADY KNOWN — DO NOT ASK FOR IT.
+The `<current-pocket>` block above has a `Backend:` line telling you
+whether this pocket already has a backend configured and its base URL:
+- "Backend: configured — https://api.example.com (auth: bearer)" — a
+  backend EXISTS. Author the source against it directly. A source `path`
+  is ALWAYS relative to that base URL, so you only ever need the
+  relative path — never ask the user for the backend URL, you can see it.
+- "Backend: not configured" — the pocket has no backend. The source
+  cannot run until one is set in the pocket's backend settings. Tell the
+  user to configure a backend first (it's outside the spec — the
+  "Configure Backend" modal), then you can add the source.
+- "Backend: configured state unknown ..." — call `get_pocket`; its
+  result carries a `backend` field with the same summary.
+
+If the backend is configured but you cannot infer the relative path for
+the data the user wants, ask ONLY for the relative path (e.g. "which
+endpoint — /pulls? /issues?"), NOT for the whole backend URL.
 
 Rules:
 - A pocket using sources MUST have a backend configured (base URL + auth,
@@ -1599,8 +1634,45 @@ _CURRENT_POCKET_BLOCK_TEMPLATE = """\
 You are inside pocket id: `__POCKET_ID__`. Pass this id verbatim as the
 ``pocket_id`` argument to every pocket tool call (get_pocket,
 set_state, set_node_prop, add_node, etc.).
+Backend: __BACKEND_SUMMARY__
 </current-pocket>
 """
+
+
+def fill_current_pocket(prompt: str, pocket_id: str, backend_summary: dict | None) -> str:
+    """Fill the `__POCKET_ID__` and `__BACKEND_SUMMARY__` tokens in a
+    prompt that carries ``_CURRENT_POCKET_BLOCK_TEMPLATE``.
+
+    ``backend_summary`` is the non-secret ``{base_url, auth_type,
+    configured}`` dict from ``pockets.service.get_pocket_backend`` (it
+    never carries the token). ``None`` — or a summary without
+    ``configured`` — renders as "configured state unknown" so the agent
+    falls back to ``get_pocket`` rather than assuming there is no
+    backend.
+
+    Always replace BOTH tokens: a prompt that fills only `__POCKET_ID__`
+    would leak the literal `__BACKEND_SUMMARY__` text to the model.
+    """
+    return prompt.replace(POCKET_ID_TOKEN, pocket_id).replace(
+        BACKEND_SUMMARY_TOKEN, _render_backend_summary(backend_summary)
+    )
+
+
+def _render_backend_summary(summary: dict | None) -> str:
+    """One-line human-readable rendering of the non-secret backend
+    summary for the `<current-pocket>` block.
+
+    "configured — <base_url> (auth: <type>)" when a backend exists,
+    "not configured" when it explicitly does not, "configured state
+    unknown — call get_pocket to check" when the caller had no summary.
+    """
+    if not summary or "configured" not in summary:
+        return "configured state unknown — call get_pocket to check"
+    if not summary.get("configured"):
+        return "not configured"
+    base_url = summary.get("base_url") or "(unknown URL)"
+    auth_type = summary.get("auth_type") or "none"
+    return f"configured — {base_url} (auth: {auth_type})"
 
 
 def _assemble_interaction(*, mcp: bool) -> str:
@@ -1815,6 +1887,7 @@ def get_pocket_prompts(*, backend_name: str | None = None) -> tuple[str, str]:
 
 
 __all__ = [
+    "BACKEND_SUMMARY_TOKEN",
     "POCKET_CREATION_PROMPT",
     "POCKET_CREATION_PROMPT_CLI",
     "POCKET_CREATION_PROMPT_MCP",
@@ -1826,5 +1899,6 @@ __all__ = [
     "POCKET_INTERACTION_PROMPT_CLI",
     "POCKET_INTERACTION_PROMPT_MCP",
     "POCKET_SPECIALIST_PROMPT",
+    "fill_current_pocket",
     "get_pocket_prompts",
 ]
