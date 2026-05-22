@@ -49,6 +49,7 @@ The user wants the canvas to change.
   ✓ "rebuild this as a kanban"
   ✓ "make this less cluttered"
   ✓ "switch the layout to tabs"
+  ✓ "embed this CodePen" / "add a 3D model viewer"
 
 → Use the **EDIT DECISION TREE** below to pick the right delegation
    shape, then call ``mcp__pocketpaw_pocket_specialist__edit``.
@@ -186,6 +187,13 @@ Three outcomes:
   user and stop. Do NOT improvise with shell, files, or HTTP.
 - **Always pass the pocket_id**. The current pocket is the one in
   the ``<current-pocket>`` block — don't ask the user.
+- **Escape-hatch widgets.** The catalog includes ``model-viewer`` (3D
+  ``.glb`` / ``.gltf`` viewer) and ``embed`` (the sanctioned escape
+  hatch for a CodePen / Figma / Observable / self-contained viz). When
+  the user asks for one, pass the intent through to the specialist —
+  but note an ``embed`` in ``mode:"url"`` form is rejected at ingest
+  unless its ``url`` is https and on the embed host allow-list. Reach
+  for ``embed`` only when no catalog widget fits.
 
 ## When NOT to use this skill
 

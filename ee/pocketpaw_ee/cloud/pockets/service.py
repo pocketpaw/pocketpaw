@@ -98,7 +98,13 @@ from pocketpaw_ee.cloud.pockets.dto import (
     pocket_to_wire_dict,
 )
 from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
-from pocketpaw_ee.cloud.ripple_validator import validate_ripple_spec_logged
+from pocketpaw_ee.cloud.ripple_validator import (
+    CatalogViolationError,
+    format_violations_for_agent,
+    validate_against_catalog_logged,
+    validate_against_catalog_strict,
+    validate_ripple_spec_logged,
+)
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.shared.events import event_bus
 
@@ -305,6 +311,139 @@ async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str
 
 
 # ---------------------------------------------------------------------------
+# Catalog-as-allowlist ingest gate (Increment 5)
+# ---------------------------------------------------------------------------
+
+
+async def _catalog_allowed_types() -> list[str] | None:
+    """Resolve the widget-catalog allow-list from the Ripple manifest.
+
+    The manifest's ``widgets`` array is the renderer's closed registry.
+    Returns the type list, or ``None`` when the manifest is unavailable
+    (network failure, dev server down) — the caller skips the catalog
+    gate in that case, best-effort like the manifest-drift validator.
+    """
+    try:
+        from pocketpaw.config import get_settings
+        from pocketpaw.ripple.manifest import allowed_types_from_manifest, get_manifest
+
+        settings = get_settings()
+        manifest = await get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        if manifest is None:
+            return None
+        types = allowed_types_from_manifest(manifest)
+        return types or None
+    except Exception:
+        logger.debug("ripple catalog allow-list lookup skipped (non-fatal)", exc_info=True)
+        return None
+
+
+def _embed_allowed_hosts() -> list[str]:
+    """Return the configured ``embed`` host allow-list."""
+    try:
+        from pocketpaw.config import get_settings
+
+        return list(get_settings().ripple_embed_allowed_hosts or [])
+    except Exception:
+        logger.debug("ripple embed allow-list lookup skipped (non-fatal)", exc_info=True)
+        return []
+
+
+def _audit_embed_ingest(
+    spec: dict[str, Any] | None,
+    *,
+    actor: str,
+    workspace_id: str | None,
+    pocket_id: str | None,
+) -> None:
+    """Write an audit-log entry when an ingested spec contains an ``embed``
+    node.
+
+    The ``embed`` widget points an iframe at third-party content; an
+    audit trail of every embed-bearing spec that is published lets a
+    security review reconstruct what external surfaces a pocket exposed.
+    Audit failures must never break the ingest flow — the call is wrapped.
+    """
+    try:
+        from pocketpaw.ripple.manifest import find_embed_nodes
+
+        embeds = find_embed_nodes(spec)
+        if not embeds:
+            return
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        urls: list[str] = []
+        for node in embeds:
+            props = node.get("props")
+            if isinstance(props, dict):
+                url = props.get("url")
+                if isinstance(url, str) and url:
+                    urls.append(url)
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action="pocket.embed_ingest",
+                target=pocket_id or "(new)",
+                status="success",
+                category="pocket_embed",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                embed_count=len(embeds),
+                embed_urls=urls,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the ingest
+        logger.warning("pocket embed-ingest audit-log write failed", exc_info=True)
+
+
+async def _gate_catalog(
+    spec: dict[str, Any] | None,
+    *,
+    strict: bool,
+    actor: str,
+    workspace_id: str | None = None,
+    pocket_id: str | None = None,
+) -> None:
+    """Run the catalog-as-allowlist gate over a normalized rippleSpec.
+
+    ``strict=True`` (agent-generation path) raises ``CatalogViolationError``
+    on the first violation so the caller can retry the LLM. ``strict=False``
+    (human / import path) logs a structured warning per violation and does
+    not block. Either way, an embed-bearing spec is audit-logged.
+
+    Best-effort: when the widget manifest can't be fetched the gate is
+    skipped (same posture as the manifest-drift validator).
+    """
+    if not isinstance(spec, dict):
+        return
+    _audit_embed_ingest(spec, actor=actor, workspace_id=workspace_id, pocket_id=pocket_id)
+    allowed_types = await _catalog_allowed_types()
+    if allowed_types is None:
+        return
+    embed_hosts = _embed_allowed_hosts()
+    if strict:
+        validate_against_catalog_strict(
+            spec,
+            allowed_types,
+            embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+    else:
+        validate_against_catalog_logged(
+            spec,
+            allowed_types,
+            embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
 
@@ -323,6 +462,8 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
     if normalized_spec:
         validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
+        # Human/import path — catalog drift is logged for triage, not blocked.
+        await _gate_catalog(normalized_spec, strict=False, actor=user_id, workspace_id=workspace_id)
     widget_docs = [_build_widget_doc(w) for w in (body.widgets or [])]
 
     if body.project_id:
@@ -416,6 +557,14 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     if normalized_spec:
         validate_ripple_spec_logged(
             normalized_spec, pocket_id=str(doc.id), workspace_id=doc.workspace
+        )
+        # Human/import path — catalog drift is logged for triage, not blocked.
+        await _gate_catalog(
+            normalized_spec,
+            strict=False,
+            actor=user_id,
+            workspace_id=doc.workspace,
+            pocket_id=str(doc.id),
         )
 
     if body.name is not None:
@@ -517,12 +666,25 @@ async def create_from_ripple_spec(
     description: str = "",
 ) -> str | None:
     """Auto-create a pocket from an agent-generated ripple spec.
-    Returns the pocket id on success, None on failure."""
+    Returns the pocket id on success, None on failure.
+
+    This is the agent-generation path, so the catalog gate runs in
+    STRICT mode — a spec with a node outside the widget catalog (or an
+    ``embed`` URL violating the host policy) is BLOCKED: the function
+    returns ``None`` rather than persist a pocket the renderer would
+    draw as a red "Unknown widget type" box. The inline chat path has
+    no LLM-retry loop, so blocking + logging is the strict behavior here
+    (the specialist edit tools, which can retry, surface the corrective
+    message instead).
+    """
     try:
         normalized = normalize_ripple_spec(ripple_spec)
         if not normalized:
             return None
         validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
+        # Strict catalog gate — CatalogViolationError is caught by the
+        # catch-all below, blocking the create and logging the reason.
+        await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
 
         name = (
             normalized.get("lifecycle", {}).get("name")
@@ -1103,6 +1265,18 @@ async def agent_update(
             validate_ripple_spec_logged(
                 doc.rippleSpec, pocket_id=str(doc.id), workspace_id=doc.workspace
             )
+            # Agent-generation path — strict catalog gate. Surface a
+            # violation as the error string so the specialist can retry.
+            try:
+                await _gate_catalog(
+                    doc.rippleSpec,
+                    strict=True,
+                    actor="agent",
+                    workspace_id=doc.workspace,
+                    pocket_id=str(doc.id),
+                )
+            except CatalogViolationError as exc:
+                return None, format_violations_for_agent(exc.violations)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
@@ -2108,6 +2282,14 @@ async def agent_create(
     normalized = normalize_ripple_spec(ripple_spec) if ripple_spec else None
     if normalized:
         validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
+        # Agent-generation path — strict catalog gate. A violation is
+        # returned as the error string so the specialist sees the
+        # corrective detail and can retry, instead of persisting a spec
+        # the renderer would draw as a red "Unknown widget type" box.
+        try:
+            await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
+        except CatalogViolationError as exc:
+            return None, None, format_violations_for_agent(exc.violations)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,
