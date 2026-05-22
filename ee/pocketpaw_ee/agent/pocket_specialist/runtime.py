@@ -29,6 +29,16 @@ pipeline now fetches the pocket's non-secret backend summary and fills it
 into the ``<current-pocket>`` block via ``fill_current_pocket`` so the
 specialist sees whether a backend is configured before authoring a
 ``sources`` block. The token is never surfaced.
+Changes: 2026-05-22 (feat/bundled-templates, Increment 2a) — built-in
+pocket templates. ``PocketSpecialistHints`` gains ``template_id`` (the
+highest-authority structural plan — when set, the specialist instantiates
+and customizes that template instead of cold-generating).
+``PocketSpecialistCreateInput`` gains ``backend_summary`` (a non-secret
+``{base_url, auth_type, configured}`` summary — unused in 2a, added now so
+2b's per-backend API-skill loading does not re-touch this model).
+``_build_system_prompt`` accepts ``backend_summary`` and, when a
+``template_id`` hint is set, splices the loaded template skeleton +
+customization rules in via ``_load_template_block``.
 """
 
 from __future__ import annotations
@@ -123,6 +133,21 @@ class PocketSpecialistHints(BaseModel):
         ),
     )
 
+    # ---- built-in template (highest-authority structural plan) ----
+    template_id: str | None = Field(
+        default=None,
+        description=(
+            "Slug of a built-in pocket template to instantiate and "
+            "customize (e.g. 'todo-task-tracker', 'kanban-board'). Set by "
+            "the chat agent's STEP 0 template-library keyword match. When "
+            "set, this is the HIGHEST-AUTHORITY structural plan — the "
+            "specialist starts from the template's hand-authored rippleSpec "
+            "skeleton and customizes it rather than cold-generating. An "
+            "unknown slug is ignored and the specialist falls back to cold "
+            "generation."
+        ),
+    )
+
 
 class PocketSpecialistCreateInput(BaseModel):
     brief: str = Field(..., min_length=10, max_length=4000)
@@ -133,6 +158,13 @@ class PocketSpecialistCreateInput(BaseModel):
             "Pre-drafted rippleSpec for agent-mode's second call. When set, "
             "the specialist skips its own LLM draft phase and goes straight "
             "to validate-and-persist. Ignored in subagent mode."
+        ),
+    )
+    backend_summary: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Non-secret backend summary {base_url, auth_type, configured} — "
+            "NEVER include auth_token. Used in 2b for API-skill loading."
         ),
     )
 
@@ -261,7 +293,7 @@ async def _run_subagent_pipeline(
         ]
     )
 
-    system_prompt = _build_system_prompt(input.hints)
+    system_prompt = _build_system_prompt(input.hints, backend_summary=input.backend_summary)
     user_message = _build_user_message(input)
 
     log.info(
@@ -348,7 +380,115 @@ async def _run_subagent_pipeline(
     )
 
 
-def _build_system_prompt(hints: PocketSpecialistHints | None) -> str:
+# ---------------------------------------------------------------------------
+# Built-in pocket templates (feat/bundled-templates, Increment 2a).
+#
+# When the caller sets ``hints.template_id`` the specialist starts from a
+# hand-authored, production-quality rippleSpec skeleton instead of
+# cold-generating. The template block below is spliced into the system
+# prompt and is the HIGHEST-AUTHORITY structural plan — it outranks the
+# layout / focal_widget hints because the skeleton already encodes them.
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_BLOCK = """\
+
+BUILT-IN TEMPLATE — INSTANTIATE AND CUSTOMIZE, DO NOT REDESIGN:
+
+The chat agent matched this brief to PocketPaw's built-in
+``{slug}`` template. This is the HIGHEST-AUTHORITY structural plan —
+it outranks every layout / focal_widget hint above. Your job is
+INSTANTIATION + CUSTOMIZATION, not a cold draft.
+
+The template's hand-authored rippleSpec skeleton:
+
+{spec_json}
+
+CUSTOMIZATION RULES:
+- Replace every ``[bracketed]`` placeholder value with content for the
+  user's actual domain. Placeholders mark where real content goes.
+- Rename labels, headings, column headers, and option labels to the
+  user's domain. A "Task Tracker" brief about bugs becomes a "Bug
+  Tracker" with a "Bug" column, not a generic "Task" column.
+- PRESERVE the widget structure — the node tree, the state/bind/on_click
+  wiring, the composer rows. The skeleton is correct; do not strip
+  interactivity or swap the focal widget unless the brief explicitly
+  demands a different shape.
+- Keep seeded sample rows realistic and on-domain (3-5 rows) so the
+  canvas is alive on first load. Do not ship empty arrays for a
+  display-style widget.
+- Drop the ``_placeholder_note`` field and any ``_``-prefixed key from
+  the final spec — those are template authoring notes, not spec fields.
+{sources_rule}
+Then call persist_pocket exactly once with the customized spec.
+"""
+
+_TEMPLATE_SOURCES_WITH_BACKEND = """\
+- The template carries a ``sources`` block (a placeholder live-data
+  binding). The user HAS a backend configured — keep the ``sources``
+  block so the real endpoint hydrates the bound state. Adjust the
+  ``path`` to the user's actual endpoint if the brief names one.
+"""
+
+_TEMPLATE_SOURCES_NO_BACKEND = """\
+- The template carries a ``sources`` block (a placeholder live-data
+  binding). The user has NO backend configured — REMOVE the ``sources``
+  block entirely and keep the seeded sample rows as the working data.
+"""
+
+
+def _load_template_block(template_id: str, backend_summary: dict[str, Any] | None) -> str | None:
+    """Load a built-in template and format the splice-in prompt block.
+
+    Lazy-imports ``pocketpaw.bundled_templates.loader`` so the OSS-core
+    import is paid only when a ``template_id`` hint is actually set.
+
+    Returns the formatted ``_TEMPLATE_BLOCK`` (the skeleton + the
+    customization rules) on success, or ``None`` when the slug is
+    unknown / the template files are missing — in which case the
+    specialist falls back to cold generation.
+
+    ``backend_summary`` decides the sources-placeholder rule: a template
+    that ships a ``sources`` block (the CRM list) keeps it when a backend
+    is configured and drops it when not.
+    """
+    try:
+        from pocketpaw.bundled_templates.loader import load_template
+    except Exception:  # noqa: BLE001 — bundled_templates is OSS core; defensive only
+        log.warning("[pocket-specialist] bundled_templates.loader import failed", exc_info=True)
+        return None
+
+    template = load_template(template_id)
+    if template is None:
+        log.info(
+            "[pocket-specialist] template_id=%r not found — falling back to cold generation",
+            template_id,
+        )
+        return None
+
+    import json as _json
+
+    ripple_spec = template.get("ripple_spec") or {}
+    spec_json = _json.dumps(ripple_spec, indent=2)
+
+    if isinstance(ripple_spec, dict) and "sources" in ripple_spec:
+        configured = bool(backend_summary and backend_summary.get("configured"))
+        sources_rule = (
+            _TEMPLATE_SOURCES_WITH_BACKEND if configured else _TEMPLATE_SOURCES_NO_BACKEND
+        )
+    else:
+        sources_rule = ""
+
+    return _TEMPLATE_BLOCK.format(
+        slug=template_id,
+        spec_json=spec_json,
+        sources_rule=sources_rule,
+    )
+
+
+def _build_system_prompt(
+    hints: PocketSpecialistHints | None,
+    backend_summary: dict[str, Any] | None = None,
+) -> str:
     """Compose the specialist system prompt from the canonical creation
     prompt + any hints from the caller.
 
@@ -358,6 +498,11 @@ def _build_system_prompt(hints: PocketSpecialistHints | None) -> str:
     set, are AUTHORITATIVE — the specialist follows them rather than
     re-deciding. See the FOLLOW-THE-PLAN rule in the specialist
     workflow block.
+
+    When ``hints.template_id`` is set, the matching built-in template's
+    rippleSpec skeleton + customization rules are spliced in via
+    ``_load_template_block`` — the highest-authority structural plan.
+    An unknown slug is ignored (the specialist cold-generates).
     """
     base = POCKET_SPECIALIST_PROMPT.replace(POCKET_ID_TOKEN, "")
     if not hints:
@@ -389,9 +534,13 @@ def _build_system_prompt(hints: PocketSpecialistHints | None) -> str:
             "not creative reimagining."
         )
 
-    if not lines:
+    template_block: str | None = None
+    if hints.template_id:
+        template_block = _load_template_block(hints.template_id, backend_summary)
+
+    if not lines and template_block is None:
         return base
-    return base + "\n".join(lines)
+    return base + "\n".join(lines) + (template_block or "")
 
 
 def _build_user_message(input: PocketSpecialistCreateInput) -> str:

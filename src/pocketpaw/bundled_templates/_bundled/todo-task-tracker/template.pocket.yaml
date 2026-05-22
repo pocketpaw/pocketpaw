@@ -1,0 +1,22 @@
+# src/pocketpaw/bundled_templates/_bundled/todo-task-tracker/template.pocket.yaml
+# Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
+# Pocket Template Schema metadata for the built-in todo / task tracker.
+name: todo-task-tracker
+version: 1.0.0
+vertical: productivity
+shape: data-grid
+description: |
+  A personal task tracker. A sortable, filterable list of tasks with a
+  status, a priority, and a due date. Type a task into the composer
+  row, add it, mark it done, filter by status. The whole list lives in
+  pocket state so every change is reactive — no chat round-trip needed.
+state:
+  entity_type: Task
+  columns:
+    - { field: title, widget: text }
+    - { field: status, widget: badge }
+    - { field: priority, widget: badge }
+    - { field: due_date, widget: date }
+actions: []
+connectors: []
+skills: []

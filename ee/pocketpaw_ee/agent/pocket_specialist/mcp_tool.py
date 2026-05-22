@@ -22,6 +22,12 @@ declarative / Tier 1 deterministic op); only on an *escalate* verdict
 does the handler fall through to ``run_edit_specialist`` (the existing
 flow, unchanged). ``create`` is out of scope — a new pocket has nothing
 to classify against, so it always goes straight to ``run_specialist``.
+Changes: 2026-05-22 (feat/bundled-templates, Increment 2a) — the
+``create`` tool's ``hints`` object accepts ``template_id`` (a built-in
+pocket-template slug) and the tool gains a top-level optional
+``backend_summary`` (a non-secret ``{base_url, auth_type, configured}``
+summary — unused in 2a, declared now so 2b's API-skill loading does not
+re-touch the schema).
 """
 
 from __future__ import annotations
@@ -81,10 +87,12 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
     raw_hints = args.get("hints")
     hints = PocketSpecialistHints(**raw_hints) if raw_hints else None
     raw_spec = args.get("spec")
+    raw_backend_summary = args.get("backend_summary")
     payload = PocketSpecialistCreateInput(
         brief=args.get("brief", ""),
         hints=hints,
         spec=raw_spec if isinstance(raw_spec, dict) else None,
+        backend_summary=(raw_backend_summary if isinstance(raw_backend_summary, dict) else None),
     )
 
     try:
@@ -296,8 +304,34 @@ def build_pocket_specialist_server() -> Any:
                                 "done', 'filter by status']."
                             ),
                         },
+                        "template_id": {
+                            "type": "string",
+                            "description": (
+                                "Slug of a built-in pocket template to "
+                                "instantiate and customize (e.g. "
+                                "'todo-task-tracker', 'kanban-board', "
+                                "'metrics-dashboard', 'crm-record-list', "
+                                "'calendar-planner', 'activity-feed'). Set "
+                                "this when the brief matched a built-in "
+                                "template in ~/.pocketpaw/templates/index.json. "
+                                "It is the HIGHEST-AUTHORITY structural plan — "
+                                "the specialist starts from the template's "
+                                "hand-authored skeleton instead of "
+                                "cold-generating. An unknown slug is ignored."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
+                },
+                "backend_summary": {
+                    "type": "object",
+                    "description": (
+                        "Optional non-secret backend summary "
+                        "{base_url, auth_type, configured} — NEVER include "
+                        "auth_token. Unused in 2a; declared for 2b's "
+                        "per-backend API-skill loading."
+                    ),
+                    "additionalProperties": True,
                 },
                 "spec": {
                     "type": "object",
