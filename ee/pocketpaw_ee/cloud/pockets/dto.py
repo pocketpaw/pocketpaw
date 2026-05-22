@@ -23,6 +23,11 @@ into an Instinct Action instead of fired). Added ApprovalRouteDTO and
 SetApprovalRouteRequest plus an optional ``approval_route`` field on
 PocketBackendConfigResponse — the per-pocket approver routing for gated
 writes.
+Updated: 2026-05-22 (security-review fix for PR #1183, SHOULD-FIX 2) —
+RunActionResponse is now ``extra="forbid"`` so an executor-internal key
+(``_park``, ``outcome``) that the router fails to strip raises on
+construction instead of leaking the resolved write path/params onto the
+wire.
 """
 
 from __future__ import annotations
@@ -254,7 +259,16 @@ class RunActionResponse(BaseModel):
     "waiting for approval" state and does NOT run the reconcile handlers.
 
     All optional fields keep one model usable for every outcome.
+
+    ``extra="forbid"`` (security-review fix for PR #1183, SHOULD-FIX 2):
+    the executor result dict carries internal-only keys (``_park`` —
+    the resolved write path/params — and ``outcome``) that the router
+    strips before constructing this response. ``forbid`` makes that
+    strip mandatory: if the strip ever misses a key, model construction
+    raises instead of leaking the resolved write onto the wire.
     """
+
+    model_config = {"extra": "forbid"}
 
     ok: bool
     action: str

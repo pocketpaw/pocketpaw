@@ -41,6 +41,12 @@ instead of firing. A fired, non-gated write emits a ``pocket.outcome``
 event (M2b.2) when its binding declares an ``outcome``. Added the
 owner-only ``PUT /pockets/{id}/backend/approval-route`` for the
 per-pocket gated-write approver routing.
+
+Updated: 2026-05-22 (security-review fix for PR #1183, SHOULD-FIX 2) —
+``run_pocket_action`` now asserts the executor-internal ``_park`` blob is
+absent from the wire dict before constructing ``RunActionResponse`` (the
+DTO is also ``extra="forbid"``), so a resolved write path/params can
+never leak onto the response if the strip drifts.
 """
 
 from __future__ import annotations
@@ -558,8 +564,14 @@ async def run_pocket_action(
         )
 
     # Strip executor-internal keys (`_park`, `outcome`) the wire model
-    # does not carry before building the response.
+    # does not carry before building the response. SHOULD-FIX 2
+    # (PR #1183) — the strip is defensive: `_park` carries the resolved
+    # write path/params and must NEVER reach the wire. The explicit
+    # assertion below catches a strip that drifts out of sync with the
+    # executor's result keys; `RunActionResponse` is also `extra="forbid"`
+    # so a missed key fails construction rather than leaking.
     wire = {k: v for k, v in result.items() if k not in ("_park", "outcome")}
+    assert "_park" not in wire, "executor `_park` blob must be stripped before the wire response"
     return RunActionResponse(**wire)
 
 

@@ -13,6 +13,12 @@
 #   The ledger lives at `<dir>/<workspace_id>.jsonl`. `<dir>` defaults to
 #   `~/.pocketpaw/outcomes/` and is overridable via `set_ledger_dir` so
 #   tests write to a tmp path instead of the real home directory.
+#
+# Updated: 2026-05-22 (security-review fix for PR #1183, SHOULD-FIX 3) —
+#   `count_outcomes` now skips any ledger row whose `workspace_id` does
+#   not match the caller's workspace. The ledger file is already keyed by
+#   workspace, so this is defense-in-depth: a corrupt or hand-edited line
+#   carrying a foreign tenant id is no longer counted into the totals.
 from __future__ import annotations
 
 import json
@@ -172,6 +178,13 @@ async def count_outcomes(
                     # than failing the whole count.
                     continue
                 if not isinstance(row, dict):
+                    continue
+                # SHOULD-FIX 3 (PR #1183) — defense-in-depth tenant
+                # filter. The ledger file is already keyed by workspace
+                # (`<dir>/<workspace_id>.jsonl`), but a corrupt or
+                # hand-edited line carrying a foreign `workspace_id`
+                # must NOT be counted into this workspace's totals.
+                if str(row.get("workspace_id") or "") != workspace_id:
                     continue
                 if body.pocket_id is not None and row.get("pocket_id") != body.pocket_id:
                     continue

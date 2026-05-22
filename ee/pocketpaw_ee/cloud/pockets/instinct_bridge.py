@@ -30,6 +30,17 @@
 #   * The approver defaults to the pocket OWNER. An optional
 #     `approval_route` on the backend config can name a different
 #     workspace member (membership validated when the route is set).
+#
+# Updated: 2026-05-22 (security-review fix for PR #1183 — BLOCKER 1
+#   defense-in-depth) — `execute_approved_write` now refuses a parked
+#   blob whose `workspace_id` is empty: a write with no tenant to scope
+#   it to is unexecutable. The credential re-load
+#   (`get_pocket_backend_for_executor`) is itself the tenancy gate — it
+#   finds a credential row only when `(workspace_id, pocket_id)` BOTH
+#   match, so a tampered blob carrying a foreign `workspace_id` resolves
+#   no credentials and is marked failed instead of firing a cross-tenant
+#   write. The instinct router's per-`_pocket_write` workspace assertion
+#   is the primary gate; this is belt-and-braces.
 
 from __future__ import annotations
 
@@ -219,6 +230,18 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
     action_name = str(blob.get("action") or "")
     requested_by = str(blob.get("requested_by") or "")
     approver = str(getattr(action, "approved_by", "") or "") or "system"
+
+    # BLOCKER 1 defense-in-depth (PR #1183) — a parked write with no
+    # workspace is unexecutable. The credential re-load below is the
+    # tenancy gate (it matches `(workspace_id, pocket_id)` together), so
+    # an empty workspace_id would never resolve creds anyway — but fail
+    # loud here so a malformed blob is recorded, not silently dropped.
+    if not workspace_id:
+        await store.mark_failed(
+            action.id,
+            "parked-write blob carries no workspace_id — cannot scope the write",
+        )
+        return
 
     # The action's raw binding shape, rebuilt from the parked blob. The
     # executor reads `method` off this dict and re-validates everything.

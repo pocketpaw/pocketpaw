@@ -25,6 +25,12 @@
 #   — it makes NO HTTP call. The executor stays pure (no Beanie/Instinct
 #   imports); `instinct_bridge.py` does the proposing. A successful write
 #   result now carries the binding's `outcome` string for M2b.2 emission.
+# Updated: 2026-05-22 (security-review fix for PR #1183, SHOULD-FIX 4) —
+#   `_action_rate_limited` now bounds `_action_log`: a key whose
+#   timestamp list is empty after window pruning is evicted, and stale
+#   keys are swept opportunistically under the existing lock. Previously
+#   the map grew one permanent entry per `(pocket, user)` pair that ever
+#   ran a write — an unbounded memory leak in a long-running worker.
 #
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
@@ -209,11 +215,29 @@ async def _action_rate_limited(pocket_id: str, user_id: str) -> bool:
     cannot race past the limit (TOCTOU under ``asyncio.gather``). Mirrors
     ``source_executor._rate_limited`` but against the separate write
     counter.
+
+    SHOULD-FIX 4 (PR #1183) — the map is bounded: a key whose timestamp
+    list is empty after pruning is evicted, and stale keys are swept
+    opportunistically. Without this every ``(pocket, user)`` pair that
+    ever ran a write would leave a permanent entry — an unbounded
+    process-lifetime memory leak in a long-running cloud worker.
     """
     key = (pocket_id, user_id)
     now = time.monotonic()
     window_start = now - _ACTION_RATE_LIMIT_WINDOW_S
     async with _action_log_lock:
+        # Opportunistic sweep — drop any OTHER key whose stamps have all
+        # aged out of the window. Bounds the dict to keys with live
+        # traffic. Cheap: the map only ever holds active (pocket, user)
+        # pairs, and the sweep runs under the same lock the check needs.
+        stale = [
+            k
+            for k, ts in _action_log.items()
+            if k != key and not any(t >= window_start for t in ts)
+        ]
+        for k in stale:
+            del _action_log[k]
+
         stamps = [t for t in _action_log.get(key, []) if t >= window_start]
         if len(stamps) >= _ACTION_RATE_LIMIT_MAX:
             _action_log[key] = stamps
