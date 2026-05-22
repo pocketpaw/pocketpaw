@@ -486,15 +486,6 @@ async def startup_event(
 
     asyncio.create_task(_rate_limit_cleanup_loop())
 
-    # Start meeting reminder + auto-start loop (every 60s)
-    try:
-        from pocketpaw_ee.cloud.meetings.service import start_reminder_loop
-
-        start_reminder_loop()
-        logger.info("Meeting reminder + auto-start loop started")
-    except Exception as exc:
-        logger.warning("Failed to start meeting reminder loop (EE feature): %s", exc)
-
     async def _trace_retention_cleanup_loop():
         while True:
             await asyncio.sleep(21600)

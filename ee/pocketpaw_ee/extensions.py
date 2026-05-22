@@ -108,6 +108,15 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cloud chat-title listener registration failed: %s", exc)
 
+        # Start meeting reminder + auto-start background loop.
+        try:
+            from pocketpaw_ee.cloud.meetings.service import start_reminder_loop
+
+            start_reminder_loop()
+            logger.info("Meeting reminder + auto-start loop started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to start meeting reminder loop: %s", exc)
+
     async def on_shutdown(self) -> None:
         # Cloud teardown is handled inside mount_cloud's own shutdown hook.
         return None
