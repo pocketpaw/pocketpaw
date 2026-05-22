@@ -25,6 +25,10 @@
 # Updated: 2026-05-22 (feat/api-skills, Increment 2b) — added
 # ``skills.manage`` (ADMIN) so the new ee.cloud.skills router can guard
 # POST /skills/api-doc, the per-backend API-skill install endpoint.
+#
+# Updated: 2026-05-22 (RFC 05 M2b.2) — added ``outcomes.read`` (MEMBER) so
+# the pocket-outcomes count router (ee.cloud.outcomes) can guard
+# ``GET /api/v1/outcomes``.
 
 from __future__ import annotations
 
@@ -191,6 +195,12 @@ ACTIONS: dict[str, ActionRule] = {
     # and the install accepts an uploaded document, so it should not be
     # open to every member.
     "skills.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Outcomes — workspace-scoped pocket-outcome count surface
+    # (ee.cloud.outcomes, RFC 05 M2b.2). MEMBER: an outcome count is a
+    # non-sensitive activity metric (how many "renewal_completed" events a
+    # pocket produced), with no credentials or decision payloads — any
+    # workspace member may view it, mirroring instinct.read.
+    "outcomes.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
 }
 
 

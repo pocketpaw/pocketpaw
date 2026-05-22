@@ -161,7 +161,9 @@ async def test_tier0_invokes_source_executor_and_handles():
     with (
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
-            new=AsyncMock(return_value=("https://api.example.com", "bearer", None, "tok", [])),
+            new=AsyncMock(
+                return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+            ),
         ),
         patch("pocketpaw_ee.cloud.pockets.source_executor.run_sources", new=fake_run),
     ):
@@ -197,7 +199,9 @@ async def test_tier0_emits_execution_frame_with_zero_tokens_and_skipped_stages()
         with (
             patch(
                 "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
-                new=AsyncMock(return_value=("https://api.example.com", "bearer", None, "tok", [])),
+                new=AsyncMock(
+                    return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+                ),
             ),
             patch(
                 "pocketpaw_ee.cloud.pockets.source_executor.run_sources",
@@ -238,7 +242,9 @@ async def test_tier0_source_errors_escalate():
     with (
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
-            new=AsyncMock(return_value=("https://api.example.com", "bearer", None, "tok", [])),
+            new=AsyncMock(
+                return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+            ),
         ),
         patch(
             "pocketpaw_ee.cloud.pockets.source_executor.run_sources",
@@ -290,7 +296,9 @@ async def test_router_resolves_spec_via_agent_view_when_pocket_absent():
         ),
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
-            new=AsyncMock(return_value=("https://api.example.com", "bearer", None, "tok", [])),
+            new=AsyncMock(
+                return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+            ),
         ),
         patch("pocketpaw_ee.cloud.pockets.source_executor.run_sources", new=fake_run),
     ):

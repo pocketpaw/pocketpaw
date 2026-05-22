@@ -208,7 +208,11 @@ async def _run_tier0(
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, input.pocket_id)
     if creds is None:
         return False, "pocket has no backend configured — cannot run a declarative tier"
-    base_url, auth_type, auth_header, token, allowed_writes = creds
+    # RFC 05 M2b.1 — the executor-creds tuple is a 6-tuple; the trailing
+    # `approval_route` is unused on the Tier-0 path (the classifier
+    # escalates a `requires_instinct` action to the specialist tier, so a
+    # gated write never reaches this declarative run).
+    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
 
     if classification.op == "run_source":
         # A source run mirrors ``POST /pockets/{id}/sources/run`` — read

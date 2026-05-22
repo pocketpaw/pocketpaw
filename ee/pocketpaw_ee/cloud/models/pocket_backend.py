@@ -16,6 +16,11 @@
 #   human-configured store as the auth credential — so a compromised or
 #   hallucinated spec cannot widen its own blast radius. The default is an
 #   EMPTY list: fail-closed, no write can fire until a human allow-lists it.
+# Updated: 2026-05-22 (RFC 05 M2b.1) — added the per-pocket APPROVAL ROUTE.
+#   `ApprovalRoute` decides who approves a `requires_instinct` write:
+#   `mode="owner"` (the default when `approval_route` is None) routes to
+#   the pocket owner; `mode="user"` routes to a named workspace member.
+#   It lives HERE alongside the credential — owner-set, outside the spec.
 
 from __future__ import annotations
 
@@ -39,6 +44,19 @@ class AllowedWrite(BaseModel):
 
     method: Literal["POST", "PUT", "PATCH", "DELETE"]
     path_pattern: str
+
+
+class ApprovalRoute(BaseModel):
+    """Who approves a pocket's `requires_instinct` writes (RFC 05 M2b.1).
+
+    `mode="owner"` routes a gated write to the pocket owner — the same as
+    leaving `approval_route` unset. `mode="user"` routes to the named
+    `user_id`; the service validates that id is a current workspace
+    member when the route is set, so a stale `user_id` here is trusted.
+    """
+
+    mode: Literal["owner", "user"] = "owner"
+    user_id: str | None = None
 
 
 class PocketBackendCredential(TimestampedDocument):
@@ -65,6 +83,10 @@ class PocketBackendCredential(TimestampedDocument):
     # with no policy can fire no write actions. A human widens it via
     # `PUT /pockets/{id}/backend/write-policy`.
     allowed_writes: list[AllowedWrite] = Field(default_factory=list)
+    # RFC 05 M2b.1 approval route. None means the default — `requires_instinct`
+    # writes route to the pocket owner. An owner sets a named approver via
+    # `PUT /pockets/{id}/backend/approval-route`.
+    approval_route: ApprovalRoute | None = None
 
     class Settings:
         name = "pocket_backend_credentials"

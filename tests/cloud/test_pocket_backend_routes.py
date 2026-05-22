@@ -103,6 +103,9 @@ def test_put_backend_configures(monkeypatch, client):
         # RFC 05 M2a: the response now carries the write allowlist —
         # empty by default (fail-closed).
         "allowed_writes": [],
+        # RFC 05 M2b.1: the response carries the gated-write approval
+        # route — None by default (the pocket owner approves).
+        "approval_route": None,
     }
     # The route forwarded the right identity + body to the service.
     assert captured["workspace_id"] == FAKE_WORKSPACE
@@ -226,8 +229,9 @@ def test_run_sources_happy_path(monkeypatch, client):
         return {"_id": pocket_id, "rippleSpec": spec}
 
     async def _get_creds(workspace_id, pocket_id):
-        # RFC 05 M2a: 5-tuple — the trailing element is the write allowlist.
-        return ("https://api.example.com", "bearer", None, "tok", [])
+        # RFC 05 M2b.1: 6-tuple — trailing elements are the write
+        # allowlist and the approval route (None = owner approves).
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
 
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
     monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
@@ -354,12 +358,14 @@ def test_run_action_happy_path(monkeypatch, client):
         return {"_id": pocket_id, "rippleSpec": spec}
 
     async def _get_creds(workspace_id, pocket_id):
+        # RFC 05 M2b.1: 6-tuple — write allowlist + approval route.
         return (
             "https://api.example.com",
             "bearer",
             None,
             "tok",
             [{"method": "POST", "path_pattern": "/leases/*/renew"}],
+            None,
         )
 
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
@@ -459,3 +465,192 @@ def test_run_action_forbidden_for_non_invited(monkeypatch):
 
     res = TestClient(a).post("/pockets/pocket-1/actions/run", json={"action": "a", "path": "/x"})
     assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# RFC 05 M2b.1 — instinct-pending routing on POST /actions/run
+# ---------------------------------------------------------------------------
+
+
+def _instinct_spec() -> dict:
+    return {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+                "requires_instinct": True,
+                "outcome": "renewal_completed",
+            }
+        }
+    }
+
+
+def test_run_action_instinct_pending_routes_to_bridge(monkeypatch, client):
+    """A `requires_instinct` write: the executor returns the
+    `instinct_pending` sentinel, the route calls
+    `instinct_bridge.propose_pocket_write`, and the response carries
+    `code:"instinct_pending"` + `proposed_action_id`."""
+
+    async def _get_pocket(pocket_id, user_id):
+        return {
+            "_id": pocket_id,
+            "workspace": FAKE_WORKSPACE,
+            "owner": FAKE_USER,
+            "rippleSpec": _instinct_spec(),
+        }
+
+    async def _get_creds(workspace_id, pocket_id):
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor, instinct_bridge
+
+    park_blob = {
+        "action": "mark_renewed",
+        "method": "POST",
+        "path": "/leases/42/renew",
+        "params": {},
+        "idempotency_key": None,
+        "outcome": "renewal_completed",
+    }
+
+    async def _run_action(**kwargs):
+        # The executor parked the write — no HTTP call.
+        return {
+            "ok": True,
+            "code": "instinct_pending",
+            "action": kwargs["action"],
+            "_park": park_blob,
+            "on_success": [],
+            "on_error": [],
+        }
+
+    proposed = {}
+
+    async def _propose(**kwargs):
+        proposed.update(kwargs)
+        return "act_pending_123"
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+    monkeypatch.setattr(instinct_bridge, "propose_pocket_write", _propose)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["code"] == "instinct_pending"
+    assert body["proposed_action_id"] == "act_pending_123"
+    # The route handed the parked write to the bridge.
+    assert proposed["parked_write"] == park_blob
+    assert proposed["requested_by"] == FAKE_USER
+
+
+def test_run_action_direct_write_emits_outcome(monkeypatch, client):
+    """A fired (non-gated) write whose binding declares an `outcome`
+    emits a `pocket.outcome` event via the outcomes service."""
+    spec = {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+                "outcome": "renewal_completed",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "workspace": FAKE_WORKSPACE, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.outcomes import service as outcomes_service
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    async def _run_action(**kwargs):
+        return {
+            "ok": True,
+            "action": kwargs["action"],
+            "status": 200,
+            "response": {},
+            "outcome": "renewal_completed",
+            "on_success": [],
+            "on_error": [],
+        }
+
+    emitted = {}
+
+    async def _emit_outcome(**kwargs):
+        emitted.update(kwargs)
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+    monkeypatch.setattr(outcomes_service, "emit_pocket_outcome", _emit_outcome)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["ok"] is True
+    # The route emitted the outcome with via_instinct=False.
+    assert emitted["outcome"] == "renewal_completed"
+    assert emitted["via_instinct"] is False
+    assert emitted["actor"] == FAKE_USER
+
+
+# ---------------------------------------------------------------------------
+# PUT /pockets/{id}/backend/approval-route — RFC 05 M2b.1
+# ---------------------------------------------------------------------------
+
+
+def test_put_approval_route_sets_named_approver(monkeypatch, client):
+    captured = {}
+
+    async def _set_route(workspace_id, user_id, pocket_id, route):
+        captured.update(route=route, pocket_id=pocket_id)
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "bearer",
+            "configured": True,
+            "allowed_writes": [],
+            "approval_route": route,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_approval_route", _set_route)
+    res = client.put(
+        "/pockets/pocket-1/backend/approval-route",
+        json={"route": {"mode": "user", "user_id": "approver-7"}},
+    )
+    assert res.status_code == 200, res.text
+    assert captured["route"] == {"mode": "user", "user_id": "approver-7"}
+    assert res.json()["approval_route"] == {"mode": "user", "user_id": "approver-7"}
+
+
+def test_put_approval_route_empty_body_clears_route(monkeypatch, client):
+    """An omitted body clears the route — service receives route=None."""
+    captured = {}
+
+    async def _set_route(workspace_id, user_id, pocket_id, route):
+        captured["route"] = route
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_writes": [],
+            "approval_route": None,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_approval_route", _set_route)
+    res = client.put("/pockets/pocket-1/backend/approval-route", json={})
+    assert res.status_code == 200, res.text
+    assert captured["route"] is None

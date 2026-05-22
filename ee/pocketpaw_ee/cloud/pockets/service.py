@@ -76,6 +76,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 from pocketpaw_ee.cloud.models.pocket import Widget as _WidgetDoc
 from pocketpaw_ee.cloud.models.pocket_backend import AllowedWrite as _AllowedWriteDoc
+from pocketpaw_ee.cloud.models.pocket_backend import ApprovalRoute as _ApprovalRouteDoc
 from pocketpaw_ee.cloud.models.pocket_backend import (
     PocketBackendCredential as _BackendCredentialDoc,
 )
@@ -996,12 +997,14 @@ async def _agent_backend_summary(doc: _PocketDoc) -> dict[str, Any]:
     # get_pocket_backend already excludes the token — assert the shape
     # and never pass anything else through. ``allowed_writes`` is carried
     # so the edit specialist can see which write methods+paths the owner
-    # has authorized before it authors a write action.
+    # has authorized before it authors a write action; ``approval_route``
+    # so it knows who approves a `requires_instinct` write.
     return {
         "base_url": summary.get("base_url"),
         "auth_type": summary.get("auth_type"),
         "configured": True,
         "allowed_writes": summary.get("allowed_writes") or [],
+        "approval_route": summary.get("approval_route"),
     }
 
 
@@ -2353,12 +2356,27 @@ def _allowed_writes_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
     return out
 
 
+def _approval_route_wire(doc: _BackendCredentialDoc) -> dict[str, str | None] | None:
+    """Render a backend doc's ``approval_route`` as a plain wire dict.
+
+    Returns ``{"mode": ..., "user_id": ...}`` or ``None`` when no route is
+    set (the default — gated writes go to the pocket owner). A row written
+    before RFC 05 M2b.1 has no attribute — ``getattr`` defaults it to
+    ``None``.
+    """
+    route = getattr(doc, "approval_route", None)
+    if route is None:
+        return None
+    return {"mode": route.mode, "user_id": route.user_id}
+
+
 async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
     """Return the pocket's backend binding summary, or ``None`` if unset.
 
     NEVER returns the token — only ``base_url`` / ``auth_type`` /
-    ``configured`` / ``allowed_writes`` (the write allowlist; an
-    owner/editor-facing non-secret).
+    ``configured`` / ``allowed_writes`` (the write allowlist) /
+    ``approval_route`` (the gated-write approver routing; ``None`` when
+    unset). All owner/editor-facing non-secrets.
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -2371,20 +2389,22 @@ async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
         "auth_type": doc.auth_type,
         "configured": True,
         "allowed_writes": _allowed_writes_wire(doc),
+        "approval_route": _approval_route_wire(doc),
     }
 
 
 async def get_pocket_backend_for_executor(
     workspace_id: str, pocket_id: str
-) -> tuple[str, str, str | None, str, list[dict[str, str]]] | None:
+) -> tuple[str, str, str | None, str, list[dict[str, str]], dict[str, str | None] | None] | None:
     """Internal — return ``(base_url, auth_type, auth_header, token,
-    allowed_writes)``.
+    allowed_writes, approval_route)``.
 
     Decrypts the stored token. Used by the run-sources route handler (it
-    ignores ``allowed_writes``) and the run-action route handler (it needs
-    it). Returns ``None`` when the pocket has no backend configured. The
+    ignores the trailing elements), the run-action route handler (it needs
+    ``allowed_writes`` and ``approval_route``), and ``instinct_bridge``.
+    Returns ``None`` when the pocket has no backend configured. The
     plaintext token returned here must never be logged or returned to a
-    client.
+    client. ``approval_route`` is ``None`` when no route is set.
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -2396,7 +2416,14 @@ async def get_pocket_backend_for_executor(
     token = ""
     if doc.auth_type != "none" and doc.encrypted_token and doc.nonce and doc.salt:
         token = backend_crypto.decrypt_token(doc.encrypted_token, doc.nonce, doc.salt)
-    return doc.base_url, doc.auth_type, doc.auth_header, token, _allowed_writes_wire(doc)
+    return (
+        doc.base_url,
+        doc.auth_type,
+        doc.auth_header,
+        token,
+        _allowed_writes_wire(doc),
+        _approval_route_wire(doc),
+    )
 
 
 async def set_pocket_write_policy(
@@ -2450,6 +2477,79 @@ async def set_pocket_write_policy(
         "auth_type": doc.auth_type,
         "configured": True,
         "allowed_writes": _allowed_writes_wire(doc),
+        "approval_route": _approval_route_wire(doc),
+    }
+
+
+async def set_pocket_approval_route(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    route: dict[str, str | None] | None,
+) -> dict:
+    """Set (or clear) the pocket's gated-write approval route. Owner-only.
+
+    ``route`` is ``{"mode": "owner"|"user", "user_id": ...}`` or ``None``.
+    ``None`` (or ``mode="owner"``) clears the route — ``requires_instinct``
+    writes then route to the pocket owner. ``mode="user"`` routes to the
+    named member; the ``user_id`` is validated as a CURRENT workspace
+    member here, at set-time, so the bridge can trust a stored route
+    without re-checking on every parked write.
+
+    Lives on the backend-credential row alongside the write allowlist —
+    owner-set, outside the spec. Rejects with ``pocket_backend.not_configured``
+    when the pocket has no backend (a route with no backend to gate is
+    meaningless), and ``pocket_backend.invalid_approver`` when a
+    ``mode="user"`` route names a non-member. Audit-logged.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before an approval route",
+        )
+
+    new_route: _ApprovalRouteDoc | None = None
+    if route is not None:
+        parsed = _ApprovalRouteDoc.model_validate(route)
+        if parsed.mode == "user":
+            if not parsed.user_id:
+                raise ValidationError(
+                    "pocket_backend.invalid_approver",
+                    "approval route mode 'user' requires a user_id",
+                )
+            from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+            members = await workspace_service.list_member_ids(workspace_id)
+            if parsed.user_id not in members:
+                raise ValidationError(
+                    "pocket_backend.invalid_approver",
+                    "the routed approver is not a member of this workspace",
+                )
+            new_route = parsed
+        # mode == "owner" → store None (the explicit default).
+
+    doc.approval_route = new_route
+    await doc.save()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.approval_route",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: see set_pocket_write_policy — credential rows aren't pocket state.
+    return {
+        "base_url": doc.base_url,
+        "auth_type": doc.auth_type,
+        "configured": True,
+        "allowed_writes": _allowed_writes_wire(doc),
+        "approval_route": _approval_route_wire(doc),
     }
 
 
@@ -2524,6 +2624,7 @@ __all__ = [
     "remove_widget",
     "reorder_widgets",
     "revoke_share_link",
+    "set_pocket_approval_route",
     "set_pocket_backend",
     "set_pocket_write_policy",
     "unassign_project_on_pockets",

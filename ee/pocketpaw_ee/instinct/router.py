@@ -28,6 +28,13 @@
 #   POST /instinct/actions/bulk-reject. Bulk endpoints write N audit rows with
 #   a shared ``bulk_id`` UUID so the bulk transaction is replay-able per item
 #   and query-able as a unit.
+# Updated: 2026-05-22 (RFC 05 M2b.1) — ``approve_action`` now fires a parked
+#   pocket write. When the approved Action's ``parameters`` carries a
+#   ``_pocket_write`` blob, the route lazy-imports
+#   ``ee.cloud.pockets.instinct_bridge`` and calls ``execute_approved_write``
+#   — best-effort, failures recorded on the Action, never breaking the
+#   approve response. A lazy import avoids an instinct→pockets module-top
+#   dependency.
 
 from __future__ import annotations
 
@@ -359,6 +366,21 @@ async def approve_action(action_id: str, req: ApproveRequest | None = None):
     approved = await store.approve(action_id, approver=req.approver)
     if not approved:
         raise HTTPException(404, "Action not found")
+
+    # RFC 05 M2b.1 — when the approved Action carries a parked pocket
+    # write (``parameters._pocket_write``), fire it. Best-effort: a
+    # lazy import keeps the instinct package free of a module-top
+    # dependency on ee.cloud.pockets, and any failure is recorded on the
+    # Action by the bridge itself — it must NEVER break this approve
+    # response. A non-pocket-write Action (the common case) skips this.
+    if isinstance(approved.parameters, dict) and "_pocket_write" in approved.parameters:
+        try:
+            from pocketpaw_ee.cloud.pockets import instinct_bridge
+
+            await instinct_bridge.execute_approved_write(approved)
+        except Exception:
+            logger.exception("pocket-write execution after approval failed (non-fatal)")
+
     return ApproveResponse(action=approved, correction=correction)
 
 

@@ -4,6 +4,11 @@ Updated: 2026-05-22 (feat/api-skills, Increment 2b) — mounts the Skills
     entity at ``/api/v1/skills`` (POST /skills/api-doc), the per-backend
     API-skill install endpoint that turns a pocket backend's OpenAPI
     document into a loadable SKILL.md for the authoring agent.
+Updated: 2026-05-22 (RFC 05 M2b.2) — Mounts the pocket-outcomes entity at
+    ``/api/v1/outcomes`` (the count surface over the per-workspace
+    outcome ledger) and registers its ``pocket.outcome`` bus subscriber
+    (``outcomes_service.record_outcome``) after ``init_realtime`` so a
+    successful gated/direct write appends to the ledger.
 Updated: 2026-05-17 — Mounts the workspace-scoped Audit entity at
     ``/api/v1/audit`` (B1) with tenancy from ``RequestContext.workspace_id``,
     the legacy ``/api/v1/runtime/audit`` remaining live; also mounts
@@ -192,6 +197,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
+    from pocketpaw_ee.cloud.outcomes.router import router as outcomes_router
     from pocketpaw_ee.cloud.tasks.router import router as tasks_router
     from pocketpaw_ee.cloud.uploads.router import router as uploads_router
     from pocketpaw_ee.fabric.router import router as fabric_router
@@ -207,6 +213,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(files_router, prefix="/api/v1")
     app.include_router(mission_control_router, prefix="/api/v1")
     app.include_router(livekit_router, prefix="/api/v1")
+    # Pocket outcomes — GET /api/v1/outcomes count surface (RFC 05 M2b.2).
+    app.include_router(outcomes_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
@@ -443,6 +451,16 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.uploads.listeners import register_upload_listeners
 
     register_upload_listeners()
+
+    # Pocket outcomes ledger subscriber (RFC 05 M2b.2). Appends every
+    # ``pocket.outcome`` event to its workspace-scoped JSONL ledger so
+    # ``GET /api/v1/outcomes`` can count business outcomes. Same
+    # constraint as the upload listeners — subscribe AFTER init_realtime
+    # installed the singleton bus.
+    from pocketpaw_ee.cloud._core.realtime.bus import get_bus as _get_bus
+    from pocketpaw_ee.cloud.outcomes import service as _outcomes_service
+
+    _get_bus().subscribe("pocket.outcome", _outcomes_service.record_outcome)
 
     # Tasks → notifications fan-out. When a Task is proposed to a human
     # assignee, drop an in-app notification so they see it even without

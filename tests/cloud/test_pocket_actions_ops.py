@@ -260,9 +260,9 @@ async def test_agent_set_action_requires_a_key(fake_doc):
 
 
 async def test_agent_set_action_carries_governance_fields_through(fake_doc):
-    """M2b governance fields (``requires_instinct`` / ``outcome``) are
-    CARRIED THROUGH on the persisted binding even though ``ActionBinding``
-    ignores them on parse — an M2b-aware client can author them now."""
+    """M2b governance fields (``requires_instinct`` / ``outcome``) survive
+    on the persisted binding. RFC 05 M2b.1 promoted them to real declared
+    ``ActionBinding`` fields, so they round-trip through validation."""
     ctx, _ = _patches(fake_doc)
     binding = {
         **_VALID_BINDING,

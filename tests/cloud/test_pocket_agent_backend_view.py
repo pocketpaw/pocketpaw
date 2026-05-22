@@ -104,9 +104,11 @@ async def test_agent_view_includes_configured_backend_summary(mongo_db, agent_id
         "base_url": "https://jsonplaceholder.typicode.com",
         "auth_type": "none",
         "configured": True,
-        # RFC 05 M2a: the summary now carries the write allowlist —
-        # empty by default (fail-closed).
+        # RFC 05 M2a: the summary carries the write allowlist (empty by
+        # default — fail-closed). RFC 05 M2b.1: and the approval route
+        # (None by default — the owner approves).
         "allowed_writes": [],
+        "approval_route": None,
     }
 
 
@@ -134,8 +136,15 @@ async def test_agent_view_backend_summary_never_leaks_the_token(mongo_db, agent_
     assert backend["configured"] is True
     assert backend["auth_type"] == "bearer"
     # The summary carries only non-secret keys (RFC 05 M2a adds
-    # `allowed_writes` — the write allowlist, also non-secret).
-    assert set(backend) == {"base_url", "auth_type", "configured", "allowed_writes"}
+    # `allowed_writes` — the write allowlist; M2b.1 adds `approval_route`
+    # — the gated-write approver routing — both non-secret).
+    assert set(backend) == {
+        "base_url",
+        "auth_type",
+        "configured",
+        "allowed_writes",
+        "approval_route",
+    }
     # The token must not appear anywhere in the serialized view.
     import json
 
@@ -192,8 +201,10 @@ async def test_fetch_pocket_for_agent_carries_backend_summary(mongo_db, agent_id
         "base_url": "https://jsonplaceholder.typicode.com",
         "auth_type": "none",
         "configured": True,
-        # RFC 05 M2a: the summary now carries the write allowlist.
+        # RFC 05 M2a: the summary carries the write allowlist; M2b.1
+        # adds the approval route (None — the owner approves).
         "allowed_writes": [],
+        "approval_route": None,
     }
 
 

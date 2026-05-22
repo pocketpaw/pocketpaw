@@ -26,6 +26,15 @@
 #   - N1: a DELETE with empty params sends NO request body; a DELETE with
 #     params still does.
 #   - The happy path returns the backend's parsed JSON + on_success.
+#
+# Updated: 2026-05-22 (RFC 05 M2b.1 — Instinct routing) — the M2a
+# fail-closed `instinct_required` reject is gone. `ActionBinding` now
+# DECLARES `requires_instinct` / `instinct_policy` / `outcome`, with a
+# validator that rejects an `instinct_policy` set without
+# `requires_instinct`. A `requires_instinct` write now PARKS — `run_action`
+# returns `code:"instinct_pending"` with the resolved write under `_park`
+# and makes NO call. `from_instinct=True` skips the gate. A successful
+# write result carries the binding's `outcome`.
 
 from __future__ import annotations
 
@@ -104,10 +113,9 @@ def test_action_binding_parses_minimal():
     assert binding.on_error == []
 
 
-def test_action_binding_ignores_m2b_governance_fields():
-    """`requires_instinct` / `instinct_policy` / `outcome` are M2b fields —
-    ActionBinding ignores them on parse (extra: ignore) so an M2b-authored
-    spec stays parseable by the M2a runtime."""
+def test_action_binding_declares_m2b_governance_fields():
+    """`requires_instinct` / `instinct_policy` / `outcome` are now REAL
+    declared fields on ActionBinding (RFC 05 M2b.1) — parsed, not dropped."""
     raw = {
         **_write_action(),
         "requires_instinct": True,
@@ -115,10 +123,27 @@ def test_action_binding_ignores_m2b_governance_fields():
         "outcome": "renewal_completed",
     }
     binding = ActionBinding.model_validate(raw)
-    # The governance fields are dropped, not declared on the model.
-    assert not hasattr(binding, "requires_instinct")
-    assert "requires_instinct" not in binding.model_dump()
-    assert "outcome" not in binding.model_dump()
+    assert binding.requires_instinct is True
+    assert binding.instinct_policy == "approve_per_row"
+    assert binding.outcome == "renewal_completed"
+    dumped = binding.model_dump()
+    assert dumped["requires_instinct"] is True
+    assert dumped["outcome"] == "renewal_completed"
+
+
+def test_action_binding_defaults_governance_fields_off():
+    """A plain binding has the gate off, no policy, no outcome."""
+    binding = ActionBinding.model_validate(_write_action())
+    assert binding.requires_instinct is False
+    assert binding.instinct_policy is None
+    assert binding.outcome is None
+
+
+def test_action_binding_policy_without_gate_is_invalid():
+    """An `instinct_policy` set without `requires_instinct` is a
+    misconfiguration — the model_validator rejects the binding."""
+    with pytest.raises(Exception):
+        ActionBinding.model_validate({**_write_action(), "instinct_policy": "approve_per_row"})
 
 
 def test_action_binding_rejects_non_write_verb():
@@ -127,13 +152,14 @@ def test_action_binding_rejects_non_write_verb():
 
 
 # ---------------------------------------------------------------------------
-# Instinct-reject (fail-closed)
+# Instinct park (M2b.1)
 # ---------------------------------------------------------------------------
 
 
-async def test_instinct_required_rejects_before_any_call(monkeypatch):
-    """A truthy raw `requires_instinct` is rejected with code
-    `instinct_required` and NO HTTP call is made."""
+async def test_instinct_required_parks_before_any_call(monkeypatch):
+    """A `requires_instinct` write is PARKED — `run_action` returns
+    `code:"instinct_pending"` with the resolved write under `_park` and
+    makes NO HTTP call."""
     called = {"hit": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -142,6 +168,75 @@ async def test_instinct_required_rejects_before_any_call(monkeypatch):
 
     _mock_client_patch(monkeypatch, handler)
 
+    raw = {**_write_action(), "requires_instinct": True, "outcome": "renewal_completed"}
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="mark_renewed",
+        raw_action=raw,
+        path="/leases/42/renew",
+        params={"rent": 2000},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow(),
+    )
+    assert result["ok"] is True
+    assert result["code"] == "instinct_pending"
+    assert called["hit"] is False
+    # The resolved write rides on `_park` for the bridge to propose.
+    park = result["_park"]
+    assert park["action"] == "mark_renewed"
+    assert park["method"] == "POST"
+    assert park["path"] == "/leases/42/renew"
+    assert park["params"] == {"rent": 2000}
+    assert park["outcome"] == "renewal_completed"
+
+
+async def test_instinct_required_allowlist_miss_rejected_not_parked(monkeypatch):
+    """A `requires_instinct` write the allowlist would reject is REJECTED
+    at park time — an off-policy write must never reach the approval
+    surface looking legitimate."""
+    called = {"hit": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["hit"] = True
+        return httpx.Response(200, json={})
+
+    _mock_client_patch(monkeypatch, handler)
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="del",
+        raw_action={**_write_action("POST", "/users/9/delete"), "requires_instinct": True},
+        path="/users/9/delete",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow("POST", "/leases/*/renew"),
+    )
+    # NOT parked — a plain `not_allowed` rejection.
+    assert result["ok"] is False
+    assert result["code"] == "not_allowed"
+    assert "_park" not in result
+    assert called["hit"] is False
+
+
+async def test_from_instinct_skips_the_park_gate(monkeypatch):
+    """`from_instinct=True` (a post-approval re-entry) skips the park gate
+    and fires the write — every OTHER gate still runs."""
+    called = {"hit": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["hit"] = True
+        return httpx.Response(200, json={"renewed": True})
+
+    _mock_client_patch(monkeypatch, handler)
     raw = {**_write_action(), "requires_instinct": True}
     result = await run_action(
         workspace_id="w1",
@@ -156,23 +251,25 @@ async def test_instinct_required_rejects_before_any_call(monkeypatch):
         auth_header=None,
         token="",
         allowed_writes=_allow(),
+        from_instinct=True,
     )
-    assert result["ok"] is False
-    assert result["code"] == "instinct_required"
-    assert called["hit"] is False
+    assert result["ok"] is True
+    # A fired write carries no `code` — the pending sentinel was skipped.
+    assert result.get("code") != "instinct_pending"
+    assert result["response"] == {"renewed": True}
+    assert called["hit"] is True
 
 
-async def test_instinct_policy_alone_does_not_reject(monkeypatch):
-    """`instinct_policy` without a truthy `requires_instinct` does NOT
-    trigger the fail-closed gate — only `requires_instinct` does."""
+async def test_successful_write_carries_outcome(monkeypatch):
+    """A fired write result carries the binding's declared `outcome` for
+    M2b.2 emission; a binding with no outcome carries None."""
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={"ok": 1}))
-    raw = {**_write_action(), "instinct_policy": "approve_per_row"}
-    result = await run_action(
+    with_outcome = await run_action(
         workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
-        action="mark_renewed",
-        raw_action=raw,
+        action="a",
+        raw_action={**_write_action(), "outcome": "renewal_completed"},
         path="/leases/42/renew",
         params={},
         base_url=BASE,
@@ -181,7 +278,22 @@ async def test_instinct_policy_alone_does_not_reject(monkeypatch):
         token="",
         allowed_writes=_allow(),
     )
-    assert result["ok"] is True
+    assert with_outcome["outcome"] == "renewal_completed"
+    no_outcome = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="a",
+        raw_action=_write_action(),
+        path="/leases/42/renew",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow(),
+    )
+    assert no_outcome["outcome"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -250,9 +250,10 @@ def _action_params_resolve(action_entry: Any) -> bool:
 def _action_requires_instinct(action_entry: Any) -> bool:
     """True when the raw action carries a truthy ``requires_instinct``.
 
-    Mirrors ``action_executor._instinct_rejected`` — such an action must
-    NOT be auto-fired by the router; it escalates so the specialist flow
-    (and its human-in-the-loop affordances) handles it.
+    Reads the same ``requires_instinct`` flag the write executor parks on
+    (see ``ActionBinding.requires_instinct``) — such an action must NOT be
+    auto-fired by the router; it escalates so the specialist flow (and its
+    human-in-the-loop affordances) handles it.
     """
     return isinstance(action_entry, dict) and bool(action_entry.get("requires_instinct"))
 

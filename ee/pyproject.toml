@@ -176,6 +176,10 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets._http_guard",
     "pocketpaw_ee.cloud.pockets.action_executor",
     "pocketpaw_ee.cloud.pockets.actions_ops",
+    # RFC 05 M2b.1 — the instinct bridge proposes/executes parked writes
+    # through `pockets.service` and the Instinct store; it never touches
+    # Beanie document classes directly.
+    "pocketpaw_ee.cloud.pockets.instinct_bridge",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",

@@ -12,6 +12,19 @@
 #   sees a generic message; (N1) an empty-params DELETE sends no JSON
 #   body; (N3) `workspace_id` is now on every write-action audit entry so
 #   the entries are tenant-filterable.
+# Updated: 2026-05-22 (RFC 05 M2b.1 — Instinct routing) — the M2a
+#   fail-closed `_instinct_rejected` gate is GONE. `ActionBinding` now
+#   declares the real governance fields (`requires_instinct`,
+#   `instinct_policy`, `outcome`) with a `model_validator` that rejects an
+#   `instinct_policy` set without `requires_instinct`. `run_action` takes a
+#   `from_instinct` flag: when a binding requires instinct and the call is
+#   NOT already post-approval, the executor runs every cheap validation
+#   gate (rate-limit, base-URL, SSRF/allowlist/DNS) so a write the
+#   allowlist would reject is rejected NOW, then returns an
+#   `instinct_pending` sentinel carrying the resolved write under `_park`
+#   — it makes NO HTTP call. The executor stays pure (no Beanie/Instinct
+#   imports); `instinct_bridge.py` does the proposing. A successful write
+#   result now carries the binding's `outcome` string for M2b.2 emission.
 #
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
@@ -20,11 +33,13 @@
 #      match an allowlist entry is rejected before any call leaves the
 #      server. Authorship (the agent writes bindings) and authorization
 #      (the human allow-lists the *class* of writes) are split.
-#   2. INSTINCT-REJECT (fail-closed). M2b will route `requires_instinct`
-#      actions through the Instinct approval surface. M2a must NOT silently
-#      honor-then-ignore the flag: any action whose RAW dict carries a
-#      truthy `requires_instinct` is rejected with `code: instinct_required`
-#      and makes NO call.
+#   2. INSTINCT PARK (M2b.1). A binding with `requires_instinct` is routed
+#      through the Instinct approval surface instead of firing: a direct
+#      run validates the write (gates 2-6) then returns the
+#      `instinct_pending` sentinel with the resolved write under `_park`
+#      and makes NO call. Only `instinct_bridge.execute_approved_write`,
+#      re-entering with `from_instinct=True` after a human approval, runs
+#      the actual HTTP call.
 #   3. An `Idempotency-Key` header (client-supplied or server `uuid4().hex`)
 #      so a write retried after a network timeout cannot double-submit.
 #
@@ -52,7 +67,7 @@ import uuid
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from pocketpaw.security.url_validators import validate_external_url_strict
 from pocketpaw_ee.cloud.pockets._http_guard import (
@@ -102,16 +117,25 @@ class _BackendHTTPError(Exception):
 class ActionBinding(BaseModel):
     """One write binding parsed from `rippleSpec.actions`.
 
-    ``model_config`` ignores unknown keys — the spec entry carries M2b
-    governance/metering fields (`requires_instinct`, `instinct_policy`,
-    `outcome`) and possibly RFC-03 template fields that this M2a executor
-    does not act on. Ignoring them keeps an M2b-authored spec parseable by
-    an M2a runtime instead of crashing on an unknown field.
+    ``model_config`` still ignores unknown keys — a spec entry may carry
+    RFC-03 template fields this executor does not act on, plus M2b.3's
+    deferred ``approve_batch`` extras. Ignoring them keeps a forward-dated
+    spec parseable instead of crashing on an unknown field.
 
-    NOTE: `requires_instinct` is deliberately NOT a declared field — the
-    instinct-reject check reads it off the RAW action dict (see
-    `_instinct_rejected`). Declaring it here would let `extra:ignore` drop
-    it and the fail-closed gate would silently pass.
+    M2b.1 promotes the three governance fields to REAL declared fields:
+
+    * ``requires_instinct`` — when true the write is routed through the
+      Instinct approval surface instead of firing directly.
+    * ``instinct_policy`` — how Instinct batches the write
+      (``approve_per_row`` is the only policy this build executes;
+      ``approve_batch`` is reserved for M2b.3 and not yet implemented).
+    * ``outcome`` — the named outcome a successful run emits as a
+      ``pocket.outcome`` event (M2b.2). ``None`` means no emit.
+
+    A ``model_validator`` rejects an ``instinct_policy`` set WITHOUT
+    ``requires_instinct`` — a policy with no gate to apply to is a
+    misconfiguration, and silently ignoring it would hide the author's
+    intent.
     """
 
     model_config = {"extra": "ignore"}
@@ -123,17 +147,26 @@ class ActionBinding(BaseModel):
     confirm: bool = False
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
+    # --- M2b governance / metering fields (RFC 05 M2b.1) ----------------
+    requires_instinct: bool = False
+    instinct_policy: Literal["approve_per_row", "approve_batch"] | None = None
+    outcome: str | None = None
 
+    @model_validator(mode="after")
+    def _policy_needs_gate(self) -> ActionBinding:
+        """An ``instinct_policy`` is meaningless without ``requires_instinct``.
 
-def _instinct_rejected(raw_action: dict[str, Any]) -> bool:
-    """Return ``True`` when the RAW action dict requests Instinct gating.
-
-    Fail-closed: M2a has no Instinct wiring, so any truthy
-    ``requires_instinct`` means the action must NOT fire. Reads the raw
-    dict — never the parsed ``ActionBinding`` — because ``extra: ignore``
-    drops the field off the model.
-    """
-    return bool(raw_action.get("requires_instinct"))
+        Setting a policy but leaving the gate off would silently never
+        route the write — reject the binding so the misconfiguration is
+        caught at parse time (``agent_set_action`` and the executor both
+        validate through this model).
+        """
+        if self.instinct_policy is not None and not self.requires_instinct:
+            raise ValueError(
+                "instinct_policy is set but requires_instinct is false — "
+                "a policy needs the instinct gate enabled"
+            )
+        return self
 
 
 def _allowlist_match(method: str, path_no_query: str, allowed_writes: list[dict[str, Any]]) -> bool:
@@ -267,40 +300,58 @@ async def run_action(
     token: str,
     allowed_writes: list[dict[str, Any]],
     idempotency_key: str | None = None,
+    from_instinct: bool = False,
 ) -> dict:
     """Run ONE pocket write action against its configured backend.
 
     ``raw_action`` is the action's entry from the persisted
     ``rippleSpec.actions`` block — the server reads ``method`` /
-    ``confirm`` / ``on_success`` / ``on_error`` from it (a compromised
-    client cannot pick the verb). ``path`` and ``params`` arrive from the
-    client already resolved by Ripple's ``{...}`` expression resolver.
+    ``confirm`` / ``on_success`` / ``on_error`` / the M2b governance
+    fields from it (a compromised client cannot pick the verb). ``path``
+    and ``params`` arrive from the client already resolved by Ripple's
+    ``{...}`` expression resolver.
 
-    The result shape on success::
+    ``from_instinct`` is ``False`` for a direct run and ``True`` only when
+    ``instinct_bridge.execute_approved_write`` re-enters this function
+    after a human approved the parked write. When a binding has
+    ``requires_instinct`` and ``from_instinct`` is ``False`` the executor
+    runs every cheap validation gate then PARKS the write — it returns the
+    ``instinct_pending`` sentinel and makes NO HTTP call.
 
-        {"ok": true, "action", "status", "response",
+    The result shape on a fired success::
+
+        {"ok": true, "action", "status", "response", "outcome",
          "on_success": [...], "on_error": [...]}
+
+    On the parked (instinct-pending) path::
+
+        {"ok": true, "code": "instinct_pending", "_park": <write dict>,
+         "action", "on_success": [], "on_error": []}
 
     On failure::
 
         {"ok": false, "action", "error", "code", "on_error": [...]}
 
-    The executor is pure: it makes the one HTTP call and returns. It does
-    NOT persist to the Pocket document and does NOT emit ``pocket_mutation``
-    — the response is delivered in the calling route's HTTP body.
+    The executor is pure: it makes the one HTTP call (or signals a park)
+    and returns. It does NOT persist to the Pocket document, does NOT emit
+    ``pocket_mutation``, and does NOT touch Beanie or the Instinct store —
+    the calling route / ``instinct_bridge`` own that.
 
     Gate order (each gate makes NO call when it rejects):
       1. Parse the binding (``ActionBinding``); a malformed entry is a
          ``bad_binding`` rejection.
-      2. INSTINCT-REJECT — fail-closed on a truthy raw ``requires_instinct``.
-      3. Write rate limit — 20 writes / 60s / (pocket, user).
-      4. Strict base-URL re-validation (defense in depth).
-      5. ``_resolve_url`` — path-traversal / absolute-URL / cross-host
+      2. Write rate limit — 20 writes / 60s / (pocket, user).
+      3. Strict base-URL re-validation (defense in depth).
+      4. ``_resolve_url`` — path-traversal / absolute-URL / cross-host
          rejection (shared SSRF guard).
-      6. ALLOWLIST — ``(method, query-stripped, percent-decoded path)``
+      5. ALLOWLIST — ``(method, query-stripped, percent-decoded path)``
          must match an ``allowed_writes`` entry; a miss is audited WARNING
          ``rejected``.
-      7. DNS pre-resolve — reject a host that resolves internal.
+      6. DNS pre-resolve — reject a host that resolves internal.
+      7. INSTINCT PARK — when the binding requires instinct and this is
+         not a post-approval call, return the ``instinct_pending``
+         sentinel after gates 2-6 have validated the write. A write the
+         allowlist would reject is rejected here, NOT parked.
       8. The HTTP call: redirects disabled, 3xx is an error, tight
          timeouts, 512 KB response cap, sanitized errors.
     """
@@ -318,26 +369,7 @@ async def run_action(
     on_error = binding.on_error
     method = binding.method
 
-    # ── 2. instinct-reject (fail-closed) ────────────────────────────────
-    # M2a has no Instinct wiring. Honoring-then-ignoring the flag would
-    # silently fire a write the spec said needs approval — reject instead.
-    if _instinct_rejected(raw_action):
-        _audit_action_run(
-            actor=user_id,
-            workspace_id=workspace_id,
-            pocket_id=pocket_id,
-            action=action,
-            status="instinct-required",
-            base_url=base_url,
-        )
-        return _error(
-            action,
-            "action requires approval — Instinct gating is not in this build",
-            "instinct_required",
-            on_error,
-        )
-
-    # ── 3. write rate limit ─────────────────────────────────────────────
+    # ── 2. write rate limit ─────────────────────────────────────────────
     if await _action_rate_limited(pocket_id, user_id):
         _audit_action_run(
             actor=user_id,
@@ -349,7 +381,7 @@ async def run_action(
         )
         return _error(action, "write rate limit exceeded", "rate_limited", on_error)
 
-    # ── 4. strict base-URL re-validation ────────────────────────────────
+    # ── 3. strict base-URL re-validation ────────────────────────────────
     # D6/D15 — re-validate even though config-time validation already ran.
     try:
         validate_external_url_strict(base_url)
@@ -364,7 +396,7 @@ async def run_action(
         )
         return _error(action, str(exc), "bad_base_url", on_error)
 
-    # ── 5. resolve + SSRF-guard the path ────────────────────────────────
+    # ── 4. resolve + SSRF-guard the path ────────────────────────────────
     try:
         url = _resolve_url(base_url, path)
     except _GuardError as exc:
@@ -378,7 +410,7 @@ async def run_action(
         )
         return _error(action, exc.message, exc.code, on_error)
 
-    # ── 6. allowlist check ──────────────────────────────────────────────
+    # ── 5. allowlist check ──────────────────────────────────────────────
     # Match (method, path-with-query-stripped) against the human-set
     # allowlist. The query is stripped so `/leases/*` is not bypassed by a
     # trailing `?x=y`. A miss makes NO call and is audited as `rejected`.
@@ -417,7 +449,7 @@ async def run_action(
             on_error,
         )
 
-    # ── 7. DNS pre-resolve ──────────────────────────────────────────────
+    # ── 6. DNS pre-resolve ──────────────────────────────────────────────
     try:
         await _assert_host_external(urllib.parse.urlsplit(url).hostname or "")
     except _GuardError as exc:
@@ -430,6 +462,40 @@ async def run_action(
             base_url=base_url,
         )
         return _error(action, exc.message, exc.code, on_error)
+
+    # ── 7. instinct park ────────────────────────────────────────────────
+    # A binding that requires instinct, on a direct (not post-approval)
+    # run, is PARKED — not fired. Gates 2-6 already ran as VALIDATION, so a
+    # write the allowlist would reject was rejected above, NOT parked: an
+    # off-policy write must never reach the approval surface looking
+    # legitimate. The executor stays pure — it just returns the resolved
+    # write under `_park` and signals `instinct_pending`. The router hands
+    # `_park` to `instinct_bridge.propose_pocket_write`, which builds the
+    # Instinct Action. NO HTTP call is made here.
+    if binding.requires_instinct and not from_instinct:
+        _audit_action_run(
+            actor=user_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            action=action,
+            status="instinct-pending",
+            base_url=base_url,
+        )
+        return {
+            "ok": True,
+            "code": "instinct_pending",
+            "action": action,
+            "_park": {
+                "action": action,
+                "method": method,
+                "path": path,
+                "params": params,
+                "idempotency_key": idempotency_key,
+                "outcome": binding.outcome,
+            },
+            "on_success": [],
+            "on_error": [],
+        }
 
     # ── 8. the HTTP call ────────────────────────────────────────────────
     headers = _auth_headers(auth_type, auth_header, token)
@@ -508,6 +574,10 @@ async def run_action(
         "action": action,
         "status": result["status"],
         "response": result["response"],
+        # M2b.2 — the named outcome a successful write emits as a
+        # `pocket.outcome` event. `None` when the binding declares none;
+        # the emit helper treats `None` as a no-op.
+        "outcome": binding.outcome,
         "on_success": binding.on_success,
         "on_error": on_error,
     }

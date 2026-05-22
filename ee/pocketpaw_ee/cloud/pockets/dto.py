@@ -17,6 +17,12 @@ empty string to None; documented that `auth_token` for `basic` is the
 Updated: 2026-05-22 (RFC 05 M2a) — added RunActionRequest /
 RunActionResponse for the write-action run endpoint, plus AllowedWriteDTO
 and SetWritePolicyRequest for the per-pocket write-allowlist endpoint.
+Updated: 2026-05-22 (RFC 05 M2b.1) — RunActionResponse gained
+``proposed_action_id`` (set when a ``requires_instinct`` write is parked
+into an Instinct Action instead of fired). Added ApprovalRouteDTO and
+SetApprovalRouteRequest plus an optional ``approval_route`` field on
+PocketBackendConfigResponse — the per-pocket approver routing for gated
+writes.
 """
 
 from __future__ import annotations
@@ -151,18 +157,41 @@ class PocketBackendConfigRequest(BaseModel):
     auth_header: str | None = None
 
 
+class ApprovalRouteDTO(BaseModel):
+    """Who approves a pocket's ``requires_instinct`` writes (RFC 05 M2b.1).
+
+    ``mode="owner"`` (the default) routes every gated write to the pocket
+    owner. ``mode="user"`` routes to a named workspace member —
+    ``user_id`` is then required and is validated as a current workspace
+    member when the route is set.
+    """
+
+    mode: Literal["owner", "user"] = "owner"
+    user_id: str | None = None
+
+    @field_validator("user_id")
+    @classmethod
+    def _empty_user_is_none(cls, v: str | None) -> str | None:
+        return v or None
+
+
 class PocketBackendConfigResponse(BaseModel):
     """Backend binding as returned to clients — never carries the token.
 
     ``allowed_writes`` is the per-pocket write allowlist (RFC 05 M2a) —
     an owner/editor-facing non-secret. Empty by default (fail-closed: no
     write fires until a human allow-lists it).
+
+    ``approval_route`` is the per-pocket approver routing for
+    ``requires_instinct`` writes (RFC 05 M2b.1). ``None`` means the
+    default — the pocket owner approves.
     """
 
     base_url: str
     auth_type: str
     configured: bool
     allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+    approval_route: ApprovalRouteDTO | None = None
 
 
 class RunSourcesRequest(BaseModel):
@@ -213,11 +242,18 @@ class RunActionRequest(BaseModel):
 class RunActionResponse(BaseModel):
     """Result of a write-action run.
 
-    On success ``ok`` is true and ``status`` / ``response`` carry the
+    On a fired write ``ok`` is true and ``status`` / ``response`` carry the
     backend's HTTP status + parsed JSON body. On failure ``ok`` is false
     and ``error`` / ``code`` describe the rejection. ``on_success`` /
     ``on_error`` are the reconcile handler lists the client runs after.
-    All optional fields keep one model usable for both outcomes.
+
+    On a PARKED write (RFC 05 M2b.1) — a ``requires_instinct`` action —
+    ``ok`` is true, ``code`` is ``"instinct_pending"``, and
+    ``proposed_action_id`` carries the id of the Instinct Action the
+    write was routed into. No backend call was made; the client shows a
+    "waiting for approval" state and does NOT run the reconcile handlers.
+
+    All optional fields keep one model usable for every outcome.
     """
 
     ok: bool
@@ -226,6 +262,7 @@ class RunActionResponse(BaseModel):
     response: Any = None
     error: str | None = None
     code: str | None = None
+    proposed_action_id: str | None = None
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
 
@@ -238,6 +275,18 @@ class SetWritePolicyRequest(BaseModel):
     """
 
     allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+
+
+class SetApprovalRouteRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend/approval-route`` (RFC 05 M2b.1).
+
+    Sets who approves the pocket's ``requires_instinct`` writes.
+    ``route=None`` (or an omitted body) clears the route back to the
+    default — the pocket owner. ``mode="user"`` requires a ``user_id``
+    that the service validates as a current workspace member.
+    """
+
+    route: ApprovalRouteDTO | None = None
 
 
 # ---------------------------------------------------------------------------

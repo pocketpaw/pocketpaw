@@ -32,6 +32,15 @@ Updated: 2026-05-22 (RFC 05 M2a) — added the write-action routes:
 The action-run route is gated OWNER or explicit shared_with ONLY
 (``require_pocket_action_run``) — narrower than source-run, because a
 write has blast radius. The write-policy route is owner-only.
+
+Updated: 2026-05-22 (RFC 05 M2b.1) — the action-run route now branches on
+the executor's ``instinct_pending`` sentinel: a ``requires_instinct``
+write is routed into an Instinct Action via ``instinct_bridge`` and the
+route returns ``{ok:true, code:"instinct_pending", proposed_action_id}``
+instead of firing. A fired, non-gated write emits a ``pocket.outcome``
+event (M2b.2) when its binding declares an ``outcome``. Added the
+owner-only ``PUT /pockets/{id}/backend/approval-route`` for the
+per-pocket gated-write approver routing.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     RunActionRequest,
     RunActionResponse,
     RunSourcesRequest,
+    SetApprovalRouteRequest,
     SetWritePolicyRequest,
     ShareLinkRequest,
     UpdatePocketRequest,
@@ -349,7 +359,9 @@ async def run_pocket_sources(
             "pocket_backend.not_configured",
             "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
         )
-    base_url, auth_type, auth_header, token, _allowed_writes = creds
+    # M2b.1 — the executor-creds tuple gained `allowed_writes` (M2a) and
+    # `approval_route` (M2b.1); read-only source runs need neither.
+    base_url, auth_type, auth_header, token, _allowed_writes, _approval_route = creds
 
     from pocketpaw_ee.cloud.pockets import source_executor
 
@@ -395,6 +407,35 @@ async def set_pocket_write_policy(
     return PocketBackendConfigResponse(**result)
 
 
+@router.put(
+    "/{pocket_id}/backend/approval-route",
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def set_pocket_approval_route(
+    pocket_id: str,
+    body: SetApprovalRouteRequest | None = None,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Set who approves this pocket's ``requires_instinct`` writes
+    (RFC 05 M2b.1). Owner-only.
+
+    A ``mode="user"`` route names a workspace member as the approver —
+    the service validates that id is a current member. An omitted body
+    (or ``route=null``) clears the route back to the default: the pocket
+    owner. Returns ``400`` when the pocket has no backend configured.
+    """
+    body = body or SetApprovalRouteRequest()
+    route = body.route.model_dump() if body.route is not None else None
+    result = await pockets_service.set_pocket_approval_route(
+        workspace_id,
+        user_id,
+        pocket_id,
+        route,
+    )
+    return PocketBackendConfigResponse(**result)
+
+
 @router.post(
     "/{pocket_id}/actions/run",
     dependencies=[Depends(require_pocket_action_run)],
@@ -413,6 +454,16 @@ async def run_pocket_action(
     HTTP ``method`` is read server-side from the persisted action entry;
     the client only sends the resolved ``path`` / ``params``. The write
     fires only if the human owner allow-listed the method+path.
+
+    RFC 05 M2b.1 — a binding marked ``requires_instinct`` is NOT fired
+    here. The executor validates the write then returns an
+    ``instinct_pending`` sentinel; this route hands the parked write to
+    ``instinct_bridge.propose_pocket_write`` and returns
+    ``{ok:true, code:"instinct_pending", proposed_action_id}``. The
+    actual write fires later, from the instinct router's approve hook.
+
+    On a fired (non-pending) success the route emits a ``pocket.outcome``
+    event when the binding declares an ``outcome`` (M2b.2).
 
     The backend's response is delivered in THIS response body — there is
     no ``pocket_mutation`` SSE emit, because the run endpoint is a
@@ -445,7 +496,7 @@ async def run_pocket_action(
             "pocket_backend.not_configured",
             "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
         )
-    base_url, auth_type, auth_header, token, allowed_writes = creds
+    base_url, auth_type, auth_header, token, allowed_writes, approval_route = creds
 
     from pocketpaw_ee.cloud.pockets import action_executor
 
@@ -465,7 +516,51 @@ async def run_pocket_action(
         allowed_writes=allowed_writes,
         idempotency_key=body.idempotency_key,
     )
-    return RunActionResponse(**result)
+
+    # M2b.1 — a `requires_instinct` write was PARKED, not fired. The
+    # executor validated it (a write the allowlist rejects already came
+    # back `ok:false`); `_park` carries the resolved write. Route it into
+    # an Instinct Action and return the pending response.
+    if result.get("code") == "instinct_pending":
+        from pocketpaw_ee.cloud.pockets import instinct_bridge
+
+        proposed_id = await instinct_bridge.propose_pocket_write(
+            pocket=pocket,
+            backend_config={
+                "base_url": base_url,
+                "auth_type": auth_type,
+                "allowed_writes": allowed_writes,
+                "approval_route": approval_route,
+            },
+            parked_write=result["_park"],
+            requested_by=user_id,
+        )
+        return RunActionResponse(
+            ok=True,
+            action=body.action,
+            code="instinct_pending",
+            proposed_action_id=proposed_id,
+        )
+
+    # M2b.2 — a direct (non-gated) write succeeded. Emit its outcome when
+    # the binding declared one. A binding with no `outcome` is a no-op.
+    if result.get("ok"):
+        from pocketpaw_ee.cloud.outcomes import service as outcomes_service
+
+        await outcomes_service.emit_pocket_outcome(
+            outcome=result.get("outcome"),
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+            action=body.action,
+            actor=user_id,
+            via_instinct=False,
+            instinct_action_id=None,
+        )
+
+    # Strip executor-internal keys (`_park`, `outcome`) the wire model
+    # does not carry before building the response.
+    wire = {k: v for k, v in result.items() if k not in ("_park", "outcome")}
+    return RunActionResponse(**wire)
 
 
 # ---------------------------------------------------------------------------
