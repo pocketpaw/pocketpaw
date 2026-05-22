@@ -3,8 +3,13 @@
 Post-Task-11: the calling-agent creation prompts only carry the STEP 0
 delegation block, so the heavy ``<state-sources>`` / ``<creation-examples>``
 content moved onto the specialist's own prompt
-(``POCKET_SPECIALIST_PROMPT``). Interaction prompts still need it because
-they edit existing pockets directly.
+(``POCKET_SPECIALIST_PROMPT``).
+
+Post-#1163: the prompt-split moved the heavy mutation block off the main
+chat agent's ``POCKET_INTERACTION_PROMPT_*`` (now a slim delegation rule)
+and onto the edit specialist's ``POCKET_EDIT_SPECIALIST_PROMPT_*``. The
+edit specialist is the agent that actually edits rippleSpec directly, so
+that is the prompt that must carry ``<state-sources>``.
 """
 
 from __future__ import annotations
@@ -12,17 +17,17 @@ from __future__ import annotations
 import pytest
 
 from pocketpaw.ripple._pockets import (
-    POCKET_INTERACTION_PROMPT_CLI,
-    POCKET_INTERACTION_PROMPT_MCP,
+    POCKET_EDIT_SPECIALIST_PROMPT_CLI,
+    POCKET_EDIT_SPECIALIST_PROMPT_MCP,
     POCKET_SPECIALIST_PROMPT,
 )
 
 _PROMPTS_WITH_SOURCES = [
     POCKET_SPECIALIST_PROMPT,
-    POCKET_INTERACTION_PROMPT_MCP,
-    POCKET_INTERACTION_PROMPT_CLI,
+    POCKET_EDIT_SPECIALIST_PROMPT_MCP,
+    POCKET_EDIT_SPECIALIST_PROMPT_CLI,
 ]
-_IDS = ["specialist", "interact-mcp", "interact-cli"]
+_IDS = ["specialist", "edit-mcp", "edit-cli"]
 
 
 @pytest.mark.parametrize("prompt", _PROMPTS_WITH_SOURCES, ids=_IDS)

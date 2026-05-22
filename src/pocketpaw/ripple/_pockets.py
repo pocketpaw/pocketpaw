@@ -13,6 +13,12 @@
 # `<mutation-strategy>` block gained the Tier-2 prop-array item ops from
 # PR #1159 with guidance on when to use them.
 #
+# Changes: 2026-05-22 (RFC 04 alpha follow-up) — the edit-specialist prompt
+# now also carries RFC 04 `sources` guidance: `_EDIT_TOOLS_MCP` lists the
+# new `set_source` / `remove_source` ops, and `_assemble_interaction()`
+# splices in `_LIVE_DATA_SOURCES_EDIT_BLOCK` so the EDIT specialist (not
+# just the create flow) knows it can author a `rippleSpec.sources` block.
+#
 # Canonical source for every pocket-mode system prompt the agent ever sees.
 # Four strings are exported, one per (action × backend) cell:
 #
@@ -489,6 +495,49 @@ Rules:
 """
 
 
+# Edit-specialist variant of the live-data-sources guidance. The create
+# block above describes authoring the `sources` JSON directly inside the
+# rippleSpec; the EDIT specialist never authors whole-spec JSON — it works
+# through granular ops, so it gets the `set_source` / `remove_source`
+# instructions instead. Spliced into _assemble_interaction.
+_LIVE_DATA_SOURCES_EDIT_BLOCK = """\
+<live-data-sources>
+When the user asks for live data from THEIR OWN backend (a CRM, an
+internal API, a service with a base URL + token) — not the workspace
+`$source` markers — use the `set_source` / `remove_source` ops. Alpha is
+READ-ONLY: GET bindings only. These write the pocket's top-level
+`rippleSpec.sources` block; the state/node ops cannot.
+
+  set_source(
+    source_key="prs",            # the sources map key
+    path="/pulls?state=open",    # RELATIVE path on the backend, never a URL
+    bind="state.prs",            # dotted state path the JSON is written to
+    method="GET",                # always GET
+    refresh=["pocket_open", "manual"],   # when to run it
+  )
+
+  remove_source(source_key="prs")
+
+After `set_source`, do the wiring with the normal ops:
+- `set_state` the `bind` target to an empty list/value so the bound
+  widget renders before the first fetch (e.g. set_state("prs", [])).
+- For a manual refresh, `add_node` a button whose on_click is
+  {"action": "run_source", "source": "prs"} — `run_source` is a
+  client-side action, NOT a chat round-trip.
+
+Rules:
+- A pocket using sources MUST have a backend configured (base URL + auth,
+  set once in the pocket's backend settings — outside the spec). Without
+  a backend the sources will not run.
+- Do NOT stash a fake source descriptor in `state`, and do NOT build a
+  refresh button that sends a chat message — use `set_source` + the
+  `run_source` action.
+- Use sources ONLY for the user's real backend. For workspace data use
+  the `$source` markers; for canvas-local input use literal values.
+</live-data-sources>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Tool surface — MCP variant (claude_agent_sdk).
 # Identity (workspace, user, session) is bound from the active SSE
@@ -603,6 +652,16 @@ project-dashboard.team, feed.items, select.options, form-layout.fields…)
 
 `match` (and `after`) is an ItemMatch: {index:N} | {id:"..."} |
 {by_field:"label", equals:"X"} | {by_key:{k:v}}.
+
+DATA-SOURCE OPS — read-only live data bindings (rippleSpec.sources)
+
+  set_source(source_key, path, bind, method?, refresh?)
+                                declare a GET binding that fetches from the
+                                pocket's configured backend into state
+  remove_source(source_key)     delete a data-source declaration
+
+Use these only for the user's OWN backend (a CRM, an internal API). See
+the `<live-data-sources>` block for when and how.
 
 The toolset above is the WHOLE interface. Apply the smallest granular op
 that satisfies the intent.
@@ -1554,7 +1613,13 @@ def _assemble_interaction(*, mcp: bool) -> str:
     (the creation toolset): advertising create_pocket / update_pocket /
     add_widget to a specialist that only holds set_node_prop / add_node /
     *_prop_array_item made the planner pick a non-existent tool and emit
-    zero ops with no error (#1163 root cause B)."""
+    zero ops with no error (#1163 root cause B).
+
+    ``_LIVE_DATA_SOURCES_EDIT_BLOCK`` is spliced in so the edit specialist
+    knows it can author a ``rippleSpec.sources`` block via the
+    ``set_source`` / ``remove_source`` ops (RFC 04 alpha follow-up) —
+    without it, the specialist stashed fake source descriptors in state
+    and built chat-round-trip refresh buttons."""
     parts = [
         _SCOPE_BLOCK,
         _CANVAS_BLOCK,
@@ -1562,6 +1627,7 @@ def _assemble_interaction(*, mcp: bool) -> str:
         _WORKFLOW_INTERACTION_MCP if mcp else _WORKFLOW_INTERACTION_CLI,
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
+        _LIVE_DATA_SOURCES_EDIT_BLOCK,
         RIPPLE_DESIGN_RULES,
         # MUST be last — see _CURRENT_POCKET_BLOCK_TEMPLATE rationale.
         _CURRENT_POCKET_BLOCK_TEMPLATE,

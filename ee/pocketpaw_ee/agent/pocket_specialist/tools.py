@@ -19,6 +19,10 @@ result dict. A service-rejected op (``{ok: false}``) is NO LONGER
 appended to ``capture['ops']`` — a rejected op is not an applied op.
 Instead it is recorded in ``capture['rejected']`` with its error so the
 runtime can fold the reason into the response ``warnings``.
+Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the ``set_source``
+/ ``remove_source`` edit-tool factories so the specialist can author the
+pocket's top-level ``rippleSpec.sources`` block (read-only GET data
+bindings). Registered in ``make_edit_pocket_tools``.
 """
 
 from __future__ import annotations
@@ -832,6 +836,103 @@ def make_remove_prop_array_item_tool(
     )
 
 
+# ---------------------------------------------------------------------------
+# rippleSpec.sources ops — read-only data bindings (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+class _SetSourceArgs(BaseModel):
+    source_key: str = Field(
+        ..., description="Short name for the source — also the `sources` map key."
+    )
+    path: str = Field(
+        ...,
+        description=(
+            "RELATIVE path against the pocket's configured backend "
+            "(e.g. `/pulls?state=open`). Never an absolute URL."
+        ),
+    )
+    bind: str = Field(
+        ...,
+        description="Dotted `state.` path the fetched JSON is written to (e.g. `state.prs`).",
+    )
+    method: str = Field(default="GET", description='Always "GET" — alpha is read-only.')
+    refresh: list[str] | None = Field(
+        default=None,
+        description=(
+            "When to run the source: `pocket_open` (on open) and/or `manual` "
+            "(refresh button). Defaults to `[\"pocket_open\"]` when omitted."
+        ),
+    )
+
+
+def make_set_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Declare (or replace) a read-only data source on the pocket."""
+
+    async def _run(
+        source_key: str,
+        path: str,
+        bind: str,
+        method: str = "GET",
+        refresh: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_source_for_agent
+
+        binding: dict[str, Any] = {"method": method, "path": path, "bind": bind}
+        if refresh is not None:
+            binding["refresh"] = refresh
+        result = await set_source_for_agent(pocket_id, source_key, binding)
+        _capture_op(capture, "set_source", {"source_key": source_key, "path": path}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_source",
+        description=(
+            "Declare a READ-ONLY live data source in rippleSpec.sources — a "
+            "GET binding that fetches from the pocket's own configured "
+            "backend (a CRM, an internal API) and writes the JSON into "
+            "state at `bind`. Use this when the user wants live data from "
+            "THEIR backend. The pocket must have a backend configured "
+            "(base URL + auth, set in backend settings). Seed state at the "
+            "`bind` target with an empty value so the widget renders before "
+            "the first fetch. For a manual refresh, add a button with "
+            "on_click {action: 'run_source', source: '<source_key>'}."
+        ),
+        args_schema=_SetSourceArgs,
+    )
+
+
+class _RemoveSourceArgs(BaseModel):
+    source_key: str = Field(..., description="The `sources` map key to remove.")
+
+
+def make_remove_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a read-only data source declaration from the pocket."""
+
+    async def _run(source_key: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_source_for_agent
+
+        result = await remove_source_for_agent(pocket_id, source_key)
+        _capture_op(capture, "remove_source", {"source_key": source_key}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_source",
+        description=(
+            "Remove a read-only data source from rippleSpec.sources by its "
+            "key. Idempotent — removing a source that was never declared "
+            "still succeeds. The state the source bound to is left alone."
+        ),
+        args_schema=_RemoveSourceArgs,
+    )
+
+
 def make_edit_pocket_tools(
     *, pocket_id: str, capture: dict[str, Any] | None = None
 ) -> list[StructuredTool]:
@@ -840,7 +941,9 @@ def make_edit_pocket_tools(
     Order is the order the LLM sees them; we lead with the read tool
     so the agent is prompted toward "get then mutate" rather than
     blind writes. The Tier-2 ``*_prop_array_item`` ops sit next to
-    ``set_node_prop`` — they are the surgical alternative to it.
+    ``set_node_prop`` — they are the surgical alternative to it. The
+    ``*_source`` ops sit last — they write the top-level
+    ``rippleSpec.sources`` block, not the ui tree or state.
     """
     return [
         make_get_pocket_tool(pocket_id=pocket_id),
@@ -856,4 +959,6 @@ def make_edit_pocket_tools(
         make_replace_node_tool(pocket_id=pocket_id, capture=capture),
         make_move_node_tool(pocket_id=pocket_id, capture=capture),
         make_remove_node_tool(pocket_id=pocket_id, capture=capture),
+        make_set_source_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_source_tool(pocket_id=pocket_id, capture=capture),
     ]

@@ -32,6 +32,11 @@ binding API: ``set_pocket_backend``, ``get_pocket_backend``,
 ``get_pocket_backend_for_executor``, ``remove_pocket_backend``. The
 credential lives in a SEPARATE collection (``PocketBackendCredential``);
 this service is the sole Beanie writer for it, same as for ``Pocket``.
+Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the agent-facing
+``rippleSpec.sources`` ops ``agent_set_source`` / ``agent_remove_source``
+so the pocket EDIT specialist (not just the create flow) can author the
+top-level read-only data-source block. Bindings are validated through
+the ``SourceBinding`` model before persistence.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ from collections import OrderedDict
 from typing import Any
 
 from beanie import PydanticObjectId
+from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
@@ -56,7 +62,13 @@ from pocketpaw_ee.cloud.models.pocket import Widget as _WidgetDoc
 from pocketpaw_ee.cloud.models.pocket_backend import (
     PocketBackendCredential as _BackendCredentialDoc,
 )
-from pocketpaw_ee.cloud.pockets import backend_crypto, prop_arrays, spec_ops, state_ops
+from pocketpaw_ee.cloud.pockets import (
+    backend_crypto,
+    prop_arrays,
+    sources_ops,
+    spec_ops,
+    state_ops,
+)
 from pocketpaw_ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
@@ -1775,6 +1787,115 @@ async def agent_patch_state(
         )
 
 
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.sources mutations — agent-facing (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+#
+# The third top-level rippleSpec key, alongside ``ui`` (node ops) and
+# ``state`` (state ops). ``sources`` declares read-only GET data bindings
+# the ``source_executor`` runs against the pocket's configured backend.
+#
+# Unlike hydrated state — which is response-body only and never persisted —
+# a ``sources`` declaration IS part of the pocket document, so these ops
+# call ``doc.save()``. The create flow already accepts ``sources`` in the
+# rippleSpec it persists; these ops give the EDIT specialist the same
+# reach on an existing pocket.
+#
+# Each binding is validated through ``SourceBinding`` (source_executor.py)
+# before it is written — an invalid binding is rejected, never stored.
+
+
+def _sources_root(doc: _PocketDoc) -> dict[str, Any]:
+    """Return the mutable ``rippleSpec`` dict for a doc, creating it if
+    absent. ``sources_ops`` materialises the ``sources`` key on demand."""
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        spec = {}
+        doc.rippleSpec = spec
+    return spec
+
+
+async def agent_set_source(
+    pocket_id: str,
+    *,
+    source_key: str,
+    binding: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Declare (or replace) a read-only data source on the pocket.
+
+    ``binding`` is validated through the ``SourceBinding`` model — an
+    entry missing ``path`` / ``bind``, or carrying a write verb, is
+    rejected before any write. The validated, normalized binding (with
+    ``refresh`` defaulted) is what gets persisted.
+
+    Returns ``({"source_key": ..., "binding": ..., "pocket": <view>},
+    None)`` on success.
+    """
+    from pocketpaw_ee.cloud.pockets.source_executor import SourceBinding
+
+    if not source_key:
+        return None, "source_key is required"
+    if not isinstance(binding, dict):
+        return None, "binding must be an object"
+    try:
+        validated = SourceBinding.model_validate(binding)
+    except PydanticValidationError as exc:
+        return None, f"invalid source binding: {exc.errors()[0].get('msg', exc)}"
+
+    normalized = validated.model_dump(mode="json")
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        try:
+            sources_ops.set_source(spec, source_key, normalized)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "source_key": source_key,
+                "binding": normalized,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_source(
+    pocket_id: str,
+    *,
+    source_key: str,
+) -> tuple[dict | None, str | None]:
+    """Remove a read-only data source declaration from the pocket.
+
+    Idempotent — removing a source that was never declared still
+    succeeds. Returns ``({"source_key": ..., "pocket": <view>}, None)``.
+    """
+    if not source_key:
+        return None, "source_key is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        sources_ops.remove_source(spec, source_key)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"source_key": source_key, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
 async def agent_create(
     *,
     workspace_id: str,
@@ -2109,10 +2230,12 @@ __all__ = [
     "agent_move_node",
     "agent_patch_state",
     "agent_remove_node",
+    "agent_remove_source",
     "agent_remove_state",
     "agent_remove_widget",
     "agent_replace_node",
     "agent_set_node_prop",
+    "agent_set_source",
     "agent_set_state",
     "agent_update",
     "agent_update_widget",
