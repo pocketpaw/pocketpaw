@@ -18,6 +18,12 @@
 #
 # Use ``get_pocket_prompts(backend_name=...)`` to pick the right pair.
 #
+#   * HOME_POCKET_PROMPT — the home-surface analogue of the interaction
+#     prompt, injected when the chat is scoped to the per-user
+#     ``type="home"`` pocket. Tells the agent to call ``add_widget`` for
+#     an explicit widget request and otherwise answer directly.
+#
+# Changes: 2026-05-22 — re-export ``HOME_POCKET_PROMPT``.
 # Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — re-export the new
 # ``fill_current_pocket`` helper + ``BACKEND_SUMMARY_TOKEN``.
 #
@@ -30,6 +36,7 @@ from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
 from pocketpaw.ripple._inline import INLINE_RIPPLE_SYSTEM_PROMPT
 from pocketpaw.ripple._pockets import (
     BACKEND_SUMMARY_TOKEN,
+    HOME_POCKET_PROMPT,
     POCKET_CREATION_PROMPT,
     POCKET_CREATION_PROMPT_CLI,
     POCKET_CREATION_PROMPT_MCP,
@@ -47,6 +54,7 @@ from pocketpaw.ripple._pockets import (
 
 __all__ = [
     "BACKEND_SUMMARY_TOKEN",
+    "HOME_POCKET_PROMPT",
     "INLINE_RIPPLE_SYSTEM_PROMPT",
     "POCKET_CREATION_PROMPT",
     "POCKET_CREATION_PROMPT_CLI",

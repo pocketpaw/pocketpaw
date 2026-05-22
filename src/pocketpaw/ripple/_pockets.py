@@ -1,5 +1,12 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-22 — added `HOME_POCKET_PROMPT`, the home-surface
+# analogue of the slim interaction prompt. It is injected when the chat
+# is scoped to the per-user `type="home"` pocket: the agent calls
+# `add_widget` for an explicit widget request and answers directly
+# otherwise. No specialist delegation — the home grid is curated one
+# widget at a time.
+#
 # Changes: 2026-05-21 (RFC 04 alpha) — added `_LIVE_DATA_SOURCES_BLOCK`,
 # spliced into the create specialist prompt. It teaches the agent to
 # declare a `sources` block (read-only GET bindings) and a `run_source`
@@ -2151,6 +2158,47 @@ POCKET_CREATION_PROMPT = POCKET_CREATION_PROMPT_MCP
 POCKET_INTERACTION_PROMPT = POCKET_INTERACTION_PROMPT_MCP
 
 
+# ---------------------------------------------------------------------------
+# Home surface — the per-user `type="home"` pocket that backs the home page.
+#
+# The home-surface analogue of POCKET_INTERACTION_PROMPT: slim, one tagged
+# block. The home page is a Pocket like any other, but its canvas is a grid
+# of pinned widgets the user curates — not a designed dashboard. The agent's
+# job here is narrow: add a widget when the user names one, otherwise just
+# talk. No specialist delegation, no spec-rewrite workflow.
+# ---------------------------------------------------------------------------
+
+HOME_POCKET_PROMPT = """\
+<home-pocket>
+This conversation is happening on the user's HOME page. The home page is
+backed by a Pocket whose canvas is a grid of pinned widgets — the things
+the user keeps an eye on (a revenue stat, a task list, an active-agents
+counter). It is the user's own dashboard, assembled one widget at a time.
+
+Two response paths:
+
+  1. ADD A WIDGET. The user asks to add, show, track, or pin a specific
+     widget — "show me revenue", "add a task list", "track active
+     agents", "put a chart of signups here". Call the `add_widget` tool
+     with a well-formed widget spec drawn from the Ripple widget catalog
+     (stat, chart, table, list, kanban, …). Pick the catalog widget that
+     fits what the user named, give it a clear `name`, and seed sensible
+     props/state so the tile is alive on first render.
+
+  2. CHAT. Anything else — a question, a request that isn't about pinning
+     a widget, ordinary conversation ("what's on my home page?", "how do
+     I do X", "summarize my week"). Answer directly. Do NOT call
+     `add_widget` — only add a widget when the user actually asked for one.
+
+To see what is already on the home grid before you add or answer, call
+`get_pocket` once and read the returned widgets.
+
+Add one widget per explicit request. Don't pre-populate the grid with
+widgets the user didn't ask for.
+</home-pocket>
+"""
+
+
 def get_pocket_prompts(*, backend_name: str | None = None) -> tuple[str, str]:
     """Return ``(creation_prompt, interaction_prompt)`` for ``backend_name``.
 
@@ -2166,6 +2214,7 @@ def get_pocket_prompts(*, backend_name: str | None = None) -> tuple[str, str]:
 
 __all__ = [
     "BACKEND_SUMMARY_TOKEN",
+    "HOME_POCKET_PROMPT",
     "POCKET_CREATION_PROMPT",
     "POCKET_CREATION_PROMPT_CLI",
     "POCKET_CREATION_PROMPT_MCP",
