@@ -182,45 +182,62 @@ async def get_meeting(workspace_id: str, meeting_id: str) -> MeetingDetailRespon
 
 
 # ---------------------------------------------------------------------------
-# Adapter factory — constructs a ConnectorProtocol instance from env creds.
-# Single-account model: the deployment configures ONE Zoom S2S app and ONE
-# Google Cloud OAuth client via environment variables. Tests replace this
-# via ``_set_adapter_factory`` to inject fakes.
+# Adapter factory — constructs a ConnectorProtocol instance from stored or
+# env credentials. Single-account model: the deployment configures ONE Zoom
+# S2S app and ONE Google Cloud OAuth client, either through the Settings
+# connector page (stored, encrypted) or via environment variables. Tests
+# replace this via ``_set_adapter_factory`` to inject fakes.
 # ---------------------------------------------------------------------------
 
 
 async def _build_adapter_default(workspace_id: str, provider: str):
-    """Default factory: construct a native provider adapter from env creds.
+    """Default factory: build a provider adapter from stored or env credentials.
 
-    ``workspace_id`` is accepted for signature compatibility but unused —
-    the meeting-provider credentials are deployment-wide, not per-tenant.
-    Raises ``ValidationError`` when the provider's env vars are unset.
+    Resolution order: the ``MeetingProviderCredentials`` store first (set
+    via Settings → Meetings), then the ``ZOOM_*`` / ``GOOGLE_MEET_*``
+    environment variables as a fallback. ``workspace_id`` is accepted for
+    signature compatibility but unused — credentials are deployment-wide,
+    not per-tenant. Raises ``ValidationError`` when neither source is set.
     """
+    from pocketpaw_ee.cloud.meetings import credentials as creds_service
+
+    stored = await creds_service.resolve(provider)
+
     if provider == "zoom":
-        account_id = os.environ.get("ZOOM_ACCOUNT_ID", "").strip()
-        client_id = os.environ.get("ZOOM_CLIENT_ID", "").strip()
-        client_secret = os.environ.get("ZOOM_CLIENT_SECRET", "").strip()
-        if not (account_id and client_id and client_secret):
-            raise ValidationError(
-                "meeting.zoom_not_configured",
-                "Zoom is not configured — set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID "
-                "and ZOOM_CLIENT_SECRET in the environment.",
-            )
+        if stored is not None:
+            account_id = stored["account_id"]
+            client_id = stored["client_id"]
+            client_secret = stored["client_secret"]
+        else:
+            account_id = os.environ.get("ZOOM_ACCOUNT_ID", "").strip()
+            client_id = os.environ.get("ZOOM_CLIENT_ID", "").strip()
+            client_secret = os.environ.get("ZOOM_CLIENT_SECRET", "").strip()
+            if not (account_id and client_id and client_secret):
+                raise ValidationError(
+                    "meeting.zoom_not_configured",
+                    "Zoom is not configured — connect it in Settings → Meetings, "
+                    "or set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID and ZOOM_CLIENT_SECRET.",
+                )
         from pocketpaw_ee.cloud.meetings.adapters.zoom import ZoomConnector
 
         return ZoomConnector(account_id, client_id, client_secret)
 
     if provider == "google_meet":
-        client_id = os.environ.get("GOOGLE_MEET_CLIENT_ID", "").strip()
-        client_secret = os.environ.get("GOOGLE_MEET_CLIENT_SECRET", "").strip()
-        refresh_token = os.environ.get("GOOGLE_MEET_REFRESH_TOKEN", "").strip()
-        if not (client_id and client_secret and refresh_token):
-            raise ValidationError(
-                "meeting.google_meet_not_configured",
-                "Google Meet is not configured — set GOOGLE_MEET_CLIENT_ID, "
-                "GOOGLE_MEET_CLIENT_SECRET and GOOGLE_MEET_REFRESH_TOKEN in "
-                "the environment.",
-            )
+        if stored is not None:
+            client_id = stored["client_id"]
+            client_secret = stored["client_secret"]
+            refresh_token = stored["refresh_token"]
+        else:
+            client_id = os.environ.get("GOOGLE_MEET_CLIENT_ID", "").strip()
+            client_secret = os.environ.get("GOOGLE_MEET_CLIENT_SECRET", "").strip()
+            refresh_token = os.environ.get("GOOGLE_MEET_REFRESH_TOKEN", "").strip()
+            if not (client_id and client_secret and refresh_token):
+                raise ValidationError(
+                    "meeting.google_meet_not_configured",
+                    "Google Meet is not configured — connect it in Settings → "
+                    "Meetings, or set GOOGLE_MEET_CLIENT_ID, GOOGLE_MEET_CLIENT_SECRET "
+                    "and GOOGLE_MEET_REFRESH_TOKEN.",
+                )
         from pocketpaw_ee.cloud.meetings.adapters.google_meet import GoogleMeetConnector
 
         return GoogleMeetConnector(client_id, client_secret, refresh_token)

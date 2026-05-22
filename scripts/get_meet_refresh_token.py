@@ -60,7 +60,9 @@ def main() -> int:
     print(f"   {auth_url}\n")
     print("2. Google redirects to a 'localhost' page that will not load —")
     print("   that is expected. Copy the `code=` value from the address bar.\n")
-    code = input("Paste the code here: ").strip()
+    # The browser address bar usually shows the code percent-encoded
+    # (the leading "4/" becomes "4%2F"). unquote handles both forms.
+    code = urllib.parse.unquote(input("Paste the code here: ").strip())
     if not code:
         print("ERROR: no code provided.", file=sys.stderr)
         return 2

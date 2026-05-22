@@ -12,10 +12,18 @@
 #   POST   /meetings/{meeting_id}/bot         — dispatch a Recall.ai bot
 #   GET    /meetings/{meeting_id}/bot         — bot lifecycle status
 #   DELETE /meetings/{meeting_id}/bot         — stop the bot
+#   GET    /meetings/credentials              — provider credential status
+#   POST   /meetings/credentials/zoom         — store + validate Zoom creds
+#   POST   /meetings/credentials/google_meet  — store Meet OAuth app creds
+#   GET    /meetings/credentials/google_meet/auth-url — Meet consent URL
+#   POST   /meetings/credentials/google_meet/callback — finish Meet OAuth
+#   DELETE /meetings/credentials/{provider}   — disconnect a provider
 #
-# Provider credentials (Zoom S2S + Google Meet OAuth) are deployment-wide
-# environment variables — single-account model, no per-workspace BYO and
-# no /credentials sub-resource. See meetings/service._build_adapter_default.
+# Provider credentials (Zoom S2S + Google Meet OAuth) — one deployment-
+# global account per provider, configured via the /meetings/credentials/*
+# routes (admin-gated, connector.manage) with secret values encrypted at
+# rest. The ZOOM_* / GOOGLE_MEET_* environment variables remain a
+# fallback. See meetings/credentials.py + service._build_adapter_default.
 
 from __future__ import annotations
 
@@ -25,13 +33,21 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.meetings import credentials as credentials_service
 from pocketpaw_ee.cloud.meetings import recall_client
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.meetings.dto import (
+    CompleteGoogleMeetOAuthRequest,
     CreateMeetingRequest,
+    CredentialsResponse,
+    DisconnectResponse,
+    GoogleMeetAuthUrlResponse,
+    GoogleMeetRedirectUriResponse,
     ListMeetingsRequest,
     MeetingDetailResponse,
     MeetingResponse,
+    StoreGoogleMeetCredentialsRequest,
+    StoreZoomCredentialsRequest,
     TranscriptResponse,
 )
 from pocketpaw_ee.cloud.shared.deps import (
@@ -69,6 +85,84 @@ async def create_meeting(
 ) -> MeetingResponse:
     """Create a meeting via the configured provider adapter."""
     return await meetings_service.create_meeting(workspace_id, user_id, body)
+
+
+# ---------------------------------------------------------------------------
+# Provider credentials — the Settings → Meetings connector page. One
+# deployment-global account per provider; admin-gated (connector.manage);
+# secret values encrypted at rest. Declared before /{meeting_id} so the
+# literal /credentials segment isn't captured as a meeting id.
+# ---------------------------------------------------------------------------
+
+_require_admin = Depends(require_action_any_workspace("connector.manage"))
+
+
+@router.get("/credentials", response_model=list[CredentialsResponse], dependencies=[_require_admin])
+async def list_credentials() -> list[CredentialsResponse]:
+    """Credential status for every configured meeting provider."""
+    return await credentials_service.list_credentials()
+
+
+@router.get(
+    "/credentials/google_meet/redirect-uri",
+    response_model=GoogleMeetRedirectUriResponse,
+    dependencies=[_require_admin],
+)
+async def google_meet_redirect_uri() -> GoogleMeetRedirectUriResponse:
+    """The redirect URI to register on the Google OAuth client."""
+    return credentials_service.get_google_meet_redirect_uri()
+
+
+@router.get(
+    "/credentials/google_meet/auth-url",
+    response_model=GoogleMeetAuthUrlResponse,
+    dependencies=[_require_admin],
+)
+async def google_meet_auth_url() -> GoogleMeetAuthUrlResponse:
+    """Build the Google consent URL (Meet app credentials must be stored first)."""
+    return await credentials_service.get_google_meet_auth_url()
+
+
+@router.post(
+    "/credentials/google_meet/callback",
+    response_model=CredentialsResponse,
+    dependencies=[_require_admin],
+)
+async def google_meet_callback(body: CompleteGoogleMeetOAuthRequest) -> CredentialsResponse:
+    """Complete Google Meet OAuth — exchange the consent code for a refresh token."""
+    return await credentials_service.complete_google_meet_oauth(body)
+
+
+@router.post("/credentials/zoom", response_model=CredentialsResponse, dependencies=[_require_admin])
+async def store_zoom_credentials(body: StoreZoomCredentialsRequest) -> CredentialsResponse:
+    """Store + validate Zoom Server-to-Server OAuth credentials."""
+    return await credentials_service.store_zoom(body)
+
+
+@router.post(
+    "/credentials/google_meet", response_model=CredentialsResponse, dependencies=[_require_admin]
+)
+async def store_google_meet_credentials(
+    body: StoreGoogleMeetCredentialsRequest,
+) -> CredentialsResponse:
+    """Store Google Meet OAuth app credentials (consent completed separately)."""
+    return await credentials_service.store_google_meet(body)
+
+
+@router.get(
+    "/credentials/{provider}", response_model=CredentialsResponse, dependencies=[_require_admin]
+)
+async def get_credentials(provider: str) -> CredentialsResponse:
+    """One provider's credential status."""
+    return await credentials_service.get_credentials(provider)
+
+
+@router.delete(
+    "/credentials/{provider}", response_model=DisconnectResponse, dependencies=[_require_admin]
+)
+async def disconnect_provider(provider: str) -> DisconnectResponse:
+    """Remove a provider's stored credentials."""
+    return await credentials_service.disconnect(provider)
 
 
 @router.get("/{meeting_id}", response_model=MeetingDetailResponse)

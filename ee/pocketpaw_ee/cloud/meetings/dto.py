@@ -81,3 +81,64 @@ class TranscriptResponse(BaseModel):
     language: str | None
     fetched_at: datetime | None
     indexed_in_kb: bool
+
+
+# ---------------------------------------------------------------------------
+# Provider credentials (Settings → Meetings connector page)
+# ---------------------------------------------------------------------------
+
+
+class StoreZoomCredentialsRequest(BaseModel):
+    """POST /meetings/credentials/zoom — Zoom S2S OAuth app credentials."""
+
+    account_id: str = Field(min_length=1, max_length=200)
+    client_id: str = Field(min_length=1, max_length=200)
+    client_secret: str = Field(min_length=1, max_length=500)
+
+
+class StoreGoogleMeetCredentialsRequest(BaseModel):
+    """POST /meetings/credentials/google_meet — Meet OAuth app credentials.
+
+    Stores the app credentials only; the long-lived refresh token is
+    obtained afterwards via the OAuth consent callback.
+    """
+
+    client_id: str = Field(min_length=1, max_length=300)
+    client_secret: str = Field(min_length=1, max_length=300)
+
+
+class CompleteGoogleMeetOAuthRequest(BaseModel):
+    """POST /meetings/credentials/google_meet/callback — the consent result."""
+
+    code: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+
+
+class CredentialsResponse(BaseModel):
+    """One provider's credential status. Never carries secret values."""
+
+    provider: MeetingProviderName
+    enabled: bool
+    has_credentials: bool
+    last_validated_at: datetime | None = None
+    last_error: str = ""
+
+
+class GoogleMeetAuthUrlResponse(BaseModel):
+    """GET /meetings/credentials/google_meet/auth-url."""
+
+    auth_url: str
+    redirect_uri: str
+
+
+class GoogleMeetRedirectUriResponse(BaseModel):
+    """GET /meetings/credentials/google_meet/redirect-uri."""
+
+    redirect_uri: str
+
+
+class DisconnectResponse(BaseModel):
+    """DELETE /meetings/credentials/{provider}."""
+
+    provider: MeetingProviderName
+    disconnected: bool

@@ -1,8 +1,8 @@
 # ZoomConnector — native adapter wrapping ZoomClient.
 # Created: 2026-05-19 — phase 1.4 of the meetings integration. Follows
-# the GoogleCalendarConnector pattern (adapters/gcalendar.py) but is
-# constructed per-workspace instead of as a global singleton — every
-# enterprise tenant brings its own Zoom Marketplace app.
+# the GoogleCalendarConnector pattern (adapters/gcalendar.py). Single
+# account: constructed from one deployment-wide Zoom Marketplace app
+# (S2S OAuth credentials read from env).
 #
 # Action surface lines up with the design's MeetingResponse shape:
 #   meeting_create / meeting_list / meeting_get / meeting_cancel
@@ -79,11 +79,11 @@ class ZoomConnector:
     # -----------------------------------------------------------------------
 
     async def connect(self, pocket_id: str, config: dict[str, Any]) -> ConnectionResult:
-        """Validate the configured token; does NOT walk OAuth from scratch.
+        """Validate the configured S2S credentials; reports current state.
 
-        OAuth provisioning happens in the cloud-side credentials service
-        (``ee/cloud/meetings/credentials.py``). This method exists for
-        ConnectorProtocol compatibility and reports the current state.
+        Server-to-Server OAuth has no browser flow — the client mints a
+        token directly from the env-configured app credentials. This
+        method exists for ConnectorProtocol compatibility.
         """
         try:
             await self._client._get_token()  # noqa: SLF001
@@ -102,8 +102,8 @@ class ZoomConnector:
             )
 
     async def disconnect(self, pocket_id: str) -> bool:
-        # Credentials lifecycle lives in ee/cloud/meetings/credentials.py;
-        # the adapter has nothing to tear down beyond the in-memory client.
+        # Single-account S2S: credentials are env-configured, nothing to
+        # tear down beyond the in-memory client + its cached token.
         return True
 
     async def actions(self) -> list[ActionSchema]:
@@ -212,6 +212,18 @@ class ZoomConnector:
                     start_time=start_time,
                     duration_minutes=int(params.get("duration_minutes", 30)),
                     agenda=params.get("agenda", ""),
+                    # Unattended-friendly defaults: the Recall recording bot
+                    # (and attendees) must get in with no host present.
+                    #   waiting_room=False           — no lobby to be admitted from
+                    #   join_before_host=True        — host account is never online
+                    #   approval_type=2              — no registration gate
+                    #   meeting_authentication=False — bot isn't a signed-in Zoom user
+                    settings={
+                        "waiting_room": False,
+                        "join_before_host": True,
+                        "approval_type": 2,
+                        "meeting_authentication": False,
+                    },
                 )
                 return ActionResult(success=True, data=data, records_affected=1)
 

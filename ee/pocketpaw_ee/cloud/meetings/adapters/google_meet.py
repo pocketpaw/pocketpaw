@@ -123,8 +123,15 @@ class GoogleMeetConnector:
                     },
                     "access_type": {
                         "type": "string",
-                        "description": "OPEN | TRUSTED (default) | RESTRICTED",
-                        "default": "TRUSTED",
+                        "description": (
+                            "OPEN (default) | TRUSTED | RESTRICTED. OPEN lets "
+                            "anyone with the link join without knocking — required "
+                            "for the recording bot to join unattended, since an "
+                            "anonymous bot otherwise waits in the lobby for a host "
+                            "to admit it, and the shared service account has no "
+                            "human behind it to do so."
+                        ),
+                        "default": "OPEN",
                     },
                 },
                 trust_level=TrustLevel.CONFIRM,
@@ -198,8 +205,13 @@ class GoogleMeetConnector:
     async def execute(self, action: str, params: dict[str, Any]) -> ActionResult:
         try:
             if action == "meeting_create":
+                # OPEN by default: an anonymous Recall recording bot waits in
+                # the Meet lobby until a *host* admits it, and our shared
+                # service account has no human behind it to click "admit".
+                # OPEN = anyone with the link joins without knocking, so the
+                # bot (and attendees) get in unattended.
                 space = await self._client.create_space(
-                    access_type=params.get("access_type", "TRUSTED")
+                    access_type=params.get("access_type", "OPEN")
                 )
                 # Normalize the response into Zoom-ish shape for the
                 # service-layer mapper (it reads ``id``, ``join_url``,

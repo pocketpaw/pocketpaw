@@ -112,8 +112,9 @@ async def test_execute_meeting_create_normalizes_to_zoom_shape(connector):
     assert result.data["id"] == "spaces/abc"
     assert result.data["join_url"] == "https://meet.google.com/xyz-pdq"
     assert result.data["space_name"] == "spaces/abc"
-    # access_type defaults to TRUSTED.
-    assert fake.calls[0] == ("create_space", {"access_type": "TRUSTED"})
+    # access_type defaults to OPEN so the anonymous recording bot can join
+    # without a host admitting it from the lobby.
+    assert fake.calls[0] == ("create_space", {"access_type": "OPEN"})
 
 
 async def test_execute_meeting_list_returns_records(connector):

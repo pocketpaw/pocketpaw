@@ -7,9 +7,11 @@
 #   * MeetingTranscript — one row per transcript session. Transcript entries
 #     live in the .vtt/.txt blob (referenced via file_id), NOT here.
 #
-# Provider credentials are NOT modeled — the deployment configures one
-# Zoom S2S app + one Google OAuth client via environment variables
-# (single-account model); there is no per-workspace BYO credential doc.
+# Provider credentials live in MeetingProviderCredentials — one
+# deployment-global row per provider, set via the Settings connector
+# page, with secret values encrypted at rest (_core/crypto.py). The
+# ZOOM_* / GOOGLE_MEET_* environment variables remain a fallback when no
+# stored row exists.
 
 from __future__ import annotations
 
@@ -123,3 +125,40 @@ class MeetingTranscript(TimestampedDocument):
         indexes = [
             [("workspace", 1), ("indexed_in_kb", 1)],
         ]
+
+
+# ---------------------------------------------------------------------------
+# Provider credentials
+# ---------------------------------------------------------------------------
+
+
+class MeetingProviderCredentials(TimestampedDocument):
+    """Stored credentials for ONE meeting provider — deployment-global.
+
+    Single-account model: exactly one row per provider for the whole
+    deployment (``provider`` is the unique key — there is deliberately no
+    ``workspace`` field). A workspace admin sets these via the
+    Settings → Meetings connector page.
+
+    Secret values (Zoom ``client_secret``; Google Meet ``client_secret``
+    + ``refresh_token``) are stored in ``secret_enc`` — a Fernet token
+    over a JSON dict (see _core/crypto.py). Non-secret values (Zoom
+    ``account_id`` + ``client_id``; Meet ``client_id``) live in
+    ``public_config`` in clear text so the UI can echo them back.
+
+    ``enabled`` flips True only once the credentials are validated — Zoom
+    via a live token grant, Google Meet once OAuth consent completes.
+    ``pending_state`` holds the in-flight OAuth ``state`` nonce between
+    the auth-url call and the consent callback.
+    """
+
+    provider: Indexed(str, unique=True)  # type: ignore[valid-type]  # "zoom" | "google_meet"
+    enabled: bool = False
+    public_config: dict[str, str] = Field(default_factory=dict)
+    secret_enc: str = ""
+    pending_state: str | None = None
+    last_validated_at: datetime | None = None
+    last_error: str = ""
+
+    class Settings(TimestampedDocument.Settings):
+        name = "meeting_provider_credentials"
