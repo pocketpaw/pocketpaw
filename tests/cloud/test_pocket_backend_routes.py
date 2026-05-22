@@ -15,6 +15,13 @@
 # Updated: 2026-05-21 (PR #1177 security pass) — added coverage for the
 # DELETE route, the edit-access guard on GET, and the user_id thread-through
 # on the source-run route.
+#
+# Updated: 2026-05-22 (RFC 05 M2a) — the executor-creds tuple gained a
+# trailing `allowed_writes` element and the backend response carries the
+# write allowlist; existing assertions updated. Added coverage for the two
+# new write-action routes:
+#   POST /pockets/{id}/actions/run        — run a declared write action
+#   PUT  /pockets/{id}/backend/write-policy — set the write allowlist
 
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ from pocketpaw_ee.cloud.pockets.router import router
 from pocketpaw_ee.cloud.shared.deps import (
     current_user_id,
     current_workspace_id,
+    require_pocket_action_run,
     require_pocket_edit,
     require_pocket_owner,
 )
@@ -46,6 +54,7 @@ def app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     a.dependency_overrides[require_license] = lambda: None
     a.dependency_overrides[require_pocket_edit] = lambda: None
     a.dependency_overrides[require_pocket_owner] = lambda: None
+    a.dependency_overrides[require_pocket_action_run] = lambda: None
     a.dependency_overrides[current_user_id] = lambda: FAKE_USER
     a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
     return a
@@ -91,6 +100,9 @@ def test_put_backend_configures(monkeypatch, client):
         "base_url": "https://api.example.com",
         "auth_type": "bearer",
         "configured": True,
+        # RFC 05 M2a: the response now carries the write allowlist —
+        # empty by default (fail-closed).
+        "allowed_writes": [],
     }
     # The route forwarded the right identity + body to the service.
     assert captured["workspace_id"] == FAKE_WORKSPACE
@@ -214,7 +226,8 @@ def test_run_sources_happy_path(monkeypatch, client):
         return {"_id": pocket_id, "rippleSpec": spec}
 
     async def _get_creds(workspace_id, pocket_id):
-        return ("https://api.example.com", "bearer", None, "tok")
+        # RFC 05 M2a: 5-tuple — the trailing element is the write allowlist.
+        return ("https://api.example.com", "bearer", None, "tok", [])
 
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
     monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
@@ -254,3 +267,192 @@ def test_run_sources_400_when_no_backend(monkeypatch, client):
 
     res = client.post("/pockets/pocket-1/sources/run", json={})
     assert res.status_code == 400, res.text
+
+
+# ---------------------------------------------------------------------------
+# PUT /pockets/{id}/backend/write-policy — RFC 05 M2a
+# ---------------------------------------------------------------------------
+
+
+def test_put_write_policy_sets_allowlist(monkeypatch, client):
+    captured = {}
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_writes):
+        captured.update(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            allowed_writes=allowed_writes,
+        )
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "bearer",
+            "configured": True,
+            "allowed_writes": allowed_writes,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_write_policy", _set_policy)
+
+    res = client.put(
+        "/pockets/pocket-1/backend/write-policy",
+        json={"allowed_writes": [{"method": "POST", "path_pattern": "/leases/*/renew"}]},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["allowed_writes"] == [{"method": "POST", "path_pattern": "/leases/*/renew"}]
+    # The route forwarded the right identity + rules to the service.
+    assert captured["pocket_id"] == "pocket-1"
+    assert captured["allowed_writes"] == [{"method": "POST", "path_pattern": "/leases/*/renew"}]
+
+
+def test_put_write_policy_rejects_bad_method(client):
+    """`method` is a write-verb Literal — GET is rejected at parse time."""
+    res = client.put(
+        "/pockets/pocket-1/backend/write-policy",
+        json={"allowed_writes": [{"method": "GET", "path_pattern": "/x"}]},
+    )
+    assert res.status_code == 422
+
+
+def test_put_write_policy_empty_list_is_valid(monkeypatch, client):
+    """An empty allowlist revokes every write — a valid request."""
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_writes):
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_writes": [],
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_write_policy", _set_policy)
+    res = client.put("/pockets/pocket-1/backend/write-policy", json={"allowed_writes": []})
+    assert res.status_code == 200, res.text
+    assert res.json()["allowed_writes"] == []
+
+
+# ---------------------------------------------------------------------------
+# POST /pockets/{id}/actions/run — RFC 05 M2a
+# ---------------------------------------------------------------------------
+
+
+def test_run_action_happy_path(monkeypatch, client):
+    """The route reads `method` server-side from the persisted action,
+    threads the resolved path/params + creds + allowlist to the executor,
+    and returns its result."""
+    spec = {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leases/*/renew"}],
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "action": kwargs["action"],
+            "status": 200,
+            "response": {"renewed": True},
+            "on_success": [],
+            "on_error": [],
+        }
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew", "params": {"rent": 2000}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["response"] == {"renewed": True}
+    # The executor saw the raw action (the server picks the verb), the
+    # resolved path/params, the creds, and the allowlist.
+    assert captured["raw_action"]["method"] == "POST"
+    assert captured["path"] == "/leases/42/renew"
+    assert captured["params"] == {"rent": 2000}
+    assert captured["allowed_writes"] == [{"method": "POST", "path_pattern": "/leases/*/renew"}]
+    assert captured["user_id"] == FAKE_USER
+
+
+def test_run_action_404_when_action_not_declared(monkeypatch, client):
+    """An action name not in the persisted spec returns an `ok:false`
+    body with code `action_not_found` — no executor call."""
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": {"actions": {}}}
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "ghost", "path": "/x"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is False
+    assert body["code"] == "action_not_found"
+
+
+def test_run_action_400_when_no_backend(monkeypatch, client):
+    spec = {"actions": {"a": {"kind": "write_binding", "method": "POST", "path": "/x"}}}
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _no_creds(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
+
+    res = client.post("/pockets/pocket-1/actions/run", json={"action": "a", "path": "/x"})
+    assert res.status_code == 400, res.text
+
+
+def test_run_action_forbidden_for_non_invited(monkeypatch):
+    """The action-run gate is owner OR explicit shared_with ONLY — a
+    workspace-visible pocket does not grant access. The guard denies."""
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    a = FastAPI()
+    add_error_handler(a)
+    a.include_router(router)
+    a.dependency_overrides[require_license] = lambda: None
+    a.dependency_overrides[require_pocket_edit] = lambda: None
+    a.dependency_overrides[require_pocket_owner] = lambda: None
+    a.dependency_overrides[current_user_id] = lambda: FAKE_USER
+    a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
+
+    def _deny():
+        raise Forbidden("pocket.access_denied", "write-action access required")
+
+    a.dependency_overrides[require_pocket_action_run] = _deny
+
+    res = TestClient(a).post("/pockets/pocket-1/actions/run", json={"action": "a", "path": "/x"})
+    assert res.status_code == 403

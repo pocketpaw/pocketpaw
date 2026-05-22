@@ -2427,10 +2427,11 @@ async def set_pocket_write_policy(
             "This pocket has no backend configured — set one before a write policy",
         )
 
-    doc.allowed_writes = [
-        _AllowedWriteDoc(method=rule["method"], path_pattern=rule["path_pattern"])
-        for rule in allowed_writes
-    ]
+    # `model_validate` re-checks the method Literal at runtime — the router
+    # already validated each rule through `AllowedWriteDTO`, but internal
+    # callers (bus handlers, jobs) re-parse here, matching the entry-point
+    # validation rule.
+    doc.allowed_writes = [_AllowedWriteDoc.model_validate(rule) for rule in allowed_writes]
     await doc.save()
 
     _audit_backend_config(

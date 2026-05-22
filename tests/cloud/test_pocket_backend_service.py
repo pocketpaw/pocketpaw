@@ -114,9 +114,11 @@ async def test_get_for_executor_no_token_for_none_auth(mongo_db):
     )
     creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
     assert creds is not None
-    _, auth_type, _, token = creds
+    # RFC 05 M2a: the executor tuple gained a trailing `allowed_writes`.
+    _, auth_type, _, token, allowed_writes = creds
     assert auth_type == "none"
     assert token == ""
+    assert allowed_writes == []
 
 
 async def test_set_backend_upserts(mongo_db):

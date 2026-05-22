@@ -50,9 +50,9 @@ from pocketpaw.security.url_validators import validate_external_url_strict
 from pocketpaw_ee.cloud.pockets._http_guard import (
     _HTTP_TIMEOUT,
     _MAX_RESPONSE_BYTES,
-    _GuardError,
     _assert_host_external,
     _auth_headers,
+    _GuardError,
     _resolve_url,
     _strip_query,
 )
@@ -114,9 +114,7 @@ def _instinct_rejected(raw_action: dict[str, Any]) -> bool:
     return bool(raw_action.get("requires_instinct"))
 
 
-def _allowlist_match(
-    method: str, path_no_query: str, allowed_writes: list[dict[str, Any]]
-) -> bool:
+def _allowlist_match(method: str, path_no_query: str, allowed_writes: list[dict[str, Any]]) -> bool:
     """Return ``True`` when ``(method, path)`` matches an allowlist entry.
 
     ``method`` is matched exactly (case-sensitive — both sides are upper
@@ -261,8 +259,10 @@ async def run_action(
     try:
         binding = ActionBinding.model_validate(raw_action)
     except ValidationError as exc:
-        msg = exc.errors()[0].get("msg", "malformed action binding") if exc.errors() else (
-            "malformed action binding"
+        msg = (
+            exc.errors()[0].get("msg", "malformed action binding")
+            if exc.errors()
+            else ("malformed action binding")
         )
         return _error(action, f"action binding is malformed: {msg}", "bad_binding", [])
 

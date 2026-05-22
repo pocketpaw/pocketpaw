@@ -7,6 +7,11 @@
 #   `backend` summary ({base_url, auth_type, configured}), and that the
 #   token NEVER reaches agent context.
 #
+# Updated: 2026-05-22 (RFC 05 M2a) — the backend summary gained an
+#   `allowed_writes` key (the per-pocket write allowlist — a non-secret
+#   the edit specialist needs to author write actions). Assertions updated
+#   to the new four-key shape.
+#
 # Exercises the real Beanie path against the in-memory mongomock-motor DB
 # (mongo_db fixture) with the w1/u1 SSE-stream identity (agent_identity).
 
@@ -99,6 +104,9 @@ async def test_agent_view_includes_configured_backend_summary(mongo_db, agent_id
         "base_url": "https://jsonplaceholder.typicode.com",
         "auth_type": "none",
         "configured": True,
+        # RFC 05 M2a: the summary now carries the write allowlist —
+        # empty by default (fail-closed).
+        "allowed_writes": [],
     }
 
 
@@ -125,8 +133,9 @@ async def test_agent_view_backend_summary_never_leaks_the_token(mongo_db, agent_
     backend = view["backend"]
     assert backend["configured"] is True
     assert backend["auth_type"] == "bearer"
-    # The summary carries only the three non-secret keys.
-    assert set(backend) == {"base_url", "auth_type", "configured"}
+    # The summary carries only non-secret keys (RFC 05 M2a adds
+    # `allowed_writes` — the write allowlist, also non-secret).
+    assert set(backend) == {"base_url", "auth_type", "configured", "allowed_writes"}
     # The token must not appear anywhere in the serialized view.
     import json
 
@@ -183,6 +192,8 @@ async def test_fetch_pocket_for_agent_carries_backend_summary(mongo_db, agent_id
         "base_url": "https://jsonplaceholder.typicode.com",
         "auth_type": "none",
         "configured": True,
+        # RFC 05 M2a: the summary now carries the write allowlist.
+        "allowed_writes": [],
     }
 
 

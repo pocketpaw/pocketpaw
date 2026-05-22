@@ -39,9 +39,7 @@ def set_action(spec: dict[str, Any], key: str, binding: dict[str, Any]) -> dict[
         actions = {}
         spec["actions"] = actions
     if not isinstance(actions, dict):
-        raise ValueError(
-            f"rippleSpec.actions is a {type(actions).__name__}, expected an object"
-        )
+        raise ValueError(f"rippleSpec.actions is a {type(actions).__name__}, expected an object")
     actions[key] = binding
     return spec
 

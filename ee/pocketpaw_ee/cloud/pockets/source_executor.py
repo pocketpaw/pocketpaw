@@ -43,9 +43,9 @@ from pocketpaw.security.url_validators import validate_external_url_strict
 from pocketpaw_ee.cloud.pockets._http_guard import (
     _HTTP_TIMEOUT,
     _MAX_RESPONSE_BYTES,
-    _GuardError,
     _assert_host_external,
     _auth_headers,
+    _GuardError,
     _resolve_url,
     _strip_query,
 )

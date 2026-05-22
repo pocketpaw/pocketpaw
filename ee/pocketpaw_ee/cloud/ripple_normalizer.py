@@ -271,13 +271,14 @@ _WRITE_VERBS = ("POST", "PUT", "PATCH", "DELETE")
 _CALL_BINDING_NAME_ALIASES = ("binding", "action_id", "name")
 
 
-def _is_relative_url(raw: str) -> bool:
+def _is_relative_url(raw: Any) -> bool:
     """Return ``True`` when ``raw`` is a relative path (no scheme, no
     netloc) — the only shape we lift onto the pocket's own backend.
 
     An absolute URL (``https://third-party.example/x``) or a
     protocol-relative URL (``//host/x``, which carries a netloc) is a
-    different intent and returns ``False``.
+    different intent and returns ``False``. A non-string (the agent's
+    ``url`` field may be missing or malformed) also returns ``False``.
     """
     if not isinstance(raw, str) or not raw:
         return False

@@ -10,6 +10,10 @@ API is described in the auto-generated wiki article
 Updated: 2026-05-21 (PR #1177 security pass) — documented the new
 DELETE /pockets/{id}/backend endpoint and the edit-access requirement on
 GET /pockets/{id}/backend.
+
+Updated: 2026-05-22 (RFC 05 M2a) — documented the write-action endpoints
+(POST /pockets/{id}/actions/run, PUT /pockets/{id}/backend/write-policy)
+and the per-pocket write allowlist now carried on the backend summary.
 -->
 
 # Cloud REST API Reference
@@ -44,11 +48,18 @@ Request body:
 Response `200`:
 
 ```json
-{ "base_url": "https://api.example.com", "auth_type": "bearer", "configured": true }
+{
+  "base_url": "https://api.example.com",
+  "auth_type": "bearer",
+  "configured": true,
+  "allowed_writes": []
+}
 ```
 
 The token is never echoed back. A non-https or internal `base_url` yields
-a `400`.
+a `400`. `allowed_writes` is the per-pocket write allowlist (RFC 05 M2a) —
+empty by default, so no write action can fire until an owner sets a policy
+via `PUT /pockets/{id}/backend/write-policy`.
 
 For `basic` auth, send `auth_token` as the raw `user:pass` credential —
 the server base64-encodes it into the `Authorization: Basic` header. Do
@@ -63,11 +74,17 @@ consistent with the `PUT` route. Viewers receive a `403`.
 Response `200`:
 
 ```json
-{ "base_url": "https://api.example.com", "auth_type": "bearer", "configured": true }
+{
+  "base_url": "https://api.example.com",
+  "auth_type": "bearer",
+  "configured": true,
+  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }]
+}
 ```
 
 Returns `404` when the pocket has no backend configured. The token is
-never included in the response.
+never included in the response. `allowed_writes` carries the current
+write allowlist (RFC 05 M2a).
 
 ### `DELETE /pockets/{pocket_id}/backend`
 
@@ -124,3 +141,95 @@ tight timeouts, caps response bodies at 512 KB, sanitizes error messages,
 and rate-limits to 10 runs per `(pocket, user)` pair per minute. Every run
 is written to the audit log (actor, pocket, status, query-stripped base
 URL) — the credential token is never logged.
+
+## Pockets — Write Actions
+
+RFC 05 M2a. A pocket's `rippleSpec.actions` declares **write** bindings
+(`POST` / `PUT` / `PATCH` / `DELETE`) — the write half of the data layer.
+A write has blast radius a read does not, so two controls sit on top of the
+SSRF guards the read executor already enforces:
+
+- **The per-pocket write allowlist** (`allowed_writes` on the backend
+  config). A write whose `(method, path)` does not match an allowlist entry
+  is rejected server-side before any call leaves PocketPaw. The allowlist
+  lives **outside** `rippleSpec`, in the same human-configured store as the
+  credential — the agent authors bindings, a human authorizes the *class*
+  of writes. The allowlist is **empty by default**: fail-closed, no write
+  fires until an owner sets a policy.
+- **Instinct-reject (fail-closed).** An action whose declaration carries a
+  truthy `requires_instinct` is rejected with `code: instinct_required` and
+  makes no call — M2a has no Instinct approval surface, so it refuses
+  rather than silently honor-then-ignore the flag. M2b wires the approval
+  routing.
+
+### `PUT /pockets/{pocket_id}/backend/write-policy`
+
+Set the pocket's write allowlist. Requires pocket **owner** access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `allowed_writes` | array | List of `{method, path_pattern}` rules. Replaces the whole list. An empty list is valid — it revokes every write. |
+
+Each rule: `method` is one of `POST` / `PUT` / `PATCH` / `DELETE`;
+`path_pattern` is a glob (`/leases/*/renew` allows `POST /leases/42/renew`).
+Omitting a verb means no action with that verb can ever fire.
+
+Response `200`: the backend summary, including the updated `allowed_writes`.
+
+Returns `400` when the pocket has no backend configured — a write policy
+with no backend to apply it to is meaningless. The change is audit-logged.
+
+### `POST /pockets/{pocket_id}/actions/run`
+
+Run one declared `rippleSpec.actions` write action against the pocket's
+configured backend. Access is **owner or explicit `shared_with` only** —
+deliberately narrower than the source-run route: a write has blast radius,
+so a workspace-visible pocket does **not** grant run access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `action` | string | Required. The action's name (its key in `rippleSpec.actions`). |
+| `path` | string | Required. The resolved path — Ripple's `{...}` expression resolver runs client-side at click time. |
+| `params` | object | Optional. The resolved request body. |
+| `idempotency_key` | string \| null | Optional. When omitted the server generates one so a write retried after a timeout cannot double-submit. |
+
+The HTTP `method` is **read server-side** from the persisted action entry —
+the client never picks the verb. The write fires only if the owner
+allow-listed the `(method, path)`.
+
+Response `200` (success):
+
+```json
+{
+  "ok": true,
+  "action": "mark_renewed",
+  "status": 201,
+  "response": { "id": 42, "status": "renewed" },
+  "on_success": [{ "action": "run_source", "source": "leases" }],
+  "on_error": []
+}
+```
+
+Response `200` (rejected): `ok` is `false`, with an `error` message and a
+`code`. Codes: `action_not_found`, `bad_binding`, `instinct_required`,
+`rate_limited`, `bad_base_url`, `bad_path`, `bad_host`, `not_allowed`,
+`redirect`, `http_error`, `too_large`, `timeout`, `request_failed`,
+`error`. The result is delivered **in this response body** — there is no
+`pocket_mutation` SSE emit; the client applies the `on_success` /
+`on_error` reconcile handlers.
+
+Returns `400` when the pocket has no backend configured; `403` when the
+caller is neither the owner nor in `shared_with`.
+
+**Security.** The write executor inherits every SSRF / timeout / size /
+redirect guard from the shared `_http_guard` module (the same code the
+read executor uses), then layers the write allowlist check, the
+fail-closed instinct-reject, an `Idempotency-Key` header on every call,
+and a write-specific rate limit — 20 writes per `(pocket, user)` per
+minute, a **separate** counter from the read budget. Every run (including
+every rejection) is written to the audit log; the credential token is
+never logged.

@@ -196,6 +196,4 @@ async def require_pocket_action_run(
         code="pocket.access_denied",
         resource_id=pocket_id,
     )
-    raise Forbidden(
-        "pocket.access_denied", "You do not have write-action access to this pocket"
-    )
+    raise Forbidden("pocket.access_denied", "You do not have write-action access to this pocket")

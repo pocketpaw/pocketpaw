@@ -962,7 +962,7 @@ class _SetActionArgs(BaseModel):
         default=None,
         description=(
             "Request body for the write — a map of fields, values may be "
-            "`{...}` expressions (e.g. {\"rent\": \"{state.form.rent}\"})."
+            '`{...}` expressions (e.g. {"rent": "{state.form.rent}"}).'
         ),
     )
     confirm: bool = Field(
@@ -1010,9 +1010,7 @@ def make_set_action_tool(
         if on_error is not None:
             binding["on_error"] = on_error
         result = await set_action_for_agent(pocket_id, action_key, binding)
-        _capture_op(
-            capture, "set_action", {"action_key": action_key, "method": method}, result
-        )
+        _capture_op(capture, "set_action", {"action_key": action_key, "method": method}, result)
         return result
 
     return StructuredTool.from_function(
