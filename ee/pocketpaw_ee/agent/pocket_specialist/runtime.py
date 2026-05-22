@@ -39,6 +39,16 @@ and customizes that template instead of cold-generating).
 ``_build_system_prompt`` accepts ``backend_summary`` and, when a
 ``template_id`` hint is set, splices the loaded template skeleton +
 customization rules in via ``_load_template_block``.
+Changes: 2026-05-22 (feat/api-skills, Increment 2b) — per-backend API
+skills. When a pocket has a backend configured, the specialist now loads
+that backend's installed API skill (a SKILL.md under
+``~/.pocketpaw/skills/api-<domain-slug>/``) and splices an endpoint
+reference into the prompt via ``_load_api_skill_for_backend`` +
+``_format_api_skill_block``, so the agent authors ``sources`` / ``actions``
+against real relative paths instead of hallucinating endpoints. Wired into
+``_build_system_prompt`` for the create path and into
+``_run_edit_subagent_pipeline`` for the edit path (the edit path already
+fetches ``backend_summary`` from ``get_pocket_backend``).
 """
 
 from __future__ import annotations
@@ -485,6 +495,94 @@ def _load_template_block(template_id: str, backend_summary: dict[str, Any] | Non
     )
 
 
+# ---------------------------------------------------------------------------
+# Per-backend API skills (feat/api-skills, Increment 2b).
+#
+# When a pocket has a backend configured, its OpenAPI spec may have been
+# installed as a skill (a SKILL.md under ``~/.pocketpaw/skills/api-<slug>/``,
+# written by ``pocketpaw.skills.api_skill_builder.install_api_skill``).
+# Loading that skill into the authoring prompt gives the specialist the
+# backend's REAL endpoints — so it authors ``sources`` / ``actions`` with
+# correct relative paths and response shapes instead of guessing.
+# ---------------------------------------------------------------------------
+
+
+def _load_api_skill_for_backend(backend_summary: dict[str, Any] | None) -> str | None:
+    """Load the installed API-skill content for a pocket's backend.
+
+    Derives the domain slug from ``backend_summary["base_url"]``'s
+    hostname (e.g. ``https://api.example.com`` → ``api-example-com``),
+    then loads ``~/.pocketpaw/skills/api-<slug>/SKILL.md`` via the
+    runtime ``parse_skill_md`` and returns its body ``.content``.
+
+    Returns ``None`` when ``backend_summary`` is missing, carries no
+    ``base_url``, or the skill file does not exist / fails to parse — a
+    missing API skill must never block pocket authoring. All imports are
+    lazy so the cost is paid only when a backend is actually configured.
+    """
+    if not backend_summary:
+        return None
+    try:
+        from urllib.parse import urlparse
+
+        from pocketpaw.skills.api_skill_builder import _slugify_domain
+        from pocketpaw.skills.loader import parse_skill_md
+
+        base_url = backend_summary.get("base_url")
+        if not isinstance(base_url, str) or not base_url.strip():
+            return None
+        parsed = urlparse(base_url if "://" in base_url else f"//{base_url}")
+        host = parsed.hostname or base_url.strip()
+        slug = _slugify_domain(host)
+
+        from pathlib import Path
+
+        skill_md = Path.home() / ".pocketpaw" / "skills" / f"api-{slug}" / "SKILL.md"
+        if not skill_md.is_file():
+            log.debug("[pocket-specialist] no API skill installed for backend slug=%s", slug)
+            return None
+
+        skill = parse_skill_md(skill_md)
+        if skill is None or not skill.content.strip():
+            return None
+        log.info("[pocket-specialist] loaded API skill api-%s into authoring prompt", slug)
+        return skill.content
+    except Exception:  # noqa: BLE001 — a missing/broken API skill must not block authoring
+        log.debug("[pocket-specialist] API-skill load failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _format_api_skill_block(content: str, backend_summary: dict[str, Any] | None) -> str:
+    """Wrap loaded API-skill content in a ``<backend-api>`` prompt block.
+
+    The block tells the specialist this is the backend's REAL API and to
+    author ``sources`` / ``actions`` ``path`` values from it — never an
+    invented endpoint, always a relative path.
+    """
+    base_url = ""
+    if backend_summary and isinstance(backend_summary.get("base_url"), str):
+        base_url = backend_summary["base_url"]
+    header = (
+        "\n\n<backend-api>\n"
+        "This pocket's backend has a published API. The endpoint "
+        "reference below is the REAL API"
+    )
+    if base_url:
+        header += f" of `{base_url}`"
+    header += (
+        ".\n"
+        "- Use these endpoint references to author every `sources` and "
+        "`actions` `path` — they are the authoritative list of what the "
+        "backend exposes.\n"
+        "- NEVER invent an endpoint that is not in this reference. If the "
+        "data the user wants has no matching endpoint, say so rather than "
+        "guessing a path.\n"
+        "- ALWAYS use the RELATIVE path shown (e.g. `/contacts`), never an "
+        "absolute URL — the runtime joins it to the backend base URL.\n\n"
+    )
+    return header + content.strip() + "\n</backend-api>\n"
+
+
 def _build_system_prompt(
     hints: PocketSpecialistHints | None,
     backend_summary: dict[str, Any] | None = None,
@@ -503,10 +601,25 @@ def _build_system_prompt(
     rippleSpec skeleton + customization rules are spliced in via
     ``_load_template_block`` — the highest-authority structural plan.
     An unknown slug is ignored (the specialist cold-generates).
+
+    When ``backend_summary`` names a configured backend whose API has
+    been installed as a skill, that endpoint reference is spliced in via
+    ``_load_api_skill_for_backend`` + ``_format_api_skill_block`` so the
+    specialist authors ``sources`` / ``actions`` against real paths. The
+    API block is appended even on a bare (no-``hints``) call.
     """
     base = POCKET_SPECIALIST_PROMPT.replace(POCKET_ID_TOKEN, "")
+
+    # The backend API skill is independent of hints — load it once up
+    # front so a bare ``_build_system_prompt(None, backend_summary)``
+    # call still gets the endpoint reference.
+    api_skill_content = _load_api_skill_for_backend(backend_summary)
+    api_block = (
+        _format_api_skill_block(api_skill_content, backend_summary) if api_skill_content else ""
+    )
+
     if not hints:
-        return base
+        return base + api_block
 
     surface = ("name", "description", "color", "icon", "target_pocket_id")
     plan = ("purpose", "layout", "focal_widget", "data_shape", "key_interactions")
@@ -539,8 +652,8 @@ def _build_system_prompt(
         template_block = _load_template_block(hints.template_id, backend_summary)
 
     if not lines and template_block is None:
-        return base
-    return base + "\n".join(lines) + (template_block or "")
+        return base + api_block
+    return base + "\n".join(lines) + (template_block or "") + api_block
 
 
 def _build_user_message(input: PocketSpecialistCreateInput) -> str:
@@ -827,6 +940,12 @@ async def _run_edit_subagent_pipeline(
     system_prompt = fill_current_pocket(
         POCKET_EDIT_SPECIALIST_PROMPT_MCP, input.pocket_id, backend_summary
     )
+    # When the pocket's backend has an installed API skill, splice its
+    # endpoint reference in so the edit specialist authors set_source /
+    # set_action ``path`` values against real endpoints (Increment 2b).
+    api_skill_content = _load_api_skill_for_backend(backend_summary)
+    if api_skill_content:
+        system_prompt += _format_api_skill_block(api_skill_content, backend_summary)
     user_message = _build_edit_user_message(input)
 
     log.info(

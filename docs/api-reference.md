@@ -14,6 +14,11 @@ GET /pockets/{id}/backend.
 Updated: 2026-05-22 (RFC 05 M2a) — documented the write-action endpoints
 (POST /pockets/{id}/actions/run, PUT /pockets/{id}/backend/write-policy)
 and the per-pocket write allowlist now carried on the backend summary.
+
+Updated: 2026-05-22 (feat/api-skills, Increment 2b) — documented
+POST /skills/api-doc, the per-backend API-skill install endpoint that
+turns a pocket backend's OpenAPI document into a loadable SKILL.md so
+the authoring agent stops hallucinating endpoints.
 -->
 
 # Cloud REST API Reference
@@ -233,3 +238,49 @@ and a write-specific rate limit — 20 writes per `(pocket, user)` per
 minute, a **separate** counter from the read budget. Every run (including
 every rejection) is written to the audit log; the credential token is
 never logged.
+
+## Skills — Per-Backend API Skills
+
+Increment 2b (the second half of pocket Increment 2, after the built-in
+templates of 2a). When a pocket is bound to a backend, the
+pocket-authoring agent does better work if it can see the backend's
+**real** API instead of guessing endpoints. This endpoint installs a
+backend's OpenAPI / Swagger document as a loadable skill: the agent then
+authors `rippleSpec.sources` / `rippleSpec.actions` against real relative
+paths and real response shapes rather than hallucinating them.
+
+The skill is a `SKILL.md` file written under `~/.pocketpaw/skills/api-<domain-slug>/`
+— one of the three roots PocketPaw's `SkillLoader` scans. The
+pocket-specialist runtime loads it (keyed by the pocket's backend
+hostname) and splices a `<backend-api>` endpoint reference into the
+authoring prompt.
+
+### `POST /skills/api-doc`
+
+Install a backend's OpenAPI / Swagger spec as a per-backend API skill.
+Requires the `skills.manage` role (**ADMIN**) — installing a skill
+changes workspace-wide pocket-authoring behaviour.
+
+Multipart form upload:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `file` | file | Required. The OpenAPI 3.x or Swagger 2.x document — `.json`, `.yaml`, or `.yml`, max 2 MB. |
+| `name` | string | Optional. The backend display name — used to derive the skill slug when the spec itself names no server. |
+
+The slug is derived from the spec's server hostname (`servers[0].url`
+for OpenAPI 3.x, `host` for Swagger 2.x), falling back to `name`. The
+generated reference groups operations by tag (or first path segment),
+caps at 200 endpoints, and records each operation's method, path,
+summary, key request params, and key 200-response fields.
+
+Response `200`:
+
+```json
+{ "ok": true, "slug": "api-example-com" }
+```
+
+Returns `422` when the file extension is unsupported, the file exceeds
+the 2 MB cap, the document is unparseable, or it carries no `paths`
+object. Every install is audit-logged with the workspace, the actor, and
+the resulting slug — never the spec contents.

@@ -1,5 +1,9 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated: 2026-05-22 (feat/api-skills, Increment 2b) — mounts the Skills
+    entity at ``/api/v1/skills`` (POST /skills/api-doc), the per-backend
+    API-skill install endpoint that turns a pocket backend's OpenAPI
+    document into a loadable SKILL.md for the authoring agent.
 Updated: 2026-05-17 — Mounts the workspace-scoped Audit entity at
     ``/api/v1/audit`` (B1) with tenancy from ``RequestContext.workspace_id``,
     the legacy ``/api/v1/runtime/audit`` remaining live; also mounts
@@ -134,6 +138,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
     from pocketpaw_ee.cloud.projects.router import router as projects_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
+    from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
     app.include_router(auth_router, prefix="/api/v1")
@@ -151,6 +156,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
+    # Skills — per-backend API-skill install (POST /skills/api-doc).
+    app.include_router(skills_router, prefix="/api/v1")
 
     # Phase 1 PR-8: register the connector bus listener so local-mode
     # CLI actions (firebase, gcp, …) get picked up by the in-process

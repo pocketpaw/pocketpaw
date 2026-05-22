@@ -34,6 +34,13 @@
 # fires only if the human owner allow-listed the method+path.
 # `_EDIT_TOOLS_MCP` now also lists `set_action` / `remove_action`.
 #
+# Changes: 2026-05-22 (feat/api-skills, Increment 2b) — both
+# `_LIVE_DATA_SOURCES_BLOCK` (create) and `_LIVE_DATA_SOURCES_EDIT_BLOCK`
+# (edit) gain a rule pointing the specialist at the `<backend-api>` block:
+# when an installed per-backend API skill is spliced into the prompt, the
+# agent must author `path` values from its real endpoint references rather
+# than guessing.
+#
 # Canonical source for every pocket-mode system prompt the agent ever sees.
 # Four strings are exported, one per (action × backend) cell:
 #
@@ -512,6 +519,9 @@ Rules:
 - A pocket using `sources` MUST have a backend configured (base URL +
   auth, set once via the pocket's backend settings — outside the spec).
   If no backend is configured, the sources will not run.
+- If a `<backend-api>` block is present in this prompt, use its endpoint
+  references to author `path` values — never guess a path when the
+  reference is available.
 - A source `path` is ALWAYS relative to the configured backend base URL
   — never put an absolute URL in `path`. You only ever author the
   relative path. If you are extending an existing pocket, `get_pocket`
@@ -600,6 +610,9 @@ Rules:
 - A pocket using sources MUST have a backend configured (base URL + auth,
   set once in the pocket's backend settings — outside the spec). Without
   a backend the sources will not run.
+- If a `<backend-api>` block is present in this prompt, use its endpoint
+  references to author `path` values — never guess a path when the
+  reference is available.
 - Do NOT stash a fake source descriptor in `state`, and do NOT build a
   refresh button that sends a chat message — use `set_source` + the
   `run_source` action.

@@ -21,6 +21,10 @@
 # ``instinct.propose``, ``instinct.approve``, ``instinct.audit`` so the
 # Fabric and Instinct routers (previously fully unguarded) can use
 # ``require_action_any_workspace``.
+#
+# Updated: 2026-05-22 (feat/api-skills, Increment 2b) — added
+# ``skills.manage`` (ADMIN) so the new ee.cloud.skills router can guard
+# POST /skills/api-doc, the per-backend API-skill install endpoint.
 
 from __future__ import annotations
 
@@ -181,6 +185,12 @@ ACTIONS: dict[str, ActionRule] = {
     # every workspace member. The role choice mirrors the existing
     # abac.ACTION_ROLES["audit.read"] entry.
     "audit.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Skills — installing a backend's OpenAPI spec as a per-backend API
+    # skill (ee.cloud.skills). ADMIN, mirroring connector.manage: the
+    # installed skill changes workspace-wide pocket-authoring behaviour
+    # and the install accepts an uploaded document, so it should not be
+    # open to every member.
+    "skills.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
 }
 
 
