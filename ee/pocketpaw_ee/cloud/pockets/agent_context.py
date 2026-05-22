@@ -14,6 +14,16 @@ edit specialist can author the pocket's ``rippleSpec.sources`` block.
 They emit a full-document ``replace`` ``pocket_mutation`` (the
 frontend's ``applyMutation`` already understands ``replace``) so no
 paw-enterprise change is needed.
+Changes: 2026-05-22 (Increment 3, RFC-06 structure/data split) — the
+granular node / state op frames are now discriminated: every
+``pocket_mutation`` they push carries a ``family`` field
+("updateComponents" for node ops, "updateDataModel" for state ops) so
+the canvas can patch only the structure layer or only the data layer.
+The frame is built via ``PocketMutationFrame`` and emitted FLAT so the
+historical un-discriminated consumers keep working; the coarse
+``PocketUpdated`` realtime event the service layer emits is untouched
+(it remains the refetch fallback). Still one ``pocket_mutation`` push
+per op — purely additive enrichment, not a second event.
 """
 
 from __future__ import annotations
@@ -212,29 +222,62 @@ async def _push_replace(pocket_view: dict[str, Any]) -> None:
         logger.debug("push_pocket_mutation failed (non-fatal)", exc_info=True)
 
 
-async def _push_node_op(action: str, pocket_view: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Push a granular ``pocket_mutation`` SSE event for one of the
-    five node-level ops (``node_added`` / ``node_replaced`` /
-    ``node_prop_set`` / ``node_moved`` / ``node_removed``).
+def _push_mutation_frame(op: str, pocket_view: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Build a discriminated ``PocketMutationFrame`` for one granular op
+    and push it as the ``pocket_mutation`` SSE event.
 
-    Newer clients apply the op in place using ``payload`` (which carries
-    the changed subtree + position info). Older clients ignore the
-    unknown action — but they STILL get a full re-render via the
-    realtime ``pocket.updated`` event the service layer emits on every
-    write, so they stay consistent without code changes.
+    ``op`` is the granular op identifier (``node_added`` / ``state_set`` /
+    …). It resolves to a mutation ``family`` — ``updateComponents`` for a
+    node/structure op, ``updateDataModel`` for a state/data op — which is
+    the RFC-06 split letting the canvas patch only the layer that
+    changed. The frame is emitted FLAT (``to_wire``) so the historical
+    un-discriminated consumers, which read ``action`` + flat payload
+    keys, keep working byte-for-byte.
+
+    Exactly one ``pocket_mutation`` push per op — the coarse
+    ``PocketUpdated`` realtime event the service layer emits on the same
+    write is the separate refetch fallback for clients that ignore
+    ``family``. An op whose identifier has no known family falls back to
+    the legacy flat frame (no ``family`` key) rather than dropping the
+    push.
     """
-    try:
-        from pocketpaw_ee.cloud.chat.agent_service import push_pocket_mutation
+    from pocketpaw_ee.cloud.chat.agent_schemas import PocketMutationFrame, family_for_op
+    from pocketpaw_ee.cloud.chat.agent_service import push_pocket_mutation
 
-        push_pocket_mutation(
-            {
-                "action": action,
-                "pocket_id": pocket_view.get("_id", ""),
-                **payload,
-            }
+    pocket_id = pocket_view.get("_id", "")
+    family = family_for_op(op)
+    try:
+        if family is None:
+            # Unknown op — keep the legacy flat frame so the canvas still
+            # gets a signal; only the discriminant is missing.
+            logger.debug("no mutation family for op %r — emitting legacy flat frame", op)
+            push_pocket_mutation({"action": op, "pocket_id": pocket_id, **payload})
+            return
+        frame = PocketMutationFrame(
+            family=family,
+            op=op,
+            pocket_id=pocket_id,
+            payload=payload,
         )
+        push_pocket_mutation(frame.to_wire())
     except Exception:
-        logger.debug("push_pocket_mutation(%s) failed (non-fatal)", action, exc_info=True)
+        logger.debug("push_pocket_mutation(%s) failed (non-fatal)", op, exc_info=True)
+
+
+async def _push_node_op(action: str, pocket_view: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Push a discriminated ``pocket_mutation`` SSE event for one of the
+    eight node-level ops (``node_added`` / ``node_replaced`` /
+    ``node_prop_set`` / ``node_moved`` / ``node_removed`` plus the three
+    ``node_prop_array_item_*`` ops).
+
+    Newer clients branch on ``family == "updateComponents"`` and apply
+    the op in place using ``payload`` (which carries the changed subtree
+    + position info). Older clients ignore the unknown ``family`` /
+    ``action`` — but they STILL get a full re-render via the realtime
+    ``pocket.updated`` event the service layer emits on every write, so
+    they stay consistent without code changes.
+    """
+    _push_mutation_frame(action, pocket_view, payload)
 
 
 def _spec_grammar_warnings(ripple_spec: dict[str, Any] | None) -> str | None:
@@ -669,21 +712,12 @@ async def remove_node_for_agent(pocket_id: str, node_id: str) -> dict[str, Any]:
 
 
 async def _push_state_op(action: str, pocket_view: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Push a granular ``pocket_mutation`` SSE event for one of the four
-    state-level ops (``state_set`` / ``state_appended`` / ``state_removed`` /
-    ``state_patched``). Mirrors ``_push_node_op``."""
-    try:
-        from pocketpaw_ee.cloud.chat.agent_service import push_pocket_mutation
-
-        push_pocket_mutation(
-            {
-                "action": action,
-                "pocket_id": pocket_view.get("_id", ""),
-                **payload,
-            }
-        )
-    except Exception:
-        logger.debug("push_pocket_mutation(%s) failed (non-fatal)", action, exc_info=True)
+    """Push a discriminated ``pocket_mutation`` SSE event for one of the
+    four state-level ops (``state_set`` / ``state_appended`` /
+    ``state_removed`` / ``state_patched``). Mirrors ``_push_node_op`` —
+    state ops resolve to ``family == "updateDataModel"`` so a client can
+    re-render only the data-bound widgets and skip layout entirely."""
+    _push_mutation_frame(action, pocket_view, payload)
 
 
 async def set_state_for_agent(pocket_id: str, path: str, value: Any) -> dict[str, Any]:

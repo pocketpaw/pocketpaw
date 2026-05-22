@@ -1,6 +1,9 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-05-22: Added ``pocket_router_enabled`` (kill-switch) and
+    ``pocket_router_min_confidence`` (cheap-tier confidence floor) for
+    the pocket execution router (Increment 3).
   - 2026-05-21: Added ``auto_install_bundled_skills`` and
     ``auto_install_bundled_kb_scopes`` — toggle the boot-time mirror of
     bundled SKILL.md files and pre-compiled kb-go scopes.
@@ -367,6 +370,33 @@ class Settings(BaseSettings):
             "with ``spec=<draft>`` for validate-and-persist. ``agent`` mode "
             "ignores ``pocket_specialist_backend`` and ``pocket_specialist_model`` "
             "entirely — the chat agent's runtime is the LLM."
+        ),
+    )
+    pocket_router_enabled: bool = Field(
+        default=True,
+        description=(
+            "Kill-switch for the pocket execution router (Increment 3). When "
+            "True (default) ``pocket_specialist__edit`` first runs a pure, "
+            "rule-based classifier that routes a request to the cheapest "
+            "capable tier — Tier 0 declarative (fire a declared source/action), "
+            "Tier 1 deterministic op (apply one granular op), or Tier 2 "
+            "specialist (the existing LLM flow). When False the router always "
+            "escalates to Tier 2, restoring pre-router behaviour exactly — "
+            "every edit invokes the specialist. Flip to False to disable the "
+            "router instantly without a deploy if a Tier-0/1 verdict ever "
+            "misfires."
+        ),
+    )
+    pocket_router_min_confidence: float = Field(
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence floor for a cheap-tier (Tier 0 / Tier 1) routing "
+            "verdict. The classifier escalates to the specialist (Tier 2) "
+            "whenever its confidence in the cheap tier falls below this "
+            "threshold. High by default — a wrong skip produces a broken "
+            "pocket, so the router is deliberately conservative."
         ),
     )
     auto_install_bundled_skills: bool = Field(

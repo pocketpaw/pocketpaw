@@ -14,6 +14,9 @@ fills the interaction prompt's current-pocket block via ``fill_current_pocket``
 (both the pocket-id and backend-summary tokens) instead of a bare
 ``POCKET_ID_TOKEN`` replace, so the new ``__BACKEND_SUMMARY__`` token never
 leaks as literal text.
+Changes: 2026-05-22 (Increment 3) — added ``push_pocket_execution``, the
+SSE-sink push for the execution router's per-request ``pocket_execution``
+observability frame.
 """
 
 from __future__ import annotations
@@ -118,6 +121,15 @@ def push_sse_event(name: str, data: dict[str, Any]) -> None:
 def push_pocket_mutation(payload: dict[str, Any]) -> None:
     """Compatibility wrapper — historic call site for pocket-mutation pushes."""
     push_sse_event("pocket_mutation", payload)
+
+
+def push_pocket_execution(payload: dict[str, Any]) -> None:
+    """Push a ``pocket_execution`` SSE frame — the execution router's
+    per-request observability readout (which tier ran, the stage
+    timeline, total latency, token spend). Sibling of
+    ``push_pocket_mutation``; emitted once per ``classify_and_route``
+    call. No-op outside an SSE stream."""
+    push_sse_event("pocket_execution", payload)
 
 
 def attach_sse_event_sink(queue: asyncio.Queue[tuple[str, dict[str, Any]]]) -> Token:

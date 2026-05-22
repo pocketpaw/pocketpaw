@@ -356,3 +356,22 @@ source_modules = [
     "pocketpaw_ee.cloud.audit.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.audit"]
+
+# Increment 3 — the pocket execution router. The classifier is PURE: a
+# rule-based ``classify(intent, ripple_spec)`` with no I/O. It must never
+# import Beanie documents, the cloud-side executors / services, or the LLM
+# specialist — those belong to the router layer (``router.py``), which is
+# the only module here allowed to invoke them.
+[[tool.importlinter.contracts]]
+name = "Pocket router — classifier stays pure"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["pocketpaw_ee.agent.pocket_router.classifier"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.pockets.service",
+    "pocketpaw_ee.cloud.pockets.source_executor",
+    "pocketpaw_ee.cloud.pockets.action_executor",
+    "pocketpaw_ee.agent.pocket_specialist.runtime",
+    "pocketpaw_ee.agent.pocket_specialist.adapters",
+]

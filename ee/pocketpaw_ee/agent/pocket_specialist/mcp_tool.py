@@ -15,6 +15,13 @@ Changes: 2026-05-21 (#1170) — the ``edit`` tool now accepts an optional
 ``ops`` argument: the agent-mode second-call payload. In agent mode the
 first ``edit`` call returns ``action='draft_kit'`` and the chat agent
 calls back with ``ops=<granular op list>``. Subagent mode ignores it.
+Changes: 2026-05-22 (Increment 3) — ``_edit_handler`` now calls the
+execution router (``pocket_router.classify_and_route``) FIRST. The
+router routes the request to the cheapest capable tier (Tier 0
+declarative / Tier 1 deterministic op); only on an *escalate* verdict
+does the handler fall through to ``run_edit_specialist`` (the existing
+flow, unchanged). ``create`` is out of scope — a new pocket has nothing
+to classify against, so it always goes straight to ``run_specialist``.
 """
 
 from __future__ import annotations
@@ -133,13 +140,48 @@ async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
         ops=raw_ops if isinstance(raw_ops, list) else None,
     )
 
+    settings = get_settings()
     try:
-        out = await run_edit_specialist(
-            payload,
-            workspace_id=workspace_id,
-            user_id=user_id,
-            settings=get_settings(),
-        )
+        # Increment 3 — the execution router runs FIRST. It classifies the
+        # intent and, when HIGH-confidence, routes to a cheap tier (Tier 0
+        # declarative / Tier 1 deterministic op) without ever invoking the
+        # LLM specialist. Only on an *escalate* verdict (``handled`` is
+        # False) does control fall through to ``run_edit_specialist`` — the
+        # existing flow, unchanged. The router's kill-switch
+        # (``pocket_router_enabled=false``) makes every request escalate,
+        # restoring the pre-router behaviour exactly.
+        #
+        # The router only applies to a *second-call* edit (``ops is None``):
+        # the chat agent's first call is the draft-kit handshake, which the
+        # router has nothing to classify against — let it reach the
+        # specialist's agent-mode adapter unchanged.
+        if payload.ops is None:
+            from pocketpaw_ee.agent.pocket_router.router import classify_and_route
+
+            handled, routed = await classify_and_route(
+                payload,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                settings=settings,
+            )
+            if handled:
+                out = routed
+            else:
+                out = await run_edit_specialist(
+                    payload,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    settings=settings,
+                )
+        else:
+            # An explicit op list — the chat agent already computed the
+            # ops; route straight to the deterministic apply path.
+            out = await run_edit_specialist(
+                payload,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                settings=settings,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("pocket specialist edit run failed")
         return {
