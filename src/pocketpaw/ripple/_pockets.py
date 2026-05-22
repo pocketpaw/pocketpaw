@@ -508,6 +508,28 @@ Rules:
   widget renders before the first fetch.
 - Use `sources` ONLY for the user's real backend. For workspace data use
   the `$source` markers above; for canvas-local input use literal values.
+
+DO NOT GET THIS WRONG — the runtime reads `rippleSpec.sources` and
+nothing else:
+- Data sources go in `rippleSpec.sources` ONLY. NEVER put them in
+  `tool_specs` — `tool_specs` is for LLM tools, not data, and a
+  `tool_specs` entry inside the rippleSpec is silently inert.
+- A source entry has EXACTLY four fields: `method`, `path`, `bind`,
+  `refresh`. Do NOT invent `kind`, `url`, `auto_fetch`, `into`, or `id` —
+  none of those exist and the source will not run.
+- The refresh button targets the source by `source` (the sources-map
+  key). NEVER use `source_id`.
+
+  WRONG — inert, the runtime ignores all of this:
+    "tool_specs": [{"id": "src_todos", "kind": "rest", "method": "GET",
+                    "url": "/todos", "auto_fetch": true, "into": "todos"}]
+    {"action": "run_source", "source_id": "src_todos"}
+
+  RIGHT:
+    "sources": {"todos": {"method": "GET", "path": "/todos",
+                          "bind": "state.todos",
+                          "refresh": ["pocket_open", "manual"]}}
+    {"action": "run_source", "source": "todos"}
 </live-data-sources>
 """
 
@@ -569,6 +591,22 @@ Rules:
   `run_source` action.
 - Use sources ONLY for the user's real backend. For workspace data use
   the `$source` markers; for canvas-local input use literal values.
+
+DO NOT GET THIS WRONG — the runtime reads `rippleSpec.sources` and
+nothing else:
+- Live data sources go in `rippleSpec.sources` ONLY, written via
+  `set_source`. NEVER author a `tool_specs` entry for data — `tool_specs`
+  is for LLM tools, not data, and is silently inert as a data source.
+- A source is EXACTLY `{method, path, bind, refresh}`. Do NOT invent
+  `kind`, `url`, `auto_fetch`, `into`, or `id` — they do not exist.
+- The refresh button targets the source by `source` (the source key),
+  NEVER `source_id`.
+
+  WRONG — inert, the runtime ignores it:
+    {"action": "run_source", "source_id": "todos"}
+
+  RIGHT:
+    {"action": "run_source", "source": "todos"}
 </live-data-sources>
 """
 
