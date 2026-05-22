@@ -451,6 +451,7 @@ async def run_pocket_action(
 
     # no-event: the write result is response-body delivery, not persisted.
     result = await action_executor.run_action(
+        workspace_id=workspace_id,
         pocket_id=pocket_id,
         user_id=user_id,
         action=body.action,

@@ -17,6 +17,14 @@
 #   - The write rate limit is a SEPARATE counter from the read executor's
 #     (a read budget never drains the write budget and vice versa).
 #   - The Idempotency-Key header is present; a client-supplied key wins.
+#
+# Updated: 2026-05-22 (security review hardening) — adds:
+#   - S1: the allowlist matches the percent-DECODED path, so encoding
+#     cannot flip the verdict and an off-allowlist path cannot slip past.
+#   - S2: a backend >=400 status does not leak the exact number to the
+#     client — the response carries a generic message.
+#   - N1: a DELETE with empty params sends NO request body; a DELETE with
+#     params still does.
 #   - The happy path returns the backend's parsed JSON + on_success.
 
 from __future__ import annotations
@@ -136,6 +144,7 @@ async def test_instinct_required_rejects_before_any_call(monkeypatch):
 
     raw = {**_write_action(), "requires_instinct": True}
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="mark_renewed",
@@ -159,6 +168,7 @@ async def test_instinct_policy_alone_does_not_reject(monkeypatch):
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={"ok": 1}))
     raw = {**_write_action(), "instinct_policy": "approve_per_row"}
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="mark_renewed",
@@ -182,6 +192,7 @@ async def test_instinct_policy_alone_does_not_reject(monkeypatch):
 async def test_allowlist_happy_match(monkeypatch):
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={"renewed": True}))
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="mark_renewed",
@@ -208,6 +219,7 @@ async def test_allowlist_method_mismatch_rejected(monkeypatch):
 
     _mock_client_patch(monkeypatch, handler)
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="del",
@@ -235,6 +247,7 @@ async def test_allowlist_path_mismatch_rejected(monkeypatch):
 
     _mock_client_patch(monkeypatch, handler)
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="del",
@@ -257,6 +270,7 @@ async def test_allowlist_strips_query_before_match(monkeypatch):
     the query is stripped before the allowlist check."""
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={"ok": 1}))
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="patch",
@@ -282,6 +296,7 @@ async def test_allowlist_empty_rejects_everything(monkeypatch):
 
     _mock_client_patch(monkeypatch, handler)
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="mark_renewed",
@@ -312,6 +327,7 @@ async def test_allowlist_literal_star_in_path_does_not_match_concrete_pattern(mo
 
     _mock_client_patch(monkeypatch, handler)
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="weird",
@@ -338,6 +354,7 @@ async def test_allowlist_literal_star_in_path_does_not_match_concrete_pattern(mo
 async def test_dotdot_traversal_rejected(monkeypatch):
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={}))
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -357,6 +374,7 @@ async def test_dotdot_traversal_rejected(monkeypatch):
 async def test_absolute_url_path_rejected(monkeypatch):
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={}))
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -376,6 +394,7 @@ async def test_absolute_url_path_rejected(monkeypatch):
 async def test_internal_base_url_rejected(monkeypatch):
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={}))
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -401,6 +420,7 @@ async def test_host_resolving_internal_rejected(monkeypatch):
 
     monkeypatch.setattr("socket.getaddrinfo", _internal_getaddrinfo)
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -424,6 +444,7 @@ async def test_redirect_is_an_error(monkeypatch):
         lambda r: httpx.Response(302, headers={"location": "https://evil.com/x"}),
     )
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -449,6 +470,7 @@ async def test_oversize_response_rejected(monkeypatch):
         lambda r: httpx.Response(200, content=big, headers={"content-type": "application/json"}),
     )
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -475,6 +497,7 @@ async def test_write_rate_limit_breach(monkeypatch):
 
     async def _one():
         return await run_action(
+            workspace_id="w1",
             pocket_id="p-rl",
             user_id="u1",
             action="a",
@@ -504,6 +527,7 @@ async def test_write_rate_limit_isolated_from_read_budget(monkeypatch):
     # Drain the WRITE budget fully.
     for _ in range(action_executor._ACTION_RATE_LIMIT_MAX):
         await run_action(
+            workspace_id="w1",
             pocket_id="shared",
             user_id="u1",
             action="a",
@@ -517,6 +541,7 @@ async def test_write_rate_limit_isolated_from_read_budget(monkeypatch):
             allowed_writes=_allow(),
         )
     breach = await run_action(
+        workspace_id="w1",
         pocket_id="shared",
         user_id="u1",
         action="a",
@@ -548,6 +573,7 @@ async def test_read_budget_does_not_drain_write_budget(monkeypatch):
 
     # A write for the same key still goes through — separate counter.
     result = await run_action(
+        workspace_id="w1",
         pocket_id="shared2",
         user_id="u1",
         action="a",
@@ -578,6 +604,7 @@ async def test_idempotency_key_generated_when_omitted(monkeypatch):
 
     _mock_client_patch(monkeypatch, handler)
     await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -605,6 +632,7 @@ async def test_client_supplied_idempotency_key_is_honored(monkeypatch):
 
     _mock_client_patch(monkeypatch, handler)
     await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -643,6 +671,7 @@ async def test_happy_path_sends_params_and_carries_on_success(monkeypatch):
         "on_error": [{"action": "toast", "variant": "error"}],
     }
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="mark_renewed",
@@ -665,8 +694,13 @@ async def test_happy_path_sends_params_and_carries_on_success(monkeypatch):
 
 
 async def test_backend_4xx_becomes_http_error(monkeypatch):
+    """A backend >=400 maps to the `http_error` category — and the exact
+    numeric status is NOT echoed to the client (S2: the endpoint must not
+    be a backend path-probing oracle). The number lives only in the audit
+    log."""
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(422, json={"err": "bad"}))
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -681,12 +715,16 @@ async def test_backend_4xx_becomes_http_error(monkeypatch):
     )
     assert result["ok"] is False
     assert result["code"] == "http_error"
+    # S2 — the client-facing message is generic; the raw 422 is not leaked.
+    assert "422" not in result["error"]
+    assert result["error"] == "the backend rejected the request"
 
 
 async def test_malformed_binding_is_bad_binding(monkeypatch):
     """A raw action missing `method` is a `bad_binding` rejection."""
     _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={}))
     result = await run_action(
+        workspace_id="w1",
         pocket_id="p1",
         user_id="u1",
         action="a",
@@ -701,3 +739,165 @@ async def test_malformed_binding_is_bad_binding(monkeypatch):
     )
     assert result["ok"] is False
     assert result["code"] == "bad_binding"
+
+
+# ---------------------------------------------------------------------------
+# S1 — the allowlist matches the DECODED path
+# ---------------------------------------------------------------------------
+
+
+async def test_percent_encoded_path_matches_decoded_form_consistently(monkeypatch):
+    """A request path with percent-encoded segments is matched against the
+    human-authored `path_pattern` after a single decode. The match result
+    is identical to the result for the path's plain, decoded form — a
+    client cannot change the allowlist verdict by encoding the request.
+
+    Pattern `/leases/*/renew` allows lease renewals. The literal word
+    `renew` encoded as `%72%65%6e%65%77` decodes back to `renew`, so the
+    encoded request matches exactly as its decoded twin does — without the
+    decode, the trailing literal would not match the pattern and an
+    allowed request would be wrongly rejected."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["hit"] = True
+        return httpx.Response(200, json={"renewed": True})
+
+    _mock_client_patch(monkeypatch, handler)
+
+    # `%72%65%6e%65%77` == "renew"; the resolved path decodes to
+    # `/leases/42/renew`, matching the `/leases/*/renew` pattern.
+    encoded_result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="mark_renewed",
+        raw_action=_write_action("POST", "/leases/42/%72%65%6e%65%77"),
+        path="/leases/42/%72%65%6e%65%77",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow("POST", "/leases/*/renew"),
+    )
+    # The decoded twin — the SAME resource expressed plainly.
+    plain_result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="mark_renewed",
+        raw_action=_write_action("POST", "/leases/42/renew"),
+        path="/leases/42/renew",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow("POST", "/leases/*/renew"),
+    )
+    # Encoding the path must not flip the allowlist verdict.
+    assert encoded_result["ok"] == plain_result["ok"] is True
+    assert seen.get("hit") is True
+
+
+async def test_percent_encoded_path_cannot_slip_past_allowlist(monkeypatch):
+    """A request whose DECODED path is not on the allowlist stays rejected
+    even when the client percent-encodes it. `%2E%2E` decodes to `..`; the
+    SSRF guard catches the traversal, and a non-traversal encoded path that
+    decodes to an off-allowlist resource is a plain `not_allowed` miss —
+    either way the encoded form gets the same verdict as its decoded twin:
+    no call leaves the server."""
+    called = {"hit": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["hit"] = True
+        return httpx.Response(200, json={})
+
+    _mock_client_patch(monkeypatch, handler)
+
+    # `%75%73%65%72%73` == "users"; decoded path is `/users/9/delete`,
+    # which the `/leases/*/renew` pattern does not cover. Encoding it does
+    # not smuggle it past the allowlist.
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="del",
+        raw_action=_write_action("POST", "/%75%73%65%72%73/9/delete"),
+        path="/%75%73%65%72%73/9/delete",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow("POST", "/leases/*/renew"),
+    )
+    assert result["ok"] is False
+    assert result["code"] == "not_allowed"
+    # The rejection message names the DECODED path, not the encoded one.
+    assert "/users/9/delete" in result["error"]
+    assert called["hit"] is False
+
+
+# ---------------------------------------------------------------------------
+# N1 — empty-params DELETE sends no JSON body
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_with_empty_params_sends_no_body(monkeypatch):
+    """A DELETE with no params sends NO request body — some backends and
+    WAFs reject a DELETE that carries a JSON body."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["content"] = request.content
+        seen["content_type"] = request.headers.get("content-type")
+        return httpx.Response(200, json={"deleted": True})
+
+    _mock_client_patch(monkeypatch, handler)
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="del",
+        raw_action=_write_action("DELETE", "/leases/42"),
+        path="/leases/42",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow("DELETE", "/leases/*"),
+    )
+    assert result["ok"] is True
+    # No body at all — not even an empty `{}`.
+    assert seen["content"] == b""
+
+
+async def test_delete_with_params_still_sends_body(monkeypatch):
+    """A DELETE WITH params still carries the JSON body — only the empty
+    case is special-cased."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content) if request.content else None
+        return httpx.Response(200, json={"deleted": True})
+
+    _mock_client_patch(monkeypatch, handler)
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="del",
+        raw_action={**_write_action("DELETE", "/leases/42"), "params": {"reason": "expired"}},
+        path="/leases/42",
+        params={"reason": "expired"},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow("DELETE", "/leases/*"),
+    )
+    assert result["ok"] is True
+    assert seen["body"] == {"reason": "expired"}

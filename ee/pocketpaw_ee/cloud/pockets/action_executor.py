@@ -4,6 +4,14 @@
 #   module runs POST/PUT/PATCH/DELETE write bindings declared in a pocket's
 #   `rippleSpec.actions` block against the pocket's single configured
 #   backend.
+# Updated: 2026-05-22 (security review hardening) — (S1) the write
+#   allowlist now globs the human `path_pattern` against the percent-
+#   DECODED request path so encoding cannot defeat the match; (S2) a
+#   backend >=400 status is no longer echoed to the client — the exact
+#   number goes only to the audit log via `_BackendHTTPError`, the client
+#   sees a generic message; (N1) an empty-params DELETE sends no JSON
+#   body; (N3) `workspace_id` is now on every write-action audit entry so
+#   the entries are tenant-filterable.
 #
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
@@ -77,6 +85,20 @@ _action_log: dict[tuple[str, str], list[float]] = {}
 _action_log_lock = asyncio.Lock()
 
 
+class _BackendHTTPError(Exception):
+    """Raised by ``_do_request`` when the backend returns a >=400 status.
+
+    Carries the exact numeric ``status_code`` so the caller can record it
+    in the audit log — but the caller never echoes it to the client. A
+    separate type (not ``_GuardError``) keeps the status-bearing failure
+    from leaking the number through a shared ``message`` field.
+    """
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"backend returned status {status_code}")
+        self.status_code = status_code
+
+
 class ActionBinding(BaseModel):
     """One write binding parsed from `rippleSpec.actions`.
 
@@ -124,6 +146,12 @@ def _allowlist_match(method: str, path_no_query: str, allowed_writes: list[dict[
     the caller before this check so a pattern like ``/leases/*`` is not
     defeated by ``?x=y``.
 
+    The caller passes the percent-DECODED path — the human-authored
+    ``path_pattern`` is globbed against the decoded request path so the
+    match is consistent regardless of client encoding (a ``%2e%2e`` cannot
+    slip past as something the pattern does not recognise). The
+    ``path_pattern`` itself is matched as-is and is NOT decoded.
+
     An empty ``allowed_writes`` matches nothing — fail-closed: a pocket
     with no write policy can fire no writes.
     """
@@ -163,19 +191,39 @@ async def _action_rate_limited(pocket_id: str, user_id: str) -> bool:
 
 
 def _audit_action_run(
-    *, actor: str, pocket_id: str, action: str, status: str, base_url: str
+    *,
+    actor: str,
+    workspace_id: str,
+    pocket_id: str,
+    action: str,
+    status: str,
+    base_url: str,
+    backend_status: int | None = None,
 ) -> None:
     """Write an audit-log entry for a write-action run.
 
     Mirrors ``source_executor._audit_source_run`` — category
     ``pocket_backend_config``, severity WARNING. The token is NEVER passed;
-    ``base_url`` is query-stripped before it is logged. A rejected write
-    (allowlist miss, instinct gate, bad path) is audited with the matching
-    ``status`` so the rejection is visible. Audit failures must not break
-    the run, so the call is wrapped.
+    ``base_url`` is query-stripped before it is logged. ``workspace_id`` is
+    logged so write-action entries are tenant-filterable, the same way the
+    backend-config audit entries already are. A rejected write (allowlist
+    miss, instinct gate, bad path) is audited with the matching ``status``
+    so the rejection is visible. ``backend_status`` carries the exact
+    numeric HTTP status from the backend on an ``http_error`` — it goes
+    ONLY into the audit log, never the client response, so the endpoint is
+    not a path-probing oracle. Audit failures must not break the run, so
+    the call is wrapped.
     """
     try:
         from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        fields: dict[str, Any] = {
+            "pocket_id": pocket_id,
+            "pocket_action": action,
+            "base_url": _strip_query(base_url),
+        }
+        if backend_status is not None:
+            fields["backend_status"] = backend_status
 
         get_audit_logger().log(
             AuditEvent.create(
@@ -185,9 +233,8 @@ def _audit_action_run(
                 target=pocket_id,
                 status=status,
                 category="pocket_backend_config",
-                pocket_id=pocket_id,
-                pocket_action=action,
-                base_url=_strip_query(base_url),
+                workspace_id=workspace_id,
+                **fields,
             )
         )
     except Exception:  # noqa: BLE001 — audit must never break the run
@@ -207,6 +254,7 @@ def _error(action: str, message: str, code: str, on_error: list[dict]) -> dict:
 
 async def run_action(
     *,
+    workspace_id: str,
     pocket_id: str,
     user_id: str,
     action: str,
@@ -249,8 +297,9 @@ async def run_action(
       4. Strict base-URL re-validation (defense in depth).
       5. ``_resolve_url`` — path-traversal / absolute-URL / cross-host
          rejection (shared SSRF guard).
-      6. ALLOWLIST — ``(method, query-stripped path)`` must match an
-         ``allowed_writes`` entry; a miss is audited WARNING ``rejected``.
+      6. ALLOWLIST — ``(method, query-stripped, percent-decoded path)``
+         must match an ``allowed_writes`` entry; a miss is audited WARNING
+         ``rejected``.
       7. DNS pre-resolve — reject a host that resolves internal.
       8. The HTTP call: redirects disabled, 3xx is an error, tight
          timeouts, 512 KB response cap, sanitized errors.
@@ -275,6 +324,7 @@ async def run_action(
     if _instinct_rejected(raw_action):
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="instinct-required",
@@ -291,6 +341,7 @@ async def run_action(
     if await _action_rate_limited(pocket_id, user_id):
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="rate-limited",
@@ -305,6 +356,7 @@ async def run_action(
     except ValueError as exc:
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="rejected",
@@ -318,6 +370,7 @@ async def run_action(
     except _GuardError as exc:
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="rejected",
@@ -333,16 +386,25 @@ async def run_action(
     # _strip_query keeps the scheme+host; match the entry against the path
     # portion only, the same shape the human authors in `path_pattern`.
     path_only = urllib.parse.urlsplit(path_no_query).path or "/"
-    if not _allowlist_match(method, path_only, allowed_writes):
+    # Decode percent-encoding ONCE before the match — `_allowlist_match`
+    # globs the human-authored `path_pattern` against the DECODED path, so
+    # an entry like `/leases/*/renew` matches consistently regardless of
+    # how the client encoded the path. A `%2e%2e` cannot slip past the
+    # allowlist as something the human pattern does not recognise. The
+    # `path_pattern` itself is human-authored and matched as-is — only the
+    # request path is decoded.
+    path_decoded = urllib.parse.unquote(path_only)
+    if not _allowlist_match(method, path_decoded, allowed_writes):
         logger.warning(
             "pocket %s action %s: %s %s not in write allowlist",
             pocket_id,
             action,
             method,
-            path_only,
+            path_decoded,
         )
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="rejected",
@@ -350,7 +412,7 @@ async def run_action(
         )
         return _error(
             action,
-            f"{method} {path_only} is not in this pocket's write allowlist",
+            f"{method} {path_decoded} is not in this pocket's write allowlist",
             "not_allowed",
             on_error,
         )
@@ -361,6 +423,7 @@ async def run_action(
     except _GuardError as exc:
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="rejected",
@@ -388,15 +451,32 @@ async def run_action(
     except TimeoutError:
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="error",
             base_url=base_url,
         )
         return _error(action, "action timed out", "timeout", on_error)
+    except _BackendHTTPError as exc:
+        # S2 — the exact backend HTTP status goes ONLY to the audit log,
+        # never the client. Echoing `resp.status_code` to the caller turns
+        # this endpoint into a path-probing oracle on the configured
+        # backend. The client sees a generic `http_error` category.
+        _audit_action_run(
+            actor=user_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            action=action,
+            status="error",
+            base_url=base_url,
+            backend_status=exc.status_code,
+        )
+        return _error(action, "the backend rejected the request", "http_error", on_error)
     except _GuardError as exc:
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="error",
@@ -407,6 +487,7 @@ async def run_action(
         logger.warning("pocket %s action %s: unexpected failure", pocket_id, action, exc_info=True)
         _audit_action_run(
             actor=user_id,
+            workspace_id=workspace_id,
             pocket_id=pocket_id,
             action=action,
             status="error",
@@ -416,6 +497,7 @@ async def run_action(
 
     _audit_action_run(
         actor=user_id,
+        workspace_id=workspace_id,
         pocket_id=pocket_id,
         action=action,
         status="success",
@@ -439,20 +521,29 @@ async def _do_request(
     params: dict[str, Any],
 ) -> dict:
     """Make the one write request. Returns ``{status, response}``; raises
-    ``_GuardError`` on a transport failure, a 3xx redirect, a >=400 status,
-    or an oversized body.
+    ``_GuardError`` on a transport failure, a 3xx redirect, or an oversized
+    body, and ``_BackendHTTPError`` on a >=400 status.
 
-    ``params`` is sent as the JSON request body for POST/PUT/PATCH; DELETE
-    sends it too (some APIs accept a DELETE body) — an empty dict is
-    harmless. Redirects are disabled on the client; a 3xx is an error,
-    exactly as the read executor treats one.
+    ``params`` is sent as the JSON request body for POST/PUT/PATCH. For a
+    DELETE the body is sent ONLY when ``params`` is non-empty — a DELETE
+    with no params sends no JSON body at all, because some backends and
+    WAFs reject a DELETE that carries a body. Redirects are disabled on
+    the client; a 3xx is an error, exactly as the read executor treats one.
     """
+    # N1 — omit the JSON body on an empty-params DELETE; some backends/WAFs
+    # reject a DELETE with a body. Any verb with non-empty params still
+    # sends the body.
+    send_body = bool(params) or method != "DELETE"
+
     async with httpx.AsyncClient(
         follow_redirects=False,
         timeout=_HTTP_TIMEOUT,
     ) as client:
         try:
-            resp = await client.request(method, url, headers=headers, json=params)
+            if send_body:
+                resp = await client.request(method, url, headers=headers, json=params)
+            else:
+                resp = await client.request(method, url, headers=headers)
         except httpx.HTTPError as exc:
             # D12 — never propagate raw exception text; log a stripped URL.
             logger.warning(
@@ -465,8 +556,11 @@ async def _do_request(
     # D9 — redirects are disabled on the client; treat any 3xx as an error.
     if 300 <= resp.status_code < 400:
         raise _GuardError("backend returned a redirect (not followed)", code="redirect")
+    # S2 — a >=400 status raises a status-bearing error; the caller logs
+    # the exact number to the audit log and returns a generic message to
+    # the client so the endpoint is not a backend path-probing oracle.
     if resp.status_code >= 400:
-        raise _GuardError(f"backend returned status {resp.status_code}", code="http_error")
+        raise _BackendHTTPError(resp.status_code)
 
     # D11 — reject oversized bodies; never surface partial data.
     body = resp.content

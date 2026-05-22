@@ -397,6 +397,9 @@ def test_run_action_happy_path(monkeypatch, client):
     assert captured["params"] == {"rent": 2000}
     assert captured["allowed_writes"] == [{"method": "POST", "path_pattern": "/leases/*/renew"}]
     assert captured["user_id"] == FAKE_USER
+    # The route threads `workspace_id` so the executor can tenant-tag its
+    # audit-log entries.
+    assert captured["workspace_id"]
 
 
 def test_run_action_404_when_action_not_declared(monkeypatch, client):
