@@ -176,6 +176,11 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets._http_guard",
     "pocketpaw_ee.cloud.pockets.action_executor",
     "pocketpaw_ee.cloud.pockets.actions_ops",
+    # RFC 04 M3 — the interval-refresh scheduler + the auto-refresh budget
+    # helper. The scheduler scans pockets through `pockets.service` and
+    # refreshes through `source_executor`; neither touches Beanie directly.
+    "pocketpaw_ee.cloud.pockets.refresh_scheduler",
+    "pocketpaw_ee.cloud.pockets._refresh_budget",
     # RFC 05 M2b.1 — the instinct bridge proposes/executes parked writes
     # through `pockets.service` and the Instinct store; it never touches
     # Beanie document classes directly.

@@ -16,6 +16,15 @@
 #   executor's own per-source errors (timeouts, http_error, bad_json, …).
 #   Behavior-identical — pure refactor; the read-executor tests are the
 #   regression gate.
+# Updated: 2026-05-22 (RFC 04 M3) — `SourceBinding.refresh` now also
+#   accepts `"interval"` (re-run on a timer) and `"webhook"` (re-run on an
+#   inbound authenticated POST). A binding may carry
+#   `refresh_interval_seconds` — the desired interval; the interval
+#   scheduler floors it by `POCKETPAW_SOURCE_REFRESH_MIN_INTERVAL_SECONDS`
+#   so a hallucinated `1` cannot spin the loop. Both new triggers are
+#   AUTO-refresh: they re-run a source with no human in the loop, so they
+#   are metered by the per-pocket budget in `_refresh_budget.py` —
+#   SEPARATE from the manual per-(pocket, user) `_run_log` limiter here.
 #
 # SSRF BOUNDARY. The outbound-HTTP defenses now live in `_http_guard.py` —
 # the ONE canonical guard module both executors import. Every defense from
@@ -67,8 +76,15 @@ _run_log: dict[tuple[str, str], list[float]] = {}
 # TOCTOU race under ``asyncio.gather``; the lock makes it atomic.
 _run_log_lock = asyncio.Lock()
 
+# A refresh trigger names WHEN a source re-runs:
+#   pocket_open — re-run when the user opens the pocket
+#   manual      — re-run from a refresh button (run_source action)
+#   interval    — re-run on a timer (RFC 04 M3 — interval scheduler)
+#   webhook     — re-run on an authenticated inbound POST (RFC 04 M3)
+RefreshTrigger = Literal["pocket_open", "manual", "interval", "webhook"]
+
 # Default refresh policy for a source that omits ``refresh``.
-_DEFAULT_REFRESH: list[Literal["pocket_open", "manual"]] = ["pocket_open"]
+_DEFAULT_REFRESH: list[RefreshTrigger] = ["pocket_open"]
 
 
 class SourceBinding(BaseModel):
@@ -77,14 +93,20 @@ class SourceBinding(BaseModel):
     Unknown keys on a source entry are ignored — the spec may carry fields
     a later milestone reads. ``method`` is a Literal so only GET is ever
     accepted (write verbs are Milestone 2).
+
+    ``refresh_interval_seconds`` is the source author's desired interval
+    when ``"interval"`` is in ``refresh``. It is a REQUEST, not a
+    guarantee: the interval scheduler floors it by the configured
+    minimum (``POCKETPAW_SOURCE_REFRESH_MIN_INTERVAL_SECONDS``), so a
+    hallucinated ``refresh_interval_seconds: 1`` is clamped, never
+    honored. ``None`` means "use the floor as the interval".
     """
 
     method: Literal["GET"] = "GET"
     path: str
     bind: str
-    refresh: list[Literal["pocket_open", "manual"]] = Field(
-        default_factory=lambda: _DEFAULT_REFRESH.copy()
-    )
+    refresh: list[RefreshTrigger] = Field(default_factory=lambda: _DEFAULT_REFRESH.copy())
+    refresh_interval_seconds: int | None = Field(default=None, ge=1)
 
 
 def _normalize_bind(bind: str) -> str:
@@ -382,4 +404,4 @@ async def run_sources(
     return {"ran": ran, "errors": errors}
 
 
-__all__ = ["run_sources", "SourceBinding"]
+__all__ = ["run_sources", "SourceBinding", "RefreshTrigger"]

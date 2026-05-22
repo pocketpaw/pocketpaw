@@ -47,13 +47,26 @@ Updated: 2026-05-22 (security-review fix for PR #1183, SHOULD-FIX 2) —
 absent from the wire dict before constructing ``RunActionResponse`` (the
 DTO is also ``extra="forbid"``), so a resolved write path/params can
 never leak onto the response if the strip drifts.
+
+Updated: 2026-05-22 (RFC 04 M3) — added the webhook-refresh routes:
+
+    POST /pockets/{id}/sources/{source}/refresh — inbound webhook trigger
+    GET  /pockets/{id}/backend/webhook          — read the webhook secret
+    POST /pockets/{id}/backend/webhook/rotate   — rotate the webhook secret
+
+The inbound refresh route is authenticated by a per-pocket SECRET carried
+in the ``X-Pocket-Webhook-Secret`` header — NOT by the cookie/Bearer auth
+chain — so an upstream system can trigger a refresh without a user
+session. A wrong / missing secret returns the SAME 403 whether or not the
+pocket exists, so the endpoint is not a tenant-existence oracle. The two
+secret-management routes are owner-only.
 """
 
 from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 
@@ -382,6 +395,138 @@ async def run_pocket_sources(
         token=token,
         trigger=body.trigger,
         only_source=body.source,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Webhook refresh (RFC 04 M3)
+# ---------------------------------------------------------------------------
+
+
+class WebhookSecretResponse(BaseModel):
+    """The pocket's webhook secret + the inbound URL to call with it.
+
+    Owner-facing. ``secret`` is the value an upstream system echoes back in
+    the ``X-Pocket-Webhook-Secret`` header on the refresh call. ``secret``
+    is ``None`` until an owner runs a rotate.
+    """
+
+    pocket_id: str
+    secret: str | None
+    refresh_path: str
+
+
+@router.post("/{pocket_id}/sources/{source}/refresh")
+async def webhook_refresh_source(
+    pocket_id: str,
+    source: str,
+    x_pocket_webhook_secret: str | None = Header(default=None),
+) -> dict:
+    """Re-run one ``"webhook"``-refresh source — triggered by an upstream
+    system, authenticated by the per-pocket webhook secret.
+
+    This route is DELIBERATELY outside the cookie/Bearer auth chain: an
+    upstream backend has no PocketPaw user session. Authentication is the
+    secret carried in ``X-Pocket-Webhook-Secret`` — generated server-side,
+    stored on the backend-credential row, never in the spec.
+
+    Security:
+    * A wrong / missing / unset secret, a pocket with no backend, and a
+      genuinely-missing pocket ALL return the SAME ``403`` — the endpoint
+      reveals nothing about whether a pocket id exists.
+    * The secret compare is constant-time (``secrets.compare_digest`` in
+      the service).
+    * The refresh is metered by the per-pocket auto-refresh budget — a
+      webhook flood cannot run up unbounded backend cost; over-budget
+      hits are skipped (HTTP 200 with a ``skipped`` marker), not queued.
+    * The named source must actually carry ``"webhook"`` in its refresh
+      policy — a webhook hit cannot run an arbitrary source.
+    """
+    from pocketpaw_ee.cloud.pockets import _refresh_budget, source_executor
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    creds = await pockets_service.resolve_webhook_pocket(pocket_id, x_pocket_webhook_secret or "")
+    if creds is None:
+        # Identical error for every failure mode — not a pocket oracle.
+        raise CloudError(403, "pocket_webhook.unauthorized", "Invalid or missing webhook secret")
+    base_url, auth_type, auth_header, token, _allowed, _route, workspace_id = creds
+
+    ripple_spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
+    if ripple_spec is None:
+        raise CloudError(403, "pocket_webhook.unauthorized", "Invalid or missing webhook secret")
+
+    # The named source must exist AND opt into webhook refresh — a valid
+    # secret does not grant the right to run a non-webhook source.
+    sources = ripple_spec.get("sources")
+    binding = sources.get(source) if isinstance(sources, dict) else None
+    if not isinstance(binding, dict) or "webhook" not in (binding.get("refresh") or []):
+        raise CloudError(
+            404,
+            "pocket_webhook.source_not_found",
+            f"no webhook-refresh source named '{source}' on this pocket",
+        )
+
+    # Per-pocket auto-refresh budget — separate from the manual limiter.
+    if not await _refresh_budget.consume_auto_refresh(pocket_id):
+        return {"ran": [], "errors": [], "skipped": "rate_limited"}
+
+    # no-event: webhook refresh is response-body delivery, not persisted.
+    return await source_executor.run_sources(
+        pocket_id=pocket_id,
+        user_id="system:webhook-refresh",
+        ripple_spec=ripple_spec,
+        base_url=base_url,
+        auth_type=auth_type,
+        auth_header=auth_header,
+        token=token,
+        only_source=source,
+    )
+
+
+@router.get(
+    "/{pocket_id}/backend/webhook",
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def get_pocket_webhook_secret(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> WebhookSecretResponse:
+    """Read this pocket's webhook secret. Owner-only.
+
+    The secret IS the credential an upstream caller echoes back, so the
+    owner can read it to configure the upstream. ``secret`` is ``None``
+    until a rotate generates one. Returns ``400`` when the pocket has no
+    backend configured.
+    """
+    secret = await pockets_service.get_webhook_secret(workspace_id, pocket_id)
+    return WebhookSecretResponse(
+        pocket_id=pocket_id,
+        secret=secret,
+        refresh_path=f"/api/v1/pockets/{pocket_id}/sources/{{source}}/refresh",
+    )
+
+
+@router.post(
+    "/{pocket_id}/backend/webhook/rotate",
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def rotate_pocket_webhook_secret(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> WebhookSecretResponse:
+    """Generate a fresh webhook secret for this pocket. Owner-only.
+
+    Rotating invalidates the previous secret immediately — any upstream
+    still sending the old value gets a 403 until reconfigured. Returns
+    ``400`` when the pocket has no backend configured.
+    """
+    secret = await pockets_service.rotate_webhook_secret(workspace_id, user_id, pocket_id)
+    return WebhookSecretResponse(
+        pocket_id=pocket_id,
+        secret=secret,
+        refresh_path=f"/api/v1/pockets/{pocket_id}/sources/{{source}}/refresh",
     )
 
 

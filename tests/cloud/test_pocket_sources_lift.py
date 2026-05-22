@@ -13,6 +13,12 @@
 #   - auto_fetch:false -> refresh ["manual"].
 #   - an absolute `url` is reduced to a relative `path`.
 #   - a non-GET method entry is skipped (alpha is GET-only).
+#
+# Updated: 2026-05-22 (RFC 04 M3) — `_lifted_source_entry` now carries an
+# interval through. A hallucinated REST entry with a poll-interval key
+# (`interval` / `interval_seconds` / `poll_seconds` / …) is lifted with
+# `refresh_interval_seconds` set and `interval` appended to its refresh
+# policy. Added coverage for that lift.
 
 from __future__ import annotations
 
@@ -269,3 +275,100 @@ def test_handler_arrays_are_walked():
     handlers = normalized["ui"]["children"][0]["on_click"]
     assert handlers[0] == {"action": "run_source", "source": "src_todos"}
     assert handlers[1] == {"action": "set_state", "path": "todos", "value": []}
+
+
+# ---------------------------------------------------------------------------
+# RFC 04 M3 — interval lift
+# ---------------------------------------------------------------------------
+
+
+def test_hallucinated_interval_key_is_lifted():
+    """A REST entry with an invented `interval` key lifts to a source with
+    `refresh_interval_seconds` and `interval` appended to its refresh list."""
+    spec = {
+        "title": "Polled",
+        "version": "1.0",
+        "tool_specs": [
+            {
+                "id": "live_prs",
+                "kind": "rest",
+                "method": "GET",
+                "url": "/pulls",
+                "into": "prs",
+                "interval": 300,
+            }
+        ],
+        "state": {"prs": []},
+        "ui": {"type": "flex", "children": []},
+    }
+    normalized = normalize_ripple_spec(spec)
+    assert normalized is not None
+    src = normalized["sources"]["live_prs"]
+    assert src["refresh_interval_seconds"] == 300
+    assert "interval" in src["refresh"]
+
+
+def test_interval_lift_accepts_poll_seconds_alias():
+    """The `poll_seconds` alias is recognised as an interval key too."""
+    spec = {
+        "title": "Polled",
+        "version": "1.0",
+        "tool_specs": [
+            {
+                "id": "feed",
+                "kind": "rest",
+                "method": "GET",
+                "url": "/feed",
+                "into": "feed",
+                "poll_seconds": 120,
+            }
+        ],
+        "state": {"feed": []},
+        "ui": {"type": "flex", "children": []},
+    }
+    normalized = normalize_ripple_spec(spec)
+    src = normalized["sources"]["feed"]
+    assert src["refresh_interval_seconds"] == 120
+    assert "interval" in src["refresh"]
+
+
+def test_no_interval_key_leaves_source_without_interval():
+    """A REST entry with no poll key lifts to a source with NO
+    `refresh_interval_seconds` and no `interval` trigger."""
+    spec = {
+        "title": "Static",
+        "version": "1.0",
+        "tool_specs": [
+            {"id": "once", "kind": "rest", "method": "GET", "url": "/once", "into": "once"}
+        ],
+        "state": {"once": []},
+        "ui": {"type": "flex", "children": []},
+    }
+    normalized = normalize_ripple_spec(spec)
+    src = normalized["sources"]["once"]
+    assert "refresh_interval_seconds" not in src
+    assert "interval" not in src["refresh"]
+
+
+def test_unusable_interval_value_is_dropped():
+    """A non-numeric / zero interval value is ignored — no interval lift."""
+    spec = {
+        "title": "Bad interval",
+        "version": "1.0",
+        "tool_specs": [
+            {
+                "id": "x",
+                "kind": "rest",
+                "method": "GET",
+                "url": "/x",
+                "into": "x",
+                "interval": "soon",
+            }
+        ],
+        "state": {"x": []},
+        "ui": {"type": "flex", "children": []},
+    }
+    normalized = normalize_ripple_spec(spec)
+    src = normalized["sources"]["x"]
+    assert "refresh_interval_seconds" not in src
+    assert "interval" not in src["refresh"]

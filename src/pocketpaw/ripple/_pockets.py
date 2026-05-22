@@ -507,8 +507,21 @@ READ-ONLY: GET bindings only.
 
 Each source entry: `method` (always "GET"), `path` (a RELATIVE path
 against the pocket's backend — never an absolute URL), `bind` (a dotted
-`state.` path the result is written to), and `refresh` (when to run it —
-`pocket_open` on open, `manual` for a refresh button).
+`state.` path the result is written to), and `refresh` (when to run it).
+
+`refresh` is a list of triggers — combine any of:
+- `pocket_open` — re-fetch each time the user opens the pocket.
+- `manual` — re-fetch from a refresh button (the `run_source` action).
+- `interval` — re-fetch on a timer. Add `refresh_interval_seconds` (the
+  desired gap in seconds) alongside `refresh`; the runtime floors a
+  too-small value, so pick a real cadence (e.g. 300 for 5 minutes).
+- `webhook` — re-fetch when an upstream system calls the pocket's
+  webhook-refresh URL. The webhook secret is generated in the pocket's
+  backend settings — never authored in the spec.
+
+  "prs": {"method": "GET", "path": "/pulls", "bind": "state.prs",
+          "refresh": ["pocket_open", "interval"],
+          "refresh_interval_seconds": 300}
 
 For a manual refresh, add a button wired to the `run_source` action:
 
@@ -538,9 +551,10 @@ nothing else:
 - Data sources go in `rippleSpec.sources` ONLY. NEVER put them in
   `tool_specs` — `tool_specs` is for LLM tools, not data, and a
   `tool_specs` entry inside the rippleSpec is silently inert.
-- A source entry has EXACTLY four fields: `method`, `path`, `bind`,
-  `refresh`. Do NOT invent `kind`, `url`, `auto_fetch`, `into`, or `id` —
-  none of those exist and the source will not run.
+- A source entry has `method`, `path`, `bind`, `refresh` — plus
+  `refresh_interval_seconds` ONLY when `refresh` includes `interval`. Do
+  NOT invent `kind`, `url`, `auto_fetch`, `into`, or `id` — none of those
+  exist and the source will not run.
 - The refresh button targets the source by `source` (the sources-map
   key). NEVER use `source_id`.
 
@@ -580,6 +594,11 @@ READ-ONLY: GET bindings only. These write the pocket's top-level
   )
 
   remove_source(source_key="prs")
+
+`refresh` triggers: `pocket_open` (on open), `manual` (refresh button),
+`interval` (a timer — pass `refresh_interval_seconds` in the binding too,
+e.g. 300 for 5 minutes), `webhook` (an upstream system pings the pocket's
+webhook-refresh URL; the secret is set in backend settings, never here).
 
 After `set_source`, do the wiring with the normal ops:
 - `set_state` the `bind` target to an empty list/value so the bound
@@ -624,8 +643,9 @@ nothing else:
 - Live data sources go in `rippleSpec.sources` ONLY, written via
   `set_source`. NEVER author a `tool_specs` entry for data — `tool_specs`
   is for LLM tools, not data, and is silently inert as a data source.
-- A source is EXACTLY `{method, path, bind, refresh}`. Do NOT invent
-  `kind`, `url`, `auto_fetch`, `into`, or `id` — they do not exist.
+- A source is `{method, path, bind, refresh}` — plus
+  `refresh_interval_seconds` when `refresh` includes `interval`. Do NOT
+  invent `kind`, `url`, `auto_fetch`, `into`, or `id` — they do not exist.
 - The refresh button targets the source by `source` (the source key),
   NEVER `source_id`.
 
