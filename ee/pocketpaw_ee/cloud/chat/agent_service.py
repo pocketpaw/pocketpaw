@@ -14,6 +14,11 @@ Changes: 2026-05-22 — ``ScopeContext`` carries the anchored pocket's
 when that type is ``"home"`` so the agent behaves correctly on the home page
 (call ``add_widget`` for an explicit widget request, answer directly
 otherwise). ``_resolve_pocket`` / ``_resolve_session`` populate the field.
+Changes: 2026-05-22 (#1174) — ``build_behavior_instructions`` no longer emits
+``POCKET_DELEGATION_RULE`` (nor the heavy interaction prompt) for a
+``type="home"`` scope. The delegation rule ("never call add_widget, delegate
+to the specialist") contradicts ``HOME_POCKET_PROMPT`` ("call add_widget");
+the home agent now gets exactly one consistent widget-creation instruction.
 Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — ``build_behavior_instructions``
 fills the interaction prompt's current-pocket block via ``fill_current_pocket``
 (both the pocket-id and backend-summary tokens) instead of a bare
@@ -505,7 +510,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
 
     Backend gating mirrors ``build_context_block``: MCP-capable backends
     get ``INLINE_RIPPLE_SYSTEM_PROMPT + POCKET_DELEGATION_RULE``;
-    others get the heavy inline pocket prompt.
+    others get the heavy inline pocket prompt. A ``type="home"`` scope is
+    the exception — it gets ``INLINE_RIPPLE_SYSTEM_PROMPT +
+    HOME_POCKET_PROMPT`` and NOT the delegation rule, because the home
+    agent mutates widgets directly via the ``add_widget`` MCP tool rather
+    than delegating to the pocket specialist.
     """
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
@@ -517,7 +526,23 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     if _composio_service.is_enabled():
         parts.append(_COMPOSIO_AUTH_FLOW_RULE)
         parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)
-    if backend_name in _MCP_POCKET_BACKENDS:
+    # The home pocket is a special case: its agent mutates widgets directly
+    # via the ``add_widget`` MCP tool — it does NOT delegate to the pocket
+    # specialist. ``POCKET_DELEGATION_RULE`` ("never call add_widget,
+    # delegate to the specialist") and ``HOME_POCKET_PROMPT`` ("call
+    # add_widget") flatly contradict each other, so the delegation rule is
+    # dropped for a ``type="home"`` scope. The home agent then gets exactly
+    # one consistent widget-creation instruction.
+    is_home = ctx.pocket_type == "home"
+    if is_home:
+        # The home agent's only widget-creation instruction is
+        # HOME_POCKET_PROMPT (appended below). It must not also receive the
+        # specialist-delegation rule (MCP backends) or the heavy
+        # interaction prompt (CLI backends) — both carry the contradicting
+        # "delegate, don't call add_widget" framing. Just the base ripple
+        # conventions, then HOME_POCKET_PROMPT.
+        parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+    elif backend_name in _MCP_POCKET_BACKENDS:
         parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
         parts.append(POCKET_DELEGATION_RULE)
     else:
@@ -533,13 +558,10 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
             parts.append(fill_current_pocket(interaction_prompt, ctx.pocket_id, None))
         else:
             parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
-    # Home surface: when the chat is scoped to the per-user ``type="home"``
-    # pocket, append the home-surface prompt so the agent calls add_widget
-    # for an explicit widget request and answers directly otherwise. This
-    # rides on top of whichever pocket prompt the branch above selected and
-    # is backend-agnostic — the discriminator is the pocket type, not the
-    # backend or a settings id.
-    if ctx.pocket_type == "home":
+    # Home surface: append the home-surface prompt so the agent calls
+    # add_widget for an explicit widget request and answers directly
+    # otherwise. Backend-agnostic — the discriminator is the pocket type.
+    if is_home:
         parts.append(HOME_POCKET_PROMPT)
     return "\n".join(parts)
 

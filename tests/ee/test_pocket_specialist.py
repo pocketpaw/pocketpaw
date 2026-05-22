@@ -22,16 +22,13 @@ def test_delegation_rule_points_at_mcp_tool():
     assert "subagent_type='pocket_specialist'" not in POCKET_DELEGATION_RULE
 
 
-def test_pocket_mcp_server_is_read_only():
-    """The pocket-context MCP surface exposes ONLY read tools. All mutation
-    tool ids must be gone — pocket writes flow through the
-    ``pocket_specialist__create`` / ``__edit`` tools, which run an isolated
-    specialist backend with its own StructuredTool wrappers.
+def test_widget_spec_mcp_server_is_read_only():
+    """The core ``pocketpaw_widgets`` server exposes ONLY read tools — it
+    serves the catalog/manifest, nothing mutable.
 
     The OSS-EE split (Phase 3b) split the old ``pocketpaw_pocket`` server in
-    two: ripple widget-spec tools (core ``pocketpaw_widgets``) and the cloud
-    pocket-context tools (EE ``pocketpaw_pocket``). Both must stay read-only.
-    """
+    two: ripple widget-spec tools (core ``pocketpaw_widgets``, this one) and
+    the cloud pocket-context tools (EE ``pocketpaw_pocket``)."""
     from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
     assert set(WIDGET_TOOL_IDS) == {
@@ -39,6 +36,14 @@ def test_pocket_mcp_server_is_read_only():
         "mcp__pocketpaw_widgets__get_inline_widget_help",
     }, f"drift in widget MCP tool surface: {set(WIDGET_TOOL_IDS)}"
 
+
+def test_pocket_mcp_server_surface():
+    """The cloud ``pocketpaw_pocket`` server exposes the two read tools plus
+    the writable ``add_widget`` tool — the home agent's widget-creation
+    path. rippleSpec *design* mutations still flow through the
+    ``pocket_specialist__create`` / ``__edit`` tools; ``add_widget`` only
+    appends a tile to a pocket's ``widgets[]`` array, a different surface.
+    """
     # The cloud pocket-context server is EE-only — skip when absent.
     try:
         from pocketpaw_ee.agent.mcp_servers.pockets import POCKET_TOOL_IDS
@@ -47,6 +52,7 @@ def test_pocket_mcp_server_is_read_only():
     assert set(POCKET_TOOL_IDS) == {
         "mcp__pocketpaw_pocket__get_pocket",
         "mcp__pocketpaw_pocket__list_pockets",
+        "mcp__pocketpaw_pocket__add_widget",
     }, f"drift in pocket MCP tool surface: {set(POCKET_TOOL_IDS)}"
 
 

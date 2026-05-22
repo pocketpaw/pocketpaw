@@ -17,6 +17,10 @@ carries no ``rippleSpec`` to render or validate.
 Updated: 2026-05-21 — added ``HomePocketResponse`` so ``GET /pockets/home``
 has a real OpenAPI schema instead of an empty ``dict``.
 
+Updated: 2026-05-22 (#1174) — ``AddWidgetRequest`` and ``_widget_to_wire``
+carry the optional ``spec`` field: a per-tile rippleSpec subtree the home
+grid renders. Populated by the home agent's ``add_widget`` MCP tool.
+
 Updated: 2026-05-21 (RFC 04 alpha) — added PocketBackendConfigRequest /
 PocketBackendConfigResponse / RunSourcesRequest for the per-pocket backend
 binding + read-only source-run endpoints.
@@ -82,7 +86,9 @@ class AddWidgetRequest(BaseModel):
 
     ``type`` is free-form. Two kinds of widget ride this schema:
 
-    * ordinary Ripple-spec widgets — ``config``/``props`` carry the spec;
+    * ordinary Ripple-spec widgets — ``spec`` carries the rippleSpec
+      subtree the home grid renders for this tile (e.g. a ``chart`` node
+      with a real ``data`` series);
     * native widgets — ``type="native"`` and ``name`` is the key the
       frontend uses to resolve a built-in Svelte component. Native
       widgets have no rippleSpec, so manifest validation (which only
@@ -98,6 +104,9 @@ class AddWidgetRequest(BaseModel):
     data_source_type: str = "static"
     config: dict = Field(default_factory=dict)
     props: dict = Field(default_factory=dict)
+    # Optional per-tile rippleSpec subtree. The home grid renders the tile
+    # from ``spec`` when present; native widgets leave it ``None``.
+    spec: dict | None = None
     assigned_agent: str | None = None
 
 
@@ -399,6 +408,9 @@ def _widget_to_wire(w) -> dict:
         "config": dict(w.config),
         "props": dict(w.props),
         "data": w.data,
+        # Per-tile rippleSpec subtree the home grid renders; ``None`` for
+        # native and legacy widgets.
+        "spec": getattr(w, "spec", None),
         "assignedAgent": w.assigned_agent,
         "position": {"row": w.position.row, "col": w.position.col},
     }

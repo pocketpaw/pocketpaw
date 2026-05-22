@@ -62,6 +62,10 @@ workspace-visible). ``get_pocket_backend`` /
 ``get_pocket_backend_for_executor`` / ``_agent_backend_summary`` now
 carry ``allowed_writes`` so the executor and the edit specialist can see
 the write policy.
+Changes: 2026-05-22 (#1174) — widgets carry an optional ``spec`` field (a
+per-tile rippleSpec subtree the home grid renders). ``_build_widget_doc``,
+``_widget_to_domain``, the REST ``add_widget``, and ``agent_update_widget``
+thread it through; the home agent's ``add_widget`` MCP tool populates it.
 """
 
 from __future__ import annotations
@@ -144,6 +148,7 @@ def _widget_to_domain(w: _WidgetDoc) -> Widget:
         data=w.data,
         assigned_agent=w.assignedAgent,
         position=WidgetPosition(row=w.position.row, col=w.position.col),
+        spec=getattr(w, "spec", None),
     )
 
 
@@ -225,6 +230,9 @@ def _build_widget_doc(payload: dict) -> _WidgetDoc:
         config=payload.get("config", {}),
         props=payload.get("props", {}),
         data=payload.get("data"),
+        # ``spec`` is the per-tile rippleSpec subtree the home grid renders.
+        # Optional — native widgets and legacy widget entries omit it.
+        spec=payload.get("spec"),
         assignedAgent=payload.get("assignedAgent", payload.get("assigned_agent")),
     )
 
@@ -665,6 +673,7 @@ async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> di
             "dataSourceType": body.data_source_type,
             "config": body.config,
             "props": body.props,
+            "spec": body.spec,
             "assignedAgent": body.assigned_agent,
         }
     )
@@ -1237,7 +1246,7 @@ async def agent_update_widget(
     widget = next((w for w in doc.widgets if w.id == widget_id), None)
     if widget is None:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"
-    for k in ("name", "type", "icon", "color", "span", "data", "assignedAgent"):
+    for k in ("name", "type", "icon", "color", "span", "data", "spec", "assignedAgent"):
         if k in fields:
             setattr(widget, k, fields[k])
     if "config" in fields and isinstance(fields["config"], dict):

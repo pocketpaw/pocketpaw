@@ -397,6 +397,56 @@ def test_home_pocket_prompt_injected_for_cli_backend_too():
     assert "<home-pocket>" in block
 
 
+def test_home_pocket_scope_omits_specialist_delegation_rule():
+    """The home agent mutates widgets directly via ``add_widget`` — it does
+    NOT delegate to the pocket specialist. ``POCKET_DELEGATION_RULE`` and
+    ``HOME_POCKET_PROMPT`` contradict each other (one says "never call
+    add_widget, delegate"; the other says "call add_widget"). For a
+    type='home' scope on an MCP backend the delegation rule must be dropped
+    so the agent gets exactly one consistent widget-creation instruction."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="home-pocket-1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="home-pocket-1",
+        pocket_type="home",
+    )
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    # The home prompt is present...
+    assert "<home-pocket>" in block
+    # ...and the contradicting delegation rule is NOT.
+    assert "<pocket-delegation>" not in block, (
+        "POCKET_DELEGATION_RULE contradicts HOME_POCKET_PROMPT — it must "
+        "not be emitted for a type='home' scope"
+    )
+
+
+def test_non_home_pocket_scope_keeps_specialist_delegation_rule():
+    """A normal (non-home) MCP pocket scope still gets the delegation rule —
+    the home-only drop must not regress ordinary pocket chats."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="pocket-abc",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="pocket-abc",
+        pocket_type="custom",
+    )
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    assert "<pocket-delegation>" in block
+
+
 @pytest.mark.asyncio
 async def test_build_knowledge_context_includes_workspace_kb_hits_and_file_refs():
     ctx = ScopeContext(

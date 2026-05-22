@@ -161,6 +161,24 @@ def test_home_pocket_prompt_is_exported_and_focused() -> None:
     assert "pocket_specialist__edit" not in HOME_POCKET_PROMPT
 
 
+def test_home_pocket_prompt_teaches_the_spec_first_workflow() -> None:
+    """For a non-trivial widget the home agent must first look up the
+    catalog shape (``get_widget_spec``) and then call ``add_widget`` with a
+    populated rippleSpec ``spec``. A chart needs a real ``data`` series — the
+    prompt must say so and carry one worked example so the agent does not
+    ship a bare stat tile when asked for a chart."""
+    from pocketpaw.ripple import HOME_POCKET_PROMPT
+
+    # The catalog-lookup step is named — the agent must not guess prop shapes.
+    assert "get_widget_spec" in HOME_POCKET_PROMPT
+    # The prompt teaches the chart-data contract explicitly.
+    assert "data" in HOME_POCKET_PROMPT
+    # A worked example of a populated chart widget is embedded.
+    assert "label" in HOME_POCKET_PROMPT and "value" in HOME_POCKET_PROMPT
+    # The example shows the spec is stored under the widget's ``spec`` key.
+    assert "spec" in HOME_POCKET_PROMPT
+
+
 def test_pocket_id_token_substitution() -> None:
     """The interaction prompt has a literal ``__POCKET_ID__`` token the
     caller substitutes via ``str.replace``. A naive ``str.format`` would

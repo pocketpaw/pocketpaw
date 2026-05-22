@@ -18,6 +18,10 @@
 # ``(pocket_dict, created)`` tuple; tests unpack it and assert the flag.
 # Updated: 2026-05-21 — added the provision-race coverage; ``ensure_home_pocket``
 # persists the new id via an atomic compare-and-swap.
+# Updated: 2026-05-22 — a Ripple-spec widget (``type="chart"`` with a real
+# ``data`` series) round-trips through ``add_widget`` / ``agent_add_widget``:
+# the widget's ``spec`` rippleSpec subtree is stored and read back so the
+# home grid can render the tile.
 #
 # Uses the shared ``mongo_db`` fixture so the service exercises real Beanie
 # reads/writes against an isolated mongomock-motor DB.
@@ -188,6 +192,101 @@ async def test_native_widget_round_trips_through_agent_add_widget() -> None:
     native = fetched["widgets"][0]
     assert native["type"] == "native"
     assert native["name"] == "Mission · Agents in flight"
+
+
+# ---------------------------------------------------------------------------
+# Ripple-spec widget round-trip — the home agent's add_widget path
+# ---------------------------------------------------------------------------
+
+
+def _chart_widget_payload() -> dict:
+    """A chart widget entry with a populated rippleSpec ``spec`` subtree —
+    the shape the home agent's ``add_widget`` MCP tool produces."""
+    return {
+        "name": "7-day sales",
+        "type": "chart",
+        "icon": "trending-up",
+        "color": "#0A84FF",
+        "spec": {
+            "type": "chart",
+            "props": {
+                "variant": "bar",
+                "data": [
+                    {"label": "Mon", "value": 1200},
+                    {"label": "Tue", "value": 1850},
+                    {"label": "Wed", "value": 1400},
+                    {"label": "Thu", "value": 2100},
+                    {"label": "Fri", "value": 2600},
+                    {"label": "Sat", "value": 900},
+                    {"label": "Sun", "value": 700},
+                ],
+            },
+        },
+    }
+
+
+async def test_chart_widget_round_trips_through_add_widget() -> None:
+    """A Ripple-spec widget carries a ``spec`` rippleSpec subtree. The home
+    grid renders the tile from ``widget.spec``, so the field must survive a
+    create + read round-trip."""
+    user_id = await _seed_user()
+    pocket, _ = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+
+    payload = _chart_widget_payload()
+    result = await pockets_service.add_widget(
+        pocket["_id"],
+        user_id,
+        AddWidgetRequest(
+            name=payload["name"],
+            type=payload["type"],
+            icon=payload["icon"],
+            color=payload["color"],
+            spec=payload["spec"],
+        ),
+    )
+
+    widgets = result["widgets"]
+    assert len(widgets) == 1
+    chart = widgets[0]
+    assert chart["type"] == "chart"
+    assert chart["spec"]["type"] == "chart"
+    # The chart carries a real 7-point data series — not a bare stat tile.
+    assert len(chart["spec"]["props"]["data"]) == 7
+    assert chart["spec"]["props"]["data"][0] == {"label": "Mon", "value": 1200}
+
+    # Read back: the spec survives a fresh fetch unchanged.
+    fetched = await pockets_service.get(pocket["_id"], user_id)
+    assert fetched["widgets"][0]["spec"]["props"]["data"][4]["value"] == 2600
+
+
+async def test_chart_widget_round_trips_through_agent_add_widget() -> None:
+    """The agent path (``agent_add_widget``) stores the chart ``spec`` too —
+    the home agent's MCP tool reaches the store through this helper."""
+    from pocketpaw_ee.cloud.chat.agent_service import (
+        attach_agent_identity,
+        detach_agent_identity,
+    )
+
+    user_id = await _seed_user()
+    pocket, _ = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+
+    tokens = attach_agent_identity(workspace_id=WORKSPACE, user_id=user_id)
+    try:
+        view, err = await pockets_service.agent_add_widget(
+            pocket["_id"],
+            _chart_widget_payload(),
+        )
+    finally:
+        detach_agent_identity(tokens)
+
+    assert err is None
+    assert view is not None
+    chart = view["widgets"][0]
+    assert chart["type"] == "chart"
+    assert len(chart["spec"]["props"]["data"]) == 7
+
+    fetched = await pockets_service.get(pocket["_id"], user_id)
+    assert fetched["widgets"][0]["spec"]["props"]["data"][3]["label"] == "Thu"
 
 
 # ---------------------------------------------------------------------------

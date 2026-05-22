@@ -5,6 +5,11 @@ per-user pocket that backs the home page) and the ``type="native"``
 widget type (rendered by the frontend as a built-in Svelte component
 keyed on ``name``). Both reuse the free-form ``type`` field — no schema
 change, just recognized values.
+Updated: 2026-05-22 — added the optional ``Widget.spec`` field: a Ripple
+rippleSpec subtree for a single tile (e.g. a ``chart`` node with a real
+``data`` series). The home grid renders a ``widgets[]`` entry from its
+``spec``; the home agent's ``add_widget`` MCP tool populates it. Native
+widgets leave it ``None``.
 """
 
 from __future__ import annotations
@@ -42,6 +47,11 @@ class Widget(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     props: dict[str, Any] = Field(default_factory=dict)
     data: Any = None
+    # Optional Ripple rippleSpec subtree for this single tile (e.g. a
+    # ``chart`` node carrying a real ``data`` series). The home grid
+    # renders the tile from ``spec`` when present. ``None`` for native
+    # widgets, which have no rippleSpec.
+    spec: dict[str, Any] | None = None
     assignedAgent: str | None = Field(default=None, alias="assignedAgent")
     position: WidgetPosition = Field(default_factory=WidgetPosition)
 
