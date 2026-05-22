@@ -26,6 +26,14 @@
 # to read that line instead of asking the user for a backend URL it can
 # already see.
 #
+# Changes: 2026-05-22 (RFC 05 M2a) — added `_WRITE_ACTIONS_BLOCK` (create)
+# and `_WRITE_ACTIONS_EDIT_BLOCK` (edit), spliced in after the
+# `_LIVE_DATA_SOURCES_*` blocks. They teach the agent the `rippleSpec.actions`
+# write-binding block — a sibling of `sources` — the `call_binding` action,
+# `confirm` for destructive writes, `on_success` reconcile, and that a write
+# fires only if the human owner allow-listed the method+path.
+# `_EDIT_TOOLS_MCP` now also lists `set_action` / `remove_action`.
+#
 # Canonical source for every pocket-mode system prompt the agent ever sees.
 # Four strings are exported, one per (action × backend) cell:
 #
@@ -611,6 +619,158 @@ nothing else:
 """
 
 
+# Create-specialist write-actions guidance. `sources` (reads) and `actions`
+# (writes) are two sibling rippleSpec blocks; this teaches the second.
+_WRITE_ACTIONS_BLOCK = """\
+<write-actions>
+A `sources` binding READS the backend; a `actions` binding WRITES to it.
+When the user wants a widget that DOES something to their backend — submit
+a form, mark a row done, advance a card, delete a record — declare a
+`actions` block in the rippleSpec. `actions` is a SIBLING of `sources`.
+
+  "rippleSpec": {
+    "sources": { "leases": {"method": "GET", "path": "/leases?expiring=90d",
+                            "bind": "state.leases", "refresh": ["pocket_open"]} },
+    "actions": {
+      "mark_renewed": {
+        "kind": "write_binding",
+        "method": "POST",
+        "path": "/leases/{item.id}/renew",
+        "params": { "proposed_rent": "{state.form.rent}" },
+        "confirm": false,
+        "on_success": [{ "action": "run_source", "source": "leases" }],
+        "on_error":   [{ "action": "toast", "variant": "error" }]
+      }
+    },
+    "ui": [ ... ],
+    "state": { "leases": [], "form": { "rent": "" } }
+  }
+
+An action entry has EXACTLY these fields (M2a):
+- `kind`     — always the string `"write_binding"`.
+- `method`   — `POST`, `PUT`, `PATCH`, or `DELETE`. (GET is a `source`, not
+  an action.)
+- `path`     — a RELATIVE path on the pocket's backend, never an absolute
+  URL. May carry `{...}` expressions (`{item.id}`, `{state.form.x}`) — they
+  resolve client-side at click time, the SAME resolver `sources` and binds
+  use. No new syntax.
+- `params`   — the request body, a map; values may be `{...}` expressions.
+- `confirm`  — `true` puts a confirm step in front of the write. See below.
+- `on_success` / `on_error` — handler lists run after the write resolves.
+
+A widget triggers an action BY NAME with the `call_binding` action:
+
+  {"type": "button", "props": {"label": "Renew"},
+   "on_click": {"action": "call_binding", "binding": "mark_renewed"}}
+
+DESTRUCTIVE WRITES NEED A CONFIRM. `DELETE` and a full-resource `PUT` are
+destructive. Set `confirm: true` on the action AND author the click as a
+`[confirm, call_binding]` flow so the user sees a speed bump:
+
+  "on_click": {"action": "flow", "steps": [
+    {"action": "confirm", "message": "Delete this lease? This cannot be undone."},
+    {"action": "call_binding", "binding": "delete_lease"}
+  ]}
+
+`POST` / `PATCH` are additive — no confirm needed by default.
+
+RECONCILE WITH on_success. After a write succeeds the UI must catch up:
+- Single-record write → `on_success` a `set` mutate plus the `{event}`
+  response, or just re-run the one source.
+- List-changing write (added/removed a row) → `on_success` a `run_source`
+  that re-fetches the list.
+
+OPTIMISTIC UPDATE is just a flow, not a new feature. For a snappy toggle,
+`mutate_state` first, then `call_binding`, with an `on_error` that reverses
+the mutate:
+
+  "on_click": {"action": "flow", "steps": [
+    {"action": "mutate_state", "op": "set", "path": "row.{item.id}.status",
+     "value": "renewed"},
+    {"action": "call_binding", "binding": "mark_renewed", "on_error": [
+       {"action": "mutate_state", "op": "set", "path": "row.{item.id}.status",
+        "value": "active"}]}
+  ]}
+
+THE WRITE ONLY FIRES IF THE OWNER ALLOW-LISTED IT. Authoring an action does
+NOT authorize the write. The pocket's human owner sets a write allowlist
+(method + path pattern) in the backend settings — OUTSIDE the spec. A write
+whose method+path is not allow-listed is rejected server-side and never
+leaves PocketPaw. Author the action the user asked for; if no backend or no
+allowlist entry exists, tell the user to configure it in backend settings.
+
+DO NOT GET THIS WRONG:
+- Writes go in `rippleSpec.actions` ONLY, triggered by `call_binding`.
+  NEVER inline an `{action: "api", method: "POST", url: ...}` handler — that
+  is the read-source mistake's write twin and is normalized away.
+- `path` is RELATIVE. An absolute URL is a different (third-party) intent
+  and must not be authored as a pocket action.
+</write-actions>
+"""
+
+
+# Edit-specialist variant — the EDIT specialist authors actions through the
+# `set_action` / `remove_action` granular ops, not whole-spec JSON.
+_WRITE_ACTIONS_EDIT_BLOCK = """\
+<write-actions>
+A `sources` binding READS the backend; a `actions` binding WRITES to it.
+When the user wants a widget that DOES something to their backend — submit
+a form, mark a row done, delete a record — use the `set_action` /
+`remove_action` ops. They write the pocket's top-level `rippleSpec.actions`
+block (a SIBLING of `sources`); the state/node ops cannot.
+
+  set_action(
+    action_key="mark_renewed",
+    method="POST",                 # POST | PUT | PATCH | DELETE
+    path="/leases/{item.id}/renew",  # RELATIVE path, never an absolute URL
+    params={"proposed_rent": "{state.form.rent}"},
+    confirm=False,
+    on_success=[{"action": "run_source", "source": "leases"}],
+  )
+
+  remove_action(action_key="mark_renewed")
+
+An action is EXACTLY `{kind:"write_binding", method, path, params, confirm,
+on_success?, on_error?}` (M2a). `method` is a write verb — GET is a
+`source`, not an action. `path` is RELATIVE and may carry `{...}`
+expressions (`{item.id}`, `{state.form.x}`) resolved client-side at click
+time — no new syntax.
+
+After `set_action`, wire the trigger with the normal node ops — a widget
+fires the action BY NAME via `call_binding`:
+
+  add_node(... a button whose on_click is
+           {"action": "call_binding", "binding": "mark_renewed"})
+
+DESTRUCTIVE WRITES NEED A CONFIRM. For `DELETE` / full-resource `PUT`, pass
+`confirm=true` to `set_action` AND author the on_click as a
+`[confirm, call_binding]` flow so the user sees a speed bump. `POST` /
+`PATCH` are additive — no confirm by default.
+
+RECONCILE WITH on_success. After a write succeeds the UI must catch up: for
+a single-record write `set` the changed state from the response; for a
+list-changing write `run_source` to refetch the list. For an optimistic
+toggle, author the on_click as a flow — `mutate_state` then `call_binding`
+with an `on_error` that reverses the mutate.
+
+THE WRITE ONLY FIRES IF THE OWNER ALLOW-LISTED IT. Authoring an action does
+NOT authorize the write. The pocket's human owner sets a write allowlist
+(method + path pattern) in the pocket's backend settings — OUTSIDE the
+spec. A write whose method+path is not allow-listed is rejected server-side.
+The `Backend:` line in `<current-pocket>` tells you whether a backend
+exists. If there is no backend, tell the user to configure one (and the
+write allowlist) in backend settings before the action can fire.
+
+DO NOT GET THIS WRONG:
+- Writes go in `rippleSpec.actions` ONLY, via `set_action`, triggered by a
+  `call_binding` handler. NEVER stash a write in `state` and never build a
+  chat-round-trip button for it.
+- `path` is RELATIVE. An absolute URL is a third-party intent — not a
+  pocket action.
+</write-actions>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Tool surface — MCP variant (claude_agent_sdk).
 # Identity (workspace, user, session) is bound from the active SSE
@@ -733,8 +893,16 @@ DATA-SOURCE OPS — read-only live data bindings (rippleSpec.sources)
                                 pocket's configured backend into state
   remove_source(source_key)     delete a data-source declaration
 
+WRITE-ACTION OPS — write bindings (rippleSpec.actions)
+
+  set_action(action_key, method, path, params?, confirm?,
+             on_success?, on_error?)
+                                declare a POST/PUT/PATCH/DELETE binding the
+                                backend; a widget fires it via call_binding
+  remove_action(action_key)     delete a write-action declaration
+
 Use these only for the user's OWN backend (a CRM, an internal API). See
-the `<live-data-sources>` block for when and how.
+the `<live-data-sources>` and `<write-actions>` blocks for when and how.
 
 The toolset above is the WHOLE interface. Apply the smallest granular op
 that satisfies the intent.
@@ -1653,6 +1821,7 @@ def _assemble_specialist() -> str:
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
         _LIVE_DATA_SOURCES_BLOCK,
+        _WRITE_ACTIONS_BLOCK,
         _CREATION_EXAMPLES_MCP,
         _RESEARCH_PROTOCOL,
         _RIPPLE_DESIGN_ESSENTIALS,
@@ -1729,7 +1898,12 @@ def _assemble_interaction(*, mcp: bool) -> str:
     knows it can author a ``rippleSpec.sources`` block via the
     ``set_source`` / ``remove_source`` ops (RFC 04 alpha follow-up) —
     without it, the specialist stashed fake source descriptors in state
-    and built chat-round-trip refresh buttons."""
+    and built chat-round-trip refresh buttons.
+
+    ``_WRITE_ACTIONS_EDIT_BLOCK`` is spliced in next (RFC 05 M2a) so the
+    specialist knows it can author a ``rippleSpec.actions`` write-binding
+    block via the ``set_action`` / ``remove_action`` ops, triggered by a
+    ``call_binding`` handler."""
     parts = [
         _SCOPE_BLOCK,
         _CANVAS_BLOCK,
@@ -1738,6 +1912,7 @@ def _assemble_interaction(*, mcp: bool) -> str:
         _INTERACTIVE_DEFAULT_BLOCK,
         _STATE_SOURCES_BLOCK,
         _LIVE_DATA_SOURCES_EDIT_BLOCK,
+        _WRITE_ACTIONS_EDIT_BLOCK,
         RIPPLE_DESIGN_RULES,
         # MUST be last — see _CURRENT_POCKET_BLOCK_TEMPLATE rationale.
         _CURRENT_POCKET_BLOCK_TEMPLATE,

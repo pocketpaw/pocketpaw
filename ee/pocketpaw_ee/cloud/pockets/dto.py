@@ -14,6 +14,9 @@ Updated: 2026-05-21 (PR #1177 security pass) — PocketBackendConfigRequest
 .base_url now requires min_length=1; RunSourcesRequest.source coerces an
 empty string to None; documented that `auth_token` for `basic` is the
 `user:pass` credential (base64-encoded server-side).
+Updated: 2026-05-22 (RFC 05 M2a) — added RunActionRequest /
+RunActionResponse for the write-action run endpoint, plus AllowedWriteDTO
+and SetWritePolicyRequest for the per-pocket write-allowlist endpoint.
 """
 
 from __future__ import annotations
@@ -115,6 +118,17 @@ class PocketResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class AllowedWriteDTO(BaseModel):
+    """One write-allowlist rule on the wire — a (method, path_pattern) pair.
+
+    Mirrors ``models.pocket_backend.AllowedWrite``. ``path_pattern`` is a
+    glob: ``/leases/*/renew`` allows ``POST /leases/42/renew``. RFC 05 M2a.
+    """
+
+    method: Literal["POST", "PUT", "PATCH", "DELETE"]
+    path_pattern: str = Field(min_length=1)
+
+
 class PocketBackendConfigRequest(BaseModel):
     """Body for ``PUT /pockets/{id}/backend`` — bind a pocket to one backend.
 
@@ -138,11 +152,17 @@ class PocketBackendConfigRequest(BaseModel):
 
 
 class PocketBackendConfigResponse(BaseModel):
-    """Backend binding as returned to clients — never carries the token."""
+    """Backend binding as returned to clients — never carries the token.
+
+    ``allowed_writes`` is the per-pocket write allowlist (RFC 05 M2a) —
+    an owner/editor-facing non-secret. Empty by default (fail-closed: no
+    write fires until a human allow-lists it).
+    """
 
     base_url: str
     auth_type: str
     configured: bool
+    allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
 
 
 class RunSourcesRequest(BaseModel):
@@ -164,6 +184,60 @@ class RunSourcesRequest(BaseModel):
     @classmethod
     def _empty_source_is_none(cls, v: str | None) -> str | None:
         return v or None
+
+
+# ---------------------------------------------------------------------------
+# Pocket write actions + write policy (RFC 05 M2a)
+# ---------------------------------------------------------------------------
+
+
+class RunActionRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/actions/run``.
+
+    The client sends the action's NAME (``action``) plus the *resolved*
+    ``path`` and ``params`` — Ripple's ``{...}`` expression resolver runs
+    client-side at click time. The server loads the named action from the
+    persisted ``rippleSpec.actions`` block to read the HTTP ``method`` —
+    the client never picks the verb.
+
+    ``idempotency_key`` is optional: when omitted the server generates one
+    so a write retried after a timeout cannot double-submit.
+    """
+
+    action: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+
+
+class RunActionResponse(BaseModel):
+    """Result of a write-action run.
+
+    On success ``ok`` is true and ``status`` / ``response`` carry the
+    backend's HTTP status + parsed JSON body. On failure ``ok`` is false
+    and ``error`` / ``code`` describe the rejection. ``on_success`` /
+    ``on_error`` are the reconcile handler lists the client runs after.
+    All optional fields keep one model usable for both outcomes.
+    """
+
+    ok: bool
+    action: str
+    status: int | None = None
+    response: Any = None
+    error: str | None = None
+    code: str | None = None
+    on_success: list[dict] = Field(default_factory=list)
+    on_error: list[dict] = Field(default_factory=list)
+
+
+class SetWritePolicyRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend/write-policy``.
+
+    Replaces the pocket's whole write allowlist. An empty list is valid
+    and meaningful — it revokes every write (fail-closed).
+    """
+
+    allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

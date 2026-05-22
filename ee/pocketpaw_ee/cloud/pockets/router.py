@@ -23,6 +23,15 @@ DELETE /pockets/{id}/backend route so a configured credential can be
 revoked; the GET route now requires pocket edit access (owner/editor),
 matching the PUT route; the source-run route threads user_id into the
 executor for per-user rate limiting + audit logging.
+
+Updated: 2026-05-22 (RFC 05 M2a) — added the write-action routes:
+
+    POST /pockets/{id}/actions/run        — run a declared write action
+    PUT  /pockets/{id}/backend/write-policy — set the write allowlist
+
+The action-run route is gated OWNER or explicit shared_with ONLY
+(``require_pocket_action_run``) — narrower than source-run, because a
+write has blast radius. The write-policy route is owner-only.
 """
 
 from __future__ import annotations
@@ -43,7 +52,10 @@ from pocketpaw_ee.cloud.pockets.dto import (
     PocketBackendConfigRequest,
     PocketBackendConfigResponse,
     ReorderWidgetsRequest,
+    RunActionRequest,
+    RunActionResponse,
     RunSourcesRequest,
+    SetWritePolicyRequest,
     ShareLinkRequest,
     UpdatePocketRequest,
     UpdateWidgetRequest,
@@ -59,6 +71,7 @@ from pocketpaw_ee.cloud.sessions.dto import CreateSessionRequest
 from pocketpaw_ee.cloud.shared.deps import (
     current_user_id,
     current_workspace_id,
+    require_pocket_action_run,
     require_pocket_edit,
     require_pocket_owner,
 )
@@ -336,7 +349,7 @@ async def run_pocket_sources(
             "pocket_backend.not_configured",
             "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
         )
-    base_url, auth_type, auth_header, token = creds
+    base_url, auth_type, auth_header, token, _allowed_writes = creds
 
     from pocketpaw_ee.cloud.pockets import source_executor
 
@@ -352,6 +365,106 @@ async def run_pocket_sources(
         trigger=body.trigger,
         only_source=body.source,
     )
+
+
+@router.put(
+    "/{pocket_id}/backend/write-policy",
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def set_pocket_write_policy(
+    pocket_id: str,
+    body: SetWritePolicyRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Set this pocket's write allowlist (RFC 05 M2a). Owner-only.
+
+    Replaces the whole ``allowed_writes`` list — an empty list revokes
+    every write (fail-closed). The policy lives on the backend-credential
+    row, OUTSIDE the spec, so the agent that authors the spec cannot widen
+    its own write blast radius. Returns ``400`` when the pocket has no
+    backend configured — a write policy with no backend to apply to is
+    meaningless.
+    """
+    result = await pockets_service.set_pocket_write_policy(
+        workspace_id,
+        user_id,
+        pocket_id,
+        [rule.model_dump() for rule in body.allowed_writes],
+    )
+    return PocketBackendConfigResponse(**result)
+
+
+@router.post(
+    "/{pocket_id}/actions/run",
+    dependencies=[Depends(require_pocket_action_run)],
+)
+async def run_pocket_action(
+    pocket_id: str,
+    body: RunActionRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> RunActionResponse:
+    """Run one declared ``rippleSpec.actions`` write action against the
+    pocket's backend.
+
+    Access is OWNER or explicit ``shared_with`` ONLY — a write has blast
+    radius, so a workspace-visible pocket does NOT grant run access. The
+    HTTP ``method`` is read server-side from the persisted action entry;
+    the client only sends the resolved ``path`` / ``params``. The write
+    fires only if the human owner allow-listed the method+path.
+
+    The backend's response is delivered in THIS response body — there is
+    no ``pocket_mutation`` SSE emit, because the run endpoint is a
+    standalone REST call outside any SSE stream. The client applies the
+    ``on_success`` / ``on_error`` reconcile handlers.
+    """
+    pocket = await pockets_service.get(pocket_id, user_id)
+    ripple_spec = pocket.get("rippleSpec") or {}
+    actions = ripple_spec.get("actions")
+    if not isinstance(actions, dict) or body.action not in actions:
+        return RunActionResponse(
+            ok=False,
+            action=body.action,
+            error=f"no action named '{body.action}' on this pocket",
+            code="action_not_found",
+        )
+    raw_action = actions[body.action]
+    if not isinstance(raw_action, dict):
+        return RunActionResponse(
+            ok=False,
+            action=body.action,
+            error=f"action '{body.action}' is malformed",
+            code="bad_binding",
+        )
+
+    creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
+    if creds is None:
+        raise CloudError(
+            400,
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
+        )
+    base_url, auth_type, auth_header, token, allowed_writes = creds
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    # no-event: the write result is response-body delivery, not persisted.
+    result = await action_executor.run_action(
+        pocket_id=pocket_id,
+        user_id=user_id,
+        action=body.action,
+        raw_action=raw_action,
+        path=body.path,
+        params=body.params,
+        base_url=base_url,
+        auth_type=auth_type,
+        auth_header=auth_header,
+        token=token,
+        allowed_writes=allowed_writes,
+        idempotency_key=body.idempotency_key,
+    )
+    return RunActionResponse(**result)
 
 
 # ---------------------------------------------------------------------------

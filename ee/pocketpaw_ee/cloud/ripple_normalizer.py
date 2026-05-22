@@ -18,6 +18,19 @@ field instead of ``source``. The runtime reads only ``sources`` and only
 ``handler.source``, so that output is inert. Prompt guidance has not
 beaten the model's prior, so we translate the output deterministically:
 lift the REST entries into ``sources`` and repair the button handlers.
+
+Changes: 2026-05-22 (RFC 05 M2a) — ``normalize_ripple_spec`` now runs
+``_lift_write_actions`` right after ``_lift_rest_sources``. The authoring
+agent emits a write the same hallucinated way it emits a read: an inline
+``{action: "api", method: "POST", url: "/x", body: {...}}`` handler
+instead of a ``rippleSpec.actions`` write binding triggered by
+``call_binding``. We lift any such handler whose ``url`` is a RELATIVE
+path into the ``actions`` block and rewrite the handler to
+``call_binding``. An ABSOLUTE-URL ``api`` call is a DIFFERENT intent (a
+third-party endpoint) and is left as ``api`` — never redirected onto the
+pocket's credentialed backend. ``call_binding`` handlers wired with the
+wrong binding-name field (``action_id`` / ``name``) are repaired to
+``binding``.
 """
 
 from __future__ import annotations
@@ -238,6 +251,206 @@ def _lift_rest_sources(spec: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# RFC 05 M2a — lift inline write `api` handlers into rippleSpec.actions.
+#
+# The runtime fires a write through the `actions` block + a `call_binding`
+# handler. The authoring agent emits writes inline instead — a handler
+# `{action: "api", method: "POST", url: "/x", body: {...}}`. We translate
+# that deterministically. CRITICAL: only a RELATIVE-url `api` call is lifted
+# — an absolute-URL `api` call targets a different (third-party) host and is
+# left untouched, never redirected onto the pocket's credentialed backend.
+# ---------------------------------------------------------------------------
+
+_WRITE_VERBS = ("POST", "PUT", "PATCH", "DELETE")
+
+# Keys an inline `api` write handler may carry that we map onto a write
+# binding. Everything else on the handler is dropped from the binding (it
+# was never a write-binding field) but `on_success` / `on_error` are
+# preserved on BOTH the binding and the rewritten call_binding handler.
+_CALL_BINDING_NAME_ALIASES = ("binding", "action_id", "name")
+
+
+def _is_relative_url(raw: str) -> bool:
+    """Return ``True`` when ``raw`` is a relative path (no scheme, no
+    netloc) — the only shape we lift onto the pocket's own backend.
+
+    An absolute URL (``https://third-party.example/x``) or a
+    protocol-relative URL (``//host/x``, which carries a netloc) is a
+    different intent and returns ``False``.
+    """
+    if not isinstance(raw, str) or not raw:
+        return False
+    split = urllib.parse.urlsplit(raw)
+    return not split.scheme and not split.netloc
+
+
+def _is_inline_write_api(handler: Any) -> bool:
+    """Heuristic: is ``handler`` an inline write ``api`` call we should lift?
+
+    True only when it is an ``api`` action with a write ``method`` and a
+    RELATIVE ``url``. A GET ``api`` call, an absolute-URL ``api`` call, and
+    a non-``api`` handler all return False.
+    """
+    if not isinstance(handler, dict) or handler.get("action") != "api":
+        return False
+    method = str(handler.get("method") or "").upper()
+    if method not in _WRITE_VERBS:
+        return False
+    return _is_relative_url(handler.get("url"))
+
+
+def _lifted_action_entry(handler: dict[str, Any]) -> dict[str, Any]:
+    """Translate one inline write ``api`` handler into a canonical
+    ``rippleSpec.actions`` entry.
+
+    ``params`` is taken from the handler's ``body`` (the agent's usual
+    field for a request payload), falling back to ``params``.
+    ``on_success`` / ``on_error`` are carried through.
+    """
+    method = str(handler["method"]).upper()
+    body = handler.get("body")
+    if not isinstance(body, dict):
+        body = handler.get("params") if isinstance(handler.get("params"), dict) else {}
+    entry: dict[str, Any] = {
+        "kind": "write_binding",
+        "method": method,
+        "path": handler["url"],
+        "params": body,
+        "confirm": bool(handler.get("confirm", False)),
+    }
+    on_success = handler.get("on_success")
+    if isinstance(on_success, list):
+        entry["on_success"] = on_success
+    on_error = handler.get("on_error")
+    if isinstance(on_error, list):
+        entry["on_error"] = on_error
+    return entry
+
+
+def _repair_call_binding_handler(handler: Any) -> Any:
+    """Repair a ``call_binding`` handler that names its target with the
+    wrong field — the agent uses ``action_id`` / ``name`` where the
+    runtime reads ``binding``. Non-``call_binding`` handlers pass through.
+    """
+    if not isinstance(handler, dict) or handler.get("action") != "call_binding":
+        return handler
+    if handler.get("binding"):
+        # Already correct — drop any stray alias.
+        if "action_id" in handler or "name" in handler:
+            return {k: v for k, v in handler.items() if k not in ("action_id", "name")}
+        return handler
+    for alias in ("action_id", "name"):
+        candidate = handler.get(alias)
+        if isinstance(candidate, str) and candidate:
+            repaired = {k: v for k, v in handler.items() if k not in ("action_id", "name")}
+            repaired["binding"] = candidate
+            return repaired
+    return handler
+
+
+class _ActionLifter:
+    """Stateful walk that lifts inline write ``api`` handlers into a single
+    ``actions`` dict, generating ``act_1`` / ``act_2`` / … names.
+
+    Pure with respect to its input: every visited dict/list is rebuilt, the
+    input structure is never mutated. ``actions`` accumulates the lifted
+    entries; ``_counter`` mints unique names that do not collide with a
+    binding name already present in ``actions``.
+    """
+
+    def __init__(self, actions: dict[str, Any]) -> None:
+        self.actions = actions
+        self._counter = 0
+
+    def _next_name(self) -> str:
+        while True:
+            self._counter += 1
+            name = f"act_{self._counter}"
+            if name not in self.actions:
+                return name
+
+    def _transform_handler(self, handler: Any) -> Any:
+        """Lift an inline write ``api`` handler; else repair a
+        ``call_binding`` handler; else pass through."""
+        if _is_inline_write_api(handler):
+            name = self._next_name()
+            self.actions[name] = _lifted_action_entry(handler)
+            rewritten: dict[str, Any] = {"action": "call_binding", "binding": name}
+            # Keep the reconcile handlers on the call site too — Ripple
+            # runs per-action on_success/on_error from the handler.
+            on_success = handler.get("on_success")
+            if isinstance(on_success, list):
+                rewritten["on_success"] = on_success
+            on_error = handler.get("on_error")
+            if isinstance(on_error, list):
+                rewritten["on_error"] = on_error
+            return rewritten
+        return _repair_call_binding_handler(handler)
+
+    def walk(self, node: Any) -> Any:
+        """Recursively rebuild a UI structure, transforming every handler
+        in an event slot. Returns a new structure; input is not mutated."""
+        if isinstance(node, dict):
+            rebuilt = dict(node)
+            for slot in _HANDLER_SLOTS:
+                if slot not in rebuilt:
+                    continue
+                value = rebuilt[slot]
+                if isinstance(value, list):
+                    rebuilt[slot] = [self._transform_handler(h) for h in value]
+                else:
+                    rebuilt[slot] = self._transform_handler(value)
+            for key in ("children", "else_children"):
+                kids = rebuilt.get(key)
+                if isinstance(kids, list):
+                    rebuilt[key] = [self.walk(c) for c in kids]
+            return rebuilt
+        if isinstance(node, list):
+            return [self.walk(c) for c in node]
+        return node
+
+
+def _lift_write_actions(spec: dict[str, Any]) -> dict[str, Any]:
+    """Translate inline write ``api`` handlers into the canonical RFC 05
+    ``rippleSpec.actions`` shape.
+
+    Two repairs, both pure (the input ``spec`` is not mutated):
+
+    1. Lift every event handler shaped ``{action: "api", method:
+       POST|PUT|PATCH|DELETE, url: <RELATIVE path>, body: {...}}`` into a
+       ``rippleSpec.actions`` entry (``kind: write_binding``, the method,
+       ``path`` from ``url``, ``params`` from ``body``, carrying
+       ``on_success`` / ``on_error``). The handler is rewritten to
+       ``{action: "call_binding", binding: "<generated name>"}``. An
+       absolute-URL ``api`` handler is a third-party call — left as ``api``.
+    2. Repair ``call_binding`` handlers that name the target with the wrong
+       field (``action_id`` / ``name`` → ``binding``).
+
+    A correctly-authored ``actions`` block is never clobbered — lifted
+    entries get fresh ``act_N`` names that skip any existing key. A spec
+    with no inline write handlers and no ``call_binding`` mis-wires passes
+    through structurally unchanged.
+    """
+    actions: dict[str, Any] = (
+        dict(spec.get("actions") or {}) if isinstance(spec.get("actions"), dict) else {}
+    )
+    lifter = _ActionLifter(actions)
+
+    result = spec
+    if isinstance(result.get("ui"), (dict, list)):
+        result = {**result, "ui": lifter.walk(result["ui"])}
+    if isinstance(result.get("panes"), dict):
+        result = {
+            **result,
+            "panes": {k: lifter.walk(v) for k, v in result["panes"].items()},
+        }
+
+    if actions:
+        result = {**result, "actions": actions}
+    return result
+
+
 def _stamp_node_ids(ui: Any) -> Any:
     """Assign a stable ``n_xxxxxxxx`` id to every node in a UISpec
     tree that lacks one. Idempotent and collision-safe — nodes that
@@ -382,6 +595,11 @@ def normalize_ripple_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
     # canonical RFC 04 shape before any other normalization. Pure: returns
     # a new dict, leaves a correctly-authored spec structurally unchanged.
     spec = _lift_rest_sources(spec)
+
+    # Translate inline write ``api`` handlers into the RFC 05
+    # ``rippleSpec.actions`` block + ``call_binding`` handlers. Pure; an
+    # absolute-URL ``api`` call (third-party intent) is left untouched.
+    spec = _lift_write_actions(spec)
 
     name = spec.get("title") or spec.get("name")
     pocket_id = spec.get("id") or (spec.get("lifecycle") or {}).get("id") or f"pocket-{_short_id()}"

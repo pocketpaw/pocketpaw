@@ -5,6 +5,10 @@
 #
 # Updated: 2026-05-21 (PR #1177 security pass) — added coverage that
 # remove_pocket_backend writes an audit-log entry.
+# Updated: 2026-05-22 (RFC 05 M2a) — get_pocket_backend now carries an
+# `allowed_writes` list and get_pocket_backend_for_executor returns a
+# 5-tuple (the trailing element is the write allowlist). Assertions
+# updated to the new contract.
 #
 # What this pins:
 #   - set_pocket_backend then get_pocket_backend returns configured:true
@@ -46,10 +50,13 @@ async def test_set_then_get_backend(mongo_db):
     assert "token" not in result
 
     summary = await pockets_service.get_pocket_backend("w1", "pocket-1")
+    # RFC 05 M2a: the summary now also carries the write allowlist —
+    # empty by default (fail-closed). The token is still never present.
     assert summary == {
         "base_url": "https://api.example.com",
         "auth_type": "bearer",
         "configured": True,
+        "allowed_writes": [],
     }
     assert "token" not in summary
     assert "encrypted_token" not in summary
@@ -84,11 +91,12 @@ async def test_get_for_executor_decrypts_token(mongo_db):
     )
     creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
     assert creds is not None
-    base_url, auth_type, auth_header, token = creds
+    base_url, auth_type, auth_header, token, allowed_writes = creds
     assert base_url == "https://api.example.com"
     assert auth_type == "api_key"
     assert auth_header == "X-Custom-Key"
     assert token == "my-api-key"
+    assert allowed_writes == []
 
 
 async def test_get_for_executor_none_when_unset(mongo_db):

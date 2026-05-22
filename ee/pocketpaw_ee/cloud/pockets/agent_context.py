@@ -777,6 +777,39 @@ async def remove_source_for_agent(pocket_id: str, source_key: str) -> dict[str, 
     return {"ok": True, "source_key": source_key}
 
 
+# ---------------------------------------------------------------------------
+# rippleSpec.actions mutations — the write-action surface (RFC 05 M2a)
+# ---------------------------------------------------------------------------
+#
+# Sibling of the ``sources`` wrappers above. An ``actions`` declaration is
+# part of the persisted pocket document, so these wrappers push a
+# full-document ``replace`` ``pocket_mutation`` via ``_push_replace``.
+
+
+async def set_action_for_agent(
+    pocket_id: str, action_key: str, binding: dict[str, Any]
+) -> dict[str, Any]:
+    """Declare (or replace) a write action on the pocket."""
+    result, err = await pockets_service.agent_set_action(
+        pocket_id, action_key=action_key, binding=binding
+    )
+    if err is not None or result is None:
+        return {"ok": False, "error": err or "set_action failed"}
+    pocket_view: dict[str, Any] = result.get("pocket") or {}
+    await _push_replace(pocket_view)
+    return {"ok": True, "action_key": action_key, "binding": result.get("binding")}
+
+
+async def remove_action_for_agent(pocket_id: str, action_key: str) -> dict[str, Any]:
+    """Remove a write-action declaration from the pocket."""
+    result, err = await pockets_service.agent_remove_action(pocket_id, action_key=action_key)
+    if err is not None or result is None:
+        return {"ok": False, "error": err or "remove_action failed"}
+    pocket_view: dict[str, Any] = result.get("pocket") or {}
+    await _push_replace(pocket_view)
+    return {"ok": True, "action_key": action_key}
+
+
 __all__ = [
     "add_node_for_agent",
     "add_widget_for_agent",
@@ -787,12 +820,14 @@ __all__ = [
     "list_pockets_for_agent",
     "move_node_for_agent",
     "patch_state_for_agent",
+    "remove_action_for_agent",
     "remove_node_for_agent",
     "remove_prop_array_item_for_agent",
     "remove_source_for_agent",
     "remove_state_for_agent",
     "remove_widget_for_agent",
     "replace_node_for_agent",
+    "set_action_for_agent",
     "set_node_prop_for_agent",
     "set_prop_array_item_for_agent",
     "set_source_for_agent",

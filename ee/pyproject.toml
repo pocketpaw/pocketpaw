@@ -173,6 +173,9 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets.agent_context",
     "pocketpaw_ee.cloud.pockets.source_executor",
     "pocketpaw_ee.cloud.pockets.sources_ops",
+    "pocketpaw_ee.cloud.pockets._http_guard",
+    "pocketpaw_ee.cloud.pockets.action_executor",
+    "pocketpaw_ee.cloud.pockets.actions_ops",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",

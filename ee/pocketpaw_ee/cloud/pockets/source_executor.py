@@ -2,18 +2,27 @@
 # Created: 2026-05-21 (RFC 04 alpha) — runs the GET "bindings" declared in a
 #   pocket's `rippleSpec.sources` against the pocket's single configured
 #   backend and returns the JSON results. Read-only (GET) only — write
-#   bindings land in RFC 04 Milestone 2.
+#   bindings land in RFC 05 (write actions).
 # Updated: 2026-05-21 (PR #1177 security pass) — basic auth now base64-encodes
 #   the `user:pass` credential; the rate limiter is keyed per (pocket, user)
 #   and guarded by an asyncio.Lock; imports the public `host_is_internal`;
 #   `run_sources` writes an audit-log entry for every run.
+# Updated: 2026-05-22 (RFC 05 M2a) — the SSRF/timeout/size guards extracted
+#   to the shared `_http_guard.py` module: `_resolve_url`,
+#   `_assert_host_external`, `_auth_headers`, `_strip_query`, the
+#   `_HTTP_TIMEOUT` / `_MAX_RESPONSE_BYTES` constants, and the error class
+#   (renamed `_SourceError` -> `_GuardError`). This executor now imports
+#   them; `_SourceError` is kept as a `_GuardError` subclass for the read
+#   executor's own per-source errors (timeouts, http_error, bad_json, …).
+#   Behavior-identical — pure refactor; the read-executor tests are the
+#   regression gate.
 #
-# SSRF BOUNDARY. This module is the ONLY pocket-domain module that makes
-# outbound HTTP. Every defense from the locked security review is enforced
-# here: strict base-URL re-validation, path-traversal rejection, same-host
-# assertion after URL join, DNS rebinding check, no redirect following,
-# tight timeouts, a 512 KB response cap, error-message sanitization, and a
-# per-(pocket, user) rate limit.
+# SSRF BOUNDARY. The outbound-HTTP defenses now live in `_http_guard.py` —
+# the ONE canonical guard module both executors import. Every defense from
+# the locked security review still applies: strict base-URL re-validation,
+# path-traversal rejection, same-host assertion after URL join, DNS
+# rebinding check, no redirect following, tight timeouts, a 512 KB response
+# cap, error-message sanitization, and a per-(pocket, user) rate limit.
 #
 # IMPORT-LINTER: must NOT import `pocketpaw_ee.cloud.models.*`. The executor
 # receives base_url / auth / spec by parameter only — `pockets/service.py`
@@ -22,10 +31,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import ipaddress
 import logging
-import socket
 import time
 import urllib.parse
 from typing import Literal
@@ -33,16 +39,23 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from pocketpaw.security.url_validators import host_is_internal, validate_external_url_strict
+from pocketpaw.security.url_validators import validate_external_url_strict
+from pocketpaw_ee.cloud.pockets._http_guard import (
+    _HTTP_TIMEOUT,
+    _MAX_RESPONSE_BYTES,
+    _GuardError,
+    _assert_host_external,
+    _auth_headers,
+    _resolve_url,
+    _strip_query,
+)
 
 logger = logging.getLogger(__name__)
 
 # --- limits / policy --------------------------------------------------------
 _PER_SOURCE_TIMEOUT_S = 10.0
-_MAX_RESPONSE_BYTES = 524_288  # 512 KB (D11)
 _RATE_LIMIT_MAX = 10  # runs per window per (pocket, user) (D16)
 _RATE_LIMIT_WINDOW_S = 60.0
-_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)  # D10
 
 # Per-(pocket, user) run timestamps for the rate limiter. Keyed on both so a
 # single member cannot exhaust another member's budget on a shared pocket.
@@ -102,11 +115,6 @@ async def _rate_limited(pocket_id: str, user_id: str) -> bool:
         return False
 
 
-def _strip_query(url: str) -> str:
-    """Return ``url`` with query string and fragment removed — safe to log."""
-    return urllib.parse.urlsplit(url)._replace(query="", fragment="").geturl()
-
-
 def _audit_source_run(
     *, actor: str, pocket_id: str, status: str, base_url: str, ran: int, errors: int
 ) -> None:
@@ -138,84 +146,16 @@ def _audit_source_run(
         logger.warning("pocket source-run audit-log write failed", exc_info=True)
 
 
-class _SourceError(Exception):
-    """Internal: a per-source failure with an already-sanitized message."""
+class _SourceError(_GuardError):
+    """Internal: a per-source failure with an already-sanitized message.
 
-    def __init__(self, message: str, code: str = "error") -> None:
-        super().__init__(message)
-        self.message = message
-        self.code = code
-
-
-def _resolve_url(base_url: str, path: str) -> str:
-    """Join ``path`` onto ``base_url`` and reject anything that escapes it.
-
-    Implements D7: reject absolute URLs, ``..`` segments, null bytes /
-    non-printable chars, and any join whose resulting netloc differs from
-    the base. Returns the safe absolute URL.
+    Subclasses the shared ``_GuardError`` so a single ``except _GuardError``
+    catch covers both the guard primitives' rejections (extracted to
+    ``_http_guard.py``) and the read executor's own per-source errors
+    (timeout, http_error, bad_json, …). The guard messages say "path …";
+    this read-executor subclass keeps the "source …" wording for its own
+    rejections so the read-executor tests pass unchanged.
     """
-    if "\x00" in path or any(not ch.isprintable() for ch in path):
-        raise _SourceError("source path contains illegal characters", code="bad_path")
-
-    split_path = urllib.parse.urlsplit(path)
-    if split_path.scheme or split_path.netloc:
-        raise _SourceError("source path must be relative, not an absolute URL", code="bad_path")
-
-    # Percent-decode and reject traversal segments.
-    decoded = urllib.parse.unquote(split_path.path)
-    if any(seg == ".." for seg in decoded.split("/")):
-        raise _SourceError("source path may not contain '..' segments", code="bad_path")
-
-    joined = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
-    if urllib.parse.urlsplit(joined).netloc != urllib.parse.urlsplit(base_url).netloc:
-        raise _SourceError("source path resolves to a different host", code="bad_path")
-    return joined
-
-
-async def _assert_host_external(hostname: str) -> None:
-    """D8 — resolve ``hostname`` and reject if any IP is internal.
-
-    Guards against DNS rebinding: the base URL may be a public name that
-    resolves to a private address. ``getaddrinfo`` runs in a worker thread
-    so the event loop is not blocked.
-    """
-    try:
-        infos = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
-    except socket.gaierror as exc:
-        raise _SourceError("backend host could not be resolved", code="dns_error") from exc
-
-    for info in infos:
-        # info[4] is the sockaddr — (host, port[, flowinfo, scope_id]).
-        ip = str(info[4][0])
-        # strip a zone id (fe80::1%eth0) before parsing
-        ip = ip.split("%", 1)[0]
-        if host_is_internal(ip):
-            raise _SourceError("backend host resolves to an internal address", code="bad_host")
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            continue
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
-            raise _SourceError("backend host resolves to an internal address", code="bad_host")
-
-
-def _auth_headers(auth_type: str, auth_header: str | None, token: str) -> dict[str, str]:
-    """Build the request auth header for the configured auth type.
-
-    ``none`` adds no header. Unknown types are treated as ``none`` —
-    the DTO Literal already constrains the wire input.
-
-    For ``basic`` the stored token is the raw ``user:pass`` credential; it
-    is base64-encoded here to form a valid ``Authorization: Basic`` header.
-    """
-    if auth_type == "bearer":
-        return {"Authorization": f"Bearer {token}"}
-    if auth_type == "api_key":
-        return {(auth_header or "X-Api-Key"): token}
-    if auth_type == "basic":
-        encoded = base64.b64encode(token.encode()).decode()
-        return {"Authorization": f"Basic {encoded}"}
-    return {}
 
 
 def _select_sources(
@@ -268,7 +208,9 @@ async def _run_one(
     base_url: str,
     headers: dict[str, str],
 ) -> dict:
-    """Fetch a single source. Returns a ``ran`` row; raises ``_SourceError``."""
+    """Fetch a single source. Returns a ``ran`` row; raises ``_GuardError``
+    (the shared guard rejections) or its ``_SourceError`` subclass (the
+    read executor's own per-source failures)."""
     url = _resolve_url(base_url, binding.path)
     await _assert_host_external(urllib.parse.urlsplit(url).hostname or "")
 
@@ -410,7 +352,9 @@ async def run_sources(
                         "code": "timeout",
                     }
                 }
-            except _SourceError as exc:
+            except _GuardError as exc:
+                # Covers both the shared-guard rejections and this
+                # executor's own ``_SourceError`` subclass.
                 return {"__error__": {"source": key, "error": exc.message, "code": exc.code}}
             except Exception:
                 # Catch-all: never let a raw exception escape into the body.

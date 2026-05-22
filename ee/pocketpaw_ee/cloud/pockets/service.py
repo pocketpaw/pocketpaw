@@ -42,6 +42,17 @@ attaches a non-secret ``backend`` summary (``{base_url, auth_type,
 configured}``) so the edit specialist knows whether a backend is already
 configured before it authors a ``sources`` block. The token is NEVER
 included — the summary comes from ``get_pocket_backend``.
+Changes: 2026-05-22 (RFC 05 M2a) — added the write-action half:
+``agent_set_action`` / ``agent_remove_action`` author the top-level
+``rippleSpec.actions`` block (twins of the ``sources`` ops, validated
+through ``ActionBinding``); ``set_pocket_write_policy`` sets the
+per-pocket write allowlist (owner-only, audit-logged, rejects when no
+backend is configured); ``has_action_run_access`` gates the action-run
+route (owner OR explicit shared_with ONLY — a write is NOT
+workspace-visible). ``get_pocket_backend`` /
+``get_pocket_backend_for_executor`` / ``_agent_backend_summary`` now
+carry ``allowed_writes`` so the executor and the edit specialist can see
+the write policy.
 """
 
 from __future__ import annotations
@@ -64,10 +75,12 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 from pocketpaw_ee.cloud.models.pocket import Widget as _WidgetDoc
+from pocketpaw_ee.cloud.models.pocket_backend import AllowedWrite as _AllowedWriteDoc
 from pocketpaw_ee.cloud.models.pocket_backend import (
     PocketBackendCredential as _BackendCredentialDoc,
 )
 from pocketpaw_ee.cloud.pockets import (
+    actions_ops,
     backend_crypto,
     prop_arrays,
     sources_ops,
@@ -868,6 +881,31 @@ async def is_owner(pocket_id: str, user_id: str) -> bool:
     return doc.owner == user_id
 
 
+async def has_action_run_access(pocket_id: str, user_id: str) -> bool:
+    """Return ``True`` if ``user_id`` may RUN a write action on the pocket.
+
+    The gate is OWNER or explicit ``shared_with`` ONLY — deliberately
+    NARROWER than ``has_edit_access`` (which also allows any caller on a
+    workspace-visible pocket). A write has blast radius: it hits a real
+    backend with a real ``DELETE``. M2a keeps the run surface to people
+    the owner explicitly invited; M2b widens this once Instinct gating is
+    wired. Raises ``NotFound`` if the pocket doesn't exist — the
+    ``require_pocket_action_run`` guard converts that to a 404.
+    """
+    try:
+        pocket_oid = PydanticObjectId(pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("pocket", pocket_id) from exc
+
+    doc = await _PocketDoc.get(pocket_oid)
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+
+    if doc.owner == user_id:
+        return True
+    return user_id in (doc.shared_with or [])
+
+
 async def is_member(pocket_id: str, user_id: str) -> bool:
     """Return ``True`` if ``user_id`` may read the pocket — owner, team
     member, explicit shared_with, or any caller when visibility is
@@ -956,11 +994,14 @@ async def _agent_backend_summary(doc: _PocketDoc) -> dict[str, Any]:
     if summary is None:
         return {"configured": False}
     # get_pocket_backend already excludes the token — assert the shape
-    # and never pass anything else through.
+    # and never pass anything else through. ``allowed_writes`` is carried
+    # so the edit specialist can see which write methods+paths the owner
+    # has authorized before it authors a write action.
     return {
         "base_url": summary.get("base_url"),
         "auth_type": summary.get("auth_type"),
         "configured": True,
+        "allowed_writes": summary.get("allowed_writes") or [],
     }
 
 
@@ -1939,6 +1980,108 @@ async def agent_remove_source(
         )
 
 
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.actions mutations — agent-facing (RFC 05 M2a)
+# ---------------------------------------------------------------------------
+#
+# The write-action sibling of the ``sources`` ops above. ``actions`` is a
+# fourth top-level rippleSpec key declaring write bindings (POST/PUT/PATCH/
+# DELETE). Like ``sources`` it is part of the persisted pocket document, so
+# these ops call ``doc.save()``. Each binding is validated through
+# ``ActionBinding`` (action_executor.py) before it is written — an invalid
+# binding is rejected, never stored. Authoring a binding does NOT authorize
+# the write: the human-set ``allowed_writes`` allowlist on the backend
+# config decides whether the write may actually fire.
+
+
+async def agent_set_action(
+    pocket_id: str,
+    *,
+    action_key: str,
+    binding: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Declare (or replace) a write action on the pocket.
+
+    ``binding`` is validated through the ``ActionBinding`` model — an
+    entry missing ``method`` / ``path``, or carrying a non-write verb, is
+    rejected before any write. M2b governance/metering fields
+    (``requires_instinct``, ``outcome``, …) are CARRIED THROUGH unchanged:
+    ``ActionBinding`` ignores them on parse, so they are taken from the
+    raw ``binding`` dict and re-merged onto the validated core. The write
+    only fires at run time if the human owner has allow-listed the
+    method+path in backend settings.
+
+    Returns ``({"action_key": ..., "binding": ..., "pocket": <view>},
+    None)`` on success.
+    """
+    from pocketpaw_ee.cloud.pockets.action_executor import ActionBinding
+
+    if not action_key:
+        return None, "action_key is required"
+    if not isinstance(binding, dict):
+        return None, "binding must be an object"
+    try:
+        validated = ActionBinding.model_validate(binding)
+    except PydanticValidationError as exc:
+        return None, f"invalid action binding: {exc.errors()[0].get('msg', exc)}"
+
+    # The validated model drops M2b governance fields (extra: ignore). Carry
+    # them through verbatim so an M2b-aware client can author them now and
+    # they survive a round-trip through an M2a runtime.
+    normalized = {**binding, **validated.model_dump(mode="json")}
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        try:
+            actions_ops.set_action(spec, action_key, normalized)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "action_key": action_key,
+                "binding": normalized,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_action(
+    pocket_id: str,
+    *,
+    action_key: str,
+) -> tuple[dict | None, str | None]:
+    """Remove a write-action declaration from the pocket.
+
+    Idempotent — removing an action that was never declared still
+    succeeds. Returns ``({"action_key": ..., "pocket": <view>}, None)``.
+    """
+    if not action_key:
+        return None, "action_key is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        actions_ops.remove_action(spec, action_key)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"action_key": action_key, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
 async def agent_create(
     *,
     workspace_id: str,
@@ -2196,11 +2339,26 @@ async def set_pocket_backend(
     return {"base_url": base_url, "auth_type": auth_type, "configured": True}
 
 
+def _allowed_writes_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
+    """Render a backend doc's ``allowed_writes`` as plain wire dicts.
+
+    Each rule is ``{method, path_pattern}``. An older row written before
+    RFC 05 has no ``allowed_writes`` attribute — ``getattr`` defaults it
+    to an empty list (fail-closed: no write fires).
+    """
+    rules = getattr(doc, "allowed_writes", None) or []
+    out: list[dict[str, str]] = []
+    for rule in rules:
+        out.append({"method": rule.method, "path_pattern": rule.path_pattern})
+    return out
+
+
 async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
     """Return the pocket's backend binding summary, or ``None`` if unset.
 
     NEVER returns the token — only ``base_url`` / ``auth_type`` /
-    ``configured``.
+    ``configured`` / ``allowed_writes`` (the write allowlist; an
+    owner/editor-facing non-secret).
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -2208,18 +2366,25 @@ async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
     )
     if doc is None:
         return None
-    return {"base_url": doc.base_url, "auth_type": doc.auth_type, "configured": True}
+    return {
+        "base_url": doc.base_url,
+        "auth_type": doc.auth_type,
+        "configured": True,
+        "allowed_writes": _allowed_writes_wire(doc),
+    }
 
 
 async def get_pocket_backend_for_executor(
     workspace_id: str, pocket_id: str
-) -> tuple[str, str, str | None, str] | None:
-    """Internal — return ``(base_url, auth_type, auth_header, token)``.
+) -> tuple[str, str, str | None, str, list[dict[str, str]]] | None:
+    """Internal — return ``(base_url, auth_type, auth_header, token,
+    allowed_writes)``.
 
-    Decrypts the stored token. Used ONLY by the run-sources route handler
-    to pass credentials to the source executor. Returns ``None`` when the
-    pocket has no backend configured. The plaintext token returned here
-    must never be logged or returned to a client.
+    Decrypts the stored token. Used by the run-sources route handler (it
+    ignores ``allowed_writes``) and the run-action route handler (it needs
+    it). Returns ``None`` when the pocket has no backend configured. The
+    plaintext token returned here must never be logged or returned to a
+    client.
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -2231,7 +2396,60 @@ async def get_pocket_backend_for_executor(
     token = ""
     if doc.auth_type != "none" and doc.encrypted_token and doc.nonce and doc.salt:
         token = backend_crypto.decrypt_token(doc.encrypted_token, doc.nonce, doc.salt)
-    return doc.base_url, doc.auth_type, doc.auth_header, token
+    return doc.base_url, doc.auth_type, doc.auth_header, token, _allowed_writes_wire(doc)
+
+
+async def set_pocket_write_policy(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    allowed_writes: list[dict[str, str]],
+) -> dict:
+    """Replace the pocket's write allowlist. Owner-only.
+
+    ``allowed_writes`` is a list of ``{method, path_pattern}`` rules. The
+    list lives on the backend-credential row — OUTSIDE the spec — so the
+    agent (which authors the spec) cannot widen its own write blast
+    radius. An empty list is valid and revokes every write.
+
+    Rejects with ``pocket_backend.not_configured`` if the pocket has no
+    backend configured: a write policy with no backend to apply it to is
+    meaningless, and silently storing one would mask the misconfiguration.
+    The mutation is audit-logged via the ``_audit_backend_config`` path.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a write policy",
+        )
+
+    doc.allowed_writes = [
+        _AllowedWriteDoc(method=rule["method"], path_pattern=rule["path_pattern"])
+        for rule in allowed_writes
+    ]
+    await doc.save()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.write_policy",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: backend credentials (and the write policy on them) are a
+    # separate collection, not pocket state — no downstream handler keys
+    # off a PocketUpdated for them.
+    return {
+        "base_url": doc.base_url,
+        "auth_type": doc.auth_type,
+        "configured": True,
+        "allowed_writes": _allowed_writes_wire(doc),
+    }
 
 
 async def remove_pocket_backend(workspace_id: str, user_id: str, pocket_id: str) -> None:
@@ -2272,11 +2490,13 @@ __all__ = [
     "agent_list",
     "agent_move_node",
     "agent_patch_state",
+    "agent_remove_action",
     "agent_remove_node",
     "agent_remove_source",
     "agent_remove_state",
     "agent_remove_widget",
     "agent_replace_node",
+    "agent_set_action",
     "agent_set_node_prop",
     "agent_set_source",
     "agent_set_state",
@@ -2291,6 +2511,7 @@ __all__ = [
     "get",
     "get_pocket_backend",
     "get_pocket_backend_for_executor",
+    "has_action_run_access",
     "has_edit_access",
     "is_member",
     "is_owner",
@@ -2303,6 +2524,7 @@ __all__ = [
     "reorder_widgets",
     "revoke_share_link",
     "set_pocket_backend",
+    "set_pocket_write_policy",
     "unassign_project_on_pockets",
     "update",
     "update_share_link",
