@@ -19,6 +19,10 @@ Updated: 2026-05-22 (feat/api-skills, Increment 2b) — documented
 POST /skills/api-doc, the per-backend API-skill install endpoint that
 turns a pocket backend's OpenAPI document into a loadable SKILL.md so
 the authoring agent stops hallucinating endpoints.
+
+Updated: 2026-05-22 (feat/catalog-allowlist, Increment 5) — documented
+the catalog-as-allowlist ingest gate, the two escape-hatch widgets
+(`model-viewer` + `embed`), and the `embed` URL/host policy.
 -->
 
 # Cloud REST API Reference
@@ -284,3 +288,58 @@ Returns `422` when the file extension is unsupported, the file exceeds
 the 2 MB cap, the document is unparseable, or it carries no `paths`
 object. Every install is audit-logged with the workspace, the actor, and
 the resulting slug — never the spec contents.
+
+## Pockets — Catalog-as-Allowlist Ingest Gate
+
+Increment 5. The Ripple renderer has a **closed widget registry**: a
+node whose `type` is not a known widget renders as a red "Unknown widget
+type" box. The catalog gate catches that at ingest time, before the spec
+is persisted.
+
+On every pocket write that carries a `rippleSpec`, the service walks the
+node tree and flags any node whose `type` is not in the widget manifest
+(plus the control-flow types `if` and `each`). The gate runs in one of
+two modes:
+
+- **Strict** — the agent-generation path (`create_from_ripple_spec`, the
+  pocket-specialist `agent_create` / `agent_update` ops). A violation
+  blocks the write; the specialist edit tools return the corrective
+  message so the LLM can retry with a real widget type.
+- **Logged** — the human / import path (`POST /pockets`,
+  `PUT /pockets/{id}`). A violation is recorded as a structured warning
+  for triage but does **not** block — an older imported spec may use a
+  widget that has since left the catalog.
+
+Each flagged node reports `{path, type, suggestion}`, where `suggestion`
+is the nearest catalog widget by edit distance. The gate is best-effort:
+when the widget manifest can't be fetched it is skipped.
+
+### Escape-hatch widgets
+
+Two catalog widgets cover content the rest of the catalog can't express:
+
+- `model-viewer` — an interactive 3D model (`.glb` / `.gltf`) with
+  orbit / zoom / pan controls.
+- `embed` — the **sanctioned escape hatch**: a renderer-sandboxed
+  iframe for a CodePen, a Figma frame, an Observable notebook, or a
+  self-contained visualization. `mode` is required (`url` or `srcdoc`).
+  The iframe `sandbox` attribute is renderer-controlled — it is **not**
+  author-settable.
+
+### `embed` URL / host policy
+
+An `embed` node in `mode: "url"` points an iframe at a third-party page,
+so its `url` is an SSRF / clickjacking boundary. The ingest gate
+enforces:
+
+- `url` must be **https** — plain `http` is rejected.
+- the host must be on the embed allow-list (`POCKETPAW_RIPPLE_EMBED_ALLOWED_HOSTS`,
+  a JSON array — default: `youtube-nocookie.com`, `player.vimeo.com`,
+  `codepen.io`, `codesandbox.io`, `observablehq.com`, `www.figma.com`).
+- loopback / RFC1918 / link-local / carrier-grade-NAT / cloud-metadata
+  hosts are **hard-blocked unconditionally** — this holds even if the
+  allow-list is widened to `["*"]`.
+
+Every ingested spec that contains an `embed` node is audit-logged
+(category `pocket_embed`) with the embed count and URLs — never the
+iframe contents.

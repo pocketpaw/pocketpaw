@@ -5,6 +5,9 @@ Changes:
     floor) and ``source_refresh_max_per_hour`` (per-pocket auto-refresh
     budget) — cost controls for pocket data-source interval / webhook
     refresh (RFC 04 M3).
+  - 2026-05-22: Added ``ripple_embed_allowed_hosts`` — host allow-list
+    for the Ripple ``embed`` widget's ``mode:"url"`` form (Increment 5,
+    escape-hatch node + embed URL policy).
   - 2026-05-22: Added ``pocket_router_enabled`` (kill-switch) and
     ``pocket_router_min_confidence`` (cheap-tier confidence floor) for
     the pocket execution router (Increment 3).
@@ -1196,6 +1199,25 @@ class Settings(BaseSettings):
     ripple_manifest_ttl_seconds: int = Field(
         default=86400,
         description="TTL in seconds for cached Ripple manifest (default: 24h)",
+    )
+    ripple_embed_allowed_hosts: list[str] = Field(
+        default_factory=lambda: [
+            "youtube-nocookie.com",
+            "player.vimeo.com",
+            "codepen.io",
+            "codesandbox.io",
+            "observablehq.com",
+            "www.figma.com",
+        ],
+        description=(
+            'Host allow-list for the Ripple `embed` widget\'s `mode:"url"` form. '
+            "An `embed` URL must be https and its host must match an entry here "
+            "(exact or sub-domain). Set via POCKETPAW_RIPPLE_EMBED_ALLOWED_HOSTS "
+            'as a JSON array. A literal `["*"]` widens it to every host; even '
+            "then loopback / private / link-local / cloud-metadata hosts stay "
+            "hard-blocked. Defaults to a curated set of sandbox-friendly "
+            "embed providers."
+        ),
     )
 
     # Pocket data-source refresh — cost controls (RFC 04 M3).
