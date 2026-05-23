@@ -107,8 +107,12 @@ from pocketpaw_ee.cloud.pockets.dto import (
 )
 from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
+    ActionWiringViolationError,
     CatalogViolationError,
+    format_action_violations_for_agent,
     format_violations_for_agent,
+    validate_action_wiring_logged,
+    validate_action_wiring_strict,
     validate_against_catalog_logged,
     validate_against_catalog_strict,
     validate_ripple_spec_logged,
@@ -441,11 +445,27 @@ async def _gate_catalog(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
+        # Action-handler wiring runs as a sibling gate — same strict
+        # posture as the catalog walk so the agent-generation path
+        # gets a single corrective signal per failed attempt rather
+        # than chained-and-shadowed errors. Manifest-driven catalog
+        # already passed; this catches the verb-level / Refresh-button
+        # failure modes the catalog can't see.
+        validate_action_wiring_strict(
+            spec,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
     else:
         validate_against_catalog_logged(
             spec,
             allowed_types,
             embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+        validate_action_wiring_logged(
+            spec,
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
@@ -715,6 +735,24 @@ async def create_from_ripple_spec(
         logger.info("Auto-created pocket %s from ripple spec", pocket_id)
         await emit(PocketCreated(data=await _pocket_event_payload(doc)))
         return pocket_id
+    except CatalogViolationError as exc:
+        # Strict catalog gate blocked the auto-create; surface the field
+        # paths explicitly instead of letting them disappear into the
+        # catch-all stack trace below.
+        logger.warning(
+            "Auto-create blocked by catalog gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
+    except ActionWiringViolationError as exc:
+        # Strict action-wiring gate blocked the auto-create (PR #1196).
+        logger.warning(
+            "Auto-create blocked by action-wiring gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
     except Exception:
         logger.warning("Failed to auto-create pocket from ripple spec", exc_info=True)
         return None
@@ -1285,6 +1323,8 @@ async def agent_update(
                 )
             except CatalogViolationError as exc:
                 return None, format_violations_for_agent(exc.violations)
+            except ActionWiringViolationError as exc:
+                return None, format_action_violations_for_agent(exc.violations)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
@@ -2298,6 +2338,8 @@ async def agent_create(
             await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
         except CatalogViolationError as exc:
             return None, None, format_violations_for_agent(exc.violations)
+        except ActionWiringViolationError as exc:
+            return None, None, format_action_violations_for_agent(exc.violations)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,

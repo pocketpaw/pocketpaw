@@ -482,6 +482,323 @@ def _walk_embed_policy(
                 _walk_embed_policy(child, f"{path}.{key}[{i}]", allowed_hosts, issues)
 
 
+# ---------------------------------------------------------------------------
+# Action-verb allowlist + unwired-live-button detector (2026-05-23).
+#
+# Two related failure modes the prompt-side "label without source" rule
+# (PR #1194) didn't catch:
+#
+#  A. Invented action verbs. The specialist authors ``on_click:
+#     {action: "fetch", endpoint: "/pet/1", target: "pet_rows"}``. The
+#     Ripple event dispatcher has no ``fetch`` verb — its default case
+#     ``console.warn``s and returns. The button looks live but does
+#     nothing.
+#
+#  B. "Live"-labelled buttons with no real wiring. A Refresh button
+#     whose ``on_click`` is empty (or only contains the invented verb
+#     above) renders, takes user clicks, and never fetches. Coupled
+#     with pre-seeded mock data in ``state.<key>``, the canvas looks
+#     alive but is inert.
+#
+# Both walks here run as siblings to the catalog gate — strict on the
+# agent-generation path (raises so the chat agent can retry), logged on
+# the human / import path.
+# ---------------------------------------------------------------------------
+
+# Canonical action verbs the Ripple event dispatcher understands.
+# Source of truth: ``ripple/src/lib/core/event-dispatcher.ts`` — the
+# switch in ``dispatch()``. Drift between the two would let an invented
+# verb pass spec validation and silently no-op at runtime, which is the
+# exact failure we are guarding against; mirror this list whenever the
+# dispatcher gains a new case.
+_KNOWN_ACTION_VERBS: frozenset[str] = frozenset(
+    {
+        "set",
+        "toggle",
+        "push",
+        "remove",
+        "open",
+        "navigate",
+        "toast",
+        "emit",
+        "pin",
+        "unpin",
+        "api",
+        "run_source",
+        "call_binding",
+        "flow",
+        "branch",
+        "confirm",
+        "validate",
+        "delay",
+        "invoke",
+    }
+)
+
+# Button labels (case-insensitive substring match) that promise a live
+# fetch. Used by :func:`find_unwired_live_buttons` to know which buttons
+# are advertising behavior that must actually be wired.
+_LIVE_BUTTON_KEYWORDS: tuple[str, ...] = (
+    "refresh",
+    "reload",
+    "sync",
+    "pull",
+    "fetch",
+    "update from",
+    "re-fetch",
+    "refetch",
+)
+
+# Event-prop names that carry one or more action handlers. Mirrors the
+# Ripple node shape — any prop value whose key matches and whose value
+# is a handler-shaped object (or list of them) is in scope.
+_EVENT_PROP_NAMES: frozenset[str] = frozenset(
+    {
+        "on_click",
+        "onClick",
+        "on_change",
+        "onChange",
+        "on_submit",
+        "onSubmit",
+        "on_input",
+        "onInput",
+        "on_blur",
+        "onBlur",
+        "on_focus",
+        "onFocus",
+        "on_select",
+        "onSelect",
+    }
+)
+
+
+def _iter_handlers(value: Any) -> list[dict[str, Any]]:
+    """Normalise a handler prop value into the list of handler dicts.
+
+    A handler is either a single object ``{action: ..., ...}`` or a
+    list of such objects (action chains). Returns the flat list — any
+    non-dict entries are dropped (the catalog already rejected those).
+    """
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [h for h in value if isinstance(h, dict)]
+    return []
+
+
+def _walk_action_verbs(node: Any, path: str, issues: list[dict[str, Any]]) -> None:
+    """Recursive walk that collects unknown-action-verb violations.
+
+    Each issue: ``{path, prop, action, suggestion}``. ``suggestion`` is
+    the nearest known verb (difflib) so the corrective hint can be
+    specific. A handler without an ``action`` field is skipped — that
+    is the catalog's concern, not the verb gate.
+    """
+    if isinstance(node, dict):
+        # node-level prop scan
+        props = node.get("props") if isinstance(node.get("props"), dict) else node
+        if isinstance(props, dict):
+            for prop_name, prop_value in props.items():
+                if prop_name not in _EVENT_PROP_NAMES:
+                    continue
+                for handler in _iter_handlers(prop_value):
+                    verb = handler.get("action")
+                    if not isinstance(verb, str) or not verb:
+                        # No action field — the renderer treats this as
+                        # a no-op too. Flag it: a Refresh button bound
+                        # to ``{}`` is identical to ``{action: "fetch"}``
+                        # in effect.
+                        issues.append(
+                            {
+                                "path": f"{path}.props.{prop_name}",
+                                "prop": prop_name,
+                                "action": "<missing>",
+                                "suggestion": None,
+                            }
+                        )
+                        continue
+                    if verb not in _KNOWN_ACTION_VERBS:
+                        matches = difflib.get_close_matches(
+                            verb, sorted(_KNOWN_ACTION_VERBS), n=1, cutoff=0.6
+                        )
+                        issues.append(
+                            {
+                                "path": f"{path}.props.{prop_name}",
+                                "prop": prop_name,
+                                "action": verb,
+                                "suggestion": matches[0] if matches else None,
+                            }
+                        )
+
+        for key in ("children", "else_children"):
+            kids = node.get(key)
+            if isinstance(kids, list):
+                for i, child in enumerate(kids):
+                    _walk_action_verbs(child, f"{path}.{key}[{i}]", issues)
+
+
+def validate_action_verbs(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Walk the spec, flag every event-handler whose ``action`` verb
+    is not in :data:`_KNOWN_ACTION_VERBS`.
+
+    Returns one issue per offending handler; ``[]`` when ``spec`` is
+    not a dict or every handler's verb is recognized. Issue shape::
+
+        {
+          "path": "ui.children[2].props.on_click",
+          "prop": "on_click",
+          "action": "fetch",
+          "suggestion": "run_source",   # nearest known verb, or None
+        }
+
+    The renderer's event dispatcher silently no-ops unknown verbs (it
+    ``console.warn``s and returns), which masks broken buttons as
+    "working." Catching this at spec ingest forces the agent to use
+    the right verb.
+    """
+    if not isinstance(spec, dict):
+        return []
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_action_verbs(root, "ui", issues)
+    return issues
+
+
+def _node_label_text(node: dict[str, Any]) -> str:
+    """Return the user-visible text of a node — used to detect Refresh
+    / Sync / Fetch labels. Concatenates ``props.label``, ``props.text``,
+    ``props.title``, and ``props.aria_label`` if present.
+    """
+    props = node.get("props") if isinstance(node.get("props"), dict) else {}
+    parts: list[str] = []
+    for key in ("label", "text", "title", "aria_label", "ariaLabel"):
+        v = props.get(key) if isinstance(props, dict) else None
+        if isinstance(v, str):
+            parts.append(v)
+    return " ".join(parts)
+
+
+def _looks_live(label: str) -> bool:
+    """True when a button's label promises live fetching behaviour."""
+    if not label:
+        return False
+    lo = label.lower()
+    return any(kw in lo for kw in _LIVE_BUTTON_KEYWORDS)
+
+
+def _walk_live_buttons(
+    node: Any,
+    path: str,
+    sources: dict[str, Any],
+    issues: list[dict[str, Any]],
+) -> None:
+    """Recursive walk that flags Refresh-labelled buttons whose
+    ``on_click`` is empty or wired to an unrecognized verb / missing
+    source.
+    """
+    if isinstance(node, dict):
+        wtype = node.get("type")
+        if wtype == "button":
+            props = node.get("props") if isinstance(node.get("props"), dict) else {}
+            label = _node_label_text(node)
+            if _looks_live(label):
+                handlers = _iter_handlers(
+                    props.get("on_click") if isinstance(props, dict) else None
+                )
+                if not handlers:
+                    issues.append(
+                        {
+                            "path": f"{path}.props.on_click",
+                            "label": label,
+                            "reason": "live-labelled button has no on_click handler",
+                        }
+                    )
+                else:
+                    # Pick the first handler that's plausibly the
+                    # "fetch" — verb in {api, run_source, invoke, flow}.
+                    plausible = [
+                        h
+                        for h in handlers
+                        if h.get("action") in {"api", "run_source", "invoke", "flow"}
+                    ]
+                    if not plausible:
+                        # Either all handlers use non-fetching verbs
+                        # (set/toggle/etc.) or an unknown verb. Either
+                        # way the button doesn't fetch anything.
+                        verbs = sorted({str(h.get("action") or "<missing>") for h in handlers})
+                        issues.append(
+                            {
+                                "path": f"{path}.props.on_click",
+                                "label": label,
+                                "reason": (
+                                    "live-labelled button has no fetching action — "
+                                    f"verbs present: {verbs}; expected one of "
+                                    "['api', 'run_source', 'invoke', 'flow']"
+                                ),
+                            }
+                        )
+                    else:
+                        for h in plausible:
+                            if h.get("action") == "run_source":
+                                src_key = h.get("source")
+                                if not isinstance(src_key, str) or src_key not in sources:
+                                    issues.append(
+                                        {
+                                            "path": f"{path}.props.on_click",
+                                            "label": label,
+                                            "reason": (
+                                                f"run_source references source "
+                                                f"{src_key!r} which is not declared "
+                                                "in rippleSpec.sources"
+                                            ),
+                                        }
+                                    )
+                            elif h.get("action") == "api":
+                                if not isinstance(h.get("url"), str) or not h.get("url"):
+                                    issues.append(
+                                        {
+                                            "path": f"{path}.props.on_click",
+                                            "label": label,
+                                            "reason": "api handler has no url",
+                                        }
+                                    )
+
+        for key in ("children", "else_children"):
+            kids = node.get(key)
+            if isinstance(kids, list):
+                for i, child in enumerate(kids):
+                    _walk_live_buttons(child, f"{path}.{key}[{i}]", sources, issues)
+
+
+def find_unwired_live_buttons(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Walk the spec, flag every "live"-labelled button whose on_click
+    is empty, references an undeclared source, or uses an action verb
+    that doesn't actually fetch.
+
+    Returns one issue per offending button; ``[]`` when ``spec`` is
+    not a dict or every Refresh-class button is properly wired. Issue
+    shape::
+
+        {
+          "path": "ui.children[2].props.on_click",
+          "label": "Refresh",
+          "reason": "...",
+        }
+
+    Pairs with :func:`validate_action_verbs` — the verb check catches
+    the dispatcher-level failure (unknown verb), this catches the
+    semantic-level failure (verb known, but the wiring is broken for
+    the button's purpose).
+    """
+    if not isinstance(spec, dict):
+        return []
+    raw_sources = (spec.get("sources") if isinstance(spec.get("sources"), dict) else {}) or {}
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_live_buttons(root, "ui", raw_sources, issues)
+    return issues
+
+
 def format_for_prompt(manifest: dict[str, Any]) -> str:
     """Render the manifest as a markdown block for system-prompt injection.
 
