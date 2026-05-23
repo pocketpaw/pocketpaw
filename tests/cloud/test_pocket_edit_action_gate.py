@@ -160,9 +160,9 @@ async def test_invented_verb_in_edit_returns_ok_false(mongo_db, agent_identity):
     )
     # The corrective hint must teach the agent the right shape, not
     # just say "rejected" — that's what unblocks the next retry.
-    assert any(
-        verb in (out.error or "") for verb in ("run_source", "api")
-    ), f"hint must recommend a real verb; got error={out.error!r}"
+    assert any(verb in (out.error or "") for verb in ("run_source", "api")), (
+        f"hint must recommend a real verb; got error={out.error!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
