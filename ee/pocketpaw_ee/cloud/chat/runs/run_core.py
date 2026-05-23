@@ -421,7 +421,11 @@ async def _drive_agent_loop(
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
         ).__aiter__()
-        next_event_task: asyncio.Task[Any] | None = asyncio.create_task(agent_iter.__anext__())
+
+        async def _next_event() -> Any:
+            return await agent_iter.__anext__()
+
+        next_event_task: asyncio.Task[Any] | None = asyncio.create_task(_next_event())
         next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] = asyncio.create_task(
             side_channel_queue.get()
         )
@@ -445,7 +449,7 @@ async def _drive_agent_loop(
                 next_event_task = None
                 next_queue_task.cancel()
                 break
-            next_event_task = asyncio.create_task(agent_iter.__anext__())
+            next_event_task = asyncio.create_task(_next_event())
             etype = getattr(event, "type", None)
             econtent = getattr(event, "content", "")
             if etype == "message":
