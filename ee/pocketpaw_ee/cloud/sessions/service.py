@@ -330,38 +330,32 @@ async def link_pocket(workspace_id: str, session_id_str: str, pocket_id: str) ->
 
 
 async def _active_run_for_session(session: _SessionDoc) -> dict | None:
-    """Newest non-terminal ``ChatRunDoc`` for the session's scope, or ``None``.
+    """Newest non-terminal ``ChatRunDoc`` for this session, or ``None``.
 
-    Scope mapping mirrors what ``post_agent_chat`` writes:
-      * session → context_type=session, scope_id=str(session.id)
-      * group   → context_type=group,   scope_id=session.group
-      * pocket  → context_type=pocket,  scope_id=session.pocket
+    The desktop client POSTs every session-routed chat to
+    ``/cloud/chat/session/{_id}/agent`` — including pocket and dm sessions —
+    so every run for a session is written as ``(session, str(session.id))``
+    regardless of ``session.context_type``. Query that scope first; fall
+    back to the context-type-derived scope so curl / future clients that hit
+    ``/cloud/chat/pocket/{id}/agent`` directly still resolve.
     """
     from pocketpaw_ee.cloud.chat.runs import service as run_service
 
-    if session.context_type == "session":
-        scope_id: str | None = str(session.id)
-        ctype: str | None = "session"
-    elif session.context_type == "group":
-        scope_id = session.group
-        ctype = "group"
-    elif session.context_type == "pocket":
-        scope_id = session.pocket
-        ctype = "pocket"
-    else:
-        return None
+    candidates: list[tuple[str, str]] = [("session", str(session.id))]
+    if session.context_type == "group" and session.group:
+        candidates.append(("group", session.group))
+    elif session.context_type == "pocket" and session.pocket:
+        candidates.append(("pocket", session.pocket))
 
-    if not scope_id or not ctype:
-        return None
-
-    active = await run_service.find_active_run_for_scope(
-        workspace_id=session.workspace,
-        context_type=ctype,
-        scope_id=scope_id,
-    )
-    if active is None:
-        return None
-    return {"run_id": active.run_id, "status": active.status}
+    for ctype, scope_id in candidates:
+        active = await run_service.find_active_run_for_scope(
+            workspace_id=session.workspace,
+            context_type=ctype,
+            scope_id=scope_id,
+        )
+        if active is not None:
+            return {"run_id": active.run_id, "status": active.status}
+    return None
 
 
 async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:

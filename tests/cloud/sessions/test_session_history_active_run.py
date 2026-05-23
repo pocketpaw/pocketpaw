@@ -107,6 +107,30 @@ async def test_session_history_active_run_for_pocket_scope() -> None:
     assert result["active_run"] == {"run_id": "pk", "status": "running"}
 
 
+async def test_session_history_active_run_for_pocket_session_session_scope_run() -> None:
+    """Regression: the desktop client POSTs pocket chats to
+    ``/cloud/chat/session/{_id}/agent`` (not ``/cloud/chat/pocket/...``),
+    so the run is written under ``(session, str(session.id))`` even though
+    the Session doc has ``context_type=pocket``. The helper must still find
+    it — otherwise no resume-on-refresh."""
+    session = await sessions_service.create(
+        _ctx(),
+        "w1",
+        CreateSessionRequest(title="t", pocket_id="p1", agent_id="agent-x"),
+    )
+    assert session.context_type == "pocket"
+
+    # Run is in the session scope, not the pocket scope — matches the
+    # frontend's actual POST URL pattern.
+    await run_service.create_run(
+        _spec(run_id="pk-as-session", context_type="session", scope_id=session.id)
+    )
+    await run_service.mark_running("pk-as-session")
+
+    result = await sessions_service.get_history(session.id, "u1")
+    assert result["active_run"] == {"run_id": "pk-as-session", "status": "running"}
+
+
 async def test_session_history_active_run_isolated_by_workspace() -> None:
     """A run in a different workspace must NOT surface as active for this
     session — tenancy filter on the lookup."""
