@@ -8,6 +8,7 @@ remains registered in ``get_all_documents()`` for Beanie init.
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
@@ -47,6 +48,7 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "Attachment",
+    "ChatRunDoc",
     "Comment",
     "CommentAuthor",
     "CommentTarget",
@@ -109,6 +111,7 @@ def get_all_documents():
         Cycle,
         Project,
         PlanSession,
+        ChatRunDoc,
     ]
 
 
