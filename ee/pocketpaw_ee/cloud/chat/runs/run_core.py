@@ -15,6 +15,7 @@ from typing import Any
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
 )
+from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
@@ -68,9 +69,6 @@ async def _broadcast_message_new(
     attachments: list[dict[str, Any]],
     created_at: datetime,
 ) -> None:
-    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
-    from pocketpaw_ee.cloud.chat.ws import manager
-
     # Include the caller so OS chat panels (which render off chatRoomsStore
     # via WS `message.new`) see the agent reply land without a refresh. The
     # new resumable-runs SSE writes to chatStore, which os/ChatPanel doesn't
@@ -78,43 +76,60 @@ async def _broadcast_message_new(
     recipients = list(ctx.members) if ctx.members else [ctx.user_id]
     if not recipients:
         return
+    data = {
+        "id": message_id,
+        "group": ctx.scope_id,
+        "sender_type": "agent",
+        "agent": ctx.target_agent_id,
+        "content": content,
+        "attachments": attachments,
+        "created_at": created_at.isoformat(),
+    }
+    if xproc.is_worker():
+        await xproc.publish_ws_envelope(
+            scope_id=ctx.scope_id,
+            recipients=recipients,
+            ws_type="message.new",
+            ws_data=data,
+        )
+        return
+
+    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
+    from pocketpaw_ee.cloud.chat.ws import manager
+
     await manager.broadcast_to_group(
         ctx.scope_id,
         recipients,
-        WsOutbound(
-            type="message.new",
-            data={
-                "id": message_id,
-                "group": ctx.scope_id,
-                "sender_type": "agent",
-                "agent": ctx.target_agent_id,
-                "content": content,
-                "attachments": attachments,
-                "created_at": created_at.isoformat(),
-            },
-        ),
+        WsOutbound(type="message.new", data=data),
     )
 
 
 async def _broadcast_agent_typing(ctx: ScopeContext, active: bool) -> None:
-    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
-    from pocketpaw_ee.cloud.chat.ws import manager
-
     others = [m for m in ctx.members if m != ctx.user_id]
     if not others:
         return
+    data = {
+        "scope": ctx.kind.value,
+        "scope_id": ctx.scope_id,
+        "agent_id": ctx.target_agent_id,
+        "active": active,
+    }
+    if xproc.is_worker():
+        await xproc.publish_ws_envelope(
+            scope_id=ctx.scope_id,
+            recipients=others,
+            ws_type="agent.typing",
+            ws_data=data,
+        )
+        return
+
+    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
+    from pocketpaw_ee.cloud.chat.ws import manager
+
     await manager.broadcast_to_group(
         ctx.scope_id,
         others,
-        WsOutbound(
-            type="agent.typing",
-            data={
-                "scope": ctx.kind.value,
-                "scope_id": ctx.scope_id,
-                "agent_id": ctx.target_agent_id,
-                "active": active,
-            },
-        ),
+        WsOutbound(type="agent.typing", data=data),
     )
 
 
@@ -551,6 +566,38 @@ async def _iter_agent_events(
         yield ev
 
 
+async def _handle_interrupted_cleanup(
+    spec: RunSpec,
+    ctx: ScopeContext,
+    full_text: str,
+    transport: Any,
+) -> None:
+    """Best-effort finalisation when ``execute_run`` is cancelled by the host.
+
+    Each step is wrapped so a single transient failure (Mongo, Redis) can't
+    block the others — every action is independently best-effort. The
+    caller wraps THIS in ``asyncio.shield`` so a second cancel arriving
+    during the cleanup can't abort it mid-flight.
+    """
+    try:
+        await _broadcast_agent_typing(ctx, active=False)
+    except Exception:
+        logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
+    try:
+        await run_service.mark_terminal(
+            spec.run_id,
+            status="interrupted",
+            partial_text=full_text,
+        )
+    except Exception:
+        logger.exception("mark_terminal(interrupted) failed for %s", spec.run_id)
+    try:
+        await transport.append_event(spec.run_id, "interrupted", {"run_id": spec.run_id})
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("interrupted stream write failed", exc_info=True)
+
+
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -590,6 +637,26 @@ async def execute_run(spec: RunSpec) -> None:
                 # doesn't get flipped to ``completed`` by the empty-text branch.
                 backend_error_message = str(event_data.get("message") or "")
                 break
+    except asyncio.CancelledError:
+        # The task itself was cancelled (worker shutdown, host signal). Run
+        # the interrupted-cleanup INSIDE the except clause so the bare
+        # ``raise`` below re-raises the original CancelledError instance —
+        # preserving the cancel-reason arq supplies via ``task.cancel(msg)``
+        # and the original traceback. The cleanup is shielded so a second
+        # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
+        # and strand the doc in ``running`` with no terminal stream frame.
+        logger.info("execute_run %s cancelled by host", spec.run_id)
+        try:
+            await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+        except asyncio.CancelledError:
+            # The outer await is cancelled but the shielded inner task
+            # continues running to completion in the background. That's
+            # exactly what we want; just don't re-raise from this layer —
+            # let the original cancel propagate after the except clause.
+            pass
+        except Exception:
+            logger.exception("interrupted cleanup raised after shield for %s", spec.run_id)
+        raise
     except Exception as exc:
         error = exc
         logger.exception("execute_run %s crashed", spec.run_id)
@@ -600,7 +667,8 @@ async def execute_run(spec: RunSpec) -> None:
         )
 
     # Drop the typing indicator before persist so a slow Mongo write
-    # doesn't leave it stuck on.
+    # doesn't leave it stuck on. Only reached on non-cancelled paths;
+    # the cancelled path handles typing-off inside the cleanup helper.
     try:
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:

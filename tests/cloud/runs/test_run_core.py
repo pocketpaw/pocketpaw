@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import fakeredis.aioredis
@@ -238,6 +239,142 @@ async def test_execute_run_backend_error_marks_failed(monkeypatch):
             "error": "codex sdk missing",
         }
     ]
+
+
+async def fake_agent_events_cancelled(spec, ctx):
+    yield ("chunk", {"content": "partial ", "type": "text"})
+    raise asyncio.CancelledError()
+
+
+async def test_execute_run_propagates_cancellation(monkeypatch):
+    """When the task is cancelled mid-stream (arq worker shutdown), the
+    agent loop must (a) NOT swallow CancelledError, (b) mark the run
+    ``interrupted`` with the partial text preserved, (c) append a terminal
+    event to the stream so live SSE subscribers finalise, and (d) re-raise
+    so the arq worker actually exits."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    persisted: list[str] = []
+    mark_calls: list[dict[str, Any]] = []
+
+    async def _track_persist(*a, **k):
+        persisted.append("called")
+        return "should-not-happen"
+
+    async def _track_terminal(run_id, *, status, partial_text="", error=None, **k):
+        mark_calls.append(
+            {"run_id": run_id, "status": status, "partial_text": partial_text, "error": error}
+        )
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events_cancelled)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _track_persist)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    # The chunk made it through, then a terminal `interrupted` frame.
+    assert events[0].event == "chunk"
+    assert events[-1].event == "interrupted"
+    assert events[-1].is_terminal
+    assert persisted == []
+    assert mark_calls == [
+        {
+            "run_id": "r1",
+            "status": "interrupted",
+            "partial_text": "partial ",
+            "error": None,
+        }
+    ]
+
+
+async def test_execute_run_cancellation_preserves_original_exception(monkeypatch):
+    """Review finding #6 — the host-cancellation re-raise must use the
+    original CancelledError instance (bare ``raise``), not a fresh one, so
+    arq sees the cancel reason it sent and the original traceback survives.
+    """
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    async def long_running_events(spec, ctx):
+        yield ("chunk", {"content": "x", "type": "text"})
+        # Block long enough for the cancel to land in this await.
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", long_running_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _noop)
+
+    task = asyncio.create_task(run_core.execute_run(_spec()))
+    # Give the first chunk a moment to flow through; then cancel with a
+    # specific reason that we expect to survive the re-raise.
+    await asyncio.sleep(0.05)
+    task.cancel("worker SIGTERM, graceful shutdown")
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await task
+
+    # The cancel-reason supplied via task.cancel(msg) survives the cleanup
+    # path. A fresh ``raise asyncio.CancelledError()`` would drop the args.
+    assert excinfo.value.args == ("worker SIGTERM, graceful shutdown",)
+
+
+async def test_execute_run_cancellation_cleanup_survives_second_cancel(monkeypatch):
+    """Review finding #3 — when a second cancel arrives during the
+    interrupted cleanup (SIGKILL grace window), ``asyncio.shield`` must keep
+    mark_terminal + append + set_ttl running to completion so the doc isn't
+    stranded in ``running`` with no terminal stream frame."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    mark_started = asyncio.Event()
+    mark_finished = asyncio.Event()
+
+    async def slow_mark_terminal(run_id, **kwargs):
+        mark_started.set()
+        # The cleanup is in flight; arrange for the OUTER task to be
+        # cancelled while we're awaiting this sleep.
+        await asyncio.sleep(0.1)
+        mark_finished.set()
+
+    async def fake_events(spec, ctx):
+        yield ("chunk", {"content": "partial ", "type": "text"})
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal",
+        slow_mark_terminal,
+    )
+
+    task = asyncio.create_task(run_core.execute_run(_spec()))
+    await asyncio.wait_for(mark_started.wait(), timeout=1.0)
+
+    # Second cancel arrives while mark_terminal is still running. Without
+    # shield this would abort the cleanup mid-flight; with shield, the
+    # cleanup task continues to completion in the background.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.wait_for(mark_finished.wait(), timeout=2.0)
 
 
 async def fake_agent_events_raising(spec, ctx):
