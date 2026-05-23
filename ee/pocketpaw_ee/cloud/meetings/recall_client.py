@@ -278,21 +278,12 @@ async def create_async_transcript(recording_id: str) -> str:
     """Kick off async transcription for a finished recording.
 
     POSTs to ``/api/v1/recording/{id}/create_transcript/`` with the
-    deployment's configured async provider + model (e.g. Deepgram
-    ``nova-3``). Returns the Recall transcript id. Driven by the
-    ``recording.done`` webhook — see service.start_async_transcript.
+    deployment's configured async provider + model. Returns the Recall
+    transcript id. Driven by the ``recording.done`` webhook — see
+    service.start_async_transcript.
     """
     resolved = await meetings_settings.resolve()
-    # Recall passes this straight to Deepgram. The field is `language`, NOT
-    # `language_code` — Recall silently ignores unknown fields and Deepgram
-    # then defaults to English, so a wrong key locks every transcript to
-    # English regardless of what was actually spoken. Default to `multi`
-    # for nova-3's code-switching (English+Hindi+Spanish+French+German+
-    # Russian+Portuguese+Japanese+Italian+Dutch). Pin a single language
-    # via RECALL_TRANSCRIPT_LANGUAGE when monolingual accuracy matters
-    # more than coverage.
-    language = os.environ.get("RECALL_TRANSCRIPT_LANGUAGE", "").strip() or "multi"
-    options: dict[str, Any] = {"language": language}
+    options: dict[str, Any] = _auto_language_options(resolved["provider"])
     if resolved["model"]:
         options["model"] = resolved["model"]
 
@@ -426,6 +417,43 @@ def _seconds_to_vtt_ts(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _auto_language_options(provider: str) -> dict[str, Any]:
+    """Per-provider 'auto language' options for create_async_transcript.
+
+    Each Recall provider names the language field differently and
+    accepts different sentinel values for auto-detect / multilingual.
+    Sending the wrong field name is silently ignored by Recall and the
+    provider then defaults to English — which is how a Hinglish call
+    came back English-only despite a "multi" setting on a non-Deepgram
+    provider. Centralise the dispatch here so every provider gets the
+    right field with no caller-side knowledge.
+
+    ``RECALL_TRANSCRIPT_LANGUAGE`` overrides the auto default — set it
+    to a single language code ("en", "hi", "es", …) when monolingual
+    accuracy matters more than coverage. The caller is responsible for
+    using a value the chosen provider understands.
+    """
+    override = os.environ.get("RECALL_TRANSCRIPT_LANGUAGE", "").strip()
+    if provider == "deepgram_async":
+        # nova-3 multilingual; field name is `language`, value `multi`.
+        return {"language": override or "multi"}
+    if provider == "recallai_async":
+        # Recall's own; field `language_code`, value `auto` for detect.
+        return {"language_code": override or "auto"}
+    if provider == "gladia_v2_async":
+        # Gladia v2 (Whisper-based) auto-detects when language_code is
+        # omitted. Only emit the field if an override is set.
+        return {"language_code": override} if override else {}
+    if provider == "speechmatics_async":
+        return {"language": override or "auto"}
+    if provider == "assembly_ai_async":
+        # AssemblyAI Universal handles multi-lang without a language hint.
+        return {"language_code": override} if override else {}
+    # Unknown / new provider — let it run with provider defaults rather
+    # than guessing a field name that may be wrong.
+    return {"language": override} if override else {}
 
 
 def _latest_status(bot_payload: dict[str, Any]) -> str:

@@ -142,6 +142,51 @@ async def test_create_async_transcript(mongo_db, monkeypatch):
     assert call["json"]["provider"] == {"deepgram_async": {"language": "multi", "model": "nova-3"}}
 
 
+async def test_create_async_transcript_recallai_uses_language_code(mongo_db, monkeypatch):
+    """Recall's own provider takes `language_code: auto`, not `language: multi`."""
+    monkeypatch.setenv("RECALL_BASE_URL", "http://recall.test")
+    monkeypatch.setenv("RECALL_API_KEY", "k")
+    monkeypatch.delenv("RECALL_TRANSCRIPT_LANGUAGE", raising=False)
+    await meetings_settings.update_settings(
+        UpdateMeetingsSettingsRequest(transcript_provider="recallai_async", transcript_model="")
+    )
+    _FakeHttp.reset([_resp(200, {"id": "tr-1"})])
+    monkeypatch.setattr(recall_client.httpx, "AsyncClient", _FakeHttp)
+
+    await recall_client.create_async_transcript("rec-1")
+    assert _FakeHttp.calls[0]["json"]["provider"] == {"recallai_async": {"language_code": "auto"}}
+
+
+async def test_create_async_transcript_gladia_omits_language(mongo_db, monkeypatch):
+    """Gladia v2 auto-detects when no language_code is sent."""
+    monkeypatch.setenv("RECALL_BASE_URL", "http://recall.test")
+    monkeypatch.setenv("RECALL_API_KEY", "k")
+    monkeypatch.delenv("RECALL_TRANSCRIPT_LANGUAGE", raising=False)
+    await meetings_settings.update_settings(
+        UpdateMeetingsSettingsRequest(transcript_provider="gladia_v2_async", transcript_model="")
+    )
+    _FakeHttp.reset([_resp(200, {"id": "tr-1"})])
+    monkeypatch.setattr(recall_client.httpx, "AsyncClient", _FakeHttp)
+
+    await recall_client.create_async_transcript("rec-1")
+    assert _FakeHttp.calls[0]["json"]["provider"] == {"gladia_v2_async": {}}
+
+
+async def test_create_async_transcript_env_override(mongo_db, monkeypatch):
+    """RECALL_TRANSCRIPT_LANGUAGE pins a single language via the provider's field."""
+    monkeypatch.setenv("RECALL_BASE_URL", "http://recall.test")
+    monkeypatch.setenv("RECALL_API_KEY", "k")
+    monkeypatch.setenv("RECALL_TRANSCRIPT_LANGUAGE", "hi")
+    await meetings_settings.update_settings(
+        UpdateMeetingsSettingsRequest(transcript_provider="recallai_async", transcript_model="")
+    )
+    _FakeHttp.reset([_resp(200, {"id": "tr-1"})])
+    monkeypatch.setattr(recall_client.httpx, "AsyncClient", _FakeHttp)
+
+    await recall_client.create_async_transcript("rec-1")
+    assert _FakeHttp.calls[0]["json"]["provider"] == {"recallai_async": {"language_code": "hi"}}
+
+
 async def test_create_async_transcript_propagates_4xx(mongo_db, monkeypatch):
     monkeypatch.setenv("RECALL_BASE_URL", "http://recall.test")
     monkeypatch.setenv("RECALL_API_KEY", "k")
