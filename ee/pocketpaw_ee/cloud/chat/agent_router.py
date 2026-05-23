@@ -8,7 +8,6 @@ frontend already speaks.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import uuid
@@ -133,7 +132,6 @@ async def post_agent_chat(
             if saw_terminal:
                 return
             yield b": ping\n\n"
-            await asyncio.sleep(0)
 
     return StreamingResponse(
         gen(),
