@@ -283,26 +283,24 @@ async def create_meeting(
     if not body.title.strip():
         raise ValidationError("meeting.empty_title", "title must not be empty or whitespace")
 
-    adapter = await _adapter_factory(workspace_id, body.provider)
+    # Dispatch to the right provider for body.source. The provider does the
+    # source-specific work (adapter call for Recall; room reservation for
+    # LiveKit) and returns the provider_payload + join_url. Persistence and
+    # event emission stay here in the service layer — that contract is the
+    # same for every source.
+    from types import SimpleNamespace
 
-    params: dict = {
-        "topic": body.title,
-        "duration_minutes": body.duration_minutes,
-    }
-    if body.scheduled_start is not None:
-        # Adapter expects an ISO string; both providers accept the "Z" form.
-        params["start_time"] = body.scheduled_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    from pocketpaw_ee.cloud.meetings.providers import base as providers_base
 
-    result: ActionResult = await adapter.execute("meeting_create", params)
-    if not result.success:
-        raise ValidationError(
-            "meeting.provider_error",
-            result.error or f"{body.provider} rejected the create request",
-        )
+    provider_impl = providers_base.resolve(body.source)
+    ctx = SimpleNamespace(workspace_id=workspace_id, user_id=user_id)
+    provider_result = await provider_impl.create(ctx, body)
 
-    provider_payload = result.data or {}
+    provider_payload = provider_result.provider_payload or {}
     provider_meeting_id = str(provider_payload.get("id") or provider_payload.get("name") or "")
-    if not provider_meeting_id:
+    if body.source == "recall" and not provider_meeting_id:
+        # External providers MUST return an id we can correlate webhooks
+        # against; LiveKit meetings don't (room name lives in payload).
         raise ValidationError(
             "meeting.provider_no_id",
             f"{body.provider} did not return a meeting ID",
@@ -310,11 +308,13 @@ async def create_meeting(
 
     doc = _MeetingDoc(
         workspace=workspace_id,
+        source=body.source,
         provider=body.provider,
         provider_meeting_id=provider_meeting_id,
         provider_space_id=provider_payload.get("space_name"),
         title=body.title,
-        join_url=str(provider_payload.get("join_url") or provider_payload.get("meetingUri") or ""),
+        join_url=provider_result.join_url
+        or str(provider_payload.get("join_url") or provider_payload.get("meetingUri") or ""),
         organizer_email=provider_payload.get("host_email"),
         scheduled_start=body.scheduled_start,
         scheduled_end=None,
@@ -331,6 +331,7 @@ async def create_meeting(
         {
             "workspace_id": workspace_id,
             "meeting_id": str(doc.id),
+            "source": body.source,
             "provider": body.provider,
             "created_by": user_id,
         },
@@ -346,16 +347,18 @@ async def cancel_meeting(workspace_id: str, meeting_id: str) -> MeetingResponse:
     actually deletes the meeting on its side.
     """
     detail = await get_meeting(workspace_id, meeting_id)
-    adapter = await _adapter_factory(workspace_id, detail.provider)
 
-    result: ActionResult = await adapter.execute(
-        "meeting_cancel", {"meeting_id": detail.provider_meeting_id}
-    )
-    if not result.success:
-        raise ValidationError(
-            "meeting.provider_error",
-            result.error or f"{detail.provider} rejected the cancel request",
-        )
+    # Dispatch the provider-specific cancel through the registry. For
+    # Recall this hits the Zoom/Meet adapter via RecallProvider.cancel();
+    # LiveKit's cancel is a no-op (nothing reserved server-side).
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.meetings.providers import base as providers_base
+
+    source = getattr(detail, "source", "recall") or "recall"
+    provider_impl = providers_base.resolve(source)
+    ctx = SimpleNamespace(workspace_id=workspace_id, user_id="")
+    await provider_impl.cancel(ctx, detail)
 
     # Fetch the Beanie doc (get_meeting returned a DTO) and patch status.
     doc = await _MeetingDoc.find_one(

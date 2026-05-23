@@ -483,6 +483,21 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_task_listeners()
 
+    # Meeting bridges — meeting.* events → in-app notifications, and
+    # calendar.event.created → auto-create a recall-source Meeting when
+    # the calendar event carries a Zoom/Meet URL. Source-agnostic on
+    # the notification side (LiveKit meetings get notifications too when
+    # they emit meeting.scheduled).
+    from pocketpaw_ee.cloud.meetings.bridges.calendar import (
+        register_meeting_calendar_listeners,
+    )
+    from pocketpaw_ee.cloud.meetings.bridges.notifications import (
+        register_meeting_notification_listeners,
+    )
+
+    register_meeting_notification_listeners()
+    register_meeting_calendar_listeners()
+
     # In-process daily-snapshot scheduler — opt-in via env var.
     #
     # Default OFF in tests + dev (each pytest run would otherwise spawn a
