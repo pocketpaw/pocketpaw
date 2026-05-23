@@ -7,7 +7,6 @@ remains registered in ``get_all_documents()`` for Beanie init.
 
 from __future__ import annotations
 
-from pocketpaw_ee.cloud.meetings.models import MeetingSchedule
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
@@ -16,6 +15,12 @@ from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.invite import Invite
+from pocketpaw_ee.cloud.models.meeting import (
+    Meeting,
+    MeetingProviderCredentials,
+    MeetingsSettings,
+    MeetingTranscript,
+)
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -60,7 +65,10 @@ __all__ = [
     "Group",
     "GroupAgent",
     "Invite",
-    "MeetingSchedule",
+    "Meeting",
+    "MeetingProviderCredentials",
+    "MeetingsSettings",
+    "MeetingTranscript",
     "Mention",
     "Message",
     "Notification",
@@ -89,10 +97,15 @@ __all__ = [
 def get_all_documents():
     """Get all Beanie documents, with lazy FileUpload loading."""
     _ensure_file_upload()
+    # Calendar lives in ee/pocketpaw_ee/calendar/ (sibling package, not
+    # under cloud/), so its docs are imported here and added to the list.
+    # Late import keeps the cloud models module free of a hard dep on
+    # the calendar package.
+    from pocketpaw_ee.calendar.models import _CalendarDoc, _EventDoc
+
     return [
         User,
         Agent,
-        MeetingSchedule,
         Pocket,
         PocketBackendCredential,
         Session,
@@ -112,6 +125,13 @@ def get_all_documents():
         Cycle,
         Project,
         PlanSession,
+        Meeting,
+        MeetingTranscript,
+        MeetingProviderCredentials,
+        MeetingsSettings,
+        # Calendar — sibling enterprise package.
+        _CalendarDoc,
+        _EventDoc,
     ]
 
 

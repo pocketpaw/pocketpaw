@@ -128,6 +128,12 @@ def mount_cloud(app: FastAPI) -> None:
     # Eager-import ripple_sources so @register decorators run at startup
     # rather than on first pocket get(). Keeps ``_REGISTRY`` populated
     # for any startup self-checks that inspect it.
+    # Same pattern for meeting providers: importing the package runs the
+    # provider's `base.register(...)` side effect so the MeetingProvider
+    # registry is populated before the first /api/v1/meetings request.
+    # ``providers.livekit`` is empty in Phase 1 (owned by a separate
+    # engineer); ``providers.recall`` registers the Recall implementation.
+    import pocketpaw_ee.cloud.meetings.providers.recall  # noqa: F401
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     # Import and mount domain routers
@@ -138,6 +144,10 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.license import get_license_info
+    from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
+        router as meetings_webhooks_router,
+    )
+    from pocketpaw_ee.cloud.meetings.router import router as meetings_router
     from pocketpaw_ee.cloud.planner.router import router as planner_router
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
@@ -163,6 +173,9 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(cycles_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
+    app.include_router(meetings_router, prefix="/api/v1")
+    # Inbound Recall.ai webhook — no auth dependency (Svix-signed instead).
+    app.include_router(meetings_webhooks_router, prefix="/api/v1")
 
     # Phase 1 PR-8: register the connector bus listener so local-mode
     # CLI actions (firebase, gcp, …) get picked up by the in-process
@@ -195,7 +208,6 @@ def mount_cloud(app: FastAPI) -> None:
 
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
-    from pocketpaw_ee.cloud.meetings.router import router as meetings_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
     from pocketpaw_ee.cloud.outcomes.router import router as outcomes_router
@@ -214,7 +226,6 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(files_router, prefix="/api/v1")
     app.include_router(mission_control_router, prefix="/api/v1")
     app.include_router(livekit_router, prefix="/api/v1")
-    app.include_router(meetings_router, prefix="/api/v1")
     # Pocket outcomes — GET /api/v1/outcomes count surface (RFC 05 M2b.2).
     app.include_router(outcomes_router, prefix="/api/v1")
 
@@ -471,6 +482,21 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.tasks.listeners import register_task_listeners
 
     register_task_listeners()
+
+    # Meeting bridges — meeting.* events → in-app notifications, and
+    # calendar.event.created → auto-create a recall-source Meeting when
+    # the calendar event carries a Zoom/Meet URL. Source-agnostic on
+    # the notification side (LiveKit meetings get notifications too when
+    # they emit meeting.scheduled).
+    from pocketpaw_ee.cloud.meetings.bridges.calendar import (
+        register_meeting_calendar_listeners,
+    )
+    from pocketpaw_ee.cloud.meetings.bridges.notifications import (
+        register_meeting_notification_listeners,
+    )
+
+    register_meeting_notification_listeners()
+    register_meeting_calendar_listeners()
 
     # In-process daily-snapshot scheduler — opt-in via env var.
     #

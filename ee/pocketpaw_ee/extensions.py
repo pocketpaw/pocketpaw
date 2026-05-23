@@ -117,7 +117,7 @@ class CloudLifecycleHook:
 
         # Start meeting reminder + auto-start background loop.
         try:
-            from pocketpaw_ee.cloud.meetings.service import start_reminder_loop
+            from pocketpaw_ee.cloud.meetings.scheduling.reminders import start_reminder_loop
 
             start_reminder_loop()
             logger.info("Meeting reminder + auto-start loop started")
@@ -143,7 +143,7 @@ class CloudLifecycleHook:
         logger = logging.getLogger(__name__)
         # Shut down the meeting APScheduler if it was started.
         try:
-            from pocketpaw_ee.cloud.meetings.service import shutdown_scheduler
+            from pocketpaw_ee.cloud.meetings.scheduling.reminders import shutdown_scheduler
 
             await shutdown_scheduler()
         except Exception as exc:  # noqa: BLE001
@@ -226,6 +226,25 @@ class CloudTasksMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.tasks import TASK_TOOL_IDS
 
         return list(TASK_TOOL_IDS)
+
+
+class CloudMeetingsMcpProvider:
+    """`pocketpaw.mcp_servers` — the meetings in-process server.
+
+    Exposes schedule / list / cancel / search / find-transcript / send-bot
+    tools so the agent can run Zoom + Google Meet meetings (and dispatch a
+    Recall.ai recording bot) natively from chat.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.meetings import build_meetings_context_server
+
+        return build_meetings_context_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.meetings import MEETING_TOOL_IDS
+
+        return list(MEETING_TOOL_IDS)
 
 
 class CloudPlannerMcpProvider:
