@@ -24,6 +24,7 @@ from arq.connections import RedisSettings
 
 # Imported at module scope so tests can ``monkeypatch.setattr(worker, …)``.
 from pocketpaw_ee.cloud import init_realtime
+from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.run_core import execute_run
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
@@ -45,7 +46,13 @@ async def execute_run_job(ctx: dict[str, Any], spec_dict: dict[str, Any]) -> Non
 
 
 async def _startup(ctx: dict[str, Any]) -> None:
-    """Boot the worker: init the DB + realtime bus, then sweep orphans."""
+    """Boot the worker: pin role, init the DB + realtime bus, sweep orphans.
+
+    ``xproc.set_role("worker")`` must run before any agent code emits, so
+    ``emit()`` and the run-side broadcast helpers route over the bridge
+    instead of into the worker's empty local bus / WS manager.
+    """
+    xproc.set_role("worker")
     mongo_uri = os.environ.get("CLOUD_MONGODB_URI", "mongodb://localhost:27017/paw-enterprise")
     await init_cloud_db(mongo_uri)
     init_realtime()

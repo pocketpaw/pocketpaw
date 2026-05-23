@@ -27,6 +27,7 @@ from typing import Any
 
 _run_sweeper_logger = logging.getLogger(__name__)
 _sweeper_task: asyncio.Task[None] | None = None
+_xproc_consumer_task: asyncio.Task[None] | None = None
 
 
 async def _sweeper_loop() -> None:
@@ -59,6 +60,32 @@ async def stop_run_sweeper() -> None:
         with suppress(asyncio.CancelledError):
             await _sweeper_task
         _sweeper_task = None
+
+
+async def start_xproc_consumer() -> None:
+    """Start the cross-process bus/WS bridge consumer in the web process.
+
+    No-op when ``POCKETPAW_REDIS_URL`` is unset — without Redis no Tier 2
+    worker can publish to the bridge, and the existing in-process bus
+    handles every emit locally. This keeps Tier 0 deployments quiet.
+    """
+    import os
+
+    if not os.environ.get("POCKETPAW_REDIS_URL", "").strip():
+        return
+    from pocketpaw_ee.cloud._core.realtime.xproc import run_consumer
+
+    global _xproc_consumer_task
+    _xproc_consumer_task = asyncio.create_task(run_consumer())
+
+
+async def stop_xproc_consumer() -> None:
+    global _xproc_consumer_task
+    if _xproc_consumer_task is not None:
+        _xproc_consumer_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _xproc_consumer_task
+        _xproc_consumer_task = None
 
 
 class CloudEventBusProvider:
@@ -177,6 +204,15 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper start failed: %s", exc)
 
+        # Cross-process bus/WS bridge consumer. Tier 2's arq worker can't
+        # reach this process's InProcessBus or WsManager directly; it XADDs
+        # envelopes to a shared Redis stream and the consumer dispatches
+        # them locally. No-op without POCKETPAW_REDIS_URL.
+        try:
+            await start_xproc_consumer()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("xproc consumer start failed: %s", exc)
+
     async def on_shutdown(self) -> None:
         # Most cloud teardown is handled inside mount_cloud's own shutdown
         # hook. The interval-refresh scheduler is owned by this lifecycle
@@ -196,6 +232,11 @@ class CloudLifecycleHook:
             await stop_run_sweeper()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper stop failed: %s", exc)
+
+        try:
+            await stop_xproc_consumer()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("xproc consumer stop failed: %s", exc)
         return None
 
 
