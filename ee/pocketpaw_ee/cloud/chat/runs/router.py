@@ -47,8 +47,12 @@ async def get_run_stream(
 
     async def gen() -> AsyncIterator[bytes]:
         cursor = after
-        # Stream expired (or never created) — fall back to the Mongo doc.
-        if not await transport.stream_exists(run_id):
+        # Only fall back to Mongo if the run is terminal AND the stream is
+        # gone. For queued/running runs, XREAD BLOCK on a not-yet-created key
+        # waits for the writer — avoids the POST→GET race where the executor
+        # hasn't XADD'd its first event yet.
+        is_terminal = doc.status not in ("queued", "running")
+        if is_terminal and not await transport.stream_exists(run_id):
             yield _sse(
                 "0-0",
                 "stream_end",

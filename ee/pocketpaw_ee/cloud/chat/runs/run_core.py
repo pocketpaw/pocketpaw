@@ -411,6 +411,8 @@ async def _drive_agent_loop(
         return events
 
     handled_pocket_ids: set[str] = set()
+    next_event_task: asyncio.Task[Any] | None = None
+    next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
     try:
         session_key = session_key_for(ctx)
         agent_iter = pool.run(
@@ -425,10 +427,8 @@ async def _drive_agent_loop(
         async def _next_event() -> Any:
             return await agent_iter.__anext__()
 
-        next_event_task: asyncio.Task[Any] | None = asyncio.create_task(_next_event())
-        next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] = asyncio.create_task(
-            side_channel_queue.get()
-        )
+        next_event_task = asyncio.create_task(_next_event())
+        next_queue_task = asyncio.create_task(side_channel_queue.get())
         while True:
             if await is_cancelled():
                 break
@@ -447,11 +447,13 @@ async def _drive_agent_loop(
                 event = next_event_task.result()
             except StopAsyncIteration:
                 next_event_task = None
-                next_queue_task.cancel()
                 break
-            next_event_task = asyncio.create_task(_next_event())
             etype = getattr(event, "type", None)
             econtent = getattr(event, "content", "")
+            if etype == "done":
+                next_event_task = None
+                break
+            next_event_task = asyncio.create_task(_next_event())
             if etype == "message":
                 yield (
                     "chunk",
@@ -493,11 +495,14 @@ async def _drive_agent_loop(
                     handled_pocket_ids=handled_pocket_ids,
                 )
                 yield ("tool_result", {"tool": name, "output": output})
-            elif etype == "done":
-                break
         for ev in _drain_side_channel():
             yield ev
     finally:
+        pending = [t for t in (next_event_task, next_queue_task) if t is not None and not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         try:
             detach_sse_event_sink(sink_token)
         except Exception:
