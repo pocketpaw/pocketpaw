@@ -147,3 +147,104 @@ async def test_sweep_skips_transport_when_no_stream(
     await sweeper.sweep_stale_runs(older_than_minutes=10)
 
     assert await fake_transport.stream_exists(stale.run_id) is False
+
+
+# --- review-finding fixes ---------------------------------------------------
+
+
+async def test_sweep_older_than_minutes_zero_is_honored(mongo_db, fake_transport):  # noqa: ARG001
+    """Regression for review finding #2 — `older_than_minutes=0` was being
+    coerced to 10 by `or 10`, silently nullifying an emergency 'sweep
+    everything queued/running right now' call."""
+    just_now = ChatRunDoc(
+        run_id="r-now",
+        workspace="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="k1",
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c-now",
+        user_message_id="um1",
+        status="running",  # type: ignore[arg-type]
+        createdAt=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    await just_now.insert()
+
+    n = await sweeper.sweep_stale_runs(older_than_minutes=0)
+
+    assert n == 1
+    refreshed = await ChatRunDoc.find_one(ChatRunDoc.run_id == just_now.run_id)
+    assert refreshed is not None and refreshed.status == "interrupted"
+
+
+async def test_sweep_rejects_both_cutoff_kwargs(mongo_db):  # noqa: ARG001
+    """Review finding #9 — passing both `older_than_minutes` and
+    `older_than_seconds` used to silently ignore minutes. Now an explicit
+    error so the caller's intent is unambiguous."""
+    with pytest.raises(ValueError, match="exactly one"):
+        await sweeper.sweep_stale_runs(older_than_minutes=10, older_than_seconds=5)
+
+
+async def test_sweep_no_redis_env_does_not_call_transport(
+    mongo_db,  # noqa: ARG001
+    monkeypatch,
+    caplog,
+):
+    """Review finding #5 — Tier 0 deployments (EE installed, but Redis not
+    configured yet) used to get a WARNING+traceback every sweep tick. The
+    sweep must short-circuit cleanly when there's no Redis env: no transport
+    call, no warning, no traceback."""
+    import logging
+
+    monkeypatch.delenv("POCKETPAW_REDIS_URL", raising=False)
+    called: list[str] = []
+
+    def _spy_transport():
+        called.append("get_stream_transport")
+        raise RuntimeError("POCKETPAW_REDIS_URL is not set")
+
+    monkeypatch.setattr(sweeper, "get_stream_transport", _spy_transport)
+
+    stale = _make_run(status="running", created_minutes_ago=30)
+    await stale.insert()
+
+    with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.cloud.chat.runs.sweeper"):
+        n = await sweeper.sweep_stale_runs(older_than_minutes=10)
+
+    # Mongo update still happens — the sweep core works without Redis.
+    assert n == 1
+    # Sweeper short-circuited before calling the transport.
+    assert called == []
+    # And no WARNING from the sweeper.
+    sweeper_warnings = [
+        r
+        for r in caplog.records
+        if r.name == "pocketpaw_ee.cloud.chat.runs.sweeper" and r.levelno >= logging.WARNING
+    ]
+    assert sweeper_warnings == []
+
+
+async def test_sweep_sets_ttl_on_resurrected_stream(mongo_db, fake_transport, monkeypatch):  # noqa: ARG001
+    """Review finding #8 — TOCTOU window between `stream_exists` and
+    `append_event`. The append on a TTL-evicted stream creates a brand-new
+    key, so the sweep must set a TTL so the orphan doesn't live forever."""
+    stale = _make_run(status="running", created_minutes_ago=30)
+    await stale.insert()
+
+    set_ttls: list[tuple[str, int]] = []
+    orig_set_ttl = fake_transport.set_ttl
+
+    async def _record_set_ttl(run_id: str, ttl_seconds: int) -> None:
+        set_ttls.append((run_id, ttl_seconds))
+        await orig_set_ttl(run_id, ttl_seconds)
+
+    # Simulate a stream that exists at check time (race window).
+    await fake_transport.append_event(stale.run_id, "chunk", {"content": "p"})
+    monkeypatch.setattr(fake_transport, "set_ttl", _record_set_ttl)
+
+    await sweeper.sweep_stale_runs(older_than_minutes=10)
+
+    assert any(rid == stale.run_id and ttl > 0 for rid, ttl in set_ttls), (
+        f"sweep should set a TTL on the run's stream, got {set_ttls!r}"
+    )

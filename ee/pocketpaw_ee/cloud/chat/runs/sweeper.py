@@ -14,18 +14,27 @@ Two cadences share this:
 
 When the run's Redis stream is still alive, the sweeper appends an
 ``interrupted`` terminal event so any live SSE subscriber finalises
-immediately instead of waiting for the heartbeat timeout.
+immediately instead of waiting for the heartbeat timeout. The append step
+is silently skipped when ``POCKETPAW_REDIS_URL`` is unset (Tier 0
+deployments) so no warning spam appears on every tick.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_OLDER_THAN_MINUTES = 10
+# Bound the lifetime of any stream the sweeper might resurrect via the
+# append step (stream_exists/append_event race window) so a TTL-evicted key
+# can't be brought back from the dead to live forever.
+_STREAM_TTL_AFTER_INTERRUPT = 3600
 
 
 async def sweep_stale_runs(
@@ -35,29 +44,30 @@ async def sweep_stale_runs(
 ) -> int:
     """Mark queued/running runs older than the cutoff as ``interrupted``.
 
-    Pass either ``older_than_minutes`` or ``older_than_seconds``; if both are
-    omitted, defaults to 10 minutes. Returns the number of docs updated.
+    Pass exactly one of ``older_than_minutes`` or ``older_than_seconds`` (the
+    other must be ``None``). Both ``None`` defaults to 10 minutes; passing
+    both raises ``ValueError`` so the caller's intent stays unambiguous.
+    Returns the number of docs updated.
     """
+    if older_than_minutes is not None and older_than_seconds is not None:
+        raise ValueError(
+            "sweep_stale_runs: pass exactly one of older_than_minutes / older_than_seconds"
+        )
     if older_than_seconds is not None:
         cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+    elif older_than_minutes is not None:
+        cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
     else:
-        cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes or 10)
+        cutoff = datetime.now(UTC) - timedelta(minutes=_DEFAULT_OLDER_THAN_MINUTES)
+
     stale = await ChatRunDoc.find(
         {"status": {"$in": ["queued", "running"]}},
         ChatRunDoc.createdAt < cutoff,
     ).to_list()
     if not stale:
         return 0
-    # Resolve the transport once per sweep; if Redis is unavailable we still
-    # mark interruptions in Mongo, we just can't wake live SSE subscribers.
-    try:
-        transport = get_stream_transport()
-    except Exception:
-        logger.warning(
-            "sweep_stale_runs: stream transport unavailable, interrupt events will not be appended",
-            exc_info=True,
-        )
-        transport = None
+
+    transport = _resolve_transport()
     now = datetime.now(UTC)
     for doc in stale:
         doc.status = "interrupted"  # type: ignore[assignment]
@@ -67,6 +77,11 @@ async def sweep_stale_runs(
             try:
                 if await transport.stream_exists(doc.run_id):
                     await transport.append_event(doc.run_id, "interrupted", {"run_id": doc.run_id})
+                    # The append above will recreate the key if it was just
+                    # TTL-evicted between stream_exists and append_event, so
+                    # set a fresh TTL unconditionally to bound the stream's
+                    # lifetime in that race.
+                    await transport.set_ttl(doc.run_id, _STREAM_TTL_AFTER_INTERRUPT)
             except Exception:
                 logger.exception(
                     "sweep_stale_runs: transport append failed for run %s",
@@ -74,3 +89,25 @@ async def sweep_stale_runs(
                 )
     logger.info("sweep_stale_runs: marked %d runs as interrupted", len(stale))
     return len(stale)
+
+
+def _resolve_transport():
+    """Return the stream transport when Redis is configured, else ``None``.
+
+    A Tier 0 deployment (EE installed but ``POCKETPAW_REDIS_URL`` unset) used
+    to log a WARNING + traceback every 5 minutes from the heartbeat sweeper.
+    Short-circuiting on the env var keeps those deployments quiet — the
+    Mongo-only sweep still works.
+    """
+    if not os.environ.get("POCKETPAW_REDIS_URL", "").strip():
+        return None
+    try:
+        return get_stream_transport()
+    except Exception:
+        # Env is set but the transport refused to construct (e.g. malformed
+        # URL). One-off WARNING without traceback — operators get told once
+        # per process start, not on every tick.
+        logger.warning(
+            "sweep_stale_runs: stream transport unavailable; interrupt events will not be appended"
+        )
+        return None
