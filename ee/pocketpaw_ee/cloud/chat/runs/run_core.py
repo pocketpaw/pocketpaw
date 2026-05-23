@@ -41,7 +41,7 @@ RIPPLE_JSON_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 def _stream_ttl() -> int:
-    return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "900"))
+    return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
 
 
 async def _persist_assistant_message(
