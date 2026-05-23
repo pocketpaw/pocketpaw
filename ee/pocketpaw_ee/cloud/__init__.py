@@ -128,6 +128,12 @@ def mount_cloud(app: FastAPI) -> None:
     # Eager-import ripple_sources so @register decorators run at startup
     # rather than on first pocket get(). Keeps ``_REGISTRY`` populated
     # for any startup self-checks that inspect it.
+    # Same pattern for meeting providers: importing the package runs the
+    # provider's `base.register(...)` side effect so the MeetingProvider
+    # registry is populated before the first /api/v1/meetings request.
+    # ``providers.livekit`` is empty in Phase 1 (owned by a separate
+    # engineer); ``providers.recall`` registers the Recall implementation.
+    import pocketpaw_ee.cloud.meetings.providers.recall  # noqa: F401
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     # Import and mount domain routers

@@ -17,10 +17,14 @@ from pocketpaw_ee.cloud.meetings.providers import base
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """Every test starts with an empty provider registry."""
+    """Every test in THIS module starts with an empty registry and
+    restores whatever was registered before — so the autoloaded
+    RecallProvider survives for sibling test files (e.g.
+    test_recall_provider.py)."""
+    snapshot = dict(base._REGISTRY)
     base._clear_registry_for_tests()
     yield
-    base._clear_registry_for_tests()
+    base._REGISTRY.update(snapshot)
 
 
 class _StubProvider:
