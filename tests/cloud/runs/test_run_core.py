@@ -1,11 +1,4 @@
-"""Tests for ``execute_run`` — the relocated agent loop.
-
-Both tests exercise the seams ``run_core`` exposes (``_iter_agent_events``,
-``get_stream_transport``, ``_mark_running``, ``_persist_and_complete``,
-``_broadcast_agent_typing``, ``resolve_scope_context``) so we can assert the
-event sequence written to the transport without spinning up Mongo, Redis,
-or an agent pool.
-"""
+"""Tests for ``execute_run``."""
 
 from __future__ import annotations
 

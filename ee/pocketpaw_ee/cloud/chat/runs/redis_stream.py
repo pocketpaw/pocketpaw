@@ -1,14 +1,8 @@
 """Redis-Streams implementation of RunStreamTransport.
 
 Key layout:
-  run:{run_id}:events   XADD stream of SSE events (the resumable log)
+  run:{run_id}:events   XADD stream of SSE events (resumable log)
   run:{run_id}:cancel   string flag; presence = cancellation requested
-
-Each stream entry has fields {"event": <type>, "data": <json>}. The Redis
-entry id ("<ms>-<seq>") is monotonic and is what a reconnecting client passes
-back as the cursor.
-
-Works with any Redis-protocol server: Redis, Dragonfly, Valkey.
 """
 
 from __future__ import annotations
@@ -31,8 +25,6 @@ def _cancel_key(run_id: str) -> str:
 
 
 class RedisStreamTransport:
-    """RunStreamTransport backed by Redis Streams."""
-
     def __init__(self, redis: Redis) -> None:
         self._redis = redis
 
@@ -45,9 +37,7 @@ class RedisStreamTransport:
     async def read_events(
         self, run_id: str, *, after: str = "0", block_ms: int = 15000
     ) -> AsyncIterator[StreamEvent]:
-        """Yield events after the cursor, then block for live ones. Stops on
-        a terminal event. Returns when ``block`` times out with no entries —
-        the caller loops and emits a heartbeat between calls."""
+        # Returns on terminal event OR block timeout — caller loops + emits heartbeat.
         cursor = after
         while True:
             resp = await self._redis.xread({_events_key(run_id): cursor}, block=block_ms, count=64)

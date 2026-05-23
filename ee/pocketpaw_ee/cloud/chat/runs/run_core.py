@@ -1,10 +1,4 @@
-"""Agent-run core — the loop the executor invokes for every chat run.
-
-The single entry point ``execute_run(spec)`` rebuilds a ``ScopeContext``
-from the ``RunSpec``, drives the agent via ``_iter_agent_events`` and
-writes every event through a :class:`RunStreamTransport`. The
-in-process and arq executors invoke this same function.
-"""
+"""Agent-run core — the loop the executor invokes for every chat run."""
 
 from __future__ import annotations
 
@@ -18,7 +12,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
-from pocketpaw.agents.pool import (  # type: ignore[import-untyped]  # re-exported for test patching
+from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
@@ -47,13 +41,7 @@ RIPPLE_JSON_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 def _stream_ttl() -> int:
-    """Read the run-stream TTL at call time so tests can monkeypatch env."""
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "900"))
-
-
-# ---------------------------------------------------------------------------
-# Persistence + broadcast helpers
-# ---------------------------------------------------------------------------
 
 
 async def _persist_assistant_message(
@@ -80,7 +68,6 @@ async def _broadcast_message_new(
     attachments: list[dict[str, Any]],
     created_at: datetime,
 ) -> None:
-    """Broadcast the finished assistant message to every other scope member."""
     from pocketpaw_ee.cloud.chat.schemas import WsOutbound
     from pocketpaw_ee.cloud.chat.ws import manager
 
@@ -127,20 +114,10 @@ async def _broadcast_agent_typing(ctx: ScopeContext, active: bool) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Specialist response detection
-# ---------------------------------------------------------------------------
-
-
 def _extract_specialist_payload(output: Any) -> dict[str, Any] | None:
-    """Return the specialist's ``{ok, action, pocket, ...}`` dict if ``output``
-    looks like a pocket-specialist response, else ``None``.
+    """Return the specialist's ``{ok, action, pocket, ...}`` dict, else ``None``.
 
-    The same payload surfaces in three shapes depending on the agent backend:
-      * raw dict — in-process function tool returning the dict directly
-      * JSON string — most common (BaseTool, codex shell stdout, MCP text)
-      * list of MCP content blocks — claude_agent_sdk's in-process MCP server
-        wraps the JSON in ``[{"type": "text", "text": "<json>"}]``
+    Handles three payload shapes: raw dict, JSON string, or MCP content-block list.
     """
     if output is None:
         return None
@@ -193,11 +170,7 @@ async def _maybe_handle_specialist_response(
     output: Any,
     handled_pocket_ids: set[str],
 ) -> None:
-    """Bind session → pocket and push ``pocket_created`` SSE on detection.
-
-    Idempotent per ``pocket_id``. Failure to bind or to push the SSE frame
-    is logged and swallowed — neither is allowed to break the agent stream.
-    """
+    """Bind session → pocket and push ``pocket_created`` SSE. Idempotent per pocket id."""
     payload = _extract_specialist_payload(output)
     if payload is None:
         return
@@ -235,9 +208,6 @@ async def _maybe_handle_specialist_response(
     except Exception:
         logger.debug("push_sse_event(pocket_created) failed", exc_info=True)
 
-    # Re-emit the realtime ``pocket.created`` / ``pocket.updated`` event from
-    # the parent process so every connected client sees the new pocket
-    # without a manual refresh.
     try:
         from beanie import PydanticObjectId
 
@@ -259,17 +229,11 @@ async def _maybe_handle_specialist_response(
         )
 
 
-# ---------------------------------------------------------------------------
-# First-turn auto-titling
-# ---------------------------------------------------------------------------
-
-
 _DEFAULT_TITLES = ("", "New Chat", "Chat")
 _TITLE_PLACEHOLDER_LIMIT = 60
 
 
 def _truncate_for_title(message: str) -> str:
-    """One-line, ~tweet-sized preview of the user's first message."""
     raw = (message or "").strip().replace("\n", " ").replace("\r", " ")
     one_line = " ".join(raw.split())
     if len(one_line) > _TITLE_PLACEHOLDER_LIMIT:
@@ -278,14 +242,13 @@ def _truncate_for_title(message: str) -> str:
 
 
 async def _set_session_title_in_mongo(session_id: str, title: str) -> bool:
-    """Persist a title via :func:`sessions.service.set_title`."""
     from pocketpaw_ee.cloud.sessions import service as sessions_service
 
     return await sessions_service.set_title(session_id, title)
 
 
 async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None:
-    """Set placeholder, then upgrade to Haiku-generated title in the background."""
+    """Write a placeholder title, then upgrade to a Haiku-generated one."""
     if not ctx.session_id:
         return
 
@@ -321,18 +284,8 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
         )
 
 
-# ---------------------------------------------------------------------------
-# Run-status seam (thin wrapper so tests can patch ``_mark_running`` cheaply)
-# ---------------------------------------------------------------------------
-
-
 async def _mark_running(run_id: str) -> None:
     await run_service.mark_running(run_id)
-
-
-# ---------------------------------------------------------------------------
-# Persist + broadcast tail
-# ---------------------------------------------------------------------------
 
 
 def _new_run_id() -> str:
@@ -340,12 +293,7 @@ def _new_run_id() -> str:
 
 
 def _extract_ripple_attachment(full_text: str) -> tuple[str, dict[str, Any] | None]:
-    """Strip the trailing ``ripple`` JSON block from ``full_text`` and return
-    ``(remaining_text, normalized_spec_or_None)``.
-
-    Mirrors the regex-based extraction used by ``agent_bridge`` so the cloud
-    SSE path produces identical attachments to the OSS bus path.
-    """
+    """Strip the trailing ripple JSON fence and return ``(remaining_text, spec_or_None)``."""
     match = RIPPLE_JSON_RE.search(full_text)
     if not match:
         return full_text, None
@@ -375,12 +323,7 @@ async def _persist_and_complete(
     full_text: str,
     attachments: list[dict[str, Any]],
 ) -> str:
-    """Persist the assistant message, mark the run completed, broadcast.
-
-    Returns the persisted assistant message id (string ``ObjectId``).
-    Side-effects: appends ``message_service`` write, ``run_service.mark_completed``,
-    WS broadcast, best-effort ``pool.observe`` for soul.
-    """
+    """Persist the assistant message, mark the run completed, broadcast."""
     msg = await _persist_assistant_message(ctx, full_text, attachments)
     assistant_id = str(msg.id)
     await run_service.mark_completed(
@@ -392,7 +335,6 @@ async def _persist_and_complete(
         ctx, assistant_id, full_text, attachments, created_at=msg.createdAt
     )
 
-    # Best-effort per-agent soul observation. Failure must not block the run.
     try:
         pool = get_agent_pool()
         await pool.observe(ctx.target_agent_id, spec.content, full_text)
@@ -405,11 +347,6 @@ async def _persist_and_complete(
     return assistant_id
 
 
-# ---------------------------------------------------------------------------
-# Agent-pool driver
-# ---------------------------------------------------------------------------
-
-
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -420,10 +357,7 @@ async def _drive_agent_loop(
     is_cancelled: Any,
     emit_stream_start: bool,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-    """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples.
-
-    ``is_cancelled`` is an awaitable nullary callable returning ``bool``.
-    """
+    """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples."""
     pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
@@ -570,20 +504,10 @@ async def _drive_agent_loop(
             pass
 
 
-# ---------------------------------------------------------------------------
-# _iter_agent_events — used by ``execute_run`` (no transport calls inside)
-# ---------------------------------------------------------------------------
-
-
 async def _iter_agent_events(
     spec: RunSpec, ctx: ScopeContext
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-    """Yield ``(event_name, event_data)`` tuples for the executor.
-
-    The transport is purposefully NOT touched in here — ``execute_run`` is
-    the single place that writes to the transport so the seam stays clean.
-    The cancel check is handled by ``execute_run`` *between* events.
-    """
+    # Transport writes happen only in ``execute_run`` so the seam stays clean.
 
     async def _never_cancelled() -> bool:
         return False
@@ -600,18 +524,11 @@ async def _iter_agent_events(
         yield ev
 
 
-# ---------------------------------------------------------------------------
-# execute_run — the executor-facing entry point
-# ---------------------------------------------------------------------------
-
-
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
-    Status transitions: ``queued → running → completed``, or the terminal
-    ``cancelled`` / ``failed`` paths. A stream that produced no text is
-    treated like ``cancelled`` for persistence purposes (no assistant
-    message is created) but the run is still marked completed.
+    A stream that produced no text is treated like ``cancelled`` for
+    persistence purposes (no assistant message created).
     """
     transport = get_stream_transport()
     ctx = await resolve_scope_context(
@@ -647,8 +564,8 @@ async def execute_run(spec: RunSpec) -> None:
             {"code": "agent.run_failed", "message": str(exc)},
         )
 
-    # Always drop the typing indicator; do it before the persist/broadcast
-    # tail so a slow Mongo write doesn't leave the indicator stuck on.
+    # Drop the typing indicator before persist so a slow Mongo write
+    # doesn't leave it stuck on.
     try:
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:
@@ -667,7 +584,6 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
 
-    # Cancelled OR empty stream — no assistant message; no broadcast.
     if cancelled or not full_text.strip():
         if cancelled:
             try:
@@ -686,7 +602,6 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
 
-    # Strip ripple attachment from the tail of the text before persistence.
     remaining_text, ripple_spec = _extract_ripple_attachment(full_text)
     attachments: list[dict[str, Any]] = []
     if ripple_spec is not None:

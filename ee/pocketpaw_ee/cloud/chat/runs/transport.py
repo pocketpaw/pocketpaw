@@ -1,11 +1,5 @@
-"""Transport abstraction for chat-run events.
-
-Every module that needs to write or read run events depends on this Protocol,
-not on Redis directly. The default impl is RedisStreamTransport (which works
-with Redis, Dragonfly, or Valkey — same wire protocol). A non-Redis backend
-(NATS JetStream, Kafka, ...) implements the Protocol and is selected via
-POCKETPAW_CLOUD_STREAM_TRANSPORT.
-"""
+"""Transport abstraction for chat-run events. Backend selected by
+``POCKETPAW_CLOUD_STREAM_TRANSPORT``."""
 
 from __future__ import annotations
 
@@ -19,7 +13,7 @@ TERMINAL_EVENTS = {"stream_end", "error", "interrupted"}
 
 @dataclass(frozen=True)
 class StreamEvent:
-    entry_id: str  # opaque cursor — Redis entry id, JetStream seq, ...
+    entry_id: str  # opaque cursor
     event: str
     data: dict[str, Any]
 
@@ -46,7 +40,6 @@ _transport: RunStreamTransport | None = None
 
 
 def get_stream_transport() -> RunStreamTransport:
-    """Return the process-wide transport singleton, selecting the impl by env."""
     global _transport
     if _transport is None:
         backend = os.environ.get("POCKETPAW_CLOUD_STREAM_TRANSPORT", "redis").lower()

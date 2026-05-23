@@ -1,14 +1,4 @@
-"""Unit tests for ``_ensure_scope_session`` with SESSION kind.
-
-Tests the SESSION scope kind handling in ``_ensure_scope_session``, which
-should fetch an existing :class:`Session` and return its ``sessionId``
-without creating a new one.
-
-The SSE smoke / cancel coverage for session scope used to live in this
-file; it now lives in ``tests/cloud/runs/`` since the POST endpoint no
-longer streams and cancellation moved to
-``POST /cloud/chat/runs/{run_id}/stop``.
-"""
+"""Unit tests for ``_ensure_scope_session`` with SESSION kind."""
 
 from __future__ import annotations
 

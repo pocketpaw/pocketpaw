@@ -1,11 +1,4 @@
-"""``message_service.get_messages`` must surface the newest non-terminal
-``ChatRunDoc`` for the (dm | group) scope so DM and group chats can
-auto-resume an in-flight agent reply after a refresh / session switch.
-
-``post_agent_chat`` writes ``context_type=scope`` (one of ``"dm"`` or
-``"group"``) and ``scope_id=group_id`` for these scopes — both must match
-when ``get_messages`` looks up the active run.
-"""
+"""``get_messages`` surfaces the newest non-terminal run for the scope."""
 
 from __future__ import annotations
 

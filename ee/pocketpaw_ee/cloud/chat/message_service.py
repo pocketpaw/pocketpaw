@@ -774,15 +774,10 @@ async def get_messages(
 ) -> dict:
     """Cursor-based paginated messages, newest first.
 
-    Cursor format: ``"{iso_timestamp}|{object_id}"``.
-    Fetches ``limit + 1`` to determine ``has_more``.
-
-    The response also carries ``active_run`` (``{"run_id", "status"}`` or
-    ``None``) — the newest non-terminal ``ChatRunDoc`` for this group's
-    scope across both ``"dm"`` and ``"group"`` ``context_type`` values
-    (``post_agent_chat`` writes one or the other depending on the URL
-    scope). The frontend uses it to auto-resume an in-flight agent reply
-    after a refresh / session switch.
+    Cursor format: ``"{iso_timestamp}|{object_id}"``. Fetches ``limit + 1``
+    to determine ``has_more``. The response includes ``active_run`` (newest
+    non-terminal ``ChatRunDoc`` for this group across both ``dm`` and
+    ``group`` context_types) for frontend auto-resume.
     """
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
     from pocketpaw_ee.cloud.chat.runs import service as run_service
@@ -1252,15 +1247,9 @@ async def list_recent_for_group(group_id: str, *, limit: int = 20) -> list[_Mess
     return [_message_doc_to_domain(d) for d in docs]
 
 
-# ---------------------------------------------------------------------------
-# Agent-stream persist helpers
-#
-# These bypass ``send_message`` (and its ``message.sent`` event_bus emit
-# that drives the legacy agent_bridge auto-response path) — the SSE
-# endpoint is the sole driver of the reply, so we go straight to the
-# ``Message`` Beanie doc. Lives here so the agent router stays out of
-# ``ee.cloud.models.message``.
-# ---------------------------------------------------------------------------
+# Agent-stream persist helpers — bypass ``send_message`` (and its
+# ``message.sent`` emit that would re-trigger ``agent_bridge``) since the
+# run executor is the sole driver of the reply.
 
 
 async def persist_user_message_for_scope(
@@ -1275,12 +1264,7 @@ async def persist_user_message_for_scope(
     mentions: list[dict] | None = None,
     reply_to: str | None = None,
 ) -> str:
-    """Persist the caller's message in an agent-stream context.
-
-    ``kind`` is one of ``"pocket" | "session" | "group" | "dm"``. Pocket
-    and session contexts write the row keyed on ``session_key``; group
-    and dm contexts write the row keyed on the group id.
-    """
+    """Persist the caller's message in an agent-stream context."""
     if kind in ("pocket", "session"):
         msg = _MessageDoc(
             context_type=kind,  # type: ignore[arg-type]
@@ -1319,8 +1303,7 @@ async def persist_assistant_message_for_scope(
     content: str,
     attachments: list[dict] | None = None,
 ) -> _MessageDoc:
-    """Persist an agent's reply in an agent-stream context. Returns the
-    Beanie doc so callers can read ``msg.id`` / ``msg.createdAt``."""
+    """Persist an agent's reply in an agent-stream context."""
     att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
     if kind in ("pocket", "session"):
         msg = _MessageDoc(

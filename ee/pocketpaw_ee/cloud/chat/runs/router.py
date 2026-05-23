@@ -1,8 +1,4 @@
-"""Run streaming + control endpoints.
-
-GET  /cloud/chat/runs/{run_id}/stream?after=<entry_id>   resumable SSE
-POST /cloud/chat/runs/{run_id}/stop                       request cancellation
-"""
+"""Run streaming + control endpoints."""
 
 from __future__ import annotations
 
@@ -31,13 +27,9 @@ def _sse(entry_id: str, event: str, data: dict) -> bytes:
 
 
 async def _authorize(run_id: str, workspace_id: str):
-    """Load the run and confirm it belongs to the caller's workspace.
-
-    Raises ``NotFound`` either when the run doesn't exist or when it
-    belongs to a different workspace — we never leak the existence of
-    cross-tenant runs.
-    """
-    doc = await run_service.get_run(run_id)  # raises NotFound
+    # Raises ``NotFound`` for both missing and cross-tenant runs — never
+    # leak the existence of a run in another workspace.
+    doc = await run_service.get_run(run_id)
     if doc.workspace != workspace_id:
         raise NotFound("chat_run", run_id)
     return doc
@@ -47,7 +39,7 @@ async def _authorize(run_id: str, workspace_id: str):
 async def get_run_stream(
     run_id: str,
     after: str = Query("0"),
-    user_id: str = Depends(current_user_id),  # noqa: ARG001 — tenancy comes via workspace
+    user_id: str = Depends(current_user_id),  # noqa: ARG001
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
     doc = await _authorize(run_id, workspace_id)
@@ -55,8 +47,7 @@ async def get_run_stream(
 
     async def gen() -> AsyncIterator[bytes]:
         cursor = after
-        # If the stream has already expired (or was never created), fall
-        # back to the Mongo run doc and emit a single synthetic stream_end.
+        # Stream expired (or never created) — fall back to the Mongo doc.
         if not await transport.stream_exists(run_id):
             yield _sse(
                 "0-0",
@@ -77,7 +68,7 @@ async def get_run_stream(
                     saw_terminal = True
             if saw_terminal:
                 return
-            # block timed out — heartbeat so proxies keep the connection open
+            # heartbeat so proxies keep the connection open
             yield b": ping\n\n"
             await asyncio.sleep(0)
 
@@ -95,7 +86,7 @@ async def get_run_stream(
 @router.post("/cloud/chat/runs/{run_id}/stop")
 async def post_run_stop(
     run_id: str,
-    user_id: str = Depends(current_user_id),  # noqa: ARG001 — tenancy comes via workspace
+    user_id: str = Depends(current_user_id),  # noqa: ARG001
     workspace_id: str = Depends(current_workspace_id),
 ) -> StopRunResponse:
     await _authorize(run_id, workspace_id)

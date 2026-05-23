@@ -1,8 +1,4 @@
-"""Beanie document for a chat agent run — one assistant turn.
-
-A run outlives the HTTP request that created it. Status transitions:
-``queued -> running -> completed`` or terminal ``interrupted``/``failed``/``cancelled``.
-"""
+"""Beanie document for one assistant chat turn."""
 
 from __future__ import annotations
 
@@ -42,7 +38,6 @@ class ChatRunDoc(Document):
         name = "chat_runs"
         indexes = [
             [("run_id", 1)],
-            # Fast lookup of the newest non-terminal run for a scope.
             [
                 ("workspace", 1),
                 ("context_type", 1),

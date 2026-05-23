@@ -1,11 +1,4 @@
-"""POST /cloud/chat/{scope}/{scope_id}/agent — the JSON endpoint.
-
-The POST no longer streams: it persists the user message, creates a
-:class:`ChatRunDoc`, and hands the run to a :class:`RunExecutor`. Event
-streaming lives in :mod:`pocketpaw_ee.cloud.chat.runs.router`
-(``GET /cloud/chat/runs/{run_id}/stream``) and is covered by
-``tests/cloud/runs/test_run_router.py`` + ``tests/cloud/runs/test_run_core.py``.
-"""
+"""POST /cloud/chat/{scope}/{scope_id}/agent."""
 
 from __future__ import annotations
 

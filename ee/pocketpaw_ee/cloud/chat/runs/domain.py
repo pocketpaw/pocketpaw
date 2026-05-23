@@ -1,6 +1,5 @@
-"""Value objects for chat runs. RunSpec is the JSON-serializable payload
-handed to a RunExecutor — it must survive an arq pickle round-trip, so it
-holds only primitives."""
+"""Value objects for chat runs. ``RunSpec`` must survive an arq pickle
+round-trip — primitives only."""
 
 from __future__ import annotations
 
@@ -10,8 +9,6 @@ from pydantic import BaseModel, ConfigDict
 
 
 class RunSpec(BaseModel):
-    """Everything execute_run() needs, decoupled from the HTTP request."""
-
     model_config = ConfigDict(frozen=True)
 
     run_id: str

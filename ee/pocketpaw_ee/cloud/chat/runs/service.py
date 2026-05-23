@@ -1,14 +1,7 @@
 """Chat-run service — the only module that touches ``ChatRunDoc``.
 
-Note on signature: cloud rule #5 prescribes
-``async def op(workspace_id, user_id, body) -> dict`` for entity services
-exposed over HTTP. The chat-run service deviates: it takes a ``RunSpec``
-value object (and bare ``run_id`` for status mutations) because runs are
-an *internal seam* driven by the chat router and the worker — not an
-HTTP-exposed CRUD entity. The ``RunSpec`` carries the full tenancy bundle
-(``workspace_id``, ``user_id``, ``agent_id``, scope) so the service still
-honours rule #7 (tenant filter on every read) — see ``find_one`` on
-``workspace + client_message_id`` and ``find_active_run_for_scope``.
+Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
+``RunSpec`` value object rather than the standard ``(workspace_id, user_id, body)``.
 """
 
 from __future__ import annotations
@@ -26,9 +19,7 @@ def _utcnow() -> datetime:
 
 
 async def create_run(spec: RunSpec) -> ChatRunDoc:
-    """Create the run doc. Idempotent on ``(workspace, client_message_id)``
-    so a re-submitted message returns the existing run instead of
-    duplicating."""
+    """Idempotent on ``(workspace, client_message_id)``."""
     existing = await ChatRunDoc.find_one(
         ChatRunDoc.workspace == spec.workspace_id,
         ChatRunDoc.client_message_id == spec.client_message_id,
@@ -87,8 +78,7 @@ async def mark_terminal(
     error: str | None = None,
     assistant_message_id: str | None = None,
 ) -> None:
-    """Set a non-completed terminal status: ``interrupted`` | ``failed`` |
-    ``cancelled``."""
+    """Set a non-completed terminal status (``interrupted`` | ``failed`` | ``cancelled``)."""
     doc = await get_run(run_id)
     doc.status = status  # type: ignore[assignment]
     doc.partial_text = partial_text or doc.partial_text
@@ -104,14 +94,9 @@ async def find_active_run_for_scope(
     context_type: str | Iterable[str],
     scope_id: str,
 ) -> ChatRunDoc | None:
-    """Newest non-terminal run for a scope — drives frontend auto-resume.
-
-    ``context_type`` accepts either a single string (the original signature
-    used by ``post_agent_chat``) or any iterable of strings (used by the
-    group-messages history path, which has to query for both ``"dm"`` and
-    ``"group"`` because ``post_agent_chat`` writes one or the other depending
-    on the URL scope but ``get_messages`` only knows the group id).
-    """
+    """Newest non-terminal run for a scope. ``context_type`` may be a single
+    string or an iterable (the group history path queries both ``dm`` and
+    ``group`` at once)."""
     if isinstance(context_type, str):
         ctype_filter: dict = {"context_type": context_type}
     else:
@@ -130,7 +115,7 @@ async def find_active_run_for_scope(
 
 
 async def find_stale_running(older_than: datetime) -> list[ChatRunDoc]:
-    """Runs left queued/running before a cutoff — for the PR2 startup sweep."""
+    """Runs left queued/running before a cutoff."""
     return await ChatRunDoc.find(
         {"status": {"$in": ["queued", "running"]}},
         ChatRunDoc.createdAt < older_than,

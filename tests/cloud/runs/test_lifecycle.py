@@ -1,15 +1,4 @@
-"""Pin InProcessExecutor.drain() behaviour used by the shutdown wiring.
-
-The web-process shutdown hook (registered in ``pocketpaw.dashboard_lifecycle``
-and as a defence-in-depth ``on_event("shutdown")`` in ``mount_cloud``) awaits
-``InProcessExecutor.drain()`` so in-flight asyncio runs get a chance to
-finish or be cleanly cancelled before the event loop dies.
-
-drain() must:
-
-* await every outstanding tracked task (and let them complete normally), and
-* be a no-op when no tasks are tracked.
-"""
+"""Pin ``InProcessExecutor.drain()`` behaviour."""
 
 from __future__ import annotations
 

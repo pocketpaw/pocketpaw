@@ -1,9 +1,5 @@
-"""RunExecutor — decides WHERE an agent run executes.
-
-Tier 1: InProcessExecutor (asyncio task in the web process).
-Tier 2: ArqExecutor (added in PR2) enqueues a job for a worker service.
-Selected by POCKETPAW_CLOUD_RUN_EXECUTOR (inprocess | arq).
-"""
+"""RunExecutor — decides where an agent run executes. Selected by
+``POCKETPAW_CLOUD_RUN_EXECUTOR`` (``inprocess`` | ``arq``)."""
 
 from __future__ import annotations
 
@@ -23,7 +19,7 @@ class RunExecutor(Protocol):
 
 
 class InProcessExecutor:
-    """Runs execute_run() in a tracked asyncio task in the web process."""
+    """Runs ``execute_run()`` in a tracked asyncio task in the web process."""
 
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task] = set()
@@ -40,7 +36,7 @@ class InProcessExecutor:
             logger.exception("in-process run %s crashed", spec.run_id)
 
     async def drain(self) -> None:
-        """Await all outstanding run tasks (used on shutdown and in tests)."""
+        """Await all outstanding run tasks."""
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
@@ -53,7 +49,6 @@ def get_executor() -> RunExecutor:
     if _executor is None:
         mode = os.environ.get("POCKETPAW_CLOUD_RUN_EXECUTOR", "inprocess").lower()
         if mode == "arq":
-            # arq_executor lands in the Tier 2 PR; tolerated here as untyped.
             from pocketpaw_ee.cloud.chat.runs.arq_executor import (  # type: ignore[import-not-found,import-untyped]
                 ArqExecutor,
             )

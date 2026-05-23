@@ -1,14 +1,4 @@
-"""``sessions/service.get_history`` must surface the newest non-terminal
-``ChatRunDoc`` for the session's scope so the frontend can auto-resume a
-mid-flight agent run after a refresh / session switch.
-
-The injected field is ``active_run`` — either ``{"run_id", "status"}`` or
-``None``. The scope mapping mirrors what ``post_agent_chat`` writes:
-
-* session-typed sessions → ``context_type="session"``, ``scope_id=str(session.id)``
-* group-typed sessions   → ``context_type="group"``, ``scope_id=session.group``
-* pocket-typed sessions  → ``context_type="pocket"``, ``scope_id=session.pocket``
-"""
+"""``get_history`` surfaces ``active_run`` for the session's scope."""
 
 from __future__ import annotations
 
