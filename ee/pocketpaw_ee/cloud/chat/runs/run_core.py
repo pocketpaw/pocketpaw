@@ -15,6 +15,7 @@ from typing import Any
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
 )
+from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
@@ -68,9 +69,6 @@ async def _broadcast_message_new(
     attachments: list[dict[str, Any]],
     created_at: datetime,
 ) -> None:
-    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
-    from pocketpaw_ee.cloud.chat.ws import manager
-
     # Include the caller so OS chat panels (which render off chatRoomsStore
     # via WS `message.new`) see the agent reply land without a refresh. The
     # new resumable-runs SSE writes to chatStore, which os/ChatPanel doesn't
@@ -78,43 +76,60 @@ async def _broadcast_message_new(
     recipients = list(ctx.members) if ctx.members else [ctx.user_id]
     if not recipients:
         return
+    data = {
+        "id": message_id,
+        "group": ctx.scope_id,
+        "sender_type": "agent",
+        "agent": ctx.target_agent_id,
+        "content": content,
+        "attachments": attachments,
+        "created_at": created_at.isoformat(),
+    }
+    if xproc.is_worker():
+        await xproc.publish_ws_envelope(
+            scope_id=ctx.scope_id,
+            recipients=recipients,
+            ws_type="message.new",
+            ws_data=data,
+        )
+        return
+
+    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
+    from pocketpaw_ee.cloud.chat.ws import manager
+
     await manager.broadcast_to_group(
         ctx.scope_id,
         recipients,
-        WsOutbound(
-            type="message.new",
-            data={
-                "id": message_id,
-                "group": ctx.scope_id,
-                "sender_type": "agent",
-                "agent": ctx.target_agent_id,
-                "content": content,
-                "attachments": attachments,
-                "created_at": created_at.isoformat(),
-            },
-        ),
+        WsOutbound(type="message.new", data=data),
     )
 
 
 async def _broadcast_agent_typing(ctx: ScopeContext, active: bool) -> None:
-    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
-    from pocketpaw_ee.cloud.chat.ws import manager
-
     others = [m for m in ctx.members if m != ctx.user_id]
     if not others:
         return
+    data = {
+        "scope": ctx.kind.value,
+        "scope_id": ctx.scope_id,
+        "agent_id": ctx.target_agent_id,
+        "active": active,
+    }
+    if xproc.is_worker():
+        await xproc.publish_ws_envelope(
+            scope_id=ctx.scope_id,
+            recipients=others,
+            ws_type="agent.typing",
+            ws_data=data,
+        )
+        return
+
+    from pocketpaw_ee.cloud.chat.schemas import WsOutbound
+    from pocketpaw_ee.cloud.chat.ws import manager
+
     await manager.broadcast_to_group(
         ctx.scope_id,
         others,
-        WsOutbound(
-            type="agent.typing",
-            data={
-                "scope": ctx.kind.value,
-                "scope_id": ctx.scope_id,
-                "agent_id": ctx.target_agent_id,
-                "active": active,
-            },
-        ),
+        WsOutbound(type="agent.typing", data=data),
     )
 
 
