@@ -512,8 +512,8 @@ renders but every interaction is a no-op.
      "props": {"columns": [...], "columnKey": "status", ...}}
 
 Widgets that REQUIRE a node-level ``bind`` to be functional:
-``kanban``, ``board``, ``calendar``, ``checkbox``, ``switch``,
-``input``, ``textarea``, ``select``, ``combobox``, ``autocomplete``,
+``kanban`` (alias ``board``), ``calendar``, ``checkbox``, ``switch``,
+``input``, ``textarea``, ``select``, ``combobox``,
 ``multi-select``, ``radio-group``, ``slider``, ``rating``,
 ``date-picker``, ``time-picker``, ``otp-input``.
 

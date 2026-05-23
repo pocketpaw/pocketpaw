@@ -19,6 +19,12 @@
 
 from __future__ import annotations
 
+# Intentional private-attribute import: this file is a CONTENT regression
+# guard for prompt blocks that are deliberately not part of
+# ``pocketpaw.ripple``'s public surface. If a future refactor renames or
+# relocates these constants, the test should fail loud (ImportError) so
+# the new author sees the content rules need to move too — that is the
+# whole point of pinning them at the source.
 from pocketpaw.ripple._pockets import (
     POCKET_DELEGATION_RULE,
     _INTERACTIVE_DEFAULT_BLOCK,
