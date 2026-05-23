@@ -13,6 +13,7 @@ from pocketpaw_ee.cloud.meetings.providers.base import (
     ProviderStartResult,
     RecordingRef,
 )
+from pocketpaw_ee.cloud.meetings.providers.livekit import recording as livekit_recording
 
 
 class LiveKitProvider:
@@ -78,16 +79,16 @@ class LiveKitProvider:
     # ----- SupportsRecording -----
 
     async def request_recording(self, ctx: RequestContext, meeting) -> RecordingRef:
-        """Start composite egress via the existing recording helpers.
+        """Start composite egress via the livekit recording module.
 
-        The existing start_room_recording expects group_id; we extract it
-        from the meeting's provider_payload.
+        Delegates to ``livekit_recording.start_composite_egress`` which wraps
+        the existing LiveKit Egress API call.
         """
         group_id = meeting.raw_provider_payload.get("group_id")
         if not group_id:
             raise ValueError("LiveKit recording requires group_id in provider_payload")
 
-        result = await livekit_service.start_room_recording(group_id)
+        result = await livekit_recording.start_composite_egress(group_id)
 
         return RecordingRef(
             provider="livekit",
@@ -98,11 +99,11 @@ class LiveKitProvider:
         )
 
     async def stop_recording(self, ctx: RequestContext, meeting) -> None:
-        """Stop active egress via the existing recording helpers."""
+        """Stop active egress via the livekit recording module."""
         group_id = meeting.raw_provider_payload.get("group_id")
         if not group_id:
             return
         try:
-            await livekit_service.stop_room_recording(group_id)
+            await livekit_recording.stop_egress(group_id)
         except RuntimeError:
             pass  # no active recording — idempotent
