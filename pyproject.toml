@@ -437,6 +437,7 @@ dev = [
     "moto[s3]>=5.0.0",
     "types-aiofiles>=25.1.0.20260409",
     "import-linter>=2.11",
+    "fakeredis>=2.21.0",
 ]
 
 # Enterprise layer — opt-in. `uv sync --dev --group ee` installs the
