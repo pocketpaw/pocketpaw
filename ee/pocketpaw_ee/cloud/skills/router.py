@@ -7,6 +7,9 @@
 # HTTPException for domain failures — CloudError maps to JSON via
 # _core.http. Mounted in mount_cloud() alongside the other domain
 # routers. Guarded by skills.manage (ADMIN).
+# Updated: 2026-05-23 — add POST /api/v1/skills/api-doc-from-url, the
+# JSON sibling that fetches a spec from a public URL. Same auth +
+# RBAC posture; the service runs an SSRF guard before fetching.
 from __future__ import annotations
 
 from typing import Annotated
@@ -21,8 +24,11 @@ from pocketpaw_ee.cloud.shared.deps import (
     require_action_any_workspace,
 )
 from pocketpaw_ee.cloud.skills import service as skills_service
-from pocketpaw_ee.cloud.skills.domain import ApiDocInstall
-from pocketpaw_ee.cloud.skills.dto import InstallApiDocResponse
+from pocketpaw_ee.cloud.skills.domain import ApiDocFromUrlInstall, ApiDocInstall
+from pocketpaw_ee.cloud.skills.dto import (
+    InstallApiDocFromUrlRequest,
+    InstallApiDocResponse,
+)
 
 # A spec upload bigger than this is rejected before the bytes are read
 # into memory — mirrors the 2 MB cap in skills.service / api_skill_builder.
@@ -77,3 +83,32 @@ async def install_api_doc(
         name=name,
     )
     return await skills_service.install_api_doc(workspace_id, user_id, body)
+
+
+@router.post(
+    "/api-doc-from-url",
+    response_model=InstallApiDocResponse,
+    dependencies=[Depends(require_action_any_workspace("skills.manage"))],
+)
+async def install_api_doc_from_url(
+    body: InstallApiDocFromUrlRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> InstallApiDocResponse:
+    """Fetch a public OpenAPI / Swagger spec by URL and install it.
+
+    Most production APIs publish their OpenAPI at a stable URL — the
+    user pastes that here instead of downloading + re-uploading. The
+    service layer enforces https-only, runs the same SSRF guard the
+    read-source executor uses (rejects loopback / private / link-local
+    hosts), caps the response at 2 MB, and hands the parsed dict to
+    the same installer the multipart endpoint uses. Requires the
+    ``skills.manage`` role (ADMIN).
+    """
+    domain_body = ApiDocFromUrlInstall(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        url=str(body.url),
+        name=body.name,
+    )
+    return await skills_service.install_api_doc_from_url(workspace_id, user_id, domain_body)
