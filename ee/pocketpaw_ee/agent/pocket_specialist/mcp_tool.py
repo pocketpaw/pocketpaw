@@ -136,7 +136,12 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
-    if getattr(out, "ok", True) is False:
+    # Only the explicit ``failed`` action means the run errored — ``draft_kit``
+    # and ``redraft`` are legitimate ``ok=False`` protocol states (the
+    # agent-mode first-call handshake, and the create-validation retry loop)
+    # that the chat agent MUST receive and act on. Flagging those as
+    # ``is_error`` would silently break the two-call flow.
+    if getattr(out, "action", None) == "failed":
         response["is_error"] = True
     return response
 
@@ -237,7 +242,12 @@ async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
-    if getattr(out, "ok", True) is False:
+    # Only the explicit ``failed`` action means the run errored — ``draft_kit``
+    # and ``redraft`` are legitimate ``ok=False`` protocol states (the
+    # agent-mode first-call handshake, and the create-validation retry loop)
+    # that the chat agent MUST receive and act on. Flagging those as
+    # ``is_error`` would silently break the two-call flow.
+    if getattr(out, "action", None) == "failed":
         response["is_error"] = True
     return response
 

@@ -165,6 +165,82 @@ class TestCreateHandler:
         assert body["ok"] is False
         assert "imaginary-card" in body["error"]
 
+    @pytest.mark.asyncio
+    async def test_handler_does_not_flag_is_error_on_draft_kit(self):
+        """``ok=False, action="draft_kit"`` is the agent-mode first-call
+        HANDSHAKE — the adapter returns the draft kit so the chat agent
+        can compute granular ops and call back. Flagging it as is_error
+        breaks the two-call flow silently."""
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistCreateOutput,
+        )
+
+        draft = PocketSpecialistCreateOutput(
+            ok=False,
+            action="draft_kit",
+            pocket=None,
+            duration_ms=10,
+            backend_used="agent_mode",
+        )
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                new=AsyncMock(return_value=draft),
+            ),
+        ):
+            payload = await _create_handler({"brief": "Build a thing"})
+
+        assert "is_error" not in payload, (
+            "draft_kit is a protocol handshake, not a failure — flagging it "
+            "breaks the agent-mode two-call flow"
+        )
+
+    @pytest.mark.asyncio
+    async def test_handler_does_not_flag_is_error_on_redraft(self):
+        """``ok=False, action="redraft"`` is the create validation retry
+        loop — the chat agent must see the redraft signal to retry, not
+        treat it as a hard tool failure."""
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistCreateOutput,
+        )
+
+        redraft = PocketSpecialistCreateOutput(
+            ok=False,
+            action="redraft",
+            pocket=None,
+            duration_ms=10,
+            backend_used="agent_mode",
+        )
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                new=AsyncMock(return_value=redraft),
+            ),
+        ):
+            payload = await _create_handler({"brief": "Build a thing"})
+
+        assert "is_error" not in payload, (
+            "redraft is the create validation retry signal — flagging it breaks the retry loop"
+        )
+
 
 class TestEditHandler:
     """The bug: ``add_node`` with a stale ``parent_id`` was rejected by
@@ -331,6 +407,46 @@ class TestEditHandler:
             payload = await _edit_handler({"pocket_id": "p1", "intent": "Make the chart blue"})
 
         assert "is_error" not in payload, "A planner that legitimately did nothing is not a failure"
+
+    @pytest.mark.asyncio
+    async def test_handler_does_not_flag_is_error_on_draft_kit(self):
+        """``ok=False, action="draft_kit"`` is the edit agent-mode
+        first-call HANDSHAKE — the adapter returns the draft kit so
+        the chat agent can compute granular ops and call back.
+        Flagging it as is_error breaks the two-call flow silently."""
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _edit_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditOutput,
+        )
+
+        draft = PocketSpecialistEditOutput(
+            ok=False,
+            action="draft_kit",
+            pocket_id="p1",
+            ops=[],
+            duration_ms=10,
+            backend_used="agent_mode",
+        )
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_edit_specialist",
+                new=AsyncMock(return_value=draft),
+            ),
+        ):
+            payload = await _edit_handler({"pocket_id": "p1", "intent": "add a chart"})
+
+        assert "is_error" not in payload, (
+            "draft_kit is a protocol handshake, not a failure — flagging it "
+            "breaks the agent-mode two-call flow"
+        )
 
     # NOTE: An end-to-end variant of the captain's bug — running real
     # agent-mode ``_apply_ops`` against a real (mongomock) pocket with
