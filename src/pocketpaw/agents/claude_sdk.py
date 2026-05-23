@@ -507,6 +507,19 @@ class ClaudeSDKBackend:
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocket_context MCP server not registered: %s", exc)
 
+        # In-process MCP server: exposes `edit_document` so the agent can
+        # manipulate Editor.js blocks during file editing. Always registered
+        # — returns an error when no editing session is active.
+        try:
+            from pocketpaw.tools.builtin.edit_document import build_edit_document_mcp_server
+
+            edit_server = build_edit_document_mcp_server()
+            if edit_server is not None:
+                name, cfg_entry = edit_server
+                servers[name] = cfg_entry
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("edit_document MCP server not registered: %s", exc)
+
         return servers
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
@@ -804,6 +817,10 @@ class ClaudeSDKBackend:
             from pocketpaw.agents.sdk_mcp_pocket import POCKET_TOOL_IDS
 
             allowed_tools.extend(POCKET_TOOL_IDS)
+
+            from pocketpaw.tools.builtin.edit_document import EDIT_DOCUMENT_TOOL_ID
+
+            allowed_tools.append(EDIT_DOCUMENT_TOOL_ID)
 
             # Build hooks for security
             hooks = {
