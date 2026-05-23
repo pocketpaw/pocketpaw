@@ -177,6 +177,65 @@ async def test_execute_run_empty_text_marks_completed(monkeypatch):
     ]
 
 
+async def fake_agent_events_backend_error(spec, ctx):
+    # Backend-yielded error (e.g. codex_cli without ``openai-codex-sdk``),
+    # surfaced through _drive_agent_loop's ``elif etype == "error"`` branch.
+    yield ("error", {"code": "agent.backend_error", "message": "codex sdk missing"})
+
+
+async def test_execute_run_backend_error_marks_failed(monkeypatch):
+    """Regression for PR #1191's fix, ported into _drive_agent_loop: when
+    the backend yields an error event, the doc must end up ``failed`` (not
+    silently ``completed`` via the empty-text path)."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    persisted: list[str] = []
+    mark_calls: list[dict[str, Any]] = []
+
+    async def _track_persist(*a, **k):
+        persisted.append("called")
+        return "should-not-happen"
+
+    async def _track_terminal(run_id, *, status, partial_text="", error=None, **k):
+        mark_calls.append(
+            {"run_id": run_id, "status": status, "partial_text": partial_text, "error": error}
+        )
+
+    async def _track_completed(*a, **k):
+        mark_calls.append({"fn": "mark_completed"})
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events_backend_error)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _track_persist)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_completed", _track_completed
+    )
+
+    await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    # ``error`` is terminal — read_events stops here, and we MUST NOT have
+    # appended a stream_end frame after it.
+    assert [e.event for e in events] == ["error"]
+    assert events[0].data["message"] == "codex sdk missing"
+    assert persisted == []
+    assert mark_calls == [
+        {
+            "run_id": "r1",
+            "status": "failed",
+            "partial_text": "",
+            "error": "codex sdk missing",
+        }
+    ]
+
+
 async def fake_agent_events_raising(spec, ctx):
     yield ("chunk", {"content": "partial ", "type": "text"})
     raise RuntimeError("boom")

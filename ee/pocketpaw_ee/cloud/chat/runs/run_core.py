@@ -499,6 +499,20 @@ async def _drive_agent_loop(
                     handled_pocket_ids=handled_pocket_ids,
                 )
                 yield ("tool_result", {"tool": name, "output": output})
+            elif etype == "error":
+                # Surface backend-yielded errors instead of silently dropping
+                # them — a misconfigured backend (codex_cli without
+                # ``openai-codex-sdk``, claude_agent_sdk without the CLI) would
+                # otherwise end the stream with no diagnostic and a blank reply.
+                # Port of PR #1191's fix from the old ``_run_agent_stream``.
+                message = econtent if isinstance(econtent, str) else str(econtent)
+                logger.warning(
+                    "Backend yielded error for agent=%s: %s",
+                    ctx.target_agent_id,
+                    message[:200],
+                )
+                yield ("error", {"code": "agent.backend_error", "message": message})
+                break
         for ev in _drain_side_channel():
             yield ev
     finally:
@@ -558,6 +572,7 @@ async def execute_run(spec: RunSpec) -> None:
     full_text = ""
     cancelled = False
     error: Exception | None = None
+    backend_error_message: str | None = None
     try:
         async for event_name, event_data in _iter_agent_events(spec, ctx):
             if await transport.is_cancelled(spec.run_id):
@@ -568,6 +583,13 @@ async def execute_run(spec: RunSpec) -> None:
                 if isinstance(content, str):
                     full_text += content
             await transport.append_event(spec.run_id, event_name, event_data)
+            if event_name == "error":
+                # ``_drive_agent_loop`` already broke out after yielding this.
+                # The frame is terminal for the client (TERMINAL_EVENTS); stop
+                # writing and route to the failed-mark path below so the doc
+                # doesn't get flipped to ``completed`` by the empty-text branch.
+                backend_error_message = str(event_data.get("message") or "")
+                break
     except Exception as exc:
         error = exc
         logger.exception("execute_run %s crashed", spec.run_id)
@@ -584,13 +606,14 @@ async def execute_run(spec: RunSpec) -> None:
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
 
-    if error is not None:
+    if error is not None or backend_error_message is not None:
+        err_msg = str(error) if error is not None else (backend_error_message or "")
         try:
             await run_service.mark_terminal(
                 spec.run_id,
                 status="failed",
                 partial_text=full_text,
-                error=str(error),
+                error=err_msg,
             )
         except Exception:
             logger.exception("mark_terminal(failed) failed for %s", spec.run_id)
