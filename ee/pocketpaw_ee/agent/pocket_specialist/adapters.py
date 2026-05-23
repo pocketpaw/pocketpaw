@@ -835,6 +835,54 @@ async def _apply_ops(input: Any, *, started: float) -> Any:
             "No edit ops were applied — every supplied op was rejected or "
             "unsupported. See warnings for the per-op reasons."
         )
+
+    # Post-apply action-wiring gate (#1196 follow-up). Each granular
+    # op writes through ``update_pocket`` which runs ``_gate_catalog``
+    # in LOGGED mode — fine for the partial mid-batch state, but it
+    # means the assembled-end-of-batch spec can still carry inert
+    # buttons (``action: "fetch"``) or live-labelled refreshers with
+    # no real fetch. PR #1196 caught those on the create path; this
+    # closes the same loophole on the edit path. Verified against the
+    # Test-D regression: agent renamed the fictitious verb from
+    # ``fetch`` to ``backend_fetch`` after the prompt-only fix — only
+    # a strict end-of-batch gate stops that retry-the-wrong-thing
+    # behaviour by forcing the corrective hint back to the agent.
+    if success:
+        try:
+            from pocketpaw_ee.cloud.pockets import service as _pockets_service
+            from pocketpaw_ee.cloud.ripple_validator import (
+                ActionWiringViolationError,
+                format_action_violations_for_agent,
+                validate_action_wiring_strict,
+            )
+
+            doc = await _pockets_service._fetch_pocket(input.pocket_id)
+            validate_action_wiring_strict(
+                doc.rippleSpec,
+                pocket_id=str(doc.id),
+                workspace_id=doc.workspace,
+            )
+        except ActionWiringViolationError as exc:
+            # Mirrors the ``nothing_applied`` fall-through: ops landed
+            # in Mongo, but the assembled spec is broken. Report
+            # ``ok=False`` with the corrective hint so the chat agent's
+            # ``is_error`` path (#1190) retries. The intermediate
+            # broken state in Mongo is overwritten by the next batch.
+            success = False
+            error_msg = format_action_violations_for_agent(exc.violations)
+            warnings.append(
+                "Edit applied ops but the assembled spec failed action-wiring "
+                "validation — see error for which handler / button needs the "
+                "real verb. The chat agent's next turn should retry."
+            )
+        except Exception:  # noqa: BLE001 — infra failures don't block edits
+            # Manifest fetch / Mongo read / etc. The gate is best-effort
+            # like the catalog walk: a transient infra failure must not
+            # mask a successful edit.
+            logger.warning(
+                "[pocket-specialist:edit] post-apply action-wiring check failed (skipped)",
+                exc_info=True,
+            )
     logger.info(
         "[pocket-specialist:edit] agent-mode apply complete: pocket_id=%s "
         "ops=%d rejected=%d unknown=%d success=%s duration=%dms",
