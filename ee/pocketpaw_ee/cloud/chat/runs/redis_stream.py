@@ -29,9 +29,12 @@ class RedisStreamTransport:
         self._redis = redis
 
     async def append_event(self, run_id: str, event: str, data: dict[str, Any]) -> str:
+        # ``default=str`` coerces stragglers (bytes, datetime, Path, custom
+        # objects) tool results may carry. Without this, one un-serializable
+        # value would crash ``execute_run`` and fail the whole turn.
         return await self._redis.xadd(
             _events_key(run_id),
-            {"event": event, "data": json.dumps(data)},
+            {"event": event, "data": json.dumps(data, default=str)},
         )
 
     async def read_events(
