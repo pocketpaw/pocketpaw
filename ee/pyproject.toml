@@ -134,6 +134,7 @@ planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
 pocket = "pocketpaw_ee.extensions:CloudPocketMcpProvider"
 pocket_specialist = "pocketpaw_ee.extensions:CloudPocketSpecialistMcpProvider"
 composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
+meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 
 [project.entry-points."pocketpaw.agent_extensions"]
 cloud = "pocketpaw_ee.extensions:CloudAgentExtension"
@@ -300,6 +301,18 @@ source_modules = [
     "pocketpaw_ee.cloud.tasks.listeners",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.task"]
+
+[[tool.importlinter.contracts]]
+name = "Meetings — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.meetings.router",
+    "pocketpaw_ee.cloud.meetings.dto",
+    "pocketpaw_ee.cloud.meetings.domain",
+    "pocketpaw_ee.cloud.meetings.webhooks",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.meeting"]
 
 [[tool.importlinter.contracts]]
 name = "Mission Control — no Beanie touches from façade layer"

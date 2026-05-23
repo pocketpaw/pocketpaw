@@ -209,6 +209,25 @@ class CloudTasksMcpProvider:
         return list(TASK_TOOL_IDS)
 
 
+class CloudMeetingsMcpProvider:
+    """`pocketpaw.mcp_servers` — the meetings in-process server.
+
+    Exposes schedule / list / cancel / search / find-transcript / send-bot
+    tools so the agent can run Zoom + Google Meet meetings (and dispatch a
+    Recall.ai recording bot) natively from chat.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.meetings import build_meetings_context_server
+
+        return build_meetings_context_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.meetings import MEETING_TOOL_IDS
+
+        return list(MEETING_TOOL_IDS)
+
+
 class CloudPlannerMcpProvider:
     """`pocketpaw.mcp_servers` — the cloud Planner in-process server."""
 

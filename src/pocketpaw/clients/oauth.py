@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import time
 import urllib.parse
@@ -15,9 +16,16 @@ from pocketpaw.clients.token_store import OAuthTokens, TokenStore
 logger = logging.getLogger(__name__)
 
 
-# OAuth 2.0 provider configuration
+# OAuth 2.0 provider configuration.
+# `grant_type` key marks providers that use a non-default flow on refresh.
+# Default (omitted) = 3-leg authorization_code + refresh_token grant.
 PROVIDERS: dict[str, dict[str, str]] = {
     "google": {
+        "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "revoke_url": "https://oauth2.googleapis.com/revoke",
+    },
+    "google_meet": {
         "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
         "token_url": "https://oauth2.googleapis.com/token",
         "revoke_url": "https://oauth2.googleapis.com/revoke",
@@ -26,6 +34,12 @@ PROVIDERS: dict[str, dict[str, str]] = {
         "auth_url": "https://accounts.spotify.com/authorize",
         "token_url": "https://accounts.spotify.com/api/token",
         "revoke_url": "",
+    },
+    "zoom": {
+        "auth_url": "",  # S2S has no browser flow
+        "token_url": "https://zoom.us/oauth/token",
+        "revoke_url": "https://zoom.us/oauth/revoke",
+        "grant_type": "account_credentials",
     },
 }
 
@@ -138,6 +152,64 @@ class OAuthManager:
         logger.info("OAuth tokens obtained for %s via %s", service, provider)
         return tokens
 
+    async def exchange_account_credentials(
+        self,
+        provider: str,
+        service: str,
+        client_id: str,
+        client_secret: str,
+        account_id: str,
+        scopes: list[str] | None = None,
+    ) -> OAuthTokens:
+        """Server-to-Server OAuth (account_credentials grant).
+
+        Used by Zoom S2S OAuth apps where the app acts on behalf of an
+        entire account rather than a single user. No refresh token —
+        a new access token is requested whenever the current one expires.
+
+        The account_id is persisted in tokens.extra so future "refreshes"
+        can re-request without the caller having to track it.
+        """
+        config = PROVIDERS.get(provider)
+        if not config:
+            raise ValueError(f"Unknown OAuth provider: {provider}")
+
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                config["token_url"],
+                headers={"Authorization": f"Basic {basic}"},
+                data={
+                    "grant_type": "account_credentials",
+                    "account_id": account_id,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        expires_in = data.get("expires_in", 3600)
+        # We persist client_id + client_secret alongside account_id in
+        # the token blob (chmod 0600, never in Mongo). Downstream callers
+        # (the meetings adapter factory, the refresh path) read them
+        # back without the caller having to track them separately.
+        tokens = OAuthTokens(
+            service=service,
+            access_token=data["access_token"],
+            refresh_token=None,
+            token_type=data.get("token_type", "Bearer"),
+            expires_at=time.time() + expires_in,
+            scopes=scopes or [s for s in data.get("scope", "").split(" ") if s],
+            extra={
+                "account_id": account_id,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+        )
+
+        self.store.save(tokens)
+        logger.info("S2S OAuth tokens obtained for %s via %s", service, provider)
+        return tokens
+
     async def refresh_token(
         self,
         provider: str,
@@ -145,16 +217,36 @@ class OAuthManager:
         client_id: str,
         client_secret: str,
     ) -> OAuthTokens | None:
-        """Refresh an expired access token using the refresh token.
+        """Refresh an expired access token.
+
+        For standard 3-leg providers uses the stored refresh_token.
+        For S2S (account_credentials) providers re-requests via the
+        original account_id, which is read from tokens.extra.
 
         Returns updated OAuthTokens, or None if refresh fails.
         """
-        tokens = self.store.load(service)
-        if not tokens or not tokens.refresh_token:
-            return None
-
         config = PROVIDERS.get(provider)
         if not config:
+            return None
+
+        if config.get("grant_type") == "account_credentials":
+            tokens = self.store.load(service)
+            if not tokens:
+                return None
+            account_id = tokens.extra.get("account_id")
+            if not account_id:
+                logger.warning("S2S refresh missing account_id for %s", service)
+                return None
+            try:
+                return await self.exchange_account_credentials(
+                    provider, service, client_id, client_secret, account_id, tokens.scopes
+                )
+            except Exception as e:
+                logger.warning("S2S token refresh failed for %s: %s", service, e)
+                return None
+
+        tokens = self.store.load(service)
+        if not tokens or not tokens.refresh_token:
             return None
 
         try:

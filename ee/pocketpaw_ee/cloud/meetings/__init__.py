@@ -21,4 +21,16 @@ Layout:
 
 This is the entrypoint for the unified meetings platform. See the design
 plan for ownership split + phase rollout.
+
+Note: this commit folds in #1140's Recall.ai work via merge. The Recall
+code currently lives at the top level (router.py, service.py, webhooks.py,
+recall_client.py, etc.) — follow-up commits move it under
+``providers/recall/`` to match the platform layout.
 """
+
+# Re-export the legacy top-level router + webhooks until the providers/recall/
+# move lands. ``ee/cloud/__init__.py`` imports both names.
+from pocketpaw_ee.cloud.meetings.router import router
+from pocketpaw_ee.cloud.meetings.webhooks import router as webhooks_router
+
+__all__ = ["router", "webhooks_router"]
