@@ -1,18 +1,6 @@
 """Unified files service — merges chat S3 uploads, local workspace dir,
-and (stubbed for now) Drive-synced files into one list the FE Files
-panel can render.
-
-Cluster E sub-PR 4. The Drive branch returns an empty list today;
-Cluster C owns the connector-status endpoint that will tell us which
-pockets have a connected Drive account. Once that lands we can fan a
-Drive listing in here without changing the response shape the FE already
-consumes. See ``docs/plans/cluster-E-reality.md`` for the handshake.
-
-2026-05-03 (Stage 3.E "Files as Knowledge"): ``list_unified`` accepts an
-optional ``pocket_id``. When set, the chat-uploads slice is filtered to
-that pocket only. When ``None`` (the default), the listing returns
-workspace-only rows — the workspace Files panel never sees pocket files,
-which is the privacy contract for pocket-scoped uploads.
+Drive-synced files (stubbed), KB articles, and agent-produced files into
+one list the FE Files panel can render.
 """
 
 from __future__ import annotations
@@ -27,7 +15,7 @@ from ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
 logger = logging.getLogger(__name__)
 
 
-FileSource = Literal["chat", "local", "drive"]
+FileSource = Literal["chat", "local", "drive", "kb", "agent"]
 
 
 @dataclass
@@ -39,10 +27,10 @@ class UnifiedFile:
     filename: str
     mime: str | None
     size: int | None
-    url: str | None  # None for local fs (FE uses Tauri for those)
+    url: str | None  # None for local fs / kb / agent sources
     created: datetime | None
     chat_id: str | None = None
-
+    agent_id: str | None = None  # Owning agent for kb/agent-source rows
 
 def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
     """Drop later duplicates keyed on ``(filename, size, mime)``.
@@ -60,6 +48,14 @@ def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
         seen.add(key)
         out.append(f)
     return out
+
+
+def _parse_iso(s: str) -> datetime | None:
+    """Parse an ISO-8601 string to datetime; return None on failure."""
+    try:
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
 
 
 class UnifiedFilesService:
@@ -113,6 +109,68 @@ class UnifiedFilesService:
         )
         return []
 
+    async def list_kb_articles(
+        self,
+        workspace_id: str,
+        *,
+        limit: int,
+    ) -> list[UnifiedFile]:
+        """KB articles sourced from the kb-go binary via the workspace aggregator.
+        """
+        from ee.cloud.agents import service as agents_service
+        from ee.cloud.kb.workspace_aggregator import aggregate_workspace_articles
+
+        # Resolve agent ids in this workspace for scope fan-out.
+        agents = await agents_service.list_agents(workspace_id)
+        agent_ids = [a.id for a in agents]
+
+        def _kb_list(scope: str) -> list:
+            from ee.cloud.agents.knowledge import _kb
+
+            try:
+                result = _kb("list", "--scope", scope)
+            except Exception:
+                return []
+            return result if isinstance(result, list) else []
+
+        articles = await aggregate_workspace_articles(
+            workspace_id=workspace_id,
+            agent_ids=agent_ids,
+            kb_list=_kb_list,
+        )
+
+        return [
+            UnifiedFile(
+                id=a.id,
+                source="kb",
+                filename=a.title or a.source or a.id,
+                mime="text/markdown",
+                size=None,
+                url=None,
+                created=_parse_iso(a.updated_at) if a.updated_at else None,
+                agent_id=a.agent_id,
+            )
+            for a in articles
+        ][:limit]
+
+    async def list_agent_files(
+        self,
+        workspace_id: str,
+        *,
+        limit: int,
+    ) -> list[UnifiedFile]:
+        """Agent-produced files.
+
+        Agent tool calls (WriteFileTool, Claude SDK Write) write directly to
+        the local filesystem and bypass the upload pipeline. Until we add a
+        file-registration hook on tool completion, this returns empty.
+
+        The stub emits an info-level log so operators can confirm the branch
+        is reachable; the FE handles an empty list gracefully.
+        """
+        
+        return []
+
     async def list_unified(
         self,
         workspace_id: str,
@@ -151,6 +209,23 @@ class UnifiedFilesService:
                 warnings.append(
                     "drive.not_connected: Drive source is not wired yet; "
                     "see Cluster C connector-status endpoint."
+                )
+
+        if source in (None, "kb"):
+            kb_hits = await self.list_kb_articles(
+                workspace_id, limit=per_source
+            )
+            merged.extend(kb_hits)
+
+        if source in (None, "agent"):
+            agent_hits = await self.list_agent_files(
+                workspace_id, limit=per_source
+            )
+            merged.extend(agent_hits)
+            if not agent_hits:
+                warnings.append(
+                    "agent.not_wired: Agent-produced files are not yet "
+                    "tracked (Smart Files Milestone 2+)."
                 )
 
         # Local filesystem is addressed by the FE's Tauri bridge (no

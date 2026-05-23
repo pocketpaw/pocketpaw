@@ -43,6 +43,7 @@ class FileUpload(TimestampedDocument):
     # Storage layout is unchanged — partitioning is metadata-only.
     pocket_id: str | None = None
     deleted_at: datetime | None = None
+    content_version: int = 0
 
     class Settings:
         name = "file_uploads"
