@@ -35,6 +35,10 @@ class CloudAgentChatRequest(BaseModel):
     # ``create_pocket`` tool instead of rendering an inline ``ui-spec``
     # block as a chat reply.
     intent: Literal["pocket_create"] | None = None
+    # Editor.js blocks from the file editor, if the chat is scoped to an
+    # open file. The agent_router injects them into the system prompt so the
+    # agent can call ``edit_document`` to make changes.
+    editor_blocks: list[dict[str, Any]] | None = None
 
 
 class SseEventName(StrEnum):

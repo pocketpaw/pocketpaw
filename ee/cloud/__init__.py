@@ -119,12 +119,15 @@ def mount_cloud(app: FastAPI) -> None:
     from ee.cloud.notifications.router import router as notifications_router
     from ee.cloud.uploads.router import router as uploads_router
     from ee.paw_print.router import router as paw_print_router
+    from ee.cloud.file_versions.router import router as file_versions_router
 
     app.include_router(kb_router, prefix="/api/v1")
     app.include_router(knowledge_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
     app.include_router(notifications_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
+
+    app.include_router(file_versions_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
@@ -344,10 +347,14 @@ def mount_cloud(app: FastAPI) -> None:
     # Start/stop agent pool with app lifecycle.
     #
     # Chat persistence lives entirely in ``MongoMemoryStore.save`` — it
-    # writes the message row, auto-creates/touches the linked Session, and
-    # receives attachments via ``InboundMessage.metadata["attachments"]``.
-    # The old ``ee.cloud.shared.chat_persistence`` bus subscriber was
-    # removed because it dual-wrote every turn.
+    # CSRF token endpoint — the frontend http() wrapper fetches a token
+    # before POST/PUT/DELETE. The cloud backend uses JWT auth, not cookie
+    # double-submit, so this returns a placeholder token to silence 404s.
+    @app.get("/api/v1/auth/csrf")
+    async def get_csrf():
+        import uuid
+        return {"csrf_token": uuid.uuid4().hex}
+
     @app.on_event("startup")
     async def _start_agent_pool():
         from pocketpaw.agents.pool import get_agent_pool
