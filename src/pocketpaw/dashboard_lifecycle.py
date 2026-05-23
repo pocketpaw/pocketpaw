@@ -587,6 +587,28 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
     except Exception as exc:
         logger.warning("Agent pool stop failed: %s", exc)
 
+    # Drain in-flight cloud chat runs (resumable-runs Tier 1).
+    #
+    # Verified 2026-05-23: this lifespan path is the ONLY shutdown hook that
+    # fires under the host's ``FastAPI(lifespan=...)`` setup —
+    # ``@app.on_event("shutdown")`` handlers registered inside ``mount_cloud``
+    # are silently dropped. So the InProcessExecutor drain MUST be wired here
+    # (the mount_cloud on_event hook is kept as defence-in-depth in case the
+    # host ever switches off ``lifespan``).
+    #
+    # ``drain()`` ``gather``s the tracked tasks with ``return_exceptions=True``
+    # — it waits for in-flight asyncio runs to finish naturally, it does NOT
+    # cancel them. Bounded by ``_bounded`` so a stuck run can't wedge exit.
+    try:
+        from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
+
+        executor = get_executor()
+        if isinstance(executor, InProcessExecutor):
+            await _bounded("cloud_run_drain", executor.drain(), timeout=10.0)
+    except Exception as exc:
+        # Cloud package not installed, or executor not yet constructed.
+        logger.debug("Cloud run drain skipped: %s", exc)
+
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):

@@ -53,7 +53,10 @@ def get_executor() -> RunExecutor:
     if _executor is None:
         mode = os.environ.get("POCKETPAW_CLOUD_RUN_EXECUTOR", "inprocess").lower()
         if mode == "arq":
-            from pocketpaw_ee.cloud.chat.runs.arq_executor import ArqExecutor
+            # arq_executor lands in the Tier 2 PR; tolerated here as untyped.
+            from pocketpaw_ee.cloud.chat.runs.arq_executor import (  # type: ignore[import-not-found,import-untyped]
+                ArqExecutor,
+            )
 
             _executor = ArqExecutor()
         else:

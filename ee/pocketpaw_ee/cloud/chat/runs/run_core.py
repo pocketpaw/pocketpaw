@@ -18,7 +18,9 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
-from pocketpaw.agents.pool import get_agent_pool  # re-exported for test patching
+from pocketpaw.agents.pool import (  # type: ignore[import-untyped]  # re-exported for test patching
+    get_agent_pool,
+)
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
@@ -296,8 +298,8 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
             )
 
     try:
-        from pocketpaw.config import Settings
-        from pocketpaw.memory.titler import generate_title
+        from pocketpaw.config import Settings  # type: ignore[import-untyped]
+        from pocketpaw.memory.titler import generate_title  # type: ignore[import-untyped]
 
         settings = Settings.load()
         title = await generate_title(

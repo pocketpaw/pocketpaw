@@ -522,3 +522,20 @@ def mount_cloud(app: FastAPI) -> None:
         from pocketpaw.agents.pool import get_agent_pool
 
         await get_agent_pool().stop()
+
+    # Drain in-flight cloud chat runs (resumable-runs Tier 1).
+    #
+    # Verified 2026-05-23 via a FastAPI/TestClient probe: when the host
+    # constructs ``FastAPI(lifespan=...)`` (see ``src/pocketpaw/dashboard.py``)
+    # this ``@app.on_event("shutdown")`` hook is silently dropped — only the
+    # lifespan ctx-manager's teardown fires. The real drain therefore lives in
+    # ``src/pocketpaw/dashboard_lifecycle.shutdown_event``. This hook is kept
+    # as defence-in-depth: if the host ever stops passing ``lifespan=`` (or a
+    # different host mounts ``mount_cloud`` without one), the drain still runs.
+    @app.on_event("shutdown")
+    async def _drain_chat_runs() -> None:
+        from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
+
+        executor = get_executor()
+        if isinstance(executor, InProcessExecutor):
+            await executor.drain()

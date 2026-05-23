@@ -124,7 +124,7 @@ async def find_active_run_for_scope(
             ctype_filter,
             {"status": {"$in": ["queued", "running"]}},
         )
-        .sort(-ChatRunDoc.createdAt)
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .first_or_none()
     )
 
