@@ -165,3 +165,69 @@ async def test_post_agent_idempotent_on_client_message_id(
         "create_run is idempotent on (workspace, client_message_id), so a "
         "re-submitted message must return the same run."
     )
+
+
+async def test_post_agent_stop_cancels_active_run(
+    cloud_app_client: AsyncClient,
+    mongo_db,  # noqa: ARG001
+    monkeypatch,
+):
+    """POST /agent/stop calls request_cancel on the active run for the scope."""
+    from pocketpaw_ee.cloud.chat import agent_router as mod
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+    from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+
+    spec = RunSpec(
+        run_id="run-to-cancel",
+        workspace_id="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="k1",
+        group=None,
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c1",
+        user_message_id="um1",
+        content="hi",
+        history=[],
+        intent=None,
+        attachments=[],
+        mentions=[],
+        reply_to=None,
+    )
+    await run_service.create_run(spec)
+
+    cancelled: list[str] = []
+
+    class _StubTransport:
+        async def request_cancel(self, run_id: str) -> None:
+            cancelled.append(run_id)
+
+    monkeypatch.setattr(mod, "get_stream_transport", lambda: _StubTransport())
+
+    resp = await cloud_app_client.post("/cloud/chat/session/s1/agent/stop")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+    assert cancelled == ["run-to-cancel"]
+
+
+async def test_post_agent_stop_is_noop_when_no_active_run(
+    cloud_app_client: AsyncClient,
+    mongo_db,  # noqa: ARG001
+    monkeypatch,
+):
+    """No active run for scope → still returns ok (idempotent)."""
+    from pocketpaw_ee.cloud.chat import agent_router as mod
+
+    cancelled: list[str] = []
+
+    class _StubTransport:
+        async def request_cancel(self, run_id: str) -> None:
+            cancelled.append(run_id)
+
+    monkeypatch.setattr(mod, "get_stream_transport", lambda: _StubTransport())
+
+    resp = await cloud_app_client.post("/cloud/chat/session/s-nonexistent/agent/stop")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+    assert cancelled == []
