@@ -71,12 +71,16 @@ async def _broadcast_message_new(
     from pocketpaw_ee.cloud.chat.schemas import WsOutbound
     from pocketpaw_ee.cloud.chat.ws import manager
 
-    others = [m for m in ctx.members if m != ctx.user_id]
-    if not others:
+    # Include the caller so OS chat panels (which render off chatRoomsStore
+    # via WS `message.new`) see the agent reply land without a refresh. The
+    # new resumable-runs SSE writes to chatStore, which os/ChatPanel doesn't
+    # subscribe to, so without this the caller would never see the message.
+    recipients = list(ctx.members) if ctx.members else [ctx.user_id]
+    if not recipients:
         return
     await manager.broadcast_to_group(
         ctx.scope_id,
-        others,
+        recipients,
         WsOutbound(
             type="message.new",
             data={
