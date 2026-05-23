@@ -651,6 +651,13 @@ async def _run_agent_stream(
                     ctx.target_agent_id,
                     message[:200],
                 )
+                # Clear the typing indicator BEFORE breaking out — control
+                # never reaches the normal ``stream_end`` cleanup at the end
+                # of the function, and other group members would otherwise see
+                # the agent typing indicator spin indefinitely after the
+                # backend error. Solo users are unaffected (the broadcast
+                # early-returns when ``ctx.members == [user_id]``).
+                await _broadcast_agent_typing(ctx, active=False)
                 yield ("error", {"code": "agent.backend_error", "message": message})
                 break
             elif etype == "done":

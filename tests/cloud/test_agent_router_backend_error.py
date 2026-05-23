@@ -87,7 +87,10 @@ async def test_backend_error_event_surfaces_as_sse_error(cloud_app_client: Async
     async def fake_persist(ctx, body):
         return "user_msg_id_1"
 
+    typing_calls: list[tuple[object, bool]] = []
+
     async def fake_broadcast_typing(ctx, active):
+        typing_calls.append((ctx, active))
         return None
 
     async def fake_build_knowledge_context(_ctx, *, user_message, attachments=None, mentions=None):
@@ -123,3 +126,12 @@ async def test_backend_error_event_surfaces_as_sse_error(cloud_app_client: Async
     assert error_payload["code"] == "agent.backend_error"
     assert "openai-codex-sdk" in error_payload["message"]
     assert names[-1] == "error"
+
+    # The error branch must clear the typing indicator before breaking out —
+    # otherwise other group members see the agent typing forever (the outer
+    # ``finally``/``stream_end`` cleanup never runs on this path because
+    # ``gen()`` breaks on the error frame).
+    assert any(active is False for _, active in typing_calls), (
+        "typing indicator left ON after backend error — group members would "
+        "see the agent typing indefinitely"
+    )
