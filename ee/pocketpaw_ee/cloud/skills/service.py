@@ -74,17 +74,21 @@ def _audit_api_skill_install(
 
 
 def _strip_url_query(url: str) -> str:
-    """Drop the query string from a URL for audit logging.
+    """Drop query string, userinfo credentials, and fragment from a URL
+    for audit logging.
 
-    Some upstreams ship API keys in URL params (rare for OpenAPI specs,
-    but plausible). Logging the bare path keeps the audit trail useful
-    without persisting a token in the audit log.
+    Some upstreams ship API keys in URL params OR userinfo
+    (``https://user:apikey@host/...``). Logging the bare ``scheme://host[:port]/path``
+    keeps the audit trail useful without persisting a token.
     """
     try:
         parts = urllib.parse.urlsplit(url)
-        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        safe_netloc = parts.hostname or ""
+        if parts.port:
+            safe_netloc = f"{safe_netloc}:{parts.port}"
+        return urllib.parse.urlunsplit((parts.scheme, safe_netloc, parts.path, "", ""))
     except Exception:  # noqa: BLE001 — fallback for malformed input
-        return url.split("?", 1)[0]
+        return url.split("?", 1)[0].split("#", 1)[0]
 
 
 async def install_api_doc(

@@ -124,9 +124,7 @@ async def client(monkeypatch, tmp_path) -> AsyncClient:
 # ---------------------------------------------------------------------------
 
 
-async def test_install_from_url_installs_skill(
-    client: AsyncClient, monkeypatch, tmp_path
-) -> None:
+async def test_install_from_url_installs_skill(client: AsyncClient, monkeypatch, tmp_path) -> None:
     """A valid https URL returning a real OpenAPI spec installs the skill."""
     _patch_ssrf_allow(monkeypatch)
     _patch_httpx_get(monkeypatch, body=json.dumps(_minimal_spec()).encode("utf-8"))
@@ -145,9 +143,7 @@ async def test_install_from_url_installs_skill(
     assert "`GET /things`" in skill_md.read_text(encoding="utf-8")
 
 
-async def test_install_from_url_accepts_yaml_response(
-    client: AsyncClient, monkeypatch
-) -> None:
+async def test_install_from_url_accepts_yaml_response(client: AsyncClient, monkeypatch) -> None:
     """YAML responses are parsed and installed too."""
     import yaml
 
@@ -167,9 +163,7 @@ async def test_install_from_url_accepts_yaml_response(
 # ---------------------------------------------------------------------------
 
 
-async def test_install_from_url_rejects_http_scheme(
-    client: AsyncClient, monkeypatch
-) -> None:
+async def test_install_from_url_rejects_http_scheme(client: AsyncClient, monkeypatch) -> None:
     """http:// URLs are rejected before any DNS / fetch — https-only."""
     _patch_ssrf_allow(monkeypatch)  # ensure SSRF wouldn't be the first reject
 
@@ -195,9 +189,7 @@ async def test_install_from_url_rejects_malformed_url(client: AsyncClient) -> No
 # ---------------------------------------------------------------------------
 
 
-async def test_install_from_url_rejects_private_host(
-    client: AsyncClient, monkeypatch
-) -> None:
+async def test_install_from_url_rejects_private_host(client: AsyncClient, monkeypatch) -> None:
     """A hostname that resolves to a private / loopback IP is rejected
     before any fetch fires — the SSRF guard is the trust boundary."""
     from pocketpaw_ee.cloud.pockets import _http_guard
@@ -223,9 +215,7 @@ async def test_install_from_url_rejects_private_host(
 # ---------------------------------------------------------------------------
 
 
-async def test_install_from_url_rejects_redirect(
-    client: AsyncClient, monkeypatch
-) -> None:
+async def test_install_from_url_rejects_redirect(client: AsyncClient, monkeypatch) -> None:
     """A 3xx response is rejected — redirects are off, so the caller
     must pass the final URL directly."""
     _patch_ssrf_allow(monkeypatch)
@@ -239,9 +229,7 @@ async def test_install_from_url_rejects_redirect(
     assert r.json()["error"]["code"] == "skills.api_doc.fetch_redirect"
 
 
-async def test_install_from_url_rejects_non_2xx(
-    client: AsyncClient, monkeypatch
-) -> None:
+async def test_install_from_url_rejects_non_2xx(client: AsyncClient, monkeypatch) -> None:
     """A 4xx / 5xx response surfaces as fetch_failed with the status."""
     _patch_ssrf_allow(monkeypatch)
     _patch_httpx_get(monkeypatch, body=b"not found", status=404)
@@ -270,9 +258,7 @@ async def test_install_from_url_rejects_oversized_response(
     assert r.json()["error"]["code"] == "skills.api_doc.too_large"
 
 
-async def test_install_from_url_rejects_unparseable(
-    client: AsyncClient, monkeypatch
-) -> None:
+async def test_install_from_url_rejects_unparseable(client: AsyncClient, monkeypatch) -> None:
     """A response that is neither JSON nor YAML is rejected."""
     _patch_ssrf_allow(monkeypatch)
     _patch_httpx_get(monkeypatch, body=b"{not valid: [json")
@@ -300,9 +286,7 @@ async def test_install_from_url_rejects_spec_with_no_paths(
     assert r.json()["error"]["code"] == "skills.api_doc.invalid_spec"
 
 
-async def test_install_from_url_rejects_network_error(
-    client: AsyncClient, monkeypatch
-) -> None:
+async def test_install_from_url_rejects_network_error(client: AsyncClient, monkeypatch) -> None:
     """httpx errors (DNS, TCP, TLS, timeout) all map to fetch_failed."""
     _patch_ssrf_allow(monkeypatch)
 
@@ -373,6 +357,20 @@ async def test_service_install_from_url_direct(monkeypatch, tmp_path) -> None:
     out = await skills_service.install_api_doc_from_url("w1", "u1", body)
     assert out.ok is True
     assert out.slug == "api-remote-example-com"
+
+
+def test_strip_url_query_drops_userinfo_and_fragment() -> None:
+    """Regression for S2 (PR #1195 review): the audit-log URL must drop
+    userinfo credentials AND fragment, not just the query string —
+    upstreams that ship API keys in ``https://user:token@host/...``
+    were previously leaking the token into ``audit.jsonl``."""
+    from pocketpaw_ee.cloud.skills.service import _strip_url_query
+
+    assert (
+        _strip_url_query("https://user:apikey@vendor.com/openapi.json?k=v#frag")
+        == "https://vendor.com/openapi.json"
+    )
+    assert _strip_url_query("https://vendor.com:8443/api") == "https://vendor.com:8443/api"
 
 
 # Silence ruff unused-import nudge.
