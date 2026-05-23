@@ -81,7 +81,7 @@ def _resp(status, body):
 @pytest.mark.usefixtures("mongo_db")
 async def test_request_bot_posts_correct_shape(recall_env, monkeypatch):
     """We send meeting_url + recording_config + metadata with Token auth."""
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -119,7 +119,7 @@ async def test_request_bot_posts_correct_shape(recall_env, monkeypatch):
 async def test_request_bot_rejects_when_api_key_missing(monkeypatch):
     """No RECALL_API_KEY → structured error before any HTTP call."""
     from pocketpaw_ee.cloud._core.errors import ValidationError
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     monkeypatch.setenv("RECALL_BASE_URL", "http://recall.test")
@@ -142,7 +142,7 @@ async def test_request_bot_rejects_when_api_key_missing(monkeypatch):
 async def test_request_bot_rejects_meeting_without_join_url(recall_env, monkeypatch):
     """A meeting with no join URL can't host a bot — structured error."""
     from pocketpaw_ee.cloud._core.errors import ValidationError
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -163,7 +163,7 @@ async def test_request_bot_rejects_meeting_without_join_url(recall_env, monkeypa
 async def test_request_bot_propagates_recall_4xx(recall_env, monkeypatch):
     """Recall returns 400 → we raise ``meeting.bot_service_error``."""
     from pocketpaw_ee.cloud._core.errors import ValidationError
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -192,7 +192,7 @@ async def test_request_bot_propagates_recall_4xx(recall_env, monkeypatch):
 
 @pytest.mark.usefixtures("mongo_db")
 async def test_stop_bot_url_shape(recall_env, monkeypatch):
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -218,7 +218,7 @@ async def test_stop_bot_url_shape(recall_env, monkeypatch):
 @pytest.mark.usefixtures("mongo_db")
 async def test_stop_bot_without_dispatched_bot_is_noop(recall_env, monkeypatch):
     """No correlated bot id → no-op success, no HTTP call."""
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -236,7 +236,7 @@ async def test_stop_bot_without_dispatched_bot_is_noop(recall_env, monkeypatch):
 
 @pytest.mark.usefixtures("mongo_db")
 async def test_stop_bot_treats_404_as_idempotent_success(recall_env, monkeypatch):
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -263,7 +263,7 @@ async def test_stop_bot_treats_404_as_idempotent_success(recall_env, monkeypatch
 @pytest.mark.usefixtures("mongo_db")
 async def test_fetch_transcript_assembles_vtt_from_recall_shape(recall_env, monkeypatch):
     """GET bot exposes a download URL; the linked JSON becomes WebVTT."""
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -319,7 +319,7 @@ async def test_fetch_transcript_assembles_vtt_from_recall_shape(recall_env, monk
 @pytest.mark.usefixtures("mongo_db")
 async def test_fetch_transcript_returns_none_without_bot(recall_env, monkeypatch):
     """No correlated bot → nothing to fetch, return None (caller retries)."""
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -338,7 +338,7 @@ async def test_fetch_transcript_returns_none_without_bot(recall_env, monkeypatch
 @pytest.mark.usefixtures("mongo_db")
 async def test_fetch_transcript_returns_none_when_not_ready(recall_env, monkeypatch):
     """Bot exists but Recall hasn't produced a transcript URL yet → None."""
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(
@@ -360,7 +360,7 @@ async def test_fetch_transcript_returns_none_when_not_ready(recall_env, monkeypa
 
 def test_segments_to_vtt_skips_empty_turns():
     """Turns with no words produce no cue; speaker falls back to id."""
-    from pocketpaw_ee.cloud.meetings.recall_client import _segments_to_vtt
+    from pocketpaw_ee.cloud.meetings.providers.recall.client import _segments_to_vtt
 
     segments = [
         {"participant": {"id": 7}, "words": []},
@@ -418,7 +418,7 @@ def _make_request(body: bytes, headers: dict) -> Request:
 
 async def test_webhook_transcript_done_triggers_ingest(monkeypatch):
     """A signed transcript.done webhook ingests the transcript for that bot."""
-    from pocketpaw_ee.cloud.meetings import webhooks
+    from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
     captured: dict = {}
@@ -442,7 +442,7 @@ async def test_webhook_transcript_done_triggers_ingest(monkeypatch):
 
 async def test_webhook_ignores_unrelated_events(monkeypatch):
     """An event we don't handle is acked 200 without touching the service."""
-    from pocketpaw_ee.cloud.meetings import webhooks
+    from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
     body = json.dumps({"event": "recording.processing", "data": {"bot": {"id": "bot-x"}}}).encode()
@@ -454,7 +454,7 @@ async def test_webhook_ignores_unrelated_events(monkeypatch):
 
 async def test_webhook_recording_done_starts_async_transcript(monkeypatch):
     """recording.done routes to start_async_transcript with the recording id."""
-    from pocketpaw_ee.cloud.meetings import webhooks
+    from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
     captured: dict = {}
@@ -481,7 +481,7 @@ async def test_webhook_recording_done_starts_async_transcript(monkeypatch):
 
 async def test_webhook_bot_status_event_persists_status(monkeypatch):
     """A bot.* lifecycle event routes to update_bot_status_for_recall_bot."""
-    from pocketpaw_ee.cloud.meetings import webhooks
+    from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
     captured: dict = {}
@@ -514,7 +514,7 @@ async def test_webhook_bot_status_event_persists_status(monkeypatch):
 async def test_webhook_rejects_bad_signature(monkeypatch):
     """A wrong signature → Forbidden, ingestion never runs."""
     from pocketpaw_ee.cloud._core.errors import Forbidden
-    from pocketpaw_ee.cloud.meetings import webhooks
+    from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
 
@@ -531,7 +531,7 @@ async def test_webhook_rejects_bad_signature(monkeypatch):
 async def test_webhook_rejects_stale_timestamp(monkeypatch):
     """A signature older than the tolerance window is rejected."""
     from pocketpaw_ee.cloud._core.errors import Forbidden
-    from pocketpaw_ee.cloud.meetings import webhooks
+    from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.setenv("RECALL_WEBHOOK_SECRET", _WEBHOOK_SECRET)
 
@@ -545,7 +545,7 @@ async def test_webhook_rejects_stale_timestamp(monkeypatch):
 
 async def test_webhook_skips_verification_without_secret(monkeypatch):
     """No RECALL_WEBHOOK_SECRET → accepted unsigned (dev convenience)."""
-    from pocketpaw_ee.cloud.meetings import webhooks
+    from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.delenv("RECALL_WEBHOOK_SECRET", raising=False)
 
@@ -614,7 +614,7 @@ async def test_ingest_unknown_bot_returns_false():
 
 async def test_recall_client_get_bot_status_parses_latest(recall_env, monkeypatch):
     """get_bot_status returns the latest status_changes entry."""
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
 
     bot_payload = {
         "id": "bot-s",
@@ -639,7 +639,7 @@ async def test_recall_client_get_bot_status_parses_latest(recall_env, monkeypatc
 
 
 async def test_recall_client_get_bot_status_404_returns_none(recall_env, monkeypatch):
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
 
     _FakeClient.reset([_resp(404, {})])
     monkeypatch.setattr(recall_client.httpx, "AsyncClient", _FakeClient)
@@ -675,8 +675,8 @@ async def test_update_bot_status_persists_to_meeting(monkeypatch):
 @pytest.mark.usefixtures("mongo_db")
 async def test_get_bot_status_live_fetch_and_persist(monkeypatch):
     """get_bot_status live-checks Recall, returns + persists the status."""
-    from pocketpaw_ee.cloud.meetings import recall_client
     from pocketpaw_ee.cloud.meetings import service as ms
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     meeting = _MD(

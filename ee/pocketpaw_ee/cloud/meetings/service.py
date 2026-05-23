@@ -200,7 +200,7 @@ async def _build_adapter_default(workspace_id: str, provider: str):
     signature compatibility but unused — credentials are deployment-wide,
     not per-tenant. Raises ``ValidationError`` when neither source is set.
     """
-    from pocketpaw_ee.cloud.meetings import credentials as creds_service
+    from pocketpaw_ee.cloud.meetings.providers.recall import credentials as creds_service
 
     stored = await creds_service.resolve(provider)
 
@@ -219,7 +219,7 @@ async def _build_adapter_default(workspace_id: str, provider: str):
                     "Zoom is not configured — connect it in Settings → Meetings, "
                     "or set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID and ZOOM_CLIENT_SECRET.",
                 )
-        from pocketpaw_ee.cloud.meetings.adapters.zoom import ZoomConnector
+        from pocketpaw_ee.cloud.meetings.providers.recall.adapters.zoom import ZoomConnector
 
         return ZoomConnector(account_id, client_id, client_secret)
 
@@ -239,7 +239,9 @@ async def _build_adapter_default(workspace_id: str, provider: str):
                     "Meetings, or set GOOGLE_MEET_CLIENT_ID, GOOGLE_MEET_CLIENT_SECRET "
                     "and GOOGLE_MEET_REFRESH_TOKEN.",
                 )
-        from pocketpaw_ee.cloud.meetings.adapters.google_meet import GoogleMeetConnector
+        from pocketpaw_ee.cloud.meetings.providers.recall.adapters.google_meet import (
+            GoogleMeetConnector,
+        )
 
         return GoogleMeetConnector(client_id, client_secret, refresh_token)
 
@@ -565,7 +567,7 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
         # Async path — transcription was kicked off post-recording; the
         # transcript lives at Recall's /transcript/{id} endpoint.
         try:
-            from pocketpaw_ee.cloud.meetings import recall_client
+            from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
 
             async_vtt = await recall_client.fetch_async_transcript_vtt(str(transcript_id))
             if async_vtt:
@@ -576,7 +578,7 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
     if not text and recall_block:
         # Realtime path — the transcript lives on the bot recording.
         try:
-            from pocketpaw_ee.cloud.meetings import recall_client
+            from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
 
             recall_vtt = await recall_client.fetch_transcript_vtt(workspace_id, str(meeting.id))
             if recall_vtt:
@@ -711,8 +713,8 @@ async def start_async_transcript(bot_id: str, recording_id: str) -> bool:
     """
     if not bot_id or not recording_id:
         return False
-    from pocketpaw_ee.cloud.meetings import recall_client
-    from pocketpaw_ee.cloud.meetings import settings as meetings_settings
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import settings as meetings_settings
 
     resolved = await meetings_settings.resolve()
     if not meetings_settings.is_async_provider(resolved["provider"]):
@@ -829,7 +831,7 @@ async def get_bot_status(workspace_id: str, meeting_id: str) -> dict:
     ``bot.status_change`` webhook isn't reachable (e.g. local dev).
     Raises ``NotFound`` if the meeting is unknown to the workspace.
     """
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
 
     doc = await _resolve_meeting_doc(workspace_id, meeting_id)
     bot_id = str((doc.raw_provider_payload or {}).get("recall", {}).get("bot_id") or "")

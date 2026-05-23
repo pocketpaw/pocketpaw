@@ -44,7 +44,7 @@ async def test_run_transcript_sync_pass_fetches_recent_meetings(
     fake_transcript_adapter,
 ) -> None:
     """Recent ``ended`` meetings without transcripts get fetched + reported."""
-    from pocketpaw_ee.cloud.meetings import jobs
+    from pocketpaw_ee.cloud.meetings.providers.recall import jobs
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
     # ws-alpha is discovered from its meeting docs — env-based single-account
@@ -93,7 +93,7 @@ async def test_run_transcript_sync_pass_fetches_recent_meetings(
 @pytest.mark.usefixtures("mongo_db")
 async def test_run_transcript_sync_pass_caps_at_retention_floor() -> None:
     """lookback_days > 28 is clamped — protects against Meet's 30-day window."""
-    from pocketpaw_ee.cloud.meetings import jobs
+    from pocketpaw_ee.cloud.meetings.providers.recall import jobs
 
     # No meetings exist, so no workspaces are discovered.
     reports = await jobs.run_transcript_sync_pass(lookback_days=9999)
@@ -105,7 +105,7 @@ async def test_run_transcript_sync_pass_skips_meetings_with_transcripts(
     fake_transcript_adapter,
 ) -> None:
     """A meeting that already has a transcript file_id is not re-fetched."""
-    from pocketpaw_ee.cloud.meetings import jobs
+    from pocketpaw_ee.cloud.meetings.providers.recall import jobs
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
     from pocketpaw_ee.cloud.models.meeting import MeetingTranscript as _TD
 

@@ -8,7 +8,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pocketpaw_ee.cloud.meetings.clients.zoom import ZoomAPIError, ZoomClient
+from pocketpaw_ee.cloud.meetings.providers.recall.clients.zoom import ZoomAPIError, ZoomClient
 
 
 @pytest.fixture
@@ -73,7 +73,7 @@ class _FakeAsyncClient:
         return type(self)._next_response
 
 
-_PATCH = "pocketpaw_ee.cloud.meetings.clients.zoom.httpx.AsyncClient"
+_PATCH = "pocketpaw_ee.cloud.meetings.providers.recall.clients.zoom.httpx.AsyncClient"
 
 
 # ---------------------------------------------------------------------------

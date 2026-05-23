@@ -9,14 +9,14 @@ import pytest
 from cryptography.fernet import Fernet
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
-from pocketpaw_ee.cloud.meetings import credentials as creds
 from pocketpaw_ee.cloud.meetings import service as meetings_service
-from pocketpaw_ee.cloud.meetings.clients.zoom import ZoomAPIError
 from pocketpaw_ee.cloud.meetings.dto import (
     CompleteGoogleMeetOAuthRequest,
     StoreGoogleMeetCredentialsRequest,
     StoreZoomCredentialsRequest,
 )
+from pocketpaw_ee.cloud.meetings.providers.recall import credentials as creds
+from pocketpaw_ee.cloud.meetings.providers.recall.clients.zoom import ZoomAPIError
 from pocketpaw_ee.cloud.models.meeting import MeetingProviderCredentials
 
 _KEY_ENV = "CLOUD_ENCRYPTION_KEY"

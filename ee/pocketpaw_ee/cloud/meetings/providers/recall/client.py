@@ -32,7 +32,7 @@ from typing import Any
 import httpx
 
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
-from pocketpaw_ee.cloud.meetings import settings as meetings_settings
+from pocketpaw_ee.cloud.meetings.providers.recall import settings as meetings_settings
 from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
 
 logger = logging.getLogger(__name__)

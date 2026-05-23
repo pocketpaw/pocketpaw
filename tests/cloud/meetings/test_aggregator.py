@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from pocketpaw_ee.cloud.meetings.adapters.meetings_aggregator import MeetingsAggregatorConnector
+from pocketpaw_ee.cloud.meetings.providers.recall.adapters.meetings_aggregator import (
+    MeetingsAggregatorConnector,
+)
 
 from pocketpaw.connectors.protocol import ConnectorStatus, ExecutionMode
 

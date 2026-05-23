@@ -224,7 +224,7 @@ async def _send_bot_handler(args: dict) -> dict:
         return _error_response("meeting_id is required (string)")
 
     from pocketpaw_ee.cloud._core.errors import CloudError
-    from pocketpaw_ee.cloud.meetings import recall_client
+    from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
 
     try:
         payload = await recall_client.request_bot_for_meeting(workspace_id, meeting_id)

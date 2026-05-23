@@ -33,7 +33,10 @@ from pocketpaw.connectors.protocol import (
     TrustLevel,
     WidgetRecipe,
 )
-from pocketpaw_ee.cloud.meetings.clients.google_meet import GoogleMeetAPIError, GoogleMeetClient
+from pocketpaw_ee.cloud.meetings.providers.recall.clients.google_meet import (
+    GoogleMeetAPIError,
+    GoogleMeetClient,
+)
 
 logger = logging.getLogger(__name__)
 

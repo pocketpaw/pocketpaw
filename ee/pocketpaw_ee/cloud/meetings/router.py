@@ -35,10 +35,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from pocketpaw_ee.cloud.license import require_license
-from pocketpaw_ee.cloud.meetings import credentials as credentials_service
-from pocketpaw_ee.cloud.meetings import recall_client
 from pocketpaw_ee.cloud.meetings import service as meetings_service
-from pocketpaw_ee.cloud.meetings import settings as meetings_settings
 from pocketpaw_ee.cloud.meetings.dto import (
     CompleteGoogleMeetOAuthRequest,
     CreateMeetingRequest,
@@ -55,6 +52,9 @@ from pocketpaw_ee.cloud.meetings.dto import (
     TranscriptResponse,
     UpdateMeetingsSettingsRequest,
 )
+from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
+from pocketpaw_ee.cloud.meetings.providers.recall import credentials as credentials_service
+from pocketpaw_ee.cloud.meetings.providers.recall import settings as meetings_settings
 from pocketpaw_ee.cloud.shared.deps import (
     current_user_id,
     current_workspace_id,

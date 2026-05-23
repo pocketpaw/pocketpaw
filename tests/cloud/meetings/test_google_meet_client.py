@@ -7,7 +7,10 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pocketpaw_ee.cloud.meetings.clients.google_meet import GoogleMeetAPIError, GoogleMeetClient
+from pocketpaw_ee.cloud.meetings.providers.recall.clients.google_meet import (
+    GoogleMeetAPIError,
+    GoogleMeetClient,
+)
 
 
 @pytest.fixture
@@ -61,7 +64,7 @@ class _FakeAsyncClient:
         return type(self)._next_response
 
 
-_PATCH = "pocketpaw_ee.cloud.meetings.clients.google_meet.httpx.AsyncClient"
+_PATCH = "pocketpaw_ee.cloud.meetings.providers.recall.clients.google_meet.httpx.AsyncClient"
 
 
 # ---------------------------------------------------------------------------

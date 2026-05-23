@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pocketpaw_ee.cloud.meetings.adapters.google_meet import GoogleMeetConnector
+from pocketpaw_ee.cloud.meetings.providers.recall.adapters.google_meet import GoogleMeetConnector
 
 from pocketpaw.connectors.protocol import (
     ConnectorStatus,
@@ -127,7 +127,7 @@ async def test_execute_meeting_list_returns_records(connector):
 
 async def test_execute_meeting_cancel_swallows_404(connector):
     """No active conference → API 404 → adapter still returns success."""
-    from pocketpaw_ee.cloud.meetings.clients.google_meet import GoogleMeetAPIError
+    from pocketpaw_ee.cloud.meetings.providers.recall.clients.google_meet import GoogleMeetAPIError
 
     c, fake = connector
     fake.end_active_raises = GoogleMeetAPIError(404, "not running")
@@ -136,7 +136,7 @@ async def test_execute_meeting_cancel_swallows_404(connector):
 
 
 async def test_execute_meeting_cancel_raises_real_error(connector):
-    from pocketpaw_ee.cloud.meetings.clients.google_meet import GoogleMeetAPIError
+    from pocketpaw_ee.cloud.meetings.providers.recall.clients.google_meet import GoogleMeetAPIError
 
     c, fake = connector
     fake.end_active_raises = GoogleMeetAPIError(500, "internal")

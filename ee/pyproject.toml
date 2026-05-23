@@ -310,7 +310,7 @@ source_modules = [
     "pocketpaw_ee.cloud.meetings.router",
     "pocketpaw_ee.cloud.meetings.dto",
     "pocketpaw_ee.cloud.meetings.domain",
-    "pocketpaw_ee.cloud.meetings.webhooks",
+    "pocketpaw_ee.cloud.meetings.providers.recall.webhooks",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.meeting"]
 

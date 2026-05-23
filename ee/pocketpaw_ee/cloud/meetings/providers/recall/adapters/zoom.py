@@ -33,7 +33,7 @@ from pocketpaw.connectors.protocol import (
     TrustLevel,
     WidgetRecipe,
 )
-from pocketpaw_ee.cloud.meetings.clients.zoom import ZoomAPIError, ZoomClient
+from pocketpaw_ee.cloud.meetings.providers.recall.clients.zoom import ZoomAPIError, ZoomClient
 
 logger = logging.getLogger(__name__)
 

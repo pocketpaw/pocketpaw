@@ -9,10 +9,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from pocketpaw_ee.cloud._core.errors import ValidationError
-from pocketpaw_ee.cloud.meetings import recall_client
 from pocketpaw_ee.cloud.meetings import service as meetings_service
-from pocketpaw_ee.cloud.meetings import settings as meetings_settings
 from pocketpaw_ee.cloud.meetings.dto import UpdateMeetingsSettingsRequest
+from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
+from pocketpaw_ee.cloud.meetings.providers.recall import settings as meetings_settings
 from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
 from pocketpaw_ee.cloud.models.meeting import MeetingsSettings as _SettingsDoc
 

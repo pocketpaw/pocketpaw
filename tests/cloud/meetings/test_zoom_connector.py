@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from pocketpaw_ee.cloud.meetings.adapters.zoom import ZoomConnector
+from pocketpaw_ee.cloud.meetings.providers.recall.adapters.zoom import ZoomConnector
 
 from pocketpaw.connectors.protocol import (
     ActionResult,
@@ -205,7 +205,7 @@ async def test_execute_missing_required_param(connector):
 
 async def test_execute_wraps_zoom_api_error(connector):
     """ZoomAPIError from the client becomes a non-success ActionResult."""
-    from pocketpaw_ee.cloud.meetings.clients.zoom import ZoomAPIError
+    from pocketpaw_ee.cloud.meetings.providers.recall.clients.zoom import ZoomAPIError
 
     c, fake = connector
 

@@ -27,7 +27,6 @@ import httpx
 
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
-from pocketpaw_ee.cloud.meetings.clients.zoom import ZoomAPIError, ZoomClient
 from pocketpaw_ee.cloud.meetings.dto import (
     CompleteGoogleMeetOAuthRequest,
     CredentialsResponse,
@@ -37,6 +36,7 @@ from pocketpaw_ee.cloud.meetings.dto import (
     StoreGoogleMeetCredentialsRequest,
     StoreZoomCredentialsRequest,
 )
+from pocketpaw_ee.cloud.meetings.providers.recall.clients.zoom import ZoomAPIError, ZoomClient
 from pocketpaw_ee.cloud.models.meeting import MeetingProviderCredentials as _CredsDoc
 
 logger = logging.getLogger(__name__)

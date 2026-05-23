@@ -138,8 +138,10 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.license import get_license_info
+    from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
+        router as meetings_webhooks_router,
+    )
     from pocketpaw_ee.cloud.meetings.router import router as meetings_router
-    from pocketpaw_ee.cloud.meetings.webhooks import router as meetings_webhooks_router
     from pocketpaw_ee.cloud.planner.router import router as planner_router
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router

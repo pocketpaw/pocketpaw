@@ -362,7 +362,7 @@ async def test_send_bot_happy_path(chat_identity, monkeypatch):
         return {"bot_id": "bot-abc-123", "meeting_id": meeting_id, "status": "queued"}
 
     monkeypatch.setattr(
-        "pocketpaw_ee.cloud.meetings.recall_client.request_bot_for_meeting",
+        "pocketpaw_ee.cloud.meetings.providers.recall.client.request_bot_for_meeting",
         _fake_request_bot,
     )
 
@@ -385,7 +385,7 @@ async def test_send_bot_surfaces_cloud_errors(chat_identity, monkeypatch):
         raise ValidationError("meeting.bot_secret_missing", "bot service disabled")
 
     monkeypatch.setattr(
-        "pocketpaw_ee.cloud.meetings.recall_client.request_bot_for_meeting", _broken
+        "pocketpaw_ee.cloud.meetings.providers.recall.client.request_bot_for_meeting", _broken
     )
 
     result = await _send_bot_handler({"meeting_id": "m1"})
