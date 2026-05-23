@@ -269,15 +269,52 @@ Concrete shape of the assistant turn for a create:
   3. (After tool returns) one-to-two-sentence confirmation or failure
      message — see rules below.
 
+## HARD RULE — TEMPLATE PREFLIGHT before every create
+
+Before EVERY `pocket_specialist__create` call — BEFORE the recipe
+preflight below — check whether the brief matches one of PocketPaw's
+built-in pocket templates. A template is a hand-authored,
+production-quality skeleton; instantiating one is faster and
+higher-quality than cold generation OR a recipe anchor. Templates
+auto-install to ``~/.pocketpaw/templates/``.
+
+Run via your Bash tool:
+
+```
+cat ~/.pocketpaw/templates/index.json
+```
+
+The file is ``{"templates": [{slug, title, shape, pattern, keywords,
+connectors_hint}, ...]}``. Lower-case the brief and check whether ANY
+of each template's ``keywords`` appears as a case-insensitive SUBSTRING
+of the brief.
+
+- **Match found** — set ``hints.template_id`` to the matched template's
+  ``slug``. Announce it in your preface line: "Using the built-in
+  <title> template — customizing it for <user's domain>." Then SKIP
+  the recipe preflight below (the template already encodes a polished
+  composition). Pass the brief through anyway so the specialist
+  customizes the template with the user's real content.
+
+- **No match** — proceed to the recipe preflight below. The template
+  library covers the most common shapes; many briefs won't match one.
+
+- **``index.json`` missing / cat errors** — proceed to the recipe
+  preflight. Do not block the user on infrastructure issues.
+
+The first match wins — don't agonize over picking the "best" of two
+candidates; pick the first whose keyword matched.
+
 ## HARD RULE — RECIPE PREFLIGHT before every create
 
-Before EVERY `pocket_specialist__create` call, run a recipe-library
-search via your Bash tool. PocketPaw ships pre-compiled pattern
-recipes (sales-pipeline dashboard, customer-support app, recipe/how-to
-viewer, etc.) in the ``ripple-recipes`` kb-go scope. Each recipe has
-the showcase-quality composition for that pattern + adjacent-domain
-variations. Anchoring the brief on a matching recipe is the single
-biggest quality lever for the resulting pocket.
+If the TEMPLATE PREFLIGHT above did NOT match a built-in template,
+run a recipe-library search via your Bash tool. PocketPaw ships
+pre-compiled pattern recipes (sales-pipeline dashboard,
+customer-support app, recipe/how-to viewer, etc.) in the
+``ripple-recipes`` kb-go scope. Each recipe has the showcase-quality
+composition for that pattern + adjacent-domain variations. Anchoring
+the brief on a matching recipe is the single biggest quality lever
+for the resulting pocket.
 
 The exact preflight (run this verbatim, substitute the user's intent):
 
@@ -330,7 +367,12 @@ Pass to `pocket_specialist__create`:
            conversation context. The specialist will list existing
            pockets and decide whether to create new or extend.
   hints  — optional. Only set fields the user named explicitly:
-           {name?, description?, color?, icon?, target_pocket_id?}
+           {name?, description?, color?, icon?, target_pocket_id?,
+            template_id?}
+           ``template_id`` — set ONLY when the TEMPLATE PREFLIGHT
+                             above matched a built-in template. Carry
+                             the matched template's ``slug``. Omit
+                             otherwise.
 
 The tool returns {ok, action, pocket, warnings, error, duration_ms,
 backend_used}.
@@ -451,6 +493,33 @@ asked for a frozen snapshot. If you're not sure: put it in state.
 Never ship a stranded user: if the only widget is empty and there is
 no way to populate it from the canvas, you have shipped a broken
 pocket.
+
+INTERACTIVE WIDGETS NEED `bind` AT THE NODE LEVEL — not inside `props`.
+For widgets that must write back to state when the user interacts with
+them (kanban moves cards between columns, calendar drags events,
+checkbox/switch toggles, input/textarea typing, multi-select picking),
+the ``bind`` field sits at the SAME level as ``type`` / ``props`` /
+``id`` — NOT nested inside ``props``. The renderer reads
+``node.bind`` to wire the writeback path. Without it, the widget
+renders but every interaction is a no-op.
+
+  WRONG — read-only render, drag-drop changes evaporate:
+    {"type": "kanban", "props": {"value": "{state.tasks}",
+                                 "columnKey": "status", ...}}
+
+  RIGHT — drag-drop persists to state.tasks:
+    {"type": "kanban", "bind": "state.tasks",
+     "props": {"columns": [...], "columnKey": "status", ...}}
+
+Widgets that REQUIRE a node-level ``bind`` to be functional:
+``kanban`` (alias ``board``), ``calendar``, ``checkbox``, ``switch``,
+``input``, ``textarea``, ``select``, ``combobox``,
+``multi-select``, ``radio-group``, ``slider``, ``rating``,
+``date-picker``, ``time-picker``, ``otp-input``.
+
+A read-only display widget (``text``, ``heading``, ``badge``, ``chart``,
+``table`` when not editable) does NOT need a node-level ``bind`` —
+expressions like ``{state.foo}`` inside ``props`` are fine for those.
 </interactive-by-default>
 """
 
@@ -491,6 +560,15 @@ When the user wants live data from THEIR OWN backend (a CRM, an internal
 API, a service with a base URL + token) — not the workspace `$source`
 markers above — declare a `sources` block in the rippleSpec. Alpha is
 READ-ONLY: GET bindings only.
+
+HARD RULE — label without source = broken. If a widget label or
+subtitle names a backend path ("Live from /pulls", "Pulled from
+/contacts"), the spec MUST also carry the matching ``sources`` entry
+that actually fetches it AND a seeded ``state`` key for the ``bind``
+target. A widget bound to ``{state.pulls}`` with NO source authoring
+``state.pulls`` is a dead widget — it renders empty forever. Always
+pair the three: ``sources["x"] = {path, bind: "state.x", refresh}``
++ ``state.x = []`` + the widget that reads ``{state.x}``.
 
   "rippleSpec": {
     "sources": {
@@ -584,6 +662,16 @@ internal API, a service with a base URL + token) — not the workspace
 `$source` markers — use the `set_source` / `remove_source` ops. Alpha is
 READ-ONLY: GET bindings only. These write the pocket's top-level
 `rippleSpec.sources` block; the state/node ops cannot.
+
+HARD RULE — label without `set_source` = broken. If you add a widget
+whose label or subtitle names a backend path ("Live from /pulls",
+"Pulled from /contacts"), you MUST call ``set_source`` in the SAME op
+batch to author the matching binding AND ``set_state`` to seed the
+``bind`` target. A widget bound to ``{state.pulls}`` with no
+``set_source`` for that path is a dead widget — it renders empty
+forever. The three calls always travel together: ``set_source(key, path,
+bind="state.x", refresh=[...])`` + ``set_state("x", [])`` + the
+``add_node`` for the widget that reads ``{state.x}``.
 
   set_source(
     source_key="prs",            # the sources map key

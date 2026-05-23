@@ -186,7 +186,11 @@ async def fake_agent_events_backend_error(spec, ctx):
 async def test_execute_run_backend_error_marks_failed(monkeypatch):
     """Regression for PR #1191's fix, ported into _drive_agent_loop: when
     the backend yields an error event, the doc must end up ``failed`` (not
-    silently ``completed`` via the empty-text path)."""
+    silently ``completed`` via the empty-text path).
+
+    Replaces the wire-shape test ``tests/cloud/test_agent_router_backend_error.py``
+    that PR #1191 added against the now-deleted ``_run_agent_stream``.
+    """
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     transport = RedisStreamTransport(redis)
 
