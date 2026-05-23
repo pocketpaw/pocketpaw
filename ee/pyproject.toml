@@ -171,9 +171,24 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets.dto",
     "pocketpaw_ee.cloud.pockets.domain",
     "pocketpaw_ee.cloud.pockets.agent_context",
+    "pocketpaw_ee.cloud.pockets.source_executor",
+    "pocketpaw_ee.cloud.pockets.sources_ops",
+    "pocketpaw_ee.cloud.pockets._http_guard",
+    "pocketpaw_ee.cloud.pockets.action_executor",
+    "pocketpaw_ee.cloud.pockets.actions_ops",
+    # RFC 04 M3 — the interval-refresh scheduler + the auto-refresh budget
+    # helper. The scheduler scans pockets through `pockets.service` and
+    # refreshes through `source_executor`; neither touches Beanie directly.
+    "pocketpaw_ee.cloud.pockets.refresh_scheduler",
+    "pocketpaw_ee.cloud.pockets._refresh_budget",
+    # RFC 05 M2b.1 — the instinct bridge proposes/executes parked writes
+    # through `pockets.service` and the Instinct store; it never touches
+    # Beanie document classes directly.
+    "pocketpaw_ee.cloud.pockets.instinct_bridge",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.models.pocket_backend",
     "pocketpaw_ee.cloud.models.session",
 ]
 
@@ -350,3 +365,22 @@ source_modules = [
     "pocketpaw_ee.cloud.audit.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.audit"]
+
+# Increment 3 — the pocket execution router. The classifier is PURE: a
+# rule-based ``classify(intent, ripple_spec)`` with no I/O. It must never
+# import Beanie documents, the cloud-side executors / services, or the LLM
+# specialist — those belong to the router layer (``router.py``), which is
+# the only module here allowed to invoke them.
+[[tool.importlinter.contracts]]
+name = "Pocket router — classifier stays pure"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["pocketpaw_ee.agent.pocket_router.classifier"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.pockets.service",
+    "pocketpaw_ee.cloud.pockets.source_executor",
+    "pocketpaw_ee.cloud.pockets.action_executor",
+    "pocketpaw_ee.agent.pocket_specialist.runtime",
+    "pocketpaw_ee.agent.pocket_specialist.adapters",
+]

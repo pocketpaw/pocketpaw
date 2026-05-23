@@ -7,14 +7,35 @@ separate follow-up calls.
 Updated: 2026-05-16 — added optional ``project_id`` (aliased as
 ``projectId`` on the wire) to CreatePocketRequest / UpdatePocketRequest /
 PocketResponse so pockets can be grouped under a Mission Control Project.
+Updated: 2026-05-21 (RFC 04 alpha) — added PocketBackendConfigRequest /
+PocketBackendConfigResponse / RunSourcesRequest for the per-pocket backend
+binding + read-only source-run endpoints.
+Updated: 2026-05-21 (PR #1177 security pass) — PocketBackendConfigRequest
+.base_url now requires min_length=1; RunSourcesRequest.source coerces an
+empty string to None; documented that `auth_token` for `basic` is the
+`user:pass` credential (base64-encoded server-side).
+Updated: 2026-05-22 (RFC 05 M2a) — added RunActionRequest /
+RunActionResponse for the write-action run endpoint, plus AllowedWriteDTO
+and SetWritePolicyRequest for the per-pocket write-allowlist endpoint.
+Updated: 2026-05-22 (RFC 05 M2b.1) — RunActionResponse gained
+``proposed_action_id`` (set when a ``requires_instinct`` write is parked
+into an Instinct Action instead of fired). Added ApprovalRouteDTO and
+SetApprovalRouteRequest plus an optional ``approval_route`` field on
+PocketBackendConfigResponse — the per-pocket approver routing for gated
+writes.
+Updated: 2026-05-22 (security-review fix for PR #1183, SHOULD-FIX 2) —
+RunActionResponse is now ``extra="forbid"`` so an executor-internal key
+(``_park``, ``outcome``) that the router fails to strip raises on
+construction instead of leaking the resolved write path/params onto the
+wire.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class CreatePocketRequest(BaseModel):
@@ -101,6 +122,185 @@ class PocketResponse(BaseModel):
     project_id: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Pocket backend binding + source-run (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+class AllowedWriteDTO(BaseModel):
+    """One write-allowlist rule on the wire — a (method, path_pattern) pair.
+
+    Mirrors ``models.pocket_backend.AllowedWrite``. ``path_pattern`` is a
+    glob: ``/leases/*/renew`` allows ``POST /leases/42/renew``. RFC 05 M2a.
+    """
+
+    method: Literal["POST", "PUT", "PATCH", "DELETE"]
+    path_pattern: str = Field(min_length=1)
+
+
+class PocketBackendConfigRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend`` — bind a pocket to one backend.
+
+    ``auth_token`` carries the secret only on the way IN; it is encrypted
+    server-side and never returned. Its meaning depends on ``auth_type``:
+
+    * ``bearer`` — the bearer token, sent as ``Authorization: Bearer <token>``.
+    * ``api_key`` — the API key value, sent in the ``auth_header`` header.
+    * ``basic`` — the raw ``user:pass`` credential. The server base64-encodes
+      it to form a valid ``Authorization: Basic`` header — do NOT pre-encode.
+    * ``none`` — unused.
+
+    ``auth_header`` names the custom header for the ``api_key`` auth type
+    (defaults to ``X-Api-Key`` when omitted).
+    """
+
+    base_url: str = Field(min_length=1)
+    auth_type: Literal["bearer", "api_key", "basic", "none"]
+    auth_token: str = ""
+    auth_header: str | None = None
+
+
+class ApprovalRouteDTO(BaseModel):
+    """Who approves a pocket's ``requires_instinct`` writes (RFC 05 M2b.1).
+
+    ``mode="owner"`` (the default) routes every gated write to the pocket
+    owner. ``mode="user"`` routes to a named workspace member —
+    ``user_id`` is then required and is validated as a current workspace
+    member when the route is set.
+    """
+
+    mode: Literal["owner", "user"] = "owner"
+    user_id: str | None = None
+
+    @field_validator("user_id")
+    @classmethod
+    def _empty_user_is_none(cls, v: str | None) -> str | None:
+        return v or None
+
+
+class PocketBackendConfigResponse(BaseModel):
+    """Backend binding as returned to clients — never carries the token.
+
+    ``allowed_writes`` is the per-pocket write allowlist (RFC 05 M2a) —
+    an owner/editor-facing non-secret. Empty by default (fail-closed: no
+    write fires until a human allow-lists it).
+
+    ``approval_route`` is the per-pocket approver routing for
+    ``requires_instinct`` writes (RFC 05 M2b.1). ``None`` means the
+    default — the pocket owner approves.
+    """
+
+    base_url: str
+    auth_type: str
+    configured: bool
+    allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+    approval_route: ApprovalRouteDTO | None = None
+
+
+class RunSourcesRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/sources/run``.
+
+    ``trigger`` selects sources by refresh policy (``pocket_open`` runs the
+    on-open set; ``manual`` runs the refresh-button set). ``source`` runs a
+    single named source regardless of policy. Both omitted runs every
+    source declared in the spec.
+
+    An empty-string ``source`` is coerced to ``None`` — it would otherwise
+    select zero sources (no source key is named "") and silently no-op.
+    """
+
+    trigger: Literal["pocket_open", "manual"] | None = None
+    source: str | None = None
+
+    @field_validator("source")
+    @classmethod
+    def _empty_source_is_none(cls, v: str | None) -> str | None:
+        return v or None
+
+
+# ---------------------------------------------------------------------------
+# Pocket write actions + write policy (RFC 05 M2a)
+# ---------------------------------------------------------------------------
+
+
+class RunActionRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/actions/run``.
+
+    The client sends the action's NAME (``action``) plus the *resolved*
+    ``path`` and ``params`` — Ripple's ``{...}`` expression resolver runs
+    client-side at click time. The server loads the named action from the
+    persisted ``rippleSpec.actions`` block to read the HTTP ``method`` —
+    the client never picks the verb.
+
+    ``idempotency_key`` is optional: when omitted the server generates one
+    so a write retried after a timeout cannot double-submit.
+    """
+
+    action: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+
+
+class RunActionResponse(BaseModel):
+    """Result of a write-action run.
+
+    On a fired write ``ok`` is true and ``status`` / ``response`` carry the
+    backend's HTTP status + parsed JSON body. On failure ``ok`` is false
+    and ``error`` / ``code`` describe the rejection. ``on_success`` /
+    ``on_error`` are the reconcile handler lists the client runs after.
+
+    On a PARKED write (RFC 05 M2b.1) — a ``requires_instinct`` action —
+    ``ok`` is true, ``code`` is ``"instinct_pending"``, and
+    ``proposed_action_id`` carries the id of the Instinct Action the
+    write was routed into. No backend call was made; the client shows a
+    "waiting for approval" state and does NOT run the reconcile handlers.
+
+    All optional fields keep one model usable for every outcome.
+
+    ``extra="forbid"`` (security-review fix for PR #1183, SHOULD-FIX 2):
+    the executor result dict carries internal-only keys (``_park`` —
+    the resolved write path/params — and ``outcome``) that the router
+    strips before constructing this response. ``forbid`` makes that
+    strip mandatory: if the strip ever misses a key, model construction
+    raises instead of leaking the resolved write onto the wire.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    ok: bool
+    action: str
+    status: int | None = None
+    response: Any = None
+    error: str | None = None
+    code: str | None = None
+    proposed_action_id: str | None = None
+    on_success: list[dict] = Field(default_factory=list)
+    on_error: list[dict] = Field(default_factory=list)
+
+
+class SetWritePolicyRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend/write-policy``.
+
+    Replaces the pocket's whole write allowlist. An empty list is valid
+    and meaningful — it revokes every write (fail-closed).
+    """
+
+    allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+
+
+class SetApprovalRouteRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend/approval-route`` (RFC 05 M2b.1).
+
+    Sets who approves the pocket's ``requires_instinct`` writes.
+    ``route=None`` (or an omitted body) clears the route back to the
+    default — the pocket owner. ``mode="user"`` requires a ``user_id``
+    that the service validates as a current workspace member.
+    """
+
+    route: ApprovalRouteDTO | None = None
 
 
 # ---------------------------------------------------------------------------

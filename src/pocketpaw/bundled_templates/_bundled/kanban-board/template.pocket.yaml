@@ -1,0 +1,22 @@
+# src/pocketpaw/bundled_templates/_bundled/kanban-board/template.pocket.yaml
+# Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
+# Pocket Template Schema metadata for the built-in kanban board.
+name: kanban-board
+version: 1.0.0
+vertical: productivity
+shape: kanban
+description: |
+  A drag-and-drop kanban board for work in flight. Cards move across
+  Backlog, In progress, Review, and Done lanes; the lane a card sits in
+  is its status. Add cards from the composer row. Cards live in a flat
+  state array bound to the board, so a drag persists and every change
+  is reactive.
+state:
+  entity_type: Card
+  columns:
+    - { field: title, widget: text }
+    - { field: status, widget: badge }
+    - { field: assignee, widget: text }
+actions: []
+connectors: []
+skills: []

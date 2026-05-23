@@ -19,6 +19,14 @@ result dict. A service-rejected op (``{ok: false}``) is NO LONGER
 appended to ``capture['ops']`` — a rejected op is not an applied op.
 Instead it is recorded in ``capture['rejected']`` with its error so the
 runtime can fold the reason into the response ``warnings``.
+Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the ``set_source``
+/ ``remove_source`` edit-tool factories so the specialist can author the
+pocket's top-level ``rippleSpec.sources`` block (read-only GET data
+bindings). Registered in ``make_edit_pocket_tools``.
+Changes: 2026-05-22 (RFC 05 M2a) — added the ``set_action`` /
+``remove_action`` edit-tool factories so the specialist can author the
+pocket's top-level ``rippleSpec.actions`` block (write bindings —
+POST/PUT/PATCH/DELETE). Registered in ``make_edit_pocket_tools``.
 """
 
 from __future__ import annotations
@@ -832,6 +840,226 @@ def make_remove_prop_array_item_tool(
     )
 
 
+# ---------------------------------------------------------------------------
+# rippleSpec.sources ops — read-only data bindings (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+class _SetSourceArgs(BaseModel):
+    source_key: str = Field(
+        ..., description="Short name for the source — also the `sources` map key."
+    )
+    path: str = Field(
+        ...,
+        description=(
+            "RELATIVE path against the pocket's configured backend "
+            "(e.g. `/pulls?state=open`). Never an absolute URL."
+        ),
+    )
+    bind: str = Field(
+        ...,
+        description="Dotted `state.` path the fetched JSON is written to (e.g. `state.prs`).",
+    )
+    method: str = Field(default="GET", description='Always "GET" — alpha is read-only.')
+    refresh: list[str] | None = Field(
+        default=None,
+        description=(
+            "When to run the source: `pocket_open` (on open) and/or `manual` "
+            '(refresh button). Defaults to `["pocket_open"]` when omitted.'
+        ),
+    )
+
+
+def make_set_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Declare (or replace) a read-only data source on the pocket."""
+
+    async def _run(
+        source_key: str,
+        path: str,
+        bind: str,
+        method: str = "GET",
+        refresh: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_source_for_agent
+
+        binding: dict[str, Any] = {"method": method, "path": path, "bind": bind}
+        if refresh is not None:
+            binding["refresh"] = refresh
+        result = await set_source_for_agent(pocket_id, source_key, binding)
+        _capture_op(capture, "set_source", {"source_key": source_key, "path": path}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_source",
+        description=(
+            "Declare a READ-ONLY live data source in rippleSpec.sources — a "
+            "GET binding that fetches from the pocket's own configured "
+            "backend (a CRM, an internal API) and writes the JSON into "
+            "state at `bind`. Use this when the user wants live data from "
+            "THEIR backend. The pocket must have a backend configured "
+            "(base URL + auth, set in backend settings). Seed state at the "
+            "`bind` target with an empty value so the widget renders before "
+            "the first fetch. For a manual refresh, add a button with "
+            "on_click {action: 'run_source', source: '<source_key>'}."
+        ),
+        args_schema=_SetSourceArgs,
+    )
+
+
+class _RemoveSourceArgs(BaseModel):
+    source_key: str = Field(..., description="The `sources` map key to remove.")
+
+
+def make_remove_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a read-only data source declaration from the pocket."""
+
+    async def _run(source_key: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_source_for_agent
+
+        result = await remove_source_for_agent(pocket_id, source_key)
+        _capture_op(capture, "remove_source", {"source_key": source_key}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_source",
+        description=(
+            "Remove a read-only data source from rippleSpec.sources by its "
+            "key. Idempotent — removing a source that was never declared "
+            "still succeeds. The state the source bound to is left alone."
+        ),
+        args_schema=_RemoveSourceArgs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# rippleSpec.actions ops — write bindings (RFC 05 M2a)
+# ---------------------------------------------------------------------------
+
+
+class _SetActionArgs(BaseModel):
+    action_key: str = Field(
+        ..., description="Short name for the action — also the `actions` map key."
+    )
+    method: str = Field(
+        ...,
+        description="The write verb: POST, PUT, PATCH, or DELETE.",
+    )
+    path: str = Field(
+        ...,
+        description=(
+            "RELATIVE path against the pocket's configured backend "
+            "(e.g. `/leases/{item.id}/renew`). Never an absolute URL. "
+            "May carry `{...}` expressions Ripple resolves at click time."
+        ),
+    )
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Request body for the write — a map of fields, values may be "
+            '`{...}` expressions (e.g. {"rent": "{state.form.rent}"}).'
+        ),
+    )
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "When true the widget should gate the write behind a confirm "
+            "step. Author DELETE / full-PUT actions with confirm=true."
+        ),
+    )
+    on_success: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Handlers to run after the write succeeds (e.g. run_source to refetch).",
+    )
+    on_error: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Handlers to run if the write fails (e.g. a rollback mutate_state).",
+    )
+
+
+def make_set_action_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Declare (or replace) a write action on the pocket."""
+
+    async def _run(
+        action_key: str,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        confirm: bool = False,
+        on_success: list[dict[str, Any]] | None = None,
+        on_error: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_action_for_agent
+
+        binding: dict[str, Any] = {
+            "kind": "write_binding",
+            "method": method.upper() if isinstance(method, str) else method,
+            "path": path,
+            "params": params or {},
+            "confirm": confirm,
+        }
+        if on_success is not None:
+            binding["on_success"] = on_success
+        if on_error is not None:
+            binding["on_error"] = on_error
+        result = await set_action_for_agent(pocket_id, action_key, binding)
+        _capture_op(capture, "set_action", {"action_key": action_key, "method": method}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_action",
+        description=(
+            "Declare a WRITE action in rippleSpec.actions — a binding that "
+            "POST/PUT/PATCH/DELETEs against the pocket's own configured "
+            "backend. A widget triggers it with on_click "
+            "{action: 'call_binding', binding: '<action_key>'}. The write "
+            "fires ONLY if the human owner has allow-listed that method+path "
+            "in the pocket's backend settings — authoring the action does "
+            "not authorize it. Author DELETE / full-PUT actions with "
+            "confirm=true. Use `on_success` to reconcile (run_source to "
+            "refetch a list, or set state from the response)."
+        ),
+        args_schema=_SetActionArgs,
+    )
+
+
+class _RemoveActionArgs(BaseModel):
+    action_key: str = Field(..., description="The `actions` map key to remove.")
+
+
+def make_remove_action_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a write-action declaration from the pocket."""
+
+    async def _run(action_key: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_action_for_agent
+
+        result = await remove_action_for_agent(pocket_id, action_key)
+        _capture_op(capture, "remove_action", {"action_key": action_key}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_action",
+        description=(
+            "Remove a write action from rippleSpec.actions by its key. "
+            "Idempotent — removing an action that was never declared still "
+            "succeeds. Any call_binding handler still pointing at it will "
+            "no-op after removal — drop those handlers too."
+        ),
+        args_schema=_RemoveActionArgs,
+    )
+
+
 def make_edit_pocket_tools(
     *, pocket_id: str, capture: dict[str, Any] | None = None
 ) -> list[StructuredTool]:
@@ -840,7 +1068,10 @@ def make_edit_pocket_tools(
     Order is the order the LLM sees them; we lead with the read tool
     so the agent is prompted toward "get then mutate" rather than
     blind writes. The Tier-2 ``*_prop_array_item`` ops sit next to
-    ``set_node_prop`` — they are the surgical alternative to it.
+    ``set_node_prop`` — they are the surgical alternative to it. The
+    ``*_source`` and ``*_action`` ops sit last — they write the top-level
+    ``rippleSpec.sources`` / ``rippleSpec.actions`` blocks, not the ui
+    tree or state.
     """
     return [
         make_get_pocket_tool(pocket_id=pocket_id),
@@ -856,4 +1087,8 @@ def make_edit_pocket_tools(
         make_replace_node_tool(pocket_id=pocket_id, capture=capture),
         make_move_node_tool(pocket_id=pocket_id, capture=capture),
         make_remove_node_tool(pocket_id=pocket_id, capture=capture),
+        make_set_source_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_source_tool(pocket_id=pocket_id, capture=capture),
+        make_set_action_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_action_tool(pocket_id=pocket_id, capture=capture),
     ]

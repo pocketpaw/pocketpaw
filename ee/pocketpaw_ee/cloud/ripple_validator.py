@@ -21,6 +21,16 @@ ordering).
 Grammar must mirror ``ripple/src/lib/core/expression-resolver.ts``. Any
 new token / method added to the resolver should be added here too — the
 two files together are the contract.
+
+Changes:
+  - 2026-05-22 (Increment 5): added the catalog-as-allowlist gate —
+    ``CatalogViolationError`` plus ``validate_against_catalog_strict``
+    (agent-generation path, RAISES) and ``..._logged`` (human/import
+    path, structured warn, does not block). Mirrors the
+    ``validate_ripple_spec_strict`` / ``..._logged`` split. The catalog
+    walk + the embed URL/host policy live in OSS ``pocketpaw.ripple.manifest``;
+    this module supplies the EE-side strict/logged wiring + the
+    agent-readable error formatting.
 """
 
 from __future__ import annotations
@@ -30,6 +40,11 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
+
+from pocketpaw.ripple.manifest import (
+    check_embed_nodes_in_spec,
+    validate_against_catalog,
+)
 
 log = logging.getLogger(__name__)
 
@@ -333,10 +348,165 @@ def format_warnings_for_agent(warnings: list[ExpressionWarning]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Catalog-as-allowlist gate (Increment 5)
+#
+# A node whose ``type`` is not in the widget manifest renders as a red
+# "Unknown widget type" box. A node whose ``embed`` URL violates the host
+# policy is an SSRF / clickjacking boundary. Both checks are run together
+# here: strict (raises) on the agent-generation path, logged (warns) on
+# the human / import path. The pure walks live in OSS
+# ``pocketpaw.ripple.manifest``; this layer adds the EE wiring.
+# ---------------------------------------------------------------------------
+
+
+class CatalogViolationError(Exception):
+    """Raised by :func:`validate_against_catalog_strict` when a spec
+    contains a node outside the widget catalog allow-list, or an
+    ``embed`` node whose URL violates the host policy.
+
+    Carries the full violations list so a caller (e.g. an LLM-retry
+    loop) can build an actionable corrective prompt. Mirrors
+    :class:`RippleSpecGrammarError`'s shape — ``.violations`` plus a
+    ``format_violations_for_agent`` helper.
+    """
+
+    def __init__(self, violations: list[dict[str, Any]]) -> None:
+        self.violations = violations
+        super().__init__(self._format(violations))
+
+    @staticmethod
+    def _format(violations: list[dict[str, Any]]) -> str:
+        lines = [f"{len(violations)} catalog violation(s) in rippleSpec:"]
+        for v in violations[:20]:  # cap the message length
+            if "reason" in v:
+                lines.append(f"  - [embed] {v['path']}: {v['reason']}\n      url: {v.get('url')!r}")
+            else:
+                hint = f" — did you mean '{v['suggestion']}'?" if v.get("suggestion") else ""
+                lines.append(f"  - [unknown_type] {v['path']}: type '{v['type']}'{hint}")
+        if len(violations) > 20:
+            lines.append(f"  - …and {len(violations) - 20} more")
+        return "\n".join(lines)
+
+
+def _collect_catalog_violations(
+    spec: dict[str, Any] | None,
+    allowed_types: list[str] | set[str],
+    embed_allowed_hosts: list[str] | set[str],
+) -> list[dict[str, Any]]:
+    """Run both the catalog-type walk and the embed URL/host walk, return
+    the combined violations list (unknown-type issues first, then embed
+    policy issues)."""
+    violations: list[dict[str, Any]] = []
+    violations.extend(validate_against_catalog(spec, allowed_types))
+    violations.extend(check_embed_nodes_in_spec(spec, embed_allowed_hosts))
+    return violations
+
+
+def format_violations_for_agent(violations: list[dict[str, Any]]) -> str:
+    """Build a compact, agent-readable summary of catalog violations.
+
+    Suitable as the ``error`` field on an MCP tool result so the LLM
+    sees specifically *which* node type / embed URL was rejected and can
+    target its fix.
+    """
+    if not violations:
+        return ""
+    lines = ["The rippleSpec was rejected — it contains nodes outside the widget catalog:"]
+    for v in violations[:10]:
+        if "reason" in v:
+            lines.append(f"  • {v['path']}: embed url rejected — {v['reason']}")
+        else:
+            hint = f" Use '{v['suggestion']}' instead." if v.get("suggestion") else ""
+            lines.append(f"  • {v['path']}: type '{v['type']}' is not a catalog widget.{hint}")
+    if len(violations) > 10:
+        lines.append(f"  • …and {len(violations) - 10} more")
+    lines.append(
+        "Every node `type` must appear verbatim in the widget catalog. For content "
+        "the catalog can't express, use the sanctioned `embed` widget — its `url` "
+        "must be https and point at an allow-listed host."
+    )
+    return "\n".join(lines)
+
+
+def validate_against_catalog_logged(
+    spec: dict[str, Any] | None,
+    allowed_types: list[str] | set[str],
+    *,
+    embed_allowed_hosts: list[str] | set[str],
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Validate the catalog allow-list + embed policy, emit one
+    ``log.warning`` per violation, and return the violations list.
+
+    Use this on the human / import path — a violation is recorded for
+    triage but does NOT block the write (an older imported spec may use
+    a widget that has since left the catalog).
+    """
+    violations = _collect_catalog_violations(spec, allowed_types, embed_allowed_hosts)
+    for v in violations:
+        if "reason" in v:
+            log.warning(
+                "ripple_spec.embed_policy_violation",
+                extra={
+                    "pocket_id": pocket_id,
+                    "workspace_id": workspace_id,
+                    "field_path": v["path"],
+                    "embed_url": v.get("url"),
+                    "detail": v["reason"],
+                },
+            )
+        else:
+            log.warning(
+                "ripple_spec.unknown_widget_type",
+                extra={
+                    "pocket_id": pocket_id,
+                    "workspace_id": workspace_id,
+                    "field_path": v["path"],
+                    "widget_type": v["type"],
+                    "suggestion": v.get("suggestion"),
+                },
+            )
+    return violations
+
+
+def validate_against_catalog_strict(
+    spec: dict[str, Any] | None,
+    allowed_types: list[str] | set[str],
+    *,
+    embed_allowed_hosts: list[str] | set[str],
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Validate the catalog allow-list + embed policy; raise
+    :class:`CatalogViolationError` if any node is outside the catalog or
+    any ``embed`` URL violates the host policy.
+
+    Use this only on the agent-generation path where the caller can
+    handle a retry. Human / import callers should use
+    :func:`validate_against_catalog_logged` — strict mode would block a
+    legitimate import of an older spec.
+    """
+    violations = validate_against_catalog_logged(
+        spec,
+        allowed_types,
+        embed_allowed_hosts=embed_allowed_hosts,
+        pocket_id=pocket_id,
+        workspace_id=workspace_id,
+    )
+    if violations:
+        raise CatalogViolationError(violations)
+
+
 __all__ = [
+    "CatalogViolationError",
     "ExpressionWarning",
     "RippleSpecGrammarError",
+    "format_violations_for_agent",
     "format_warnings_for_agent",
+    "validate_against_catalog_logged",
+    "validate_against_catalog_strict",
     "validate_ripple_spec",
     "validate_ripple_spec_logged",
     "validate_ripple_spec_strict",

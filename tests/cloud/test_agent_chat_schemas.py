@@ -73,6 +73,7 @@ def test_event_names_cover_spec():
         "ripple",
         "pocket_created",
         "pocket_mutation",
+        "pocket_execution",
         "ask_user_question",
         "stream_end",
         "error",

@@ -47,6 +47,7 @@ __all__ = [
     "require_group_action",
     "require_membership",
     "require_plan_feature",
+    "require_pocket_action_run",
     "require_pocket_edit",
     "require_pocket_owner",
 ]
@@ -170,3 +171,29 @@ async def require_pocket_owner(
         resource_id=pocket_id,
     )
     raise Forbidden("pocket.not_owner", "Only the pocket owner can perform this action")
+
+
+async def require_pocket_action_run(
+    pocket_id: str,
+    user: Any = Depends(current_active_user),
+) -> Any:
+    """Allow if the caller is pocket.owner or in pocket.shared_with.
+
+    Deliberately NARROWER than ``require_pocket_edit`` — a workspace-visible
+    pocket does NOT grant write-action access. A write action hits a real
+    backend with a real ``DELETE``; M2a keeps that surface to people the
+    owner explicitly invited. M2b widens this once Instinct gating is wired.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    user_id = str(user.id)
+    if await pockets_service.has_action_run_access(pocket_id, user_id):
+        return user
+
+    log_denial(
+        actor=user_id,
+        action="pocket.action.run",
+        code="pocket.access_denied",
+        resource_id=pocket_id,
+    )
+    raise Forbidden("pocket.access_denied", "You do not have write-action access to this pocket")

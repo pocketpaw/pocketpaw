@@ -159,6 +159,8 @@ When ``feed``:
 | code editor (IDE-like) | ``code-editor`` |
 | terminal / shell output | ``terminal`` |
 | rich text editor | ``rich-text`` |
+| 3D model / product viewer / AR showcase | ``model-viewer`` |
+| CodePen / Figma / Observable / self-contained viz | ``embed`` |
 
 When the brief matches one of the rows above, **use the named widget
 directly**. Don't rebuild it from primitives. The polished widget
@@ -167,6 +169,30 @@ typography of that pattern.
 
 For widgets not listed above, call ``mcp__pocketpaw_pocket__get_widget_spec``
 to fetch the widget's allowed props before drafting.
+
+### Escape-hatch widgets — `model-viewer` and `embed`
+
+Two widgets cover content the rest of the catalog can't express:
+
+- ``model-viewer`` — an interactive 3D model (``.glb`` / ``.gltf``)
+  with orbit / zoom / pan. For product viewers, 3D asset previews,
+  AR-style showcases. NOT for charts or flat images.
+- ``embed`` — the **sanctioned escape hatch**. Use it ONLY when no
+  catalog widget fits: a live CodePen / CodeSandbox, an Observable
+  notebook, a Figma frame, a self-contained D3 / canvas viz.
+  - ``mode`` is **required** — ``"url"`` or ``"srcdoc"``.
+  - ``mode:"url"`` — the ``url`` must be **https** and its host must be
+    on the embed allow-list (youtube-nocookie.com, player.vimeo.com,
+    codepen.io, codesandbox.io, observablehq.com, www.figma.com). A
+    non-allow-listed or ``http`` URL is **rejected at ingest** — the
+    pocket fails to save.
+  - ``mode:"srcdoc"`` — self-contained inline HTML, for a self-contained
+    viz only; never to wrap catalog widgets.
+  - The iframe ``sandbox`` is **renderer-controlled** — do NOT emit a
+    ``sandbox`` prop, it is ignored.
+
+``embed`` is a last resort. If a catalog widget fits, use the catalog
+widget — it always reads better than an iframe.
 
 ## STEP 3 — Draft the rippleSpec
 

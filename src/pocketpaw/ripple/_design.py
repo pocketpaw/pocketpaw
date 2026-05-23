@@ -19,6 +19,11 @@
 # WIDGET_SHAPES dict (per-widget lazy retrieval) and added
 # OPTIONAL_DESIGN_SECTIONS for the two-tier inline widget_help lookup.
 # Reworked from PR #1106.
+# Modified: 2026-05-22 (Increment 5) — added the two escape-hatch
+# widgets `model-viewer` and `embed` to WIDGET_CATALOG + WIDGET_SHAPES,
+# and amended NO_INVENTED_WIDGETS_RULE to name `embed` as the sanctioned
+# escape hatch (the renderer sandboxes the iframe; the catalog gate
+# blocks any non-catalog `type`).
 
 WIDGET_CATALOG = """\
 # WIDGET CATALOG
@@ -34,7 +39,9 @@ display     heading, text, badge, metric, stat, progress, progress-ring,
             icon, quote, highlight, definition-list, comparison-table,
             pros-cons, steps, status-dot, trend, link-preview, qr,
             diff, copy, chip, empty-state, loading, skeleton,
-            company-header, article-meta, soul-status, c4, terminal
+            company-header, article-meta, soul-status, c4, terminal,
+            model-viewer
+escape      embed
 input       button, input, textarea, select, combobox, multi-select,
             checkbox, switch, radio-group, slider, rating, date-picker,
             time-picker, number-input, segmented, color-picker,
@@ -320,8 +327,33 @@ Common rebuild antipatterns and their fixes:
                                             `type` like `flex` or
                                             `page-header`.
 
-If a shape isn't in the catalog and isn't expressible by composing
-catalog widgets, OMIT it and tell the user in prose. Do NOT invent.
+## The ONE sanctioned escape hatch — `embed`
+
+There is exactly one exception to "compose, don't extend". If a shape
+genuinely cannot be built from catalog widgets — a live CodePen, a
+Figma frame, an Observable notebook, a self-contained D3 / canvas
+visualization — use the `embed` widget. It is the sanctioned escape
+hatch and IS in the catalog:
+
+  - `embed` with `mode:"url"` points a renderer-sandboxed iframe at a
+    third-party page. The `url` must be https AND its host must be on
+    the embed allow-list — a non-allow-listed or http URL is rejected
+    at ingest.
+  - `embed` with `mode:"srcdoc"` renders self-contained inline HTML in
+    a sandboxed iframe — for a self-contained viz only, never to wrap
+    catalog widgets.
+  - The iframe `sandbox` attribute is RENDERER-CONTROLLED. Do NOT emit
+    a `sandbox` prop — it is ignored.
+
+`embed` is a last resort, not a shortcut. If a catalog widget fits the
+shape, use the catalog widget. Reaching for `embed` to dodge learning
+a widget's props is the wrong call — the catalog gate allows `embed`,
+but a real `chart` / `table` / `kanban` always reads better than an
+iframe.
+
+If a shape isn't in the catalog, isn't expressible by composing
+catalog widgets, and genuinely isn't `embed`-able either, OMIT it and
+tell the user in prose. Do NOT invent a new `type`.
 """
 
 
@@ -614,6 +646,74 @@ one child per tab by index. Do NOT use `props.tabs[i].content` — ignored:
   one screen would feel CROWDED with structurally different things,
   tabs are correct. If it would feel REPETITIVE (same widget, same
   rows, just filtered differently), use a filter — not tabs.
+""",
+    "model-viewer": """\
+`model-viewer` — renders an interactive 3D model (`.glb` / `.gltf`)
+with orbit / zoom / pan controls. Reach for it when the brief is a
+product viewer, a 3D asset preview, an AR-style showcase, or any
+"spin the object" surface — NOT for charts, NOT for images (use
+`image` for a flat picture).
+
+  { "type": "model-viewer", "props": {
+      "src": "https://cdn.example.com/models/headset.glb",
+      "alt": "Wireless headset, 3D model",
+      "poster": "https://cdn.example.com/models/headset.webp",
+      "autoRotate": true,
+      "cameraControls": true,
+      "height": 420
+  }}
+
+  - `src` *(required)* — https URL to a `.glb` / `.gltf` model.
+  - `alt` — accessibility description of the model.
+  - `poster` — image shown while the model loads.
+  - `autoRotate` — slow idle spin (default off).
+  - `cameraControls` — user orbit / zoom / pan (default on).
+  - `height` — viewport height in px.
+
+  One `model-viewer` IS the canvas — give it room; do not crowd it
+  with stat tiles.
+""",
+    "embed": """\
+`embed` — THE SANCTIONED ESCAPE HATCH. Use it ONLY when the content
+genuinely cannot be expressed with a catalog widget: a live CodePen /
+CodeSandbox, an Observable notebook cell, a Figma frame, a self-
+contained D3 / canvas visualization. If a catalog widget fits, use
+the catalog widget — `embed` is the last resort, not a shortcut.
+
+  *** `mode` IS REQUIRED — it is `"url"` or `"srcdoc"`. ***
+
+  mode "url" — point a SANDBOXED iframe at a third-party page:
+    { "type": "embed", "props": {
+        "mode": "url",
+        "url": "https://codepen.io/team/pen/abc123",
+        "height": 480,
+        "title": "Animated CSS gradient demo"
+    }}
+    - `url` MUST be https and its host MUST be on the embed
+      allow-list (configured providers: youtube-nocookie.com,
+      player.vimeo.com, codepen.io, codesandbox.io, observablehq.com,
+      www.figma.com). A non-allow-listed or http URL is REJECTED at
+      ingest — the pocket fails to save.
+    - loopback / private / internal hosts are blocked unconditionally.
+
+  mode "srcdoc" — render self-contained inline HTML in a sandboxed
+  iframe (use for a self-contained viz, never to wrap catalog widgets):
+    { "type": "embed", "props": {
+        "mode": "srcdoc",
+        "srcdoc": "<canvas id=c></canvas><script>/* self-contained */</script>",
+        "height": 360,
+        "title": "Generative art sketch"
+    }}
+
+  *** THE `sandbox` ATTRIBUTE IS RENDERER-CONTROLLED — NOT AUTHOR-
+  SETTABLE. *** Do NOT emit a `sandbox` prop. The renderer applies the
+  sandbox policy itself; an author-supplied `sandbox` is ignored.
+
+  - `mode` *(required)* — `"url"` or `"srcdoc"`.
+  - `url` — required when `mode:"url"`; https + allow-listed host only.
+  - `srcdoc` — required when `mode:"srcdoc"`; self-contained HTML only.
+  - `height` — iframe height in px.
+  - `title` — accessibility title for the iframe.
 """,
 }
 
