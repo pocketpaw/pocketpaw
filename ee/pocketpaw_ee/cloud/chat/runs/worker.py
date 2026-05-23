@@ -68,6 +68,27 @@ async def _shutdown(ctx: dict[str, Any]) -> None:
     await close_cloud_db()
 
 
+class _LazyRedisSettings:
+    """Descriptor that reads ``POCKETPAW_REDIS_URL`` on access, not at module
+    import. arq accesses ``WorkerSettings.redis_settings`` once at worker
+    boot, so this is effectively boot-time evaluation.
+
+    Two reasons it isn't a plain class attribute:
+    - Import-time read froze the env at first import (review finding #7),
+      which broke test ergonomics and any deploy that loads env after the
+      module is imported.
+    - Defaulting silently to ``redis://localhost:6379/0`` when the env is
+      unset (review finding #4) split-brain a typoed prod deploy — web
+      enqueued to prod-Redis, worker waited on localhost.
+    """
+
+    def __get__(self, obj: object, objtype: type | None = None) -> RedisSettings:
+        url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
+        if not url:
+            raise RuntimeError("POCKETPAW_REDIS_URL must be set to run the Tier 2 arq worker")
+        return RedisSettings.from_dsn(url)
+
+
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
 
@@ -78,6 +99,4 @@ class WorkerSettings:
     # so the user can decide whether to resend — re-running could double-bill or
     # surface a partial duplicate.
     max_tries = 1
-    redis_settings = RedisSettings.from_dsn(
-        os.environ.get("POCKETPAW_REDIS_URL", "redis://localhost:6379/0")
-    )
+    redis_settings = _LazyRedisSettings()

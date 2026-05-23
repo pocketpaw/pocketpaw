@@ -237,6 +237,15 @@ class CloudLifecycleHook:
             await stop_xproc_consumer()
         except Exception as exc:  # noqa: BLE001
             logger.warning("xproc consumer stop failed: %s", exc)
+
+        # Close the arq enqueuer pool if this web process ever built one
+        # (POCKETPAW_CLOUD_RUN_EXECUTOR=arq). No-op otherwise.
+        try:
+            from pocketpaw_ee.cloud.chat.runs.arq_executor import close_pool
+
+            await close_pool()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("arq pool close failed: %s", exc)
         return None
 
 
