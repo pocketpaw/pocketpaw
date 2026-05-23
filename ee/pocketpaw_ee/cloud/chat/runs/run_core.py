@@ -571,6 +571,7 @@ async def execute_run(spec: RunSpec) -> None:
 
     full_text = ""
     cancelled = False
+    interrupted = False
     error: Exception | None = None
     backend_error_message: str | None = None
     try:
@@ -590,6 +591,12 @@ async def execute_run(spec: RunSpec) -> None:
                 # doesn't get flipped to ``completed`` by the empty-text branch.
                 backend_error_message = str(event_data.get("message") or "")
                 break
+    except asyncio.CancelledError:
+        # The task itself was cancelled (worker shutdown, host signal). Mark
+        # the doc and append a terminal stream frame so live subscribers
+        # finalise, then re-raise so arq actually exits.
+        interrupted = True
+        logger.info("execute_run %s cancelled by host", spec.run_id)
     except Exception as exc:
         error = exc
         logger.exception("execute_run %s crashed", spec.run_id)
@@ -605,6 +612,25 @@ async def execute_run(spec: RunSpec) -> None:
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
+
+    if interrupted:
+        # Host-driven cancellation: persist what we have, append the terminal
+        # frame so SSE subscribers finalise without waiting on heartbeats,
+        # then re-raise CancelledError so arq exits.
+        try:
+            await run_service.mark_terminal(
+                spec.run_id,
+                status="interrupted",
+                partial_text=full_text,
+            )
+        except Exception:
+            logger.exception("mark_terminal(interrupted) failed for %s", spec.run_id)
+        try:
+            await transport.append_event(spec.run_id, "interrupted", {"run_id": spec.run_id})
+            await transport.set_ttl(spec.run_id, _stream_ttl())
+        except Exception:
+            logger.debug("interrupted stream write failed", exc_info=True)
+        raise asyncio.CancelledError()
 
     if error is not None or backend_error_message is not None:
         err_msg = str(error) if error is not None else (backend_error_message or "")

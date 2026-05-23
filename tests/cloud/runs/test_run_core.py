@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import fakeredis.aioredis
@@ -236,6 +237,61 @@ async def test_execute_run_backend_error_marks_failed(monkeypatch):
             "status": "failed",
             "partial_text": "",
             "error": "codex sdk missing",
+        }
+    ]
+
+
+async def fake_agent_events_cancelled(spec, ctx):
+    yield ("chunk", {"content": "partial ", "type": "text"})
+    raise asyncio.CancelledError()
+
+
+async def test_execute_run_propagates_cancellation(monkeypatch):
+    """When the task is cancelled mid-stream (arq worker shutdown), the
+    agent loop must (a) NOT swallow CancelledError, (b) mark the run
+    ``interrupted`` with the partial text preserved, (c) append a terminal
+    event to the stream so live SSE subscribers finalise, and (d) re-raise
+    so the arq worker actually exits."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    persisted: list[str] = []
+    mark_calls: list[dict[str, Any]] = []
+
+    async def _track_persist(*a, **k):
+        persisted.append("called")
+        return "should-not-happen"
+
+    async def _track_terminal(run_id, *, status, partial_text="", error=None, **k):
+        mark_calls.append(
+            {"run_id": run_id, "status": status, "partial_text": partial_text, "error": error}
+        )
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events_cancelled)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _track_persist)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    # The chunk made it through, then a terminal `interrupted` frame.
+    assert events[0].event == "chunk"
+    assert events[-1].event == "interrupted"
+    assert events[-1].is_terminal
+    assert persisted == []
+    assert mark_calls == [
+        {
+            "run_id": "r1",
+            "status": "interrupted",
+            "partial_text": "partial ",
+            "error": None,
         }
     ]
 
