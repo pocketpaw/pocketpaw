@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pocketpaw.connectors.protocol import ActionResult
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
@@ -40,16 +40,19 @@ logger = logging.getLogger(__name__)
 
 
 def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) -> MeetingResponse:
+    payload = doc.raw_provider_payload or {}
     return MeetingResponse(
         id=str(doc.id),
         source=getattr(doc, "source", "recall"),
         provider=doc.provider,
         provider_meeting_id=doc.provider_meeting_id,
+        group_id=payload.get("group_id"),
         title=doc.title,
         join_url=doc.join_url,
         organizer_email=doc.organizer_email,
         scheduled_start=doc.scheduled_start,
         scheduled_end=doc.scheduled_end,
+        duration_minutes=payload.get("duration_minutes", 30),
         actual_start=doc.actual_start,
         actual_end=doc.actual_end,
         status=doc.status,
@@ -297,6 +300,12 @@ async def create_meeting(
     provider_result = await provider_impl.create(ctx, body)
 
     provider_payload = provider_result.provider_payload or {}
+    # Persist duration_minutes + group_id so the response can include them.
+    if body.duration_minutes:
+        provider_payload["duration_minutes"] = body.duration_minutes
+    if body.group_id:
+        provider_payload["group_id"] = body.group_id
+
     provider_meeting_id = str(provider_payload.get("id") or provider_payload.get("name") or "")
     if body.source == "recall" and not provider_meeting_id:
         # External providers MUST return an id we can correlate webhooks
@@ -305,6 +314,18 @@ async def create_meeting(
             "meeting.provider_no_id",
             f"{body.provider} did not return a meeting ID",
         )
+
+    # Compute scheduled_end from scheduled_start + duration_minutes so the
+    # frontend can display duration without an extra field on the Beanie doc.
+    scheduled_end: datetime | None = None
+    if body.scheduled_start and body.duration_minutes:
+        try:
+            scheduled_end = body.scheduled_start.replace(
+                second=0,
+                microsecond=0,
+            ) + timedelta(minutes=body.duration_minutes)
+        except (ValueError, OverflowError):
+            scheduled_end = None
 
     doc = _MeetingDoc(
         workspace=workspace_id,
@@ -317,7 +338,7 @@ async def create_meeting(
         or str(provider_payload.get("join_url") or provider_payload.get("meetingUri") or ""),
         organizer_email=provider_payload.get("host_email"),
         scheduled_start=body.scheduled_start,
-        scheduled_end=None,
+        scheduled_end=scheduled_end,
         status="scheduled",
         participants=[],
         recording_file_ids=[],
@@ -326,6 +347,13 @@ async def create_meeting(
     )
     await doc.insert()
 
+    # Schedule APScheduler jobs for reminder (5 min before) + auto-start.
+    from pocketpaw_ee.cloud.meetings.scheduling.reminders import (
+        schedule_meeting_jobs,
+    )
+
+    schedule_meeting_jobs(doc)
+
     await event_bus.emit(
         "meeting.scheduled",
         {
@@ -333,6 +361,7 @@ async def create_meeting(
             "meeting_id": str(doc.id),
             "source": body.source,
             "provider": body.provider,
+            "group_id": body.group_id,
             "created_by": user_id,
         },
     )
@@ -381,6 +410,13 @@ async def cancel_meeting(workspace_id: str, meeting_id: str) -> MeetingResponse:
         raise NotFound("meeting", meeting_id)
     doc.status = "cancelled"
     await doc.save()
+
+    # Remove APScheduler jobs so reminders / auto-start don't fire.
+    from pocketpaw_ee.cloud.meetings.scheduling.reminders import (
+        unschedule_meeting_jobs,
+    )
+
+    unschedule_meeting_jobs(meeting_id)
 
     await event_bus.emit(
         "meeting.cancelled",

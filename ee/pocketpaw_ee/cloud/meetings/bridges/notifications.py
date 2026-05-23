@@ -37,19 +37,65 @@ logger = logging.getLogger(__name__)
 async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
     workspace_id = data.get("workspace_id")
     meeting_id = data.get("meeting_id")
-    recipient = data.get("created_by") or data.get("organizer_user_id")
-    if not (workspace_id and meeting_id and recipient):
+    if not (workspace_id and meeting_id):
         return
 
-    provider = data.get("provider") or data.get("source") or "meeting"
-    await _create(
-        workspace_id=workspace_id,
-        recipient=recipient,
-        kind="meeting_scheduled",
-        title="Meeting scheduled",
-        body=f"A {_pretty(provider)} meeting was scheduled.",
-        meeting_id=meeting_id,
-    )
+    source = data.get("source", "recall")
+
+    # LiveKit meetings: fan-out to ALL group members so everyone in the
+    # channel sees the notification. Recall meetings: creator-only (legacy).
+    if source == "livekit":
+        group_id = data.get("group_id")
+        if group_id:
+            recipients = await _group_member_ids(workspace_id, group_id)
+        else:
+            recipients = []
+    else:
+        creator = data.get("created_by") or data.get("organizer_user_id")
+        recipients = [creator] if creator else []
+
+    if not recipients:
+        return
+
+    provider = data.get("provider") or source or "meeting"
+    for recipient in recipients:
+        await _create(
+            workspace_id=workspace_id,
+            recipient=recipient,
+            kind="meeting_scheduled",
+            title="Meeting scheduled",
+            body=f"A {_pretty(provider)} meeting was scheduled.",
+            meeting_id=meeting_id,
+        )
+
+
+async def _on_meeting_started(data: dict[str, Any]) -> None:
+    workspace_id = data.get("workspace_id")
+    meeting_id = data.get("meeting_id")
+    if not (workspace_id and meeting_id):
+        return
+
+    source = data.get("source", "recall")
+    group_id = data.get("group_id")
+    if source == "livekit" and group_id:
+        recipients = await _group_member_ids(workspace_id, group_id)
+    else:
+        creator = data.get("created_by") or data.get("organizer_user_id")
+        recipients = [creator] if creator else []
+
+    if not recipients:
+        return
+
+    for recipient in recipients:
+        await _create(
+            workspace_id=workspace_id,
+            recipient=recipient,
+            kind="meeting_started",
+            title="Meeting started",
+            body="A meeting has started.",
+            meeting_id=meeting_id,
+            room_id=group_id,
+        )
 
 
 async def _on_meeting_cancelled(data: dict[str, Any]) -> None:
@@ -118,6 +164,17 @@ def _pretty(provider: str) -> str:
     }.get(provider, provider)
 
 
+async def _group_member_ids(workspace_id: str, group_id: str) -> list[str]:
+    """List user ids for all members of a group. Returns [] on any error."""
+    try:
+        from pocketpaw_ee.cloud.chat import group_service
+
+        return await group_service.list_member_ids(group_id)
+    except Exception:
+        logger.exception("Failed to list members for group=%s", group_id)
+        return []
+
+
 async def _create(
     *,
     workspace_id: str,
@@ -126,6 +183,7 @@ async def _create(
     title: str,
     body: str,
     meeting_id: str,
+    room_id: str | None = None,
 ) -> None:
     """Wrap notifications_service.create — late import to avoid circular
     deps and tolerate the service being unavailable in unit-test contexts."""
@@ -138,7 +196,9 @@ async def _create(
             kind=kind,
             title=title,
             body=body,
-            source=NotificationSource(type="meeting", id=meeting_id),
+            # type=kind so the frontend's sourceUrl switch can deep-link
+            # (meeting_started → ?join=meeting-{id}, meeting_reminder → chat, etc.)
+            source=NotificationSource(type=kind, id=meeting_id, room_id=room_id),
         )
     except Exception:
         logger.exception("Failed to create %s notification for meeting=%s", kind, meeting_id)
@@ -150,12 +210,13 @@ async def _create(
 
 
 def register_meeting_notification_listeners() -> None:
-    """Wire the four meeting.* → notification subscribers. Idempotent."""
+    """Wire the meeting.* → notification subscribers. Idempotent."""
     event_bus.subscribe("meeting.scheduled", _on_meeting_scheduled)
+    event_bus.subscribe("meeting.started", _on_meeting_started)
     event_bus.subscribe("meeting.cancelled", _on_meeting_cancelled)
     event_bus.subscribe("meeting.recording_ready", _on_meeting_recording_ready)
     event_bus.subscribe("meeting.transcript_ready", _on_meeting_transcript_ready)
-    logger.info("registered 4 meeting.* → notifications subscribers")
+    logger.info("registered meeting.* → notifications subscribers")
 
 
 __all__ = ["register_meeting_notification_listeners"]

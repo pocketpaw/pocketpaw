@@ -131,8 +131,7 @@ def mount_cloud(app: FastAPI) -> None:
     # Same pattern for meeting providers: importing the package runs the
     # provider's `base.register(...)` side effect so the MeetingProvider
     # registry is populated before the first /api/v1/meetings request.
-    # ``providers.livekit`` is empty in Phase 1 (owned by a separate
-    # engineer); ``providers.recall`` registers the Recall implementation.
+    import pocketpaw_ee.cloud.meetings.providers.livekit  # noqa: F401
     import pocketpaw_ee.cloud.meetings.providers.recall  # noqa: F401
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
