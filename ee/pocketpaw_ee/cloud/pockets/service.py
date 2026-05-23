@@ -735,6 +735,24 @@ async def create_from_ripple_spec(
         logger.info("Auto-created pocket %s from ripple spec", pocket_id)
         await emit(PocketCreated(data=await _pocket_event_payload(doc)))
         return pocket_id
+    except CatalogViolationError as exc:
+        # Strict catalog gate blocked the auto-create; surface the field
+        # paths explicitly instead of letting them disappear into the
+        # catch-all stack trace below.
+        logger.warning(
+            "Auto-create blocked by catalog gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
+    except ActionWiringViolationError as exc:
+        # Strict action-wiring gate blocked the auto-create (PR #1196).
+        logger.warning(
+            "Auto-create blocked by action-wiring gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
     except Exception:
         logger.warning("Failed to auto-create pocket from ripple spec", exc_info=True)
         return None

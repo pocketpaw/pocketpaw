@@ -702,7 +702,9 @@ def _walk_live_buttons(
             props = node.get("props") if isinstance(node.get("props"), dict) else {}
             label = _node_label_text(node)
             if _looks_live(label):
-                handlers = _iter_handlers(props.get("on_click") if isinstance(props, dict) else None)
+                handlers = _iter_handlers(
+                    props.get("on_click") if isinstance(props, dict) else None
+                )
                 if not handlers:
                     issues.append(
                         {

@@ -12,12 +12,12 @@
 from __future__ import annotations
 
 import pytest
+
 from pocketpaw.ripple.manifest import (
     _KNOWN_ACTION_VERBS,
     find_unwired_live_buttons,
     validate_action_verbs,
 )
-
 
 # ---------------------------------------------------------------------------
 # Action-verb allowlist
@@ -292,9 +292,7 @@ class TestFindUnwiredLiveButtons:
     def test_non_button_with_refresh_label_ignored(self):
         # The walk only inspects ``type: "button"`` nodes. A heading
         # that says "Refresh" is not a button and not in scope.
-        spec = {
-            "ui": {"type": "heading", "props": {"text": "Refresh history"}}
-        }
+        spec = {"ui": {"type": "heading", "props": {"text": "Refresh history"}}}
         assert find_unwired_live_buttons(spec) == []
 
     def test_non_dict_spec_returns_empty(self):
