@@ -582,20 +582,16 @@ def format_action_violations_for_agent(violations: list[dict[str, Any]]) -> str:
                 if v.get("suggestion")
                 else " Use one of: set, push, run_source, api, navigate, toast, emit."
             )
-            lines.append(
-                f"  • {v['path']}: action '{v['action']}' is not a recognized verb.{hint}"
-            )
+            lines.append(f"  • {v['path']}: action '{v['action']}' is not a recognized verb.{hint}")
         else:
-            lines.append(
-                f"  • {v['path']} (label={v.get('label')!r}): {v['reason']}"
-            )
+            lines.append(f"  • {v['path']} (label={v.get('label')!r}): {v['reason']}")
     if len(violations) > 10:
         lines.append(f"  • …and {len(violations) - 10} more")
     lines.append(
         "Action verbs are a closed set — see ripple/event-dispatcher.ts. A button "
         "labelled 'Refresh' / 'Sync' / 'Fetch' must call `run_source` with a "
         "declared `sources` key OR `api` with a real `url`. An invented verb "
-        "(e.g. `action: \"fetch\"`) silently no-ops at runtime, which looks "
+        '(e.g. `action: "fetch"`) silently no-ops at runtime, which looks '
         "like a working button but does nothing."
     )
     return "\n".join(lines)
