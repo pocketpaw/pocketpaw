@@ -48,7 +48,7 @@ _SVC = UnifiedFilesService()
 @router.get("")
 async def list_files(
     workspace_id: str | None = Query(None),
-    source: Literal["chat", "local", "drive"] | None = Query(None),
+    source: Literal["chat", "local", "drive", "kb", "agent"] | None = Query(None),
     pocket_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     user_id: str = Depends(current_user_id),
@@ -108,6 +108,7 @@ async def list_files(
                     "url": f.url,
                     "created": f.created.isoformat() if f.created else None,
                     "chat_id": f.chat_id,
+                    "agent_id": f.agent_id,
                 }
                 for f in files
             ],

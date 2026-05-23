@@ -6,6 +6,7 @@ from ee.cloud.models.agent import Agent, AgentConfig
 from ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from ee.cloud.models.connector import WorkspaceConnector
 from ee.cloud.models.file import FileObj
+from ee.cloud.models.file_version import FileVersionDoc
 from ee.cloud.models.group import Group, GroupAgent
 from ee.cloud.models.invite import Invite
 from ee.cloud.models.message import Attachment, Mention, Message, Reaction
@@ -41,6 +42,7 @@ __all__ = [
     "CommentTarget",
     "FileFolder",
     "FileObj",
+    "FileVersionDoc",
     "FileUpload",
     "Group",
     "GroupAgent",
@@ -77,6 +79,7 @@ def get_all_documents():
         FileObj,
         FileUpload,
         FileFolder,
+        FileVersionDoc,
         Workspace,
         WorkspaceConnector,
         Invite,

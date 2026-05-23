@@ -378,6 +378,11 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/api/v1/sessions",
         "/api/v1/agents",
         "/api/v1/users",
+        "/api/v1/files",
+        "/api/v1/knowledge",
+        "/api/v1/uploads",
+        "/api/v1/notifications",
+        "/api/v1/connectors",
     )
 
     for exempt in exempt_paths:
