@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import fakeredis.aioredis
 import pytest
 from pocketpaw_ee.cloud.chat.runs import run_core
@@ -102,3 +104,132 @@ async def test_execute_run_cancelled_does_not_persist(monkeypatch):
     assert events[-1].data["cancelled"] is True
     assert events[-1].data["assistant_message_id"] is None
     assert persisted == []
+
+
+async def fake_agent_events_empty(spec, ctx):
+    # Tool-only turn: the agent runs to completion but produces no text.
+    yield ("tool_start", {"tool": "noop", "input": {}})
+    yield ("tool_result", {"tool": "noop", "output": {}})
+
+
+async def test_execute_run_empty_text_marks_completed(monkeypatch):
+    """Regression: a non-cancelled run with no assistant text must still
+    flip the ChatRunDoc out of ``running`` — without this, the sweeper
+    eventually marks it ``interrupted`` (semantically wrong) and until
+    then ``active_run`` ghosts on the client."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    persisted: list[str] = []
+    mark_calls: list[dict[str, Any]] = []
+
+    async def _track_persist(*a, **k):
+        persisted.append("called")
+        return "should-not-happen"
+
+    async def _track_completed(run_id, *, assistant_message_id, partial_text):
+        mark_calls.append(
+            {
+                "fn": "mark_completed",
+                "run_id": run_id,
+                "assistant_message_id": assistant_message_id,
+                "partial_text": partial_text,
+            }
+        )
+
+    async def _track_terminal(run_id, *, status, partial_text="", **k):
+        mark_calls.append(
+            {
+                "fn": "mark_terminal",
+                "run_id": run_id,
+                "status": status,
+                "partial_text": partial_text,
+            }
+        )
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events_empty)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _track_persist)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_completed", _track_completed
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    assert events[-1].event == "stream_end"
+    assert events[-1].data["cancelled"] is False
+    assert events[-1].data["assistant_message_id"] is None
+    assert persisted == []
+    assert mark_calls == [
+        {
+            "fn": "mark_completed",
+            "run_id": "r1",
+            "assistant_message_id": None,
+            "partial_text": "",
+        }
+    ]
+
+
+async def fake_agent_events_raising(spec, ctx):
+    yield ("chunk", {"content": "partial ", "type": "text"})
+    raise RuntimeError("boom")
+
+
+async def test_execute_run_failure_marks_failed_with_error(monkeypatch):
+    """When the agent loop raises, execute_run must (a) write an ``error``
+    SSE frame, (b) mark the doc ``failed`` with the error message, and
+    (c) preserve any partial text already produced."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    persisted: list[str] = []
+    mark_calls: list[dict[str, Any]] = []
+
+    async def _track_persist(*a, **k):
+        persisted.append("called")
+        return "should-not-happen"
+
+    async def _track_terminal(run_id, *, status, partial_text="", error=None, **k):
+        mark_calls.append(
+            {
+                "run_id": run_id,
+                "status": status,
+                "partial_text": partial_text,
+                "error": error,
+            }
+        )
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events_raising)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _track_persist)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    event_names = [e.event for e in events]
+    assert "error" in event_names
+    err = next(e for e in events if e.event == "error")
+    assert err.data["code"] == "agent.run_failed"
+    assert "boom" in err.data["message"]
+    assert persisted == []
+    assert mark_calls == [
+        {
+            "run_id": "r1",
+            "status": "failed",
+            "partial_text": "partial ",
+            "error": "boom",
+        }
+    ]
