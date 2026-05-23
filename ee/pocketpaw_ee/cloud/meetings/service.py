@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) -> MeetingResponse:
     return MeetingResponse(
         id=str(doc.id),
+        source=getattr(doc, "source", "recall"),
         provider=doc.provider,
         provider_meeting_id=doc.provider_meeting_id,
         title=doc.title,

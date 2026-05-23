@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+MeetingSourceName = Literal["recall", "livekit"]
 MeetingProviderName = Literal["google_meet", "zoom"]
 
 
@@ -18,9 +19,19 @@ MeetingProviderName = Literal["google_meet", "zoom"]
 
 
 class CreateMeetingRequest(BaseModel):
-    """POST /meetings body."""
+    """POST /meetings body.
 
-    provider: MeetingProviderName
+    ``source`` selects the platform module that owns the meeting:
+      * ``recall``  — external Zoom/Meet call captured by a Recall bot.
+        ``provider`` is required (zoom | google_meet).
+      * ``livekit`` — native LiveKit room. ``provider`` must be omitted.
+
+    Defaults to ``"recall"`` so existing API consumers (Settings →
+    Meetings, the schedule_meeting MCP tool) keep working unchanged.
+    """
+
+    source: MeetingSourceName = "recall"
+    provider: MeetingProviderName | None = None
     title: str = Field(min_length=1, max_length=300)
     scheduled_start: datetime | None = None
     duration_minutes: int = Field(default=30, ge=1, le=1440)
@@ -32,6 +43,7 @@ class ListMeetingsRequest(BaseModel):
     since: datetime | None = None
     until: datetime | None = None
     status: str | None = None
+    source: MeetingSourceName | None = None
     provider: MeetingProviderName | None = None
     limit: int = Field(default=50, ge=1, le=200)
 
@@ -40,7 +52,8 @@ class MeetingResponse(BaseModel):
     """Wire shape for one meeting."""
 
     id: str
-    provider: MeetingProviderName
+    source: MeetingSourceName = "recall"
+    provider: MeetingProviderName | None = None
     provider_meeting_id: str
     title: str | None
     join_url: str

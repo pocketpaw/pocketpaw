@@ -56,10 +56,25 @@ class Meeting(TimestampedDocument):
     """
 
     workspace: Indexed(str)  # type: ignore[valid-type]
-    provider: Literal["google_meet", "zoom"]
-    provider_meeting_id: str
+    # source — which platform module owns this meeting's lifecycle.
+    # "recall" = an external Zoom/Meet/Teams meeting we capture via a
+    # Recall.ai bot. "livekit" = a native room hosted on our LiveKit
+    # Cloud. Default "recall" for back-compat: every row that existed
+    # before the unified meetings platform was a Recall meeting.
+    source: Literal["recall", "livekit"] = "recall"
+    # provider — Recall-specific external platform. Set when source="recall".
+    # For source="livekit" leave unset (the provider IS LiveKit, named in
+    # `source`). Optional so LiveKit-created rows can omit it.
+    provider: Literal["google_meet", "zoom"] | None = None
+    # External meeting id — Recall's view (Zoom meeting ID / Meet
+    # `conferenceRecords/{name}`). For source="livekit" use the room name
+    # or leave empty; nothing in the Recall paths reads it for LiveKit rows.
+    provider_meeting_id: str = ""
     provider_space_id: str | None = None
     title: str | None = None
+    # For LiveKit meetings this is the pocketpaw:// or web deep link that
+    # opens the in-app call. For Recall meetings it's the third-party
+    # Zoom/Meet join URL.
     join_url: str
     organizer_email: str | None = None
     scheduled_start: datetime | None = None

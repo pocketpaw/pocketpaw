@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+MeetingSource = Literal["recall", "livekit"]
 MeetingProvider = Literal["google_meet", "zoom"]
 MeetingStatus = Literal[
     "scheduled",
@@ -27,11 +28,19 @@ class Meeting:
     The wire layer (``dto.MeetingResponse``) and the persistence layer
     (``models.meeting.Meeting``) each have their own shape; this is the
     canonical in-memory view consumed by tools, listeners, and tests.
+
+    ``source`` selects the implementing provider:
+      * ``recall``  — external Zoom/Meet/Teams meeting; ``provider``
+        names which (zoom/google_meet) and a Recall.ai bot captures it.
+      * ``livekit`` — native real-time room on our LiveKit Cloud;
+        ``provider`` is unset.
     """
 
     id: str
     workspace_id: str
-    provider: MeetingProvider
+    source: MeetingSource
+    # Recall-specific. None for source="livekit".
+    provider: MeetingProvider | None
     provider_meeting_id: str
     provider_space_id: str | None
     title: str | None
