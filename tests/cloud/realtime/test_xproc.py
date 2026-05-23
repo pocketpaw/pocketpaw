@@ -187,8 +187,9 @@ async def test_run_consumer_dispatches_published_envelope(
     )
 
     await _wait_until(
-        lambda: fake_bus.publish.await_count == 1
-        and fake_manager.broadcast_to_group.await_count == 1,
+        lambda: (
+            fake_bus.publish.await_count == 1 and fake_manager.broadcast_to_group.await_count == 1
+        ),
         timeout=2.0,
     )
     task.cancel()
