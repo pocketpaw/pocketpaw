@@ -323,6 +323,21 @@ async def _run_agent_stream(
         mentions=body.mentions,
     )
 
+    from pocketpaw.tools.builtin.edit_document import (
+        build_editor_prompt_context,
+        clear_edit_session,
+        get_edit_session,
+        set_edit_session,
+    )
+
+    if body.editor_blocks:
+        # Deep-copy so ContextVar mutations don't touch the request body.
+        blocks_copy = json.loads(json.dumps(body.editor_blocks))
+        set_edit_session(blocks_copy)
+        editor_ctx = build_editor_prompt_context(blocks=blocks_copy)
+        if editor_ctx:
+            knowledge_context = f"{knowledge_context}\n\n{editor_ctx}"
+
     await _broadcast_agent_typing(ctx, active=True)
 
     stream_start_payload: dict[str, Any] = {
@@ -377,6 +392,7 @@ async def _run_agent_stream(
 
     full_text = ""
     cancelled = False
+    _editor_blocks_result: list[dict[str, Any]] | None = None
     try:
         async for event in pool.run(
             ctx.target_agent_id,
@@ -419,6 +435,13 @@ async def _run_agent_stream(
         # Flush anything the agent emitted right before ``done`` / break.
         for ev in _drain_side_channel():
             yield ev
+
+        # Extract editor blocks before finally clears the edit session.
+        try:
+            _editor_blocks_result = get_edit_session()
+        except Exception:
+            logger.debug("get_edit_session failed", exc_info=True)
+
     except Exception as e:
         logger.exception("Cloud agent run failed for agent=%s", ctx.target_agent_id)
         yield ("error", {"code": "agent.run_failed", "message": str(e)})
@@ -431,6 +454,10 @@ async def _run_agent_stream(
             pass
         try:
             detach_agent_identity(identity_tokens)
+        except Exception:
+            pass
+        try:
+            clear_edit_session()
         except Exception:
             pass
 
@@ -457,8 +484,25 @@ async def _run_agent_stream(
             full_text = (full_text[: match.start()] + full_text[match.end() :]).strip()
             yield ("ripple", {"spec": spec})
 
+    # Log editor blocks result for observability.
+    if _editor_blocks_result:
+        logger.info(
+            "Editor blocks result: present (%d blocks)",
+            len(_editor_blocks_result),
+        )
+    else:
+        logger.info("Editor blocks result: none")
+
     if cancelled or not full_text.strip():
-        yield ("stream_end", {"assistant_message_id": None, "usage": {}, "cancelled": cancelled})
+        yield (
+            "stream_end",
+            {
+                "assistant_message_id": None,
+                "usage": {},
+                "cancelled": cancelled,
+                "editor_blocks": _editor_blocks_result,
+            },
+        )
         await _broadcast_agent_typing(ctx, active=False)
         return
 
@@ -482,7 +526,12 @@ async def _run_agent_stream(
 
     yield (
         "stream_end",
-        {"assistant_message_id": assistant_id, "usage": {}, "cancelled": False},
+        {
+            "assistant_message_id": assistant_id,
+            "usage": {},
+            "cancelled": False,
+            "editor_blocks": _editor_blocks_result,
+        },
     )
 
 

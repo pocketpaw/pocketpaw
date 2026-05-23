@@ -103,7 +103,7 @@
     // If relative and we have a parentDir, mark it for async resolution
     if (parentDir && href && !href.startsWith("http") && !href.startsWith("data:") && !isAbsolute(href)) {
       const absPath = joinPath(parentDir, href);
-      return `<img src="" data-resolve-path="${absPath}"${altAttr}${titleAttr} />`;
+      return `<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-resolve-path="${absPath}"${altAttr}${titleAttr} />`;
     }
     return `<img src="${href}"${altAttr}${titleAttr} />`;
   };

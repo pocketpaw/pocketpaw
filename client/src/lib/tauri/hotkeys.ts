@@ -3,9 +3,14 @@
  * Gracefully no-ops in non-Tauri environments.
  */
 
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 let shortcutModule: typeof import("@tauri-apps/plugin-global-shortcut") | null = null;
 
 async function getModule() {
+  if (!isTauri()) return null;
   if (shortcutModule) return shortcutModule;
   try {
     shortcutModule = await import("@tauri-apps/plugin-global-shortcut");

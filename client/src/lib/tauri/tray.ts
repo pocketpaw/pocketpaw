@@ -1,11 +1,17 @@
 /**
  * Frontend tray state management.
  * Listens for tray events emitted by the Rust backend.
+ * Gracefully no-ops in non-Tauri (browser) environments.
  */
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 let listenFn: typeof import("@tauri-apps/api/event").listen | null = null;
 
 async function getListen() {
+  if (!isTauri()) return null;
   if (listenFn) return listenFn;
   try {
     const mod = await import("@tauri-apps/api/event");
