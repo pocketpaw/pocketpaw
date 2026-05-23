@@ -365,31 +365,36 @@ async def create_meeting(
             "created_by": user_id,
         },
     )
+    # Also emit on the realtime bus so ALL connected clients (not just the
+    # creator) receive the event and update their sidebar.
+    try:
+        from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
+        from pocketpaw_ee.cloud.meetings.events import MeetingScheduled
+
+        await _emit_realtime(
+            MeetingScheduled(
+                data={
+                    "workspace_id": workspace_id,
+                    "meeting_id": str(doc.id),
+                    "source": body.source,
+                    "group_id": body.group_id,
+                }
+            )
+        )
+    except Exception:
+        logger.exception("Failed to emit realtime meeting.scheduled for %s", doc.id)
+
     return _doc_to_response(doc, transcript_available=False)
 
 
-async def cancel_meeting(workspace_id: str, meeting_id: str) -> MeetingResponse:
+async def cancel_meeting(workspace_id: str, meeting_id: str, user_id: str = "") -> MeetingResponse:
     """Cancel a scheduled meeting via the provider, then mark the row cancelled.
 
-    Meet has no native cancel — the adapter marks it cancelled locally
-    and the join URL keeps working (documented limitation). Zoom
-    actually deletes the meeting on its side.
+    Only the meeting creator can cancel. Meet has no native cancel — the
+    adapter marks it cancelled locally and the join URL keeps working
+    (documented limitation). Zoom actually deletes the meeting on its side.
     """
-    detail = await get_meeting(workspace_id, meeting_id)
-
-    # Dispatch the provider-specific cancel through the registry. For
-    # Recall this hits the Zoom/Meet adapter via RecallProvider.cancel();
-    # LiveKit's cancel is a no-op (nothing reserved server-side).
-    from types import SimpleNamespace
-
-    from pocketpaw_ee.cloud.meetings.providers import base as providers_base
-
-    source = getattr(detail, "source", "recall") or "recall"
-    provider_impl = providers_base.resolve(source)
-    ctx = SimpleNamespace(workspace_id=workspace_id, user_id="")
-    await provider_impl.cancel(ctx, detail)
-
-    # Fetch the Beanie doc (get_meeting returned a DTO) and patch status.
+    # Fetch the Beanie doc directly so we can check created_by_user_id.
     doc = await _MeetingDoc.find_one(
         _MeetingDoc.workspace == workspace_id,
         {"_id": meeting_id} if False else _MeetingDoc.id == meeting_id,
@@ -405,9 +410,27 @@ async def cancel_meeting(workspace_id: str, meeting_id: str) -> MeetingResponse:
         except Exception:
             doc = None
     if doc is None:
-        # Mid-flight delete — extremely unlikely, but raise so the
-        # client refetches instead of seeing stale data.
         raise NotFound("meeting", meeting_id)
+
+    # Permission check: only the creator can cancel.
+    if doc.created_by_user_id and doc.created_by_user_id != user_id:
+        from pocketpaw_ee.cloud._core.errors import Forbidden
+
+        raise Forbidden("meeting.not_owner", "Only the meeting creator can cancel")
+
+    # Dispatch the provider-specific cancel through the registry. For
+    # Recall this hits the Zoom/Meet adapter via RecallProvider.cancel();
+    # LiveKit's cancel is a no-op (nothing reserved server-side).
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.meetings.providers import base as providers_base
+
+    source = getattr(doc, "source", "recall") or "recall"
+    provider_impl = providers_base.resolve(source)
+    ctx = SimpleNamespace(workspace_id=workspace_id, user_id=user_id)
+    await provider_impl.cancel(ctx, doc)
+
+    # Patch status (doc already loaded above).
     doc.status = "cancelled"
     await doc.save()
 
@@ -423,7 +446,7 @@ async def cancel_meeting(workspace_id: str, meeting_id: str) -> MeetingResponse:
         {
             "workspace_id": workspace_id,
             "meeting_id": str(doc.id),
-            "provider": detail.provider,
+            "provider": doc.provider,
         },
     )
     return _doc_to_response(doc, transcript_available=False)
