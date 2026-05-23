@@ -285,7 +285,15 @@ async def test_find_transcript_fetches_on_demand(chat_identity, monkeypatch):
 
 
 async def test_find_transcript_returns_not_ready_when_provider_empty(chat_identity):
-    """Provider returns empty (transcript not ready yet) → meeting_transcript.not_found."""
+    """No transcript + no bot → structured ``{ready: false, state: no_bot}`` payload.
+
+    The agent needs to know WHY the transcript isn't there. We return a
+    success response (not an error) so the LLM can read the ``state`` and
+    ``message`` fields and tell the user "no bot was dispatched" instead
+    of "transcript is empty".
+    """
+    import json
+
     from pocketpaw_ee.cloud.meetings import service as ms
     from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
 
@@ -313,8 +321,12 @@ async def test_find_transcript_returns_not_ready_when_provider_empty(chat_identi
     finally:
         ms._set_adapter_factory(prev)
 
-    assert result["is_error"] is True
-    assert "meeting_transcript.not_found" in result["content"][0]["text"]
+    assert result.get("is_error") is not True, result
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["ready"] is False
+    assert payload["state"] == "no_bot"
+    assert "no recording bot" in payload["message"].lower()
+    assert payload["bot"]["has_bot"] is False
 
 
 async def test_cancel_meeting_requires_id(chat_identity):

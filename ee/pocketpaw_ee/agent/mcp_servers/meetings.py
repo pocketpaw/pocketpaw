@@ -245,6 +245,22 @@ async def _send_bot_handler(args: dict) -> dict:
 
 
 async def _find_transcript_handler(args: dict) -> dict:
+    """Return the transcript OR — when it isn't ready — explain why.
+
+    "Transcript not ready" hides several distinct states that the agent
+    has to communicate differently to the user:
+
+      * No bot was ever dispatched → suggest sending one.
+      * Bot is in the waiting room → ask user to admit it.
+      * Bot is recording right now → tell user to retry after the call.
+      * Meeting ended → async transcription with Deepgram/etc. is still
+        running, give an ETA.
+      * Bot failed (denied / fatal) → escalate honestly.
+
+    We always fall through to a bot-status read on the not-ready path so
+    the agent gets structured context to respond from, instead of a bare
+    "transcript not found" that produces vague "empty transcript" replies.
+    """
     workspace_id, _ = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
@@ -253,18 +269,101 @@ async def _find_transcript_handler(args: dict) -> dict:
     if not isinstance(meeting_id, str) or not meeting_id:
         return _error_response("meeting_id is required (string)")
 
-    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud._core.errors import CloudError, NotFound
     from pocketpaw_ee.cloud.meetings import service as ms
 
     try:
         response = await ms.get_transcript(workspace_id, meeting_id)
+    except NotFound:
+        # Transcript not ready — fetch bot status to explain why.
+        return await _transcript_not_ready_response(workspace_id, meeting_id)
     except CloudError as exc:
         return _error_response(f"{exc.code}: {exc.message}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("find_meeting_transcript failed", exc_info=True)
         return _error_response(f"find_meeting_transcript failed: {exc}")
 
-    return _success_response(response.model_dump())
+    body = response.model_dump()
+    body["ready"] = True
+    body["state"] = "ready"
+    return _success_response(body)
+
+
+# Map a Recall bot status to a coarse transcript state + ETA hint.
+# Used when the transcript isn't on disk yet so the agent can choose
+# the right thing to say instead of guessing.
+_BOT_STATUS_TO_TRANSCRIPT_STATE = {
+    None: ("no_bot", "No recording bot was dispatched to this meeting."),
+    "ready": ("bot_starting", "The bot is starting up."),
+    "joining_call": ("bot_joining", "The bot is joining the call."),
+    "in_waiting_room": (
+        "bot_waiting_admission",
+        "The bot is in the meeting's waiting room and needs to be admitted by a host.",
+    ),
+    "in_call_not_recording": (
+        "bot_in_call_not_recording",
+        "The bot joined the call but isn't recording yet.",
+    ),
+    "recording_permission_allowed": (
+        "bot_recording",
+        "The bot is currently recording the call. The transcript will be ready a few "
+        "minutes after the meeting ends.",
+    ),
+    "in_call_recording": (
+        "bot_recording",
+        "The bot is currently recording the call. The transcript will be ready a few "
+        "minutes after the meeting ends.",
+    ),
+    "recording_permission_denied": (
+        "bot_recording_denied",
+        "The bot was denied recording permission and won't produce a transcript.",
+    ),
+    "call_ended": (
+        "transcribing",
+        "The meeting ended. Transcription is running (~1–3 minutes for a short call, "
+        "longer for hour-plus recordings). Retry shortly.",
+    ),
+    "done": (
+        "transcribing",
+        "The meeting ended. Transcription is running (~1–3 minutes for a short call, "
+        "longer for hour-plus recordings). Retry shortly.",
+    ),
+    "fatal": (
+        "bot_failed",
+        "The bot failed permanently — no transcript will be produced. "
+        "Check the Recall dashboard for the failure reason.",
+    ),
+}
+
+
+async def _transcript_not_ready_response(workspace_id: str, meeting_id: str) -> dict:
+    """Build a structured 'not ready' response with bot context."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.meetings import service as ms
+
+    bot_status: dict[str, Any] = {}
+    try:
+        bot_status = await ms.get_bot_status(workspace_id, meeting_id)
+    except CloudError as exc:
+        # Meeting itself unknown — surface that directly.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("transcript not-ready bot lookup failed: %s", exc)
+
+    raw_status = bot_status.get("status") if bot_status.get("has_bot") else None
+    state, message = _BOT_STATUS_TO_TRANSCRIPT_STATE.get(
+        raw_status,
+        ("unknown", f"Transcript is not ready. Bot status: {raw_status or 'unknown'}."),
+    )
+    return _success_response(
+        {
+            "ready": False,
+            "state": state,
+            "message": message,
+            "meeting_id": meeting_id,
+            "bot": bot_status or {"has_bot": False},
+        }
+    )
 
 
 async def _check_bot_handler(args: dict) -> dict:
@@ -377,11 +476,24 @@ def build_meetings_context_server() -> tuple[str, Any] | None:
     @tool(
         "find_meeting_transcript",
         (
-            "Return transcript metadata for one meeting (the meeting's "
-            "internal ID, not the provider's). ``file_id`` in the response "
-            "points at the stored transcript blob — fetch with the standard "
-            "files API. If no cached transcript exists, this fetches one "
-            "from the provider on demand."
+            "Get a meeting's transcript or — when it isn't ready yet — find "
+            "out exactly why. Always inspect the ``ready`` and ``state`` "
+            "fields before responding to the user.\n\n"
+            "When ``ready`` is true: ``file_id`` points at the stored "
+            "transcript blob (fetch via the standard files API). Use "
+            "``entry_count`` and ``language`` for context.\n\n"
+            "When ``ready`` is false, ``state`` is one of: ``no_bot`` (no "
+            "recording bot was sent — ask the user if they want to send "
+            "one), ``bot_joining`` / ``bot_starting`` (bot is on its way), "
+            "``bot_waiting_admission`` (bot is in the lobby — a host must "
+            "admit it), ``bot_in_call_not_recording`` (joined but not "
+            "recording yet), ``bot_recording`` (call is in progress — "
+            "transcript will be ready a few minutes after it ends), "
+            "``transcribing`` (call ended, async transcription is running "
+            "— retry in 1–3 minutes), ``bot_recording_denied`` or "
+            "``bot_failed`` (no transcript will ever appear). The "
+            "``message`` field is the human-readable summary — relay it to "
+            "the user instead of inventing your own status text."
         ),
         {"meeting_id": str},
     )
