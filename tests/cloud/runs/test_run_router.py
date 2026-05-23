@@ -46,6 +46,42 @@ async def test_stream_unauthorized_for_other_workspace(runs_app_client, mongo_db
     assert resp.status_code == 404
 
 
+async def test_stream_unauthorized_for_other_user(runs_app_client, mongo_db, monkeypatch):  # noqa: ARG001
+    """A workspace teammate who doesn't own the run must 404, same as a
+    foreign workspace — workspace-only auth would otherwise let teammates
+    stream each other's private chat turns."""
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+    from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+
+    # Same workspace w1, different user u2 — runs_app_client identifies as u1.
+    await run_service.create_run(
+        RunSpec(
+            run_id="other-user-run",
+            workspace_id="w1",
+            context_type="session",
+            scope_id="s1",
+            session_key="session:s1",
+            group=None,
+            user_id="u2",
+            agent_id="a1",
+            client_message_id="c-u2",
+            user_message_id="m1",
+            content="hi",
+            history=[],
+            intent=None,
+        )
+    )
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.router.get_stream_transport",
+        lambda: RedisStreamTransport(redis),
+    )
+    resp = await runs_app_client.get("/cloud/chat/runs/other-user-run/stream?after=0")
+    assert resp.status_code == 404
+    resp = await runs_app_client.post("/cloud/chat/runs/other-user-run/stop")
+    assert resp.status_code == 404
+
+
 async def test_stream_waits_for_writer_on_running_run(
     runs_app_client,
     seed_run,

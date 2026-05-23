@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -26,11 +25,12 @@ def _sse(entry_id: str, event: str, data: dict) -> bytes:
     return f"id: {entry_id}\nevent: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
-async def _authorize(run_id: str, workspace_id: str):
-    # Raises ``NotFound`` for both missing and cross-tenant runs — never
-    # leak the existence of a run in another workspace.
+async def _authorize(run_id: str, workspace_id: str, user_id: str):
+    # Raises ``NotFound`` for missing, cross-tenant, AND cross-user runs.
+    # Same response for all three so we don't leak run existence to a
+    # workspace teammate who didn't own the run.
     doc = await run_service.get_run(run_id)
-    if doc.workspace != workspace_id:
+    if doc.workspace != workspace_id or doc.user_id != user_id:
         raise NotFound("chat_run", run_id)
     return doc
 
@@ -39,10 +39,10 @@ async def _authorize(run_id: str, workspace_id: str):
 async def get_run_stream(
     run_id: str,
     after: str = Query("0"),
-    user_id: str = Depends(current_user_id),  # noqa: ARG001
+    user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
-    doc = await _authorize(run_id, workspace_id)
+    doc = await _authorize(run_id, workspace_id, user_id)
     transport = get_stream_transport()
 
     async def gen() -> AsyncIterator[bytes]:
@@ -74,7 +74,6 @@ async def get_run_stream(
                 return
             # heartbeat so proxies keep the connection open
             yield b": ping\n\n"
-            await asyncio.sleep(0)
 
     return StreamingResponse(
         gen(),
@@ -90,9 +89,9 @@ async def get_run_stream(
 @router.post("/cloud/chat/runs/{run_id}/stop")
 async def post_run_stop(
     run_id: str,
-    user_id: str = Depends(current_user_id),  # noqa: ARG001
+    user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> StopRunResponse:
-    await _authorize(run_id, workspace_id)
+    await _authorize(run_id, workspace_id, user_id)
     await get_stream_transport().request_cancel(run_id)
     return StopRunResponse()
