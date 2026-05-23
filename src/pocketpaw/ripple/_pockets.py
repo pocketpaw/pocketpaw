@@ -736,6 +736,29 @@ nothing else:
   invent `kind`, `url`, `auto_fetch`, `into`, or `id` — they do not exist.
 - The refresh button targets the source by `source` (the source key),
   NEVER `source_id`.
+- The dispatcher only knows a fixed set of action verbs — see
+  ``pocketpaw.ripple.manifest._KNOWN_ACTION_VERBS`` for the canonical
+  list. Anything else (``fetch``, ``refresh``, ``reload``, ``load``) is
+  silently dropped on click. For loading backend data the verb is
+  ALWAYS ``run_source``.
+
+  WRONG — invented verb, the dispatcher drops it:
+    {"action": "fetch", "source": "todos"}
+
+  RIGHT:
+    {"action": "run_source", "source": "todos"}
+
+  WRONG — no on_click, the button is decorative and relies on a
+  chat round-trip that never comes:
+    add_node(parent_id="root", type="button", props={
+      "label": "Refresh",
+    })
+
+  RIGHT — whole on_click wires straight to the source:
+    add_node(parent_id="root", type="button", props={
+      "label": "Refresh",
+      "on_click": {"action": "run_source", "source": "todos"},
+    })
 
   WRONG — inert, the runtime ignores it:
     {"action": "run_source", "source_id": "todos"}
