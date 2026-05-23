@@ -97,6 +97,12 @@ __all__ = [
 def get_all_documents():
     """Get all Beanie documents, with lazy FileUpload loading."""
     _ensure_file_upload()
+    # Calendar lives in ee/pocketpaw_ee/calendar/ (sibling package, not
+    # under cloud/), so its docs are imported here and added to the list.
+    # Late import keeps the cloud models module free of a hard dep on
+    # the calendar package.
+    from pocketpaw_ee.calendar.models import _CalendarDoc, _EventDoc
+
     return [
         User,
         Agent,
@@ -123,6 +129,9 @@ def get_all_documents():
         MeetingTranscript,
         MeetingProviderCredentials,
         MeetingsSettings,
+        # Calendar — sibling enterprise package.
+        _CalendarDoc,
+        _EventDoc,
     ]
 
 
