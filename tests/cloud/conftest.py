@@ -17,8 +17,17 @@ Also exposes:
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any
+
+# Tier 2 ``worker`` module evaluates ``POCKETPAW_REDIS_URL`` at import
+# (arq bypasses the descriptor protocol via __dict__ access, so eager eval
+# is the only option). Set a stub here so ``from pocketpaw_ee.cloud.chat.runs
+# import worker`` succeeds during test collection. Tests that need to assert
+# the unset-env behaviour use ``monkeypatch.delenv`` against the helper
+# function ``worker._redis_settings``, not the class attribute.
+os.environ.setdefault("POCKETPAW_REDIS_URL", "redis://test:6379/0")
 
 import pytest
 

@@ -68,25 +68,27 @@ async def _shutdown(ctx: dict[str, Any]) -> None:
     await close_cloud_db()
 
 
-class _LazyRedisSettings:
-    """Descriptor that reads ``POCKETPAW_REDIS_URL`` on access, not at module
-    import. arq accesses ``WorkerSettings.redis_settings`` once at worker
-    boot, so this is effectively boot-time evaluation.
+def _redis_settings() -> RedisSettings:
+    """Resolve the arq RedisSettings from ``POCKETPAW_REDIS_URL``.
 
-    Two reasons it isn't a plain class attribute:
-    - Import-time read froze the env at first import (review finding #7),
-      which broke test ergonomics and any deploy that loads env after the
-      module is imported.
-    - Defaulting silently to ``redis://localhost:6379/0`` when the env is
-      unset (review finding #4) split-brain a typoed prod deploy — web
-      enqueued to prod-Redis, worker waited on localhost.
+    Why eager (called at module import / class-body evaluation):
+
+    arq's ``worker.get_kwargs`` reads ``settings_cls.__dict__`` directly to
+    build the Worker (arq 0.28, ``worker.py:889``). ``__dict__`` access
+    bypasses the descriptor protocol, so a non-data descriptor here would
+    end up handed to ``Worker.__init__`` as-is — arq would crash when it
+    tried to use it as a RedisSettings. Eager evaluation is the only shape
+    that survives arq's attribute-access pattern AND fails loud when the
+    env var is missing (review finding #4 — silent fallback to localhost
+    split-brained typoed prod deploys).
+
+    Tests set ``POCKETPAW_REDIS_URL`` in ``tests/cloud/conftest.py`` before
+    any test module is imported so this import-time read succeeds.
     """
-
-    def __get__(self, obj: object, objtype: type | None = None) -> RedisSettings:
-        url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
-        if not url:
-            raise RuntimeError("POCKETPAW_REDIS_URL must be set to run the Tier 2 arq worker")
-        return RedisSettings.from_dsn(url)
+    url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
+    if not url:
+        raise RuntimeError("POCKETPAW_REDIS_URL must be set to run the Tier 2 arq worker")
+    return RedisSettings.from_dsn(url)
 
 
 class WorkerSettings:
@@ -99,4 +101,5 @@ class WorkerSettings:
     # so the user can decide whether to resend — re-running could double-bill or
     # surface a partial duplicate.
     max_tries = 1
-    redis_settings = _LazyRedisSettings()
+    # Eager: arq reads __dict__, which bypasses descriptors. See `_redis_settings`.
+    redis_settings = _redis_settings()

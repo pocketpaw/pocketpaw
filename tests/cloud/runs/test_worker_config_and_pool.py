@@ -1,13 +1,20 @@
-"""Review findings #4, #7, #10 — worker Redis-settings consistency + arq
-pool shutdown.
+"""Review findings #4, #10 + the descriptor regression — worker Redis-settings
+must be a concrete ``RedisSettings`` instance in ``WorkerSettings.__dict__``,
+and the arq pool must close on web shutdown.
+
+Why eager evaluation (not a descriptor): arq's ``get_kwargs`` reads
+``settings_cls.__dict__`` directly (arq/worker.py:889), which bypasses the
+descriptor protocol. A previous attempt to use a non-data descriptor here
+shipped to staging and crashed on boot with
+``AttributeError: '_LazyRedisSettings' object has no attribute 'host'``
+when arq passed the descriptor instance through to ``create_pool``. This
+test pins the contract: a real RedisSettings, in ``__dict__``, no
+descriptor magic.
 
 #4: ``WorkerSettings.redis_settings`` used to silently default to
     ``redis://localhost:6379/0`` if ``POCKETPAW_REDIS_URL`` was unset,
     while ``ArqExecutor._get_pool`` raised loudly. A typoed env in prod
     would split-brain (web → prod-Redis, worker → localhost).
-
-#7: ``WorkerSettings.redis_settings`` was read at module import time, so
-    a test that ``monkeypatch.setenv`` after import had no effect.
 
 #10: ``arq_executor._pool`` had no aclose hook — a web process that ever
      enqueued a job leaked the connection through shutdown.
@@ -18,47 +25,53 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from arq.connections import RedisSettings
 from pocketpaw_ee.cloud.chat.runs import arq_executor
 from pocketpaw_ee.cloud.chat.runs import worker as worker_mod
 
 pytestmark = pytest.mark.asyncio
 
 
-# --- #4 + #7: redis_settings is lazy + fail-loud ---------------------------
+# --- arq-compat contract: real RedisSettings in __dict__ -------------------
 
 
-async def test_worker_redis_settings_raises_when_env_unset(monkeypatch):
-    """Accessing WorkerSettings.redis_settings without POCKETPAW_REDIS_URL
-    set must raise — silent fallback to localhost is a deploy footgun."""
+async def test_worker_settings_redis_settings_is_a_real_redis_settings():
+    """Regression for the _LazyRedisSettings deploy crash.
+
+    arq reads ``settings_cls.__dict__['redis_settings']`` directly, so a
+    descriptor here gets handed to ``create_pool`` and crashes with
+    ``AttributeError: '<descriptor>' object has no attribute 'host'``.
+    The value in ``__dict__`` MUST be a concrete ``RedisSettings``.
+    """
+    raw = worker_mod.WorkerSettings.__dict__.get("redis_settings")
+    assert isinstance(raw, RedisSettings), (
+        f"WorkerSettings.redis_settings in __dict__ is {type(raw).__name__}, "
+        "expected RedisSettings. Eager evaluation is required because arq "
+        "bypasses the descriptor protocol via __dict__ access."
+    )
+    # Sanity: arq will read these attributes during create_pool.
+    assert isinstance(raw.host, str) and raw.host
+    assert isinstance(raw.port, int)
+
+
+# --- #4: helper fails loud when env is missing -----------------------------
+
+
+async def test_redis_settings_helper_raises_when_env_unset(monkeypatch):
+    """``_redis_settings()`` must refuse to default to localhost — that was
+    review finding #4. The module import already ran successfully (env is
+    set via conftest); we test the helper in isolation."""
     monkeypatch.delenv("POCKETPAW_REDIS_URL", raising=False)
-
     with pytest.raises(RuntimeError, match="POCKETPAW_REDIS_URL"):
-        worker_mod.WorkerSettings.redis_settings  # noqa: B018  (descriptor access)
+        worker_mod._redis_settings()
 
 
-async def test_worker_redis_settings_lazy_reads_env_after_import(monkeypatch):
-    """Regression for #7 — env is read at access time, so a test (or a
-    deployment whose env loader runs after import) can set the var and the
-    next access picks it up."""
-    monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://late-loaded:6379/3")
-
-    settings = worker_mod.WorkerSettings.redis_settings
-
-    # arq's RedisSettings exposes host/port from from_dsn.
-    assert settings.host == "late-loaded"
-    assert settings.port == 6379
-    assert settings.database == 3
-
-
-async def test_worker_redis_settings_reflects_changed_env(monkeypatch):
-    """Subsequent access reflects the current env — no cached/stale value."""
-    monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://first:6379/0")
-    s1 = worker_mod.WorkerSettings.redis_settings
-    monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://second:6379/0")
-    s2 = worker_mod.WorkerSettings.redis_settings
-
-    assert s1.host == "first"
-    assert s2.host == "second"
+async def test_redis_settings_helper_parses_env(monkeypatch):
+    monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://parsed-host:6380/2")
+    settings = worker_mod._redis_settings()
+    assert settings.host == "parsed-host"
+    assert settings.port == 6380
+    assert settings.database == 2
 
 
 # --- #10: arq pool close on shutdown ---------------------------------------
