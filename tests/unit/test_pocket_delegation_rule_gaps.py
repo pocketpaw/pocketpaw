@@ -26,10 +26,10 @@ from __future__ import annotations
 # the new author sees the content rules need to move too — that is the
 # whole point of pinning them at the source.
 from pocketpaw.ripple._pockets import (
-    POCKET_DELEGATION_RULE,
     _INTERACTIVE_DEFAULT_BLOCK,
     _LIVE_DATA_SOURCES_BLOCK,
     _LIVE_DATA_SOURCES_EDIT_BLOCK,
+    POCKET_DELEGATION_RULE,
 )
 
 
