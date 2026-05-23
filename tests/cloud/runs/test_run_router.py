@@ -1,3 +1,12 @@
+"""Tests for the run streaming + stop endpoints.
+
+These tests replace the SSE-asserting coverage previously held by:
+  - tests/cloud/test_agent_router_smoke.py    (deleted in Task 9)
+  - tests/cloud/test_agent_router_run.py      (deleted in Task 9)
+  - tests/cloud/test_agent_router_cancel.py   (deleted in Task 9)
+The agent-event sequence itself is covered by ``test_run_core.py``.
+"""
+
 import fakeredis.aioredis
 import pytest
 from pocketpaw_ee.cloud.chat.runs.redis_stream import RedisStreamTransport

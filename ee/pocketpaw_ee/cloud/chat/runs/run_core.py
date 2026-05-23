@@ -1,23 +1,9 @@
-"""Agent-run core — the loop lifted out of ``agent_router._run_agent_stream``.
+"""Agent-run core — the loop the executor invokes for every chat run.
 
-Two entry points share the same building blocks:
-
-* ``execute_run(spec)`` — the executor-facing entry point. It rebuilds a
-  ``ScopeContext`` from the ``RunSpec``, drives the agent via
-  ``_iter_agent_events`` and writes every event through a
-  :class:`RunStreamTransport`. This is what an in-process or arq worker
-  invokes.
-
-* ``_run_agent_stream_shim_for_task6`` — a temporary backwards-compatibility
-  shim with the same signature and yield contract as the old
-  ``agent_router._run_agent_stream``. Re-exported as
-  ``agent_router._run_agent_stream`` until Task 9 rewrites the POST endpoint;
-  keeps the existing SSE tests passing during the intermediate state.
-
-The shim is a thin wrapper around the same helpers ``execute_run`` uses, so
-both paths share the agent-pool loop, side-channel draining, ripple
-extraction, and assistant-message persistence logic — there is exactly one
-implementation of each concern.
+The single entry point ``execute_run(spec)`` rebuilds a ``ScopeContext``
+from the ``RunSpec``, drives the agent via ``_iter_agent_events`` and
+writes every event through a :class:`RunStreamTransport`. The
+in-process and arq executors invoke this same function.
 """
 
 from __future__ import annotations
@@ -33,7 +19,6 @@ from datetime import datetime
 from typing import Any
 
 from pocketpaw.agents.pool import get_agent_pool  # re-exported for test patching
-from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
@@ -65,7 +50,7 @@ def _stream_ttl() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Persistence + broadcast helpers (moved verbatim from agent_router)
+# Persistence + broadcast helpers
 # ---------------------------------------------------------------------------
 
 
@@ -141,7 +126,7 @@ async def _broadcast_agent_typing(ctx: ScopeContext, active: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Specialist response detection (moved verbatim from agent_router)
+# Specialist response detection
 # ---------------------------------------------------------------------------
 
 
@@ -250,8 +235,7 @@ async def _maybe_handle_specialist_response(
 
     # Re-emit the realtime ``pocket.created`` / ``pocket.updated`` event from
     # the parent process so every connected client sees the new pocket
-    # without a manual refresh. See the original implementation in
-    # ``agent_router`` (Task 6 move) for the full rationale.
+    # without a manual refresh.
     try:
         from beanie import PydanticObjectId
 
@@ -274,7 +258,7 @@ async def _maybe_handle_specialist_response(
 
 
 # ---------------------------------------------------------------------------
-# First-turn auto-titling (moved verbatim from agent_router)
+# First-turn auto-titling
 # ---------------------------------------------------------------------------
 
 
@@ -298,36 +282,14 @@ async def _set_session_title_in_mongo(session_id: str, title: str) -> bool:
     return await sessions_service.set_title(session_id, title)
 
 
-def _resolve_set_session_title() -> Any:
-    """Return ``_set_session_title_in_mongo`` looked up via the legacy
-    ``agent_router`` module if available.
-
-    Existing tests patch ``pocketpaw_ee.cloud.chat.agent_router
-    ._set_session_title_in_mongo``; the post-Task-6 module re-exports this
-    function from run_core so test patches replace the attribute on
-    ``agent_router``. We resolve the name through ``sys.modules`` at call
-    time so the patch is observed without creating a circular import at
-    module-load time.
-    """
-    import sys
-
-    mod = sys.modules.get("pocketpaw_ee.cloud.chat.agent_router")
-    if mod is not None:
-        fn = getattr(mod, "_set_session_title_in_mongo", None)
-        if fn is not None:
-            return fn
-    return _set_session_title_in_mongo
-
-
 async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None:
     """Set placeholder, then upgrade to Haiku-generated title in the background."""
     if not ctx.session_id:
         return
 
-    set_title = _resolve_set_session_title()
     placeholder = _truncate_for_title(first_message)
     if placeholder:
-        if await set_title(ctx.session_id, placeholder):
+        if await _set_session_title_in_mongo(ctx.session_id, placeholder):
             push_sse_event(
                 "session_titled",
                 {"session_id": ctx.session_id, "title": placeholder},
@@ -350,7 +312,7 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
     if not title or title == placeholder:
         return
 
-    if await set_title(ctx.session_id, title):
+    if await _set_session_title_in_mongo(ctx.session_id, title):
         push_sse_event(
             "session_titled",
             {"session_id": ctx.session_id, "title": title},
@@ -367,7 +329,7 @@ async def _mark_running(run_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Persist + broadcast tail — shared by execute_run and the legacy shim
+# Persist + broadcast tail
 # ---------------------------------------------------------------------------
 
 
@@ -442,25 +404,8 @@ async def _persist_and_complete(
 
 
 # ---------------------------------------------------------------------------
-# The agent-pool driver — shared by ``execute_run`` and the legacy shim
+# Agent-pool driver
 # ---------------------------------------------------------------------------
-
-
-def _legacy_router_attr(name: str, default: Any) -> Any:
-    """Look up ``name`` on the legacy ``agent_router`` module, falling back to
-    ``default``. Used so existing patch-by-name tests
-    (``patch.object(agent_router, "_broadcast_message_new", …)``) keep working
-    in the Task-6 intermediate state. After Task 9 rewrites the POST endpoint
-    and its tests, this indirection goes away.
-    """
-    import sys
-
-    mod = sys.modules.get("pocketpaw_ee.cloud.chat.agent_router")
-    if mod is not None:
-        attr = getattr(mod, name, None)
-        if attr is not None:
-            return attr
-    return default
 
 
 async def _drive_agent_loop(
@@ -468,25 +413,16 @@ async def _drive_agent_loop(
     *,
     user_content: str,
     attachments_in: list[dict[str, Any]] | None,
-    mentions_in: list[str] | None,
+    mentions_in: list[Any] | None,
     history: list[dict[str, str]] | None,
     is_cancelled: Any,
     emit_stream_start: bool,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples.
 
-    ``is_cancelled`` is an awaitable nullary callable returning ``bool`` — both
-    callers (the asyncio.Event-based shim and the transport-flag-based
-    ``execute_run``) provide their own.
+    ``is_cancelled`` is an awaitable nullary callable returning ``bool``.
     """
-    # Deferred lookup so legacy ``patch.object(agent_router, …)`` tests still
-    # affect behavior in the Task-6 intermediate state.
-    _get_pool = _legacy_router_attr("get_agent_pool", get_agent_pool)
-    _build_knowledge_context = _legacy_router_attr(
-        "build_knowledge_context", build_knowledge_context
-    )
-
-    pool = _get_pool()
+    pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
     except Exception as e:
@@ -494,7 +430,7 @@ async def _drive_agent_loop(
         yield ("error", {"code": "agent.load_failed", "message": str(e)})
         return
 
-    knowledge_context = await _build_knowledge_context(
+    knowledge_context = await build_knowledge_context(
         ctx,
         user_message=user_content,
         attachments=attachments_in,
@@ -763,109 +699,3 @@ async def execute_run(spec: RunSpec) -> None:
         {"assistant_message_id": assistant_id, "usage": {}, "cancelled": False},
     )
     await transport.set_ttl(spec.run_id, _stream_ttl())
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compatibility shim — same signature as the old _run_agent_stream
-# ---------------------------------------------------------------------------
-
-
-async def _run_agent_stream_shim_for_task6(
-    ctx: ScopeContext,
-    user_message_id: str,
-    body: CloudAgentChatRequest,
-    cancel_event: asyncio.Event,
-    *,
-    history: list[dict[str, str]] | None = None,
-) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-    """Yield ``(name, data)`` SSE tuples, preserving the original contract.
-
-    This keeps ``agent_router.post_agent_chat`` working unchanged until
-    Task 9 rewrites it. Functional parity with the original
-    ``_run_agent_stream`` is the bar — see ``_drive_agent_loop`` for the
-    shared agent-pool driver.
-
-    Test patches that target ``agent_router._persist_assistant_message`` /
-    ``_broadcast_message_new`` / ``_broadcast_agent_typing`` /
-    ``get_agent_pool`` continue to work because we resolve those names from
-    the legacy ``agent_router`` module at call time via
-    ``_legacy_router_attr``.
-    """
-    # Deferred lookups so legacy ``patch.object(agent_router, …)`` test
-    # bindings still affect behavior in the Task-6 intermediate state.
-    persist_assistant = _legacy_router_attr(
-        "_persist_assistant_message", _persist_assistant_message
-    )
-    broadcast_new = _legacy_router_attr("_broadcast_message_new", _broadcast_message_new)
-    broadcast_typing = _legacy_router_attr("_broadcast_agent_typing", _broadcast_agent_typing)
-    get_pool = _legacy_router_attr("get_agent_pool", get_agent_pool)
-
-    await broadcast_typing(ctx, active=True)
-
-    full_text = ""
-    cancelled = False
-
-    async def _is_cancelled() -> bool:
-        return cancel_event.is_set()
-
-    try:
-        async for name, data in _drive_agent_loop(
-            ctx,
-            user_content=body.content,
-            attachments_in=body.attachments,
-            mentions_in=body.mentions,
-            history=history,
-            is_cancelled=_is_cancelled,
-            emit_stream_start=True,
-        ):
-            if name == "error":
-                yield (name, data)
-                await broadcast_typing(ctx, active=False)
-                return
-            if name == "chunk":
-                content = data.get("content", "")
-                if isinstance(content, str):
-                    full_text += content
-            yield (name, data)
-        if cancel_event.is_set():
-            cancelled = True
-    except Exception as exc:
-        logger.exception("Cloud agent run failed for agent=%s", ctx.target_agent_id)
-        yield ("error", {"code": "agent.run_failed", "message": str(exc)})
-        await broadcast_typing(ctx, active=False)
-        return
-
-    remaining, ripple_spec = _extract_ripple_attachment(full_text)
-    attachments: list[dict[str, Any]] = []
-    if ripple_spec is not None:
-        attachments.append({"type": "ripple", "meta": ripple_spec})
-        full_text = remaining
-        yield ("ripple", {"spec": ripple_spec})
-
-    if cancelled or not full_text.strip():
-        yield ("stream_end", {"assistant_message_id": None, "usage": {}, "cancelled": cancelled})
-        await broadcast_typing(ctx, active=False)
-        return
-
-    assistant_msg = await persist_assistant(ctx, full_text, attachments)
-    assistant_id = str(assistant_msg.id)
-    await broadcast_new(
-        ctx, assistant_id, full_text, attachments, created_at=assistant_msg.createdAt
-    )
-    await broadcast_typing(ctx, active=False)
-
-    # Best-effort per-agent soul observation (matches the original).
-    try:
-        pool = get_pool()
-        await pool.observe(ctx.target_agent_id, body.content, full_text)
-    except Exception:
-        logger.warning(
-            "pool.observe failed for agent %s — per-agent soul not updated",
-            ctx.target_agent_id,
-            exc_info=True,
-        )
-
-    yield (
-        "stream_end",
-        {"assistant_message_id": assistant_id, "usage": {}, "cancelled": False},
-    )
