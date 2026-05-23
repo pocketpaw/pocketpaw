@@ -13,6 +13,7 @@ honours rule #7 (tenant filter on every read) — see ``find_one`` on
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from pocketpaw_ee.cloud._core.errors import NotFound
@@ -98,14 +99,29 @@ async def mark_terminal(
 
 
 async def find_active_run_for_scope(
-    *, workspace_id: str, context_type: str, scope_id: str
+    *,
+    workspace_id: str,
+    context_type: str | Iterable[str],
+    scope_id: str,
 ) -> ChatRunDoc | None:
-    """Newest non-terminal run for a scope — drives frontend auto-resume."""
+    """Newest non-terminal run for a scope — drives frontend auto-resume.
+
+    ``context_type`` accepts either a single string (the original signature
+    used by ``post_agent_chat``) or any iterable of strings (used by the
+    group-messages history path, which has to query for both ``"dm"`` and
+    ``"group"`` because ``post_agent_chat`` writes one or the other depending
+    on the URL scope but ``get_messages`` only knows the group id).
+    """
+    if isinstance(context_type, str):
+        ctype_filter: dict = {"context_type": context_type}
+    else:
+        types = list(context_type)
+        ctype_filter = {"context_type": {"$in": types}} if types else {"context_type": None}
     return (
         await ChatRunDoc.find(
             ChatRunDoc.workspace == workspace_id,
-            ChatRunDoc.context_type == context_type,
             ChatRunDoc.scope_id == scope_id,
+            ctype_filter,
             {"status": {"$in": ["queued", "running"]}},
         )
         .sort(-ChatRunDoc.createdAt)

@@ -329,16 +329,60 @@ async def link_pocket(workspace_id: str, session_id_str: str, pocket_id: str) ->
 # ---------------------------------------------------------------------------
 
 
+async def _active_run_for_session(session: _SessionDoc) -> dict | None:
+    """Return ``{"run_id", "status"}`` for the newest non-terminal
+    ``ChatRunDoc`` matching the session's scope, or ``None`` if no run is
+    in flight. Mapping mirrors what ``post_agent_chat`` writes:
+
+    * session-typed  → ``context_type="session"``, ``scope_id=str(session.id)``
+    * group-typed    → ``context_type="group"``,   ``scope_id=session.group``
+    * pocket-typed   → ``context_type="pocket"``,  ``scope_id=session.pocket``
+
+    Isolated under a helper so each branch of ``get_history`` is a one-liner
+    instead of repeating the lookup three times.
+    """
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    if session.context_type == "session":
+        scope_id: str | None = str(session.id)
+        ctype: str | None = "session"
+    elif session.context_type == "group":
+        scope_id = session.group
+        ctype = "group"
+    elif session.context_type == "pocket":
+        scope_id = session.pocket
+        ctype = "pocket"
+    else:
+        return None
+
+    if not scope_id or not ctype:
+        return None
+
+    active = await run_service.find_active_run_for_scope(
+        workspace_id=session.workspace,
+        context_type=ctype,
+        scope_id=scope_id,
+    )
+    if active is None:
+        return None
+    return {"run_id": active.run_id, "status": active.status}
+
+
 async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
     """Return session chat history from the unified Mongo messages store.
 
     Spans three context types (session/group/pocket) with shape-specific
     queries. Stays on Beanie because a full extraction would need a
     separate HistoryReader port.
+
+    The response carries an ``active_run`` field (``{"run_id", "status"}``
+    or ``None``) so the frontend can auto-resume an in-flight agent run on
+    history load — see ``chat/runs`` for the resumable-stream protocol.
     """
     from pocketpaw_ee.cloud.models.message import Message
 
     session = await _fetch_owned(session_id, user_id)
+    active_run = await _active_run_for_session(session)
 
     if session.context_type == "session":
         # Prefix-match on session_key so reads stay aligned with whatever
@@ -372,7 +416,8 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
                     "attachments": [a.model_dump() for a in (m.attachments or [])],
                 }
                 for m in messages
-            ]
+            ],
+            "active_run": active_run,
         }
 
     if session.context_type == "group" and session.group:
@@ -400,7 +445,8 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
                     "attachments": [a.model_dump() for a in (m.attachments or [])],
                 }
                 for m in messages
-            ]
+            ],
+            "active_run": active_run,
         }
 
     # Pocket context — three writer paths land here with different
@@ -432,7 +478,8 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
                 "attachments": [a.model_dump() for a in (m.attachments or [])],
             }
             for m in messages
-        ]
+        ],
+        "active_run": active_run,
     }
 
 

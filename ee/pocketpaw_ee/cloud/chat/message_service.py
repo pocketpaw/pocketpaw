@@ -776,8 +776,16 @@ async def get_messages(
 
     Cursor format: ``"{iso_timestamp}|{object_id}"``.
     Fetches ``limit + 1`` to determine ``has_more``.
+
+    The response also carries ``active_run`` (``{"run_id", "status"}`` or
+    ``None``) — the newest non-terminal ``ChatRunDoc`` for this group's
+    scope across both ``"dm"`` and ``"group"`` ``context_type`` values
+    (``post_agent_chat`` writes one or the other depending on the URL
+    scope). The frontend uses it to auto-resume an in-flight agent reply
+    after a refresh / session switch.
     """
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
 
     group = await _get_group_or_404(group_id)
     if group.type in ("private", "dm"):
@@ -820,7 +828,19 @@ async def get_messages(
         if last.created_at is not None:
             next_cursor = f"{last.created_at.isoformat()}|{last.id}"
 
-    return {"items": items, "nextCursor": next_cursor, "hasMore": has_more}
+    active = await run_service.find_active_run_for_scope(
+        workspace_id=group.workspace,
+        context_type=("dm", "group"),
+        scope_id=group_id,
+    )
+    active_run = {"run_id": active.run_id, "status": active.status} if active else None
+
+    return {
+        "items": items,
+        "nextCursor": next_cursor,
+        "hasMore": has_more,
+        "active_run": active_run,
+    }
 
 
 async def get_thread(message_id: str, user_id: str) -> list[dict]:
