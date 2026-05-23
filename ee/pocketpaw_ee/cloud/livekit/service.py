@@ -32,6 +32,12 @@ from pocketpaw_ee.cloud.livekit.types import MeetingAgentProtocol  # noqa: E402
 
 _active_agents: dict[str, MeetingAgentProtocol] = {}
 
+# ---------------------------------------------------------------------------
+# Active recordings registry  (group_id → egress_id)
+# ---------------------------------------------------------------------------
+
+_active_recordings: dict[str, str] = {}
+
 
 def _get_agent(group_id: str) -> MeetingAgentProtocol | None:
     """Get the active meeting agent for a group, if any."""
@@ -173,6 +179,216 @@ async def _reap_agent_process(
             group_id,
             proc.returncode,
         )
+
+
+# ---------------------------------------------------------------------------
+# S3 configuration for LiveKit recording output
+# ---------------------------------------------------------------------------
+
+
+def _get_s3_config() -> dict[str, str] | None:
+    """Read S3 config from environment for LiveKit Egress output.
+
+    Returns a dict with keys used by ``livekit.protocol.egress.S3Upload``
+    or ``None`` if S3 is not configured (falls back to temp local storage).
+    """
+    bucket = os.environ.get("S3_PRIVATE_BUCKET") or os.environ.get("S3_BUCKET")
+    if not bucket:
+        logger.warning("S3 not configured — recordings will use LiveKit's built-in storage")
+        return None
+    return {
+        "bucket": bucket,
+        "region": os.environ.get("S3_REGION", ""),
+        "endpoint": os.environ.get("S3_ENDPOINT", ""),
+        "access_key": os.environ.get("S3_ACCESS_KEY_ID", ""),
+        "secret": os.environ.get("S3_SECRET_ACCESS_KEY", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recording management
+# ---------------------------------------------------------------------------
+
+RECORDING_DIR = "recordings"
+
+
+def _recording_output_path(group_id: str) -> str:
+    """Build a deterministic S3 key for a recording."""
+    from datetime import UTC, datetime
+
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    return f"{RECORDING_DIR}/{group_id}/{timestamp}_{room_name_for_group(group_id)}.mp4"
+
+
+async def start_room_recording(group_id: str) -> dict[str, Any]:
+    """Start a composite room recording via LiveKit Egress, outputting to S3.
+
+    Returns the egress metadata including the egress ID and output path.
+
+    Raises ``RuntimeError`` if a recording is already active for this group.
+    """
+    _ensure_configured()
+
+    if group_id in _active_recordings:
+        raise RuntimeError(f"Recording already active for group {group_id}")
+
+    room_name = room_name_for_group(group_id)
+
+    from livekit.api import LiveKitAPI
+    from livekit.protocol.egress import (
+        EncodedFileOutput,
+        EncodedFileType,
+        EncodingOptionsPreset,
+        RoomCompositeEgressRequest,
+        S3Upload,
+    )
+
+    output_path = _recording_output_path(group_id)
+    s3_cfg = _get_s3_config()
+
+    file_output = EncodedFileOutput(
+        file_type=EncodedFileType.MP4,
+        filepath=output_path,
+        disable_manifest=False,
+    )
+
+    # Configure S3 upload destination
+    if s3_cfg:
+        file_output.s3.CopyFrom(
+            S3Upload(
+                bucket=s3_cfg["bucket"],
+                region=s3_cfg["region"],
+                endpoint=s3_cfg["endpoint"],
+                access_key=s3_cfg["access_key"],
+                secret=s3_cfg["secret"],
+            )
+        )
+    # If no S3 config, LiveKit uses its built-in storage (if configured)
+    # or the recording will fail — log a warning.
+
+    req = RoomCompositeEgressRequest(
+        room_name=room_name,
+        preset=EncodingOptionsPreset.H264_720P_30,
+        audio_only=False,
+        file_outputs=[file_output],
+    )
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            info = await lk.egress.start_room_composite_egress(req)
+            egress_id = info.egress_id
+            _active_recordings[group_id] = egress_id
+            logger.info(
+                "Started recording for room %s (egress_id=%s, output=%s)",
+                room_name,
+                egress_id,
+                output_path,
+            )
+            return {
+                "egress_id": egress_id,
+                "room_name": room_name,
+                "group_id": group_id,
+                "output_path": output_path,
+                "status": info.status,
+                "started_at": info.started_at,
+            }
+        except Exception as exc:
+            logger.error("Failed to start recording for room %s: %s", room_name, exc)
+            raise
+
+
+async def stop_room_recording(group_id: str) -> dict[str, Any]:
+    """Stop an active room recording.
+
+    Returns the final egress info including the S3 output path so the
+    caller can create a file record in the uploads system.
+
+    Raises ``RuntimeError`` if no recording is active for this group.
+    """
+    _ensure_configured()
+
+    egress_id = _active_recordings.pop(group_id, None)
+    if not egress_id:
+        raise RuntimeError(f"No active recording for group {group_id}")
+
+    from livekit.api import LiveKitAPI
+    from livekit.protocol.egress import StopEgressRequest
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            stop_req = StopEgressRequest(egress_id=egress_id)
+            info = await lk.egress.stop_egress(stop_req)
+            logger.info(
+                "Stopped recording for group %s (egress_id=%s, status=%s)",
+                group_id,
+                egress_id,
+                info.status,
+            )
+
+            # Collect output file info
+            output_files = []
+            for f in info.file_results or []:
+                output_files.append(
+                    {
+                        "filename": f.filename,
+                        "size": f.size,
+                        "duration": f.duration,
+                    }
+                )
+
+            return {
+                "egress_id": egress_id,
+                "room_name": info.room_name or room_name_for_group(group_id),
+                "group_id": group_id,
+                "status": info.status,
+                "output_files": output_files,
+                "ended_at": info.ended_at,
+            }
+        except Exception as exc:
+            logger.error("Failed to stop recording for group %s: %s", group_id, exc)
+            raise
+
+
+async def get_recording_info(group_id: str) -> dict[str, Any] | None:
+    """Get the current status of a recording for a group.
+
+    Returns ``None`` if no recording was ever started.
+    """
+    egress_id = _active_recordings.get(group_id)
+    if not egress_id:
+        return None
+
+    _ensure_configured()
+
+    from livekit.api import LiveKitAPI
+    from livekit.protocol.egress import ListEgressRequest
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            list_req = ListEgressRequest(room_name=room_name_for_group(group_id))
+            resp = await lk.egress.list_egress(list_req)
+            for item in resp.items or []:
+                if item.egress_id == egress_id:
+                    return {
+                        "egress_id": item.egress_id,
+                        "room_name": item.room_name,
+                        "group_id": group_id,
+                        "status": item.status,
+                        "started_at": item.started_at,
+                        "ended_at": item.ended_at,
+                    }
+            return {
+                "egress_id": egress_id,
+                "group_id": group_id,
+                "status": "unknown",
+            }
+        except Exception as exc:
+            logger.warning("Failed to get recording info for group %s: %s", group_id, exc)
+            return {
+                "egress_id": egress_id,
+                "group_id": group_id,
+                "status": "unknown",
+            }
 
 
 # ---------------------------------------------------------------------------
