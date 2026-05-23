@@ -138,6 +138,17 @@ class CloudLifecycleHook:
             logger.warning("Pocket interval-refresh scheduler start failed: %s", exc)
 
     async def on_shutdown(self) -> None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        # Shut down the meeting APScheduler if it was started.
+        try:
+            from pocketpaw_ee.cloud.meetings.service import shutdown_scheduler
+
+            await shutdown_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Meeting scheduler shutdown error: %s", exc)
+
         # Most cloud teardown is handled inside mount_cloud's own shutdown
         # hook. The interval-refresh scheduler is owned by this lifecycle
         # hook (it was started in on_startup), so it is cancelled here so
