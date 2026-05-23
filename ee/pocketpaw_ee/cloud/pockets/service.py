@@ -107,8 +107,12 @@ from pocketpaw_ee.cloud.pockets.dto import (
 )
 from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
+    ActionWiringViolationError,
     CatalogViolationError,
+    format_action_violations_for_agent,
     format_violations_for_agent,
+    validate_action_wiring_logged,
+    validate_action_wiring_strict,
     validate_against_catalog_logged,
     validate_against_catalog_strict,
     validate_ripple_spec_logged,
@@ -441,11 +445,27 @@ async def _gate_catalog(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
+        # Action-handler wiring runs as a sibling gate — same strict
+        # posture as the catalog walk so the agent-generation path
+        # gets a single corrective signal per failed attempt rather
+        # than chained-and-shadowed errors. Manifest-driven catalog
+        # already passed; this catches the verb-level / Refresh-button
+        # failure modes the catalog can't see.
+        validate_action_wiring_strict(
+            spec,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
     else:
         validate_against_catalog_logged(
             spec,
             allowed_types,
             embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+        validate_action_wiring_logged(
+            spec,
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
@@ -1285,6 +1305,8 @@ async def agent_update(
                 )
             except CatalogViolationError as exc:
                 return None, format_violations_for_agent(exc.violations)
+            except ActionWiringViolationError as exc:
+                return None, format_action_violations_for_agent(exc.violations)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
@@ -2298,6 +2320,8 @@ async def agent_create(
             await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
         except CatalogViolationError as exc:
             return None, None, format_violations_for_agent(exc.violations)
+        except ActionWiringViolationError as exc:
+            return None, None, format_action_violations_for_agent(exc.violations)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,
