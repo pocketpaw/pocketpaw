@@ -5,6 +5,15 @@
 # new two-call protocol where the calling chat agent drafts the
 # rippleSpec inline using its own LLM and the specialist only runs
 # validate-and-persist on the returned draft.
+# Modified: 2026-05-23 (#1197) — ``_apply_ops`` now re-fetches the live
+# spec after a successful op batch and runs the strict action-wiring
+# gate against it. Without this, an end-of-batch spec with a hallucinated
+# verb (e.g. ``action: "backend_fetch"`` after the prompt rename) returned
+# ``ok=True, action="applied"`` — closing #1196's loophole on the agent-
+# edit path. On violation: ``ok=False`` + corrective text → MCP
+# ``is_error: true`` → chat agent retry via #1190. The post-apply gate
+# re-raises programming errors so a stale-import regression in the
+# validator surface stays loud, not silent.
 # Modified: 2026-05-22 (feat/bundled-templates, Increment 2a) —
 # ``AgentModeAdapter.create`` short-circuits on a ``hints.template_id``:
 # it loads the built-in template, passes its ``ripple_spec`` straight to
@@ -875,6 +884,12 @@ async def _apply_ops(input: Any, *, started: float) -> Any:
                 "validation — see error for which handler / button needs the "
                 "real verb. The chat agent's next turn should retry."
             )
+        except (ImportError, AttributeError, NameError, TypeError):
+            # Programming errors (stale import after a rename, attribute
+            # typo, wrong shape) must NOT be swallowed — that's the
+            # silent-success class this PR was filed to eliminate. Let
+            # them surface.
+            raise
         except Exception:  # noqa: BLE001 — infra failures don't block edits
             # Manifest fetch / Mongo read / etc. The gate is best-effort
             # like the catalog walk: a transient infra failure must not
