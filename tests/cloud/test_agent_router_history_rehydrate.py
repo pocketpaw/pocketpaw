@@ -10,6 +10,7 @@ memory of prior turns after any process restart.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,6 +24,26 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     load_history_for_scope,
     session_key_for,
 )
+
+
+class _StubTransport:
+    """Yields one ``stream_end`` so the SSE generator finishes immediately."""
+
+    async def request_cancel(self, run_id: str) -> None:  # noqa: ARG002
+        return None
+
+    def read_events(self, run_id: str, *, after: str = "0", block_ms: int = 15000) -> AsyncIterator:  # noqa: ARG002
+        async def _gen() -> AsyncIterator:
+            from pocketpaw_ee.cloud.chat.runs.transport import StreamEvent
+
+            yield StreamEvent(
+                entry_id="1-0",
+                event="stream_end",
+                data={"assistant_message_id": None, "usage": {}, "cancelled": False},
+            )
+
+        return _gen()
+
 
 # ---------------------------------------------------------------------------
 # Helper: the message-collection accessor we patch. Stubs stand in for Beanie
@@ -229,6 +250,7 @@ async def test_post_agent_chat_ships_history_on_runspec_to_executor(
         patch.object(router_mod, "_persist_user_message", fake_persist),
         patch.object(router_mod, "_ensure_scope_session", fake_ensure_session),
         patch.object(router_mod, "get_executor", lambda: _RecordingExecutor()),
+        patch.object(router_mod, "get_stream_transport", lambda: _StubTransport()),
     ):
         resp = await cloud_app_client.post(
             "/cloud/chat/session/s1/agent",

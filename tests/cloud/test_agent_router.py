@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -44,12 +46,53 @@ async def _fake_ensure_session(_ctx):
     return "session_id_1"
 
 
-async def test_post_agent_creates_run_and_returns_json(
+class _StubTransport:
+    """Transport that emits one ``stream_end`` immediately so the SSE
+    generator terminates without needing a real Redis."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def request_cancel(self, run_id: str) -> None:
+        self.cancelled.append(run_id)
+
+    def read_events(self, run_id: str, *, after: str = "0", block_ms: int = 15000) -> AsyncIterator:  # noqa: ARG002
+        async def _gen() -> AsyncIterator:
+            from pocketpaw_ee.cloud.chat.runs.transport import StreamEvent
+
+            yield StreamEvent(
+                entry_id="1-0",
+                event="stream_end",
+                data={"assistant_message_id": None, "usage": {}, "cancelled": False},
+            )
+
+        return _gen()
+
+
+def _parse_sse(body: bytes) -> list[tuple[str, dict]]:
+    """Parse ``event:``/``data:`` SSE frames from a response body."""
+    out: list[tuple[str, dict]] = []
+    for part in body.decode().split("\n\n"):
+        event = ""
+        data = ""
+        for line in part.splitlines():
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data = line[5:].strip()
+        if event and data:
+            out.append((event, json.loads(data)))
+    return out
+
+
+async def test_post_agent_streams_sse_with_message_persisted_first(
     cloud_app_client: AsyncClient,
     mongo_db,  # noqa: ARG001 — forces Beanie init so create_run can persist
     monkeypatch,
 ):
-    """POST returns JSON with the new run_id and submits the run to the executor."""
+    """POST streams SSE: first frame is ``message.persisted`` with the user
+    message id + the just-created run id, then frames flow from the run's
+    transport until a terminal event closes the response."""
     from pocketpaw_ee.cloud.chat import agent_router as mod
 
     submitted: list[str] = []
@@ -59,6 +102,7 @@ async def test_post_agent_creates_run_and_returns_json(
             submitted.append(spec.run_id)
 
     monkeypatch.setattr(mod, "get_executor", lambda: _FakeExecutor())
+    monkeypatch.setattr(mod, "get_stream_transport", lambda: _StubTransport())
 
     with (
         patch.object(mod, "resolve_scope_context", _fake_resolve),
@@ -72,13 +116,19 @@ async def test_post_agent_creates_run_and_returns_json(
         )
 
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["run_id"]
-    assert body["user_message_id"] == "user_msg_id_1"
-    assert body["session_id"] == "session_id_1"
-    assert body["client_message_id"] == "c1"
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    frames = _parse_sse(resp.content)
+    assert frames, "expected at least the message.persisted frame"
+    assert frames[0][0] == "message.persisted"
+    persisted = frames[0][1]
+    assert persisted["user_message_id"] == "user_msg_id_1"
+    assert persisted["client_message_id"] == "c1"
+    assert persisted["session_id"] == "session_id_1"
+    assert persisted["run_id"]
+    assert frames[-1][0] == "stream_end"
     # The executor received the freshly created run.
-    assert submitted == [body["run_id"]]
+    assert submitted == [persisted["run_id"]]
 
 
 async def test_post_agent_idempotent_on_client_message_id(
@@ -96,16 +146,7 @@ async def test_post_agent_idempotent_on_client_message_id(
             submitted.append(spec.run_id)
 
     monkeypatch.setattr(mod, "get_executor", lambda: _FakeExecutor())
-
-    # The second POST sees the first run as ``active`` (still queued — the
-    # fake executor never marks it terminal) and tries to cancel it through
-    # the stream transport. Stub the transport so the test doesn't need
-    # ``POCKETPAW_REDIS_URL`` set.
-    class _NullTransport:
-        async def request_cancel(self, run_id):  # noqa: ARG002
-            return None
-
-    monkeypatch.setattr(mod, "get_stream_transport", lambda: _NullTransport())
+    monkeypatch.setattr(mod, "get_stream_transport", lambda: _StubTransport())
 
     with (
         patch.object(mod, "resolve_scope_context", _fake_resolve),
@@ -118,7 +159,9 @@ async def test_post_agent_idempotent_on_client_message_id(
         r2 = await cloud_app_client.post("/cloud/chat/session/s1/agent", json=body_json)
 
     assert r1.status_code == 200 and r2.status_code == 200
-    assert r1.json()["run_id"] == r2.json()["run_id"], (
+    run_id_1 = _parse_sse(r1.content)[0][1]["run_id"]
+    run_id_2 = _parse_sse(r2.content)[0][1]["run_id"]
+    assert run_id_1 == run_id_2, (
         "create_run is idempotent on (workspace, client_message_id), so a "
         "re-submitted message must return the same run."
     )

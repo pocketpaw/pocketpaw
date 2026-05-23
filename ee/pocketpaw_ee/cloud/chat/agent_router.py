@@ -1,18 +1,22 @@
 """Enterprise agent chat — ``POST /cloud/chat/{scope}/{scope_id}/agent``.
 
-Persists the user message, creates a ``ChatRunDoc``, hands it to a
-``RunExecutor``, and returns JSON immediately. The agent's events stream
-through ``GET /cloud/chat/runs/{run_id}/stream`` and cancel via
-``POST /cloud/chat/runs/{run_id}/stop`` (see ``runs/router.py``).
+Streams a typed SSE sequence in the response body while persisting the user
+message, submitting a ``Run`` to the configured executor, and tailing the
+run's Redis Stream so durability sits underneath the wire shape the
+frontend already speaks.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 
 from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
 from pocketpaw_ee.cloud.chat.agent_service import (
@@ -38,6 +42,10 @@ router = APIRouter(tags=["Cloud Agent Chat"], dependencies=[Depends(require_lice
 Scope = Literal["dm", "group", "pocket", "session"]
 
 
+def _sse(event: str, data: dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
 @router.post("/cloud/chat/{scope}/{scope_id}/agent")
 async def post_agent_chat(
     scope: Scope,
@@ -45,7 +53,7 @@ async def post_agent_chat(
     body: CloudAgentChatRequest,
     user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
-) -> dict[str, Any]:
+) -> StreamingResponse:
     try:
         ctx = await resolve_scope_context(
             scope=scope, scope_id=scope_id, user_id=user_id, agent_id_hint=body.agent_id
@@ -54,20 +62,22 @@ async def post_agent_chat(
     except InvalidScope:
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
 
-    # Cancel any prior in-flight run for this scope (cross-process via Redis).
+    transport = get_stream_transport()
+
+    # Supersede any prior in-flight run for this scope. ``request_cancel``
+    # writes the cancel flag in Redis so a worker in another process notices.
     prior = await run_service.find_active_run_for_scope(
         workspace_id=workspace_id, context_type=scope, scope_id=scope_id
     )
     if prior is not None:
-        await get_stream_transport().request_cancel(prior.run_id)
+        await transport.request_cancel(prior.run_id)
 
-    # Load history BEFORE persisting the new user message so ``history``
-    # contains only turns up to (but not including) this request.
+    # Load history BEFORE persisting the new user message so it excludes this turn.
     history = await load_history_for_scope(ctx)
     user_message_id = await _persist_user_message(ctx, body)
 
-    # Resolve the sidebar Session up-front so the run carries ``session_id``
-    # from the first event — lets a mid-stream refresh find the thread.
+    # Resolve the sidebar Session up-front so ``message.persisted`` carries
+    # ``session_id`` — a mid-stream refresh can still find the thread.
     try:
         ctx.session_id = await _ensure_scope_session(ctx)
     except Exception:
@@ -75,9 +85,8 @@ async def post_agent_chat(
         ctx.session_id = None
 
     client_message_id = body.client_message_id or uuid.uuid4().hex
-    run_id = uuid.uuid4().hex
     spec = RunSpec(
-        run_id=run_id,
+        run_id=uuid.uuid4().hex,
         workspace_id=workspace_id,
         context_type=scope,
         scope_id=scope_id,
@@ -94,15 +103,65 @@ async def post_agent_chat(
         mentions=[],
         reply_to=body.reply_to,
     )
+    # create_run is idempotent on (workspace, client_message_id) — when a doc
+    # already exists, re-use its run_id so the executor + SSE stream both
+    # tail the same Redis Stream as the prior request for this client_message_id.
     run = await run_service.create_run(spec)
+    if run.run_id != spec.run_id:
+        spec = spec.model_copy(update={"run_id": run.run_id})
+    run_id = run.run_id
     await get_executor().submit(spec)
 
-    return {
-        "run_id": run.run_id,
-        "user_message_id": user_message_id,
-        "session_id": ctx.session_id,
-        "client_message_id": client_message_id,
-    }
+    async def gen() -> AsyncIterator[bytes]:
+        persisted_payload: dict[str, Any] = {
+            "user_message_id": user_message_id,
+            "client_message_id": client_message_id,
+            "run_id": run_id,
+        }
+        if ctx.session_id:
+            persisted_payload["session_id"] = ctx.session_id
+        yield _sse("message.persisted", persisted_payload)
+
+        cursor = "0"
+        while True:
+            saw_terminal = False
+            async for ev in transport.read_events(run_id, after=cursor, block_ms=15000):
+                cursor = ev.entry_id
+                yield _sse(ev.event, ev.data)
+                if ev.is_terminal:
+                    saw_terminal = True
+            if saw_terminal:
+                return
+            yield b": ping\n\n"
+            await asyncio.sleep(0)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/cloud/chat/{scope}/{scope_id}/agent/stop")
+async def post_agent_chat_stop(
+    scope: Scope,
+    scope_id: str,
+    user_id: str = Depends(current_user_id),  # noqa: ARG001
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """Cancel the active run for this scope. Idempotent — returns ``ok`` even
+    when no run is in flight so the frontend's fire-and-forget stop button
+    doesn't surface a 404 toast."""
+    prior = await run_service.find_active_run_for_scope(
+        workspace_id=workspace_id, context_type=scope, scope_id=scope_id
+    )
+    if prior is not None:
+        await get_stream_transport().request_cancel(prior.run_id)
+    return {"status": "ok"}
 
 
 async def _ensure_scope_session(ctx: ScopeContext) -> str | None:
@@ -119,8 +178,8 @@ async def _ensure_scope_session(ctx: ScopeContext) -> str | None:
 
 
 async def _persist_user_message(ctx: ScopeContext, body: CloudAgentChatRequest) -> str:
-    # Bypasses ``send_message`` to skip the legacy ``agent_bridge`` auto-response
-    # path — the run executor is the sole driver of the reply here.
+    # Bypasses ``send_message`` to skip the legacy ``agent_bridge`` auto-response —
+    # the run executor is the sole driver of the reply here.
     from pocketpaw_ee.cloud.chat import message_service
 
     return await message_service.persist_user_message_for_scope(
