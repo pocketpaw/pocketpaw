@@ -20,7 +20,45 @@ no-op unless a deployment opts in.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextlib import suppress
 from typing import Any
+
+_run_sweeper_logger = logging.getLogger(__name__)
+_sweeper_task: asyncio.Task[None] | None = None
+
+
+async def _sweeper_loop() -> None:
+    from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+
+    while True:
+        try:
+            await asyncio.sleep(300)
+            await sweep_stale_runs()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _run_sweeper_logger.exception("sweep_stale_runs tick failed")
+
+
+async def start_run_sweeper() -> None:
+    """Sweep once on boot, then tick every 5 minutes until shutdown."""
+    from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+
+    global _sweeper_task
+    with suppress(Exception):
+        await sweep_stale_runs()
+    _sweeper_task = asyncio.create_task(_sweeper_loop())
+
+
+async def stop_run_sweeper() -> None:
+    global _sweeper_task
+    if _sweeper_task is not None:
+        _sweeper_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _sweeper_task
+        _sweeper_task = None
 
 
 class CloudEventBusProvider:
@@ -129,6 +167,16 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler start failed: %s", exc)
 
+        # Stale-run sweeper. Marks queued/running ChatRunDocs whose backend
+        # process died as ``interrupted`` so clients render a retry instead
+        # of subscribing to a stream nobody is writing to. One pass at boot
+        # to catch runs left behind by the prior process, then a 5-minute
+        # tick.
+        try:
+            await start_run_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Run sweeper start failed: %s", exc)
+
     async def on_shutdown(self) -> None:
         # Most cloud teardown is handled inside mount_cloud's own shutdown
         # hook. The interval-refresh scheduler is owned by this lifecycle
@@ -143,6 +191,11 @@ class CloudLifecycleHook:
             await stop_scheduler()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler stop failed: %s", exc)
+
+        try:
+            await stop_run_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Run sweeper stop failed: %s", exc)
         return None
 
 
