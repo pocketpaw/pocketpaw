@@ -637,6 +637,22 @@ async def _run_agent_stream(
                     handled_pocket_ids=handled_pocket_ids,
                 )
                 yield ("tool_result", {"tool": name, "output": output})
+            elif etype == "error":
+                # Surface backend-yielded errors to the client instead of
+                # silently dropping them. Without this, a misconfigured
+                # backend (e.g. ``codex_cli`` when ``openai-codex-sdk`` is
+                # not installed, or ``claude_agent_sdk`` without the CLI)
+                # ends the stream with ``assistant_message_id: null`` and
+                # the UI just shows an empty reply. Same shape as the
+                # outer ``except`` handler at line ~647.
+                message = econtent if isinstance(econtent, str) else str(econtent)
+                logger.warning(
+                    "Backend yielded error for agent=%s: %s",
+                    ctx.target_agent_id,
+                    message[:200],
+                )
+                yield ("error", {"code": "agent.backend_error", "message": message})
+                break
             elif etype == "done":
                 break
         # Flush anything the agent emitted right before ``done`` / break.
