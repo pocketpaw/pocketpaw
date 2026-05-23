@@ -139,9 +139,7 @@ async def test_create_async_transcript(mongo_db, monkeypatch):
     assert transcript_id == "tr-1"
     call = _FakeHttp.calls[0]
     assert call["url"] == "http://recall.test/api/v1/recording/rec-1/create_transcript/"
-    assert call["json"]["provider"] == {
-        "deepgram_async": {"language_code": "en", "model": "nova-3"}
-    }
+    assert call["json"]["provider"] == {"deepgram_async": {"language": "multi", "model": "nova-3"}}
 
 
 async def test_create_async_transcript_propagates_4xx(mongo_db, monkeypatch):

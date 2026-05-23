@@ -283,7 +283,16 @@ async def create_async_transcript(recording_id: str) -> str:
     ``recording.done`` webhook — see service.start_async_transcript.
     """
     resolved = await meetings_settings.resolve()
-    options: dict[str, Any] = {"language_code": "en"}
+    # Recall passes this straight to Deepgram. The field is `language`, NOT
+    # `language_code` — Recall silently ignores unknown fields and Deepgram
+    # then defaults to English, so a wrong key locks every transcript to
+    # English regardless of what was actually spoken. Default to `multi`
+    # for nova-3's code-switching (English+Hindi+Spanish+French+German+
+    # Russian+Portuguese+Japanese+Italian+Dutch). Pin a single language
+    # via RECALL_TRANSCRIPT_LANGUAGE when monolingual accuracy matters
+    # more than coverage.
+    language = os.environ.get("RECALL_TRANSCRIPT_LANGUAGE", "").strip() or "multi"
+    options: dict[str, Any] = {"language": language}
     if resolved["model"]:
         options["model"] = resolved["model"]
 
