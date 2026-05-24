@@ -1,0 +1,70 @@
+{
+  "_capture_context": "P3 final state — recovery pocket 6a12da94 after additive edit attempt (add deal-entry form row). Same kind_for_op import bug as Phase 1 killed all 4 set_state ops + the add_node op. Agent recognized the failure (verbatim chat: 'The edit backend's op executor has a persistent ImportError — the same root cause as before. The workaround that succeeded last time is recreating the pocket via pocket_specialist__create with target_pocket_id so it replaces in place.'). Recovery was structurally smarter than Phase 1's duplicate-pocket — replace-in-place via create with target_pocket_id. BUT the recovery rewrite introduced FOUR DISTINCT correctness regressions vs the original kanban-board template's add-card row: (1) button.on_click wired to {action:'emit', target:'chat.send'} instead of client-side {action:'push', target:'cards', value:{...}}, so every Add deal click needs an LLM round-trip; (2) select.props.options is plain string array ['Lead','Qualified','Proposal','Won'] instead of [{value:'lead', label:'Lead'},...] — bound state will hold LABELS not VALUES; (3) draft_lane defaults to 'Lead' (label-case) but kanban.columns ids are lowercase, so even if the agent recovered the click the new card would land in no column; (4) no validate/reset actions in on_click — no empty-input check, no field clear after submit. Final pocket renders correctly visually but is functionally degraded. Captured 2026-05-24 ~19:06 IST after the kind_for_op-driven rebuild.",
+  "_pocket_id": "6a12da94ae05f15284584409",
+  "_pocket_name": "Sales Pipeline",
+  "version": "1.0",
+  "state": {
+    "cards": [
+      {"id": "d1", "title": "Globex Corp", "subtitle": "$48,000", "tag": "Sarah Chen", "status": "lead"},
+      {"id": "d2", "title": "Pinnacle Media", "subtitle": "$32,500", "tag": "James Okafor", "status": "lead"},
+      {"id": "d3", "title": "Stark Industries", "subtitle": "$125,000", "tag": "Priya Nair", "status": "qualified"},
+      {"id": "d4", "title": "Axiom Retail", "subtitle": "$87,000", "tag": "Marcus Webb", "status": "qualified"},
+      {"id": "d5", "title": "Helios Financial", "subtitle": "$210,000", "tag": "Dana Liu", "status": "proposal"},
+      {"id": "d6", "title": "Crestview Logistics", "subtitle": "$94,500", "tag": "Tom Barker", "status": "proposal"},
+      {"id": "d7", "title": "NovaTech Systems", "subtitle": "$310,000", "tag": "Rachel Kim", "status": "won"},
+      {"id": "d8", "title": "Meridian Health", "subtitle": "$175,000", "tag": "Chris Andrade", "status": "won"}
+    ],
+    "draft_company": "",
+    "draft_value": "",
+    "draft_contact": "",
+    "draft_lane": "Lead"
+  },
+  "ui": {
+    "type": "flex",
+    "props": {"direction": "column", "gap": "20px"},
+    "children": [
+      {"type": "page-header", "props": {"title": "Sales Pipeline", "subtitle": "Q2 2026 · Deal Tracker"}, "id": "n_d1mq266n"},
+      {
+        "type": "flex",
+        "props": {"direction": "row", "gap": "12px", "align": "center"},
+        "children": [
+          {"type": "input", "props": {"placeholder": "Company name"}, "bind": "draft_company", "id": "n_4fn3xo5k"},
+          {"type": "input", "props": {"placeholder": "Deal value ($)"}, "bind": "draft_value", "id": "n_k3vo4jp6"},
+          {"type": "input", "props": {"placeholder": "Contact person"}, "bind": "draft_contact", "id": "n_p32moep9"},
+          {"type": "select", "props": {"options": ["Lead", "Qualified", "Proposal", "Won"]}, "bind": "draft_lane", "id": "n_07wdtp4j"},
+          {
+            "type": "button",
+            "props": {"label": "Add deal", "variant": "primary"},
+            "on_click": {
+              "action": "emit",
+              "target": "chat.send",
+              "value": "add_deal company=\"{state.draft_company}\" value=\"{state.draft_value}\" contact=\"{state.draft_contact}\" lane=\"{state.draft_lane}\""
+            },
+            "id": "n_2ttfzzhh"
+          }
+        ],
+        "id": "n_1zuq902a"
+      },
+      {
+        "type": "kanban",
+        "bind": "cards",
+        "props": {
+          "columns": [
+            {"id": "lead", "title": "Lead"},
+            {"id": "qualified", "title": "Qualified"},
+            {"id": "proposal", "title": "Proposal"},
+            {"id": "won", "title": "Won"}
+          ],
+          "columnKey": "status"
+        },
+        "id": "n_7a172qh8"
+      }
+    ],
+    "id": "n_0lmdm0dh"
+  },
+  "lifecycle": {"type": "persistent", "id": "pocket-6061207c"},
+  "title": null,
+  "name": null,
+  "color": "#0A84FF",
+  "metadata": {"category": "custom", "color": "#0A84FF"}
+}

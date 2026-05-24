@@ -370,3 +370,132 @@ implied.
   to the right lanes with `bind` preserved.
 
 Branch HEAD before Phase 2 commit: `82054afc`.
+
+## 9. Phase 3 — live additive edit (the captain caught a real bug)
+
+Phase 1 ended with a recovery pocket that the captain flagged as
+incomplete — the kanban renders but has no way to add new deals. Phase
+2 was an isolated A/B against an LLM in a measurement harness. Phase 3
+closes the loop by going back to the live `pocket_specialist` and
+asking it to add the missing "Add deal" form row to the recovery
+pocket — exactly the kind of additive structural edit (`add_node`,
+Layer 3) Phase 1 never reached because the `kind_for_op` import
+errored out before the agent ever got there.
+
+### What happened
+
+```
+19:02:13  agent kicks off, calls get_pocket() — succeeds (read path is fine)
+19:02:46  pocket_router escalates to Tier 2 — structural verbs [add, insert]
+19:02:46  agent-mode edit kit returned with targets=3 (page-header, kanban, root flex)
+19:03:50  agent in chat: "Computing the ops now — 4 state initializers + 1
+          add_node to insert the form row after the page-header."
+19:03:57  agent fires set_state ✗ ImportError: kind_for_op
+          → ops=0, success=False, but the side-effect partially landed:
+            state.draft_company appeared in the persisted spec even
+            though the dispatch reported failure. The bug isn't just
+            "ops don't apply" — it's "ops apply silently while the
+            dispatch reports failure." Worst possible failure mode.
+19:04:24  agent retries — pocket_router escalates again, edit kit returns
+          has_pocket=False targets=0 — wasted round-trip
+19:05:30  agent in chat: "The edit backend's op executor has a persistent
+          ImportError — the same root cause as before. The workaround
+          that succeeded last time is recreating the pocket via
+          pocket_specialist__create with target_pocket_id so it
+          replaces in place. Rebuilding now with the full spec
+          including the form row."
+19:06:00  rebuild lands — UI now has [page-header, form-flex, kanban]
+```
+
+### The recovery is structurally **smarter** than Phase 1's
+
+Phase 1's recovery created a duplicate pocket (left the broken original
+on disk). Phase 3's recovery used `pocket_specialist__create` with
+`target_pocket_id` to replace the existing pocket in place — no
+duplicate. The agent learned across sessions (same conversation,
+two turns apart).
+
+### …but the recovery rewrite introduces FOUR distinct correctness regressions
+
+The agent rebuilt the entire pocket spec to add the form row. In the
+rebuild it produced an interaction wire-up that is materially worse
+than the original kanban-board template's. Captured in full at
+`captures/p3-additive-edit-recovery.json`:
+
+| # | Regression | Original template | Recovery rebuild |
+|---|---|---|---|
+| 1 | Button on_click | `[{action:"validate"}, {action:"push", target:"cards", value:{...}}, {action:"set", target:"next_id", ...}, {action:"set", target:"draft", value:""}]` — client-side, agent-free, instant | `{action:"emit", target:"chat.send", value:"add_deal company=\"{state.draft_company}\" ..."}` — **every click is an LLM round-trip** through `pocket_specialist`, which still has the `kind_for_op` bug |
+| 2 | Select options | `"{state.lane_options}"` reference to `[{value:"lead", label:"Lead"}, ...]` — value/label split | Plain string array `["Lead", "Qualified", "Proposal", "Won"]` — no value/label split |
+| 3 | Bound state default | `"backlog"` (lowercase value, would-be column id) | `"Lead"` (Label-case) — does NOT match the kanban's lowercase column ids |
+| 4 | Click hygiene | Validates non-empty, increments `next_id`, clears `draft` after submit | None — no validation, no clear, no id generation |
+
+Net effect: if the user fills in fields and clicks "Add deal," the
+runtime emits a chat message to `pocket_specialist`. The agent gets
+the message, tries to use the same broken edit ops, falls back to
+another full pocket rebuild, possibly succeeds — but the new card
+will be added with `status: "Lead"` (label-case) which doesn't match
+any kanban column id ("lead", "qualified", etc.). Card lands in no
+column. Same failure shape as Phase 1's kanban-columns bug, but on
+every "Add deal" click instead of once at setup.
+
+### What this changes about the verdict
+
+Phase 1 found three failure modes that broken edit ops cause. Phase 3
+finds a **fourth, deeper one: the agent's recovery path doesn't just
+produce different output, it produces structurally worse output.**
+Specifically:
+
+- The recovery is **whole-spec re-emit**, so anything the agent forgets
+  to re-emit is lost. The original template's careful on_click sequence
+  (validate + push + increment + clear) gets dropped in favor of a
+  one-liner chat-callback.
+- The recovery is **disconnected from the original schema**, so the
+  agent re-invents conventions on the fly. `state.lane_options` exists
+  in the template specifically so kanban columns and selects share a
+  source of truth; the recovery drops it and inlines plain strings,
+  breaking the value/label contract.
+- The recovery is **agent-in-the-loop forever**, so every
+  user-interaction is gated on agent availability. The original
+  template's actions were client-side and worked offline.
+
+Each of these is a SECONDARY consequence of the `kind_for_op` bug.
+The dispatch failure forces the agent into recovery, and the recovery
+introduces these regressions. With flat (one merge primitive, no
+per-op dispatch class) the bug class cannot exist, so the recovery
+path is never entered, so the secondary regressions don't happen.
+
+The cost of broken granular ops compounds. Phase 2 said "on capable
+models, emit quality is a wash." Phase 3 shows that's only true
+when ops work. **When ops break, the recovery cascade burns the
+elegance of the original template.**
+
+### Updated bottom line
+
+The flat model's case has gotten stronger over the three phases:
+
+1. **Phase 1 (real chat, Sonnet):** wrong-layer choice + 2 dispatch
+   failures + duplicate pocket. Caveat: kind_for_op might be specific
+   to pr-1219.
+2. **Phase 2 (controlled A/B, Opus):** on capable models the surfaces
+   are equivalent. Caveat: flat has a re-emit footgun.
+3. **Phase 3 (live additive edit, Sonnet):** same dispatch failures
+   re-occur, and the recovery cascade introduces 4 distinct
+   correctness regressions in the resulting pocket. **No caveat —
+   this is a real, reproducible failure mode of the current path
+   under real load.**
+
+The architectural argument for flat is no longer "agent emits cleaner
+patches." It's: **every dispatch failure in the granular-op layer
+costs the system more than its surface looks like, because the agent's
+recovery introduces silent correctness regressions that propagate to
+the user-visible pocket.** Flat eliminates the bug class that triggers
+the recovery cascade.
+
+### Phase 3 artifacts
+
+- `captures/p3-additive-edit-recovery.json` — the final pocket spec
+  with the four regressions documented inline.
+- `captures/broken-edit-pocket.json` + `captures/recovery-fresh-pocket.json`
+  from Phase 1 — comparison points for the recovery degradation.
+
+Branch HEAD before Phase 3 commit: `bdd60bbe`.
