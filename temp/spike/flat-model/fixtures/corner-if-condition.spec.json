@@ -1,0 +1,83 @@
+{
+  "_comment": "Exercises node-level if.condition with children only (no else_children). Pattern adapted from the inline field-error if blocks in ripple/src/routes/showcase/+page.svelte:3232 (form-with-validation) and manifest/entries/wizard-layout.ts step-bound if blocks.",
+  "version": "1.0",
+  "state": {
+    "errors": {
+      "fullName": "",
+      "email": "Enter a valid email"
+    },
+    "submitted": ""
+  },
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": "8px"
+    },
+    "children": [
+      {
+        "type": "input",
+        "props": {
+          "label": "Full name"
+        },
+        "bind": "fullName"
+      },
+      {
+        "type": "if",
+        "condition": "{state.errors.fullName}",
+        "children": [
+          {
+            "type": "text",
+            "props": {
+              "text": "{state.errors.fullName}",
+              "size": "xs",
+              "class": "text-destructive"
+            }
+          }
+        ]
+      },
+      {
+        "type": "input",
+        "props": {
+          "label": "Email"
+        },
+        "bind": "email"
+      },
+      {
+        "type": "if",
+        "condition": "{state.errors.email}",
+        "children": [
+          {
+            "type": "text",
+            "props": {
+              "text": "{state.errors.email}",
+              "size": "xs",
+              "class": "text-destructive"
+            }
+          }
+        ]
+      },
+      {
+        "type": "button",
+        "props": {
+          "label": "Submit",
+          "type": "submit"
+        }
+      },
+      {
+        "type": "if",
+        "condition": "{state.submitted}",
+        "children": [
+          {
+            "type": "alert",
+            "props": {
+              "variant": "default",
+              "title": "Done",
+              "description": "{state.submitted}"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "_comment": "Exercises node-level each.items/item_as/index_as: a type='each' node looping a state-bound array and rendering children per item. Pattern adapted from ripple/src/lib/manifest/entries/each.ts and the showcase 'each chips' example at routes/showcase/+page.svelte:1849.",
+  "version": "1.0",
+  "state": {
+    "users": [
+      { "name": "Sarah K.", "role": "PM" },
+      { "name": "Diego R.", "role": "Eng" },
+      { "name": "Yui T.", "role": "Design" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": "12px"
+    },
+    "children": [
+      {
+        "type": "heading",
+        "props": {
+          "text": "Team",
+          "level": 3
+        }
+      },
+      {
+        "type": "each",
+        "items": "{state.users}",
+        "item_as": "user",
+        "index_as": "i",
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "8px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "{i + 1}.",
+                  "weight": "semibold"
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "{user.name}"
+                }
+              },
+              {
+                "type": "badge",
+                "props": {
+                  "label": "{user.role}",
+                  "variant": "secondary"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

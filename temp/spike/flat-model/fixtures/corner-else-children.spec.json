@@ -1,0 +1,89 @@
+{
+  "_comment": "Exercises if/else_children: a node with type=if carrying BOTH a children list and an else_children list. Pattern adapted from ripple's NodeRenderer if-branch + validate-catalog.test.ts 'walks else_children of an if node'.",
+  "version": "1.0",
+  "state": {
+    "isLoggedIn": false
+  },
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": "12px"
+    },
+    "children": [
+      {
+        "type": "heading",
+        "props": {
+          "text": "Welcome",
+          "level": 2
+        }
+      },
+      {
+        "type": "if",
+        "condition": "{state.isLoggedIn}",
+        "children": [
+          {
+            "type": "card",
+            "props": {
+              "title": "Dashboard"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "You are signed in."
+                }
+              },
+              {
+                "type": "button",
+                "props": {
+                  "label": "Sign out"
+                },
+                "on_click": {
+                  "action": "set",
+                  "target": "isLoggedIn",
+                  "value": false
+                }
+              }
+            ]
+          }
+        ],
+        "else_children": [
+          {
+            "type": "card",
+            "props": {
+              "title": "Sign in"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Please sign in to continue."
+                }
+              },
+              {
+                "type": "input",
+                "props": {
+                  "label": "Email",
+                  "placeholder": "you@example.com"
+                },
+                "bind": "email"
+              },
+              {
+                "type": "button",
+                "props": {
+                  "label": "Sign in"
+                },
+                "on_click": {
+                  "action": "set",
+                  "target": "isLoggedIn",
+                  "value": true
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

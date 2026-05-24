@@ -1,6 +1,9 @@
 // flatten.test.ts — RFC 06 Position 1 spike, test suite.
 // Created: 2026-05-24 — Verifies the nested→flat→nested round-trip on real
 // stored pocket specs and proves merge-by-name semantics (the OpenUI shape).
+// Updated: 2026-05-24 — Added a corner-case feature describe block exercising
+// node-level `each.items`/`item_as`/`index_as`, node-level `if.condition`,
+// `if.else_children`, and child-level `slot` against four new fixtures.
 //
 // Run: bun test temp/spike/flat-model/flatten.test.ts
 
@@ -75,6 +78,129 @@ describe('round-trip on real stored pocket specs', () => {
     const flat = flatten(fixture.spec);
     const back = unflatten(flat);
     expect(canonicalJson(back)).toBe(canonicalJson(fixture.spec));
+  });
+});
+
+describe('corner-case features round-trip', () => {
+  // The original four fixtures were all flex / grid / leaf-widget layouts and
+  // did not stress node-level `each.items`, node-level `if.condition`,
+  // `if.else_children`, or child-level `slot`. These four `corner-*` fixtures
+  // were synthesized to match production patterns in ripple's own tests and
+  // manifest entries (see each fixture's `_comment` for its provenance).
+  // `flatten` claims to support these by symmetry with `children`; this block
+  // verifies that against representative spec shapes.
+  const CORNER_NAMES = [
+    'corner-else-children.spec.json',
+    'corner-each-items.spec.json',
+    'corner-if-condition.spec.json',
+    'corner-slot.spec.json',
+  ];
+
+  // Walk a FlatSpec's components map; return true when `predicate` matches at
+  // least one component. Used by the feature-presence assertions below — a
+  // fixture that doesn't make `flatten` emit the feature would silently pass
+  // the round-trip check, so we gate on the presence of the targeted field.
+  function anyComponent(flat: FlatSpec, predicate: (n: any) => boolean): boolean {
+    for (const id of Object.keys(flat.components)) {
+      if (predicate(flat.components[id])) return true;
+    }
+    return false;
+  }
+
+  test('all four corner fixtures are present', () => {
+    const names = FIXTURES.map((f) => f.name);
+    for (const n of CORNER_NAMES) {
+      expect(names).toContain(n);
+    }
+  });
+
+  test('corner-else-children: flatten emits at least one node with else_children', () => {
+    const { spec } = FIXTURES.find((f) => f.name === 'corner-else-children.spec.json')!;
+    const flat = flatten(spec);
+    expect(
+      anyComponent(flat, (n) => Array.isArray(n.else_children) && n.else_children.length > 0),
+    ).toBe(true);
+    // Bidirectional structural fidelity, as for every other fixture.
+    expect(canonicalJson(stripIds(unflatten(flat)))).toBe(canonicalJson(stripIds(spec)));
+    expect(componentCount(flat)).toBe(nestedNodeCount(spec));
+  });
+
+  test('corner-each-items: flatten emits a node with items + item_as (+ optionally index_as)', () => {
+    const { spec } = FIXTURES.find((f) => f.name === 'corner-each-items.spec.json')!;
+    const flat = flatten(spec);
+    expect(
+      anyComponent(
+        flat,
+        (n) => n.type === 'each' && typeof n.items === 'string' && typeof n.item_as === 'string',
+      ),
+    ).toBe(true);
+    // index_as is optional in the manifest but present in this fixture — keep
+    // it as a separate assertion so a regression on that field is loud.
+    expect(anyComponent(flat, (n) => n.type === 'each' && typeof n.index_as === 'string')).toBe(
+      true,
+    );
+    expect(canonicalJson(stripIds(unflatten(flat)))).toBe(canonicalJson(stripIds(spec)));
+    expect(componentCount(flat)).toBe(nestedNodeCount(spec));
+  });
+
+  test('corner-if-condition: flatten emits an `if` node with a condition and children but no else_children', () => {
+    const { spec } = FIXTURES.find((f) => f.name === 'corner-if-condition.spec.json')!;
+    const flat = flatten(spec);
+    expect(
+      anyComponent(
+        flat,
+        (n) =>
+          n.type === 'if' &&
+          typeof n.condition === 'string' &&
+          Array.isArray(n.children) &&
+          n.children.length > 0,
+      ),
+    ).toBe(true);
+    // This fixture is the "no-else" case. None of its `if` nodes should carry
+    // an else_children array.
+    expect(
+      anyComponent(
+        flat,
+        (n) =>
+          n.type === 'if' && Array.isArray(n.else_children) && n.else_children.length > 0,
+      ),
+    ).toBe(false);
+    expect(canonicalJson(stripIds(unflatten(flat)))).toBe(canonicalJson(stripIds(spec)));
+    expect(componentCount(flat)).toBe(nestedNodeCount(spec));
+  });
+
+  test('corner-slot: flatten emits at least one component with a non-default `slot` field', () => {
+    const { spec } = FIXTURES.find((f) => f.name === 'corner-slot.spec.json')!;
+    const flat = flatten(spec);
+    expect(
+      anyComponent(
+        flat,
+        (n) => typeof n.slot === 'string' && n.slot.length > 0 && n.slot !== 'default',
+      ),
+    ).toBe(true);
+    expect(canonicalJson(stripIds(unflatten(flat)))).toBe(canonicalJson(stripIds(spec)));
+    expect(componentCount(flat)).toBe(nestedNodeCount(spec));
+  });
+
+  test('round-trip is lossless even after a merge that touches a node carrying `slot` / `condition` / `items`', () => {
+    // Sanity check: re-emitting a corner-feature node via merge() must preserve
+    // its corner field. Catches a bug where a future merge optimization drops
+    // unknown keys.
+    const { spec } = FIXTURES.find((f) => f.name === 'corner-each-items.spec.json')!;
+    const flat = flatten(spec);
+    const eachId = Object.keys(flat.components).find(
+      (id) => flat.components[id].type === 'each',
+    )!;
+    const eachNode = flat.components[eachId];
+    const patched = merge(flat, {
+      components: {
+        [eachId]: { ...eachNode, item_as: 'row' },
+      },
+    });
+    expect(patched.components[eachId].items).toBe(eachNode.items);
+    expect(patched.components[eachId].item_as).toBe('row');
+    expect(patched.components[eachId].index_as).toBe(eachNode.index_as);
+    expect(patched.components[eachId].children).toEqual(eachNode.children);
   });
 });
 

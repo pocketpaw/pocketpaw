@@ -1,0 +1,86 @@
+{
+  "_comment": "Exercises child-level slot: children with slot='header' / slot='footer' / slot='sidebar'. Pattern adapted from ripple/src/lib/components/NodeRenderer.slots.test.ts and manifest/entries/app-shell.ts.",
+  "version": "1.0",
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": "16px"
+    },
+    "children": [
+      {
+        "type": "card",
+        "props": {
+          "title": "Sales"
+        },
+        "children": [
+          {
+            "type": "stat",
+            "props": {
+              "value": "42",
+              "label": "Closed today"
+            },
+            "slot": "header"
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Pipeline is healthy."
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Updated 5m ago",
+              "size": "xs"
+            },
+            "slot": "footer"
+          }
+        ]
+      },
+      {
+        "type": "app-shell",
+        "props": {},
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "4px"
+            },
+            "slot": "sidebar",
+            "children": [
+              {
+                "type": "button",
+                "props": {
+                  "label": "Overview",
+                  "variant": "ghost"
+                }
+              },
+              {
+                "type": "button",
+                "props": {
+                  "label": "Projects",
+                  "variant": "ghost"
+                }
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "props": {
+              "text": "Overview",
+              "level": 2
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Pick a section from the sidebar."
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

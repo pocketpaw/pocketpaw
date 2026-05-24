@@ -10,7 +10,7 @@ Ripple's `UINode` is a recursive `{type, props, children}` tree today. Mutation 
 
 ## 2. Round-trip
 
-Pulled four real specs:
+Pulled four real specs and synthesized four corner-feature fixtures to match patterns from ripple's own tests and manifest entries:
 
 | Fixture | Nodes | Source |
 |---|---|---|
@@ -18,10 +18,14 @@ Pulled four real specs:
 | `business-dashboard.spec.json` | 25 | `Business Dashboard` pocket's top-level `rippleSpec` (ids stamped) |
 | `sprint-dashboard.spec.json` | 27 | `Sprint 24 Dashboard` pocket's `rippleSpec` (ids stamped) |
 | `component-showcase.spec.json` | 83 | `🧪 UI Component Showcase` pocket's `rippleSpec` (ids stamped, biggest tree on the box) |
+| `corner-else-children.spec.json` | 10 | Synthesized; matches the `if` + `else_children` shape from `validate-catalog.test.ts:60` and the `NodeRenderer.svelte` if-branch (line 308). |
+| `corner-slot.spec.json` | 11 | Synthesized; matches `NodeRenderer.slots.test.ts` (header/footer cases) and `manifest/entries/app-shell.ts` (slot="sidebar"). |
+| `corner-each-items.spec.json` | 7 | Synthesized; matches the manifest `each` entry (`each.ts`) and the chips-loop in `routes/showcase/+page.svelte:1849`. |
+| `corner-if-condition.spec.json` | 10 | Synthesized; matches the field-error `if` blocks in `routes/showcase/+page.svelte:3232` (form-with-validation). |
 
-`unflatten(flatten(x))` is structurally lossless on all four (15 bun tests pass). On the id-stamped fixtures (the production shape) the round-trip is bit-for-bit identical. On the unstamped team-activity fixture the transform mints ids, which is exactly the same thing `spec-id.ts:ensureNodeIds` does today — i.e. flattening incidentally completes id-stamping, which the normalizer already runs on persist anyway.
+`unflatten(flatten(x))` is structurally lossless on all eight (29 bun tests pass). On the id-stamped fixtures (the production shape) the round-trip is bit-for-bit identical. On the unstamped team-activity and corner-* fixtures the transform mints ids, which is exactly the same thing `spec-id.ts:ensureNodeIds` does today — i.e. flattening incidentally completes id-stamping, which the normalizer already runs on persist anyway.
 
-**Edge cases the transform handled cleanly:** none of the four fixtures actually exercise `else_children`, `slot`, `each.items` (node-level), or `if.condition` — the production pocket corpus is dominated by `flex` / `grid` / leaf-widget layouts. The transform supports all of those by symmetry (same code path as `children`), but **we did not stress them on real data.** That gap is a known follow-up if a real PR moves forward; sample specs from the test suite (`NodeRenderer.slots.test.ts`, `spec-mutator.test.ts`) should be added to the fixture corpus before declaring full coverage.
+**Corner features confirmed:** the four corner fixtures explicitly exercise `if.else_children`, child-level `slot`, node-level `each.items` + `item_as` + `index_as`, and node-level `if.condition`. Each fixture is gated by a feature-presence assertion (e.g. for `corner-else-children`, at least one component in the flat map must have a non-empty `else_children` array) so a too-weak fixture cannot silently pass the round-trip check. The transform's symmetry claim held — `flatten.ts` needed zero changes. A merge() patch that touches a corner-feature node (re-emit `each` with a new `item_as`) preserves all the other corner fields, confirming that re-emission via merge keeps the corner-feature payload intact.
 
 ## 3. Token / byte-size delta
 
@@ -71,7 +75,7 @@ The 31 pockets on this box all carry either an empty `rippleSpec` or one that pa
 
 A **back-compat read path** (flatten on read, store nested forever) is also viable and lower-risk for the rollout phase. The `normalizer.ts` pattern in ripple already supports two representations on the wire (UISpec vs UniversalSpec); adding "flat or nested" as a third axis is the same shape of problem. Probably *both*: read-path flattening during a 1-2 PR transition, then a one-shot migration to remove the dual-representation tax.
 
-**No fixture failed the transform.** The riskier shapes (`else_children`, slotted children, control-flow nodes) aren't in the corpus we have here. A pre-migration audit should grep `rippleSpec` blobs across all workspaces for `else_children` / `"slot"` / `"each"` / `"if"` types before committing to the one-shot path.
+**No fixture failed the transform.** The riskier shapes (`else_children`, slotted children, control-flow nodes) are now covered by the four `corner-*` fixtures and pass the round-trip + feature-presence checks. A pre-migration audit should still grep `rippleSpec` blobs across all workspaces for `else_children` / `"slot"` / `"each"` / `"if"` types before committing to the one-shot path — to confirm production data doesn't carry stranger combinations than the corner fixtures synthesize.
 
 ## 7. The orphan-node question
 
@@ -102,7 +106,7 @@ The wire-size delta (+17–25% per spec, +70–100% per patch) is the genuine co
 
 Caveats:
 
-1. **The fixture corpus does not exercise corner cases.** None of the 4 fixtures use `else_children`, `slot`, node-level `each.items`, or `if.condition`. A real PR series must add fixtures covering those before the migration ships. The transform supports them by symmetry, but production data did not stress them in this spike.
+1. **Corner-case coverage was a known gap in the first pass and is now closed.** Four `corner-*` fixtures (else_children, child-level slot, node-level each.items, node-level if.condition) were added with feature-presence assertions on the flat output. The transform handled all four by symmetry — `flatten.ts` needed zero changes. Production data outside this box might still carry stranger combinations; a pre-migration `grep` audit is the cheap safety net.
 
 2. **Patch size is bigger, not smaller.** OpenUI Lang's "~85% fewer tokens than full regeneration" claim is *vs full regeneration*, not vs the 8-op patch shape Ripple already has. For the targeted single-node mutations our `spec-mutator` does today, the flat patch is materially larger. The win is in the mutation *language* (one rule), not the mutation *size*.
 
@@ -119,4 +123,4 @@ If green-lit, the PR sequence is plausibly:
 
 Total: ~4 PRs, sized M/L. Captain-time per PR review is the dominant cost; agent-implementation time is plausibly 4-8 agent-hours total.
 
-The spike says yes — but it's a deliberate yes, with the corner-case fixtures and the slot-semantics question called out as gates before PR-1 ships.
+The spike says yes — a deliberate yes. The corner-case fixture gate is now closed (29 bun tests pass, including 14 added for the corner features); the slot-semantics question remains as a separate, deferable schema decision.
