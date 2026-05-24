@@ -1,12 +1,19 @@
 # pocket.py — Pocket-surface preamble.
 #
-# Created: 2026-05-24 — When the user is viewing a specific pocket
-# (/pockets/[id]) the agent should know the pocket's name, widget /
-# node summary, and backend wiring state. Reads go through
-# ``pockets_service.get`` (tenancy enforced).
+# Updated: 2026-05-24 — Added workspace_id tenancy guard. The downstream
+# ``pockets_service.get`` gates on owner / shared_with / visibility but
+# NOT workspace, so a user who belongs to multiple workspaces could
+# stamp a pocket_id from workspace B in a chat from workspace A and the
+# preamble would render B's pocket data inside A's chat context. We now
+# fetch the pocket, then reject any whose ``workspace`` field doesn't
+# match the chat's ``workspace_id``; the request falls back to the
+# unavailable-snapshot path that already covers unknown / no-access ids.
 #
-# Bad ``pocket_id`` (missing, deleted, no access) returns an empty
-# preamble per the graceful-fall-back rule; the chat send keeps going.
+# Original: When the user is viewing a specific pocket (/pockets/[id])
+# the agent should know the pocket's name, widget / node summary, and
+# backend wiring state. Bad ``pocket_id`` (missing, deleted, no access,
+# or now cross-workspace) returns an empty preamble per the graceful-
+# fall-back rule; the chat send keeps going.
 
 from __future__ import annotations
 
@@ -26,7 +33,7 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         # still knows it's on /pockets/[?] without specific context.
         return '<surface kind="pocket" route="/pockets/?" />'
 
-    pocket = await _load_pocket(meta.pocket_id, user_id)
+    pocket = await _load_pocket(meta.pocket_id, user_id, workspace_id)
     if pocket is None:
         # Unknown / no-access pocket. Tell the agent we're on a pocket
         # surface but the snapshot is empty — better than a totally bare
@@ -60,19 +67,35 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     return truncate_preamble("\n".join(parts))
 
 
-async def _load_pocket(pocket_id: str, user_id: str) -> dict | None:
+async def _load_pocket(pocket_id: str, user_id: str, workspace_id: str) -> dict | None:
     """Fetch a pocket via the canonical service. Returns ``None`` on any error.
 
     The catch is broad on purpose — Forbidden, NotFound, validation
     issues all collapse into "no preamble" rather than propagating.
+
+    Tenancy guard: ``pockets_service.get`` gates by owner / shared_with /
+    visibility — not workspace. A user in multiple workspaces could stamp
+    a pocket from workspace B in a chat from workspace A and the
+    preamble would render B's pocket inside A's context. We reject any
+    pocket whose ``workspace`` field doesn't match the chat's workspace
+    so the cross-workspace bleed-through is impossible.
     """
     try:
         from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-        return await pockets_service.get(pocket_id, user_id)
+        pocket = await pockets_service.get(pocket_id, user_id)
     except Exception:
         logger.debug("pocket_handler: get(%s) failed", pocket_id, exc_info=True)
         return None
+    if pocket.get("workspace") != workspace_id:
+        logger.warning(
+            "pocket_handler: workspace mismatch for pocket %s (chat=%s, pocket=%s); rejecting",
+            pocket_id,
+            workspace_id,
+            pocket.get("workspace"),
+        )
+        return None
+    return pocket
 
 
 def _summarise_nodes(pocket: dict) -> str:

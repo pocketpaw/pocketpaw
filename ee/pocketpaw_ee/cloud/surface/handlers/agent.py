@@ -1,8 +1,16 @@
 # agent.py — /agents/[id] surface preamble.
 #
-# Created: 2026-05-24 — Detail view for one agent. Reads via
-# ``agents_service.get``; falls back to a minimal preamble when the
-# agent id is missing or the lookup fails.
+# Updated: 2026-05-24 — Added workspace_id tenancy guard.
+# ``agents_service.get(agent_id)`` looks up by id alone — no workspace
+# filter — so a user in multiple workspaces could stamp an agent_id from
+# workspace B in a chat from workspace A and the preamble would echo
+# B's agent name/slug inside A's context. We now compare the returned
+# agent's ``workspace_id`` against the chat's; mismatches fall through
+# to the unavailable-snapshot path that already covers missing agents.
+#
+# Original: Detail view for one agent. Reads via ``agents_service.get``;
+# falls back to a minimal preamble when the agent id is missing or the
+# lookup fails.
 
 from __future__ import annotations
 
@@ -25,6 +33,22 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         agent = await agents_service.get(meta.agent_id)
     except Exception:
         logger.debug("agent_handler: get(%s) failed", meta.agent_id, exc_info=True)
+        return (
+            f'<surface kind="agent" route="/agents/{meta.agent_id}" />'
+            "<agent-snapshot>(unavailable)</agent-snapshot>"
+        )
+
+    # Tenancy guard: agents_service.get is workspace-agnostic. Reject
+    # any agent that lives in a different workspace from the chat so
+    # cross-workspace stamps can't leak the other workspace's agent.
+    agent_workspace = getattr(agent, "workspace_id", None)
+    if agent_workspace != workspace_id:
+        logger.warning(
+            "agent_handler: workspace mismatch for agent %s (chat=%s, agent=%s); rejecting",
+            meta.agent_id,
+            workspace_id,
+            agent_workspace,
+        )
         return (
             f'<surface kind="agent" route="/agents/{meta.agent_id}" />'
             "<agent-snapshot>(unavailable)</agent-snapshot>"
