@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-05-24 (#1202) — Registers ``register_audit_bridge`` during
+    ``mount_cloud`` so every ``security.audit.AuditLogger.log()`` call from
+    EE cloud writers (pocket actions, source runs, skills config, …) is
+    mirrored into ``pocketpaw.audit.store.AuditStore`` — the SQLite sink
+    the ``GET /api/v1/audit`` reader actually queries. Without this the
+    JSONL and SQLite sinks lived in parallel and the GET surface always
+    returned 0 rows even when ``~/.pocketpaw/audit.jsonl`` was full.
 Updated: 2026-05-22 (feat/api-skills, Increment 2b) — mounts the Skills
     entity at ``/api/v1/skills`` (POST /skills/api-doc), the per-backend
     API-skill install endpoint that turns a pocket backend's OpenAPI
@@ -443,6 +450,18 @@ def mount_cloud(app: FastAPI) -> None:
     # first service that calls ``emit(...)`` fails with "EventBus not
     # initialized".
     init_realtime()
+
+    # Bridge ``AuditLogger`` (JSONL) writes into ``AuditStore`` (SQLite).
+    # Cloud writers across the EE codebase (pockets/action_executor,
+    # pockets/source_executor, pockets/service, skills/service,
+    # agent/pocket_router) all call ``get_audit_logger().log(...)``, but the
+    # ``GET /api/v1/audit`` reader (``ee.cloud.audit.service``) reads from
+    # ``get_audit_store()`` — a totally separate sink. Without this bridge
+    # the reader returned 0 rows for every query (#1202). Idempotent via a
+    # module-level flag so re-mounting (tests) does not double-mirror.
+    from pocketpaw_ee.cloud.audit.listeners import register_audit_bridge
+
+    register_audit_bridge()
 
     # Register in-process bus subscribers (Stage 1.B "Files as Knowledge").
     # The FileReady listener drives KB indexing for every workspace upload.
