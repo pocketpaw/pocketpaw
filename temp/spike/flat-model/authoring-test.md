@@ -240,3 +240,133 @@ greenlighting PR-1.
 
 Branch: `spike/flat-component-model`. HEAD before this commit:
 `088b7e94`.
+
+## 8. Phase 2 — controlled A/B with the same model
+
+Phase 1 left the verdict with two caveats: the `kind_for_op` import
+bug was code-specific (not inherent to the 8-op design), and we hadn't
+run a real A/B with a flat-emit prompt. Phase 2 closes both gates by
+running the same task against the same model (Opus 4.7) with two
+different prompts, in isolation from the broken cloud code.
+
+### Setup
+
+- Same broken pocket spec as input (the one captured in
+  `captures/broken-edit-pocket.json`).
+- Same user request: *"The kanban is broken — the cards have
+  lead/qualified/proposal/won status but the columns are
+  Backlog/In progress/Review/Done. Fix the columns to match the actual
+  lanes."*
+- Variant A: verbatim mutation-strategy block from
+  `src/pocketpaw/ripple/_pockets.py:1275-1354` — the live 17-tool
+  surface across 3.5 layers.
+- Variant B: replacement strategy block (~15 lines) describing
+  `merge_flat_patch(partial)` with merge-by-name semantics.
+- Both agents wrote their emitted tool calls to JSON
+  (`/tmp/p2a-baseline.json`, `/tmp/p2b-flat.json`) — no real backend
+  calls, no schema dispatch, no chance of the `kind_for_op` confound.
+
+### Result
+
+| Metric | Variant A (17 tools) | Variant B (flat) |
+|---|---|---|
+| Tool chosen first try | `set_node_prop(n_no719i8s, "columns", [...])` ✓ | `merge_flat_patch({components: {n_no719i8s: {...}}})` ✓ |
+| Tool calls in the sequence | 1 | 1 |
+| Turns | 1 | 1 |
+| Patch payload size (chars) | ~120B | ~340B |
+| Resulting spec is correct | Yes | Yes (verified — `captures/p2-verify.ts` applies the patch via the spike's `merge()` and proves all 8 cards route to the right lanes, `bind="cards"` is preserved) |
+| Agent flagged any concern | Briefly considered 4× `set_prop_array_item` (Layer 2.5) but ruled out — every item changes both id and title, so re-emitting the whole prop is more economical | **Real footgun:** re-emit-by-name replaces the WHOLE node, so the agent had to re-state `type`, `id`, `bind`, `columnKey` etc. The agent explicitly flagged: *"a real foot-gun if I forget `bind` — the card data would silently detach"* |
+
+### What this changes about the verdict
+
+The Phase 1 hypothesis was that the 17-tool surface caused the LLM to
+pick the wrong layer (`patch_state` instead of `set_node_prop`).
+**Phase 2 falsifies that for capable models.** Opus 4.7 navigated the
+3.5-layer hierarchy on the first try and ruled out the lower-layer
+alternatives with explicit reasoning. The wrong-layer choice in Phase 1
+was likely a **model-capability artifact** (Sonnet 4-6 inside a long
+chat session with template-context and recipe-context biasing
+toward state-level mutations) rather than a structural defect of the
+17-tool surface.
+
+The Phase 1 failures that **do** survive Phase 2 are #2 and #3 — the
+per-op pydantic schema fragility and the per-op `kind_for_op` import
+bug. Both are **codebase-side** consequences of having 17 distinct
+op-dispatch paths instead of one merge function. Those are real and
+they would be structurally eliminated by flat.
+
+Phase 2 also surfaced a **new cost** that the spike's structural
+analysis didn't quantify: **the re-emit footgun.** The flat variant
+must re-state every field of a touched node — including fields the
+mutation isn't supposed to change. The Opus agent flagged this
+unprompted: *"if I forget `bind` the card data would silently detach."*
+The 17-tool surface has no equivalent footgun — `set_node_prop` only
+ever touches the one prop, no possibility of silent collateral damage.
+
+### Updated verdict
+
+| Aspect | 17-tool surface | Flat re-emit |
+|---|---|---|
+| Capable-model emit quality (Opus) | Equal — both correct first try | Equal — both correct first try |
+| Weak-model emit quality (Phase 1, Sonnet) | Wrong layer first try | Untested in Phase 2 against the weak model; structural argument says better, but unproven |
+| Per-mutation patch size | Smaller (~30% of flat) | Larger (~340B vs ~120B for the same prop-change) |
+| Codebase surface area for bugs | 17 dispatches, 17 pydantic schemas, 17 service hops — Phase 1 caught a `kind_for_op` bug that killed ALL of them globally | 1 merge function, 1 schema, 1 hop — structurally cannot have the per-op-kind class of bug |
+| Agent footgun risk | Low — surgical ops can't drop unintended fields | **Material** — re-emit-by-name can silently drop any field the agent forgets to re-state. The agent itself flagged this on the first run |
+| Cognitive load on prompt | 80 lines of mutation-strategy block | 15 lines |
+
+The honest synthesis: **flat is a clean win on codebase surface area
+(failures #2 and #3 from Phase 1 cannot happen), a wash on
+capable-model emit quality, a likely improvement on weak-model emit
+quality (but Phase 2 didn't prove that), and a regression on
+per-mutation wire size + a NEW agent-side footgun risk.**
+
+### One design move that would change the calculus
+
+The footgun is a property of OpenUI's "merge-by-name = whole-node
+replacement" choice. Ripple could instead define merge as **per-field
+shallow-merge inside a node** (i.e. only the fields the agent emits
+overwrite; un-mentioned fields keep their value). That would:
+
+- Eliminate the re-emit footgun entirely.
+- Shrink the per-mutation patch from ~340B back toward parity with
+  `set_node_prop` (~150-180B for this case — emit just `props.columns`).
+- Stay one rule (still "re-emit a node by name").
+- Diverge from OpenUI Lang's published semantics, so it's not a
+  literal compatible implementation — but PocketPaw can choose its
+  own merge depth without changing the wire shape.
+
+This would be a small extension to the spike's `merge()` function and
+worth prototyping if the captain greenlights PR-1. Filed as an open
+design question in `findings.md`.
+
+### Recommendation (updated from §6)
+
+**Greenlight PR-1 of the migration sequence** (dual-read renderer +
+`format: "flat" | "nested"` discriminator, default nested — no caller
+has to change). The downside risk is bounded by the dual-read shape:
+if PR-3 (the authoring claim test) shows the per-field merge depth is
+needed, we can ship that without breaking PR-1's wire format.
+
+**Defer the rest of the sequence** until PR-3 measures real
+pocket_specialist emit on a hardened codebase (i.e., after the
+`kind_for_op` import bug is fixed, so we're comparing flat against a
+working 17-tool surface, not a broken one). Phase 2 strongly suggests
+that on a capable model the surfaces are equivalent on emit quality;
+the bet pays off on codebase surface area, not on the LLM's cognitive
+load.
+
+If the captain wants further signal before PR-1: re-run Phase 2 with
+**Sonnet 4-6** instead of Opus 4.7 to test the weak-model hypothesis.
+That's a 5-minute experiment and would either confirm or refute the
+"flat helps weaker models" argument that Phase 1's failure-mode #1
+implied.
+
+### Phase 2 artifacts
+
+- `/tmp/p2a-baseline.json` — the 17-tool agent's emitted tool call.
+- `/tmp/p2b-flat.json` — the flat agent's emitted patch.
+- `captures/p2-verify.ts` — applies the flat patch via the spike's
+  `merge()` function and proves the resulting spec routes all 8 cards
+  to the right lanes with `bind` preserved.
+
+Branch HEAD before Phase 2 commit: `82054afc`.

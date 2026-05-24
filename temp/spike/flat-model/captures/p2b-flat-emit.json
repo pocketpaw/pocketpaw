@@ -1,0 +1,31 @@
+{
+  "tool_calls": [
+    {
+      "tool": "merge_flat_patch",
+      "args": {
+        "partial": {
+          "components": {
+            "n_no719i8s": {
+              "type": "kanban",
+              "id": "n_no719i8s",
+              "bind": "cards",
+              "props": {
+                "columnKey": "status",
+                "columns": [
+                  {"id": "lead",      "title": "Lead"},
+                  {"id": "qualified", "title": "Qualified"},
+                  {"id": "proposal",  "title": "Proposal"},
+                  {"id": "won",       "title": "Won"}
+                ]
+              }
+            }
+          }
+        }
+      },
+      "reasoning": "Re-emit the kanban node by its stable id with columns aligned to the actual status values; no other node or state changes needed."
+    }
+  ],
+  "turn_count": 1,
+  "ambiguity_notes": "Re-emit-by-name requires the FULL new node value, so I include type/id/bind even though only props.columns changes — the contract says nodes not mentioned keep their value, but a mentioned node is replaced wholesale. Mild awkwardness: I have to re-state bind='cards' to avoid clobbering it. Column titles derived from lane_options labels in state (Lead/Qualified/Proposal/Won) — could have read from state.lane_options at runtime instead of hardcoding, but the kanban widget expects literal column defs.",
+  "final_state_summary": "Kanban node n_no719i8s now has columns lead/qualified/proposal/won matching the card status values; all other nodes and state unchanged."
+}

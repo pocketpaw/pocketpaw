@@ -1,0 +1,21 @@
+{
+  "tool_calls": [
+    {
+      "tool": "set_node_prop",
+      "args": {
+        "node_id": "n_no719i8s",
+        "prop": "columns",
+        "value": [
+          {"id": "lead", "title": "Lead"},
+          {"id": "qualified", "title": "Qualified"},
+          {"id": "proposal", "title": "Proposal"},
+          {"id": "won", "title": "Won"}
+        ]
+      },
+      "reasoning": "All four column items need replacement; replacing the whole prop array is fewer ops than 4 separate set_prop_array_item calls and there's no risk of drift since every item changes."
+    }
+  ],
+  "turn_count": 1,
+  "ambiguity_notes": "Briefly considered 4x set_prop_array_item (Layer 2.5) matching by id, but every item's id AND title both change, so there's no unchanged item to preserve — replacing the whole columns prop is more economical. Also considered patching lane_options to match the columns instead, but the user explicitly said 'fix the columns to match the actual lanes,' so the columns are what's wrong.",
+  "final_state_summary": "Kanban widget n_no719i8s now has columns whose ids match the card.status values (lead/qualified/proposal/won), so all 8 cards render in their correct lanes."
+}
