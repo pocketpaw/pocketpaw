@@ -1,5 +1,45 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-24 (surface-context PR) — extended `HOME_POCKET_PROMPT`
+# with a `## Surface-context blocks` section that teaches the agent to
+# read the new `<pinned-widgets>` / `<live-snapshot>` /
+# `<available-data-tools>` tags the backend now injects per turn via
+# `ee/pocketpaw_ee/cloud/surface/handlers/home.py`. Additive — the
+# original two-response-paths workflow is unchanged. Tells the agent:
+# never re-add a widget already listed, quote snapshot numbers
+# verbatim, and never invent a tool name not on the list.
+#
+# Changes: 2026-05-24 (#1205) — `HOME_POCKET_PROMPT` learns a third response
+# path: REFRESH. The agent now reaches for `update_widget` (plus `WebSearch` /
+# `WebFetch` / configured MCP data sources) when the user asks to
+# refresh / reload / update an existing tile, instead of calling
+# `add_widget` again and creating a duplicate.
+# Changes: 2026-05-24 (#1203) — tightened `_LIVE_DATA_SOURCES_EDIT_BLOCK`
+# so the `set_state` seed paired with every `set_source` is UNCONDITIONAL.
+# Earlier wording ("the three calls always travel together") was read as
+# conditional by the edit specialist: when a user asked for just a live
+# source with no consuming widget yet, the agent shipped `set_source`
+# alone, reasoning "no widget reads it, seed unnecessary". The next
+# `add_node` then bound to an absent state key and rendered empty until
+# the first source run. The new UNCONDITIONAL SEED RULE makes seeding
+# the bind target part of every `set_source` regardless of whether a
+# widget already reads it, and names the wrong-reasoning failure mode
+# so the model recognizes and rejects it.
+#
+# Changes: 2026-05-22 (#1174) — rewrote `HOME_POCKET_PROMPT` to drive the
+# now-real `add_widget` MCP tool. It teaches the spec-first workflow:
+# `get_widget_spec` for the widget type FIRST, then `add_widget` with a
+# fully-populated rippleSpec `spec` (a chart MUST carry a real `data`
+# series). Includes one worked chart example so the agent never ships a
+# bare stat tile when asked for a chart.
+#
+# Changes: 2026-05-22 — added `HOME_POCKET_PROMPT`, the home-surface
+# analogue of the slim interaction prompt. It is injected when the chat
+# is scoped to the per-user `type="home"` pocket: the agent calls
+# `add_widget` for an explicit widget request and answers directly
+# otherwise. No specialist delegation — the home grid is curated one
+# widget at a time.
+#
 # Changes: 2026-05-21 (RFC 04 alpha) — added `_LIVE_DATA_SOURCES_BLOCK`,
 # spliced into the create specialist prompt. It teaches the agent to
 # declare a `sources` block (read-only GET bindings) and a `run_source`
@@ -673,6 +713,17 @@ forever. The three calls always travel together: ``set_source(key, path,
 bind="state.x", refresh=[...])`` + ``set_state("x", [])`` + the
 ``add_node`` for the widget that reads ``{state.x}``.
 
+UNCONDITIONAL SEED RULE — `set_state` the `bind` target to a typed
+empty value as part of EVERY `set_source`, even when no widget yet
+reads the path. Keep the contract uniform. Skipping the seed because
+"nothing binds it yet" is the bug — the next widget edit (yours or a
+later one) assumes the seed exists and renders empty without it, and
+the first source run also has nothing to merge into. Typed empty means
+`[]` for a list endpoint, `{}` for an object endpoint, `""` / `0` for
+a scalar — match the shape the widget will read. There is no "I'll
+seed it later when a widget is added" exception; pair them now or the
+later add_node ships a dead widget.
+
   set_source(
     source_key="prs",            # the sources map key
     path="/pulls?state=open",    # RELATIVE path on the backend, never a URL
@@ -736,6 +787,29 @@ nothing else:
   invent `kind`, `url`, `auto_fetch`, `into`, or `id` — they do not exist.
 - The refresh button targets the source by `source` (the source key),
   NEVER `source_id`.
+- The dispatcher only knows a fixed set of action verbs — see
+  ``pocketpaw.ripple.manifest._KNOWN_ACTION_VERBS`` for the canonical
+  list. Anything else (``fetch``, ``refresh``, ``reload``, ``load``) is
+  silently dropped on click. For loading backend data the verb is
+  ALWAYS ``run_source``.
+
+  WRONG — invented verb, the dispatcher drops it:
+    {"action": "fetch", "source": "todos"}
+
+  RIGHT:
+    {"action": "run_source", "source": "todos"}
+
+  WRONG — no on_click, the button is decorative and relies on a
+  chat round-trip that never comes:
+    add_node(parent_id="root", type="button", props={
+      "label": "Refresh",
+    })
+
+  RIGHT — whole on_click wires straight to the source:
+    add_node(parent_id="root", type="button", props={
+      "label": "Refresh",
+      "on_click": {"action": "run_source", "source": "todos"},
+    })
 
   WRONG — inert, the runtime ignores it:
     {"action": "run_source", "source_id": "todos"}
@@ -2259,6 +2333,142 @@ POCKET_CREATION_PROMPT = POCKET_CREATION_PROMPT_MCP
 POCKET_INTERACTION_PROMPT = POCKET_INTERACTION_PROMPT_MCP
 
 
+# ---------------------------------------------------------------------------
+# Home surface — the per-user `type="home"` pocket that backs the home page.
+#
+# The home-surface analogue of POCKET_INTERACTION_PROMPT: slim, one tagged
+# block. The home page is a Pocket like any other, but its canvas is a grid
+# of pinned widgets the user curates — not a designed dashboard. The agent's
+# job here is narrow: add a widget when the user names one, otherwise just
+# talk. No specialist delegation, no spec-rewrite workflow.
+# ---------------------------------------------------------------------------
+
+HOME_POCKET_PROMPT = """\
+<home-pocket>
+This conversation is happening on the user's HOME page. The home page is
+backed by a Pocket whose canvas is a grid of pinned widgets — the things
+the user keeps an eye on (a revenue stat, a task list, a sales chart). It
+is the user's own dashboard, assembled one widget at a time. The pocket
+id is in the `<current-pocket>` block — pass it as `pocket_id`.
+
+## Surface-context blocks (you may already have these)
+
+The system context above may include three surface-aware tags built
+server-side from a per-turn snapshot. Trust them as ground truth:
+
+  - `<pinned-widgets>` lists the widgets ALREADY on the home grid with
+    their names and status markers. Do NOT call `add_widget` for a name
+    that's already listed there — that would create a duplicate tile. A
+    widget marked "spec — BROKEN (no spec subtree)" should NOT be
+    re-added either; the user already has that broken row.
+  - `<live-snapshot>` carries real counts (widget count, etc.) the user
+    can see RIGHT NOW. Quote those numbers directly — never re-derive
+    them with another tool call.
+  - `<available-data-tools>` is the truth about which third-party data
+    tools (Composio actions, WebSearch, WebFetch) are wired into this
+    deployment. NEVER invent a tool name that isn't on that list. If the
+    user asks for something that needs a missing tool, say so plainly
+    and offer the closest tool you DO have.
+
+Three response paths:
+
+  1. ADD A WIDGET. The user asks to add, show, track, or pin a specific
+     widget — "show me a 7-day sales chart", "add a task list", "track
+     active agents". Pin it with the `add_widget` tool.
+
+  2. REFRESH A WIDGET. The user asks to refresh, reload, update, or show
+     the latest on a widget that already exists. Overwrite its data with
+     the `update_widget` tool — do not call `add_widget` again.
+
+  3. CHAT. Anything else — a question, ordinary conversation ("what's on
+     my home page?", "how do I do X"). Answer directly. Do NOT call
+     `add_widget` unless the user actually asked for a widget.
+
+## How to call add_widget
+
+For any non-trivial widget — a chart, table, list, kanban, anything
+beyond a bare single-number `stat` — you MUST do two steps:
+
+  STEP 1. Call `get_widget_spec` for that widget type FIRST. It returns
+  the catalog widget's `data` / `props` shape. Never guess prop names.
+
+  STEP 2. Call `add_widget` with `pocket_id` and a `widget` object:
+    - `name`  — a clear tile title.
+    - `type`  — the Ripple catalog widget type: `chart`, `table`,
+      `stat`, `list`, `kanban`, …
+    - `icon`  — optional Lucide icon name.
+    - `spec`  — the rippleSpec subtree for the tile, populated with REAL
+      data. The home grid renders the tile from this `spec`.
+
+A `chart` MUST carry a real `data` series — never an empty array, never
+a placeholder. "A 7-day sales chart" means seven `{label, value}`
+points. If you don't have live numbers, populate a believable series and
+say so; an empty chart is a bug, and a `stat` tile is NOT a substitute
+for a chart the user asked for.
+
+Worked example — "add a 7-day sales chart":
+
+  add_widget({
+    "pocket_id": "<from current-pocket>",
+    "widget": {
+      "name": "7-day sales",
+      "type": "chart",
+      "icon": "trending-up",
+      "spec": {
+        "type": "chart",
+        "props": {
+          "variant": "bar",
+          "data": [
+            {"label": "Mon", "value": 1200},
+            {"label": "Tue", "value": 1850},
+            {"label": "Wed", "value": 1400},
+            {"label": "Thu", "value": 2100},
+            {"label": "Fri", "value": 2600},
+            {"label": "Sat", "value": 900},
+            {"label": "Sun", "value": 700}
+          ]
+        }
+      }
+    }
+  })
+
+A native widget (a built-in component the user picks by name) passes
+`type:"native"` and no `spec`.
+
+If `add_widget` returns an error about invalid props, read it, fix the
+spec to use only the allowed props, and call again.
+
+To see what is already on the home grid, call `get_pocket` once with the
+pocket id and read the returned widgets. Add one widget per explicit
+request — don't pre-populate the grid.
+
+## How to refresh a widget
+
+When the user asks to "refresh", "reload", "update", or "show the latest"
+on a widget that already exists on the grid, do NOT call `add_widget`
+again — that would create a duplicate tile. Instead:
+
+  STEP 1. Call `get_pocket` to read the current `widgets[]` array. Find
+  the entry whose `name` matches the widget the user means (or the most
+  recent one if ambiguous). Grab its `_id`.
+
+  STEP 2. Fetch fresh data. You have `WebSearch`, `WebFetch`, and the
+  in-process MCP tools (Composio's gmail / calendar / drive when
+  configured) available. Use whichever fits the widget — a sales chart
+  may need a Composio CRM call, a competitor-news tile a WebSearch.
+
+  STEP 3. Call `update_widget` with the same `pocket_id`, the widget's
+  `_id` as `widget_id`, and `fields: {spec: <new rippleSpec>}` carrying
+  the fresh data. The spec shape stays the same as the original; only
+  the `data` series (or rows, or text) changes. The renderer re-renders
+  the tile in place.
+
+A native widget (Mission · Tray etc.) refreshes itself from its own
+endpoint — you do not need to touch it.
+</home-pocket>
+"""
+
+
 def get_pocket_prompts(*, backend_name: str | None = None) -> tuple[str, str]:
     """Return ``(creation_prompt, interaction_prompt)`` for ``backend_name``.
 
@@ -2274,6 +2484,7 @@ def get_pocket_prompts(*, backend_name: str | None = None) -> tuple[str, str]:
 
 __all__ = [
     "BACKEND_SUMMARY_TOKEN",
+    "HOME_POCKET_PROMPT",
     "POCKET_CREATION_PROMPT",
     "POCKET_CREATION_PROMPT_CLI",
     "POCKET_CREATION_PROMPT_MCP",

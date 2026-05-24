@@ -7,6 +7,20 @@ separate follow-up calls.
 Updated: 2026-05-16 — added optional ``project_id`` (aliased as
 ``projectId`` on the wire) to CreatePocketRequest / UpdatePocketRequest /
 PocketResponse so pockets can be grouped under a Mission Control Project.
+
+Updated: 2026-05-21 — documented the ``type="native"`` widget contract on
+``AddWidgetRequest`` (home-as-pocket foundation). A native widget is an
+ordinary widget entry whose ``type`` is ``"native"`` and whose ``name`` is
+the key the frontend uses to look up a built-in Svelte component — it
+carries no ``rippleSpec`` to render or validate.
+
+Updated: 2026-05-21 — added ``HomePocketResponse`` so ``GET /pockets/home``
+has a real OpenAPI schema instead of an empty ``dict``.
+
+Updated: 2026-05-22 (#1174) — ``AddWidgetRequest`` and ``_widget_to_wire``
+carry the optional ``spec`` field: a per-tile rippleSpec subtree the home
+grid renders. Populated by the home agent's ``add_widget`` MCP tool.
+
 Updated: 2026-05-21 (RFC 04 alpha) — added PocketBackendConfigRequest /
 PocketBackendConfigResponse / RunSourcesRequest for the per-pocket backend
 binding + read-only source-run endpoints.
@@ -68,6 +82,20 @@ class UpdatePocketRequest(BaseModel):
 
 
 class AddWidgetRequest(BaseModel):
+    """Body for POST /pockets/{id}/widgets.
+
+    ``type`` is free-form. Two kinds of widget ride this schema:
+
+    * ordinary Ripple-spec widgets — ``spec`` carries the rippleSpec
+      subtree the home grid renders for this tile (e.g. a ``chart`` node
+      with a real ``data`` series);
+    * native widgets — ``type="native"`` and ``name`` is the key the
+      frontend uses to resolve a built-in Svelte component. Native
+      widgets have no rippleSpec, so manifest validation (which only
+      walks rippleSpec trees) never touches them. ``icon``/``color`` are
+      kept for the tile chrome.
+    """
+
     name: str = Field(min_length=1, max_length=100)
     type: str = "custom"
     icon: str = ""
@@ -76,6 +104,9 @@ class AddWidgetRequest(BaseModel):
     data_source_type: str = "static"
     config: dict = Field(default_factory=dict)
     props: dict = Field(default_factory=dict)
+    # Optional per-tile rippleSpec subtree. The home grid renders the tile
+    # from ``spec`` when present; native widgets leave it ``None``.
+    spec: dict | None = None
     assigned_agent: str | None = None
 
 
@@ -122,6 +153,23 @@ class PocketResponse(BaseModel):
     project_id: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class HomePocketResponse(BaseModel):
+    """Response for ``GET /pockets/home``.
+
+    ``pocket`` is the full pocket wire dict (camelCase keys, ``_id``,
+    ``rippleSpec`` — the legacy shape ``pocket_to_wire_dict`` emits), kept
+    as a free-form ``dict`` because it is not the snake_case
+    ``PocketResponse`` shape and the client builds against the wire dict
+    verbatim. ``created`` is ``True`` only when this call provisioned a
+    brand-new home pocket — the client gates one-time widget seeding /
+    localStorage migration on it.
+    """
+
+    pocket_id: str
+    pocket: dict[str, Any]
+    created: bool
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +408,9 @@ def _widget_to_wire(w) -> dict:
         "config": dict(w.config),
         "props": dict(w.props),
         "data": w.data,
+        # Per-tile rippleSpec subtree the home grid renders; ``None`` for
+        # native and legacy widgets.
+        "spec": getattr(w, "spec", None),
         "assignedAgent": w.assigned_agent,
         "position": {"row": w.position.row, "col": w.position.col},
     }

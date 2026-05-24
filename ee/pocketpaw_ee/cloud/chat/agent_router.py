@@ -32,6 +32,7 @@ from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 from pocketpaw_ee.cloud.shared.errors import CloudError
+from pocketpaw_ee.cloud.surface import resolve_surface_context
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,29 @@ async def post_agent_chat(
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
 
     transport = get_stream_transport()
+    # Resolve the surface-aware context preamble AFTER scope is resolved
+    # (so we have ``workspace_id`` / ``user_id`` confirmed) and BEFORE any
+    # other prompt assembly. The resolver never raises — failures fall
+    # back to a GENERIC context with an empty preamble, which
+    # ``build_dynamic_context`` then treats as the legacy three-line
+    # shape. Older clients that send neither ``surface`` nor
+    # ``surface_meta`` land here as ``{surface: None, meta: {}}`` and
+    # produce a GENERIC context with a placeholder preamble that the
+    # router still attaches; the chat continues to work either way.
+    ctx.surface_context = await resolve_surface_context(
+        ctx.workspace_id,
+        user_id,
+        {"surface": body.surface, "meta": body.surface_meta or {}},
+    )
+
+    # Signal any prior in-flight run for the same (scope, scope_id, user_id)
+    # to stop. We don't wait on it — each generator cleans its own slot in
+    # ``_active_runs`` only when the slot still points to its own event, so
+    # the new request's entry is safe from the old generator's ``finally``.
+    key = (scope, scope_id, user_id)
+    prev = _active_runs.get(key)
+    if prev is not None:
+        prev.set()
 
     # Supersede any prior in-flight run for this scope. ``request_cancel``
     # writes the cancel flag in Redis so a worker in another process notices.

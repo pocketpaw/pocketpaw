@@ -5,6 +5,10 @@ Updated: 2026-05-21 — refactor/gate-planner-mcp. Expanded the
   is stripped even though it is opt-in rather than always-on. Added
   ``TestPlannerMCPGate`` covering the opt-in gate: the planner loads only
   when an injected ``ToolPolicy`` names it in ``mcp_servers_allow``.
+Updated: 2026-05-22 (#1174) — added ``TestMcpToolAllowlist``: the resolved
+  in-process MCP tool-id allowlist (``_collect_mcp_tool_ids``) includes the
+  cloud ``pocketpaw_pocket`` server's writable ``add_widget`` tool, so the
+  home-pocket agent on this backend can pin real widgets.
 
 All SDK imports are mocked.
 """
@@ -261,3 +265,39 @@ class TestPlannerMCPGate:
         with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
             result = sdk._get_mcp_servers()
         assert _PLANNER_MCP_SERVER_NAME not in result
+
+
+class TestMcpToolAllowlist:
+    """The in-process MCP tool-id allowlist the claude_agent_sdk backend
+    builds. An MCP tool is only callable when its id is on this list, so the
+    home-pocket agent's ``add_widget`` tool must appear here."""
+
+    def _make_sdk(self) -> ClaudeAgentSDK:
+        settings = Settings(anthropic_api_key="test-key", tool_profile="full")
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_allowlist_includes_writable_add_widget_tool(self):
+        """The resolved tool list carries the cloud ``add_widget`` MCP tool —
+        the home agent's widget-creation tool — alongside the read tools."""
+        from pocketpaw_ee.agent.mcp_servers.pockets import (
+            ADD_WIDGET_TOOL_ID,
+            GET_POCKET_TOOL_ID,
+        )
+
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert ADD_WIDGET_TOOL_ID in ids, (
+            "the writable add_widget tool must be on the allowlist or the home agent cannot call it"
+        )
+        # The read tools are still there — add_widget is additive.
+        assert GET_POCKET_TOOL_ID in ids
+
+    def test_allowlist_excludes_opt_in_planner_by_default(self):
+        """Opt-in servers stay off the allowlist unless the policy opts them
+        in — the loop the writable tool rides must keep that gate."""
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert not any(f"__{_PLANNER_MCP_SERVER_NAME}__" in t for t in ids)

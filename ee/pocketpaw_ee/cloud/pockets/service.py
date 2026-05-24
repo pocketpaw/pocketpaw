@@ -6,6 +6,7 @@ Sole owner of writes to the ``Pocket`` Beanie document. Module-level
 
 Public API (returns wire dicts for legacy router compatibility):
 - ``create``, ``list_pockets``, ``get``, ``update``, ``delete``
+- ``ensure_home_pocket`` — resolve-or-provision the user's home pocket
 - ``create_from_ripple_spec`` — agent-generated pockets
 - ``add_widget``, ``update_widget``, ``remove_widget``, ``reorder_widgets``
 - ``generate_share_link``, ``revoke_share_link``, ``update_share_link``,
@@ -27,6 +28,14 @@ onto the pocketpaw_ee layout from PR #1106).
 Changes: 2026-05-21 (#1172) — ``agent_view`` self-heals node ids via
 ``_heal_node_ids`` so pockets persisted before node-id stamping became
 addressable by granular edit ops on first agent read.
+Changes: 2026-05-21 — added ``ensure_home_pocket`` (home-as-pocket
+foundation): idempotently resolves-or-provisions a per-user ``type="home"``
+pocket and persists its id onto the user's ``home_pocket_id`` setting via
+an atomic compare-and-swap, so a first-login provision race resolves to a
+single home pocket (the losing call deletes its orphan and adopts the
+winner's). Native widgets (``type="native"``) ride the existing
+``widgets[]`` paths unchanged — they carry no ``rippleSpec``, so manifest
+validation (which only walks ``rippleSpec`` trees) never touches them.
 Changes: 2026-05-21 (RFC 04 alpha) — added the per-pocket backend
 binding API: ``set_pocket_backend``, ``get_pocket_backend``,
 ``get_pocket_backend_for_executor``, ``remove_pocket_backend``. The
@@ -61,6 +70,10 @@ already-authenticated refresh caller), and the webhook-secret trio
 for every failure so the endpoint is not a pocket-existence oracle),
 ``get_webhook_secret`` / ``rotate_webhook_secret`` (owner-only). The
 secret lives on the ``PocketBackendCredential`` row — never in the spec.
+Changes: 2026-05-22 (#1174) — widgets carry an optional ``spec`` field (a
+per-tile rippleSpec subtree the home grid renders). ``_build_widget_doc``,
+``_widget_to_domain``, the REST ``add_widget``, and ``agent_update_widget``
+thread it through; the home agent's ``add_widget`` MCP tool populates it.
 """
 
 from __future__ import annotations
@@ -122,6 +135,17 @@ from pocketpaw_ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
 
+# Pocket ``type`` for the per-user pocket that backs the home page. Behaves
+# like an ordinary private pocket — the type is a marker the home route and
+# the frontend key on, not a behavioural switch.
+HOME_POCKET_TYPE = "home"
+
+# Widget ``type`` for "native" widgets — widgets the frontend renders as a
+# built-in Svelte component (looked up by ``name``) rather than from a
+# ``rippleSpec``. Native widgets have no spec, so manifest validation —
+# which only walks ``rippleSpec`` trees — never touches them.
+NATIVE_WIDGET_TYPE = "native"
+
 
 # ---------------------------------------------------------------------------
 # Private mapping + access helpers
@@ -142,6 +166,7 @@ def _widget_to_domain(w: _WidgetDoc) -> Widget:
         data=w.data,
         assigned_agent=w.assignedAgent,
         position=WidgetPosition(row=w.position.row, col=w.position.col),
+        spec=getattr(w, "spec", None),
     )
 
 
@@ -223,6 +248,9 @@ def _build_widget_doc(payload: dict) -> _WidgetDoc:
         config=payload.get("config", {}),
         props=payload.get("props", {}),
         data=payload.get("data"),
+        # ``spec`` is the per-tile rippleSpec subtree the home grid renders.
+        # Optional — native widgets and legacy widget entries omit it.
+        spec=payload.get("spec"),
         assignedAgent=payload.get("assignedAgent", payload.get("assigned_agent")),
     )
 
@@ -521,6 +549,82 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     return await _resolved_wire_dict(doc, user_id)
 
 
+async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, bool]:
+    """Resolve-or-provision the caller's home pocket.
+
+    Returns ``(pocket_wire_dict, created)``. ``created`` is ``True`` only
+    when this call provisioned a brand-new home pocket, ``False`` when it
+    returned an existing one. The home route surfaces ``created`` so the
+    client can gate one-time work — seeding default widgets, migrating
+    legacy ``localStorage`` widgets — on a genuinely fresh pocket and
+    never re-seed a returning user who deliberately cleared their grid.
+
+    Idempotent. If the user's ``home_pocket_id`` setting points at a pocket
+    that still exists and is owned by the user, that pocket is returned
+    unchanged with ``created=False``. Otherwise a fresh ``type="home"``
+    pocket is created (``name="Home"``, ``visibility="private"``, no
+    widgets), its id is persisted back onto the user setting, and it is
+    returned with ``created=True``.
+
+    A stale ``home_pocket_id`` — the pocket was deleted, or it now belongs
+    to someone else — falls through to re-provisioning rather than raising.
+
+    **Concurrency.** Provisioning persists the new id with an atomic
+    compare-and-swap (``auth_service.claim_home_pocket_id``), not a plain
+    write. If two concurrent first-login calls both insert a pocket, only
+    one wins the swap; the loser deletes its own orphan pocket, adopts the
+    winner's, and returns it with ``created=False``. The home page is
+    therefore single-pocket even under a provision race.
+
+    Provisioning is deliberately empty: the client owns the home page's
+    default / seed widgets. This service only guarantees a backing pocket
+    exists.
+    """
+    from pocketpaw_ee.cloud.auth import service as auth_service
+
+    existing_id = await auth_service.get_home_pocket_id(user_id)
+    if existing_id:
+        try:
+            doc = await _fetch_pocket(existing_id)
+        except NotFound:
+            doc = None
+        if doc is not None and doc.owner == user_id:
+            return await _resolved_wire_dict(doc, user_id), False
+
+    doc = _PocketDoc(
+        workspace=workspace_id,
+        name="Home",
+        description="",
+        type=HOME_POCKET_TYPE,
+        owner=user_id,
+        visibility="private",
+        widgets=[],
+    )
+    await doc.insert()
+
+    # Compare-and-swap the new id onto the user. ``expected`` is whatever we
+    # read above — None for a genuine first provision, the stale id when
+    # re-provisioning. If the swap fails another writer beat us here.
+    claimed = await auth_service.claim_home_pocket_id(user_id, str(doc.id), expected=existing_id)
+    if not claimed:
+        winner_id = await auth_service.get_home_pocket_id(user_id)
+        if winner_id and winner_id != str(doc.id):
+            try:
+                winner = await _fetch_pocket(winner_id)
+            except NotFound:
+                winner = None
+            if winner is not None and winner.owner == user_id:
+                # Adopt the winner's pocket and drop our orphan.
+                await doc.delete()
+                return await _resolved_wire_dict(winner, user_id), False
+        # The winner's pocket couldn't be resolved (deleted in the race
+        # window). Keep our own pocket rather than orphan the user — but it
+        # is not the id of record, so report created=True and move on.
+
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id), True
+
+
 async def list_pockets(
     workspace_id: str,
     user_id: str,
@@ -777,6 +881,7 @@ async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> di
             "dataSourceType": body.data_source_type,
             "config": body.config,
             "props": body.props,
+            "spec": body.spec,
             "assignedAgent": body.assigned_agent,
         }
     )
@@ -1363,7 +1468,7 @@ async def agent_update_widget(
     widget = next((w for w in doc.widgets if w.id == widget_id), None)
     if widget is None:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"
-    for k in ("name", "type", "icon", "color", "span", "data", "assignedAgent"):
+    for k in ("name", "type", "icon", "color", "span", "data", "spec", "assignedAgent"):
         if k in fields:
             setattr(widget, k, fields[k])
     if "config" in fields and isinstance(fields["config"], dict):

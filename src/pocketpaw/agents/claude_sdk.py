@@ -1,5 +1,10 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
+  collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
+  server now carries a writable ``add_widget`` tool alongside the read tools;
+  its id flows through the same provider loop, so the home-pocket agent can
+  call ``add_widget`` on the ``claude_agent_sdk`` backend.
 Updated: 2026-05-21 — Gate the ``pocketpaw_planner`` in-process MCP server
   behind an explicit policy opt-in (``is_mcp_server_explicitly_allowed``).
   It was the only in-process MCP server with no gate, so the
@@ -594,6 +599,39 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         return servers
 
+    def _collect_mcp_tool_ids(self) -> list[str]:
+        """Collect the in-process MCP tool ids to add to the SDK allowlist.
+
+        An MCP tool is only callable if its id is on the allowlist. This
+        gathers the core ripple widget-spec ids plus every cloud
+        ``pocketpaw.mcp_servers`` provider's ``tool_ids()`` (which includes
+        the ``pocketpaw_pocket`` server's writable ``add_widget`` tool).
+
+        Opt-in servers (the planner) are skipped unless the policy opts
+        them in, mirroring the registration gate in ``_get_mcp_servers``.
+        Tool ids follow the ``mcp__<server>__<tool>`` convention, so the
+        server name is the segment between the first and second ``__``.
+        """
+        from pocketpaw._registry import providers as _ext_providers
+        from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
+
+        ids: list[str] = list(WIDGET_TOOL_IDS)
+        for provider in _ext_providers("pocketpaw.mcp_servers"):
+            try:
+                tool_ids = list(provider.tool_ids())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("MCP provider tool ids not added to allowlist: %s", exc)
+                continue
+            for tool_id in tool_ids:
+                parts = tool_id.split("__")
+                server = parts[1] if len(parts) >= 3 and parts[0] == "mcp" else ""
+                if server in OPT_IN_MCP_SERVERS and not (
+                    self._policy.is_mcp_server_explicitly_allowed(server)
+                ):
+                    continue
+                ids.append(tool_id)
+        return ids
+
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
@@ -913,34 +951,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # callable. The ripple widget-spec tools are core; the cloud
             # pocket / Mission Control tasks / planner / pocket-specialist
             # ids come from the ``pocketpaw.mcp_servers`` providers (none on
-            # an OSS install). Mutations are NOT here — pocket writes flow
-            # through the pocket_specialist create/edit tools.
-            #
-            # Opt-in servers (the planner) are skipped here unless the
-            # policy opts them in, mirroring the registration gate in
-            # ``_get_mcp_servers``. An allowlist id without a registered
-            # server is harmless, but keeping the two gates consistent
-            # avoids a misleading entry. Tool ids follow the
-            # ``mcp__<server>__<tool>`` convention, so the server name is
-            # the segment between the first and second ``__``.
-            from pocketpaw._registry import providers as _ext_providers
-            from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
-
-            allowed_tools.extend(WIDGET_TOOL_IDS)
-            for provider in _ext_providers("pocketpaw.mcp_servers"):
-                try:
-                    tool_ids = list(provider.tool_ids())
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("MCP provider tool ids not added to allowlist: %s", exc)
-                    continue
-                for tool_id in tool_ids:
-                    parts = tool_id.split("__")
-                    server = parts[1] if len(parts) >= 3 and parts[0] == "mcp" else ""
-                    if server in OPT_IN_MCP_SERVERS and not (
-                        self._policy.is_mcp_server_explicitly_allowed(server)
-                    ):
-                        continue
-                    allowed_tools.append(tool_id)
+            # an OSS install). The cloud ``pocketpaw_pocket`` server carries
+            # both read tools (get_pocket / list_pockets) and the writable
+            # ``add_widget`` tool — they all flow through the loop below.
+            allowed_tools.extend(self._collect_mcp_tool_ids())
 
             # Build hooks for security
             hooks = {

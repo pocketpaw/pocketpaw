@@ -9,6 +9,16 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-05-22 — ``ScopeContext`` carries the anchored pocket's
+``pocket_type``; ``build_behavior_instructions`` appends ``HOME_POCKET_PROMPT``
+when that type is ``"home"`` so the agent behaves correctly on the home page
+(call ``add_widget`` for an explicit widget request, answer directly
+otherwise). ``_resolve_pocket`` / ``_resolve_session`` populate the field.
+Changes: 2026-05-22 (#1174) — ``build_behavior_instructions`` no longer emits
+``POCKET_DELEGATION_RULE`` (nor the heavy interaction prompt) for a
+``type="home"`` scope. The delegation rule ("never call add_widget, delegate
+to the specialist") contradicts ``HOME_POCKET_PROMPT`` ("call add_widget");
+the home agent now gets exactly one consistent widget-creation instruction.
 Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — ``build_behavior_instructions``
 fills the interaction prompt's current-pocket block via ``fill_current_pocket``
 (both the pocket-id and backend-summary tokens) instead of a bare
@@ -17,6 +27,13 @@ leaks as literal text.
 Changes: 2026-05-22 (Increment 3) — added ``push_pocket_execution``, the
 SSE-sink push for the execution router's per-request ``pocket_execution``
 observability frame.
+Changes: 2026-05-24 — ``ScopeContext`` carries an optional
+``surface_context`` (the resolved {surface_kind, meta, preamble} tuple
+from ``surface_context.resolve_surface_context``). ``build_dynamic_context``
+prepends its preamble before the legacy scope/participants/current-pocket
+tags so the chat agent sees the surface snapshot first. Clients that
+don't stamp a surface hint keep the old three-line shape unchanged —
+``surface_context is None`` is the legacy path.
 """
 
 from __future__ import annotations
@@ -29,6 +46,7 @@ from enum import StrEnum
 from typing import Any
 
 from pocketpaw.ripple import (
+    HOME_POCKET_PROMPT,
     INLINE_RIPPLE_SYSTEM_PROMPT,
     POCKET_DELEGATION_RULE,
     fill_current_pocket,
@@ -36,6 +54,7 @@ from pocketpaw.ripple import (
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
 from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw_ee.cloud.surface import SurfaceContext
 
 logger = logging.getLogger(__name__)
 
@@ -179,11 +198,22 @@ class ScopeContext:
     # when the underlying ``Session.pocket`` is set. The system prompt uses
     # it to tell the agent which pocket it can edit via the write MCP tools.
     pocket_id: str | None = None
+    # The anchored pocket's free-form ``Pocket.type`` (``custom``, ``home``,
+    # …), populated alongside ``pocket_id``. ``build_behavior_instructions``
+    # uses it to inject ``HOME_POCKET_PROMPT`` when the chat is scoped to the
+    # per-user ``type="home"`` pocket that backs the home page.
+    pocket_type: str | None = None
     # Optional client-supplied intent hint that swaps which system-prompt
     # block ``build_context_block`` emits. ``pocket_create`` makes the
     # agent reach for the ``create_pocket`` MCP tool instead of rendering
     # an inline ``ui-spec`` chat reply.
     intent: str | None = None
+    # Resolved per-turn surface context from
+    # ``surface_context.resolve_surface_context``. ``None`` when the
+    # client didn't stamp a hint or the surface module is unreachable —
+    # ``build_dynamic_context`` falls back to the legacy three-line
+    # shape in that case.
+    surface_context: SurfaceContext | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -286,11 +316,13 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
     # (pocket scope keys all sessions under one stream); without this lookup
     # those chats would silently lose pocket tools.
     pocket_tool_specs: list[dict[str, Any]] = []
+    pocket_type: str | None = None
     pocket_id = getattr(session, "pocket", None)
     if pocket_id:
         pocket = await _get_pocket(str(pocket_id))
         if pocket is not None:
             pocket_tool_specs = list(getattr(pocket, "tool_specs", []) or [])
+            pocket_type = getattr(pocket, "type", None)
 
     target = agent_id_hint or getattr(session, "agent", None)
     if not target:
@@ -314,6 +346,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         agent_ids_in_scope=[target],
         pocket_tool_specs=pocket_tool_specs,
         pocket_id=str(pocket_id) if pocket_id else None,
+        pocket_type=pocket_type,
     )
 
 
@@ -416,6 +449,7 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
         agent_ids_in_scope=agent_ids,
         pocket_tool_specs=list(getattr(pocket, "tool_specs", []) or []),
         pocket_id=scope_id,
+        pocket_type=getattr(pocket, "type", None),
     )
 
 
@@ -490,7 +524,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
 
     Backend gating mirrors ``build_context_block``: MCP-capable backends
     get ``INLINE_RIPPLE_SYSTEM_PROMPT + POCKET_DELEGATION_RULE``;
-    others get the heavy inline pocket prompt.
+    others get the heavy inline pocket prompt. A ``type="home"`` scope is
+    the exception — it gets ``INLINE_RIPPLE_SYSTEM_PROMPT +
+    HOME_POCKET_PROMPT`` and NOT the delegation rule, because the home
+    agent mutates widgets directly via the ``add_widget`` MCP tool rather
+    than delegating to the pocket specialist.
     """
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
@@ -502,7 +540,23 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     if _composio_service.is_enabled():
         parts.append(_COMPOSIO_AUTH_FLOW_RULE)
         parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)
-    if backend_name in _MCP_POCKET_BACKENDS:
+    # The home pocket is a special case: its agent mutates widgets directly
+    # via the ``add_widget`` MCP tool — it does NOT delegate to the pocket
+    # specialist. ``POCKET_DELEGATION_RULE`` ("never call add_widget,
+    # delegate to the specialist") and ``HOME_POCKET_PROMPT`` ("call
+    # add_widget") flatly contradict each other, so the delegation rule is
+    # dropped for a ``type="home"`` scope. The home agent then gets exactly
+    # one consistent widget-creation instruction.
+    is_home = ctx.pocket_type == "home"
+    if is_home:
+        # The home agent's only widget-creation instruction is
+        # HOME_POCKET_PROMPT (appended below). It must not also receive the
+        # specialist-delegation rule (MCP backends) or the heavy
+        # interaction prompt (CLI backends) — both carry the contradicting
+        # "delegate, don't call add_widget" framing. Just the base ripple
+        # conventions, then HOME_POCKET_PROMPT.
+        parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+    elif backend_name in _MCP_POCKET_BACKENDS:
         parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
         parts.append(POCKET_DELEGATION_RULE)
     else:
@@ -518,6 +572,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
             parts.append(fill_current_pocket(interaction_prompt, ctx.pocket_id, None))
         else:
             parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+    # Home surface: append the home-surface prompt so the agent calls
+    # add_widget for an explicit widget request and answers directly
+    # otherwise. Backend-agnostic — the discriminator is the pocket type.
+    if is_home:
+        parts.append(HOME_POCKET_PROMPT)
     return "\n".join(parts)
 
 
@@ -627,12 +686,22 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     participants, current-pocket-id. Pairs with
     ``build_behavior_instructions``: the dynamic context is reference
     data and lives inside the ``knowledge_context`` wrapper; the
-    behavioral instructions live at the top level."""
+    behavioral instructions live at the top level.
+
+    When a ``surface_context`` is attached, its preamble is prepended
+    FIRST — surface state (pinned widgets, snapshot, available tools)
+    is more informationally dense than the bare scope tags and the
+    agent should see it before anything else. ``surface_context is None``
+    keeps the legacy three-line shape (clients that don't stamp a
+    surface hint, or surfaces that fell back to GENERIC with an empty
+    preamble).
+    """
+    parts: list[str] = []
+    if ctx.surface_context and ctx.surface_context.preamble:
+        parts.append(ctx.surface_context.preamble)
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
-    parts = [
-        f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>",
-        f"<participants>{member_list}</participants>",
-    ]
+    parts.append(f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>")
+    parts.append(f"<participants>{member_list}</participants>")
     if ctx.pocket_id and ctx.intent != "pocket_create":
         parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
     return "\n".join(parts)
