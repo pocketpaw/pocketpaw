@@ -1,0 +1,37 @@
+{
+  "_capture_context": "RFC 06 Position 1 spike, push-back P1 (real pocket_specialist test, 2026-05-24 ~16:31 IST). This is the spec of the FRESH pocket pocket_specialist created after giving up on the granular edit path of the previous pocket (see broken-edit-pocket.json). The agent emitted this entire spec in one create call, sidestepping every granular edit op. End result for the user: one broken pocket + one duplicate working pocket left in the workspace.",
+  "_pocket_id": "6a12da94ae05f15284584409",
+  "_pocket_name": "Sales Pipeline",
+  "color": "#0A84FF",
+  "lifecycle": {"id": "pocket-b9d07efd", "type": "persistent"},
+  "metadata": {"category": "custom", "color": "#0A84FF"},
+  "name": null,
+  "state": {
+    "cards": [
+      {"id": "d1", "status": "lead", "subtitle": "$48,000", "tag": "Sarah Chen", "title": "Globex Corp"},
+      {"id": "d2", "status": "lead", "subtitle": "$32,500", "tag": "James Okafor", "title": "Pinnacle Media"},
+      {"id": "d3", "status": "qualified", "subtitle": "$125,000", "tag": "Priya Nair", "title": "Stark Industries"},
+      {"id": "d4", "status": "qualified", "subtitle": "$87,000", "tag": "Marcus Webb", "title": "Axiom Retail"},
+      {"id": "d5", "status": "proposal", "subtitle": "$210,000", "tag": "Dana Liu", "title": "Helios Financial"},
+      {"id": "d6", "status": "proposal", "subtitle": "$94,500", "tag": "Tom Barker", "title": "Crestview Logistics"},
+      {"id": "d7", "status": "won", "subtitle": "$310,000", "tag": "Rachel Kim", "title": "NovaTech Systems"},
+      {"id": "d8", "status": "won", "subtitle": "$175,000", "tag": "Chris Andrade", "title": "Meridian Health"}
+    ]
+  },
+  "title": null,
+  "ui": {
+    "children": [
+      {"id": "n_vqwnr4o7", "props": {"subtitle": "Q2 2026 · Deal Tracker", "title": "Sales Pipeline"}, "type": "page-header"},
+      {"bind": "cards", "id": "n_d3ufk3fx", "props": {"columnKey": "status", "columns": [
+        {"id": "lead", "title": "Lead"},
+        {"id": "qualified", "title": "Qualified"},
+        {"id": "proposal", "title": "Proposal"},
+        {"id": "won", "title": "Won"}
+      ]}, "type": "kanban"}
+    ],
+    "id": "n_bw3l6ne6",
+    "props": {"direction": "column", "gap": "20px"},
+    "type": "flex"
+  },
+  "version": "1.0"
+}

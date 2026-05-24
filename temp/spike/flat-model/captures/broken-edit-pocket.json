@@ -1,0 +1,56 @@
+{
+  "_capture_context": "RFC 06 Position 1 spike, push-back P1 (real pocket_specialist test, 2026-05-24 ~16:30 IST). This is the spec of the pocket pocket_specialist tried to edit. The template was Kanban Board with default columns (Backlog/In progress/Review/Done). state.cards and state.lane_options were updated successfully to Lead/Qualified/Proposal/Won via a successful patch_state op, but the kanban widget's props.columns prop (at id n_no719i8s) was NEVER updated because the follow-up ops all failed (see authoring-test.md for the failure log). Render result: empty Backlog/In progress columns; the 8 cards exist in state.cards but their status field doesn't match any column id in props.columns, so they fall off the board entirely.",
+  "_pocket_id": "6a12d9ffae05f15284584408",
+  "_pocket_name": "Sales Pipeline",
+  "color": "#0A84FF",
+  "lifecycle": {"id": "pocket-8e1b8772", "type": "persistent"},
+  "metadata": {"category": "custom", "color": "#0A84FF"},
+  "name": null,
+  "state": {
+    "cards": [
+      {"id": "d1", "status": "lead", "subtitle": "$48,000", "tag": "Sarah Chen", "title": "Globex Corp"},
+      {"id": "d2", "status": "lead", "subtitle": "$32,500", "tag": "James Okafor", "title": "Pinnacle Media"},
+      {"id": "d3", "status": "qualified", "subtitle": "$125,000", "tag": "Priya Nair", "title": "Stark Industries"},
+      {"id": "d4", "status": "qualified", "subtitle": "$87,000", "tag": "Marcus Webb", "title": "Axiom Retail"},
+      {"id": "d5", "status": "proposal", "subtitle": "$210,000", "tag": "Dana Liu", "title": "Helios Financial"},
+      {"id": "d6", "status": "proposal", "subtitle": "$94,500", "tag": "Tom Barker", "title": "Crestview Logistics"},
+      {"id": "d7", "status": "won", "subtitle": "$310,000", "tag": "Rachel Kim", "title": "NovaTech Systems"},
+      {"id": "d8", "status": "won", "subtitle": "$175,000", "tag": "Chris Andrade", "title": "Meridian Health"}
+    ],
+    "draft": "",
+    "draft_lane": "backlog",
+    "lane_options": [
+      {"label": "Lead", "value": "lead"},
+      {"label": "Qualified", "value": "qualified"},
+      {"label": "Proposal", "value": "proposal"},
+      {"label": "Won", "value": "won"}
+    ],
+    "next_id": 7
+  },
+  "title": null,
+  "ui": {
+    "children": [
+      {"id": "n_jgmvilpt", "props": {"subtitle": "[Drag a card to move it across the workflow]", "title": "Sales Pipeline"}, "type": "page-header"},
+      {"children": [
+        {"bind": "draft", "id": "n_zfqamnbb", "props": {"label": "New card", "placeholder": "[What's the work?]"}, "type": "input"},
+        {"bind": "draft_lane", "id": "n_xbvdbhr2", "props": {"label": "Lane", "options": "{state.lane_options}"}, "type": "select"},
+        {"id": "n_pm5cxvxw", "on_click": [
+          {"action": "validate", "condition": "{state.draft.length > 0}", "message": "Type a card title first"},
+          {"action": "push", "target": "cards", "value": {"assignee": "", "id": "c-{state.next_id}", "status": "{state.draft_lane}", "title": "{state.draft}"}},
+          {"action": "set", "target": "next_id", "value": "{state.next_id + 1}"},
+          {"action": "set", "target": "draft", "value": ""}
+        ], "props": {"label": "Add card", "variant": "primary"}, "type": "button"}
+      ], "id": "n_5fayz8v6", "props": {"align": "end", "direction": "row", "gap": "8px"}, "type": "flex"},
+      {"bind": "cards", "id": "n_no719i8s", "props": {"columnKey": "status", "columns": [
+        {"id": "backlog", "title": "Backlog"},
+        {"id": "in_progress", "title": "In progress"},
+        {"id": "review", "title": "Review"},
+        {"id": "done", "title": "Done"}
+      ]}, "type": "kanban"}
+    ],
+    "id": "n_n1wvkvkv",
+    "props": {"direction": "column", "gap": "16px"},
+    "type": "flex"
+  },
+  "version": "1.0"
+}
