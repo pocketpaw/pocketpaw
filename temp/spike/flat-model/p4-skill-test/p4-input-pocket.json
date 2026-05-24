@@ -1,0 +1,48 @@
+{
+  "_comment": "P4 input — the current broken-recovery sales pipeline pocket BEFORE the add-deal form row. This is the state pocket_specialist had on Phase 3 before the recovery cascade re-emitted the spec. We want to see what a skill-driven Claude Code agent does with the same starting point.",
+  "version": "1.0",
+  "state": {
+    "cards": [
+      {"id": "d1", "title": "Globex Corp", "subtitle": "$48,000", "tag": "Sarah Chen", "status": "lead"},
+      {"id": "d2", "title": "Pinnacle Media", "subtitle": "$32,500", "tag": "James Okafor", "status": "lead"},
+      {"id": "d3", "title": "Stark Industries", "subtitle": "$125,000", "tag": "Priya Nair", "status": "qualified"},
+      {"id": "d4", "title": "Axiom Retail", "subtitle": "$87,000", "tag": "Marcus Webb", "status": "qualified"},
+      {"id": "d5", "title": "Helios Financial", "subtitle": "$210,000", "tag": "Dana Liu", "status": "proposal"},
+      {"id": "d6", "title": "Crestview Logistics", "subtitle": "$94,500", "tag": "Tom Barker", "status": "proposal"},
+      {"id": "d7", "title": "NovaTech Systems", "subtitle": "$310,000", "tag": "Rachel Kim", "status": "won"},
+      {"id": "d8", "title": "Meridian Health", "subtitle": "$175,000", "tag": "Chris Andrade", "status": "won"}
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": {"direction": "column", "gap": "20px"},
+    "children": [
+      {
+        "type": "page-header",
+        "props": {"title": "Sales Pipeline", "subtitle": "Q2 2026 · Deal Tracker"},
+        "id": "n_vqwnr4o7"
+      },
+      {
+        "type": "kanban",
+        "bind": "cards",
+        "props": {
+          "columnKey": "status",
+          "columns": [
+            {"id": "lead", "title": "Lead"},
+            {"id": "qualified", "title": "Qualified"},
+            {"id": "proposal", "title": "Proposal"},
+            {"id": "won", "title": "Won"}
+          ]
+        },
+        "id": "n_d3ufk3fx"
+      }
+    ],
+    "id": "n_bw3l6ne6"
+  },
+  "lifecycle": {"type": "persistent", "id": "pocket-b9d07efd"},
+  "title": null,
+  "name": null,
+  "color": "#0A84FF",
+  "metadata": {"category": "custom", "color": "#0A84FF"},
+  "version": "1.0"
+}

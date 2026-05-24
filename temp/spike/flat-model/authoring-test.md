@@ -499,3 +499,169 @@ the recovery cascade.
   from Phase 1 — comparison points for the recovery degradation.
 
 Branch HEAD before Phase 3 commit: `bdd60bbe`.
+
+## 10. Phase 4 — captain hypothesis: skill + native tools, drop LangChain
+
+After Phase 3, the captain proposed reframing the architecture: instead
+of 17 LangChain `StructuredTool` wrappers fronting per-op `_for_agent`
+service hops, give `pocket_specialist` a **markdown skill** (procedural
+guidance) plus Claude Code's native tools (Bash, Read, Write, Edit). The
+agent already runs on the Claude Code backend; it can `curl` an API or
+write JSON directly. The 17-tool layer is a second tool surface stacked
+on top of the native one, and it's where the `kind_for_op` import bug
+class lives.
+
+Captain's discipline: test the hypothesis before changing any code.
+
+### Setup
+
+Isolated measurement run — no live backend, no `kind_for_op` confound,
+same model as Phase 2 (Opus 4.7).
+
+- Skill: hand-written `pocket-edit` SKILL.md (~70 lines) at
+  `p4-skill-test/SKILL.md`. Names the four conventions Phase 3's
+  recovery silently violated: client-side `push` actions, value/label
+  splits on selects, lowercase-value defaults that match kanban column
+  ids, and the validate-push-increment-clear hygiene sequence.
+- Agent tools: Read, Write, Bash, Grep, Glob. **Zero LangChain
+  wrappers.** No `set_state`, no `add_node`, no `set_node_prop`.
+- Input: the recovery pocket spec from `p4-skill-test/p4-input-pocket.json`
+  (the same starting state Phase 3 worked from).
+- Task: verbatim same prompt as Phase 3 — *"Add an 'Add deal' form row
+  above the kanban with company/value/contact inputs, lane select, and
+  an Add deal button that appends to state.cards."*
+- Output: agent writes proposed full new rippleSpec to
+  `p4-skill-test/p4-skill-output.json`.
+
+### Result
+
+The skill-driven agent produced a structurally correct edit on the
+first attempt. Direct comparison against Phase 3's live recovery on
+the same task:
+
+| Convention | Phase 3 (live, LangChain) | Phase 4 (skill, native) |
+|---|---|---|
+| Button on_click uses client-side `push` | ✗ `{action:"emit", target:"chat.send"}` | ✓ `{action:"push", target:"cards", value:{...}}` |
+| `validate` before push | ✗ absent | ✓ `{action:"validate", condition:"{state.draft_company.length > 0}"}` |
+| Clear drafts after submit | ✗ absent | ✓ 4× `{action:"set", target:"draft_*", value:""}` |
+| Increment id counter | ✗ absent | ✓ `{action:"set", target:"next_deal_id", value:"{state.next_deal_id + 1}"}` |
+| Select options as value/label pairs | ✗ plain strings `["Lead","Qualified",...]` | ✓ `[{value:"lead", label:"Lead"}, ...]` |
+| Bound state default = value, not label | ✗ `"Lead"` (label-case) | ✓ `"lead"` (value) |
+| Kanban column id ↔ status match | ✓ (both lowercase) | ✓ (both lowercase) |
+| Preserved existing nodes by id | partial (template's add row had been dropped earlier) | ✓ page-header, kanban, root flex all preserved by id |
+| Honest reflection on ambiguities | ✗ | ✓ flagged the `$` literal vs interpolation question on the subtitle template |
+
+**9-for-9 on the structural conventions** versus Phase 3's 0-for-4 on
+the four where they materially differ.
+
+### Why this matters
+
+Same model. Same task. Same starting spec. Same Sonnet/Opus class of
+reasoning capacity. The difference is the prompt design and tool
+surface:
+
+- Phase 3 had 80 lines of mutation-strategy text (the layered tool
+  hierarchy) plus 17 LangChain tools, hit a dispatch failure on every
+  granular op (`kind_for_op`), and the recovery cascade emitted a
+  whole-spec rebuild that silently dropped four template conventions.
+- Phase 4 had 70 lines of procedural-guide markdown that explicitly
+  named the four conventions, plus Bash/Read/Write/Edit. No dispatch
+  layer to fail. The agent re-emitted the whole spec and kept every
+  convention.
+
+The skill teaches the agent **what good output looks like** with worked
+examples. The 17-tool surface teaches the agent **which slot to call**
+with branching examples per layer. Skill > tool-slot when the failure
+modes are "agent forgets a convention," which is exactly what Phase 1
+and Phase 3 surfaced.
+
+### What this doesn't prove
+
+Three caveats. Honest ones:
+
+1. **Isolated, no real backend.** The skill agent wrote to a JSON file,
+   not to mongo. We didn't test what happens when the proposed spec is
+   actually persisted. The validate-against-manifest gate that lives
+   in `pocketpaw_ee.cloud.pockets.agent_context.persist_pocket_for_agent`
+   could still reject a bad spec.
+2. **Skill was hand-crafted with the right conventions named.** If
+   pocket_specialist's current prompt missed these conventions (and
+   Phase 3 evidence suggests it does), the fair comparison is "skill
+   with the same content" vs "current prompt." A fairer next step is
+   to read `_pockets.py`'s mutation-strategy block more carefully and
+   ask whether the conventions could just be added to the existing
+   prompt without dropping LangChain.
+3. **One task, one run.** N=1 sample size. The skill might fail on
+   tasks that lean harder on the value/label rule or on more complex
+   tree restructuring. Phase 4 would need 3-5 task variants before
+   the verdict is generalizable.
+
+### What this DOES strongly suggest
+
+The captain's reframing is right at the architectural level:
+
+- **The LangChain layer is a second tool surface stacked on the native
+  one.** It adds dispatch fragility (Phase 1+3's `kind_for_op`),
+  per-op schema fragility (Phase 1's pydantic missing-wrapper), and
+  layered cognitive overhead in the prompt (the 80-line
+  mutation-strategy block).
+- **A skill + native tools wins on the conventions test** in this
+  measurement run. The agent makes the right call when the
+  conventions are named explicitly in procedural guidance.
+- **The flat-model spike's PR-1 simplifies further.** Instead of
+  "ship the dispatch wrapper + format discriminator + dual-read
+  renderer," the new shape is "ship a `POST /api/v1/pockets/<id>/spec`
+  endpoint (server-side merge + validation) and a `pocket-edit` skill
+  for the agent. Remove the 17-tool LangChain layer." The flat-on-disk
+  question becomes a server-side implementation detail, not an
+  agent-facing concern.
+
+### Updated synthesis across all four phases
+
+| Phase | Setup | Result |
+|---|---|---|
+| **1** | Live chat, Sonnet 4-6, real backend on pr-1219 | Wrong-layer choice + 2 dispatch failures + duplicate pocket |
+| **2** | Isolated Opus, two prompts (17-tool vs flat), same task | Both nail it — capable models navigate either surface |
+| **3** | Live chat, Sonnet 4-6, additive edit on the recovery pocket | Same dispatch failures + recovery cascade introduces 4 silent regressions |
+| **4** | Isolated Opus, skill + native tools, same task as P3 | 9-for-9 on conventions — the agent makes the right call when the conventions are named |
+
+The strongest single signal in this whole experiment: **Phase 3's
+real-load recovery and Phase 4's isolated skill run produced
+materially different output quality on the same task with the same
+model class.** That difference is attributable to prompt design +
+tool surface, not to model capacity.
+
+### Recommendation (updated)
+
+Drop the original 5-PR spike sequence. The replacement is:
+
+- **PR-1 (S/M):** add `POST /api/v1/pockets/<id>/spec` endpoint that
+  accepts a full or partial rippleSpec, runs
+  `validate_against_manifest`, and (for partials) merges via the
+  spike's `merge()` function before persisting. Audit log records
+  the diff. One dispatch path, one schema, no `kind_for_op`.
+- **PR-2 (M):** write a `pocket-edit` skill that bundles the
+  procedural guide (this Phase 4 SKILL.md is a working draft). Wire
+  it into `bundled_skills/` so it auto-installs at boot. Update
+  `pocket_specialist`'s prompt to point at the skill and drop the
+  17-tool LangChain layer entirely.
+- **PR-3 (S):** measure on real chat traffic for one review cycle.
+  If the skill + endpoint shape holds, retire the
+  `pocketpaw_ee.cloud.pockets.agent_context.<op>_for_agent`
+  service hops (touch-time migration during normal feature work).
+
+Two PRs of code change, one PR-cycle of observation. The original
+spike's flat-vs-nested format work becomes the *internal* shape of
+the merge function in PR-1 — exposed to the API as one endpoint, not
+to the agent as a wire format.
+
+### Phase 4 artifacts
+
+- `p4-skill-test/SKILL.md` — the 70-line procedural guide the agent
+  was given.
+- `p4-skill-test/p4-input-pocket.json` — the same starting state
+  Phase 3 worked from.
+- `p4-skill-test/p4-skill-output.json` — the agent's proposed new
+  spec, 9-for-9 on conventions.
+
+Branch HEAD before Phase 4 commit: `e2ba96d6`.

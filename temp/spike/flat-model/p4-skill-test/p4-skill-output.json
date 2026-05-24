@@ -1,0 +1,110 @@
+{
+  "version": "1.0",
+  "state": {
+    "cards": [
+      {"id": "d1", "title": "Globex Corp", "subtitle": "$48,000", "tag": "Sarah Chen", "status": "lead"},
+      {"id": "d2", "title": "Pinnacle Media", "subtitle": "$32,500", "tag": "James Okafor", "status": "lead"},
+      {"id": "d3", "title": "Stark Industries", "subtitle": "$125,000", "tag": "Priya Nair", "status": "qualified"},
+      {"id": "d4", "title": "Axiom Retail", "subtitle": "$87,000", "tag": "Marcus Webb", "status": "qualified"},
+      {"id": "d5", "title": "Helios Financial", "subtitle": "$210,000", "tag": "Dana Liu", "status": "proposal"},
+      {"id": "d6", "title": "Crestview Logistics", "subtitle": "$94,500", "tag": "Tom Barker", "status": "proposal"},
+      {"id": "d7", "title": "NovaTech Systems", "subtitle": "$310,000", "tag": "Rachel Kim", "status": "won"},
+      {"id": "d8", "title": "Meridian Health", "subtitle": "$175,000", "tag": "Chris Andrade", "status": "won"}
+    ],
+    "draft_company": "",
+    "draft_value": "",
+    "draft_contact": "",
+    "draft_lane": "lead",
+    "next_deal_id": 9
+  },
+  "ui": {
+    "type": "flex",
+    "props": {"direction": "column", "gap": "20px"},
+    "children": [
+      {
+        "type": "page-header",
+        "props": {"title": "Sales Pipeline", "subtitle": "Q2 2026 · Deal Tracker"},
+        "id": "n_vqwnr4o7"
+      },
+      {
+        "type": "flex",
+        "props": {"direction": "row", "gap": "12px", "align": "end"},
+        "id": "n_adddeal01",
+        "children": [
+          {
+            "type": "input",
+            "bind": "draft_company",
+            "props": {"label": "Company", "placeholder": "Company name"},
+            "id": "n_adddeal02"
+          },
+          {
+            "type": "input",
+            "bind": "draft_value",
+            "props": {"label": "Deal value", "placeholder": "$ amount"},
+            "id": "n_adddeal03"
+          },
+          {
+            "type": "input",
+            "bind": "draft_contact",
+            "props": {"label": "Contact", "placeholder": "Contact person"},
+            "id": "n_adddeal04"
+          },
+          {
+            "type": "select",
+            "bind": "draft_lane",
+            "props": {
+              "label": "Lane",
+              "options": [
+                {"value": "lead", "label": "Lead"},
+                {"value": "qualified", "label": "Qualified"},
+                {"value": "proposal", "label": "Proposal"},
+                {"value": "won", "label": "Won"}
+              ]
+            },
+            "id": "n_adddeal05"
+          },
+          {
+            "type": "button",
+            "props": {"label": "Add deal", "variant": "primary"},
+            "on_click": [
+              {"action": "validate", "condition": "{state.draft_company.length > 0}", "message": "Enter a company name first"},
+              {"action": "push", "target": "cards", "value": {
+                "id": "d-{state.next_deal_id}",
+                "title": "{state.draft_company}",
+                "subtitle": "${state.draft_value}",
+                "tag": "{state.draft_contact}",
+                "status": "{state.draft_lane}"
+              }},
+              {"action": "set", "target": "next_deal_id", "value": "{state.next_deal_id + 1}"},
+              {"action": "set", "target": "draft_company", "value": ""},
+              {"action": "set", "target": "draft_value", "value": ""},
+              {"action": "set", "target": "draft_contact", "value": ""},
+              {"action": "set", "target": "draft_lane", "value": "lead"}
+            ],
+            "id": "n_adddeal06"
+          }
+        ]
+      },
+      {
+        "type": "kanban",
+        "bind": "cards",
+        "props": {
+          "columnKey": "status",
+          "columns": [
+            {"id": "lead", "title": "Lead"},
+            {"id": "qualified", "title": "Qualified"},
+            {"id": "proposal", "title": "Proposal"},
+            {"id": "won", "title": "Won"}
+          ]
+        },
+        "id": "n_d3ufk3fx"
+      }
+    ],
+    "id": "n_bw3l6ne6"
+  },
+  "lifecycle": {"type": "persistent", "id": "pocket-b9d07efd"},
+  "title": null,
+  "name": null,
+  "color": "#0A84FF",
+  "metadata": {"category": "custom", "color": "#0A84FF"}
+}
