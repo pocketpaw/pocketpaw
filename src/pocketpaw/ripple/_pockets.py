@@ -1,12 +1,10 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
-<<<<<<< HEAD
-# Changes: 2026-05-24 — `HOME_POCKET_PROMPT` learns a third response path:
-# REFRESH. The agent now reaches for `update_widget` (plus `WebSearch` /
+# Changes: 2026-05-24 (#1205) — `HOME_POCKET_PROMPT` learns a third response
+# path: REFRESH. The agent now reaches for `update_widget` (plus `WebSearch` /
 # `WebFetch` / configured MCP data sources) when the user asks to
 # refresh / reload / update an existing tile, instead of calling
 # `add_widget` again and creating a duplicate.
-=======
 # Changes: 2026-05-24 (#1203) — tightened `_LIVE_DATA_SOURCES_EDIT_BLOCK`
 # so the `set_state` seed paired with every `set_source` is UNCONDITIONAL.
 # Earlier wording ("the three calls always travel together") was read as
@@ -18,7 +16,6 @@
 # the bind target part of every `set_source` regardless of whether a
 # widget already reads it, and names the wrong-reasoning failure mode
 # so the model recognizes and rejects it.
->>>>>>> origin/dev
 #
 # Changes: 2026-05-22 (#1174) — rewrote `HOME_POCKET_PROMPT` to drive the
 # now-real `add_widget` MCP tool. It teaches the spec-first workflow:
