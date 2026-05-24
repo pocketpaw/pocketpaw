@@ -40,6 +40,10 @@ const FIXTURES = loadFixtures();
 // fixture that lacks ids to a round-trip that *minted* them. The transform's
 // job after id-stamping is to be lossless on the structural shape — the ids
 // themselves are an artifact of the flat model, not the original spec.
+// Also strips the top-level `format` field — push-back D adds that
+// discriminator, but it's a storage-format artifact stamped by the transform
+// (input fixtures pre-date it), so it shouldn't fail a structural-equality
+// check. The dispatch test in dispatch.test.ts asserts on `format` directly.
 function stripIds(spec: UISpec): UISpec {
   function strip(node: any): any {
     if (!node || typeof node !== 'object') return node;
@@ -50,7 +54,8 @@ function stripIds(spec: UISpec): UISpec {
     }
     return out;
   }
-  return { ...spec, ui: strip(spec.ui) };
+  const { format: _format, ...rest } = spec as Record<string, unknown>;
+  return { ...(rest as UISpec), ui: strip(spec.ui) };
 }
 
 describe('round-trip on real stored pocket specs', () => {
@@ -73,11 +78,17 @@ describe('round-trip on real stored pocket specs', () => {
 
   test('id-stable fixture round-trips byte-for-byte (no id minting needed)', () => {
     // Pick a fixture that already has ids — business-dashboard came through
-    // the normalizer's ensure_ids pass.
+    // the normalizer's ensure_ids pass. Strip only the top-level `format`
+    // (round-trip stamps it; ids should remain identical so this test still
+    // proves no id-minting happened).
     const fixture = FIXTURES.find((f) => f.name === 'business-dashboard.spec.json')!;
     const flat = flatten(fixture.spec);
     const back = unflatten(flat);
-    expect(canonicalJson(back)).toBe(canonicalJson(fixture.spec));
+    const stripFormat = (s: UISpec): UISpec => {
+      const { format: _f, ...rest } = s as Record<string, unknown>;
+      return rest as UISpec;
+    };
+    expect(canonicalJson(stripFormat(back))).toBe(canonicalJson(stripFormat(fixture.spec)));
   });
 });
 

@@ -5,10 +5,16 @@
 //
 // Created: 2026-05-24 — Initial spike for the captain-gated flat-component-model
 // experiment. Self-contained (no Svelte / Zod dep) so bun test can run it.
+// Updated: 2026-05-24 — Push-back D. Added an optional `format` discriminator
+// field on both `UISpec` and `FlatSpec`. The dispatch wrapper (RippleRenderer.
+// svelte) reads it to route to the right renderer path; the absence of the
+// field is treated as `"nested"` (back-compat default). `flatten()` stamps
+// `format: "flat"` on output, `unflatten()` stamps `format: "nested"` on
+// output. This is the coexistence shape PR-1 ships.
 //
 // Shape:
 //   FlatNode = a UINode minus its child arrays; child arrays become string[] of ids.
-//   FlatSpec = { root: id, components: { id -> FlatNode }, version?, state?, data?, sources?, theme?, meta?, actions? }
+//   FlatSpec = { root: id, components: { id -> FlatNode }, version?, state?, data?, sources?, theme?, meta?, actions?, format? }
 //   The patch is also a FlatSpec — merge() replaces same-name nodes, adds new-name
 //   nodes, and keeps un-mentioned nodes. Orphans (unreachable from root) live in
 //   the components map until you GC them (see gcOrphans).
@@ -50,6 +56,11 @@ export interface UISpec {
   theme?: Record<string, unknown>;
   meta?: Record<string, unknown>;
   actions?: Record<string, unknown>;
+  // Storage-format discriminator. Read by the RippleRenderer dispatch wrapper
+  // to route to the right renderer path. Absent → treated as "nested" by every
+  // reader (back-compat default for specs persisted before this field
+  // existed). `unflatten()` stamps "nested" on its output.
+  format?: 'flat' | 'nested';
   [key: string]: unknown;
 }
 
@@ -91,6 +102,11 @@ export interface FlatSpec {
   actions?: Record<string, unknown>;
   root: string;
   components: Record<string, FlatNode>;
+  // Storage-format discriminator. Read by the RippleRenderer dispatch wrapper
+  // to route to the flat renderer path. `flatten()` always stamps "flat" on
+  // its output. A spec without `format` is treated as "nested" by every
+  // reader (back-compat default).
+  format?: 'flat' | 'nested';
   [key: string]: unknown;
 }
 
@@ -125,11 +141,15 @@ export function flatten(spec: UISpec): FlatSpec {
     root: rootId,
     components,
   };
-  // Copy top-level fields except `ui` (replaced by root/components).
+  // Copy top-level fields except `ui` (replaced by root/components) and
+  // `format` (always overwritten to "flat" by this function — the input's
+  // format is irrelevant to the output's storage shape).
   for (const key of Object.keys(spec)) {
-    if (key === 'ui') continue;
+    if (key === 'ui' || key === 'format') continue;
     out[key] = (spec as Record<string, unknown>)[key];
   }
+  // Stamp the storage-format discriminator unconditionally.
+  out.format = 'flat';
   return out;
 }
 
@@ -169,9 +189,11 @@ export function unflatten(flat: FlatSpec): UISpec {
   const ui = unflattenNode(flat.root, flat.components, new Set());
   const out: UISpec = { ui };
   for (const key of Object.keys(flat)) {
-    if (key === 'root' || key === 'components') continue;
+    if (key === 'root' || key === 'components' || key === 'format') continue;
     out[key] = (flat as Record<string, unknown>)[key];
   }
+  // Stamp the storage-format discriminator on the nested output.
+  out.format = 'nested';
   return out;
 }
 
