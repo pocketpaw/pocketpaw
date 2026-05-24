@@ -613,6 +613,24 @@ async def execute_run(spec: RunSpec) -> None:
     )
     ctx.intent = spec.intent
 
+    # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
+    # title-gen guard (`if not history and ctx.session_id`) actually fires
+    # — the executor builds its own ctx and resolve_scope_context leaves
+    # session_id as None.
+    try:
+        from pocketpaw_ee.cloud.sessions import service as _sessions_service
+
+        ctx.session_id = await _sessions_service.ensure_for_agent_scope(
+            kind=ctx.kind.value,
+            scope_id=ctx.scope_id,
+            workspace_id=ctx.workspace_id,
+            user_id=ctx.user_id,
+            target_agent_id=ctx.target_agent_id,
+        )
+    except Exception:
+        logger.exception("ensure session failed for run %s", spec.run_id)
+        ctx.session_id = None
+
     await _mark_running(spec.run_id)
     await _broadcast_agent_typing(ctx, active=True)
 
