@@ -1,5 +1,10 @@
 # tests/cloud/kb/test_service.py — Workspace KB scope listing service.
 #
+# Updated: 2026-05-24 — Added ``test_list_scopes_caps_concurrent_probes``
+# proving the new ``_PROBE_CONCURRENCY`` semaphore actually bounds the
+# parallel kb-go probe fan-out. Seeds 50 fake candidate scopes via
+# monkeypatch and observes peak in-flight probe count under a lock.
+#
 # Created: 2026-05-24 — Covers ``kb.service.list_scopes`` with an
 # in-memory kb_list shim. Four guarantees:
 #   1. A workspace with one pocket + one agent + workspace-level
@@ -15,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -161,3 +167,53 @@ async def test_list_scopes_blank_workspace_returns_empty() -> None:
 
     assert scopes == []
     assert probed == []  # never reached the probe
+
+
+async def test_list_scopes_caps_concurrent_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe fan-out must stay bounded by ``_PROBE_CONCURRENCY``.
+
+    Reviewer-flagged P1: unbounded ``asyncio.gather`` on a 100-pocket +
+    50-agent workspace would spawn 151 concurrent kb-go subprocesses
+    even though the default-executor thread pool can only service ~32
+    at a time. The fix is a semaphore around ``_probe_scope``; this
+    test seeds 50 fake candidate scopes, has each probe announce its
+    in-flight status under a lock, and asserts the observed peak never
+    exceeds the cap.
+    """
+    candidates = [f"pocket:p-{i}" for i in range(50)]
+
+    async def _fake_candidates(_workspace_id: str, _user_id: str) -> list[str]:
+        return candidates
+
+    monkeypatch.setattr(kb_service, "_candidate_scopes", _fake_candidates)
+
+    in_flight = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    async def _probe(scope: str) -> list[dict]:
+        nonlocal in_flight, peak
+        async with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        # Yield so other gated tasks can attempt the semaphore — without
+        # an await the whole coroutine completes synchronously and the
+        # peak collapses to 1.
+        await asyncio.sleep(0.01)
+        async with lock:
+            in_flight -= 1
+        return [{"id": f"art-{scope}"}]
+
+    scopes = await kb_service.list_scopes("ws-cap", "u-cap", kb_list=_probe)
+
+    assert len(scopes) == len(candidates), "every populated probe should keep its scope"
+    assert peak <= kb_service._PROBE_CONCURRENCY, (
+        f"observed peak in-flight {peak} exceeded cap {kb_service._PROBE_CONCURRENCY}"
+    )
+    # Cap actually engaged — if peak is 1 we proved nothing about the
+    # semaphore. With 50 candidates and a 10ms sleep, the loop must
+    # have saturated the semaphore at least once.
+    assert peak == kb_service._PROBE_CONCURRENCY, (
+        f"probe fan-out never reached the cap (peak={peak}); "
+        "the test is no longer exercising the gate"
+    )

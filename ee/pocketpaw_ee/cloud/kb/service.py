@@ -1,5 +1,13 @@
 # service.py — Workspace-level KB scope listing.
 #
+# Updated: 2026-05-24 — Bounded the probe fan-out via a module-level
+# ``_PROBE_CONCURRENCY=8`` semaphore. The previous unbounded
+# ``asyncio.gather`` could spawn one kb-go subprocess per candidate
+# scope; on a workspace with 100 pockets + 50 agents that's 151
+# concurrent subprocesses, which exceeds the default-executor
+# thread-pool back-pressure (~32) and pressures FS + OS PID limits.
+# The cap matches the thread-pool default and stops the fork storm.
+#
 # Created: 2026-05-24 — Adds the canonical ``list_scopes(workspace_id,
 # user_id)`` helper so the /knowledge surface handler can render the
 # real KB scopes attached to a workspace instead of the
@@ -47,6 +55,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# Cap on concurrent kb-go probes during ``list_scopes``. kb-go is sync
+# I/O wrapped via ``asyncio.to_thread``, so each probe consumes a
+# default-executor thread (~32 default). On a workspace with 100
+# pockets + 50 agents, an unbounded gather would dispatch 150+
+# subprocesses at once and pressure FS + OS PID limits even though the
+# thread pool throttles wall-clock concurrency. 8 matches what
+# typical workloads can sustain without saturating the executor and
+# leaves headroom for the rest of the event loop.
+_PROBE_CONCURRENCY = 8
+
+
 # A probe callable returns the kb-go list rows for a given scope. The
 # default uses the same kb-go subprocess wrapper the knowledge router
 # already calls; tests inject a dict-backed fake so the listing path is
@@ -90,12 +109,21 @@ async def list_scopes(
     probe = kb_list if kb_list is not None else _default_kb_list
     candidates = await _candidate_scopes(workspace_id, user_id)
 
-    # Probe in parallel — each call is a kb-go subprocess on the default
-    # path, so serialising would burn wall-clock for nothing. Async
-    # ``asyncio.gather`` handles the sync-or-async shape via
-    # ``_probe_scope``.
+    # Probe in parallel under a bounded semaphore — each call is a
+    # kb-go subprocess on the default path, so serialising would burn
+    # wall-clock for nothing, but unbounded gather would spawn one
+    # process per candidate (151 on a 100-pocket + 50-agent workspace)
+    # and pressure FS + OS PID limits. ``_PROBE_CONCURRENCY`` matches
+    # the default-executor thread-pool size, the natural back-pressure
+    # boundary for the kb-go ``asyncio.to_thread`` wrappers.
+    sem = asyncio.Semaphore(_PROBE_CONCURRENCY)
+
+    async def _gated(scope: str) -> bool:
+        async with sem:
+            return await _probe_scope(scope, probe)
+
     results = await asyncio.gather(
-        *(_probe_scope(scope, probe) for scope in candidates),
+        *(_gated(scope) for scope in candidates),
         return_exceptions=False,
     )
     return [scope for scope, has_articles in zip(candidates, results) if has_articles]
