@@ -91,7 +91,7 @@ Step-by-step:
 
 ## 4. Module Shape
 
-The module follows the 4-file shape from the cloud entity rules (`pocketPaw/CLAUDE.md`, "pocketpaw_ee/cloud Code Rules"), with handlers as a sub-package. There is no `router.py` — the surface is consumed in-process by `chat/agent_service`, not exposed over HTTP.
+The module follows the 4-file shape from the cloud entity rules (repo-root `CLAUDE.md`, "pocketpaw_ee/cloud Code Rules"), with handlers as a sub-package. There is no `router.py` — the surface is consumed in-process by `chat/agent_service`, not exposed over HTTP.
 
 ```
 ee/pocketpaw_ee/cloud/surface/
@@ -175,7 +175,7 @@ Handlers are split between **rich** (read a real entity service and render a sna
 | `agent.py` | rich, tenancy-guarded | Single-agent detail via `agents_service.get`; rejects when the returned `workspace_id` doesn't match. |
 | `knowledge.py` | minimal | Placeholder scope listing (`workspace:<workspace_id>`). Pending a `KnowledgeService.list_scopes` helper. |
 | `calendar.py` | minimal | Placeholder — points the agent at `GOOGLECALENDAR_LIST_EVENTS` via Composio. Pending a calendar entity. |
-| `chat.py` | minimal | Best-effort session count via `sessions_service.list_for_user` when the helper exists. |
+| `chat.py` | minimal | Probes for a `sessions_service.list_for_user` helper that isn't shipped yet; emits `(session count unavailable)` until it lands. Tracked in issue #1215. |
 | `quickask.py` | minimal | Surface tag only — QuickAsk overlay has no persistent state. |
 | `settings.py` | minimal | Surface tag only — no config values leaked into chat by design. |
 | `sidepanel.py` | minimal | Surface tag only — thin side-panel chat surface. |
@@ -319,7 +319,7 @@ The short version: define a new `SurfaceKind` enum value, drop a handler module 
 - **Minimal-placeholder handlers.** `knowledge.py`, `calendar.py`, `chat.py`, and `sidepanel.py` are minimal today because their upstream services don't expose the right list helper. Each handler's docstring names the helper it expects:
   - `knowledge.py` waits on `KnowledgeService.list_scopes(workspace_id)`.
   - `calendar.py` waits on a calendar entity (today it points the agent at Composio's `GOOGLECALENDAR_LIST_EVENTS`).
-  - `chat.py` already calls `sessions_service.list_for_user` but tolerates the helper being missing on older deploys.
+  - `chat.py` waits on a `sessions_service.list_for_user(workspace_id, user_id)` helper that isn't shipped yet — it probes via `getattr()` and emits `<chat-snapshot>(session count unavailable)` until the helper lands. Tracked in issue #1215.
 - **`SurfaceMetaProvider` registry has no producers yet.** Paw-enterprise's `surface-context.ts` exposes `registerSurfaceMetaProvider` for components to plug in ephemeral state (most obviously the widget-focus modal's `widget_id` / `focus_node_id`). The registry exists; no component registers against it yet. Follow-up tracked on the paw-enterprise side.
 - **Hand-curated `<available-data-tools>` block.** `_helpers.composio_tool_names` returns a static list of six canonical Composio action names. A more dynamic enumeration (e.g., querying the live MCP tool list per workspace) is future work — the static list is good enough for the agent to know what's wired, without ballooning the preamble.
 - **`SurfaceKind.AUDIT` vs `SurfaceKind.ACTIVITY`.** Both surfaces exist (`/audit` for the persisted audit log, `/activity` for the in-process activity buffer). They look similar from the outside, and the handlers do diverge meaningfully — the audit handler hits a Beanie collection, the activity handler hits the in-process buffer. Worth keeping the two distinct for now; consolidate only if a unified surface ships.
@@ -332,4 +332,4 @@ The short version: define a new `SurfaceKind` enum value, drop a handler module 
 - **PR [#250](https://github.com/pocketpaw/paw-enterprise/pull/250)** (paw-enterprise) — `feat(chat): stamp surface + meta on every chat send`. The paired client change that derives `surface` from `$page.route.id` and attaches it to every chat send.
 - **`paw-enterprise/src/lib/core/chat/surface-context.ts`** — client-side stamp. Exports `getCurrentSurface()` and `registerSurfaceMetaProvider()`.
 - **`ee/docs/architecture/pockets-builder-design.md`** — sibling design doc covering the pockets builder. Same template; useful reference when writing the next ee/cloud architecture doc.
-- **`pocketPaw/CLAUDE.md`** — the cloud entity rules ("pocketpaw_ee/cloud Code Rules" section) govern the 4-file shape, the tenancy-at-construction contract, and the touch-time migration rule that brought the surface module onto canonical shape from day one.
+- **Repo-root `CLAUDE.md`** — the cloud entity rules ("pocketpaw_ee/cloud Code Rules" section) govern the 4-file shape, the tenancy-at-construction contract, and the touch-time migration rule that brought the surface module onto canonical shape from day one.
