@@ -78,15 +78,6 @@ async def post_agent_chat(
         {"surface": body.surface, "meta": body.surface_meta or {}},
     )
 
-    # Signal any prior in-flight run for the same (scope, scope_id, user_id)
-    # to stop. We don't wait on it — each generator cleans its own slot in
-    # ``_active_runs`` only when the slot still points to its own event, so
-    # the new request's entry is safe from the old generator's ``finally``.
-    key = (scope, scope_id, user_id)
-    prev = _active_runs.get(key)
-    if prev is not None:
-        prev.set()
-
     # Supersede any prior in-flight run for this scope. ``request_cancel``
     # writes the cancel flag in Redis so a worker in another process notices.
     prior = await run_service.find_active_run_for_scope(
