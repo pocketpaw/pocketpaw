@@ -823,7 +823,7 @@ class PocketSpecialistEditOutput(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     duration_ms: int
     backend_used: str
-    action: Literal["applied", "failed", "draft_kit"] = Field(
+    action: Literal["applied", "failed", "draft_kit", "skill_kit"] = Field(
         default="applied",
         description=(
             "What the run did. ``applied`` — ops ran (subagent mode, or "

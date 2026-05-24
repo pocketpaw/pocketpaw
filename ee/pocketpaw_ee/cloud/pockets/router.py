@@ -304,8 +304,26 @@ async def get_home_pocket(
 @router.get("/{pocket_id}")
 async def get_pocket(
     pocket_id: str,
-    user_id: str = Depends(current_user_id),
+    request: Request,
+    user: Any = Depends(current_optional_user),
+    x_pocketpaw_internal: str | None = Header(default=None, alias="X-PocketPaw-Internal"),
+    x_pocketpaw_user_id: str | None = Header(default=None, alias="X-PocketPaw-User-Id"),
 ) -> dict:
+    """Read a pocket. Same loopback-internal bypass as ``/spec/merge`` so
+    the ``pocketpaw-pocket-specialist`` skill can read the spec before
+    computing a partial. Otherwise standard cookie/bearer auth.
+    """
+    bypass_allowed = (
+        _is_localhost(request)
+        and x_pocketpaw_internal == "true"
+        and x_pocketpaw_user_id
+    )
+    if bypass_allowed:
+        user_id = x_pocketpaw_user_id
+    elif user is not None:
+        user_id = str(user.id)
+    else:
+        raise CloudError(401, "auth.required", "Authentication required.")
     return await pockets_service.get(pocket_id, user_id)
 
 
