@@ -1,5 +1,17 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-24 (#1203) — tightened `_LIVE_DATA_SOURCES_EDIT_BLOCK`
+# so the `set_state` seed paired with every `set_source` is UNCONDITIONAL.
+# Earlier wording ("the three calls always travel together") was read as
+# conditional by the edit specialist: when a user asked for just a live
+# source with no consuming widget yet, the agent shipped `set_source`
+# alone, reasoning "no widget reads it, seed unnecessary". The next
+# `add_node` then bound to an absent state key and rendered empty until
+# the first source run. The new UNCONDITIONAL SEED RULE makes seeding
+# the bind target part of every `set_source` regardless of whether a
+# widget already reads it, and names the wrong-reasoning failure mode
+# so the model recognizes and rejects it.
+#
 # Changes: 2026-05-22 (#1174) — rewrote `HOME_POCKET_PROMPT` to drive the
 # now-real `add_widget` MCP tool. It teaches the spec-first workflow:
 # `get_widget_spec` for the widget type FIRST, then `add_widget` with a
@@ -686,6 +698,17 @@ batch to author the matching binding AND ``set_state`` to seed the
 forever. The three calls always travel together: ``set_source(key, path,
 bind="state.x", refresh=[...])`` + ``set_state("x", [])`` + the
 ``add_node`` for the widget that reads ``{state.x}``.
+
+UNCONDITIONAL SEED RULE — `set_state` the `bind` target to a typed
+empty value as part of EVERY `set_source`, even when no widget yet
+reads the path. Keep the contract uniform. Skipping the seed because
+"nothing binds it yet" is the bug — the next widget edit (yours or a
+later one) assumes the seed exists and renders empty without it, and
+the first source run also has nothing to merge into. Typed empty means
+`[]` for a list endpoint, `{}` for an object endpoint, `""` / `0` for
+a scalar — match the shape the widget will read. There is no "I'll
+seed it later when a widget is added" exception; pair them now or the
+later add_node ships a dead widget.
 
   set_source(
     source_key="prs",            # the sources map key

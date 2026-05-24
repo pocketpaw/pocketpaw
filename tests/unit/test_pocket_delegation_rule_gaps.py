@@ -12,6 +12,13 @@
 #     ``bind:`` but didn't make node-level placement loud enough,
 #     so kanban widgets rendered without a writeback path.
 #
+# 2026-05-24 (#1203) — add the unconditional-seed gap: even with the
+# label/source pairing rule above, the specialist still skipped the
+# ``set_state`` seed when no widget yet bound the path, reasoning
+# "nothing reads it, no need to seed". The next ``add_node`` then
+# rendered empty until the first source run. New assertion below
+# pins the UNCONDITIONAL SEED RULE language so a drift fails loud.
+#
 # These are content assertions, not behavior tests — the model still
 # has to read and follow the rules. But each gap has a concrete
 # regression case behind it, and a content drift is the easiest way
@@ -103,6 +110,22 @@ class TestLabelWithoutSourceRule:
         assert "set_source" in _LIVE_DATA_SOURCES_EDIT_BLOCK
         assert "set_state" in _LIVE_DATA_SOURCES_EDIT_BLOCK
         assert "add_node" in _LIVE_DATA_SOURCES_EDIT_BLOCK
+
+
+class TestUnconditionalSeedRule:
+    """The specialist still skipped ``set_state`` when asked for ONLY a
+    source (no consuming widget in the same ask), reasoning "nothing
+    binds it yet, no seed needed". The next ``add_node`` then rendered
+    empty. The edit block must spell out that the seed pairs with
+    EVERY ``set_source``, unconditionally — and must name the wrong
+    reasoning so the model recognizes the failure mode."""
+
+    def test_edit_block_marks_seed_as_unconditional(self):
+        # Anchor on a phrase that only the unconditional rule carries
+        # — "even when no widget yet reads the path" is the load-bearing
+        # half of the rule and the part the old wording lacked.
+        flat = " ".join(_LIVE_DATA_SOURCES_EDIT_BLOCK.split())
+        assert "even when no widget yet reads the path" in flat
 
 
 class TestInteractiveBindRule:
