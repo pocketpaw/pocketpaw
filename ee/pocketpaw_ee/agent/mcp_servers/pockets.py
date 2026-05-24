@@ -29,6 +29,14 @@ Changes: 2026-05-22 (#1174) — added the writable ``add_widget`` tool, its
 ``ADD_WIDGET_TOOL_ID`` allowlist id, manifest validation of the widget's
 rippleSpec ``spec`` subtree (skipped for ``type="native"`` widgets), and the
 ``_get_manifest_for_validation`` seam tests patch.
+Changes: 2026-05-24 (#1208) — ``_validate_widget_spec`` now also runs the
+OSS-side ``validate_action_verbs`` walker over the widget's ``spec``
+subtree. This catches hallucinated dispatcher verbs (``action: "fetch"``,
+``action: "backend_fetch"``) earlier than the service-layer gate so the
+agent's retry loop sees a tight, focused corrective hint that names the
+exact bad verb without needing a cloud round-trip. The service-layer gate
+in ``pockets/service.py`` is still the authoritative ground truth — this
+is a cheap belt-and-suspenders that runs first.
 """
 
 from __future__ import annotations
@@ -143,23 +151,67 @@ def _format_manifest_issues(issues: list[dict[str, Any]]) -> str:
     return "; ".join(lines)
 
 
-async def _validate_widget_spec(widget: dict) -> str | None:
-    """Validate the widget's rippleSpec ``spec`` subtree against the manifest.
+def _format_action_verb_issues(issues: list[dict[str, Any]]) -> str:
+    """Render ``validate_action_verbs`` issues as an agent-readable error.
 
-    Returns an error string when the spec uses props the renderer would
-    ignore, or ``None`` when the spec is clean / has no spec to check.
-    ``type="native"`` widgets carry no rippleSpec — validation is skipped.
-    Best-effort: a manifest outage returns ``None`` (never block the agent).
+    Mirrors the corrective hint in ``ripple_validator.format_action_violations_for_agent``
+    so the agent sees the same wording whether the verb gate fires at the
+    MCP layer (this function) or the service layer (#1208). Suggestions are
+    surfaced verbatim when ``difflib`` produced a close match.
+    """
+    lines = ["The widget spec uses event-handler verbs the renderer does not dispatch:"]
+    for issue in issues[:5]:
+        verb = issue.get("action", "<missing>")
+        suggestion = issue.get("suggestion")
+        path = issue.get("path", "?")
+        hint = (
+            f" Use '{suggestion}' instead."
+            if suggestion
+            else " Use one of: set, push, run_source, api, navigate, toast, emit."
+        )
+        lines.append(f"  - {path}: action '{verb}' is not a recognized verb.{hint}")
+    if len(issues) > 5:
+        lines.append(f"  - …and {len(issues) - 5} more")
+    return " ".join(lines)
+
+
+async def _validate_widget_spec(widget: dict) -> str | None:
+    """Validate the widget's rippleSpec ``spec`` subtree against the manifest
+    and the closed action-verb allowlist.
+
+    Two layered checks:
+
+    1. ``validate_action_verbs`` (OSS, no manifest needed) — catches the
+       most common LLM failure mode: invented dispatcher verbs like
+       ``action: "fetch"`` or ``action: "backend_fetch"``. This runs first
+       because it works without a manifest and the corrective hint is
+       tighter than the manifest one.
+    2. ``validate_against_manifest`` (needs a manifest fetch) — catches
+       props the renderer would silently ignore.
+
+    Returns an error string on the first failing check, or ``None`` when
+    the spec passes both. ``type="native"`` widgets carry no rippleSpec —
+    validation is skipped. Best-effort: a manifest outage returns ``None``
+    for the manifest half (never block the agent on a transient outage);
+    the verb check runs regardless because it's a pure function.
     """
     if widget.get("type") == _NATIVE_WIDGET_TYPE:
         return None
     spec = widget.get("spec")
     if not isinstance(spec, dict):
         return None
+    # Action-verb gate (#1208) — pure walker, no manifest dependency. The
+    # service-layer gate in pockets/service.py runs this same walker (and
+    # the unwired-button walker) on the same subtree; surfacing the verb
+    # half here saves a cloud round-trip on the most common failure mode.
+    from pocketpaw.ripple.manifest import validate_action_verbs, validate_against_manifest
+
+    verb_issues = validate_action_verbs(spec)
+    if verb_issues:
+        return _format_action_verb_issues(verb_issues)
     manifest = await _get_manifest_for_validation()
     if manifest is None:
         return None
-    from pocketpaw.ripple.manifest import validate_against_manifest
 
     issues = validate_against_manifest(spec, manifest, apply_aliases=True)
     actionable = [i for i in issues if i.get("unknown_props")]

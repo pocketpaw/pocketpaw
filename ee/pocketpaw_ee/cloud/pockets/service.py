@@ -74,6 +74,11 @@ Changes: 2026-05-22 (#1174) — widgets carry an optional ``spec`` field (a
 per-tile rippleSpec subtree the home grid renders). ``_build_widget_doc``,
 ``_widget_to_domain``, the REST ``add_widget``, and ``agent_update_widget``
 thread it through; the home agent's ``add_widget`` MCP tool populates it.
+Changes: 2026-05-24 (#1208) — ``agent_add_widget`` and ``agent_update_widget``
+now run the catalog + action-wiring gates on ``widgets[].spec`` the same way
+``agent_replace_node`` runs them on the pocket-level rippleSpec. Closes the
+verb-hallucination / unwired-Refresh-button class of regressions on the home
+pocket's widget-add surface (sibling to #1196 at the pocket level).
 Changes: 2026-05-28 (feat/wave-3e-template-slug) — wired the RFC 03 v2
 ``template_slug`` field end-to-end: ``create`` / ``update`` load + compile
 the bundled template (via OSS ``load_template`` + ``compile_template``)
@@ -510,6 +515,57 @@ async def _gate_catalog(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
+
+
+# Widget ``type`` whose tiles carry no rippleSpec — the frontend renders them
+# as a built-in Svelte component keyed on ``name``. Mirrors the
+# ``_NATIVE_WIDGET_TYPE`` constant in the MCP server; duplicated here so the
+# service layer can short-circuit the gate without importing from the agent
+# package (which would invert the cloud → agent dependency direction).
+_NATIVE_WIDGET_TYPE = "native"
+
+
+async def _gate_widget_spec_for_agent(
+    spec: dict[str, Any] | None,
+    *,
+    widget_type: str | None,
+    actor: str,
+    workspace_id: str | None,
+    pocket_id: str | None,
+) -> str | None:
+    """Run the catalog + action-wiring gates over a single widget's ``spec``
+    subtree on the agent-generation path. Returns an agent-readable error
+    string on rejection, or ``None`` when the spec passes (or there's nothing
+    to gate).
+
+    Mirrors the strict half of :func:`_gate_catalog` — the same posture used
+    by the pocket-level granular ops (``agent_replace_node`` etc.) — but
+    scoped to a single ``widgets[].spec`` subtree rather than the
+    ``rippleSpec.ui`` tree. ``type="native"`` widgets and missing specs are
+    a no-op; the manifest-unavailable best-effort posture is inherited
+    from :func:`_gate_catalog`.
+
+    The catalog walker tolerates an unwrapped subtree (its first line is
+    ``root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec``)
+    so we hand the widget spec in directly, no synthetic ``ui`` wrapping.
+    """
+    if widget_type == _NATIVE_WIDGET_TYPE:
+        return None
+    if not isinstance(spec, dict):
+        return None
+    try:
+        await _gate_catalog(
+            spec,
+            strict=True,
+            actor=actor,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+        )
+    except CatalogViolationError as exc:
+        return format_violations_for_agent(exc.violations)
+    except ActionWiringViolationError as exc:
+        return format_action_violations_for_agent(exc.violations)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1632,6 +1688,21 @@ async def agent_add_widget(pocket_id: str, widget: dict) -> tuple[dict | None, s
     doc, err = await _agent_load_doc(pocket_id)
     if err:
         return None, err
+    # Agent-generation path — strict catalog + action-wiring gate on the
+    # widget's own ``spec`` subtree (#1208). Mirrors the pocket-level gate
+    # in ``agent_replace_node`` so the home-pocket widget-add surface gets
+    # the same protection against hallucinated dispatcher verbs and unwired
+    # "Refresh" buttons. Validate BEFORE constructing the doc so a violating
+    # spec never reaches the save path.
+    gate_error = await _gate_widget_spec_for_agent(
+        widget.get("spec") if isinstance(widget.get("spec"), dict) else None,
+        widget_type=widget.get("type") if isinstance(widget.get("type"), str) else None,
+        actor="agent",
+        workspace_id=doc.workspace,
+        pocket_id=str(doc.id),
+    )
+    if gate_error is not None:
+        return None, gate_error
     try:
         new_widget = _build_widget_doc(widget)
     except Exception as exc:  # noqa: BLE001
@@ -1656,6 +1727,27 @@ async def agent_update_widget(
     widget = next((w for w in doc.widgets if w.id == widget_id), None)
     if widget is None:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"
+    # Agent-generation path — strict catalog + action-wiring gate when the
+    # update overwrites ``spec`` (#1208). Only fires when a new spec is
+    # supplied; a name-only / colour-only patch skips the gate the same way
+    # the MCP-layer manifest check does. ``type`` resolution mirrors the
+    # post-update widget state: take ``fields.type`` when provided, else
+    # fall back to the existing widget's type so a native widget that
+    # accidentally received a non-empty spec dict still short-circuits.
+    if "spec" in fields:
+        new_spec = fields["spec"] if isinstance(fields["spec"], dict) else None
+        effective_type = (
+            fields["type"] if "type" in fields and isinstance(fields["type"], str) else widget.type
+        )
+        gate_error = await _gate_widget_spec_for_agent(
+            new_spec,
+            widget_type=effective_type,
+            actor="agent",
+            workspace_id=doc.workspace,
+            pocket_id=str(doc.id),
+        )
+        if gate_error is not None:
+            return None, gate_error
     for k in ("name", "type", "icon", "color", "span", "data", "spec", "assignedAgent"):
         if k in fields:
             setattr(widget, k, fields[k])
