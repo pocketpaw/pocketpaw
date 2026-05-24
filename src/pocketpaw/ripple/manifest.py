@@ -18,6 +18,10 @@ Changes:
     ``check_embed_nodes_in_spec`` — an https-only, host-allowlisted URL
     policy for the sanctioned ``embed`` escape-hatch widget, with
     loopback / private / link-local hosts hard-blocked unconditionally.
+  - 2026-05-24 (#1206 part a): added ``invoke_tool`` to
+    :data:`_KNOWN_ACTION_VERBS` — the click-driven sibling of
+    ``run_source`` / ``call_binding`` that routes a button into a
+    server-side tool via the new ``POST /pockets/{id}/tools/run`` wire.
 """
 
 from __future__ import annotations
@@ -511,6 +515,14 @@ def _walk_embed_policy(
 # verb pass spec validation and silently no-op at runtime, which is the
 # exact failure we are guarding against; mirror this list whenever the
 # dispatcher gains a new case.
+#
+# ``invoke_tool`` is the click-driven sibling of ``run_source`` /
+# ``call_binding`` (#1206 part a): a button hands the host a tool name +
+# resolved args, the host runs the named tool via the per-pocket
+# ``POST /pockets/{id}/tools/run`` wire, the result flows back into the
+# usual ``on_success`` / ``on_error`` chain. The verb is fully wired into
+# the dispatcher in part (a); the home-grid ``onEvent`` plumbing that
+# actually POSTs to the wire lands in part (b).
 _KNOWN_ACTION_VERBS: frozenset[str] = frozenset(
     {
         "set",
@@ -526,6 +538,7 @@ _KNOWN_ACTION_VERBS: frozenset[str] = frozenset(
         "api",
         "run_source",
         "call_binding",
+        "invoke_tool",
         "flow",
         "branch",
         "confirm",

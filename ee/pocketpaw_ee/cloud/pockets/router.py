@@ -67,6 +67,21 @@ chain — so an upstream system can trigger a refresh without a user
 session. A wrong / missing secret returns the SAME 403 whether or not the
 pocket exists, so the endpoint is not a tenant-existence oracle. The two
 secret-management routes are owner-only.
+
+Updated: 2026-05-24 (#1206 part a) — added the tool-run wire stub:
+
+    POST /pockets/{id}/tools/run — invoke a named server-side tool
+
+The endpoint is the click-driven sibling of ``/sources/run`` (read-only
+hydration) and ``/actions/run`` (named write binding). It accepts a tool
+name plus pre-resolved args from the new ``invoke_tool`` Ripple action
+verb and runs the named tool against the per-pocket allowlist. The
+allowlist is intentionally empty in part (a) so the wire is locked down
+before any tool can actually fire; the home-grid ``onEvent`` plumbing
+that POSTs to this route lands in part (b), and Composio / WebFetch
+routing through the real tool registry is a follow-up. Auth gating
+mirrors ``/actions/run`` (owner OR explicit ``shared_with``) — a tool
+invocation has the same blast radius as a write binding.
 """
 
 from __future__ import annotations
@@ -93,6 +108,8 @@ from pocketpaw_ee.cloud.pockets.dto import (
     RunActionRequest,
     RunActionResponse,
     RunSourcesRequest,
+    RunToolRequest,
+    RunToolResponse,
     SetApprovalRouteRequest,
     SetWritePolicyRequest,
     ShareLinkRequest,
@@ -816,6 +833,66 @@ async def dispatch_bulk_action_route(
         template=template,
     )
     return BulkDispatchResponse(**result_wire)
+
+
+# ---------------------------------------------------------------------------
+# Pocket tool invocation (#1206 part a — invoke_tool wire)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{pocket_id}/tools/run",
+    dependencies=[Depends(require_pocket_action_run)],
+)
+async def run_pocket_tool(
+    pocket_id: str,
+    body: RunToolRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> RunToolResponse:
+    """Invoke a named server-side tool with the resolved args from the
+    ``invoke_tool`` Ripple action verb (#1206 part a).
+
+    Click-driven sibling of ``/sources/run`` (read-only hydration) and
+    ``/actions/run`` (named write binding). The home grid's ``onEvent``
+    plumbing (part b) POSTs here when a ripple button fires
+    ``{action: "invoke_tool", tool: "X", args: {...}}``.
+
+    Access is OWNER or explicit ``shared_with`` ONLY — a tool invocation
+    has the same blast radius as a write binding, so a workspace-visible
+    pocket does NOT grant run access.
+
+    Part (a) is intentionally fail-closed: the per-pocket allowlist is
+    empty (see :func:`tool_executor.get_pocket_allowed_tools`), so every
+    tool name returns ``ok:false, code:"not_allowed"``. The wire shape +
+    DTOs land here so part (b) (the home-grid ``onEvent`` wiring) has
+    somewhere to POST to. Part (c) adds Composio / WebFetch routing
+    through the real tool registry behind the allowlist.
+
+    The result is delivered in THIS response body — there is no
+    ``pocket_mutation`` SSE emit, because the run endpoint is a
+    standalone REST call outside any SSE stream. The client applies the
+    ``on_success`` / ``on_error`` reconcile handlers.
+    """
+    # Ensure the caller can actually see this pocket — `get` raises
+    # NotFound when the pocket is missing or not in the user's scope, so
+    # we don't expose a tenant-existence oracle via the tool wire either.
+    await pockets_service.get(pocket_id, user_id)
+
+    from pocketpaw_ee.cloud.pockets import tool_executor
+
+    allowed_tools = await tool_executor.get_pocket_allowed_tools(workspace_id, pocket_id)
+
+    # no-event: the tool result is response-body delivery, not persisted.
+    result = await tool_executor.run_tool(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        tool=body.tool,
+        args=body.args,
+        allowed_tools=allowed_tools,
+    )
+    return RunToolResponse(**result)
 
 
 # ---------------------------------------------------------------------------
