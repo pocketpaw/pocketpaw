@@ -39,10 +39,11 @@ def test_widget_spec_mcp_server_is_read_only():
 
 def test_pocket_mcp_server_surface():
     """The cloud ``pocketpaw_pocket`` server exposes the two read tools plus
-    the writable ``add_widget`` tool — the home agent's widget-creation
-    path. rippleSpec *design* mutations still flow through the
-    ``pocket_specialist__create`` / ``__edit`` tools; ``add_widget`` only
-    appends a tile to a pocket's ``widgets[]`` array, a different surface.
+    the writable ``add_widget`` / ``update_widget`` tools — the home agent's
+    widget-creation and refresh paths. rippleSpec *design* mutations still
+    flow through the ``pocket_specialist__create`` / ``__edit`` tools;
+    ``add_widget`` / ``update_widget`` only touch a pocket's ``widgets[]``
+    array, a different surface.
     """
     # The cloud pocket-context server is EE-only — skip when absent.
     try:
@@ -53,6 +54,7 @@ def test_pocket_mcp_server_surface():
         "mcp__pocketpaw_pocket__get_pocket",
         "mcp__pocketpaw_pocket__list_pockets",
         "mcp__pocketpaw_pocket__add_widget",
+        "mcp__pocketpaw_pocket__update_widget",
     }, f"drift in pocket MCP tool surface: {set(POCKET_TOOL_IDS)}"
 
 
