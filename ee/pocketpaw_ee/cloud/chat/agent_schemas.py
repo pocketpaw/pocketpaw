@@ -9,6 +9,12 @@
 #   whole pocket from the coarse ``PocketUpdated`` realtime event. Also
 #   added the ``POCKET_EXECUTION`` SSE event name for the execution
 #   router's per-request observability frame.
+# Changes: 2026-05-24 — added ``surface`` + ``surface_meta`` fields so
+#   clients can stamp a {surface_kind, meta} hint on every send. The
+#   chat router passes them to ``surface_context.resolve_surface_context``
+#   which renders a per-turn preamble injected ahead of the dynamic
+#   scope tags. Unknown surface strings fall back to the GENERIC handler
+#   so older clients keep working unchanged.
 """Request and SSE-event payload schemas for the enterprise agent chat endpoint.
 
 The endpoint lives at ``POST /cloud/chat/{scope}/{scope_id}/agent`` and streams
@@ -58,6 +64,19 @@ class CloudAgentChatRequest(BaseModel):
     # Argument string for ``intent="skill:<name>"`` (empty when the skill
     # was invoked bare). Reserved — not consumed by the backend yet.
     skill_args: str | None = None
+    # Surface-aware context hint (RFC: universal surface context).
+    # ``surface`` is the SurfaceKind enum value the client computed from
+    # ``$page.route.id`` ("home", "pockets", "pocket", "mission_control",
+    # …). Unknown values fall back to ``GENERIC`` in
+    # ``surface_context.service.resolve_surface_context`` so a client can
+    # ship a new surface name before the backend handler does. ``None``
+    # means the client didn't stamp a hint (older clients) — the agent
+    # then sees only the legacy three-line dynamic context.
+    surface: str | None = None
+    # Per-surface meta hint — ``pocket_id`` / ``widget_id`` / ``agent_id``
+    # / etc. Validated downstream by ``SurfaceMetaRequest``; unknown
+    # fields are dropped. ``None`` is treated as an empty dict.
+    surface_meta: dict[str, Any] | None = None
 
     @field_validator("intent")
     @classmethod

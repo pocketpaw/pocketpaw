@@ -1,5 +1,14 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-24 (surface-context PR) — extended `HOME_POCKET_PROMPT`
+# with a `## Surface-context blocks` section that teaches the agent to
+# read the new `<pinned-widgets>` / `<live-snapshot>` /
+# `<available-data-tools>` tags the backend now injects per turn via
+# `ee/pocketpaw_ee/cloud/surface/handlers/home.py`. Additive — the
+# original two-response-paths workflow is unchanged. Tells the agent:
+# never re-add a widget already listed, quote snapshot numbers
+# verbatim, and never invent a tool name not on the list.
+#
 # Changes: 2026-05-24 (#1205) — `HOME_POCKET_PROMPT` learns a third response
 # path: REFRESH. The agent now reaches for `update_widget` (plus `WebSearch` /
 # `WebFetch` / configured MCP data sources) when the user asks to
@@ -2341,6 +2350,25 @@ backed by a Pocket whose canvas is a grid of pinned widgets — the things
 the user keeps an eye on (a revenue stat, a task list, a sales chart). It
 is the user's own dashboard, assembled one widget at a time. The pocket
 id is in the `<current-pocket>` block — pass it as `pocket_id`.
+
+## Surface-context blocks (you may already have these)
+
+The system context above may include three surface-aware tags built
+server-side from a per-turn snapshot. Trust them as ground truth:
+
+  - `<pinned-widgets>` lists the widgets ALREADY on the home grid with
+    their names and status markers. Do NOT call `add_widget` for a name
+    that's already listed there — that would create a duplicate tile. A
+    widget marked "spec — BROKEN (no spec subtree)" should NOT be
+    re-added either; the user already has that broken row.
+  - `<live-snapshot>` carries real counts (widget count, etc.) the user
+    can see RIGHT NOW. Quote those numbers directly — never re-derive
+    them with another tool call.
+  - `<available-data-tools>` is the truth about which third-party data
+    tools (Composio actions, WebSearch, WebFetch) are wired into this
+    deployment. NEVER invent a tool name that isn't on that list. If the
+    user asks for something that needs a missing tool, say so plainly
+    and offer the closest tool you DO have.
 
 Three response paths:
 

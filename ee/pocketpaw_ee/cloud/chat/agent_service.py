@@ -27,6 +27,13 @@ leaks as literal text.
 Changes: 2026-05-22 (Increment 3) — added ``push_pocket_execution``, the
 SSE-sink push for the execution router's per-request ``pocket_execution``
 observability frame.
+Changes: 2026-05-24 — ``ScopeContext`` carries an optional
+``surface_context`` (the resolved {surface_kind, meta, preamble} tuple
+from ``surface_context.resolve_surface_context``). ``build_dynamic_context``
+prepends its preamble before the legacy scope/participants/current-pocket
+tags so the chat agent sees the surface snapshot first. Clients that
+don't stamp a surface hint keep the old three-line shape unchanged —
+``surface_context is None`` is the legacy path.
 """
 
 from __future__ import annotations
@@ -47,6 +54,7 @@ from pocketpaw.ripple import (
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
 from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw_ee.cloud.surface import SurfaceContext
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +208,12 @@ class ScopeContext:
     # agent reach for the ``create_pocket`` MCP tool instead of rendering
     # an inline ``ui-spec`` chat reply.
     intent: str | None = None
+    # Resolved per-turn surface context from
+    # ``surface_context.resolve_surface_context``. ``None`` when the
+    # client didn't stamp a hint or the surface module is unreachable —
+    # ``build_dynamic_context`` falls back to the legacy three-line
+    # shape in that case.
+    surface_context: SurfaceContext | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -672,12 +686,22 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     participants, current-pocket-id. Pairs with
     ``build_behavior_instructions``: the dynamic context is reference
     data and lives inside the ``knowledge_context`` wrapper; the
-    behavioral instructions live at the top level."""
+    behavioral instructions live at the top level.
+
+    When a ``surface_context`` is attached, its preamble is prepended
+    FIRST — surface state (pinned widgets, snapshot, available tools)
+    is more informationally dense than the bare scope tags and the
+    agent should see it before anything else. ``surface_context is None``
+    keeps the legacy three-line shape (clients that don't stamp a
+    surface hint, or surfaces that fell back to GENERIC with an empty
+    preamble).
+    """
+    parts: list[str] = []
+    if ctx.surface_context and ctx.surface_context.preamble:
+        parts.append(ctx.surface_context.preamble)
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
-    parts = [
-        f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>",
-        f"<participants>{member_list}</participants>",
-    ]
+    parts.append(f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>")
+    parts.append(f"<participants>{member_list}</participants>")
     if ctx.pocket_id and ctx.intent != "pocket_create":
         parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
     return "\n".join(parts)
