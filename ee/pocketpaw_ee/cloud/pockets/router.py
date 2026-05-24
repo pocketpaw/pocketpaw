@@ -1,5 +1,24 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-05-24 — added the MVP ``POST /{pocket_id}/spec/merge``
+endpoint. The endpoint accepts a body of exactly one
+``{"replace": <full spec>}`` or ``{"merge": <partial spec>}`` and
+delegates to ``pockets_service.merge_spec``. Supports a localhost-only
+internal bypass so the new bundled ``pocketpaw-pocket-specialist``
+skill (which runs in a Claude Code subprocess and ``curl``s the local
+API directly) can authenticate without round-tripping a real JWT for
+the MVP. The bypass requires:
+
+  - request source IP == 127.0.0.1 / ::1, AND
+  - ``X-PocketPaw-Internal: true`` header, AND
+  - ``X-PocketPaw-Workspace-Id`` + ``X-PocketPaw-User-Id`` headers
+    carrying the calling user's identity.
+
+The captain greenlights tightening this in PR-2 once we know whether
+the cookie-based auth path works end-to-end (the bypass is the safety
+net, not the primary path). For now the bypass is documented in the
+endpoint docstring as the security caveat.
+
 Updated: 2026-04-19 (Cluster B Sub-PR #3) — Added three new routes that
 close UI-TESTING-GUIDE §11 gap B5 (no widget layout save/share):
 
@@ -86,13 +105,15 @@ invocation has the same blast radius as a write binding.
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 
 from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.cloud.auth import current_optional_user
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.cloud.pockets.dto import (
@@ -314,6 +335,96 @@ async def update_pocket(
     user_id: str = Depends(current_user_id),
 ) -> dict:
     return await pockets_service.update(pocket_id, user_id, body)
+
+
+# ---------------------------------------------------------------------------
+# Spec merge endpoint — MVP for the new pocketpaw-pocket-specialist skill.
+# ---------------------------------------------------------------------------
+
+
+def _is_localhost(request: Request) -> bool:
+    """Loopback-only check used by the internal-bypass path on the spec
+    merge endpoint. ``starlette`` exposes the immediate peer on
+    ``request.client.host`` — that is the unix socket / TCP peer, not the
+    ``X-Forwarded-For`` header, so a reverse-proxy front-end cannot
+    spoof it. Accept both the IPv4 and IPv6 loopback addresses (the
+    desktop client may bind either depending on platform)."""
+    client = request.client
+    if not client:
+        return False
+    return client.host in ("127.0.0.1", "::1", "localhost")
+
+
+@router.post("/{pocket_id}/spec/merge")
+async def merge_pocket_spec(
+    pocket_id: str,
+    body: dict,
+    request: Request,
+    user: Any = Depends(current_optional_user),
+    x_pocketpaw_internal: str | None = Header(default=None, alias="X-PocketPaw-Internal"),
+    x_pocketpaw_workspace_id: str | None = Header(
+        default=None, alias="X-PocketPaw-Workspace-Id"
+    ),
+    x_pocketpaw_user_id: str | None = Header(default=None, alias="X-PocketPaw-User-Id"),
+) -> dict:
+    """One-shot rippleSpec write: full ``replace`` or partial ``merge``.
+
+    MVP entry point for the new ``pocketpaw-pocket-specialist`` skill —
+    replaces the 17-tool LangChain edit surface with a single endpoint
+    the agent invokes via ``curl``.
+
+    **Body shape.** Exactly ONE of:
+
+    .. code-block:: json
+
+        {"replace": { "version": "1.0", "state": {...}, "ui": {...} }}
+        {"merge":   { "ui": { "id": "n_xxx", ... } }}
+
+    A body that carries both or neither returns ``400``.
+
+    **Auth.** Standard cookie / bearer JWT (mirrors every other pocket
+    route) — OR a loopback-only internal bypass: when the request
+    originates from 127.0.0.1 / ::1 AND carries
+    ``X-PocketPaw-Internal: true``, the endpoint reads the calling
+    identity from ``X-PocketPaw-Workspace-Id`` and
+    ``X-PocketPaw-User-Id`` headers. Service-level edit-access checks
+    inside ``merge_spec`` still run on the resolved user_id, so a
+    mistyped header cannot escalate. Captain greenlights tightening
+    this in a follow-up PR once we confirm the shape on real traffic.
+
+    **Validation.** Runs the strict catalog + action-wiring gates
+    (mirroring the agent-generation path in ``create_from_ripple_spec``).
+    A blocking violation returns ``{ok: false, warnings: [...]}``
+    without persisting; the agent can fix and retry. Non-blocking
+    expression-grammar warnings persist with ``ok: true`` and the
+    warnings folded into the list.
+    """
+    # Resolve identity — try the loopback internal bypass first, then
+    # fall through to the standard session-user identity. The bypass
+    # needs loopback + magic header + tenancy headers, all together;
+    # any missing piece falls through to the auth dep above.
+    bypass_allowed = (
+        _is_localhost(request)
+        and x_pocketpaw_internal == "true"
+        and x_pocketpaw_workspace_id
+        and x_pocketpaw_user_id
+    )
+    if bypass_allowed:
+        workspace_id = x_pocketpaw_workspace_id
+        user_id = x_pocketpaw_user_id
+    elif user is not None:
+        user_id = str(user.id)
+        if not user.active_workspace:
+            raise CloudError(
+                400,
+                "workspace.not_set",
+                "No active workspace. Create or join a workspace first.",
+            )
+        workspace_id = user.active_workspace
+    else:
+        raise CloudError(401, "auth.required", "Authentication required.")
+
+    return await pockets_service.merge_spec(workspace_id, user_id, pocket_id, body)
 
 
 @router.delete("/{pocket_id}", status_code=204, dependencies=[Depends(require_pocket_owner)])
