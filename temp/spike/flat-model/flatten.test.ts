@@ -4,6 +4,11 @@
 // Updated: 2026-05-24 — Added a corner-case feature describe block exercising
 // node-level `each.items`/`item_as`/`index_as`, node-level `if.condition`,
 // `if.else_children`, and child-level `slot` against four new fixtures.
+// Updated: 2026-05-24 — Push-back C. Added a `gcOrphans boundary policy`
+// describe block that pins the orphan-GC lifecycle contract: orphans
+// accumulate across merges, the two named boundary helpers
+// (`gcOnPersist` / `gcOnSnapshot`) drop them, `merge()` never shrinks the
+// components map, and pre-persist undo can re-reach an orphaned subtree.
 //
 // Run: bun test temp/spike/flat-model/flatten.test.ts
 
@@ -14,6 +19,8 @@ import {
   canonicalJson,
   componentCount,
   flatten,
+  gcOnPersist,
+  gcOnSnapshot,
   gcOrphans,
   merge,
   nestedNodeCount,
@@ -298,6 +305,187 @@ describe('merge-by-name (OpenUI Lang shape)', () => {
     const someUntouchedId = Object.keys(base.components)[0];
     const patched = merge(base, { components: {} });
     expect(patched.components[someUntouchedId]).toEqual(base.components[someUntouchedId]);
+  });
+});
+
+describe('gcOrphans boundary policy', () => {
+  // Pins the orphan-GC lifecycle contract for push-back C: orphans accumulate
+  // across edits in-memory and are dropped only at two named lifecycle
+  // boundaries (gcOnPersist on the server write path, gcOnSnapshot on the
+  // export path). merge() never GCs; that's how cheap undo stays possible.
+
+  const { spec: baseSpec } = FIXTURES.find((f) => f.name === 'team-activity.spec.json')!;
+
+  // Independent reachability count — walks from root, counts every node it
+  // hits. Used to prove the post-GC components map matches reachability
+  // without leaning on the GC helper itself for the assertion.
+  function reachableCount(spec: FlatSpec): number {
+    const seen = new Set<string>();
+    function walk(id: string) {
+      if (seen.has(id)) return;
+      const node = spec.components[id];
+      if (!node) return;
+      seen.add(id);
+      for (const cid of node.children ?? []) walk(cid);
+      for (const cid of node.else_children ?? []) walk(cid);
+    }
+    walk(spec.root);
+    return seen.size;
+  }
+
+  // Helper — perform one subtree-replace merge on the current spec, returning
+  // the new spec plus the freshly minted child id and the old child id that
+  // just got orphaned. Picks the parent's current first child every iteration
+  // so a chained sequence makes the count grow predictably (one new node added
+  // per merge, one old node now unreachable but still in the map).
+  function replaceFirstChild(
+    spec: FlatSpec,
+    iteration: number,
+  ): { spec: FlatSpec; parentId: string; newId: string; oldChildId: string } {
+    const parentId = Object.keys(spec.components).find((id) => {
+      const n = spec.components[id];
+      return Array.isArray(n.children) && n.children.length >= 1;
+    })!;
+    const parent = spec.components[parentId];
+    const oldChildId = parent.children![0];
+    const newId = `n_orphtest_${iteration}`;
+    const newNode = { id: newId, type: 'text', props: { text: `iter-${iteration}` } };
+    const newChildren = [newId, ...parent.children!.slice(1)];
+    const next = merge(spec, {
+      components: {
+        [newId]: newNode,
+        [parentId]: { ...parent, children: newChildren },
+      },
+    });
+    return { spec: next, parentId, newId, oldChildId };
+  }
+
+  test('orphans accumulate across N merges with no GC', () => {
+    let current = flatten(baseSpec);
+    const startCount = componentCount(current);
+    const counts: number[] = [startCount];
+    const orphanedIds: string[] = [];
+
+    for (let i = 0; i < 5; i++) {
+      const step = replaceFirstChild(current, i);
+      current = step.spec;
+      orphanedIds.push(step.oldChildId);
+      counts.push(componentCount(current));
+    }
+
+    // Strictly monotonic — every merge adds exactly one new node id and never
+    // removes the just-orphaned one, so the count climbs by ≥1 each step.
+    for (let i = 1; i < counts.length; i++) {
+      expect(counts[i]).toBeGreaterThan(counts[i - 1]);
+    }
+    // Final count strictly larger than the starting count.
+    expect(counts[counts.length - 1]).toBeGreaterThan(startCount);
+    // Every orphaned id is STILL in the components map (the whole point of
+    // option a — orphans linger until a GC boundary).
+    for (const id of orphanedIds) {
+      expect(current.components[id]).toBeDefined();
+    }
+
+    // After gcOnPersist the count collapses to the reachable set.
+    const persisted = gcOnPersist(current);
+    expect(componentCount(persisted)).toBeLessThan(componentCount(current));
+  });
+
+  test('gcOnPersist drops orphans (componentCount equals reachableCount)', () => {
+    let current = flatten(baseSpec);
+    for (let i = 0; i < 5; i++) {
+      current = replaceFirstChild(current, i).spec;
+    }
+    // Pre-GC: there are unreachable nodes in the map.
+    expect(componentCount(current)).toBeGreaterThan(reachableCount(current));
+
+    const persisted = gcOnPersist(current);
+    // Post-GC: every node in the map is reachable from root.
+    expect(componentCount(persisted)).toBe(reachableCount(persisted));
+    // And the reachable count itself is unchanged by the GC (we only drop
+    // unreachable nodes, never anything addressable from root).
+    expect(reachableCount(persisted)).toBe(reachableCount(current));
+  });
+
+  test('gcOnSnapshot is equivalent to gcOnPersist', () => {
+    let current = flatten(baseSpec);
+    for (let i = 0; i < 5; i++) {
+      current = replaceFirstChild(current, i).spec;
+    }
+    const viaPersist = gcOnPersist(current);
+    const viaSnapshot = gcOnSnapshot(current);
+    expect(componentCount(viaSnapshot)).toBe(componentCount(viaPersist));
+    expect(canonicalJson(viaSnapshot)).toBe(canonicalJson(viaPersist));
+  });
+
+  test('merge() does NOT call gcOrphans — componentCount never shrinks', () => {
+    const start = flatten(baseSpec);
+    const startCount = componentCount(start);
+    const step = replaceFirstChild(start, 0);
+    // Contract: a subtree-replacing merge orphans the old child but does NOT
+    // drop it. The map only grows; it cannot shrink as a side effect of merge.
+    expect(componentCount(step.spec)).toBeGreaterThanOrEqual(startCount);
+  });
+
+  test('pre-persist undo works — orphaned subtree is still in the map and can be re-reached', () => {
+    const start = flatten(baseSpec);
+    const step = replaceFirstChild(start, 0);
+    const { spec: afterMerge, parentId, oldChildId, newId } = step;
+
+    // The orphaned id is STILL addressable in the components map even though
+    // it's unreachable from root. That's the data the in-memory undo stack
+    // would lean on.
+    expect(afterMerge.components[oldChildId]).toBeDefined();
+    // And reachability says it's not in the live tree right now.
+    const reachableNow = (() => {
+      const seen = new Set<string>();
+      function walk(id: string) {
+        if (seen.has(id)) return;
+        const node = afterMerge.components[id];
+        if (!node) return;
+        seen.add(id);
+        for (const cid of node.children ?? []) walk(cid);
+        for (const cid of node.else_children ?? []) walk(cid);
+      }
+      walk(afterMerge.root);
+      return seen;
+    })();
+    expect(reachableNow.has(oldChildId)).toBe(false);
+
+    // Construct the patches that represent "undo this merge": restore the
+    // parent's old children array (oldChildId back as first child). The new
+    // id becomes the orphan now; the old subtree is reachable again.
+    const parent = afterMerge.components[parentId];
+    const restoredChildren = [oldChildId, ...parent.children!.slice(1)];
+    const undone = merge(afterMerge, {
+      components: {
+        [parentId]: { ...parent, children: restoredChildren },
+      },
+    });
+    expect(undone.components[oldChildId]).toBeDefined();
+    expect(undone.components[parentId].children![0]).toBe(oldChildId);
+    expect(undone.components[newId]).toBeDefined(); // still in map, now orphan
+    // Reachability check — oldChildId is back in the live tree.
+    const reachableAfterUndo = (() => {
+      const seen = new Set<string>();
+      function walk(id: string) {
+        if (seen.has(id)) return;
+        const node = undone.components[id];
+        if (!node) return;
+        seen.add(id);
+        for (const cid of node.children ?? []) walk(cid);
+        for (const cid of node.else_children ?? []) walk(cid);
+      }
+      walk(undone.root);
+      return seen;
+    })();
+    expect(reachableAfterUndo.has(oldChildId)).toBe(true);
+
+    // Sanity check the contract we're documenting: had we called gcOnPersist
+    // BEFORE the undo, the old child would be gone and the undo could not
+    // restore it. Prove that on a parallel branch.
+    const persistedBeforeUndo = gcOnPersist(afterMerge);
+    expect(persistedBeforeUndo.components[oldChildId]).toBeUndefined();
   });
 });
 

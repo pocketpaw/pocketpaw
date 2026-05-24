@@ -87,11 +87,13 @@ When a patch re-states a parent's child list, dropping a child id, the dropped s
 
 OpenUI's semantics: dropping from `root` *is* the deletion, and the unreachable nodes are GC-target candidates — but the wire patch contains *no* explicit "delete this id" — that property is entirely structural.
 
-**My read for Ripple:** option **(a + opportunistic GC at boundaries)**. Keep orphans by default — the merge stays pure id-replacement, the wire is minimal, undo/redo is free (the dropped subtree is still in `components` for a redo to re-reachable it). Run `gcOrphans()` at well-defined boundaries: (1) on the server before persisting (avoid storing dead nodes long-term), (2) after a session of edits closes (compact the in-memory state), (3) never inside the merge step itself. This matches OpenUI's "unreachable = GC candidate, not protocol-level deletion."
+**My read for Ripple:** option **(a) + named lifecycle GC boundaries**. Keep orphans by default — the merge stays pure id-replacement, the wire is minimal, undo/redo is free (the dropped subtree is still in `components` for a redo to re-reachable it). The **only** two production GC call sites are `gcOnPersist(spec)` (server-side, immediately before a `rippleSpec` blob is written to MongoDB) and `gcOnSnapshot(spec)` (when emitting a pocket export / freeze artifact). Both are thin one-line wrappers on the underlying `gcOrphans` primitive; the named-helper layer exists so a codebase grep for `gcOnPersist` / `gcOnSnapshot` is the audit trail for orphan-drop. `merge()` never GCs — doing so would defeat the cheap undo. The earlier draft listed a third boundary ("after a session of edits closes") but it's been dropped: the lifecycle of a session is hard to pin to a function call, and the next persist already covers it.
+
+The trade is explicit: pre-persist orphans (within a single session of edits) are redo-able via the in-memory undo stack; post-persist orphans cannot be recovered, and that's by design — we don't want database bloat. Snapshot is a frozen artifact with no undo stack, so the orphan drop is safe.
 
 Option (b) (GC after every merge) is worse — it bloats the merge with a reachability pass per patch and kills the cheap undo. Option (c) (explicit deletions on the wire) defeats the entire OpenUI elegance; do not adopt.
 
-`gcOrphans()` is implemented and tested in the spike (3 LOC for the reachability walk, 7 LOC total including the new-spec emission).
+`gcOrphans()` is implemented and tested in the spike (3 LOC for the reachability walk, 7 LOC total including the new-spec emission). The two boundary helpers are 1 LOC each. Contract enforcement lives in `flatten.test.ts` under `describe('gcOrphans boundary policy', …)` — five tests prove: orphans accumulate monotonically across N merges, `gcOnPersist` collapses `componentCount` to the reachable set, `gcOnSnapshot` is byte-equivalent to `gcOnPersist`, `merge()` never shrinks the map, and a pre-persist orphaned subtree can be re-reached via a synthetic undo patch (but a `gcOnPersist` before that undo erases it — the documented trade).
 
 ## 8. Recommendation
 

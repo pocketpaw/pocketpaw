@@ -11,6 +11,11 @@
 // field is treated as `"nested"` (back-compat default). `flatten()` stamps
 // `format: "flat"` on output, `unflatten()` stamps `format: "nested"` on
 // output. This is the coexistence shape PR-1 ships.
+// Updated: 2026-05-24 — Push-back C. Pinned the orphan-GC lifecycle policy
+// by adding two named-boundary helpers — `gcOnPersist(spec)` and
+// `gcOnSnapshot(spec)` — that wrap the existing `gcOrphans` primitive.
+// Production code calls one of the named helpers; `gcOrphans` itself is now
+// flagged as the underlying primitive, only called directly from tests.
 //
 // Shape:
 //   FlatNode = a UINode minus its child arrays; child arrays become string[] of ids.
@@ -266,6 +271,13 @@ export function merge(base: FlatSpec, patch: Partial<FlatSpec>): FlatSpec {
  * Garbage-collect components unreachable from `root`. Returns a new FlatSpec.
  * NOT called by merge — the OpenUI default is to keep orphans (option a). Use
  * this when you actually want to compact storage.
+ *
+ * Underlying primitive. Production code MUST NOT call this directly — call
+ * `gcOnPersist` or `gcOnSnapshot` instead. The named boundary helpers are the
+ * only two production GC call sites; pinning the call sites at the type level
+ * lets `grep gcOnPersist|gcOnSnapshot` answer "where do orphans get dropped"
+ * without false positives. Direct callers of `gcOrphans` are limited to this
+ * file's tests, which exercise the primitive itself.
  */
 export function gcOrphans(spec: FlatSpec): FlatSpec {
   const reachable = new Set<string>();
@@ -284,6 +296,45 @@ export function gcOrphans(spec: FlatSpec): FlatSpec {
     if (spec.components[id]) components[id] = spec.components[id];
   }
   return { ...spec, components };
+}
+
+// -------- named GC boundary helpers --------
+//
+// The two — and only — production GC call sites. Both are thin wrappers on
+// `gcOrphans`; the point of naming them is so the codebase grep for
+// `gcOnPersist` / `gcOnSnapshot` is the audit trail for orphan-drop, and so a
+// future reviewer can see the lifecycle boundary at the call site instead of
+// having to reconstruct it from context.
+//
+// Policy (see findings.md §7):
+//   - Orphans live in the in-memory `components` map for as long as a session
+//     lasts. They're how undo/redo "re-reachables" a dropped subtree.
+//   - `merge()` does NOT call gcOrphans. Ever. Doing so would defeat undo.
+//   - Persist (server-side, before writing the rippleSpec blob to MongoDB) is
+//     a GC boundary — pre-persist orphans can still be redo'd from in-memory
+//     state, but post-persist they're gone, and that's by design (no DB bloat).
+//   - Snapshot (pocket export / freeze) is a GC boundary — the snapshot has no
+//     undo stack, so dropping orphans is safe.
+//
+// The wrappers are intentionally one-liners. Validation, logging, and metrics
+// are the caller's job; the spike helpers stay primitive-shaped.
+
+/**
+ * Boundary helper — server-side persist path.
+ * Drop orphans before writing the spec to durable storage. Post-persist
+ * orphans cannot be recovered via undo; that's the contract.
+ */
+export function gcOnPersist(spec: FlatSpec): FlatSpec {
+  return gcOrphans(spec);
+}
+
+/**
+ * Boundary helper — pocket snapshot / export path.
+ * Drop orphans when freezing the spec into a transferable artifact.
+ * The artifact has no undo stack, so the orphan drop is safe.
+ */
+export function gcOnSnapshot(spec: FlatSpec): FlatSpec {
+  return gcOrphans(spec);
 }
 
 // -------- utilities for measurement / preview --------
