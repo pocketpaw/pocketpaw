@@ -1,0 +1,375 @@
+{
+  "version": "1.0",
+  "lifecycle": {
+    "type": "persistent",
+    "id": "ai-859a0557"
+  },
+  "title": "Business Dashboard",
+  "description": "Real-time overview of revenue, orders, inventory, staff, and customer metrics",
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": "20px"
+    },
+    "children": [
+      {
+        "type": "heading",
+        "props": {
+          "text": "Business Dashboard",
+          "level": 2
+        },
+        "id": "n_z236n1w2"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 3,
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "metric",
+            "props": {
+              "label": "Total Revenue",
+              "value": "$2.47M",
+              "trend": "+12.3%",
+              "color": "#30D158"
+            },
+            "id": "n_qku9z1za"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Orders Today",
+              "value": "1,284",
+              "trend": "+8.1%",
+              "color": "#0A84FF"
+            },
+            "id": "n_oeuj95fr"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Avg Order Value",
+              "value": "$68.40",
+              "trend": "+3.7%",
+              "color": "#BF5AF2"
+            },
+            "id": "n_r31aeqei"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Inventory Items",
+              "value": "34,892",
+              "trend": "-2.1%",
+              "color": "#FF9F0A"
+            },
+            "id": "n_i92g5fc5"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Active Staff",
+              "value": "186",
+              "trend": "+4",
+              "color": "#5E5CE6"
+            },
+            "id": "n_d5ufhfjx"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Customer Satisfaction",
+              "value": "4.7/5",
+              "trend": "+0.2",
+              "color": "#30D158"
+            },
+            "id": "n_4b15fdjz"
+          }
+        ],
+        "id": "n_zqd72382"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 2,
+          "gap": "16px"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "8px"
+            },
+            "children": [
+              {
+                "type": "heading",
+                "props": {
+                  "text": "Monthly Revenue",
+                  "level": 4
+                },
+                "id": "n_oarriql7"
+              },
+              {
+                "type": "chart",
+                "props": {
+                  "type": "area",
+                  "height": 220,
+                  "data": [
+                    {
+                      "label": "Nov",
+                      "value": 1820000
+                    },
+                    {
+                      "label": "Dec",
+                      "value": 2150000
+                    },
+                    {
+                      "label": "Jan",
+                      "value": 1940000
+                    },
+                    {
+                      "label": "Feb",
+                      "value": 2080000
+                    },
+                    {
+                      "label": "Mar",
+                      "value": 2310000
+                    },
+                    {
+                      "label": "Apr",
+                      "value": 2470000
+                    }
+                  ]
+                },
+                "id": "n_z5bowuj3"
+              }
+            ],
+            "id": "n_fucc3u71"
+          },
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "8px"
+            },
+            "children": [
+              {
+                "type": "heading",
+                "props": {
+                  "text": "Orders by Category",
+                  "level": 4
+                },
+                "id": "n_wdy9ac41"
+              },
+              {
+                "type": "chart",
+                "props": {
+                  "type": "donut",
+                  "height": 220,
+                  "data": [
+                    {
+                      "label": "Electronics",
+                      "value": 412
+                    },
+                    {
+                      "label": "Apparel",
+                      "value": 298
+                    },
+                    {
+                      "label": "Home & Garden",
+                      "value": 187
+                    },
+                    {
+                      "label": "Food & Bev",
+                      "value": 234
+                    },
+                    {
+                      "label": "Other",
+                      "value": 153
+                    }
+                  ]
+                },
+                "id": "n_b88k22rk"
+              }
+            ],
+            "id": "n_96g77xmg"
+          }
+        ],
+        "id": "n_l45adsjd"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 2,
+          "gap": "16px"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "8px"
+            },
+            "children": [
+              {
+                "type": "heading",
+                "props": {
+                  "text": "Inventory Status",
+                  "level": 4
+                },
+                "id": "n_85s8fzqx"
+              },
+              {
+                "type": "table",
+                "props": {
+                  "columns": [
+                    "Category",
+                    "In Stock",
+                    "Low Stock",
+                    "Out of Stock"
+                  ],
+                  "data": [
+                    [
+                      "Electronics",
+                      "8,412",
+                      "124",
+                      "18"
+                    ],
+                    [
+                      "Apparel",
+                      "12,340",
+                      "89",
+                      "7"
+                    ],
+                    [
+                      "Home & Garden",
+                      "6,890",
+                      "201",
+                      "34"
+                    ],
+                    [
+                      "Food & Bev",
+                      "5,120",
+                      "67",
+                      "12"
+                    ],
+                    [
+                      "Accessories",
+                      "2,130",
+                      "45",
+                      "3"
+                    ]
+                  ]
+                },
+                "id": "n_a12635z6"
+              }
+            ],
+            "id": "n_75xcqih3"
+          },
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "8px"
+            },
+            "children": [
+              {
+                "type": "heading",
+                "props": {
+                  "text": "Staff Performance",
+                  "level": 4
+                },
+                "id": "n_amw1hnyk"
+              },
+              {
+                "type": "chart",
+                "props": {
+                  "type": "bar",
+                  "height": 220,
+                  "data": [
+                    {
+                      "label": "Sales",
+                      "value": 92
+                    },
+                    {
+                      "label": "Support",
+                      "value": 87
+                    },
+                    {
+                      "label": "Warehouse",
+                      "value": 94
+                    },
+                    {
+                      "label": "Marketing",
+                      "value": 81
+                    },
+                    {
+                      "label": "Management",
+                      "value": 89
+                    }
+                  ]
+                },
+                "id": "n_liaza32d"
+              }
+            ],
+            "id": "n_4q13fu5a"
+          }
+        ],
+        "id": "n_smx8sz3r"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "Recent Activity",
+          "level": 4
+        },
+        "id": "n_2jatsnw7"
+      },
+      {
+        "type": "feed",
+        "props": {
+          "items": [
+            {
+              "text": "New bulk order #8842 \u2014 240 units from Meridian Corp ($16,320)",
+              "type": "success"
+            },
+            {
+              "text": "Low stock alert: Wireless Earbuds Pro down to 12 units",
+              "type": "warning"
+            },
+            {
+              "text": "Customer NPS score rose to 72 this week (+4 points)",
+              "type": "info"
+            },
+            {
+              "text": "Staff onboarding: 3 new warehouse associates started today",
+              "type": "info"
+            },
+            {
+              "text": "Refund processed: Order #8801 \u2014 $142.50 returned",
+              "type": "error"
+            },
+            {
+              "text": "Monthly inventory audit completed \u2014 99.7% accuracy",
+              "type": "success"
+            }
+          ]
+        },
+        "id": "n_zihvsg00"
+      }
+    ],
+    "id": "n_ejivszog"
+  },
+  "metadata": {
+    "category": "business",
+    "color": "#0A84FF",
+    "created_at": "2026-04-22T16:26:54.162277+00:00",
+    "pocket_version": "2.0"
+  },
+  "name": "Business Dashboard",
+  "color": "#0A84FF"
+}

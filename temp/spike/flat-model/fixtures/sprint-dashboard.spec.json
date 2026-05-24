@@ -1,0 +1,379 @@
+{
+  "version": "1.0",
+  "lifecycle": {
+    "type": "persistent",
+    "id": "ai-5faf9c1d"
+  },
+  "title": "Sprint 24 Dashboard",
+  "description": "GitHub + Linear sprint tracking",
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": "20px"
+    },
+    "children": [
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "gap": "12px",
+          "align": "center"
+        },
+        "children": [
+          {
+            "type": "heading",
+            "props": {
+              "text": "Sprint 24",
+              "level": 2
+            },
+            "id": "n_9rm26p5x"
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "5 days left",
+              "variant": "warning"
+            },
+            "id": "n_1pi77nbx"
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Mar 31 - Apr 14, 2026",
+              "size": "sm",
+              "color": "secondary"
+            },
+            "id": "n_e6gkol3n"
+          }
+        ],
+        "id": "n_unx3amzm"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 4,
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "metric",
+            "props": {
+              "label": "Velocity",
+              "value": "34",
+              "trend": "+12%",
+              "color": "#0A84FF"
+            },
+            "id": "n_uym2u7xd"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Completed",
+              "value": "18/27",
+              "trend": "67%",
+              "color": "#30D158"
+            },
+            "id": "n_wr6g61t5"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "PRs Merged",
+              "value": "12",
+              "trend": "+3",
+              "color": "#BF5AF2"
+            },
+            "id": "n_o7y9v1aq"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Burndown",
+              "value": "9 pts",
+              "trend": "-15",
+              "color": "#FF9F0A"
+            },
+            "id": "n_xnxn80ht"
+          }
+        ],
+        "id": "n_thqeof7r"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 2,
+          "gap": "16px"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "12px"
+            },
+            "children": [
+              {
+                "type": "heading",
+                "props": {
+                  "text": "Active Work",
+                  "level": 4
+                },
+                "id": "n_ek7gtxjd"
+              },
+              {
+                "type": "feed",
+                "props": {
+                  "items": [
+                    {
+                      "text": "[Linear] API rate limiting implementation",
+                      "type": "info",
+                      "meta": "In Progress \u2022 Sarah"
+                    },
+                    {
+                      "text": "[GitHub] Fix OAuth redirect loop #847",
+                      "type": "success",
+                      "meta": "Review \u2022 Mike"
+                    },
+                    {
+                      "text": "[Linear] Dashboard performance optimization",
+                      "type": "warning",
+                      "meta": "Blocked \u2022 Emma"
+                    },
+                    {
+                      "text": "[GitHub] Add bulk export feature #851",
+                      "type": "info",
+                      "meta": "In Progress \u2022 Raj"
+                    },
+                    {
+                      "text": "[Linear] Mobile responsive layout fixes",
+                      "type": "info",
+                      "meta": "Todo \u2022 Chris"
+                    },
+                    {
+                      "text": "[GitHub] Update dependencies #849",
+                      "type": "success",
+                      "meta": "Merged \u2022 Alex"
+                    }
+                  ]
+                },
+                "id": "n_eyn6gid7"
+              }
+            ],
+            "id": "n_ea90jdio"
+          },
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "12px"
+            },
+            "children": [
+              {
+                "type": "heading",
+                "props": {
+                  "text": "Sprint Health",
+                  "level": 4
+                },
+                "id": "n_lglppkeh"
+              },
+              {
+                "type": "chart",
+                "props": {
+                  "type": "donut",
+                  "height": 180,
+                  "data": [
+                    {
+                      "label": "Done",
+                      "value": 18,
+                      "color": "#30D158"
+                    },
+                    {
+                      "label": "In Progress",
+                      "value": 6,
+                      "color": "#0A84FF"
+                    },
+                    {
+                      "label": "Todo",
+                      "value": 3,
+                      "color": "#FF9F0A"
+                    }
+                  ]
+                },
+                "id": "n_p1q1h6l9"
+              },
+              {
+                "type": "callout",
+                "props": {
+                  "type": "warning",
+                  "text": "3 issues at risk of spillover"
+                },
+                "id": "n_cstkcdva"
+              }
+            ],
+            "id": "n_d9bqxky3"
+          }
+        ],
+        "id": "n_nyxj3hi4"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "Burndown Chart",
+          "level": 4
+        },
+        "id": "n_6k6hzrvo"
+      },
+      {
+        "type": "chart",
+        "props": {
+          "type": "line",
+          "height": 220,
+          "data": [
+            {
+              "label": "Day 1",
+              "value": 42
+            },
+            {
+              "label": "Day 3",
+              "value": 38
+            },
+            {
+              "label": "Day 5",
+              "value": 31
+            },
+            {
+              "label": "Day 7",
+              "value": 24
+            },
+            {
+              "label": "Day 9",
+              "value": 9
+            },
+            {
+              "label": "Day 11",
+              "value": 0
+            }
+          ],
+          "ideal": [
+            {
+              "label": "Day 1",
+              "value": 42
+            },
+            {
+              "label": "Day 3",
+              "value": 36
+            },
+            {
+              "label": "Day 5",
+              "value": 30
+            },
+            {
+              "label": "Day 7",
+              "value": 24
+            },
+            {
+              "label": "Day 9",
+              "value": 18
+            },
+            {
+              "label": "Day 11",
+              "value": 0
+            }
+          ]
+        },
+        "id": "n_8qlv5bbt"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 2,
+          "gap": "16px"
+        },
+        "children": [
+          {
+            "type": "table",
+            "props": {
+              "title": "Top Contributors",
+              "columns": [
+                "Developer",
+                "Commits",
+                "PRs"
+              ],
+              "data": [
+                [
+                  "Sarah Chen",
+                  "34",
+                  "5"
+                ],
+                [
+                  "Mike Rodriguez",
+                  "28",
+                  "4"
+                ],
+                [
+                  "Emma Watson",
+                  "22",
+                  "3"
+                ]
+              ]
+            },
+            "id": "n_rzwgv3rw"
+          },
+          {
+            "type": "flex",
+            "props": {
+              "direction": "column",
+              "gap": "8px"
+            },
+            "children": [
+              {
+                "type": "heading",
+                "props": {
+                  "text": "Quick Actions",
+                  "level": 5
+                },
+                "id": "n_idb3jd4y"
+              },
+              {
+                "type": "button",
+                "props": {
+                  "text": "Sync GitHub",
+                  "variant": "secondary"
+                },
+                "id": "n_5qq1mx6y"
+              },
+              {
+                "type": "button",
+                "props": {
+                  "text": "Sync Linear",
+                  "variant": "secondary"
+                },
+                "id": "n_rbg2jdki"
+              },
+              {
+                "type": "button",
+                "props": {
+                  "text": "Generate Sprint Report",
+                  "variant": "primary"
+                },
+                "id": "n_vdgqnhsg"
+              }
+            ],
+            "id": "n_ds7jprgu"
+          }
+        ],
+        "id": "n_fheorq4w"
+      }
+    ],
+    "id": "n_f9832a7n"
+  },
+  "metadata": {
+    "category": "mission",
+    "color": "#0A84FF",
+    "created_at": "2026-04-10T16:48:15.175844+00:00",
+    "pocket_version": "2.0"
+  },
+  "name": "Sprint 24 Dashboard",
+  "color": "#0A84FF"
+}

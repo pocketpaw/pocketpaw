@@ -1,0 +1,334 @@
+{
+  "version": "1.0",
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": 2
+    },
+    "children": [
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "align": "center",
+          "justify": "between"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "6px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Sarah K.",
+                  "weight": "semibold",
+                  "size": "sm",
+                  "inline": true
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "completed Q2 Report Review",
+                  "size": "sm",
+                  "color": "#9CA3AF",
+                  "inline": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "08:15 AM",
+              "size": "xs",
+              "color": "#9CA3AF"
+            }
+          }
+        ]
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "align": "center",
+          "justify": "between"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "6px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Alex M.",
+                  "weight": "semibold",
+                  "size": "sm",
+                  "inline": true
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "pushed 3 commits to main",
+                  "size": "sm",
+                  "color": "#9CA3AF",
+                  "inline": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "08:28 AM",
+              "size": "xs",
+              "color": "#9CA3AF"
+            }
+          }
+        ]
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "align": "center",
+          "justify": "between"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "6px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Jordan L.",
+                  "weight": "semibold",
+                  "size": "sm",
+                  "inline": true
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "moved ticket #142 to In Review",
+                  "size": "sm",
+                  "color": "#9CA3AF",
+                  "inline": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "08:34 AM",
+              "size": "xs",
+              "color": "#9CA3AF"
+            }
+          }
+        ]
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "align": "center",
+          "justify": "between"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "6px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Maya R.",
+                  "weight": "semibold",
+                  "size": "sm",
+                  "inline": true
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "joined daily standup",
+                  "size": "sm",
+                  "color": "#9CA3AF",
+                  "inline": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "08:47 AM",
+              "size": "xs",
+              "color": "#9CA3AF"
+            }
+          }
+        ]
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "align": "center",
+          "justify": "between"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "6px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Chris P.",
+                  "weight": "semibold",
+                  "size": "sm",
+                  "inline": true
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "commented on PR #87",
+                  "size": "sm",
+                  "color": "#9CA3AF",
+                  "inline": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "09:02 AM",
+              "size": "xs",
+              "color": "#9CA3AF"
+            }
+          }
+        ]
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "align": "center",
+          "justify": "between"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "6px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Sam T.",
+                  "weight": "semibold",
+                  "size": "sm",
+                  "inline": true
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "closed 2 support tickets",
+                  "size": "sm",
+                  "color": "#9CA3AF",
+                  "inline": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "09:15 AM",
+              "size": "xs",
+              "color": "#9CA3AF"
+            }
+          }
+        ]
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "align": "center",
+          "justify": "between"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "align": "center",
+              "gap": "6px"
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": {
+                  "text": "Jordan L.",
+                  "weight": "semibold",
+                  "size": "sm",
+                  "inline": true
+                }
+              },
+              {
+                "type": "text",
+                "props": {
+                  "text": "deployed v1.4.2 to staging",
+                  "size": "sm",
+                  "color": "#9CA3AF",
+                  "inline": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "09:31 AM",
+              "size": "xs",
+              "color": "#9CA3AF"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

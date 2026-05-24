@@ -1,0 +1,1117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RFC 06 Position 1 — flat vs nested renderer spike</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: #0e1015; color: #e6e6e6; margin: 0; padding: 24px; }
+    h1 { font-size: 18px; font-weight: 600; }
+    h2 { font-size: 14px; font-weight: 600; margin: 28px 0 8px; color: #c9d4ff; }
+    h3 { font-size: 12px; font-weight: 600; color: #8b94a7; margin: 0 0 8px; }
+    .meta { font-weight: 400; color: #6b7280; font-size: 12px; }
+    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .col { background: #14171f; border: 1px solid #232734; border-radius: 8px; padding: 12px; min-width: 0; }
+    .render { font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.5; overflow-x: auto; }
+    .node { padding: 2px 0 2px 12px; border-left: 1px solid #2b3142; margin-left: 4px; }
+    .type { color: #82d2ff; }
+    .id { color: #888; font-size: 10px; }
+    .text { color: #ffd479; }
+    .else { color: #d29bff; padding-left: 8px; border-left: 1px dashed #5a3a8a; margin: 4px 0; }
+    .missing { color: #ff7f7f; }
+    .summary { background: #14171f; border: 1px solid #232734; border-radius: 8px; padding: 12px; margin-top: 24px; font-size: 12px; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <h1>RFC 06 Position 1 — flat vs nested component model</h1>
+  <p style="color:#8b94a7; font-size: 12px; max-width: 80ch;">
+    Side-by-side rendering of real stored pocket specs. Left column: the spec's
+    nested <code>ui.children[]</code> recursion (today's renderer). Right
+    column: the same spec flattened to <code>{root, components}</code>, with
+    children resolved via id lookup (the OpenUI shape). Visually identical
+    tree — the cost of the flat model is purely in the wire shape and renderer
+    plumbing, not in what the user sees.
+  </p>
+  <section class="fixture">
+    <h2>business-dashboard.spec.json <span class="meta">(25 nodes — nested 3885B / flat 4552B)</span></h2>
+    <div class="cols">
+      <div class="col">
+        <h3>Nested (recurses on node.children)</h3>
+        <div class="render"><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Business Dashboard"</span>
+    
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div>
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Monthly Revenue"</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Orders by Category"</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Inventory Status"</span>
+    
+  </div><div class="node node-table" data-type="table">
+    <span class="type">table</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Staff Performance"</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Recent Activity"</span>
+    
+  </div><div class="node node-feed" data-type="feed">
+    <span class="type">feed</span>
+    
+  </div>
+  </div></div>
+      </div>
+      <div class="col">
+        <h3>Flat (resolves child IDs in components map)</h3>
+        <div class="render"><div class="node node-flex" data-id="n_ejivszog" data-type="flex">
+    <span class="id">n_ejivszog</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_z236n1w2" data-type="heading">
+    <span class="id">n_z236n1w2</span> <span class="type">heading</span><span class="text"> "Business Dashboard"</span>
+    
+  </div><div class="node node-grid" data-id="n_zqd72382" data-type="grid">
+    <span class="id">n_zqd72382</span> <span class="type">grid</span>
+    <div class="node node-metric" data-id="n_qku9z1za" data-type="metric">
+    <span class="id">n_qku9z1za</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_oeuj95fr" data-type="metric">
+    <span class="id">n_oeuj95fr</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_r31aeqei" data-type="metric">
+    <span class="id">n_r31aeqei</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_i92g5fc5" data-type="metric">
+    <span class="id">n_i92g5fc5</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_d5ufhfjx" data-type="metric">
+    <span class="id">n_d5ufhfjx</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_4b15fdjz" data-type="metric">
+    <span class="id">n_4b15fdjz</span> <span class="type">metric</span>
+    
+  </div>
+  </div><div class="node node-grid" data-id="n_l45adsjd" data-type="grid">
+    <span class="id">n_l45adsjd</span> <span class="type">grid</span>
+    <div class="node node-flex" data-id="n_fucc3u71" data-type="flex">
+    <span class="id">n_fucc3u71</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_oarriql7" data-type="heading">
+    <span class="id">n_oarriql7</span> <span class="type">heading</span><span class="text"> "Monthly Revenue"</span>
+    
+  </div><div class="node node-chart" data-id="n_z5bowuj3" data-type="chart">
+    <span class="id">n_z5bowuj3</span> <span class="type">chart</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_96g77xmg" data-type="flex">
+    <span class="id">n_96g77xmg</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_wdy9ac41" data-type="heading">
+    <span class="id">n_wdy9ac41</span> <span class="type">heading</span><span class="text"> "Orders by Category"</span>
+    
+  </div><div class="node node-chart" data-id="n_b88k22rk" data-type="chart">
+    <span class="id">n_b88k22rk</span> <span class="type">chart</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-grid" data-id="n_smx8sz3r" data-type="grid">
+    <span class="id">n_smx8sz3r</span> <span class="type">grid</span>
+    <div class="node node-flex" data-id="n_75xcqih3" data-type="flex">
+    <span class="id">n_75xcqih3</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_85s8fzqx" data-type="heading">
+    <span class="id">n_85s8fzqx</span> <span class="type">heading</span><span class="text"> "Inventory Status"</span>
+    
+  </div><div class="node node-table" data-id="n_a12635z6" data-type="table">
+    <span class="id">n_a12635z6</span> <span class="type">table</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_4q13fu5a" data-type="flex">
+    <span class="id">n_4q13fu5a</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_amw1hnyk" data-type="heading">
+    <span class="id">n_amw1hnyk</span> <span class="type">heading</span><span class="text"> "Staff Performance"</span>
+    
+  </div><div class="node node-chart" data-id="n_liaza32d" data-type="chart">
+    <span class="id">n_liaza32d</span> <span class="type">chart</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-heading" data-id="n_2jatsnw7" data-type="heading">
+    <span class="id">n_2jatsnw7</span> <span class="type">heading</span><span class="text"> "Recent Activity"</span>
+    
+  </div><div class="node node-feed" data-id="n_zihvsg00" data-type="feed">
+    <span class="id">n_zihvsg00</span> <span class="type">feed</span>
+    
+  </div>
+  </div></div>
+      </div>
+    </div>
+  </section>
+<section class="fixture">
+    <h2>component-showcase.spec.json <span class="meta">(83 nodes — nested 11619B / flat 13794B)</span></h2>
+    <div class="cols">
+      <div class="col">
+        <h3>Nested (recurses on node.children)</h3>
+        <div class="render"><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "UI Component Showcase"</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span>
+    
+  </div><div class="node node-callout" data-type="callout">
+    <span class="type">callout</span><span class="text"> "All data below is mock/synthetic for testing purposes."</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📊 Metrics"</span>
+    
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📈 Charts"</span>
+    
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📋 Table"</span>
+    
+  </div><div class="node node-table" data-type="table">
+    <span class="type">table</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📰 Feed"</span>
+    
+  </div><div class="node node-feed" data-type="feed">
+    <span class="type">feed</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "🏷️ Badges"</span>
+    
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-badge" data-type="badge">
+    <span class="type">badge</span><span class="text"> "Production"</span>
+    
+  </div><div class="node node-badge" data-type="badge">
+    <span class="type">badge</span><span class="text"> "v2.4.0"</span>
+    
+  </div><div class="node node-badge" data-type="badge">
+    <span class="type">badge</span><span class="text"> "High Priority"</span>
+    
+  </div><div class="node node-badge" data-type="badge">
+    <span class="type">badge</span><span class="text"> "In Review"</span>
+    
+  </div><div class="node node-badge" data-type="badge">
+    <span class="type">badge</span><span class="text"> "Beta"</span>
+    
+  </div><div class="node node-badge" data-type="badge">
+    <span class="type">badge</span><span class="text"> "Experimental"</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "🔗 Sources Bar"</span>
+    
+  </div><div class="node node-sources-bar" data-type="sources-bar">
+    <span class="type">sources-bar</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📇 Cards"</span>
+    
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-card" data-type="card">
+    <span class="type">card</span>
+    
+  </div><div class="node node-card" data-type="card">
+    <span class="type">card</span>
+    
+  </div><div class="node node-card" data-type="card">
+    <span class="type">card</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "🔍 Discover Cards"</span>
+    
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-discover-card" data-type="discover-card">
+    <span class="type">discover-card</span>
+    
+  </div><div class="node node-discover-card" data-type="discover-card">
+    <span class="type">discover-card</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "💬 Citations"</span>
+    
+  </div><div class="node node-citation" data-type="citation">
+    <span class="type">citation</span><span class="text"> "Transformer architectures have achieved state-of-the-art results across all major NLP benchmarks."</span>
+    
+  </div><div class="node node-citation" data-type="citation">
+    <span class="type">citation</span><span class="text"> "Quantum computers with 1000+ qubits are expected to achieve practical quantum advantage by 2027."</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📌 Source Cards"</span>
+    
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-source-card" data-type="source-card">
+    <span class="type">source-card</span>
+    
+  </div><div class="node node-source-card" data-type="source-card">
+    <span class="type">source-card</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "❓ Follow-ups"</span>
+    
+  </div><div class="node node-follow-up" data-type="follow-up">
+    <span class="type">follow-up</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "🔄 Workflow"</span>
+    
+  </div><div class="node node-workflow" data-type="workflow">
+    <span class="type">workflow</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📊 Progress Bars"</span>
+    
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-progress" data-type="progress">
+    <span class="type">progress</span>
+    
+  </div><div class="node node-progress" data-type="progress">
+    <span class="type">progress</span>
+    
+  </div><div class="node node-progress" data-type="progress">
+    <span class="type">progress</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "🖼️ Image"</span>
+    
+  </div><div class="node node-image" data-type="image">
+    <span class="type">image</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "📑 Tabs"</span>
+    
+  </div><div class="node node-tabs" data-type="tabs">
+    <span class="type">tabs</span>
+    
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "⚡ Callouts"</span>
+    
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-callout" data-type="callout">
+    <span class="type">callout</span><span class="text"> "This is an informational callout for general notices."</span>
+    
+  </div><div class="node node-callout" data-type="callout">
+    <span class="type">callout</span><span class="text"> "This is a warning callout for important cautions."</span>
+    
+  </div><div class="node node-callout" data-type="callout">
+    <span class="type">callout</span><span class="text"> "This is an error callout for critical issues."</span>
+    
+  </div><div class="node node-callout" data-type="callout">
+    <span class="type">callout</span><span class="text"> "This is a success callout for positive confirmations."</span>
+    
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "🎛️ Interactive Elements"</span>
+    
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-button" data-type="button">
+    <span class="type">button</span><span class="text"> "Primary Action"</span>
+    
+  </div><div class="node node-button" data-type="button">
+    <span class="type">button</span><span class="text"> "Secondary"</span>
+    
+  </div><div class="node node-button" data-type="button">
+    <span class="type">button</span><span class="text"> "Danger"</span>
+    
+  </div>
+  </div><div class="node node-input" data-type="input">
+    <span class="type">input</span>
+    
+  </div><div class="node node-select" data-type="select">
+    <span class="type">select</span>
+    
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-checkbox" data-type="checkbox">
+    <span class="type">checkbox</span>
+    
+  </div><div class="node node-checkbox" data-type="checkbox">
+    <span class="type">checkbox</span>
+    
+  </div><div class="node node-switch" data-type="switch">
+    <span class="type">switch</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "👤 Avatars"</span>
+    
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-avatar" data-type="avatar">
+    <span class="type">avatar</span>
+    
+  </div><div class="node node-avatar" data-type="avatar">
+    <span class="type">avatar</span>
+    
+  </div><div class="node node-avatar" data-type="avatar">
+    <span class="type">avatar</span>
+    
+  </div><div class="node node-avatar" data-type="avatar">
+    <span class="type">avatar</span>
+    
+  </div>
+  </div>
+  </div></div>
+      </div>
+      <div class="col">
+        <h3>Flat (resolves child IDs in components map)</h3>
+        <div class="render"><div class="node node-flex" data-id="n_vtqvsyak" data-type="flex">
+    <span class="id">n_vtqvsyak</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_1g868bvt" data-type="heading">
+    <span class="id">n_1g868bvt</span> <span class="type">heading</span><span class="text"> "UI Component Showcase"</span>
+    
+  </div><div class="node node-text" data-id="n_vckdlj9s" data-type="text">
+    <span class="id">n_vckdlj9s</span> <span class="type">text</span>
+    
+  </div><div class="node node-callout" data-id="n_oe74aemy" data-type="callout">
+    <span class="id">n_oe74aemy</span> <span class="type">callout</span><span class="text"> "All data below is mock/synthetic for testing purposes."</span>
+    
+  </div><div class="node node-heading" data-id="n_st9pda1c" data-type="heading">
+    <span class="id">n_st9pda1c</span> <span class="type">heading</span><span class="text"> "📊 Metrics"</span>
+    
+  </div><div class="node node-grid" data-id="n_tz8xlfpt" data-type="grid">
+    <span class="id">n_tz8xlfpt</span> <span class="type">grid</span>
+    <div class="node node-metric" data-id="n_j2zfb1pi" data-type="metric">
+    <span class="id">n_j2zfb1pi</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_lmq3fwop" data-type="metric">
+    <span class="id">n_lmq3fwop</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_t1g8cv63" data-type="metric">
+    <span class="id">n_t1g8cv63</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_9aphvj0f" data-type="metric">
+    <span class="id">n_9aphvj0f</span> <span class="type">metric</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_ph291dqn" data-type="heading">
+    <span class="id">n_ph291dqn</span> <span class="type">heading</span><span class="text"> "📈 Charts"</span>
+    
+  </div><div class="node node-grid" data-id="n_pe1wkveh" data-type="grid">
+    <span class="id">n_pe1wkveh</span> <span class="type">grid</span>
+    <div class="node node-chart" data-id="n_ycuinprh" data-type="chart">
+    <span class="id">n_ycuinprh</span> <span class="type">chart</span>
+    
+  </div><div class="node node-chart" data-id="n_0b5o1ui3" data-type="chart">
+    <span class="id">n_0b5o1ui3</span> <span class="type">chart</span>
+    
+  </div><div class="node node-chart" data-id="n_f4agj4lt" data-type="chart">
+    <span class="id">n_f4agj4lt</span> <span class="type">chart</span>
+    
+  </div><div class="node node-chart" data-id="n_rfu49p2i" data-type="chart">
+    <span class="id">n_rfu49p2i</span> <span class="type">chart</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_9cjzccsk" data-type="heading">
+    <span class="id">n_9cjzccsk</span> <span class="type">heading</span><span class="text"> "📋 Table"</span>
+    
+  </div><div class="node node-table" data-id="n_ntjf6hb4" data-type="table">
+    <span class="id">n_ntjf6hb4</span> <span class="type">table</span>
+    
+  </div><div class="node node-heading" data-id="n_8v1ukr6m" data-type="heading">
+    <span class="id">n_8v1ukr6m</span> <span class="type">heading</span><span class="text"> "📰 Feed"</span>
+    
+  </div><div class="node node-feed" data-id="n_x7flq3s4" data-type="feed">
+    <span class="id">n_x7flq3s4</span> <span class="type">feed</span>
+    
+  </div><div class="node node-heading" data-id="n_ptttcqf7" data-type="heading">
+    <span class="id">n_ptttcqf7</span> <span class="type">heading</span><span class="text"> "🏷️ Badges"</span>
+    
+  </div><div class="node node-flex" data-id="n_mb6hie62" data-type="flex">
+    <span class="id">n_mb6hie62</span> <span class="type">flex</span>
+    <div class="node node-badge" data-id="n_88vekamk" data-type="badge">
+    <span class="id">n_88vekamk</span> <span class="type">badge</span><span class="text"> "Production"</span>
+    
+  </div><div class="node node-badge" data-id="n_qjsjawtv" data-type="badge">
+    <span class="id">n_qjsjawtv</span> <span class="type">badge</span><span class="text"> "v2.4.0"</span>
+    
+  </div><div class="node node-badge" data-id="n_f5m97ufj" data-type="badge">
+    <span class="id">n_f5m97ufj</span> <span class="type">badge</span><span class="text"> "High Priority"</span>
+    
+  </div><div class="node node-badge" data-id="n_lhh13nml" data-type="badge">
+    <span class="id">n_lhh13nml</span> <span class="type">badge</span><span class="text"> "In Review"</span>
+    
+  </div><div class="node node-badge" data-id="n_fzqtswd9" data-type="badge">
+    <span class="id">n_fzqtswd9</span> <span class="type">badge</span><span class="text"> "Beta"</span>
+    
+  </div><div class="node node-badge" data-id="n_bu0q2xvl" data-type="badge">
+    <span class="id">n_bu0q2xvl</span> <span class="type">badge</span><span class="text"> "Experimental"</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_gqzjzl45" data-type="heading">
+    <span class="id">n_gqzjzl45</span> <span class="type">heading</span><span class="text"> "🔗 Sources Bar"</span>
+    
+  </div><div class="node node-sources-bar" data-id="n_yn9uptez" data-type="sources-bar">
+    <span class="id">n_yn9uptez</span> <span class="type">sources-bar</span>
+    
+  </div><div class="node node-heading" data-id="n_icszt3tu" data-type="heading">
+    <span class="id">n_icszt3tu</span> <span class="type">heading</span><span class="text"> "📇 Cards"</span>
+    
+  </div><div class="node node-grid" data-id="n_j699qtv1" data-type="grid">
+    <span class="id">n_j699qtv1</span> <span class="type">grid</span>
+    <div class="node node-card" data-id="n_m67foora" data-type="card">
+    <span class="id">n_m67foora</span> <span class="type">card</span>
+    
+  </div><div class="node node-card" data-id="n_1tkdveso" data-type="card">
+    <span class="id">n_1tkdveso</span> <span class="type">card</span>
+    
+  </div><div class="node node-card" data-id="n_zjumvnz9" data-type="card">
+    <span class="id">n_zjumvnz9</span> <span class="type">card</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_va5ug9ws" data-type="heading">
+    <span class="id">n_va5ug9ws</span> <span class="type">heading</span><span class="text"> "🔍 Discover Cards"</span>
+    
+  </div><div class="node node-grid" data-id="n_3s7uka84" data-type="grid">
+    <span class="id">n_3s7uka84</span> <span class="type">grid</span>
+    <div class="node node-discover-card" data-id="n_s6mj9wxf" data-type="discover-card">
+    <span class="id">n_s6mj9wxf</span> <span class="type">discover-card</span>
+    
+  </div><div class="node node-discover-card" data-id="n_jy3iop19" data-type="discover-card">
+    <span class="id">n_jy3iop19</span> <span class="type">discover-card</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_lo52hxo1" data-type="heading">
+    <span class="id">n_lo52hxo1</span> <span class="type">heading</span><span class="text"> "💬 Citations"</span>
+    
+  </div><div class="node node-citation" data-id="n_7cji3q88" data-type="citation">
+    <span class="id">n_7cji3q88</span> <span class="type">citation</span><span class="text"> "Transformer architectures have achieved state-of-the-art results across all major NLP benchmarks."</span>
+    
+  </div><div class="node node-citation" data-id="n_c5u4yt26" data-type="citation">
+    <span class="id">n_c5u4yt26</span> <span class="type">citation</span><span class="text"> "Quantum computers with 1000+ qubits are expected to achieve practical quantum advantage by 2027."</span>
+    
+  </div><div class="node node-heading" data-id="n_y5kdaxiz" data-type="heading">
+    <span class="id">n_y5kdaxiz</span> <span class="type">heading</span><span class="text"> "📌 Source Cards"</span>
+    
+  </div><div class="node node-grid" data-id="n_newou45b" data-type="grid">
+    <span class="id">n_newou45b</span> <span class="type">grid</span>
+    <div class="node node-source-card" data-id="n_rsoxxg8q" data-type="source-card">
+    <span class="id">n_rsoxxg8q</span> <span class="type">source-card</span>
+    
+  </div><div class="node node-source-card" data-id="n_c3urtv6v" data-type="source-card">
+    <span class="id">n_c3urtv6v</span> <span class="type">source-card</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_aigbomg4" data-type="heading">
+    <span class="id">n_aigbomg4</span> <span class="type">heading</span><span class="text"> "❓ Follow-ups"</span>
+    
+  </div><div class="node node-follow-up" data-id="n_o80fcskb" data-type="follow-up">
+    <span class="id">n_o80fcskb</span> <span class="type">follow-up</span>
+    
+  </div><div class="node node-heading" data-id="n_e0p00bga" data-type="heading">
+    <span class="id">n_e0p00bga</span> <span class="type">heading</span><span class="text"> "🔄 Workflow"</span>
+    
+  </div><div class="node node-workflow" data-id="n_9gkkao3i" data-type="workflow">
+    <span class="id">n_9gkkao3i</span> <span class="type">workflow</span>
+    
+  </div><div class="node node-heading" data-id="n_ln089b77" data-type="heading">
+    <span class="id">n_ln089b77</span> <span class="type">heading</span><span class="text"> "📊 Progress Bars"</span>
+    
+  </div><div class="node node-flex" data-id="n_pfthtgsh" data-type="flex">
+    <span class="id">n_pfthtgsh</span> <span class="type">flex</span>
+    <div class="node node-progress" data-id="n_lxvnv66t" data-type="progress">
+    <span class="id">n_lxvnv66t</span> <span class="type">progress</span>
+    
+  </div><div class="node node-progress" data-id="n_j44nnb2k" data-type="progress">
+    <span class="id">n_j44nnb2k</span> <span class="type">progress</span>
+    
+  </div><div class="node node-progress" data-id="n_del5i1a9" data-type="progress">
+    <span class="id">n_del5i1a9</span> <span class="type">progress</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_13g1f94r" data-type="heading">
+    <span class="id">n_13g1f94r</span> <span class="type">heading</span><span class="text"> "🖼️ Image"</span>
+    
+  </div><div class="node node-image" data-id="n_ys47h68s" data-type="image">
+    <span class="id">n_ys47h68s</span> <span class="type">image</span>
+    
+  </div><div class="node node-heading" data-id="n_xa9g9dy4" data-type="heading">
+    <span class="id">n_xa9g9dy4</span> <span class="type">heading</span><span class="text"> "📑 Tabs"</span>
+    
+  </div><div class="node node-tabs" data-id="n_biab6md1" data-type="tabs">
+    <span class="id">n_biab6md1</span> <span class="type">tabs</span>
+    
+  </div><div class="node node-heading" data-id="n_3dq177vq" data-type="heading">
+    <span class="id">n_3dq177vq</span> <span class="type">heading</span><span class="text"> "⚡ Callouts"</span>
+    
+  </div><div class="node node-flex" data-id="n_pqwqpwzs" data-type="flex">
+    <span class="id">n_pqwqpwzs</span> <span class="type">flex</span>
+    <div class="node node-callout" data-id="n_xhvnunwo" data-type="callout">
+    <span class="id">n_xhvnunwo</span> <span class="type">callout</span><span class="text"> "This is an informational callout for general notices."</span>
+    
+  </div><div class="node node-callout" data-id="n_708osk99" data-type="callout">
+    <span class="id">n_708osk99</span> <span class="type">callout</span><span class="text"> "This is a warning callout for important cautions."</span>
+    
+  </div><div class="node node-callout" data-id="n_u2v7rnaq" data-type="callout">
+    <span class="id">n_u2v7rnaq</span> <span class="type">callout</span><span class="text"> "This is an error callout for critical issues."</span>
+    
+  </div><div class="node node-callout" data-id="n_uo6g6eid" data-type="callout">
+    <span class="id">n_uo6g6eid</span> <span class="type">callout</span><span class="text"> "This is a success callout for positive confirmations."</span>
+    
+  </div>
+  </div><div class="node node-heading" data-id="n_9frd3cil" data-type="heading">
+    <span class="id">n_9frd3cil</span> <span class="type">heading</span><span class="text"> "🎛️ Interactive Elements"</span>
+    
+  </div><div class="node node-flex" data-id="n_arwxogli" data-type="flex">
+    <span class="id">n_arwxogli</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_6ekl04fo" data-type="flex">
+    <span class="id">n_6ekl04fo</span> <span class="type">flex</span>
+    <div class="node node-button" data-id="n_jxnsnzx9" data-type="button">
+    <span class="id">n_jxnsnzx9</span> <span class="type">button</span><span class="text"> "Primary Action"</span>
+    
+  </div><div class="node node-button" data-id="n_524h25k8" data-type="button">
+    <span class="id">n_524h25k8</span> <span class="type">button</span><span class="text"> "Secondary"</span>
+    
+  </div><div class="node node-button" data-id="n_r0jentqp" data-type="button">
+    <span class="id">n_r0jentqp</span> <span class="type">button</span><span class="text"> "Danger"</span>
+    
+  </div>
+  </div><div class="node node-input" data-id="n_i71lnqdr" data-type="input">
+    <span class="id">n_i71lnqdr</span> <span class="type">input</span>
+    
+  </div><div class="node node-select" data-id="n_3p2gtt0n" data-type="select">
+    <span class="id">n_3p2gtt0n</span> <span class="type">select</span>
+    
+  </div><div class="node node-flex" data-id="n_q7vim3rk" data-type="flex">
+    <span class="id">n_q7vim3rk</span> <span class="type">flex</span>
+    <div class="node node-checkbox" data-id="n_h6unckld" data-type="checkbox">
+    <span class="id">n_h6unckld</span> <span class="type">checkbox</span>
+    
+  </div><div class="node node-checkbox" data-id="n_scfrh8ru" data-type="checkbox">
+    <span class="id">n_scfrh8ru</span> <span class="type">checkbox</span>
+    
+  </div><div class="node node-switch" data-id="n_zz81ce86" data-type="switch">
+    <span class="id">n_zz81ce86</span> <span class="type">switch</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-heading" data-id="n_goikaa6z" data-type="heading">
+    <span class="id">n_goikaa6z</span> <span class="type">heading</span><span class="text"> "👤 Avatars"</span>
+    
+  </div><div class="node node-flex" data-id="n_8ps0mzht" data-type="flex">
+    <span class="id">n_8ps0mzht</span> <span class="type">flex</span>
+    <div class="node node-avatar" data-id="n_1pgffm2w" data-type="avatar">
+    <span class="id">n_1pgffm2w</span> <span class="type">avatar</span>
+    
+  </div><div class="node node-avatar" data-id="n_v40utoia" data-type="avatar">
+    <span class="id">n_v40utoia</span> <span class="type">avatar</span>
+    
+  </div><div class="node node-avatar" data-id="n_ecd8v4eo" data-type="avatar">
+    <span class="id">n_ecd8v4eo</span> <span class="type">avatar</span>
+    
+  </div><div class="node node-avatar" data-id="n_b23u093u" data-type="avatar">
+    <span class="id">n_b23u093u</span> <span class="type">avatar</span>
+    
+  </div>
+  </div>
+  </div></div>
+      </div>
+    </div>
+  </section>
+<section class="fixture">
+    <h2>sprint-dashboard.spec.json <span class="meta">(27 nodes — nested 3911B / flat 4630B)</span></h2>
+    <div class="cols">
+      <div class="col">
+        <h3>Nested (recurses on node.children)</h3>
+        <div class="render"><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Sprint 24"</span>
+    
+  </div><div class="node node-badge" data-type="badge">
+    <span class="type">badge</span><span class="text"> "5 days left"</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Mar 31 - Apr 14, 2026"</span>
+    
+  </div>
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-type="metric">
+    <span class="type">metric</span>
+    
+  </div>
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Active Work"</span>
+    
+  </div><div class="node node-feed" data-type="feed">
+    <span class="type">feed</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Sprint Health"</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div><div class="node node-callout" data-type="callout">
+    <span class="type">callout</span><span class="text"> "3 issues at risk of spillover"</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Burndown Chart"</span>
+    
+  </div><div class="node node-chart" data-type="chart">
+    <span class="type">chart</span>
+    
+  </div><div class="node node-grid" data-type="grid">
+    <span class="type">grid</span>
+    <div class="node node-table" data-type="table">
+    <span class="type">table</span>
+    
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-heading" data-type="heading">
+    <span class="type">heading</span><span class="text"> "Quick Actions"</span>
+    
+  </div><div class="node node-button" data-type="button">
+    <span class="type">button</span><span class="text"> "Sync GitHub"</span>
+    
+  </div><div class="node node-button" data-type="button">
+    <span class="type">button</span><span class="text"> "Sync Linear"</span>
+    
+  </div><div class="node node-button" data-type="button">
+    <span class="type">button</span><span class="text"> "Generate Sprint Report"</span>
+    
+  </div>
+  </div>
+  </div>
+  </div></div>
+      </div>
+      <div class="col">
+        <h3>Flat (resolves child IDs in components map)</h3>
+        <div class="render"><div class="node node-flex" data-id="n_f9832a7n" data-type="flex">
+    <span class="id">n_f9832a7n</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_unx3amzm" data-type="flex">
+    <span class="id">n_unx3amzm</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_9rm26p5x" data-type="heading">
+    <span class="id">n_9rm26p5x</span> <span class="type">heading</span><span class="text"> "Sprint 24"</span>
+    
+  </div><div class="node node-badge" data-id="n_1pi77nbx" data-type="badge">
+    <span class="id">n_1pi77nbx</span> <span class="type">badge</span><span class="text"> "5 days left"</span>
+    
+  </div><div class="node node-text" data-id="n_e6gkol3n" data-type="text">
+    <span class="id">n_e6gkol3n</span> <span class="type">text</span><span class="text"> "Mar 31 - Apr 14, 2026"</span>
+    
+  </div>
+  </div><div class="node node-grid" data-id="n_thqeof7r" data-type="grid">
+    <span class="id">n_thqeof7r</span> <span class="type">grid</span>
+    <div class="node node-metric" data-id="n_uym2u7xd" data-type="metric">
+    <span class="id">n_uym2u7xd</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_wr6g61t5" data-type="metric">
+    <span class="id">n_wr6g61t5</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_o7y9v1aq" data-type="metric">
+    <span class="id">n_o7y9v1aq</span> <span class="type">metric</span>
+    
+  </div><div class="node node-metric" data-id="n_xnxn80ht" data-type="metric">
+    <span class="id">n_xnxn80ht</span> <span class="type">metric</span>
+    
+  </div>
+  </div><div class="node node-grid" data-id="n_nyxj3hi4" data-type="grid">
+    <span class="id">n_nyxj3hi4</span> <span class="type">grid</span>
+    <div class="node node-flex" data-id="n_ea90jdio" data-type="flex">
+    <span class="id">n_ea90jdio</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_ek7gtxjd" data-type="heading">
+    <span class="id">n_ek7gtxjd</span> <span class="type">heading</span><span class="text"> "Active Work"</span>
+    
+  </div><div class="node node-feed" data-id="n_eyn6gid7" data-type="feed">
+    <span class="id">n_eyn6gid7</span> <span class="type">feed</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_d9bqxky3" data-type="flex">
+    <span class="id">n_d9bqxky3</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_lglppkeh" data-type="heading">
+    <span class="id">n_lglppkeh</span> <span class="type">heading</span><span class="text"> "Sprint Health"</span>
+    
+  </div><div class="node node-chart" data-id="n_p1q1h6l9" data-type="chart">
+    <span class="id">n_p1q1h6l9</span> <span class="type">chart</span>
+    
+  </div><div class="node node-callout" data-id="n_cstkcdva" data-type="callout">
+    <span class="id">n_cstkcdva</span> <span class="type">callout</span><span class="text"> "3 issues at risk of spillover"</span>
+    
+  </div>
+  </div>
+  </div><div class="node node-heading" data-id="n_6k6hzrvo" data-type="heading">
+    <span class="id">n_6k6hzrvo</span> <span class="type">heading</span><span class="text"> "Burndown Chart"</span>
+    
+  </div><div class="node node-chart" data-id="n_8qlv5bbt" data-type="chart">
+    <span class="id">n_8qlv5bbt</span> <span class="type">chart</span>
+    
+  </div><div class="node node-grid" data-id="n_fheorq4w" data-type="grid">
+    <span class="id">n_fheorq4w</span> <span class="type">grid</span>
+    <div class="node node-table" data-id="n_rzwgv3rw" data-type="table">
+    <span class="id">n_rzwgv3rw</span> <span class="type">table</span>
+    
+  </div><div class="node node-flex" data-id="n_ds7jprgu" data-type="flex">
+    <span class="id">n_ds7jprgu</span> <span class="type">flex</span>
+    <div class="node node-heading" data-id="n_idb3jd4y" data-type="heading">
+    <span class="id">n_idb3jd4y</span> <span class="type">heading</span><span class="text"> "Quick Actions"</span>
+    
+  </div><div class="node node-button" data-id="n_5qq1mx6y" data-type="button">
+    <span class="id">n_5qq1mx6y</span> <span class="type">button</span><span class="text"> "Sync GitHub"</span>
+    
+  </div><div class="node node-button" data-id="n_rbg2jdki" data-type="button">
+    <span class="id">n_rbg2jdki</span> <span class="type">button</span><span class="text"> "Sync Linear"</span>
+    
+  </div><div class="node node-button" data-id="n_vdgqnhsg" data-type="button">
+    <span class="id">n_vdgqnhsg</span> <span class="type">button</span><span class="text"> "Generate Sprint Report"</span>
+    
+  </div>
+  </div>
+  </div>
+  </div></div>
+      </div>
+    </div>
+  </section>
+<section class="fixture">
+    <h2>team-activity.spec.json <span class="meta">(36 nodes — nested 3225B / flat 4826B)</span></h2>
+    <div class="cols">
+      <div class="col">
+        <h3>Nested (recurses on node.children)</h3>
+        <div class="render"><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Sarah K."</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "completed Q2 Report Review"</span>
+    
+  </div>
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "08:15 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Alex M."</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "pushed 3 commits to main"</span>
+    
+  </div>
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "08:28 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Jordan L."</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "moved ticket #142 to In Review"</span>
+    
+  </div>
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "08:34 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Maya R."</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "joined daily standup"</span>
+    
+  </div>
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "08:47 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Chris P."</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "commented on PR #87"</span>
+    
+  </div>
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "09:02 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Sam T."</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "closed 2 support tickets"</span>
+    
+  </div>
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "09:15 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-flex" data-type="flex">
+    <span class="type">flex</span>
+    <div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "Jordan L."</span>
+    
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "deployed v1.4.2 to staging"</span>
+    
+  </div>
+  </div><div class="node node-text" data-type="text">
+    <span class="type">text</span><span class="text"> "09:31 AM"</span>
+    
+  </div>
+  </div>
+  </div></div>
+      </div>
+      <div class="col">
+        <h3>Flat (resolves child IDs in components map)</h3>
+        <div class="render"><div class="node node-flex" data-id="n_0124i5wi" data-type="flex">
+    <span class="id">n_0124i5wi</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_02387u7a" data-type="flex">
+    <span class="id">n_02387u7a</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_03fb7ux5" data-type="flex">
+    <span class="id">n_03fb7ux5</span> <span class="type">flex</span>
+    <div class="node node-text" data-id="n_04tty6sz" data-type="text">
+    <span class="id">n_04tty6sz</span> <span class="type">text</span><span class="text"> "Sarah K."</span>
+    
+  </div><div class="node node-text" data-id="n_050mf2zo" data-type="text">
+    <span class="id">n_050mf2zo</span> <span class="type">text</span><span class="text"> "completed Q2 Report Review"</span>
+    
+  </div>
+  </div><div class="node node-text" data-id="n_06azh3bf" data-type="text">
+    <span class="id">n_06azh3bf</span> <span class="type">text</span><span class="text"> "08:15 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_07slo97l" data-type="flex">
+    <span class="id">n_07slo97l</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_08zaxknt" data-type="flex">
+    <span class="id">n_08zaxknt</span> <span class="type">flex</span>
+    <div class="node node-text" data-id="n_096y7x1o" data-type="text">
+    <span class="id">n_096y7x1o</span> <span class="type">text</span><span class="text"> "Alex M."</span>
+    
+  </div><div class="node node-text" data-id="n_0axttfq6" data-type="text">
+    <span class="id">n_0axttfq6</span> <span class="type">text</span><span class="text"> "pushed 3 commits to main"</span>
+    
+  </div>
+  </div><div class="node node-text" data-id="n_0b1sk4d0" data-type="text">
+    <span class="id">n_0b1sk4d0</span> <span class="type">text</span><span class="text"> "08:28 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_0ct1n5u8" data-type="flex">
+    <span class="id">n_0ct1n5u8</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_0dqn77yj" data-type="flex">
+    <span class="id">n_0dqn77yj</span> <span class="type">flex</span>
+    <div class="node node-text" data-id="n_0enppnv6" data-type="text">
+    <span class="id">n_0enppnv6</span> <span class="type">text</span><span class="text"> "Jordan L."</span>
+    
+  </div><div class="node node-text" data-id="n_0fpgjh2t" data-type="text">
+    <span class="id">n_0fpgjh2t</span> <span class="type">text</span><span class="text"> "moved ticket #142 to In Review"</span>
+    
+  </div>
+  </div><div class="node node-text" data-id="n_0g3s8hc5" data-type="text">
+    <span class="id">n_0g3s8hc5</span> <span class="type">text</span><span class="text"> "08:34 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_0hzxarw0" data-type="flex">
+    <span class="id">n_0hzxarw0</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_0il4bfzn" data-type="flex">
+    <span class="id">n_0il4bfzn</span> <span class="type">flex</span>
+    <div class="node node-text" data-id="n_0j9j0ezw" data-type="text">
+    <span class="id">n_0j9j0ezw</span> <span class="type">text</span><span class="text"> "Maya R."</span>
+    
+  </div><div class="node node-text" data-id="n_0ker7uub" data-type="text">
+    <span class="id">n_0ker7uub</span> <span class="type">text</span><span class="text"> "joined daily standup"</span>
+    
+  </div>
+  </div><div class="node node-text" data-id="n_0l5wkfz1" data-type="text">
+    <span class="id">n_0l5wkfz1</span> <span class="type">text</span><span class="text"> "08:47 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_0m7078q7" data-type="flex">
+    <span class="id">n_0m7078q7</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_0nhapx2y" data-type="flex">
+    <span class="id">n_0nhapx2y</span> <span class="type">flex</span>
+    <div class="node node-text" data-id="n_0opmlgwl" data-type="text">
+    <span class="id">n_0opmlgwl</span> <span class="type">text</span><span class="text"> "Chris P."</span>
+    
+  </div><div class="node node-text" data-id="n_0pxm8bxq" data-type="text">
+    <span class="id">n_0pxm8bxq</span> <span class="type">text</span><span class="text"> "commented on PR #87"</span>
+    
+  </div>
+  </div><div class="node node-text" data-id="n_0qy3g665" data-type="text">
+    <span class="id">n_0qy3g665</span> <span class="type">text</span><span class="text"> "09:02 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_0rpz1siq" data-type="flex">
+    <span class="id">n_0rpz1siq</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_0sucmvwp" data-type="flex">
+    <span class="id">n_0sucmvwp</span> <span class="type">flex</span>
+    <div class="node node-text" data-id="n_0tf4flat" data-type="text">
+    <span class="id">n_0tf4flat</span> <span class="type">text</span><span class="text"> "Sam T."</span>
+    
+  </div><div class="node node-text" data-id="n_0uvu4zp3" data-type="text">
+    <span class="id">n_0uvu4zp3</span> <span class="type">text</span><span class="text"> "closed 2 support tickets"</span>
+    
+  </div>
+  </div><div class="node node-text" data-id="n_0vz99x01" data-type="text">
+    <span class="id">n_0vz99x01</span> <span class="type">text</span><span class="text"> "09:15 AM"</span>
+    
+  </div>
+  </div><div class="node node-flex" data-id="n_0w9t69pq" data-type="flex">
+    <span class="id">n_0w9t69pq</span> <span class="type">flex</span>
+    <div class="node node-flex" data-id="n_0xpq7632" data-type="flex">
+    <span class="id">n_0xpq7632</span> <span class="type">flex</span>
+    <div class="node node-text" data-id="n_0yj9d49f" data-type="text">
+    <span class="id">n_0yj9d49f</span> <span class="type">text</span><span class="text"> "Jordan L."</span>
+    
+  </div><div class="node node-text" data-id="n_0zhhwisp" data-type="text">
+    <span class="id">n_0zhhwisp</span> <span class="type">text</span><span class="text"> "deployed v1.4.2 to staging"</span>
+    
+  </div>
+  </div><div class="node node-text" data-id="n_10ca43j8" data-type="text">
+    <span class="id">n_10ca43j8</span> <span class="type">text</span><span class="text"> "09:31 AM"</span>
+    
+  </div>
+  </div>
+  </div></div>
+      </div>
+    </div>
+  </section>
+  <div class="summary">
+    See <code>findings.md</code> in the same folder for round-trip / byte-size
+    / renderer-LOC / mutator-LOC numbers and the captain-facing recommendation.
+  </div>
+</body>
+</html>

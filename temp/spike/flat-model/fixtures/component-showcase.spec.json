@@ -1,0 +1,995 @@
+{
+  "version": "1.0",
+  "lifecycle": {
+    "type": "persistent",
+    "id": "ai-717e7b0d"
+  },
+  "title": "\ud83e\uddea UI Component Showcase",
+  "name": "\ud83e\uddea UI Component Showcase",
+  "description": "Comprehensive test of all PocketPaw UI specs, widgets, and layouts",
+  "category": "research",
+  "color": "#0A84FF",
+  "logo": null,
+  "ui": {
+    "type": "flex",
+    "props": {
+      "direction": "column",
+      "gap": "20px"
+    },
+    "children": [
+      {
+        "type": "heading",
+        "props": {
+          "text": "UI Component Showcase",
+          "level": 2
+        },
+        "id": "n_1g868bvt"
+      },
+      {
+        "type": "text",
+        "props": {
+          "content": "A comprehensive test pocket demonstrating every available UI component, widget type, and layout pattern."
+        },
+        "id": "n_vckdlj9s"
+      },
+      {
+        "type": "callout",
+        "props": {
+          "type": "info",
+          "title": "Test Mode",
+          "text": "All data below is mock/synthetic for testing purposes."
+        },
+        "id": "n_oe74aemy"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udcca Metrics",
+          "level": 3
+        },
+        "id": "n_st9pda1c"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 4,
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "metric",
+            "props": {
+              "label": "Total Users",
+              "value": "1,247,893",
+              "trend": "+12.4%"
+            },
+            "id": "n_j2zfb1pi"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Revenue",
+              "value": "$8.3M",
+              "trend": "+23.1%"
+            },
+            "id": "n_lmq3fwop"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "Churn Rate",
+              "value": "2.1%",
+              "trend": "-0.5%"
+            },
+            "id": "n_t1g8cv63"
+          },
+          {
+            "type": "metric",
+            "props": {
+              "label": "NPS Score",
+              "value": "78",
+              "trend": "+4"
+            },
+            "id": "n_9aphvj0f"
+          }
+        ],
+        "id": "n_tz8xlfpt"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udcc8 Charts",
+          "level": 3
+        },
+        "id": "n_ph291dqn"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 2,
+          "gap": "16px"
+        },
+        "children": [
+          {
+            "type": "chart",
+            "props": {
+              "type": "area",
+              "title": "Monthly Revenue",
+              "height": 220,
+              "data": [
+                {
+                  "label": "Jan",
+                  "value": 1200
+                },
+                {
+                  "label": "Feb",
+                  "value": 1450
+                },
+                {
+                  "label": "Mar",
+                  "value": 1380
+                },
+                {
+                  "label": "Apr",
+                  "value": 1620
+                },
+                {
+                  "label": "May",
+                  "value": 1890
+                },
+                {
+                  "label": "Jun",
+                  "value": 2100
+                },
+                {
+                  "label": "Jul",
+                  "value": 2340
+                },
+                {
+                  "label": "Aug",
+                  "value": 2580
+                }
+              ]
+            },
+            "id": "n_ycuinprh"
+          },
+          {
+            "type": "chart",
+            "props": {
+              "type": "bar",
+              "title": "Users by Region",
+              "height": 220,
+              "data": [
+                {
+                  "label": "NA",
+                  "value": 4500
+                },
+                {
+                  "label": "EU",
+                  "value": 3800
+                },
+                {
+                  "label": "APAC",
+                  "value": 2900
+                },
+                {
+                  "label": "LATAM",
+                  "value": 1200
+                },
+                {
+                  "label": "MEA",
+                  "value": 800
+                }
+              ]
+            },
+            "id": "n_0b5o1ui3"
+          },
+          {
+            "type": "chart",
+            "props": {
+              "type": "line",
+              "title": "Daily Active Users",
+              "height": 220,
+              "data": [
+                {
+                  "label": "Mon",
+                  "value": 8200
+                },
+                {
+                  "label": "Tue",
+                  "value": 9100
+                },
+                {
+                  "label": "Wed",
+                  "value": 8700
+                },
+                {
+                  "label": "Thu",
+                  "value": 9400
+                },
+                {
+                  "label": "Fri",
+                  "value": 10200
+                },
+                {
+                  "label": "Sat",
+                  "value": 6800
+                },
+                {
+                  "label": "Sun",
+                  "value": 5900
+                }
+              ]
+            },
+            "id": "n_f4agj4lt"
+          },
+          {
+            "type": "chart",
+            "props": {
+              "type": "donut",
+              "title": "Traffic Sources",
+              "height": 220,
+              "data": [
+                {
+                  "label": "Organic",
+                  "value": 45
+                },
+                {
+                  "label": "Paid",
+                  "value": 25
+                },
+                {
+                  "label": "Referral",
+                  "value": 18
+                },
+                {
+                  "label": "Direct",
+                  "value": 12
+                }
+              ]
+            },
+            "id": "n_rfu49p2i"
+          }
+        ],
+        "id": "n_pe1wkveh"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udccb Table",
+          "level": 3
+        },
+        "id": "n_9cjzccsk"
+      },
+      {
+        "type": "table",
+        "props": {
+          "columns": [
+            "Name",
+            "Role",
+            "Status",
+            "Revenue",
+            "Region"
+          ],
+          "data": [
+            [
+              "Acme Corp",
+              "Enterprise",
+              "Active",
+              "$1.2M",
+              "NA"
+            ],
+            [
+              "Globex Inc",
+              "Mid-Market",
+              "Active",
+              "$480K",
+              "EU"
+            ],
+            [
+              "Initech",
+              "SMB",
+              "Churned",
+              "$95K",
+              "NA"
+            ],
+            [
+              "Umbrella Co",
+              "Enterprise",
+              "Active",
+              "$2.1M",
+              "APAC"
+            ],
+            [
+              "Stark Industries",
+              "Enterprise",
+              "Trial",
+              "$0",
+              "NA"
+            ],
+            [
+              "Wayne Enterprises",
+              "Mid-Market",
+              "Active",
+              "$620K",
+              "EU"
+            ]
+          ]
+        },
+        "id": "n_ntjf6hb4"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udcf0 Feed",
+          "level": 3
+        },
+        "id": "n_8v1ukr6m"
+      },
+      {
+        "type": "feed",
+        "props": {
+          "items": [
+            {
+              "text": "v2.4.0 deployed to production \u2014 14 new features, 23 bug fixes",
+              "type": "success",
+              "timestamp": "2026-04-04T10:30:00Z"
+            },
+            {
+              "text": "Spike in API latency detected in EU-West region (p99 > 800ms)",
+              "type": "warning",
+              "timestamp": "2026-04-04T09:15:00Z"
+            },
+            {
+              "text": "Database migration completed successfully \u2014 3.2M rows updated",
+              "type": "info",
+              "timestamp": "2026-04-04T08:00:00Z"
+            },
+            {
+              "text": "SSL certificate for api.example.com expires in 7 days",
+              "type": "warning",
+              "timestamp": "2026-04-03T22:00:00Z"
+            },
+            {
+              "text": "Critical vulnerability patched in auth service (CVE-2026-1234)",
+              "type": "error",
+              "timestamp": "2026-04-03T18:45:00Z"
+            }
+          ]
+        },
+        "id": "n_x7flq3s4"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83c\udff7\ufe0f Badges",
+          "level": 3
+        },
+        "id": "n_ptttcqf7"
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "gap": "8px"
+        },
+        "children": [
+          {
+            "type": "badge",
+            "props": {
+              "text": "Production",
+              "color": "#30D158"
+            },
+            "id": "n_88vekamk"
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "v2.4.0",
+              "color": "#0A84FF"
+            },
+            "id": "n_qjsjawtv"
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "High Priority",
+              "color": "#FF453A"
+            },
+            "id": "n_f5m97ufj"
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "In Review",
+              "color": "#FF9F0A"
+            },
+            "id": "n_lhh13nml"
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "Beta",
+              "color": "#BF5AF2"
+            },
+            "id": "n_fzqtswd9"
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "Experimental",
+              "color": "#5E5CE6"
+            },
+            "id": "n_bu0q2xvl"
+          }
+        ],
+        "id": "n_mb6hie62"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udd17 Sources Bar",
+          "level": 3
+        },
+        "id": "n_gqzjzl45"
+      },
+      {
+        "type": "sources-bar",
+        "props": {
+          "sources": [
+            {
+              "title": "TechCrunch",
+              "url": "https://techcrunch.com"
+            },
+            {
+              "title": "Hacker News",
+              "url": "https://news.ycombinator.com"
+            },
+            {
+              "title": "ArXiv",
+              "url": "https://arxiv.org"
+            },
+            {
+              "title": "GitHub",
+              "url": "https://github.com"
+            }
+          ]
+        },
+        "id": "n_yn9uptez"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udcc7 Cards",
+          "level": 3
+        },
+        "id": "n_icszt3tu"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 3,
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "card",
+            "props": {
+              "title": "Machine Learning",
+              "subtitle": "AI/ML Research",
+              "description": "Deep learning architectures, transformer models, and reinforcement learning advances in 2026."
+            },
+            "id": "n_m67foora"
+          },
+          {
+            "type": "card",
+            "props": {
+              "title": "Quantum Computing",
+              "subtitle": "Hardware & Algorithms",
+              "description": "Recent breakthroughs in error correction and 1000+ qubit processors."
+            },
+            "id": "n_1tkdveso"
+          },
+          {
+            "type": "card",
+            "props": {
+              "title": "Web3 & Blockchain",
+              "subtitle": "Decentralized Systems",
+              "description": "Layer 2 scaling solutions and real-world asset tokenization trends."
+            },
+            "id": "n_zjumvnz9"
+          }
+        ],
+        "id": "n_j699qtv1"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udd0d Discover Cards",
+          "level": 3
+        },
+        "id": "n_va5ug9ws"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 2,
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "discover-card",
+            "props": {
+              "title": "How transformers revolutionized NLP",
+              "description": "From attention mechanisms to GPT \u2014 the architecture that changed everything.",
+              "tag": "Deep Dive"
+            },
+            "id": "n_s6mj9wxf"
+          },
+          {
+            "type": "discover-card",
+            "props": {
+              "title": "The state of quantum error correction",
+              "description": "Recent advances in topological codes and surface codes.",
+              "tag": "Research"
+            },
+            "id": "n_jy3iop19"
+          }
+        ],
+        "id": "n_3s7uka84"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udcac Citations",
+          "level": 3
+        },
+        "id": "n_lo52hxo1"
+      },
+      {
+        "type": "citation",
+        "props": {
+          "number": 1,
+          "text": "Transformer architectures have achieved state-of-the-art results across all major NLP benchmarks.",
+          "source": "Vaswani et al., 2017"
+        },
+        "id": "n_7cji3q88"
+      },
+      {
+        "type": "citation",
+        "props": {
+          "number": 2,
+          "text": "Quantum computers with 1000+ qubits are expected to achieve practical quantum advantage by 2027.",
+          "source": "Nature Physics, 2026"
+        },
+        "id": "n_c5u4yt26"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udccc Source Cards",
+          "level": 3
+        },
+        "id": "n_y5kdaxiz"
+      },
+      {
+        "type": "grid",
+        "props": {
+          "columns": 2,
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "source-card",
+            "props": {
+              "title": "Attention Is All You Need",
+              "url": "https://arxiv.org/abs/1706.03762",
+              "snippet": "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms."
+            },
+            "id": "n_rsoxxg8q"
+          },
+          {
+            "type": "source-card",
+            "props": {
+              "title": "Scaling Laws for Neural LMs",
+              "url": "https://arxiv.org/abs/2001.08361",
+              "snippet": "Performance depends strongly on scale \u2014 larger models trained on more data perform better."
+            },
+            "id": "n_c3urtv6v"
+          }
+        ],
+        "id": "n_newou45b"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\u2753 Follow-ups",
+          "level": 3
+        },
+        "id": "n_aigbomg4"
+      },
+      {
+        "type": "follow-up",
+        "props": {
+          "questions": [
+            "What are the latest advances in multi-modal AI?",
+            "How does quantum error correction work?",
+            "Compare transformer vs. SSM architectures",
+            "What is the current state of AGI research?"
+          ]
+        },
+        "id": "n_o80fcskb"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udd04 Workflow",
+          "level": 3
+        },
+        "id": "n_e0p00bga"
+      },
+      {
+        "type": "workflow",
+        "props": {
+          "steps": [
+            {
+              "label": "Data Collection",
+              "status": "complete"
+            },
+            {
+              "label": "Preprocessing",
+              "status": "complete"
+            },
+            {
+              "label": "Model Training",
+              "status": "active"
+            },
+            {
+              "label": "Evaluation",
+              "status": "pending"
+            },
+            {
+              "label": "Deployment",
+              "status": "pending"
+            }
+          ]
+        },
+        "id": "n_9gkkao3i"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udcca Progress Bars",
+          "level": 3
+        },
+        "id": "n_ln089b77"
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "column",
+          "gap": "8px"
+        },
+        "children": [
+          {
+            "type": "progress",
+            "props": {
+              "value": 87,
+              "label": "Model Accuracy"
+            },
+            "id": "n_lxvnv66t"
+          },
+          {
+            "type": "progress",
+            "props": {
+              "value": 62,
+              "label": "Training Progress"
+            },
+            "id": "n_j44nnb2k"
+          },
+          {
+            "type": "progress",
+            "props": {
+              "value": 34,
+              "label": "Data Processed"
+            },
+            "id": "n_del5i1a9"
+          }
+        ],
+        "id": "n_pfthtgsh"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\uddbc\ufe0f Image",
+          "level": 3
+        },
+        "id": "n_13g1f94r"
+      },
+      {
+        "type": "image",
+        "props": {
+          "src": "https://picsum.photos/800/300",
+          "alt": "Random test image from Picsum"
+        },
+        "id": "n_ys47h68s"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udcd1 Tabs",
+          "level": 3
+        },
+        "id": "n_xa9g9dy4"
+      },
+      {
+        "type": "tabs",
+        "props": {
+          "tabs": [
+            {
+              "label": "Overview",
+              "content": {
+                "type": "text",
+                "props": {
+                  "content": "This is the overview tab content. Tabs allow organizing related content into switchable views."
+                }
+              }
+            },
+            {
+              "label": "Details",
+              "content": {
+                "type": "flex",
+                "props": {
+                  "direction": "column",
+                  "gap": "8px"
+                },
+                "children": [
+                  {
+                    "type": "text",
+                    "props": {
+                      "content": "Detailed metrics and analysis go here."
+                    }
+                  },
+                  {
+                    "type": "metric",
+                    "props": {
+                      "label": "Accuracy",
+                      "value": "94.7%",
+                      "trend": "+2.1%"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "label": "Settings",
+              "content": {
+                "type": "text",
+                "props": {
+                  "content": "Configuration and settings panel content."
+                }
+              }
+            }
+          ]
+        },
+        "id": "n_biab6md1"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\u26a1 Callouts",
+          "level": 3
+        },
+        "id": "n_3dq177vq"
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "column",
+          "gap": "8px"
+        },
+        "children": [
+          {
+            "type": "callout",
+            "props": {
+              "type": "info",
+              "title": "Info Callout",
+              "text": "This is an informational callout for general notices."
+            },
+            "id": "n_xhvnunwo"
+          },
+          {
+            "type": "callout",
+            "props": {
+              "type": "warning",
+              "title": "Warning Callout",
+              "text": "This is a warning callout for important cautions."
+            },
+            "id": "n_708osk99"
+          },
+          {
+            "type": "callout",
+            "props": {
+              "type": "error",
+              "title": "Error Callout",
+              "text": "This is an error callout for critical issues."
+            },
+            "id": "n_u2v7rnaq"
+          },
+          {
+            "type": "callout",
+            "props": {
+              "type": "success",
+              "title": "Success Callout",
+              "text": "This is a success callout for positive confirmations."
+            },
+            "id": "n_uo6g6eid"
+          }
+        ],
+        "id": "n_pqwqpwzs"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83c\udf9b\ufe0f Interactive Elements",
+          "level": 3
+        },
+        "id": "n_9frd3cil"
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "column",
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "gap": "12px"
+            },
+            "children": [
+              {
+                "type": "button",
+                "props": {
+                  "text": "Primary Action",
+                  "variant": "primary"
+                },
+                "id": "n_jxnsnzx9"
+              },
+              {
+                "type": "button",
+                "props": {
+                  "text": "Secondary",
+                  "variant": "secondary"
+                },
+                "id": "n_524h25k8"
+              },
+              {
+                "type": "button",
+                "props": {
+                  "text": "Danger",
+                  "variant": "danger"
+                },
+                "id": "n_r0jentqp"
+              }
+            ],
+            "id": "n_6ekl04fo"
+          },
+          {
+            "type": "input",
+            "props": {
+              "placeholder": "Type something here...",
+              "label": "Text Input"
+            },
+            "id": "n_i71lnqdr"
+          },
+          {
+            "type": "select",
+            "props": {
+              "label": "Select Option",
+              "options": [
+                "Option A",
+                "Option B",
+                "Option C"
+              ]
+            },
+            "id": "n_3p2gtt0n"
+          },
+          {
+            "type": "flex",
+            "props": {
+              "direction": "row",
+              "gap": "16px"
+            },
+            "children": [
+              {
+                "type": "checkbox",
+                "props": {
+                  "label": "Enable feature X",
+                  "checked": true
+                },
+                "id": "n_h6unckld"
+              },
+              {
+                "type": "checkbox",
+                "props": {
+                  "label": "Dark mode",
+                  "checked": false
+                },
+                "id": "n_scfrh8ru"
+              },
+              {
+                "type": "switch",
+                "props": {
+                  "label": "Auto-refresh",
+                  "checked": true
+                },
+                "id": "n_zz81ce86"
+              }
+            ],
+            "id": "n_q7vim3rk"
+          }
+        ],
+        "id": "n_arwxogli"
+      },
+      {
+        "type": "heading",
+        "props": {
+          "text": "\ud83d\udc64 Avatars",
+          "level": 3
+        },
+        "id": "n_goikaa6z"
+      },
+      {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "gap": "8px"
+        },
+        "children": [
+          {
+            "type": "avatar",
+            "props": {
+              "name": "Alice Chen",
+              "size": "md"
+            },
+            "id": "n_1pgffm2w"
+          },
+          {
+            "type": "avatar",
+            "props": {
+              "name": "Bob Smith",
+              "size": "md"
+            },
+            "id": "n_v40utoia"
+          },
+          {
+            "type": "avatar",
+            "props": {
+              "name": "Carol Wu",
+              "size": "md"
+            },
+            "id": "n_ecd8v4eo"
+          },
+          {
+            "type": "avatar",
+            "props": {
+              "name": "Dave Patel",
+              "size": "md"
+            },
+            "id": "n_b23u093u"
+          }
+        ],
+        "id": "n_8ps0mzht"
+      }
+    ],
+    "id": "n_vtqvsyak"
+  },
+  "metadata": {
+    "category": "research",
+    "color": "#0A84FF",
+    "logo": null
+  }
+}
